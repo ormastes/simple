@@ -8,6 +8,7 @@ admin, and LibreOffice-like app catalog checks through
 
 - Markdown WYSIWYG model: `src/app/office/md_wysiwyg.spl`
 - Markdown GUI render entry: `src/app/office/md_wysiwyg_gui.spl`
+- Writer Markdown render: `src/app/office/word/html_render.spl`
 - IDE Markdown probe: `src/app/ide/markdown_render.spl`
 - Slide/PPT HTML render: `src/app/office/slides/html_render.spl`
 - IDE slide probe: `src/app/ide/slides_compat.spl`
@@ -17,20 +18,29 @@ admin, and LibreOffice-like app catalog checks through
 
 ## Rendering Contract
 
+Markdown is the product source format for both Writer and PPT/Impress. HTML is
+the generated render target.
+
 Markdown GUI rendering must use `wysiwyg_preview_document_html`, not a bare
 preview pane. The document helper owns the stable `.wysiwyg-preview` CSS wrapper
 and the escaped styled HTML generated from source lines.
 
-Slide rendering must remain a pure model-to-HTML/CSS transform. It should escape
-element text, sanitize CSS colors to simple `#RGB` or `#RRGGBB` values, clamp
-negative geometry to `0px`, and emit a fixed 960x540 relative slide with
-absolutely positioned element boxes.
+Writer rendering must expose Markdown source -> paper/document HTML through
+`render_writer_markdown_html`.
+
+PPT/Impress rendering must expose Markdown source -> slide-deck HTML through
+`render_ppt_markdown_html`. The object-model slide renderer remains a
+compatibility path and should escape element text, sanitize CSS colors to simple
+`#RGB` or `#RRGGBB` values, clamp negative geometry to `0px`, and emit a fixed
+960x540 relative slide with absolutely positioned element boxes.
 
 IDE feature checks should expose these hardening markers in both TUI and GUI
 modes:
 
 - Markdown: `css_doc=true escaped=true`
 - Slides: `ppt_html=true safe_css=true positioned=true`
+- LLM catalog: Writer has `render-writer-markdown-html`; Impress has
+  `render-ppt-markdown-html`.
 
 ## Verification
 

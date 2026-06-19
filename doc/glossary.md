@@ -583,6 +583,15 @@ A filesystem that uses database techniques (B-tree indexing, WAL journaling, pag
 
 Human-readable, version-control-friendly data format used by all Simple database modules. Analogous to JSON but with richer type annotations. All `*.sdn` files use atomic file I/O (shared read locks, exclusive write-rename pattern) to prevent corruption. Core infrastructure: `StringInterner` (20–40% space savings), `SdnTable`/`SdnRow` (in-memory table), `QueryBuilder` (fluent filter/sort/limit API). Defined in `src/lib/nogc_sync_mut/database/core.spl`.
 
+## SDD (Simple Diagram Document)
+
+SDN-backed diagram dialect for Markdown docs and IDE diagram previews. Preferred
+files use `.sdd.sdn`. SDD extends relationship graphs with diagram-editor
+metadata: node shape, x/y position, width/height, layer, connector route,
+waypoints, start/end anchors, reusable CSS labels, and weave-based batch style
+or layout edits. Implemented in `src/lib/editor/services/sdn_graph.spl`; guide:
+`doc/07_guide/lib/api/sdn_graph.md`.
+
 ---
 
 # Simple RISC-V RTL Vocabulary

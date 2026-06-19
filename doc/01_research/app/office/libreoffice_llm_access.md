@@ -11,9 +11,9 @@ opening each implementation file.
 | App | Owner | Features |
 | --- | --- | --- |
 | Markdown | `app.office.md_wysiwyg` | line-by-line source, styled preview, guarded `md-edit`, stale rejection |
-| Writer | `app.office.word.html_render` | document blocks, headings, lists, styled HTML through the shared office CSS resolver |
+| Writer | `app.office.word.html_render` | Markdown source generates paper/document HTML; rich document block rendering remains a compatibility adapter |
 | Calc | `app.office.sheets` | cells, ranges, formulas, guarded `sheet-edit`, stale/malformed source rejection |
-| Impress | `app.office.slides` | slide elements, outline, CSS-like design metadata, guarded `slide-edit` |
+| Impress | `app.office.slides` | Markdown source generates slide-deck HTML; slide object rendering remains a compatibility adapter; outline, CSS-like design metadata, guarded `slide-edit` |
 | Draw | `common.drawing.vector_shapes` | integer vector shapes, SVG output, labels, canvas validation |
 | Base | `app.office.base_db` | in-memory text tables, insert/select/project, deterministic route validation |
 | Math | `app.office.math_editor` | MathML token rendering, superscript, square root |
@@ -27,6 +27,9 @@ opening each implementation file.
   Markdown or Counter edit surfaces.
 - `src/app/ide/feature_report.spl` is the right product surface because it is
   pure Simple metadata/probes and runs in both TUI and GUI feature-check modes.
+- Writer and Impress should be treated as Markdown-authored apps that generate
+  HTML for rendering. Direct rich-text or slide-object HTML renderers are
+  compatibility paths, not the preferred product source format.
 
 ## Implementation Direction
 

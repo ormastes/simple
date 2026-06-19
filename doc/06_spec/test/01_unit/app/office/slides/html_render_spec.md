@@ -28,7 +28,7 @@ html_render_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -177,6 +177,43 @@ expect(html).to_contain("left: 0px; top: 0px;")
 
 </details>
 
+### slide HTML render: markdown source
+
+#### renders markdown headings as slide pages
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_ppt_markdown_html("---\nlayout: presentation\n---\n\n## Slide One\n\nBody\n\n## Slide Two\n\nNext")
+expect(html).to_start_with("<section class=\"md-ppt-deck\"")
+expect(html).to_contain("data-layout=\"presentation\"")
+expect(html).to_contain("data-slide=\"1\"")
+expect(html).to_contain("<h2>Slide One</h2>")
+expect(html).to_contain("<p>Body</p>")
+expect(html).to_contain("data-slide=\"2\"")
+```
+
+</details>
+
+#### escapes slide markdown content before HTML rendering
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_ppt_markdown_html("## <script>alert(1)</script>\n\nBody")
+expect(html).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -192,13 +229,14 @@ expect(html).to_contain("left: 0px; top: 0px;")
 Tests covering:
 - slide HTML render: title slide
 - slide HTML render: content slide
+- slide HTML render: markdown source
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

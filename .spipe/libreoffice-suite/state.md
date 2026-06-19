@@ -136,6 +136,15 @@ possible so they are runner-verifiable.
    element geometry to `0px`, and emits a fixed 960x540 relative slide with
    absolute element boxes. IDE feature checks expose `css_doc`, `escaped`,
    `ppt_html`, `safe_css`, and `positioned` markers in both TUI and GUI modes.
+11. ACTIVE (local 2026-06-19) — **Markdown-source Writer/PPT architecture**:
+   Writer and Impress/PPT use Markdown as their product source and generate HTML
+   for rendering. RichDocument and slide-object HTML renderers remain
+   compatibility paths, not the preferred authoring model.
+12. ACTIVE (local 2026-06-19) — **SDD diagram editor substrate**:
+   Named the SDN-backed diagram dialect **SDD: Simple Diagram Document**
+   (`.sdd.sdn`) and started draw.io/Figma-level hardening by adding explicit
+   node geometry, layer metadata, connector routes, waypoints, anchors, and
+   weave-based layout edits to `std.editor.services.sdn_graph`.
 
 ## Log
 
@@ -164,7 +173,7 @@ possible so they are runner-verifiable.
   feature report, and IDE office system spec; `ide_office_plugin_suite_spec`
   passed 19/0; docgen refreshed the mirrored manual with one length warning and
   pre-existing docgen dependency warnings only; direct TUI/GUI feature checks report `llm-catalog: apps=8
-  features=34 actions=8`; `find doc/06_spec -name '*_spec.spl' | wc -l`
+  features=37 actions=9`; `find doc/06_spec -name '*_spec.spl' | wc -l`
   returned `0`.
 - 2026-06-18 dev: Hardened the active Markdown WYSIWYG and PPT-like rendering
   slice. Updated `app.office.md_wysiwyg`, `app.office.md_wysiwyg_gui`,
@@ -183,3 +192,14 @@ possible so they are runner-verifiable.
   HTML plus nonblank framebuffer evidence; the renderer currently paints the
   styled `<pre>` block background but does not expose stable black glyph pixels
   for that path.
+- 2026-06-19 dev: Clarified and implemented the Markdown-source rendering
+  architecture for Writer and Impress/PPT. Added `render_writer_markdown_html`
+  and `render_ppt_markdown_html` adapters over the existing Markdown document
+  decoration/render service, updated the LLM catalog to advertise Markdown
+  source actions, and moved `md_wysiwyg_ppm` to `wysiwyg_preview_document_html`.
+- 2026-06-19 dev: Researched current SDN graph support and primary draw.io/Figma
+  references, then implemented the first SDD diagram slice. Added
+  `sdn_graph_format_name`, `sdn_graph_file_extension`, node
+  `x/y/width/height/layer`, edge `route/waypoints/start_anchor/end_anchor`,
+  deterministic `sdd-*` HTML metadata, canonical table output, and weave-based
+  layout edits. Focused `sdn_graph_diagram_spec` passed 6/0.

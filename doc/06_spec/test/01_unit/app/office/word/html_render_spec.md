@@ -29,7 +29,7 @@ html_render_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -114,6 +114,41 @@ expect(html).to_contain("class=\"paragraph\"")
 
 </details>
 
+### writer HTML render: markdown source
+
+#### renders markdown as paper/document HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("---\npage_view: true\nheader: Draft\n---\n\n# Title\n\nBody")
+expect(html).to_start_with("<article class=\"md-paper-layout\"")
+expect(html).to_contain("<header class=\"md-page-header\">Draft</header>")
+expect(html).to_contain("<h1>Title</h1>")
+expect(html).to_contain("<p>Body</p>")
+```
+
+</details>
+
+#### escapes writer markdown content before HTML rendering
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("# <script>alert(1)</script>")
+expect(html).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -129,13 +164,14 @@ expect(html).to_contain("class=\"paragraph\"")
 Tests covering:
 - word HTML render: block styling from the shared theme
 - word HTML render: whole document
+- writer HTML render: markdown source
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

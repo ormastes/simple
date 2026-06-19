@@ -1,0 +1,222 @@
+# sdn_graph_diagram_spec
+
+> Verifies the SDN-backed diagram dialect used by Markdown docs and the IDE preview. SDD means Simple Diagram Document: a named SDN dialect that extends older relationship-only graph blocks with draw.io/Figma-style geometry, layers, shapes, connector routing, anchors, and waypoints.
+
+<!-- sdn-diagram:id=sdn_graph_diagram_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=sdn_graph_diagram_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+sdn_graph_diagram_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=sdn_graph_diagram_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 6 | 6 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# sdn_graph_diagram_spec
+
+Verifies the SDN-backed diagram dialect used by Markdown docs and the IDE preview. SDD means Simple Diagram Document: a named SDN dialect that extends older relationship-only graph blocks with draw.io/Figma-style geometry, layers, shapes, connector routing, anchors, and waypoints.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Requirements | doc/02_requirements/feature/sdd_diagram_editor.md |
+| Plan | doc/03_plan/sys_test/sdd_diagram_editor.md |
+| Design | doc/07_guide/lib/api/sdn_graph.md |
+| Research | doc/01_research/local/sdd_diagram_editor.md |
+| Source | `test/01_unit/editor/services/sdn_graph_diagram_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies the SDN-backed diagram dialect used by Markdown docs and the IDE
+preview. SDD means Simple Diagram Document: a named SDN dialect that extends
+older relationship-only graph blocks with draw.io/Figma-style geometry,
+layers, shapes, connector routing, anchors, and waypoints.
+
+## Examples
+
+`Card: Card @panel shape: rounded x: 10 y: 20 width: 200 height: 100 layer: base`
+creates a positioned diagram node. `Card -> Action: opens route: orthogonal
+waypoints: 20x40;40x40 start: bottom end: left` creates an editable connector.
+
+**Requirements:** doc/02_requirements/feature/sdd_diagram_editor.md
+**NFR:** doc/02_requirements/nfr/sdd_diagram_editor.md
+**Plan:** doc/03_plan/sys_test/sdd_diagram_editor.md
+**Design:** doc/07_guide/lib/api/sdn_graph.md
+**Research:** doc/01_research/local/sdd_diagram_editor.md
+**Domain Research:** doc/01_research/domain/sdd_diagram_editor.md
+
+## Scenarios
+
+### SDD diagram document format
+
+#### exposes a stable format name and file extension
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(sdn_graph_format_name()).to_equal("SDD: Simple Diagram Document")
+expect(sdn_graph_file_extension()).to_equal(".sdd.sdn")
+```
+
+</details>
+
+#### parses explicit node geometry layer and shape from dense SDN
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: editor\nFrame: Canvas @frame role: container shape: frame x: 12 y: 24 width: 320 height: 180 layer: base\nWidget: Button @component role: control shape: rounded x: 48 y: 80 width: 120 height: 40 layer: controls")
+expect(graph.nodes.len()).to_equal(2)
+expect(graph.nodes[0].id).to_equal("Frame")
+expect(graph.nodes[0].shape).to_equal("frame")
+expect(graph.nodes[0].x).to_equal("12")
+expect(graph.nodes[0].y).to_equal("24")
+expect(graph.nodes[0].width).to_equal("320")
+expect(graph.nodes[0].height).to_equal("180")
+expect(graph.nodes[0].layer).to_equal("base")
+expect(graph.nodes[1].shape).to_equal("rounded")
+expect(graph.nodes[1].layer).to_equal("controls")
+```
+
+</details>
+
+#### parses connector routes anchors and waypoints from dense SDN
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: flow\nA: A\nB: B\nA -> B: submit @primary kind: action route: orthogonal waypoints: 10x20;80x20 start: right end: left")
+expect(graph.edges.len()).to_equal(1)
+expect(graph.edges[0].kind).to_equal("action")
+expect(graph.edges[0].route).to_equal("orthogonal")
+expect(graph.edges[0].waypoints).to_equal("10x20;80x20")
+expect(graph.edges[0].start_anchor).to_equal("right")
+expect(graph.edges[0].end_anchor).to_equal("left")
+```
+
+</details>
+
+#### renders deterministic HTML editor metadata for geometry and connectors
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: editor\nCard: Card @panel shape: rounded x: 10 y: 20 width: 200 height: 100 layer: base\nAction: Action @button shape: pill x: 40 y: 60 width: 80 height: 28 layer: controls\nCard -> Action: opens route: orthogonal waypoints: 20x40;40x40 start: bottom end: left")
+val html = sdn_graph_render_html(graph)
+expect(html).to_contain("class=\"sdn-graph sdd-diagram\"")
+expect(html).to_contain("data-format=\"sdd\"")
+expect(html).to_contain("data-format-name=\"SDD: Simple Diagram Document\"")
+expect(html).to_contain("class=\"sdn-graph-node sdd-node sdn-css-panel\"")
+expect(html).to_contain("data-layer=\"base\"")
+expect(html).to_contain("style=\"left:10px;top:20px;width:200px;height:100px\"")
+expect(html).to_contain("class=\"sdn-graph-edge sdd-connector")
+expect(html).to_contain("data-route=\"orthogonal\"")
+expect(html).to_contain("data-waypoints=\"20x40;40x40\"")
+expect(html).to_contain("data-start-anchor=\"bottom\"")
+expect(html).to_contain("data-end-anchor=\"left\"")
+```
+
+</details>
+
+#### canonicalizes geometry and connector route tables
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: flow\nA: Start @start shape: circle x: 8 y: 12 width: 48 height: 48 layer: base\nB: End @end shape: terminator x: 120 y: 12 width: 80 height: 48 layer: base\nA -> B: done route: simple waypoints: 56x36 start: right end: left")
+val canon = sdn_graph_to_canonical_sdn(graph)
+expect(canon).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer|")
+expect(canon).to_contain("A, Start, start, , circle, 8, 12, 48, 48, base")
+expect(canon).to_contain("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|")
+expect(canon).to_contain("A, B, done, , normal, simple, 56x36, right, left")
+```
+
+</details>
+
+#### weaves layout and shape edits into matching nodes
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: weave\nSvc: Service role: service\nDB: Database role: database\nweave @:\n    node where role = service:\n        add: card\n        shape: rounded\n        x: 20\n        y: 30\n        width: 160\n        height: 70\n        layer: services")
+expect(graph.nodes[0].css).to_equal("card")
+expect(graph.nodes[0].shape).to_equal("rounded")
+expect(graph.nodes[0].x).to_equal("20")
+expect(graph.nodes[0].y).to_equal("30")
+expect(graph.nodes[0].width).to_equal("160")
+expect(graph.nodes[0].height).to_equal("70")
+expect(graph.nodes[0].layer).to_equal("services")
+expect(graph.nodes[1].shape).to_equal("")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 6 |
+| Active scenarios | 6 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [doc/02_requirements/feature/sdd_diagram_editor.md](doc/02_requirements/feature/sdd_diagram_editor.md)
+- **Plan:** [doc/03_plan/sys_test/sdd_diagram_editor.md](doc/03_plan/sys_test/sdd_diagram_editor.md)
+- **Design:** [doc/07_guide/lib/api/sdn_graph.md](doc/07_guide/lib/api/sdn_graph.md)
+- **Research:** [doc/01_research/local/sdd_diagram_editor.md](doc/01_research/local/sdd_diagram_editor.md)
+
+
+</details>

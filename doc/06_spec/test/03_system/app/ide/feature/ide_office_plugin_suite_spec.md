@@ -110,7 +110,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=5 roundtrip=5 names=5
-  llm-catalog: apps=8 features=34 actions=8
+  llm-catalog: apps=8 features=37 actions=9
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Base,Math,Counter
 ```
 
@@ -274,7 +274,7 @@ expect(tui_lines[21]).to_equal(gui_lines[21])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -282,16 +282,20 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(8)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=8 features=34 actions=8")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=8 features=37 actions=9")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("guarded-edit")
 expect(catalog[0].actions.join(",")).to_contain("md-edit")
+expect(catalog[1].features.join(",")).to_contain("markdown-source")
+expect(catalog[1].actions.join(",")).to_contain("render-writer-markdown-html")
 expect(catalog[2].owner_module).to_equal("app.office.sheets")
 expect(catalog[2].features.join(",")).to_contain("formulas")
 expect(catalog[2].actions.join(",")).to_contain("sheet-edit")
 expect(catalog[3].owner_module).to_equal("app.office.slides")
+expect(catalog[3].features.join(",")).to_contain("markdown-source")
 expect(catalog[3].features.join(",")).to_contain("css-like-design")
+expect(catalog[3].actions.join(",")).to_contain("render-ppt-markdown-html")
 expect(catalog[3].actions.join(",")).to_contain("slide-edit")
 expect(catalog[4].owner_module).to_equal("common.drawing.vector_shapes")
 expect(catalog[5].owner_module).to_equal("app.office.base_db")

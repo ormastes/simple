@@ -1,9 +1,11 @@
-# SDN Graph Syntax
+# SDD / SDN Graph Syntax
 
-SDN graph blocks describe renderable graph structure with compact node and edge
-syntax, canonical SDN tables, reusable CSS labels, and selector-based weaving.
-The source syntax uses `@foo` for visual CSS names; the normalized internal
-field is named `css`.
+**SDD (Simple Diagram Document)** is the diagram dialect built on SDN. Preferred
+files use `.sdd.sdn`. SDD graph blocks describe renderable graph structure with
+compact node and edge syntax, canonical SDN tables, reusable CSS labels,
+draw.io-style connector metadata, Figma-like geometry, and selector-based
+weaving. The source syntax uses `@foo` for visual CSS names; the normalized
+internal field is named `css`.
 
 ## Dense Graph
 
@@ -16,9 +18,11 @@ css_file: "./modern.css"
 User: User @person
 Auth: Auth Service @card @important
 DB: Database @storage shape: cylinder
+Panel: Settings @card shape: rounded x: 40 y: 80 width: 220 height: 120 layer: ui
 
 User -> Auth: Login @primary
 Auth -> DB: Query @db
+Panel -> Auth: config route: orthogonal waypoints: 150x100;150x40 start: right end: left
 Auth ~> Log: Event @async
 UI -x DB: forbidden @violation
 ```
@@ -26,6 +30,10 @@ UI -x DB: forbidden @violation
 Rules:
 
 - `@foo` attaches visual CSS/tag name `foo` to the current node or edge.
+- `shape:`, `x:`, `y:`, `width:`, `height:`, and `layer:` attach diagram editor
+  metadata to nodes.
+- Edge metadata `route:`, `waypoints:`, `start:`, and `end:` attach connector
+  path and anchor metadata.
 - `css foo:` defines style, shape, or layout hints for `@foo`.
 - `weave @:` injects `@foo` names into matching nodes or edges by selector.
 - `css_file:` imports an external stylesheet for final SVG or HTML output.
@@ -35,16 +43,18 @@ Rules:
 The dense graph above normalizes to SDN tables:
 
 ```sdn
-nodes |id, label, css, role, shape|
-    User, User, person, actor,
-    Auth, Auth Service, "card important", service,
-    DB, Database, storage, database, cylinder
+nodes |id, label, css, role, shape, x, y, width, height, layer|
+    User, User, person, actor, , , , , ,
+    Auth, Auth Service, "card important", service, , , , , ,
+    DB, Database, storage, database, cylinder, , , , ,
+    Panel, Settings, card, , rounded, 40, 80, 220, 120, ui
 
-edges |from, to, label, css, kind|
-    User, Auth, Login, primary, normal
-    Auth, DB, Query, db, normal
-    Auth, Log, Event, async, async
-    UI, DB, forbidden, violation, forbidden
+edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|
+    User, Auth, Login, primary, normal, , , ,
+    Auth, DB, Query, db, normal, , , ,
+    Panel, Auth, config, , normal, orthogonal, "150x100;150x40", right, left
+    Auth, Log, Event, async, async, , , ,
+    UI, DB, forbidden, violation, forbidden, , , ,
 ```
 
 ## CSS Definitions
@@ -155,4 +165,6 @@ User -> Auth: Login @primary
 
 The TUI preview renders a compact graph summary. The GUI preview emits
 deterministic HTML with `sdn-graph`, `sdn-graph-node`, and `sdn-graph-edge`
-classes plus `sdn-css-<name>` classes derived from `@name`.
+classes plus `sdd-diagram`, `sdd-node`, `sdd-connector`, `data-format="sdd"`,
+geometry attributes, connector route/waypoint attributes, and `sdn-css-<name>`
+classes derived from `@name`.
