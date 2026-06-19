@@ -91,8 +91,8 @@ Blank `ui-label-edit`, `ui-layout-edit`, `ui-auto-layout-edit`, and
 rejected as `invalid-args`.
 `ui-layer-edit` and `ui-style-token-edit` use `node_id|expected|new`; blank
 expected fields and blank or malformed replacement style-token fields are `invalid-args`.
-`ui-style-token-read` and `ui-inspect-node` use `node_id` and return compact
-readback text.
+`ui-style-token-read` and `ui-inspect-node` use `node_id`, reject malformed IDs
+as `invalid-args`, and return compact readback text.
 
 Layout actions use `mode_or_axis|id1,id2,...`, followed by the UI or SDD
 document body. `ui-align-selection`, `ui-distribute-selection`,

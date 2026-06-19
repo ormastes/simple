@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 102 | 102 | 0 | 0 |
+| 103 | 103 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1563,6 +1563,23 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects malformed UI read target ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val read_result = office_action_dispatch("ui-style-token-read", "button bad\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val inspect_result = office_action_dispatch("ui-inspect-node", "button bad\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+expect(read_result.reason).to_equal("invalid-args")
+expect(inspect_result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects blank duplicate node ids
 
 <details>
@@ -1892,8 +1909,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 102 |
-| Active scenarios | 102 |
+| Total scenarios | 103 |
+| Active scenarios | 103 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
