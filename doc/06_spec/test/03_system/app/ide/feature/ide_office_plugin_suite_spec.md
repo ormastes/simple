@@ -100,7 +100,7 @@ slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true element_meta=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
 draw: SDD Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
-  check: draw: sdn_graph format=sdd name="SDD: Simple Diagram Document" extension=.sdd.sdn nodes=3 edges=2 html=true route=true select=true inspect=true child_meta=true path_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
+  check: draw: sdn_graph format=sdd name="SDD: Simple Diagram Document" extension=.sdd.sdn nodes=3 edges=2 html=true route=true select=false inspect=true child_meta=true path_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true display_recalc=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
@@ -684,8 +684,8 @@ expect(sdd_action.output).to_contain("data-edge-count=\"0\"")
 expect(selected_sdd_action.output).to_contain("data-selected-node-id=\"A\"")
 expect(selected_sdd_action.output).to_contain("data-selected=\"true\"")
 expect(selected_sdd_action.output).to_contain("data-resize-handle=\"se\" data-node=\"A\" data-node-index=\"0\"")
-expect(selected_sdd_edge_action.output).to_contain("data-connector-handle=\"start\" data-edge-index=\"0\" data-x=\"80\" data-y=\"10\"")
-expect(selected_sdd_edge_action.output).to_contain("data-connector-handle=\"waypoint\" data-waypoint-index=\"0\" data-edge-index=\"0\" data-x=\"80\" data-y=\"10\"")
+expect(selected_sdd_edge_action.output).to_contain("data-connector-handle=\"start\" data-edge-index=\"0\" data-kind=\"\" data-route=\"orthogonal\" data-x=\"80\" data-y=\"10\"")
+expect(selected_sdd_edge_action.output).to_contain("data-connector-handle=\"waypoint\" data-waypoint-index=\"0\" data-edge-index=\"0\" data-kind=\"\" data-route=\"orthogonal\" data-x=\"80\" data-y=\"10\"")
 expect(sdd_game_action.output).to_contain("sprite player")
 expect(sdd_game_action.output).to_contain("rect=10,20,16,16")
 expect(legacy_ui_action.action).to_equal("render-ui-html")
