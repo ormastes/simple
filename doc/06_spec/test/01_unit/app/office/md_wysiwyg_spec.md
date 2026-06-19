@@ -28,7 +28,7 @@ md_wysiwyg_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -152,6 +152,25 @@ expect(preview).to_contain(">changed</p>")
 
 </details>
 
+#### keeps edited lines inside fenced code blocks rendered as code
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val view = build_wysiwyg_view("```simple\nprint(1)\n```")
+val edited = wysiwyg_update_line(view, 1, "print(\"<x>\")")
+val preview = wysiwyg_preview_pane(edited)
+expect(preview).to_contain("<pre")
+expect(preview).to_contain("print(&quot;&lt;x&gt;&quot;)")
+expect(preview).to_contain("data-line-no=\"1\"")
+```
+
+</details>
+
 #### accepts checked edits only when expected source matches actual source
 
 <details>
@@ -167,6 +186,25 @@ expect(result.accepted).to_be(true)
 expect(result.reason).to_equal("updated")
 expect(result.diff).to_equal("@@ line 1 @@\n- second\n+ changed")
 expect(wysiwyg_source_pane(result.view)).to_equal("first\nchanged")
+```
+
+</details>
+
+#### keeps checked edits inside fenced code blocks rendered as code
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val view = build_wysiwyg_view("```simple\nprint(1)\n```")
+val result = wysiwyg_update_line_checked(view, 1, "print(1)", "print(2)")
+val preview = wysiwyg_preview_pane(result.view)
+expect(result.accepted).to_be(true)
+expect(preview).to_contain("<pre")
+expect(preview).to_contain(">print(2)</pre>")
 ```
 
 </details>
@@ -230,8 +268,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

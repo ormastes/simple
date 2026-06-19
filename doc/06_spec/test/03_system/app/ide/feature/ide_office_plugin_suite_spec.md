@@ -371,7 +371,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 505 lines folded for reproduction.
+Runnable source: 508 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -464,6 +464,7 @@ expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-node")
 expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-edge")
 val md_action = office_action_dispatch("render-markdown-preview-html", "# Markdown")
 val md_edit_action = office_action_dispatch("md-edit", "1|old|new\n# Markdown\nold")
+val md_code_edit_action = office_action_dispatch("md-edit", "1|print(1)|print(2)\n```simple\nprint(1)\n```")
 val md_stale_edit_action = office_action_dispatch("md-edit", "1|missing|new\n# Markdown\nold")
 val writer_action = office_action_dispatch("render-writer-markdown-html", "# Writer")
 val ppt_action = office_action_dispatch("render-ppt-markdown-html", "# Deck\n\n## Slide")
@@ -540,6 +541,8 @@ expect(md_action.output).to_contain("data-line-no=\"0\"")
 expect(md_action.output).to_contain("<h1>Markdown</h1>")
 expect(md_edit_action.output).to_contain("new")
 expect(md_edit_action.reason).to_equal("updated")
+expect(md_code_edit_action.output).to_contain("<pre")
+expect(md_code_edit_action.output).to_contain(">print(2)</pre>")
 expect(md_stale_edit_action.reason).to_equal("stale-line")
 expect(writer_action.output).to_contain("class=\"md-paper\"")
 expect(writer_action.output).to_contain("data-format=\"markdown-paper\"")
