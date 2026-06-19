@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 549 lines folded for reproduction.
+Runnable source: 551 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -863,6 +863,7 @@ expect(catalog[6].actions.join(",")).to_contain("db-edit")
 val base_query_count_action = office_action_dispatch("query-table", "count-where|status|open\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
 val base_query_select_action = office_action_dispatch("query-table", "select-where|status|open\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
 val base_query_project_action = office_action_dispatch("query-table", "project-column|status\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
+val base_missing_query_column_action = office_action_dispatch("query-table", "count-where|missing|open\ntable: Feature\ncolumns: id,status\nrow: 1,open")
 val base_html_action = office_action_dispatch("render-base-table-html", "table: Feature\ncolumns: id,status\nrow: 1,<open>\nrow: 2,done")
 val base_insert_action = office_action_dispatch("db-edit", "insert|3,open\ntable: Feature\ncolumns: id,status\nrow: 1,done")
 val base_update_action = office_action_dispatch("db-edit", "update-where|status|open|status|done\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
@@ -872,6 +873,7 @@ val base_empty_cell_action = office_action_dispatch("db-edit", "insert|3,\ntable
 expect(base_query_count_action.output).to_equal("1")
 expect(base_query_select_action.output).to_contain("row: 1,open")
 expect(base_query_project_action.output).to_contain("open")
+expect(base_missing_query_column_action.reason).to_equal("missing-column")
 expect(base_html_action.output).to_contain("data-format=\"base-table\"")
 expect(base_html_action.output).to_contain("data-column-count=\"2\"")
 expect(base_html_action.output).to_contain("data-row-count=\"2\"")
