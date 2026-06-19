@@ -237,6 +237,9 @@ stable for selection, connectors, and inspectors.
 adds or updates one reusable style-table rule and rejects invalid targets or
 unsafe CSS values.
 
+`sdn_graph_inspect_style_rule(graph, css, key)` returns one reusable style-rule
+snapshot with target, parent, key, and value metadata, or `missing-style-rule`.
+
 `sdn_graph_update_node_at` is the broad pure node edit operation for editor
 event wiring. It updates one node's CSS labels, role, shape, x/y geometry,
 width/height, and layer by index while leaving node id/label, connectors, CSS

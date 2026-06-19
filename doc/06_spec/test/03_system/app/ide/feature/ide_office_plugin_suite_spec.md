@@ -100,7 +100,7 @@ slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
 draw: Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
-  check: draw: sdn_graph nodes=3 edges=2 html=true route=true select=true inspect=true edit=true geometry=true layer=true role=true node_create=true style_rule=true edge_create=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
+  check: draw: sdn_graph nodes=3 edges=2 html=true route=true select=true inspect=true edit=true geometry=true layer=true role=true node_create=true style_rule=true style_inspect=true edge_create=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
@@ -112,7 +112,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6
-  llm-catalog: apps=9 features=91 actions=50
+  llm-catalog: apps=9 features=92 actions=51
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -286,7 +286,7 @@ expect(tui_lines[23]).to_equal(gui_lines[23])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -298,6 +298,7 @@ expect(probe.html_render).to_be(true)
 expect(probe.selected_render).to_be(true)
 expect(probe.node_create).to_be(true)
 expect(probe.style_rule_edit).to_be(true)
+expect(probe.style_rule_inspect).to_be(true)
 expect(probe.edge_create).to_be(true)
 expect(probe.reroute_edit).to_be(true)
 expect(probe.node_edit).to_be(true)
@@ -318,6 +319,7 @@ expect(ide_draw_sanity_summary()).to_contain("layer=true")
 expect(ide_draw_sanity_summary()).to_contain("role=true")
 expect(ide_draw_sanity_summary()).to_contain("node_create=true")
 expect(ide_draw_sanity_summary()).to_contain("style_rule=true")
+expect(ide_draw_sanity_summary()).to_contain("style_inspect=true")
 expect(ide_draw_sanity_summary()).to_contain("edge_create=true")
 expect(ide_draw_sanity_summary()).to_contain("edge_style=true")
 expect(ide_draw_sanity_summary()).to_contain("edge_kind=true")
@@ -346,7 +348,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 418 lines folded for reproduction.
+Runnable source: 427 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -354,7 +356,7 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=91 actions=50")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=92 actions=51")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("html-render")
@@ -380,6 +382,7 @@ expect(catalog[4].features.join(",")).to_contain("sdd-source")
 expect(catalog[4].features.join(",")).to_contain("connector-paths")
 expect(catalog[4].features.join(",")).to_contain("group-containers")
 expect(catalog[4].features.join(",")).to_contain("style-rule-edit")
+expect(catalog[4].features.join(",")).to_contain("style-rule-inspector")
 expect(catalog[4].features.join(",")).to_contain("node-create")
 expect(catalog[4].features.join(",")).to_contain("node-label-edit")
 expect(catalog[4].features.join(",")).to_contain("node-geometry-edit")
@@ -403,6 +406,7 @@ expect(catalog[4].features.join(",")).to_contain("distribute-layout")
 expect(catalog[4].actions.join(",")).to_contain("render-sdd-html-with-selection")
 expect(catalog[4].actions.join(",")).to_contain("reroute-sdd-connector")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-style-rule")
+expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-style-rule")
 expect(catalog[4].actions.join(",")).to_contain("add-sdd-node")
 expect(catalog[4].actions.join(",")).to_contain("add-sdd-edge")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-edge-label")
@@ -448,6 +452,8 @@ val ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "button
 val ui_inspect_action = office_action_dispatch("ui-inspect-node", "button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val sdd_duplicate_action = office_action_dispatch("duplicate-sdd-node", "A|A_copy|20|10\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val sdd_style_rule_action = office_action_dispatch("edit-sdd-style-rule", "accent|node|none|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent x: 0 y: 0 width: 80 height: 20")
+val sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent|fill\ncss |name, extends, target|\n    accent, none, node\nstyles |css, key, value|\n    accent, fill, #eeeeee")
+val missing_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent|stroke\ncss |name, extends, target|\n    accent, none, node\nstyles |css, key, value|\n    accent, fill, #eeeeee")
 val invalid_sdd_style_rule_action = office_action_dispatch("edit-sdd-style-rule", "accent|canvas|none|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
 val invalid_sdd_style_token_action = office_action_dispatch("edit-sdd-style-rule", "accent,bad|node|none|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
 val sdd_add_node_action = office_action_dispatch("add-sdd-node", "C|Choice|accent|decision|diamond|80|64|48|32|front|A\ngraph: Node Add\nA: Alpha x: 0 y: 0 width: 80 height: 20")
@@ -517,6 +523,9 @@ expect(sdd_duplicate_action.output).to_contain("data-node=\"A_copy\"")
 expect(sdd_style_rule_action.output).to_contain("css |name, extends, target|")
 expect(sdd_style_rule_action.output).to_contain("accent, fill, #eeeeee")
 expect(sdn_graph_render_html(sdn_graph_parse(sdd_style_rule_action.output))).to_contain("background-color:#eeeeee")
+expect(sdd_style_rule_inspect_action.output).to_contain("value=#eeeeee")
+expect(sdd_style_rule_inspect_action.output).to_contain("target=node")
+expect(missing_sdd_style_rule_inspect_action.reason).to_equal("missing-style-rule")
 expect(invalid_sdd_style_rule_action.reason).to_equal("invalid-target")
 expect(invalid_sdd_style_token_action.reason).to_equal("invalid-style-token")
 expect(sdd_add_node_action.output).to_contain("data-node=\"C\"")
@@ -564,6 +573,7 @@ expect(sdd_inspect_edge_action.output).to_contain("path=M")
 expect(missing_sdd_inspect_edge_action.reason).to_equal("missing-edge")
 val draw_graph = sdn_graph_parse("graph: Feature\ncanvas: width: 800 height: 600 grid: 10 snap: false zoom: 100 background: white\nA: A x: 0 y: 0 width: 80 height: 20\nB: B x: 160 y: 0 width: 80 height: 20\nA -> B: flow route: simple start: right end: left")
 val style_ruled = sdn_graph_set_style_rule_checked(sdn_graph_parse("graph: Style\nA: A @accent x: 0 y: 0 width: 80 height: 20"), "accent", "node", "none", "fill", "#eeeeee")
+val inspected_style_rule = sdn_graph_inspect_style_rule(style_ruled.graph, "accent", "fill")
 val node_added = sdn_graph_add_node_checked(draw_graph, "C", "Choice", "accent", "decision", "diamond", "80", "80", "64", "48", "front", "A")
 val edge_added = sdn_graph_add_edge(node_added.graph, "B", "A", "return", "secondary", "reply", "simple", "", "left", "right")
 val rerouted = sdn_graph_update_edge_at(edge_added, 0, "orthogonal", "120x10;120x40", "right", "left")
@@ -590,6 +600,7 @@ val draw_aligned = sdn_graph_align_checked(draw_layout_graph, draw_layout_ids, d
 val draw_distributed = sdn_graph_distribute_checked(draw_layout_graph, draw_layout_ids, draw_layout_signature, "horizontal")
 val draw_duplicate = sdn_graph_duplicate_node_checked(draw_role_only, "B", "B_copy", "24", "12")
 expect(style_ruled.accepted).to_be(true)
+expect(inspected_style_rule.value).to_equal("#eeeeee")
 expect(sdn_graph_render_html(style_ruled.graph)).to_contain("background-color:#eeeeee")
 expect(node_added.accepted).to_be(true)
 expect(node_added.graph.nodes[2].id).to_equal("C")

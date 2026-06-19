@@ -449,3 +449,7 @@ possible so they are runner-verifiable.
   rules, rejects invalid targets and unsafe CSS values, and the HTML renderer
   resolves known node/edge paint keys into safe inline styles. `edit-sdd-style-rule`
   exposes the bridge through the headless Office action surface.
+- 2026-06-19 dev: Added Draw/SDD reusable style-rule inspection.
+  `sdn_graph_inspect_style_rule` returns compact target/parent/key/value
+  readback for one style rule, and `inspect-sdd-style-rule` exposes it through
+  the headless Office action surface for LLM/editor workflows.

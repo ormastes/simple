@@ -250,7 +250,7 @@ expect(canon).to_contain("A, B, done, , normal, simple, 56x36, right, left")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -270,6 +270,13 @@ val reparsed = sdn_graph_parse(sdn_graph_to_canonical_sdn(updated.graph))
 expect(reparsed.css_defs.len()).to_equal(4)
 expect(reparsed.styles.len()).to_equal(7)
 expect(sdn_graph_render_html(reparsed)).to_contain("background-color:#eeeeee")
+val inspected = sdn_graph_inspect_style_rule(reparsed, "accent", "fill")
+val missing = sdn_graph_inspect_style_rule(reparsed, "accent", "opacity")
+expect(inspected.found).to_be(true)
+expect(inspected.target).to_equal("node")
+expect(inspected.parent_css).to_equal("base")
+expect(inspected.value).to_equal("#eeeeee")
+expect(missing.reason).to_equal("missing-style-rule")
 val bad_target = sdn_graph_set_style_rule_checked(graph, "accent", "canvas", "base", "fill", "#eeeeee")
 val bad_value = sdn_graph_set_style_rule_checked(graph, "accent", "node", "base", "fill", "red;position:absolute")
 val bad_token = sdn_graph_set_style_rule_checked(graph, "accent,bad", "node", "base", "fill", "#eeeeee")
