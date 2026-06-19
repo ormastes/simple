@@ -28,7 +28,7 @@ libreoffice_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -59,12 +59,16 @@ expect(libreoffice_suite_name()).to_equal("LibreOffice")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(libreoffice_app_name("word")).to_equal("Writer")
+expect(libreoffice_app_name("sheets")).to_equal("Calc")
+expect(libreoffice_app_name("calc")).to_equal("Calc")
 expect(libreoffice_app_name("excel")).to_equal("Calc")
+expect(libreoffice_app_name("slides")).to_equal("Impress")
+expect(libreoffice_app_name("impress")).to_equal("Impress")
 expect(libreoffice_app_name("ppt")).to_equal("Impress")
 ```
 
@@ -91,20 +95,45 @@ expect(libreoffice_app_name("math")).to_equal("Math")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(is_office_component("word")).to_be(true)
 expect(is_office_component("sheets")).to_be(true)
+expect(is_office_component("calc")).to_be(true)
+expect(is_office_component("impress")).to_be(true)
+expect(is_office_component("base")).to_be(true)
 expect(is_office_component("counter")).to_be(true)
 expect(libreoffice_app_name_checked("writer")).to_equal("Writer")
+expect(libreoffice_app_name_checked("base")).to_equal("Base")
 expect(libreoffice_app_name_checked("counter")).to_equal("Counter")
 expect(libreoffice_app_name_checked("unknown")).to_equal("error: unknown LibreOffice component: unknown")
 val route = lookup_office_component("counter")
 expect(route.valid).to_be(true)
 expect(route.status).to_equal("component")
 expect(route.component).to_equal("counter")
+```
+
+</details>
+
+#### normalizes LibreOffice direct route aliases
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(office_canonical_component("calc")).to_equal("sheets")
+expect(office_canonical_component("excel")).to_equal("sheets")
+expect(office_canonical_component("impress")).to_equal("slides")
+expect(office_canonical_component("ppt")).to_equal("slides")
+expect(office_canonical_component("base")).to_equal("db")
+expect(lookup_office_component("calc").component).to_equal("sheets")
+expect(lookup_office_component("impress").component).to_equal("slides")
+expect(lookup_office_component("base").component).to_equal("db")
 ```
 
 </details>
@@ -216,8 +245,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 53 | 53 | 0 | 0 |
+| 56 | 56 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -132,6 +132,21 @@ expect(run_office(["sheets"])).to_equal(0)
 
 </details>
 
+#### loads calc aliases
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["calc"])).to_equal(0)
+expect(run_office(["excel"])).to_equal(0)
+```
+
+</details>
+
 #### loads slides
 
 <details>
@@ -142,6 +157,38 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(run_office(["slides"])).to_equal(0)
+```
+
+</details>
+
+#### loads impress aliases
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["impress"])).to_equal(0)
+expect(run_office(["ppt"])).to_equal(0)
+```
+
+</details>
+
+#### loads draw base and math direct routes
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["draw"])).to_equal(0)
+expect(run_office(["base"])).to_equal(0)
+expect(run_office(["db"])).to_equal(0)
+expect(run_office(["math"])).to_equal(0)
 ```
 
 </details>
@@ -1080,8 +1127,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 53 |
-| Active scenarios | 53 |
+| Total scenarios | 56 |
+| Active scenarios | 56 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
