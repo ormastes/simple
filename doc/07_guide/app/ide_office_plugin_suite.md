@@ -178,7 +178,8 @@ symbols are invalid. Every LLM catalog action must be recognized by
 `unknown-action`. IDE manifest entries must advertise exactly
 `ide_capability_<capability>` and `ide_feature_check_<capability>` symbols for
 each IDE capability. The IDE plugin-manifest feature check also reports the
-LibreOffice-branded plugin entry count as `libre=6`.
+LibreOffice-branded plugin entry count and manifest round-trip count as
+`libre=6 libre_roundtrip=6`.
 
 Calc formula hardening should distinguish display-safe functions from the
 f64-returning formula path. `evaluate_formula_display_text` is the verified path

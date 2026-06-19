@@ -111,7 +111,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
-  plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6
+  plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   llm-catalog: apps=9 features=97 actions=56
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
@@ -170,7 +170,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -202,6 +202,7 @@ expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Desig
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
 expect(tui_report).to_contain("libre=6")
+expect(tui_report).to_contain("libre_roundtrip=6")
 expect(registry_checks).to_contain("metadata=true")
 expect(registry_checks).to_contain("ppt_html=true")
 expect(registry_checks).to_contain("path_meta=true")
@@ -1332,7 +1333,7 @@ expect(summary).to_contain("ppt=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1341,6 +1342,7 @@ val summary = ide_plugin_manifest_summary()
 expect(probe.entry_count).to_equal(6)
 expect(probe.roundtrip_count).to_equal(6)
 expect(probe.libreoffice_entry_count).to_equal(6)
+expect(probe.libreoffice_roundtrip_count).to_equal(6)
 expect(probe.names.join(",")).to_contain("ide.slides")
 expect(probe.names.join(",")).to_contain("ide.draw")
 expect(probe.names.join(",")).to_contain("ide.sheets")
@@ -1350,6 +1352,7 @@ expect(probe.manifest_text).to_contain("ide_capability_draw")
 expect(probe.manifest_text).to_contain("ide_feature_check_draw")
 expect(summary).to_contain("roundtrip=6")
 expect(summary).to_contain("libre=6")
+expect(summary).to_contain("libre_roundtrip=6")
 ```
 
 </details>
