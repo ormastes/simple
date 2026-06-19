@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 761 lines folded for reproduction.
+Runnable source: 762 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -803,6 +803,7 @@ expect(stale_sdd_geometry_action.reason).to_equal("missing-node")
 expect(sdd_parent_action.output).to_contain("data-parent=\"A\"")
 expect(invalid_sdd_parent_id_action.reason).to_equal("invalid-args")
 expect(sdd_parent_cycle_action.reason).to_equal("parent-cycle")
+expect(sdd_inspect_node_action.output).to_contain("node_index=0")
 expect(sdd_inspect_node_action.output).to_contain("child_count=1")
 expect(sdd_inspect_node_action.output).to_contain("child_bounds=12,16,32,26")
 expect(sdd_node_delete_action.reason).to_equal("updated")

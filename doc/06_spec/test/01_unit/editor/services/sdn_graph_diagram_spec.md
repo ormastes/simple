@@ -440,7 +440,7 @@ expect(bad_delete.reason).to_equal("invalid-style-token")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -453,6 +453,7 @@ expect(html).to_contain("width:160px")
 expect(html).to_contain("height:90px")
 expect(html).to_contain("data-x=\"32\"")
 expect(html).to_contain("data-path=\"M 192,93 L 240,68\"")
+expect(inspected.node_index).to_equal(0)
 expect(inspected.x).to_equal("32")
 expect(inspected.width).to_equal("160")
 ```
