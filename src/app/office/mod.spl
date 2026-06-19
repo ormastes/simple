@@ -17,6 +17,7 @@ use app.office.slides.html_render.{render_ppt_markdown_html}
 use app.office.ui_editor.{OfficeUiEditResult, OfficeUiInspector, office_ui_design_align_checked, office_ui_design_distribute_checked, office_ui_design_duplicate_node_checked, office_ui_design_geometry_signature, office_ui_design_inspect_node, office_ui_design_parse, office_ui_design_read_style_token, office_ui_design_render_html, office_ui_design_to_sdd, office_ui_design_update_auto_layout_checked, office_ui_design_update_constraint_checked, office_ui_design_update_label_checked, office_ui_design_update_layer_checked, office_ui_design_update_layout_checked, office_ui_design_update_style_token_checked}
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.base_db.{DbEditResult, DbTable, count_where, delete_where, insert_row_checked, new_table, project_column, select_where, update_where}
+use app.office.math_editor.{MathRenderResult, math_to_mathml, math_to_mathml_checked}
 use std.editor.services.sdn_graph.{SdnGraph, sdn_graph_align_checked, sdn_graph_distribute_checked, sdn_graph_duplicate_node_checked, sdn_graph_geometry_signature, sdn_graph_parse, sdn_graph_render_html, sdn_graph_render_html_with_selection, sdn_graph_update_canvas, sdn_graph_update_edge_at, sdn_graph_update_node_parent_at, sdn_graph_update_node_shape_at, sdn_graph_update_node_style_at}
 use common.office.file_ops.{RecentFileStore}
 use app.office.sheets.cell.{cell_ref_to_string, parse_cell_ref}
@@ -108,6 +109,12 @@ fn run_office(args: [text]) -> i32:
             return _run_office_action_command(args)
         "render-markdown-preview-html" =>
             return _run_office_action_command(args)
+        "render-mathml" =>
+            return _run_office_action_command(args)
+        "render-mathml-checked" =>
+            return _run_office_action_command(args)
+        "render-math-structure" =>
+            return _run_office_action_command(args)
         "render-ui-html" =>
             return _run_office_action_command(args)
         "ui-duplicate-node" =>
@@ -176,6 +183,12 @@ fn office_action_dispatch(action: text, source: text) -> OfficeActionResult:
             return OfficeActionResult(ok: true, code: 0, action: action, output: render_ppt_markdown_html(decoded), reason: "rendered")
         "render-markdown-preview-html" =>
             return OfficeActionResult(ok: true, code: 0, action: action, output: wysiwyg_preview_document_html(decoded), reason: "rendered")
+        "render-mathml" =>
+            return OfficeActionResult(ok: true, code: 0, action: action, output: math_to_mathml(decoded), reason: "rendered")
+        "render-mathml-checked" =>
+            return _office_action_render_mathml_checked(decoded)
+        "render-math-structure" =>
+            return _office_action_render_math_structure(decoded)
         "query-table" =>
             return _office_action_query_table(decoded)
         "db-edit" =>
@@ -253,6 +266,31 @@ fn _office_action_split_ids(value: text) -> [text]:
         if id != "":
             ids.push(id)
     ids
+
+fn _office_action_math_result(action: text, result: MathRenderResult) -> OfficeActionResult:
+    if not result.accepted:
+        return OfficeActionResult(ok: false, code: 1, action: action, output: result.mathml, reason: result.reason)
+    OfficeActionResult(ok: true, code: 0, action: action, output: result.mathml, reason: result.reason)
+
+fn _office_action_render_mathml_checked(source: text) -> OfficeActionResult:
+    _office_action_math_result("render-mathml-checked", math_to_mathml_checked(source))
+
+fn _office_action_render_math_structure(source: text) -> OfficeActionResult:
+    val result = math_to_mathml_checked(source)
+    var output = "reason=" + result.reason + "\naccepted=" + result.accepted.to_text()
+    if result.mathml.contains("<mfrac>"):
+        output = output + "\ncontains=fraction"
+    if result.mathml.contains("<msup>"):
+        output = output + "\ncontains=superscript"
+    if result.mathml.contains("<msub>"):
+        output = output + "\ncontains=subscript"
+    if result.mathml.contains("<msqrt>"):
+        output = output + "\ncontains=square-root"
+    if result.mathml.contains("<mrow>"):
+        output = output + "\ncontains=row"
+    if not result.accepted:
+        return OfficeActionResult(ok: false, code: 1, action: "render-math-structure", output: output, reason: result.reason)
+    OfficeActionResult(ok: true, code: 0, action: "render-math-structure", output: output, reason: result.reason)
 
 fn _office_action_duplicate_ui_node(source: text) -> OfficeActionResult:
     val parts = _office_action_split_edit_source(source)
@@ -489,6 +527,8 @@ fn _run_office_action_command(args: [text]) -> i32:
         print result.output
         return result.code
     print "office-action: rejected (" + result.reason + ")"
+    if result.output != "":
+        print result.output
     return result.code
 
 fn _is_office_cli_non_negative_i32_token(value: text) -> bool:

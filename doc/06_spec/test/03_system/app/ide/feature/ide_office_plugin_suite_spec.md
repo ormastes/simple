@@ -314,13 +314,14 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
    - Expected: updated_base.affected_count equals `2`
    - Expected: count_where(updated_base.table, "status", "done") equals `2`
    - Expected: row_count(deleted_base.table) equals `0`
+   - Expected: math_bad_action.reason equals `syntax-error`
    - Expected: math_to_mathml_checked("a +").reason equals `syntax-error`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 257 lines folded for reproduction.
+Runnable source: 268 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -572,8 +573,19 @@ expect(catalog[7].features.join(",")).to_contain("subscript")
 expect(catalog[7].features.join(",")).to_contain("fenced-group")
 expect(catalog[7].features.join(",")).to_contain("precedence-parser")
 expect(catalog[7].features.join(",")).to_contain("checked-rendering")
+expect(catalog[7].actions.join(",")).to_contain("render-mathml")
 expect(catalog[7].actions.join(",")).to_contain("render-math-structure")
 expect(catalog[7].actions.join(",")).to_contain("render-mathml-checked")
+val mathml_action = office_action_dispatch("render-mathml", "frac(1, 2)")
+val math_checked_action = office_action_dispatch("render-mathml-checked", "a + b * c")
+val math_bad_action = office_action_dispatch("render-mathml-checked", "a +")
+val math_structure_action = office_action_dispatch("render-math-structure", "sqrt(x^2)")
+expect(mathml_action.output).to_contain("<mfrac><mn>1</mn><mn>2</mn></mfrac>")
+expect(math_checked_action.output).to_contain("<mi>a</mi><mo>+</mo>")
+expect(math_bad_action.reason).to_equal("syntax-error")
+expect(math_bad_action.output).to_contain("<math")
+expect(math_structure_action.output).to_contain("contains=square-root")
+expect(math_structure_action.output).to_contain("contains=superscript")
 expect(math_to_mathml("frac(1, 2)")).to_contain("<mfrac><mn>1</mn><mn>2</mn></mfrac>")
 expect(math_to_mathml("a + b * c")).to_contain("<mi>a</mi><mo>+</mo><mrow><mi>b</mi><mo>*</mo><mi>c</mi></mrow>")
 expect(math_to_mathml_checked("a +").reason).to_equal("syntax-error")

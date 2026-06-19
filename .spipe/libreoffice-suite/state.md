@@ -366,3 +366,7 @@ possible so they are runner-verifiable.
   `project-column` over compact `table:`/`columns:`/`row:` text tables, while
   `db-edit` exposes the existing checked `insert`, `update-where`, and
   `delete-where` helpers and returns updated table text.
+- 2026-06-19 dev: Wired Math render actions into the headless Office action
+  bridge. `render-mathml`, `render-mathml-checked`, and
+  `render-math-structure` now execute the existing Math editor renderer and
+  expose MathML, checked rejection reasons, and compact structure readbacks.

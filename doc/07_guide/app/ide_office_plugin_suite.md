@@ -84,6 +84,11 @@ uses `count-where|column|value`, `select-where|column|value`, or
 `update-where|match_column|match_value|update_column|new_value`, or
 `delete-where|match_column|match_value`, and returns the updated table text.
 
+Math actions accept one expression body. `render-mathml` returns MathML,
+`render-mathml-checked` returns MathML with malformed-input rejection reasons,
+and `render-math-structure` returns compact structure readback markers such as
+`contains=fraction`, `contains=superscript`, or `contains=square-root`.
+
 Designer/UI editing uses `app.office.ui_editor` as a pure HTML design document
 substrate. It parses positioned frame/component records, renders a stable
 `.office-ui-design` HTML surface with inspector metadata, exports nodes to
@@ -160,7 +165,8 @@ modes:
   `count-where`, `select-where`, `project-column`, `update-where`,
   `delete-where`, and `db-edit`; Math has `fraction`,
   `subscript`, `fenced-group`, `precedence-parser`, `checked-rendering`,
-  `render-math-structure`, and `render-mathml-checked`; Designer has
+  `render-mathml`, `render-math-structure`, and `render-mathml-checked`;
+  Designer has
   `render-ui-html`, `export-ui-sdd`, and
   `ui-label-edit` / `ui-layout-edit` / `ui-auto-layout-edit` /
   `ui-duplicate-node` / `ui-constraints-edit` / `ui-align-selection` /
