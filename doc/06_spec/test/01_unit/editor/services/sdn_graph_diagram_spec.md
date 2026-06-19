@@ -422,7 +422,7 @@ expect(graph.nodes[2].shape).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -434,6 +434,8 @@ expect(html).to_contain("data-edge-index=\"0\"")
 expect(html).to_contain("data-path=\"M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30\"")
 expect(html).to_contain("data-path-bounds=\"90,30,220,80\"")
 expect(html.split("data-path-bounds=\"90,30,220,80\"").len()).to_equal(3)
+expect(html).to_contain("data-segment-count=\"5\"")
+expect(html.split("data-segment-count=\"5\"").len()).to_equal(3)
 expect(html).to_contain("data-start-x=\"90\" data-start-y=\"30\" data-end-x=\"220\" data-end-y=\"30\"")
 expect(html.split("data-start-x=\"90\" data-start-y=\"30\" data-end-x=\"220\" data-end-y=\"30\"").len()).to_equal(3)
 expect(html).to_contain("data-label-x=\"155\" data-label-y=\"55\"")
