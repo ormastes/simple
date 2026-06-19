@@ -592,7 +592,7 @@ expect(edge.edge_index).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 81 lines folded for reproduction.
+Runnable source: 83 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -621,6 +621,7 @@ val reconnected = sdn_graph_update_edge_endpoints_at(kinded, 0, "B", "A")
 val checked_reconnected = sdn_graph_update_edge_endpoints_checked(kinded, 0, " B ", " A ")
 val bad_endpoint = sdn_graph_update_edge_endpoints_checked(kinded, 0, "B", "Missing")
 val deleted = sdn_graph_delete_edge_at(reconnected, 0)
+val missing_delete = sdn_graph_delete_edge_checked(reconnected, 8)
 val html = sdn_graph_render_html(updated)
 val labeled_html = sdn_graph_render_html(labeled)
 val styled_html = sdn_graph_render_html(styled)
@@ -676,6 +677,7 @@ expect(checked_reconnected.graph.edges[0].to_id).to_equal("A")
 expect(bad_endpoint.reason).to_equal("missing-node")
 expect(reconnected_html).to_contain("data-from=\"B\" data-to=\"A\"")
 expect(deleted.edges.len()).to_equal(0)
+expect(missing_delete.reason).to_equal("missing-edge")
 expect(sdn_graph_render_html(deleted)).to_contain("data-selected-edge-index=\"-1\"")
 ```
 
