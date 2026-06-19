@@ -592,7 +592,7 @@ expect(edge.edge_index).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 69 lines folded for reproduction.
+Runnable source: 76 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -610,6 +610,9 @@ val bad_waypoint = sdn_graph_update_edge_checked(created, 0, "orthogonal", "140,
 val missing_edge = sdn_graph_update_edge_checked(created, 8, "orthogonal", "140x30", "right", "left")
 val labeled = sdn_graph_update_edge_label_at(updated, 0, "approved")
 val label_pointed = sdn_graph_update_edge_label_point_at(labeled, 0, "155", "55")
+val checked_label_point = sdn_graph_update_edge_label_point_checked(labeled, 0, " 166 ", " 65 ")
+val bad_label_point = sdn_graph_update_edge_label_point_checked(labeled, 0, "bad", "55")
+val huge_label_point = sdn_graph_update_edge_label_point_checked(labeled, 0, "999999999999999999999999", "55")
 val styled = sdn_graph_update_edge_style_at(labeled, 0, "warning dashed")
 val bad_style = sdn_graph_update_edge_style_checked(labeled, 0, "warning,bad")
 val kinded = sdn_graph_update_edge_kind_at(styled, 0, "async")
@@ -652,6 +655,10 @@ expect(labeled_html).to_contain(">approved</div>")
 expect(label_pointed.edges[0].label_x).to_equal("155")
 expect(label_pointed.edges[0].label_y).to_equal("55")
 expect(sdn_graph_render_html(label_pointed)).to_contain("data-label-x=\"155\" data-label-y=\"55\"")
+expect(checked_label_point.graph.edges[0].label_x).to_equal("166")
+expect(sdn_graph_render_html(checked_label_point.graph)).to_contain("data-label-x=\"166\" data-label-y=\"65\"")
+expect(bad_label_point.reason).to_equal("invalid-label-point")
+expect(huge_label_point.reason).to_equal("invalid-label-point")
 expect(styled.edges[0].css).to_equal("warning dashed")
 expect(styled.edges[0].route).to_equal("orthogonal")
 expect(bad_style.reason).to_equal("invalid-style-token")
