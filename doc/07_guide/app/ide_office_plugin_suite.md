@@ -84,7 +84,7 @@ Blank duplicate source/new IDs or offsets are rejected as `invalid-args`.
 Designer edit actions use compact first-line edit headers followed by the UI
 design body. `ui-label-edit` uses `node_id|expected_label|new_label`.
 `ui-layout-edit` uses `node_id|expected_x|expected_y|expected_width|expected_height|new_x|new_y|new_width|new_height`; x/y fields are signed integers and width/height fields are non-negative integers.
-`ui-auto-layout-edit` uses `node_id|expected_mode|expected_gap|expected_padding|new_mode|new_gap|new_padding`.
+`ui-auto-layout-edit` uses `node_id|expected_mode|expected_gap|expected_padding|new_mode|new_gap|new_padding`; all compact header fields are required.
 `ui-constraints-edit` uses `node_id|expected_h|expected_v|new_h|new_v`;
 Blank `ui-label-edit`, `ui-layout-edit`, `ui-auto-layout-edit`, and
 `ui-constraints-edit` / `ui-layer-edit` / `ui-style-token-edit` node ids are
