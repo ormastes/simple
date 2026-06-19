@@ -99,7 +99,10 @@ The current canonical evidence contract is:
   `.rdc` file. The aggregate RenderDoc goal requires this through
   `scripts/check/check-renderdoc-simple-gate.shs`; if that env/file is missing
   or not the Simple Vulkan Engine2D probe path, the GUI RenderDoc goal remains
-  incomplete.
+  incomplete. The top-level GUI RenderDoc feature audit re-emits the Simple
+  evidence env, capture status/magic/file, gate status/reason, and required
+  backend/scene/program/status/magic fields so the Simple Vulkan requirement is
+  visible without opening the nested goal report.
 - Original Chrome HTML/CSS path:
   `build/renderdoc/canonical-probe/html/evidence.env`, or an external-host
   evidence env, must pass the original-backend gate with `rdoc_scene=html-css-chrome`,
