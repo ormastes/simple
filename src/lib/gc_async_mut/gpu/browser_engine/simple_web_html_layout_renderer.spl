@@ -3010,6 +3010,18 @@ fn _sort_style_order_indices(indices: [i32], count: i32, styles: [Style]) -> [i3
         width = width + width
     src
 
+fn is_positioned_style(st: Style) -> bool:
+    st.position_absolute or (st.position_relative and (st.left_px != 0 or st.top_px != 0 or st.z_index != 0))
+
+fn positioned_paint_root(nodes: [HNode], styles: [Style], i: i32) -> i32:
+    var root = -1
+    var cur = i
+    while cur >= 0:
+        if is_positioned_style(styles[cur]):
+            root = cur
+        cur = nodes[cur].parent
+    root
+
 # ---------------------------------------------------------------------------
 # Compute styles (cascade: inherit -> tag defaults -> matched rules -> inline)
 # ---------------------------------------------------------------------------
@@ -4910,7 +4922,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     while i < node_count:
         val nd = nodes[i]
         val st = styles[i]
-        if st.position_absolute:
+        if is_positioned_style(st):
             has_absolute_node = true
         val x = bx[i]
         val y = by[i]
@@ -4918,7 +4930,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         val h = bh[i]
         val skip_widget_page_bg = has_widget_panel and (nd.tag == "html" or nd.tag == "body")
         val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
-        val normal_flow = not st.position_absolute
+        val normal_flow = positioned_paint_root(nodes, styles, i) < 0
         val visible_node = st.display != "none" and not st.visibility_hidden
         val visible_box = normal_flow and visible_node and nd.tag != "#text" and y < fbh
         val non_widget_mode = not widget_mode
@@ -4948,7 +4960,8 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         while i < node_count:
             val nd = nodes[i]
             val st = styles[i]
-            if st.position_absolute and st.z_index <= 0:
+            val paint_root = positioned_paint_root(nodes, styles, i)
+            if paint_root >= 0 and styles[paint_root].z_index <= 0:
                 val x = bx[i]
                 val y = by[i]
                 val w = bw[i]
@@ -4974,7 +4987,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                         out = fb_rect(out, fbw, fbh, x, y, w, 1, argb(0, 102, 204))
                 if non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
                     out = fb_rect(out, fbw, fbh, x, y, w, h, argb(203, 213, 225))
-            elif st.position_absolute and st.z_index > 0:
+            elif paint_root == i and st.z_index > 0:
                 if positive_z_count == 0 and positive_z_indices.len() == 0:
                     positive_z_indices = [0; node_count]
                 val current_positive_z = st.z_index

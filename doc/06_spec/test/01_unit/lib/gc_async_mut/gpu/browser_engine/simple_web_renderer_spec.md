@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 60 | 60 | 0 | 0 |
+| 61 | 61 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -700,6 +700,29 @@ expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(96)
 
 </details>
 
+#### paints relative positioned boxes above following normal-flow siblings
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;border:2px solid #0f172a;padding:4px;width:60px;height:42px}.rel{position:relative;left:12px;top:7px;background-color:#1d4ed8;width:22px;height:10px}.child{background-color:#22c55e;width:10px;height:4px;margin-left:4px}.after{background-color:#f59e0b;width:18px;height:7px;margin-top:4px}.marker{background-color:#334155;width:26px;height:6px;margin-top:4px}</style></head><body><section class='shell'><div class='rel'><div class='child'></div></div><div class='after'></div><div class='marker'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+expect(pixels.len()).to_equal(96 * 64)
+expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(2916)
+expect(_count_color(pixels, 0xFFF8FAFCu32)).to_equal(2256)
+expect(_count_color(pixels, 0xFF0F172Au32)).to_equal(488)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(180)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(40)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(108)
+expect(_count_color(pixels, 0xFF334155u32)).to_equal(156)
+```
+
+</details>
+
 #### matches Chrome positioned positive z-index ordering
 
 <details>
@@ -1318,8 +1341,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 60 |
-| Active scenarios | 60 |
+| Total scenarios | 61 |
+| Active scenarios | 61 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
