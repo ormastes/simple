@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 69 | 69 | 0 | 0 |
+| 70 | 70 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1291,6 +1291,22 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects blank UI label action target ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("ui-label-edit", "   |Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### replaces the first office search match
 
 <details>
@@ -1327,8 +1343,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 69 |
-| Active scenarios | 69 |
+| Total scenarios | 70 |
+| Active scenarios | 70 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
