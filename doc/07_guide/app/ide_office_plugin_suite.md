@@ -58,6 +58,11 @@ Duplicate actions use a compact first-line edit header:
 `ui-duplicate-node` action returns rendered UI HTML; `duplicate-sdd-node`
 returns rendered SDD HTML.
 
+Layout actions use `mode_or_axis|id1,id2,...`, followed by the UI or SDD
+document body. `ui-align-selection`, `ui-distribute-selection`,
+`align-sdd-selection`, and `distribute-sdd-selection` compute the current
+geometry signature and return rendered HTML for the updated document.
+
 Designer/UI editing uses `app.office.ui_editor` as a pure HTML design document
 substrate. It parses positioned frame/component records, renders a stable
 `.office-ui-design` HTML surface with inspector metadata, exports nodes to

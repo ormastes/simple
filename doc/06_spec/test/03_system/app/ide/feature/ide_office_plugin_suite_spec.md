@@ -320,7 +320,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 198 lines folded for reproduction.
+Runnable source: 208 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -380,6 +380,10 @@ val ui_sdd_action = office_action_dispatch("export-ui-sdd", "design: Feature\nno
 val sdd_action = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button_copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val sdd_duplicate_action = office_action_dispatch("duplicate-sdd-node", "A|A_copy|20|10\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+val ui_align_action = office_action_dispatch("ui-align-selection", "left|a,b\ndesign: Align\nnode a|A|button|0|0|20|20|primary|1|action\nnode b|B|button|40|20|20|20|secondary|2|action")
+val sdd_align_action = office_action_dispatch("align-sdd-selection", "left|A,B\ngraph: Align\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 40 y: 20 width: 20 height: 20")
+val ui_distribute_action = office_action_dispatch("ui-distribute-selection", "horizontal|a,b,c\ndesign: Dist\nnode a|A|button|0|0|20|20|primary|1|action\nnode b|B|button|40|0|20|20|secondary|2|action\nnode c|C|button|100|0|20|20|ghost|3|action")
+val sdd_distribute_action = office_action_dispatch("distribute-sdd-selection", "horizontal|A,B,C\ngraph: Dist\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 40 y: 0 width: 20 height: 20\nC: C x: 100 y: 0 width: 20 height: 20")
 expect(md_action.output).to_contain("class=\"wysiwyg-preview\"")
 expect(md_action.output).to_contain("<h1>Markdown</h1>")
 expect(writer_action.output).to_contain("class=\"md-paper\"")
@@ -390,6 +394,12 @@ expect(sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(sdd_action.output).to_contain("data-selected-edge-index=\"-1\"")
 expect(ui_duplicate_action.output).to_contain("data-id=\"button_copy\"")
 expect(sdd_duplicate_action.output).to_contain("data-node=\"A_copy\"")
+expect(ui_align_action.output).to_contain("data-id=\"b\"")
+expect(ui_align_action.output).to_contain("left: 0px")
+expect(sdd_align_action.output).to_contain("data-node=\"B\"")
+expect(sdd_align_action.output).to_contain("style=\"left:0px")
+expect(ui_distribute_action.output).to_contain("left: 50px")
+expect(sdd_distribute_action.output).to_contain("style=\"left:50px")
 val draw_graph = sdn_graph_parse("graph: Feature\ncanvas: width: 800 height: 600 grid: 10 snap: false zoom: 100 background: white\nA: A x: 0 y: 0 width: 80 height: 20\nB: B x: 160 y: 0 width: 80 height: 20\nA -> B: flow route: simple start: right end: left")
 val rerouted = sdn_graph_update_edge_at(draw_graph, 0, "orthogonal", "120x10;120x40", "right", "left")
 val shaped = sdn_graph_update_node_at(rerouted, 0, "accent", "decision", "diamond", "12", "8", "96", "48", "front")

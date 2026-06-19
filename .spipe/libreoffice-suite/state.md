@@ -345,3 +345,8 @@ possible so they are runner-verifiable.
   bridge. `ui-duplicate-node` and `duplicate-sdd-node` accept a first-line
   `source_id|new_id|dx|dy` edit header followed by the UI/SDD document body and
   return rendered HTML for the updated document.
+- 2026-06-19 dev: Wired UI/SDD align and distribute actions into the headless
+  Office action bridge. `ui-align-selection`, `ui-distribute-selection`,
+  `align-sdd-selection`, and `distribute-sdd-selection` accept
+  `mode_or_axis|id1,id2,...` followed by the UI/SDD document body and return
+  rendered HTML for the updated document.
