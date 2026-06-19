@@ -196,7 +196,9 @@ deterministic HTML with `sdn-graph`, `sdn-graph-node`, and `sdn-graph-edge`
 classes plus `sdd-diagram`, `sdd-node`, `sdd-connector`, `data-format="sdd"`,
 geometry attributes, connector route/waypoint attributes, and `sdn-css-<name>`
 classes derived from `@name`. Nodes also expose `data-parent`,
-`data-child-count`, and `data-has-children` for group or container membership.
+`data-child-count`, `data-has-children`, and `data-child-bounds` for group or
+container membership. `data-child-bounds` uses `min_x,min_y,max_x,max_y` from
+effective child geometry when every child has numeric geometry.
 Common layer names map to `data-layer-z` and preview `z-index` values:
 `back`/`background` 0, `base`/`default` 10, `controls`/`ui`/`middle` 20, and
 `front`/`foreground`/`overlay` 30.
