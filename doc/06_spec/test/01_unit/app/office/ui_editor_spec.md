@@ -139,7 +139,7 @@ expect(design.nodes[1].constraint_vertical).to_equal("stretch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -162,6 +162,8 @@ expect(html).to_contain("data-width=\"120\"")
 expect(html).to_contain("data-height=\"36\"")
 expect(html).to_contain("data-layer=\"controls\"")
 expect(html).to_contain("data-parent=\"\"")
+expect(html).to_contain("data-child-count=\"0\"")
+expect(html).to_contain("data-has-children=\"false\"")
 expect(html).to_contain("data-layout-mode=\"off\"")
 expect(html).to_contain("data-constraint-h=\"left\"")
 expect(html).to_contain("left: 72px")
@@ -175,11 +177,11 @@ expect(html).to_contain("Sign &lt;in&gt;")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val design = office_ui_design_parse("design: Inspect\nnode card|Card|frame|0|0|200|120|panel|1|container\nnode action|Action|button|20|20|80|32|primary|controls|action")
+val design = office_ui_design_parse("design: Inspect\nnode card|Card|frame|0|0|200|120|panel|1|container\nnode action|Action|button|20|20|80|32|primary|controls|action|card")
 val html = office_ui_design_render_html_with_selection(design, "action")
 expect(html).to_contain("data-selected-node-id=\"action\"")
 expect(html).to_contain("data-frame-count=\"1\"")
@@ -191,6 +193,9 @@ expect(html).to_contain("data-x=\"20\"")
 expect(html).to_contain("data-y=\"20\"")
 expect(html).to_contain("data-width=\"80\"")
 expect(html).to_contain("data-height=\"32\"")
+expect(html).to_contain("data-parent=\"card\"")
+expect(html).to_contain("data-child-count=\"0\"")
+expect(html).to_contain("data-has-children=\"false\"")
 expect(html).to_contain("office-ui-selected")
 expect(html).to_contain("data-selected=\"true\"")
 expect(html).to_contain("aria-selected=\"true\"")
@@ -202,6 +207,8 @@ expect(html).to_contain("left: -5px; top: -5px; cursor: nwse-resize")
 expect(html).to_contain("right: -5px; bottom: -5px; cursor: nwse-resize")
 expect(html).to_contain("data-id=\"card\"")
 expect(html).to_contain("data-node-index=\"0\"")
+expect(html).to_contain("data-child-count=\"1\"")
+expect(html).to_contain("data-has-children=\"true\"")
 expect(html).to_contain("data-selected=\"false\"")
 
 val info = office_ui_design_inspect_node(design, "card")
