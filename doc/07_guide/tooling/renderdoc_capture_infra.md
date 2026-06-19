@@ -65,6 +65,12 @@ Important keys:
 - `rdoc_capture_reason`: concrete pass/fail/unavailable reason.
 - `rdoc_capture_file`: `.rdc` path when one exists.
 - `rdoc_capture_magic`: `RDOC` for a valid RenderDoc capture.
+- `rdoc_chromium_requested_api`: requested Chromium graphics API for Electron
+  HTML capture. The canonical Electron path records `vulkan`.
+- `rdoc_chromium_requested_angle`: requested ANGLE backend for Electron HTML
+  capture. The canonical Electron path records `vulkan`.
+- `rdoc_chromium_launch_flags`: exact Electron Chromium flags, including
+  `--enable-features=Vulkan --use-angle=vulkan`.
 
 If `renderdoccmd` is unavailable, `capture-simple` and `capture-html` still
 write an `evidence.env` artifact under the requested output directory with
@@ -72,6 +78,10 @@ write an `evidence.env` artifact under the requested output directory with
 `rdoc_capture_reason=missing-renderdoc`, an empty `rdoc_capture_file`, and an
 empty `rdoc_capture_magic`. This is not completion evidence; it makes the
 missing capture explicit for status gates and CI artifacts.
+`capture-electron-html` additionally records the HTML fixture path, Electron
+binary, capture script, viewport, and requested Vulkan/ANGLE Chromium launch
+contract even in this unavailable state, so the remaining missing component is
+visible as `renderdoccmd` rather than an ambiguous Electron setup failure.
 
 The current canonical evidence contract is:
 
@@ -87,7 +97,9 @@ The current canonical evidence contract is:
 - Electron Chromium HTML/CSS path:
   `build/renderdoc/canonical-probe/electron-html/evidence.env` should report
   `rdoc_backend=electron`, `rdoc_capture_status=pass`, `rdoc_capture_magic=RDOC`,
-  and an existing `.rdc` file when proving the Electron-backed GUI path.
+  `rdoc_chromium_requested_api=vulkan`,
+  `rdoc_chromium_requested_angle=vulkan`, and an existing `.rdc` file when
+  proving the Electron-backed GUI path.
 
 ## External Host Gate
 

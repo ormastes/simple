@@ -27,7 +27,7 @@ renderdoc_cli_helper_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -94,6 +94,8 @@ rdoc_timeout_secs=45
   shared CLI.
 - Capture implementations write `evidence.env` with status, reason, and capture
   file keys.
+- Electron HTML capture evidence records the requested Chromium Vulkan/ANGLE
+  launch contract even when RenderDoc itself is unavailable.
 - Live RenderDoc capture is left to the bounded check wrappers; this spec only
   proves that test code can reach the canonical helper interface.
 
@@ -155,7 +157,7 @@ expect(electron_wrapper).to_contain("capture-electron-html")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -165,6 +167,37 @@ expect(common).to_contain("evidence.env")
 expect(common).to_contain("rdoc_capture_status=")
 expect(common).to_contain("rdoc_capture_reason=")
 expect(common).to_contain("rdoc_capture_file=")
+expect(common).to_contain("rdoc_chromium_requested_api=vulkan")
+expect(common).to_contain("rdoc_chromium_requested_angle=vulkan")
+expect(common).to_contain("--enable-features=Vulkan --use-angle=vulkan")
+```
+
+</details>
+
+#### writes Electron Vulkan readiness evidence when RenderDoc is unavailable
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-renderdoc-cli-helper-electron-unavailable && . scripts/lib/renderdoc-evidence-common.shs && root=$(pwd) && electron=$(rdoc_find_electron \"$root\" || true) && rdoc_write_electron_html_unavailable \"$root\" \"$electron\" build/test-renderdoc-cli-helper-electron-unavailable/electron-html missing-renderdoc || true"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = rt_file_read_text("build/test-renderdoc-cli-helper-electron-unavailable/electron-html/evidence.env") ?? ""
+expect(evidence).to_contain("rdoc_backend=electron")
+expect(evidence).to_contain("rdoc_capture_status=unavailable")
+expect(evidence).to_contain("rdoc_capture_reason=missing-renderdoc")
+expect(evidence).to_contain("rdoc_html_path=")
+expect(evidence).to_contain("rdoc_electron=")
+expect(evidence).to_contain("rdoc_electron_capture_script=")
+expect(evidence).to_contain("rdoc_chromium_requested_api=vulkan")
+expect(evidence).to_contain("rdoc_chromium_requested_angle=vulkan")
+expect(evidence).to_contain("rdoc_chromium_requested_features=Vulkan")
+expect(evidence).to_contain("rdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan")
 ```
 
 </details>
@@ -173,8 +206,8 @@ expect(common).to_contain("rdoc_capture_file=")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

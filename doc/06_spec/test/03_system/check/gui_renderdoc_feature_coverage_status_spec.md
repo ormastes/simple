@@ -112,13 +112,15 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: flex_safe_unsafe_center_cases equals `1`
    - Expected: rendering_manifest_status equals `pass`
    - Expected: rendering_manifest_reason equals `pass`
+   - Expected: electron_api equals `vulkan`
+   - Expected: electron_angle equals `vulkan`
 - Verify the restart-audit report was written
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 75 lines folded for reproduction.
+Runnable source: 90 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -141,6 +143,11 @@ expect(evidence).to_contain("renderdoc_goal_status_command=sh scripts/check/chec
 expect(evidence).to_contain("simple_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple")
 expect(evidence).to_contain("html_renderdoc_capture_command=RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs")
 expect(evidence).to_contain("electron_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-electron-html")
+expect(evidence).to_contain("electron_renderdoc_evidence_env=build/renderdoc/canonical-probe/electron-html/evidence.env")
+expect(evidence).to_contain("electron_renderdoc_status=")
+expect(evidence).to_contain("electron_renderdoc_reason=")
+expect(evidence).to_contain("electron_renderdoc_requested_api=")
+expect(evidence).to_contain("electron_renderdoc_requested_angle=")
 
 val status = _value_of(evidence, "gui_renderdoc_feature_coverage_status")
 val widget_count = _value_of(evidence, "widget_kind_count")
@@ -163,6 +170,10 @@ val rendering_manifest_reason = _value_of(evidence, "html_css_rendering_manifest
 val renderdoc_status = _value_of(evidence, "renderdoc_goal_status")
 val simple_status = _value_of(evidence, "simple_renderdoc_status")
 val external_status = _value_of(evidence, "external_renderdoc_status")
+val electron_status = _value_of(evidence, "electron_renderdoc_status")
+val electron_reason = _value_of(evidence, "electron_renderdoc_reason")
+val electron_api = _value_of(evidence, "electron_renderdoc_requested_api")
+val electron_angle = _value_of(evidence, "electron_renderdoc_requested_angle")
 
 step("Assert every WidgetKind has an HTML renderer dispatch entry")
 expect(status.len()).to_be_greater_than(0)
@@ -188,6 +199,11 @@ expect(rendering_manifest_reason).to_equal("pass")
 expect(renderdoc_status.len()).to_be_greater_than(0)
 expect(simple_status.len()).to_be_greater_than(0)
 expect(external_status.len()).to_be_greater_than(0)
+expect(electron_status.len()).to_be_greater_than(0)
+expect(electron_reason.len()).to_be_greater_than(0)
+if electron_status != "unavailable":
+    expect(electron_api).to_equal("vulkan")
+    expect(electron_angle).to_equal("vulkan")
 
 step("Verify the restart-audit report was written")
 val report = file_read("build/test-gui-renderdoc-feature-coverage-status/report.md")
@@ -197,6 +213,7 @@ expect(report).to_contain("- widget rendering fixture/spec coverage: pass (43/43
 expect(report).to_contain("- Electron layout manifest cases: 50")
 expect(report).to_contain("- HTML/CSS rendering manifest traceability: pass (pass)")
 expect(report).to_contain("- Electron Chromium RenderDoc:")
+expect(report).to_contain("- Electron Chromium/Vulkan RenderDoc:")
 ```
 
 </details>
