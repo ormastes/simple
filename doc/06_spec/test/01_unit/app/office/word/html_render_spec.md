@@ -29,7 +29,7 @@ html_render_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -71,6 +71,22 @@ val html = render_block_html(_block(BlockKind.Paragraph, "Body text"))
 expect(html).to_contain("class=\"paragraph\"")
 expect(html).to_contain("line-height: 1.5;")
 expect(html).to_contain(">Body text</div>")
+```
+
+</details>
+
+#### escapes rich-text block content
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_block_html(_block(BlockKind.Paragraph, "<b>raw</b>"))
+expect(html).to_contain("&lt;b&gt;raw&lt;/b&gt;")
+expect(html.contains("<b>raw</b>")).to_be(false)
 ```
 
 </details>
@@ -172,8 +188,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
