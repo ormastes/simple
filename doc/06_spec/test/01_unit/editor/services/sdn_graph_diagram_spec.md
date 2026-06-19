@@ -507,11 +507,11 @@ expect(graph.nodes[1].css).to_equal("target")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val graph = sdn_graph_parse("graph: select-edge\nA: Alpha x: 10 y: 20 width: 80 height: 20\nB: Beta x: 220 y: 20 width: 80 height: 20\nA ~> B: c @primary route: simple start: right end: left")
+val graph = sdn_graph_parse("graph: select-edge\nA: Alpha x: 10 y: 20 width: 80 height: 20\nB: Beta x: 220 y: 20 width: 80 height: 20\nA ~> B: c @primary route: simple waypoints: 140x30;180x30 start: right end: left")
 val selected = sdn_graph_render_html_with_selection(graph, "", 0)
 val invalid = sdn_graph_render_html_with_selection(graph, "", 99)
 expect(selected).to_contain("data-selected-edge-index=\"0\"")
@@ -520,8 +520,12 @@ expect(selected).to_contain("data-edge-index=\"0\" data-selected=\"true\" aria-s
 expect(selected).to_contain("class=\"sdd-connector-handle sdd-connector-start\"")
 expect(selected).to_contain("data-connector-handle=\"start\"")
 expect(selected).to_contain("data-connector-handle=\"end\"")
+expect(selected).to_contain("data-connector-handle=\"waypoint\" data-waypoint-index=\"0\"")
+expect(selected).to_contain("data-connector-handle=\"waypoint\" data-waypoint-index=\"1\"")
 expect(selected).to_contain("cx=\"90\" cy=\"30\" r=\"4\"")
 expect(selected).to_contain("cx=\"220\" cy=\"30\" r=\"4\"")
+expect(selected).to_contain("cx=\"140\" cy=\"30\" r=\"3\"")
+expect(selected).to_contain("cx=\"180\" cy=\"30\" r=\"3\"")
 expect(selected).to_contain("data-kind=\"async\"")
 expect(selected).to_contain("class=\"sdn-graph-edge sdd-connector sdn-css-primary sdd-kind-async sdd-selected\"")
 expect(invalid).to_contain("data-selected-edge-index=\"99\"")
