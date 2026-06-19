@@ -718,7 +718,7 @@ expect(unsafe.reason).to_equal("invalid-canvas-number")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 85 lines folded for reproduction.
+Runnable source: 90 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -807,6 +807,11 @@ val node_deleted = sdn_graph_delete_node_at(roled, 1)
 expect(node_deleted.nodes.len()).to_equal(1)
 expect(node_deleted.nodes[0].id).to_equal("A")
 expect(node_deleted.edges.len()).to_equal(0)
+val missing_node_delete = sdn_graph_delete_node_checked(roled, "Nope")
+val checked_node_deleted = sdn_graph_delete_node_checked(roled, "B")
+expect(missing_node_delete.reason).to_equal("missing-node")
+expect(checked_node_deleted.accepted).to_be(true)
+expect(checked_node_deleted.graph.edges.len()).to_equal(0)
 ```
 
 </details>
