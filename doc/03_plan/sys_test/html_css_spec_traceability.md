@@ -125,9 +125,9 @@ Already completed:
   `renderdoccmd` is unavailable, so no macOS `.rdc` capture was produced.
 - The GUI/rendering feature coverage audit maps all current
   `src/lib/common/ui/widget_kind.spl` widget wires to HTML renderer dispatch and
-  records the current 19-case Electron Simple Web layout manifest as the
+  records the current 20-case Electron Simple Web layout manifest as the
   canonical pixel-parity fixture list.
-- 2026-06-19 refresh: the Electron Simple Web layout manifest passes with 16
+- 2026-06-19 refresh: the Electron Simple Web layout manifest passes with 17
   exact cases, 2 tracked text-raster divergences, 1 tracked Chrome opacity
   compositor-rounding case, and 0 hard failures. The status gate still remains
   incomplete until local Simple RenderDoc and original Chrome/Vulkan RenderDoc
