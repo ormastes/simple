@@ -89,6 +89,10 @@ Math actions accept one expression body. `render-mathml` returns MathML,
 and `render-math-structure` returns compact structure readback markers such as
 `contains=fraction`, `contains=superscript`, or `contains=square-root`.
 
+Counter actions use `value|counter_increment`, `value|counter_decrement`, or
+`value|counter_reset` and return `value=...`, `status=...`, and
+`changed=...`. Unsupported actions fail closed and preserve the original value.
+
 Designer/UI editing uses `app.office.ui_editor` as a pure HTML design document
 substrate. It parses positioned frame/component records, renders a stable
 `.office-ui-design` HTML surface with inspector metadata, exports nodes to
@@ -166,7 +170,7 @@ modes:
   `delete-where`, and `db-edit`; Math has `fraction`,
   `subscript`, `fenced-group`, `precedence-parser`, `checked-rendering`,
   `render-mathml`, `render-math-structure`, and `render-mathml-checked`;
-  Designer has
+  Counter has `counter-action`; Designer has
   `render-ui-html`, `export-ui-sdd`, and
   `ui-label-edit` / `ui-layout-edit` / `ui-auto-layout-edit` /
   `ui-duplicate-node` / `ui-constraints-edit` / `ui-align-selection` /

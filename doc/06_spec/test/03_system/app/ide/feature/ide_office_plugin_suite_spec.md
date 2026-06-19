@@ -316,12 +316,15 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
    - Expected: row_count(deleted_base.table) equals `0`
    - Expected: math_bad_action.reason equals `syntax-error`
    - Expected: math_to_mathml_checked("a +").reason equals `syntax-error`
+   - Expected: counter_inc_action.reason equals `incremented`
+   - Expected: counter_bad_action.reason equals `unsupported`
+   - Expected: counter_overflow_action.reason equals `invalid-args`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 268 lines folded for reproduction.
+Runnable source: 280 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -593,6 +596,18 @@ expect(math_fraction("x + 1", "y")).to_contain("<mrow><mi>x</mi><mo>+</mo><mn>1<
 expect(math_subscript("x", "i")).to_contain("<msub><mi>x</mi><mi>i</mi></msub>")
 expect(math_fenced("(", "x + y", ")")).to_contain("<mo>(</mo><mi>x</mi><mo>+</mo><mi>y</mi><mo>)</mo>")
 expect(catalog[8].actions.join(",")).to_contain("counter-action")
+val counter_inc_action = office_action_dispatch("counter-action", "41|counter_increment")
+val counter_dec_action = office_action_dispatch("counter-action", "41|counter_decrement")
+val counter_reset_action = office_action_dispatch("counter-action", "5|counter_reset")
+val counter_bad_action = office_action_dispatch("counter-action", "5|counter_spin")
+val counter_overflow_action = office_action_dispatch("counter-action", "9223372036854775808|counter_increment")
+expect(counter_inc_action.output).to_contain("value=42")
+expect(counter_inc_action.reason).to_equal("incremented")
+expect(counter_dec_action.output).to_contain("value=40")
+expect(counter_reset_action.output).to_contain("value=0")
+expect(counter_bad_action.reason).to_equal("unsupported")
+expect(counter_bad_action.output).to_contain("changed=false")
+expect(counter_overflow_action.reason).to_equal("invalid-args")
 ```
 
 </details>

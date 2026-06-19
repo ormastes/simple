@@ -370,3 +370,7 @@ possible so they are runner-verifiable.
   bridge. `render-mathml`, `render-mathml-checked`, and
   `render-math-structure` now execute the existing Math editor renderer and
   expose MathML, checked rejection reasons, and compact structure readbacks.
+- 2026-06-19 dev: Wired Counter actions into the headless Office action bridge.
+  `counter-action` accepts `value|counter_increment`,
+  `value|counter_decrement`, or `value|counter_reset`, returns compact value /
+  status / changed readback, and keeps unsupported actions fail-closed.
