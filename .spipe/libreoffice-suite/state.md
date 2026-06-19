@@ -335,3 +335,9 @@ possible so they are runner-verifiable.
   `sdn_graph_duplicate_node_checked` for duplicating one node with a unique id
   and integer offset while preserving style, shape, layer, and parent metadata.
   Draw catalog metadata now exposes `node-duplicate` and `duplicate-sdd-node`.
+- 2026-06-19 dev: Advanced Figma-like Designer copy/paste basics. Added checked
+  `office_ui_design_duplicate_node_checked` for duplicating one UI node with a
+  unique id and integer offset while preserving style, component, layer, parent,
+  auto-layout, and constraint metadata for nodes outside auto-layout parents.
+  Designer catalog metadata now exposes `node-duplicate` and
+  `ui-duplicate-node`.

@@ -166,6 +166,38 @@ fn office_ui_design_update_layout_checked(design: OfficeUiDesign, node_id: text,
         i = i + 1
     OfficeUiEditResult(accepted: false, reason: "missing-node", diff: "@@ ui-node-layout " + node_id + " @@\nexpected: " + expected_x + "," + expected_y + "," + expected_width + "," + expected_height + "\nactual: <missing>\nrejected: " + new_x + "," + new_y + "," + new_width + "," + new_height, design: design)
 
+fn office_ui_design_duplicate_node_checked(design: OfficeUiDesign, source_id: text, new_id: text, dx: text, dy: text) -> OfficeUiEditResult:
+    if source_id == "" or new_id == "":
+        return OfficeUiEditResult(accepted: false, reason: "invalid-id", diff: "@@ ui-duplicate-node @@\nexpected: non-empty source and new id\nactual: " + source_id + " -> " + new_id, design: design)
+    if _office_ui_node_id_exists(design, new_id):
+        return OfficeUiEditResult(accepted: false, reason: "duplicate-id", diff: "@@ ui-duplicate-node @@\nexpected: unused id\nactual: " + new_id, design: design)
+    if _office_ui_node_id_count(design, source_id) > 1:
+        return OfficeUiEditResult(accepted: false, reason: "ambiguous-source", diff: "@@ ui-duplicate-node @@\nexpected: one source node\nactual: " + source_id, design: design)
+    val x_offset = _office_ui_parse_i64_result(dx)
+    val y_offset = _office_ui_parse_i64_result(dy)
+    if not x_offset.ok or not y_offset.ok:
+        return OfficeUiEditResult(accepted: false, reason: "invalid-offset", diff: "@@ ui-duplicate-node @@\nexpected: integer dx/dy\nactual: " + dx + "," + dy, design: design)
+    var out_nodes: [OfficeUiNode] = []
+    var found = false
+    for node in design.nodes:
+        out_nodes.push(_office_ui_clone_node(node))
+        if node.id == source_id:
+            if _office_ui_parent_layout_mode(design, node.parent) != "off":
+                return OfficeUiEditResult(accepted: false, reason: "auto-layout-child", diff: "@@ ui-duplicate-node @@\nexpected: source outside auto-layout parent\nactual: " + node.parent, design: design)
+            val x = _office_ui_parse_i64_result(node.x)
+            val y = _office_ui_parse_i64_result(node.y)
+            if not x.ok or not y.ok:
+                return OfficeUiEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ ui-duplicate-node @@\nexpected: integer source x/y\nactual: " + node.x + "," + node.y, design: design)
+            var copy = _office_ui_clone_node(node)
+            copy.id = new_id
+            copy.x = (x.value + x_offset.value).to_text()
+            copy.y = (y.value + y_offset.value).to_text()
+            out_nodes.push(copy)
+            found = true
+    if not found:
+        return OfficeUiEditResult(accepted: false, reason: "missing-node", diff: "@@ ui-duplicate-node @@\nexpected: " + source_id + "\nactual: missing", design: design)
+    OfficeUiEditResult(accepted: true, reason: "updated", diff: "@@ ui-duplicate-node @@\n+ " + new_id, design: OfficeUiDesign(name: design.name, width: design.width, height: design.height, nodes: out_nodes))
+
 fn office_ui_design_update_layer_checked(design: OfficeUiDesign, node_id: text, expected_layer: text, new_layer: text) -> OfficeUiEditResult:
     var out_nodes: [OfficeUiNode] = []
     for original in design.nodes:
@@ -565,6 +597,27 @@ fn _office_ui_id_in_list(node_id: text, node_ids: [text]) -> bool:
         if id == node_id:
             return true
     false
+
+fn _office_ui_node_id_exists(design: OfficeUiDesign, node_id: text) -> bool:
+    for node in design.nodes:
+        if node.id == node_id:
+            return true
+    false
+
+fn _office_ui_node_id_count(design: OfficeUiDesign, node_id: text) -> i64:
+    var count: i64 = 0
+    for node in design.nodes:
+        if node.id == node_id:
+            count = count + 1
+    count
+
+fn _office_ui_parent_layout_mode(design: OfficeUiDesign, parent_id: text) -> text:
+    if parent_id == "":
+        return "off"
+    val idx = _office_ui_find_node_index(design, parent_id)
+    if idx < 0:
+        return "off"
+    design.nodes[idx].layout_mode
 
 fn _office_ui_selected_count(design: OfficeUiDesign, node_ids: [text]) -> i64:
     var count: i64 = 0

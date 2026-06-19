@@ -112,7 +112,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6
-  llm-catalog: apps=9 features=77 actions=36
+  llm-catalog: apps=9 features=78 actions=37
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -320,7 +320,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 188 lines folded for reproduction.
+Runnable source: 194 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -328,7 +328,7 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=77 actions=36")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=78 actions=37")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("html-render")
@@ -431,12 +431,14 @@ expect(catalog[5].features.join(",")).to_contain("style-tokens")
 expect(catalog[5].features.join(",")).to_contain("auto-layout")
 expect(catalog[5].features.join(",")).to_contain("constraints")
 expect(catalog[5].features.join(",")).to_contain("layout-edit")
+expect(catalog[5].features.join(",")).to_contain("node-duplicate")
 expect(catalog[5].features.join(",")).to_contain("align-layout")
 expect(catalog[5].features.join(",")).to_contain("distribute-layout")
 expect(catalog[5].features.join(",")).to_contain("layer-edit")
 expect(catalog[5].features.join(",")).to_contain("style-token-edit")
 expect(catalog[5].actions.join(",")).to_contain("export-ui-sdd")
 expect(catalog[5].actions.join(",")).to_contain("ui-layout-edit")
+expect(catalog[5].actions.join(",")).to_contain("ui-duplicate-node")
 expect(catalog[5].actions.join(",")).to_contain("ui-auto-layout-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-constraints-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-align-selection")
@@ -449,7 +451,8 @@ val ui_design = office_ui_design_parse("design: Feature Check\nnode button|Run|b
 val moved_ui = office_ui_design_update_layout_checked(ui_design, "button", "16", "16", "80", "32", "24", "32", "96", "40")
 val layered_ui = office_ui_design_update_layer_checked(moved_ui.design, "button", "controls", "3")
 val styled_ui = office_ui_design_update_style_token_checked(layered_ui.design, "button", "primary", "accent")
-val parented_ui = office_ui_design_set_parent_checked(styled_ui.design, "label", "", "button")
+val duplicated_ui = office_ui_design_duplicate_node_checked(styled_ui.design, "button", "button_copy", "120", "0")
+val parented_ui = office_ui_design_set_parent_checked(duplicated_ui.design, "label", "", "button")
 val auto_layout_ui = office_ui_design_update_auto_layout_checked(parented_ui.design, "button", "off", "0", "0,0,0,0", "vertical", "4", "4,4,4,4")
 val constrained_ui = office_ui_design_update_constraint_checked(auto_layout_ui.design, "label", "left", "top", "stretch", "top")
 val resolved_auto_ui = office_ui_design_resolve_auto_layout(constrained_ui.design)
@@ -462,6 +465,8 @@ expect(moved_ui.reason).to_equal("updated")
 expect(office_ui_design_render_html(ui_design)).to_contain("data-format=\"html-ui\"")
 expect(layered_ui.reason).to_equal("updated")
 expect(styled_ui.reason).to_equal("updated")
+expect(duplicated_ui.reason).to_equal("updated")
+expect(duplicated_ui.design.nodes[3].id).to_equal("button_copy")
 expect(parented_ui.reason).to_equal("updated")
 expect(auto_layout_ui.reason).to_equal("updated")
 expect(constrained_ui.reason).to_equal("updated")
@@ -480,6 +485,7 @@ expect(inspected_ui.z_index).to_equal("3")
 expect(office_ui_design_read_style_token(distributed_ui.design, "button").css).to_equal("accent")
 expect(office_ui_design_to_sdd(distributed_ui.design)).to_contain("button, Run, accent, action, rounded, 24, 28, 96, 40, 3, , vertical, 4")
 expect(office_ui_design_to_sdd(distributed_ui.design)).to_contain("label, Label, secondary, copy, rounded")
+expect(office_ui_design_to_sdd(duplicated_ui.design)).to_contain("button_copy, Run, accent, action, rounded, 144, 32, 96, 40, 3")
 expect(catalog[6].owner_module).to_equal("app.office.base_db")
 expect(catalog[6].features.join(",")).to_contain("schema-validation")
 expect(catalog[6].features.join(",")).to_contain("count-where")

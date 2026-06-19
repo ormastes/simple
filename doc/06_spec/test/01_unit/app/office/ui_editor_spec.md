@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -281,6 +281,40 @@ expect(missing.reason).to_equal("missing-node")
 
 </details>
 
+#### duplicates one UI node with a new id and offset geometry
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = office_ui_design_parse("design: Copy\nnode card|Card|frame|10|20|200|120|panel|1|container\nnode action|Action|button|30|40|80|32|primary|2|action|card")
+val copied = office_ui_design_duplicate_node_checked(design, "action", "action_copy", "24", "12")
+expect(copied.accepted).to_be(true)
+expect(copied.design.nodes.len()).to_equal(3)
+expect(copied.design.nodes[2].id).to_equal("action_copy")
+expect(copied.design.nodes[2].label).to_equal("Action")
+expect(copied.design.nodes[2].css).to_equal("primary")
+expect(copied.design.nodes[2].x).to_equal("54")
+expect(copied.design.nodes[2].y).to_equal("52")
+expect(copied.design.nodes[2].parent).to_equal("card")
+expect(office_ui_design_render_html(copied.design)).to_contain("left: 54px")
+expect(office_ui_design_to_sdd(copied.design)).to_contain("action_copy, Action, primary, action, rounded, 54, 52, 80, 32, 2, card")
+
+val duplicate_id = office_ui_design_duplicate_node_checked(design, "action", "card", "1", "1")
+val missing = office_ui_design_duplicate_node_checked(design, "missing", "missing_copy", "1", "1")
+val ambiguous = office_ui_design_duplicate_node_checked(office_ui_design_parse("design: Ambiguous\nnode a|A|button|0|0|20|20|primary|1|action\nnode a|A2|button|10|10|20|20|primary|2|action"), "a", "a_copy", "1", "1")
+val auto_layout_child = office_ui_design_duplicate_node_checked(office_ui_design_parse("design: Auto\nnode frame|Frame|frame|0|0|200|120|panel|1|container||vertical|4|4,4,4,4|left|top\nnode child|Child|button|10|10|40|20|primary|2|action|frame"), "child", "child_copy", "1", "1")
+expect(duplicate_id.reason).to_equal("duplicate-id")
+expect(missing.reason).to_equal("missing-node")
+expect(ambiguous.reason).to_equal("ambiguous-source")
+expect(auto_layout_child.reason).to_equal("auto-layout-child")
+```
+
+</details>
+
 #### updates numeric layer z-order with guarded checks
 
 <details>
@@ -517,8 +551,8 @@ expect(cycle.reason).to_equal("cycle-parent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

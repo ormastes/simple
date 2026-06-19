@@ -131,7 +131,7 @@ modes:
   `render-math-structure`, and `render-mathml-checked`; Designer has
   `render-ui-html`, `export-ui-sdd`, and
   `ui-label-edit` / `ui-layout-edit` / `ui-auto-layout-edit` /
-  `ui-constraints-edit` / `ui-align-selection` /
+  `ui-duplicate-node` / `ui-constraints-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` /
   `ui-style-token-read` / `ui-style-token-edit` / `ui-inspect-node`.
 
