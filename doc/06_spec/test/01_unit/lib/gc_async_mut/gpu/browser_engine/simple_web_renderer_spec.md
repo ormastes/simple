@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 66 | 66 | 0 | 0 |
+| 67 | 67 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -729,6 +729,29 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}.a{display:block;background-color:#1d4ed8;width:30px;height:8px}.b{display:block;background-color:#22c55e;width:26px;height:8px;margin-top:3px}.c{display:block;background-color:#f59e0b;width:22px;height:8px;margin-top:3px}.d{display:block;background-color:#ef4444;width:28px;height:8px}.e{display:block;background-color:#334155;width:24px;height:8px;margin-top:3px}datalist,select,optgroup,option,br,wbr,selectedcontent,slot{display:none;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}</style></head><body><section class='stage'><div class='left'><div class='a'></div><datalist id='choices'><option value='x'></option></datalist><div class='b'></div><br><wbr><div class='c'></div></div><div class='right'><div class='d'></div><select><optgroup label='g'><option value='y'></option></optgroup><selectedcontent></selectedcontent></select><slot name='s'></slot><div class='e'></div></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+expect(pixels.len()).to_equal(96 * 64)
+expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(5104)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(240)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(208)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(176)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(224)
+expect(_count_color(pixels, 0xFF334155u32)).to_equal(192)
+expect(_count_color(pixels, 0xFFF8FAFCu32)).to_equal(0)
+```
+
+</details>
+
+#### matches Chrome hidden resource and table-column tag non-painting geometry
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}.a{display:block;background-color:#1d4ed8;width:30px;height:8px}.b{display:block;background-color:#22c55e;width:26px;height:8px;margin-top:3px}.c{display:block;background-color:#f59e0b;width:22px;height:8px;margin-top:3px}.d{display:block;background-color:#ef4444;width:28px;height:8px}.e{display:block;background-color:#334155;width:24px;height:8px;margin-top:3px}img,audio,track,embed,iframe,meter,progress,template,noscript,table,colgroup,col{display:none;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}</style></head><body><section class='stage'><div class='left'><div class='a'></div><img alt='' src=''><audio><track kind='captions' srclang='en' label='en'></audio><div class='b'></div><template><div class='ghost'></div></template><noscript><div class='ghost'></div></noscript><div class='c'></div></div><div class='right'><div class='d'></div><embed src='about:blank'><iframe src='about:blank'></iframe><meter value='0.5'></meter><progress value='1' max='2'></progress><table><colgroup><col></colgroup></table><div class='e'></div></div></section></body></html>"
 val pixels = simple_web_render_html_to_pixels(html, 96, 64)
 expect(pixels.len()).to_equal(96 * 64)
 expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(5104)
@@ -1467,8 +1490,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 66 |
-| Active scenarios | 66 |
+| Total scenarios | 67 |
+| Active scenarios | 67 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
