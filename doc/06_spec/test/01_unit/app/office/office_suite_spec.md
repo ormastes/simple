@@ -464,7 +464,7 @@ expect(result.output).to_contain("Slide")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -473,6 +473,7 @@ val html = office_action_dispatch("render-ui-html", source)
 val sdd = office_action_dispatch("export-ui-sdd", source)
 expect(html.ok).to_be(true)
 expect(html.output).to_contain("data-format=\"html-ui\"")
+expect(html.output).to_contain("data-node-count=\"1\"")
 expect(html.output).to_contain("Run")
 expect(sdd.ok).to_be(true)
 expect(sdd.output).to_contain("graph: Feature")

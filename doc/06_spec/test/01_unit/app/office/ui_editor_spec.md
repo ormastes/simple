@@ -139,7 +139,7 @@ expect(design.nodes[1].constraint_vertical).to_equal("stretch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -148,6 +148,9 @@ val html = office_ui_design_render_html(design)
 expect(html).to_contain("class=\"office-ui-design\"")
 expect(html).to_contain("data-format=\"html-ui\"")
 expect(html).to_contain("data-format-name=\"HTML UI Design Document\"")
+expect(html).to_contain("data-node-count=\"1\"")
+expect(html).to_contain("data-canvas-width=\"800\"")
+expect(html).to_contain("data-canvas-height=\"480\"")
 expect(html).to_contain("data-id=\"submit\"")
 expect(html).to_contain("data-layer=\"controls\"")
 expect(html).to_contain("data-parent=\"\"")
