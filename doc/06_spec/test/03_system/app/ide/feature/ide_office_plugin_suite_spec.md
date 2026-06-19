@@ -100,7 +100,7 @@ slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
 draw: Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
-  check: draw: sdn_graph nodes=3 edges=2 html=true route=true select=true inspect=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
+  check: draw: sdn_graph nodes=3 edges=2 html=true route=true select=true inspect=true path_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
@@ -286,7 +286,7 @@ expect(tui_lines[23]).to_equal(gui_lines[23])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -315,8 +315,10 @@ expect(probe.reconnect_edit).to_be(true)
 expect(probe.delete_edit).to_be(true)
 expect(probe.node_delete_edit).to_be(true)
 expect(probe.inspector).to_be(true)
+expect(probe.connector_path_metadata).to_be(true)
 expect(probe.layout_edit).to_be(true)
 expect(probe.canvas_metadata).to_be(true)
+expect(ide_draw_sanity_summary()).to_contain("path_meta=true")
 expect(ide_draw_sanity_summary()).to_contain("layout=true")
 expect(ide_draw_sanity_summary()).to_contain("geometry=true")
 expect(ide_draw_sanity_summary()).to_contain("layer=true")
