@@ -103,6 +103,7 @@ Parent edits reject missing parent IDs and parent cycles.
 `add-sdd-node` uses `id|label|css|role|shape|x|y|width|height|layer|parent`
 and rejects duplicate IDs, blank IDs, missing parent IDs, and unsafe style, role, shape, or layer tokens.
 `order-sdd-node` uses `node_id|front` or `node_id|back` to change document/render order.
+Blank SDD order node ids are rejected as `invalid-args`.
 `edit-sdd-style-rule` uses `css|target|extends|key|value` and returns canonical SDD text; `extends` must be `none`, empty, or an existing non-self CSS rule.
 `delete-sdd-style-rule` uses `css|key` and returns canonical SDD text with that reusable rule removed.
 `inspect-sdd-style-rule` uses `css|key` and returns compact style-rule readback text.

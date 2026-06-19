@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 589 lines folded for reproduction.
+Runnable source: 591 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -540,6 +540,7 @@ val blank_sdd_geometry_action = office_action_dispatch("edit-sdd-node-geometry",
 val sdd_layer_action = office_action_dispatch("edit-sdd-node-layer", "A|front\ngraph: Layer\nA: Old x: 0 y: 0 width: 20 height: 20 layer: back")
 val invalid_sdd_layer_action = office_action_dispatch("edit-sdd-node-layer", "A|front layer\ngraph: Layer\nA: Old x: 0 y: 0 width: 20 height: 20 layer: back")
 val sdd_order_action = office_action_dispatch("order-sdd-node", "A|front\ngraph: Order\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 40 y: 0 width: 20 height: 20")
+val blank_sdd_order_action = office_action_dispatch("order-sdd-node", "   |front\ngraph: Order\nA: A\nB: B")
 val invalid_sdd_order_action = office_action_dispatch("order-sdd-node", "A|middle\ngraph: Order\nA: A\nB: B")
 val sdd_role_action = office_action_dispatch("edit-sdd-node-role", "A|database\ngraph: Role\nA: Old role: actor x: 0 y: 0 width: 20 height: 20")
 val invalid_sdd_role_action = office_action_dispatch("edit-sdd-node-role", "A|data base\ngraph: Role\nA: Old role: actor x: 0 y: 0 width: 20 height: 20")
@@ -674,6 +675,7 @@ expect(sdd_layer_action.output).to_contain("data-layer=\"front\"")
 expect(invalid_sdd_layer_action.reason).to_equal("invalid-layer-token")
 expect(sdd_order_action.output).to_contain("data-node=\"A\"")
 expect(sdd_order_action.output.index_of("data-node=\"A\"")).to_be_greater_than(sdd_order_action.output.index_of("data-node=\"B\""))
+expect(blank_sdd_order_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_order_action.reason).to_equal("invalid-position")
 expect(sdd_role_action.output).to_contain("data-role=\"database\"")
 expect(invalid_sdd_role_action.reason).to_equal("invalid-role-token")
