@@ -104,7 +104,7 @@ and rejects duplicate IDs, blank IDs, and missing parent IDs.
 `inspect-sdd-style-rule` uses `css|key` and returns compact style-rule readback text.
 `edit-sdd-node-geometry` uses `node_id|x|y|width|height`.
 `delete-sdd-node` uses `node_id` and removes attached connectors.
-`edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`.
+`edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`; numeric fields must be non-negative integers, snap is `true` or `false`, and background must be a safe CSS value.
 `add-sdd-edge` uses `from_id|to_id|label|css|kind|route|waypoints|start|end`.
 `duplicate-sdd-edge` uses `edge_index`.
 `edit-sdd-edge-label` uses `edge_index|new_label`.

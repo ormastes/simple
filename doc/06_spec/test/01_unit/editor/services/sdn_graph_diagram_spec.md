@@ -652,12 +652,13 @@ expect(sdn_graph_render_html(deleted)).to_contain("data-selected-edge-index=\"-1
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val graph = sdn_graph_parse("graph: edit-canvas\ncanvas: width: 800 height: 600 grid: 10 snap: false zoom: 100 background: white\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nA -> B: c route: simple start: right end: left")
 val updated = sdn_graph_update_canvas(graph, "1440", "960", "24", "true", "150", "#f8fafc")
+val unsafe = sdn_graph_update_canvas_checked(graph, "1440", "960", "24;bad", "true", "150", "#f8fafc")
 val html = sdn_graph_render_html(updated)
 expect(updated.canvas_width).to_equal("1440")
 expect(updated.canvas_height).to_equal("960")
@@ -671,6 +672,7 @@ expect(html).to_contain("data-canvas-width=\"1440\"")
 expect(html).to_contain("data-canvas-grid=\"24\"")
 expect(html).to_contain("background-color:#f8fafc")
 expect(html).to_contain("background-size:24px 24px")
+expect(unsafe.reason).to_equal("invalid-canvas-number")
 ```
 
 </details>
