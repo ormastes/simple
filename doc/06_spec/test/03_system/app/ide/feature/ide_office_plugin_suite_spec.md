@@ -100,7 +100,7 @@ slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
 draw: Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
-  check: draw: sdn_graph nodes=2 edges=1 html=true route=true select=true inspect=true edit=true layout=true canvas=true
+  check: draw: sdn_graph nodes=2 edges=1 html=true route=true select=true inspect=true edit=true edge_style=true layout=true canvas=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
@@ -112,7 +112,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6
-  llm-catalog: apps=9 features=80 actions=39
+  llm-catalog: apps=9 features=81 actions=40
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -286,7 +286,7 @@ expect(tui_lines[23]).to_equal(gui_lines[23])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -298,10 +298,12 @@ expect(probe.html_render).to_be(true)
 expect(probe.selected_render).to_be(true)
 expect(probe.reroute_edit).to_be(true)
 expect(probe.node_edit).to_be(true)
+expect(probe.edge_style_edit).to_be(true)
 expect(probe.inspector).to_be(true)
 expect(probe.layout_edit).to_be(true)
 expect(probe.canvas_metadata).to_be(true)
 expect(ide_draw_sanity_summary()).to_contain("layout=true")
+expect(ide_draw_sanity_summary()).to_contain("edge_style=true")
 expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 ```
 
@@ -324,7 +326,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 319 lines folded for reproduction.
+Runnable source: 328 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -332,7 +334,7 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=80 actions=39")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=81 actions=40")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("html-render")
@@ -359,6 +361,7 @@ expect(catalog[4].features.join(",")).to_contain("connector-paths")
 expect(catalog[4].features.join(",")).to_contain("group-containers")
 expect(catalog[4].features.join(",")).to_contain("node-label-edit")
 expect(catalog[4].features.join(",")).to_contain("edge-label-edit")
+expect(catalog[4].features.join(",")).to_contain("edge-style-edit")
 expect(catalog[4].features.join(",")).to_contain("node-shape-edit")
 expect(catalog[4].features.join(",")).to_contain("node-style-edit")
 expect(catalog[4].features.join(",")).to_contain("node-duplicate")
@@ -370,6 +373,7 @@ expect(catalog[4].features.join(",")).to_contain("distribute-layout")
 expect(catalog[4].actions.join(",")).to_contain("render-sdd-html-with-selection")
 expect(catalog[4].actions.join(",")).to_contain("reroute-sdd-connector")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-edge-label")
+expect(catalog[4].actions.join(",")).to_contain("edit-sdd-edge-style")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-label")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-parent")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-shape")
@@ -414,7 +418,9 @@ val sdd_parent_action = office_action_dispatch("edit-sdd-node-parent", "B|A\ngra
 val sdd_canvas_action = office_action_dispatch("edit-sdd-canvas", "640|480|16|true|125|#ffffff\ngraph: Canvas\nA: A")
 val sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60x10;60x40|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val sdd_edge_label_action = office_action_dispatch("edit-sdd-edge-label", "0|approved\ngraph: Edge Label\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
+val sdd_edge_style_action = office_action_dispatch("edit-sdd-edge-style", "0|warning dashed\ngraph: Edge Style\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val missing_sdd_edge_label_action = office_action_dispatch("edit-sdd-edge-label", "1|approved\ngraph: Edge Label\nA: A\nB: B\nA -> B: link")
+val missing_sdd_edge_style_action = office_action_dispatch("edit-sdd-edge-style", "1|warning\ngraph: Edge Style\nA: A\nB: B\nA -> B: link")
 val missing_sdd_edge_action = office_action_dispatch("reroute-sdd-connector", "1|orthogonal|60x10|right|left\ngraph: Route\nA: A\nB: B\nA -> B: link")
 val sdd_inspect_node_action = office_action_dispatch("inspect-sdd-node", "A\ngraph: Inspect\nA: Alpha @accent role: actor shape: diamond x: 4 y: 8 width: 80 height: 24 layer: front")
 val sdd_inspect_edge_action = office_action_dispatch("inspect-sdd-edge", "0\ngraph: Inspect\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 80 y: 0 width: 20 height: 20\nA -> B: link route: orthogonal waypoints: 40x10 start: right end: left")
@@ -462,7 +468,9 @@ expect(sdd_parent_action.output).to_contain("data-parent=\"A\"")
 expect(sdd_canvas_action.output).to_contain("data-canvas-width=\"640\"")
 expect(sdd_reroute_action.output).to_contain("data-route=\"orthogonal\"")
 expect(sdd_edge_label_action.output).to_contain(">approved</div>")
+expect(sdd_edge_style_action.output).to_contain("sdn-css-warning sdn-css-dashed")
 expect(missing_sdd_edge_label_action.reason).to_equal("missing-edge")
+expect(missing_sdd_edge_style_action.reason).to_equal("missing-edge")
 expect(missing_sdd_edge_action.reason).to_equal("missing-edge")
 expect(sdd_inspect_node_action.output).to_contain("shape=diamond")
 expect(sdd_inspect_node_action.output).to_contain("x=4")
@@ -472,7 +480,8 @@ expect(missing_sdd_inspect_edge_action.reason).to_equal("missing-edge")
 val draw_graph = sdn_graph_parse("graph: Feature\ncanvas: width: 800 height: 600 grid: 10 snap: false zoom: 100 background: white\nA: A x: 0 y: 0 width: 80 height: 20\nB: B x: 160 y: 0 width: 80 height: 20\nA -> B: flow route: simple start: right end: left")
 val rerouted = sdn_graph_update_edge_at(draw_graph, 0, "orthogonal", "120x10;120x40", "right", "left")
 val edge_labeled = sdn_graph_update_edge_label_at(rerouted, 0, "approved")
-val shaped = sdn_graph_update_node_at(edge_labeled, 0, "accent", "decision", "diamond", "12", "8", "96", "48", "front")
+val edge_styled = sdn_graph_update_edge_style_at(edge_labeled, 0, "warning dashed")
+val shaped = sdn_graph_update_node_at(edge_styled, 0, "accent", "decision", "diamond", "12", "8", "96", "48", "front")
 val grouped = sdn_graph_update_node_parent_at(shaped, 1, "A")
 val draw_shape_only = sdn_graph_update_node_shape_at(grouped, 1, "cylinder")
 val draw_style_only = sdn_graph_update_node_style_at(draw_shape_only, 1, "storage")
@@ -488,6 +497,7 @@ val draw_distributed = sdn_graph_distribute_checked(draw_layout_graph, draw_layo
 val draw_duplicate = sdn_graph_duplicate_node_checked(draw_label_only, "B", "B_copy", "24", "12")
 expect(sdn_graph_render_html(rerouted)).to_contain("data-path=\"M 80,10 L 120,10 L 120,40 L 160,40 L 160,10\"")
 expect(sdn_graph_render_html(edge_labeled)).to_contain(">approved</div>")
+expect(sdn_graph_render_html(edge_styled)).to_contain("sdn-css-warning sdn-css-dashed")
 expect(sdn_graph_render_html(grouped)).to_contain("data-shape=\"diamond\"")
 expect(sdn_graph_render_html(grouped)).to_contain("sdn-css-accent")
 expect(sdn_graph_render_html(grouped)).to_contain("data-parent=\"A\"")
@@ -506,6 +516,7 @@ expect(inspected_draw_node.parent).to_equal("A")
 expect(inspected_draw_node.shape).to_equal("cylinder")
 expect(inspected_draw_edge.found).to_be(true)
 expect(inspected_draw_edge.label).to_equal("approved")
+expect(inspected_draw_edge.css).to_equal("warning dashed")
 expect(inspected_draw_edge.route).to_equal("orthogonal")
 expect(inspected_draw_edge.path).to_equal("M 80,10 L 120,10 L 120,40 L 160,40 L 160,10")
 expect(draw_aligned.accepted).to_be(true)

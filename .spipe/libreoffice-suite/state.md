@@ -403,3 +403,7 @@ possible so they are runner-verifiable.
   `sdn_graph_update_edge_label_at` edits the visible connector label without
   changing route/waypoint/anchor geometry, and `edit-sdd-edge-label` exposes it
   through the headless Office action bridge.
+- 2026-06-19 dev: Added Draw/SDD connector style editing.
+  `sdn_graph_update_edge_style_at` edits connector CSS labels without changing
+  label/route geometry, and `edit-sdd-edge-style` exposes it through the
+  headless Office action bridge and IDE Draw sanity probe.

@@ -84,6 +84,7 @@ geometry signature and return rendered HTML for the updated document.
 SDD node edit actions use `node_id|value` for label, parent, shape, and style edits.
 `edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`.
 `edit-sdd-edge-label` uses `edge_index|new_label`.
+`edit-sdd-edge-style` uses `edge_index|css_labels`.
 `reroute-sdd-connector` uses `edge_index|route|waypoints|start_anchor|end_anchor`.
 All return rendered SDD HTML for the updated document.
 `inspect-sdd-node` uses `node_id`; `inspect-sdd-edge` uses `edge_index`.
@@ -172,12 +173,12 @@ modes:
 
 - Markdown: `css_doc=true escaped=true`
 - Slides: `ppt_html=true safe_css=true positioned=true`
-- Draw: `html=true route=true select=true inspect=true edit=true layout=true canvas=true`
+- Draw: `html=true route=true select=true inspect=true edit=true edge_style=true layout=true canvas=true`
 - LLM catalog: Markdown has `render-markdown-preview-html` and `md-edit`; Writer has
   `render-writer-markdown-html`; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with
   `render-sdd-html-with-selection`, `reroute-sdd-connector`,
-  `edit-sdd-edge-label`,
+  `edit-sdd-edge-label`, `edit-sdd-edge-style`,
   `edit-sdd-node-label`, `edit-sdd-node-parent`, `edit-sdd-node-shape`,
   `edit-sdd-node-style`,
   `duplicate-sdd-node`, `edit-sdd-canvas`, `align-sdd-selection`,

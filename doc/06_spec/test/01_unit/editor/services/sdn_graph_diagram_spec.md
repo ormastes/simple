@@ -424,21 +424,26 @@ expect(edge.edge_index).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val graph = sdn_graph_parse("graph: edit\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nA -> B: c route: simple start: right end: left")
 val updated = sdn_graph_update_edge_at(graph, 0, "orthogonal", "140x30;200x80", "right", "left")
 val labeled = sdn_graph_update_edge_label_at(updated, 0, "approved")
+val styled = sdn_graph_update_edge_style_at(labeled, 0, "warning dashed")
 val html = sdn_graph_render_html(updated)
 val labeled_html = sdn_graph_render_html(labeled)
+val styled_html = sdn_graph_render_html(styled)
 expect(updated.edges[0].route).to_equal("orthogonal")
 expect(updated.edges[0].waypoints).to_equal("140x30;200x80")
 expect(html).to_contain("data-path=\"M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30\"")
 expect(labeled.edges[0].label).to_equal("approved")
 expect(labeled.edges[0].route).to_equal("orthogonal")
 expect(labeled_html).to_contain(">approved</div>")
+expect(styled.edges[0].css).to_equal("warning dashed")
+expect(styled.edges[0].route).to_equal("orthogonal")
+expect(styled_html).to_contain("sdn-css-warning sdn-css-dashed")
 ```
 
 </details>
