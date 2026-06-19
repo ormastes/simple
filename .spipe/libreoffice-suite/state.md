@@ -327,3 +327,7 @@ possible so they are runner-verifiable.
   `sdn_graph_distribute_checked` helpers for draw.io-like align/distribute
   operations, exposed `align-layout` / `distribute-layout` in the Draw catalog,
   and added `layout=true` to the IDE Draw sanity surface.
+- 2026-06-19 dev: Exposed the Markdown editor's HTML preview through the
+  headless action bridge as `render-markdown-preview-html`, completing the
+  Markdown-source HTML render triad alongside Writer paper HTML and PPT deck
+  HTML.

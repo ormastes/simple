@@ -112,7 +112,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6
-  llm-catalog: apps=9 features=75 actions=34
+  llm-catalog: apps=9 features=76 actions=35
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -320,7 +320,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 177 lines folded for reproduction.
+Runnable source: 182 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -328,10 +328,12 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=75 actions=34")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=76 actions=35")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
+expect(catalog[0].features.join(",")).to_contain("html-render")
 expect(catalog[0].features.join(",")).to_contain("guarded-edit")
+expect(catalog[0].actions.join(",")).to_contain("render-markdown-preview-html")
 expect(catalog[0].actions.join(",")).to_contain("md-edit")
 expect(catalog[1].features.join(",")).to_contain("markdown-source")
 expect(catalog[1].actions.join(",")).to_contain("render-writer-markdown-html")
@@ -368,11 +370,14 @@ expect(catalog[4].actions.join(",")).to_contain("align-sdd-selection")
 expect(catalog[4].actions.join(",")).to_contain("distribute-sdd-selection")
 expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-node")
 expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-edge")
+val md_action = office_action_dispatch("render-markdown-preview-html", "# Markdown")
 val writer_action = office_action_dispatch("render-writer-markdown-html", "# Writer")
 val ppt_action = office_action_dispatch("render-ppt-markdown-html", "# Deck\n\n## Slide")
 val ui_action = office_action_dispatch("render-ui-html", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_sdd_action = office_action_dispatch("export-ui-sdd", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val sdd_action = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+expect(md_action.output).to_contain("class=\"wysiwyg-preview\"")
+expect(md_action.output).to_contain("<h1>Markdown</h1>")
 expect(writer_action.output).to_contain("class=\"md-paper\"")
 expect(ppt_action.output).to_contain("class=\"md-ppt-deck\"")
 expect(ui_action.output).to_contain("data-format=\"html-ui\"")

@@ -42,10 +42,16 @@ compatibility path and should escape element text, sanitize CSS colors to simple
 Headless Office actions are exposed through
 `office_action_dispatch(action, source)` in `app.office.mod`. This is the stable
 non-GUI bridge for cataloged render/export actions:
-`render-writer-markdown-html`, `render-ppt-markdown-html`, `render-ui-html`,
-`export-ui-sdd`, and `render-sdd-html-with-selection`. The bridge delegates to
-the canonical Writer, Impress, Designer, and SDD renderers rather than
+`render-markdown-preview-html`, `render-writer-markdown-html`,
+`render-ppt-markdown-html`, `render-ui-html`, `export-ui-sdd`, and
+`render-sdd-html-with-selection`. The bridge delegates to the canonical
+Markdown, Writer, Impress, Designer, and SDD renderers rather than
 duplicating rendering logic.
+
+`render-markdown-preview-html` exposes the Markdown editor's own
+`wysiwyg_preview_document_html` route through the same headless bridge, so the
+suite has a triad of Markdown-source HTML render actions: Markdown preview,
+Writer paper HTML, and PPT deck HTML.
 
 Designer/UI editing uses `app.office.ui_editor` as a pure HTML design document
 substrate. It parses positioned frame/component records, renders a stable
@@ -110,7 +116,8 @@ modes:
 - Markdown: `css_doc=true escaped=true`
 - Slides: `ppt_html=true safe_css=true positioned=true`
 - Draw: `html=true route=true select=true inspect=true edit=true layout=true canvas=true`
-- LLM catalog: Writer has `render-writer-markdown-html`; Impress has
+- LLM catalog: Markdown has `render-markdown-preview-html`; Writer has
+  `render-writer-markdown-html`; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with
   `render-sdd-html-with-selection`, `reroute-sdd-connector`,
   `edit-sdd-node-parent`, `edit-sdd-node-shape`, `edit-sdd-node-style`,
