@@ -29,7 +29,7 @@ html_render_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -167,6 +167,25 @@ expect(html).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
 
 </details>
 
+#### renders Writer Markdown tables and images as document HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("| Name | Status |\n| --- | --- |\n| Alpha | Ready |\n\n![Diagram](diagram.png)")
+expect(html).to_contain("<table class=\"md-writer-table\">")
+expect(html).to_contain("<th>Name</th>")
+expect(html).to_contain("<td>Ready</td>")
+expect(html).to_contain("<figure class=\"md-writer-image\">")
+expect(html).to_contain("<img src=\"diagram.png\" alt=\"Diagram\">")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -188,8 +207,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
