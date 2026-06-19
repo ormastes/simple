@@ -2,12 +2,7 @@
 # Registers tmux hooks that write events to a temp file.
 # Main event loop polls this file for tmux state changes.
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_getpid() -> i64
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-use std.io_runtime.{file_delete, dir_create}
+use std.io_runtime.{file_delete, dir_create, process_run, getpid, file_exists, file_read, file_write}
 
 # ============================================================================
 # tmux Hook Events
@@ -40,7 +35,7 @@ class TmuxHookManager:
     hooks_active: bool
 
     static fn create() -> TmuxHookManager:
-        val pid = rt_getpid()
+        val pid = getpid()
         val event_file = ".build/smux/tmux_events_{pid}"
         TmuxHookManager(
             event_file: event_file,
@@ -53,7 +48,7 @@ class TmuxHookManager:
         dir_create(".build/smux", true)
 
         # Clear event file
-        rt_file_write_text(self.event_file, "")
+        file_write(self.event_file, "")
 
         val pid_tag = "smux_{self.pid}"
         val ef = self.event_file
@@ -79,22 +74,22 @@ class TmuxHookManager:
         _tmux_unset_hook("after-copy-mode[{pid_tag}]")
 
         # Clean up event file
-        if rt_file_exists(self.event_file):
+        if file_exists(self.event_file):
             file_delete(self.event_file)
         self.hooks_active = false
 
     # Poll for new events (non-blocking)
     fn poll_events() -> [TmuxHookEvent]:
         var events: [TmuxHookEvent] = []
-        if not rt_file_exists(self.event_file):
+        if not file_exists(self.event_file):
             return events
 
-        val content = rt_file_read_text(self.event_file)
+        val content = file_read(self.event_file)
         if content == "" or content == nil:
             return events
 
         # Clear the event file after reading
-        rt_file_write_text(self.event_file, "")
+        file_write(self.event_file, "")
 
         val lines = content.trim().split("\n")
         for line in lines:
@@ -112,10 +107,10 @@ class TmuxHookManager:
 # ============================================================================
 
 fn _tmux_set_hook(name: text, cmd: text):
-    rt_process_run("tmux", ["set-hook", "-g", name, cmd])
+    process_run("tmux", ["set-hook", "-g", name, cmd])
 
 fn _tmux_unset_hook(name: text):
-    rt_process_run("tmux", ["set-hook", "-gu", name])
+    process_run("tmux", ["set-hook", "-gu", name])
 
 fn _parse_hook_event(name: text) -> TmuxHookEvent:
     match name:
