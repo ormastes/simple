@@ -29,7 +29,7 @@ html_render_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -182,6 +182,22 @@ expect(html).to_contain("<th>Name</th>")
 expect(html).to_contain("<td>Ready</td>")
 expect(html).to_contain("<figure class=\"md-writer-image\">")
 expect(html).to_contain("<img src=\"diagram.png\" alt=\"Diagram\">")
+```
+
+</details>
+
+#### sanitizes unsafe Writer Markdown image URLs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("![Bad <x>](javascript:alert(1))")
+expect(html).to_contain("<img src=\"#\" alt=\"Bad &lt;x&gt;\">")
+expect(html).to_contain("<figcaption>Bad &lt;x&gt;</figcaption>")
 ```
 
 </details>
@@ -342,8 +358,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
