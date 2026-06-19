@@ -89,7 +89,8 @@ design body. `ui-label-edit` uses `node_id|expected_label|new_label`.
 Blank `ui-label-edit`, `ui-layout-edit`, `ui-auto-layout-edit`, and
 `ui-constraints-edit` / `ui-layer-edit` / `ui-style-token-edit` node ids are
 rejected as `invalid-args`.
-`ui-layer-edit` and `ui-style-token-edit` use `node_id|expected|new`.
+`ui-layer-edit` and `ui-style-token-edit` use `node_id|expected|new`; blank
+expected or replacement fields are `invalid-args`.
 `ui-style-token-read` and `ui-inspect-node` use `node_id` and return compact
 readback text.
 

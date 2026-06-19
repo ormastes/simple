@@ -1477,13 +1477,17 @@ expect(result.reason).to_equal("invalid-args")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val result = office_action_dispatch("ui-layer-edit", "   |controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
-expect(result.ok).to_be(false)
-expect(result.reason).to_equal("invalid-args")
+val id_result = office_action_dispatch("ui-layer-edit", "   |controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val expected_result = office_action_dispatch("ui-layer-edit", "button|   |9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val new_result = office_action_dispatch("ui-layer-edit", "button|controls|   \ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+expect(id_result.ok).to_be(false)
+expect(id_result.reason).to_equal("invalid-args")
+expect(expected_result.reason).to_equal("invalid-args")
+expect(new_result.reason).to_equal("invalid-args")
 ```
 
 </details>
@@ -1493,13 +1497,17 @@ expect(result.reason).to_equal("invalid-args")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val result = office_action_dispatch("ui-style-token-edit", "   |primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
-expect(result.ok).to_be(false)
-expect(result.reason).to_equal("invalid-args")
+val id_result = office_action_dispatch("ui-style-token-edit", "   |primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val expected_result = office_action_dispatch("ui-style-token-edit", "button|   |accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val new_result = office_action_dispatch("ui-style-token-edit", "button|primary|   \ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+expect(id_result.ok).to_be(false)
+expect(id_result.reason).to_equal("invalid-args")
+expect(expected_result.reason).to_equal("invalid-args")
+expect(new_result.reason).to_equal("invalid-args")
 ```
 
 </details>
