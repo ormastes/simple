@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 106 | 106 | 0 | 0 |
+| 107 | 107 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1765,6 +1765,21 @@ expect(style_result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects malformed SDD style rule delete keys
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("delete-sdd-style-rule", "accent,bad|fill\ngraph: Style\nstyle accent |node| fill: #eeeeee\nA: A @accent")
+expect(result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects malformed SDD edit target ids
 
 <details>
@@ -1970,8 +1985,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 106 |
-| Active scenarios | 106 |
+| Total scenarios | 107 |
+| Active scenarios | 107 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
