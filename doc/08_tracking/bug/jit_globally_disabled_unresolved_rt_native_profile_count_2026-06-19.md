@@ -92,6 +92,27 @@ scroll showcase full-repaint render (1280×800, 1.02M px/frame):
 **interpreter 2,857 ms/frame (0.35 fps) → JIT 93 ms/frame (10.7 fps) = ~30.6× faster.**
 Smoke: `bin/simple -c "print(1+1)"`=2, `bin/simple lint` exits 0 (no coredump).
 
+## Blast-radius of restoring JIT-default (verified 2026-06-19)
+
+`ExecutionMode::Jit` is the *intended* default (`driver/src/exec_core.rs:76`,
+"JIT default (Stage 2+)"); this regression had been silently forcing every
+program to the interpreter fallback since today. Restoring JIT therefore returns
+the host to its designed behavior — it is **not** a new speed-for-correctness
+flip. Confirmed scope:
+
+- **`bin/simple test` runs specs under the interpreter**
+  (`src/app/test_runner_new` → `run_test_file_interpreter`), so the suite — the
+  correctness gate parallel agents rely on — is **unaffected** by this change.
+- **`bin/simple run` / `-c` use JIT** (now restored). These are ~30× faster but
+  again subject to the repo's *pre-existing, already-tracked* JIT correctness
+  bugs that the interpreter fallback had been masking for the last few hours —
+  notably `jit_string_method_on_var_receiver_folds_2026-06-13` (`"abc".length()`
+  on a val/global receiver folds to `true` under JIT). These bugs predate this
+  change and are codegen issues, not caused by the symbol registration here.
+
+Net: safe to keep (restores intended default; test gate is interpreter). The
+re-exposed JIT codegen bugs are separate pre-existing work.
+
 **Remaining (separate, lower-priority) gap:** JIT/`run`-mode profiling does not
 yet *emit* the counter call — `codegen/instr/body.rs:477` only emits when
 `runtime_funcs` already contains `rt_native_profile_count`, which the JIT backend
