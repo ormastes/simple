@@ -27,7 +27,7 @@ renderdoc_html_external_host_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -104,7 +104,7 @@ reason and keeps the gate status out of `pass`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -121,6 +121,7 @@ expect(evidence).to_contain("rdoc_html_external_gate_required_scene=html-css-chr
 expect(evidence).to_contain("rdoc_html_external_gate_required_status=pass")
 expect(evidence).to_contain("rdoc_html_external_gate_required_magic=RDOC")
 expect(evidence).to_contain("rdoc_html_external_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+expect(evidence).to_contain("rdoc_html_external_gate_capture_file_magic=")
 
 val status = _value_of(evidence, "rdoc_html_external_gate_status")
 val reason = _value_of(evidence, "rdoc_html_external_gate_reason")
@@ -147,7 +148,7 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -161,7 +162,30 @@ expect(evidence).to_contain("rdoc_html_external_gate_reason=pass")
 expect(evidence).to_contain("rdoc_html_external_gate_backend=original")
 expect(evidence).to_contain("rdoc_html_external_gate_scene=html-css-chrome")
 expect(evidence).to_contain("rdoc_html_external_gate_capture_magic=RDOC")
+expect(evidence).to_contain("rdoc_html_external_gate_capture_file_magic=RDOC")
 expect(evidence).to_contain("rdoc_html_external_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+```
+
+</details>
+
+#### rejects Chrome captures whose file header is not RDOC
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-renderdoc-html-external-gate-bad-file-magic && mkdir -p build/test-renderdoc-html-external-gate-bad-file-magic/source && printf 'NOPEsynthetic original html capture\\n' > build/test-renderdoc-html-external-gate-bad-file-magic/source/html.rdc && printf 'rdoc_backend=original\\nrdoc_scene=html-css-chrome\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-html-external-gate-bad-file-magic/source/html.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\n' > build/test-renderdoc-html-external-gate-bad-file-magic/source/evidence.env && RDOC_HTML_EVIDENCE_ENV=build/test-renderdoc-html-external-gate-bad-file-magic/source/evidence.env BUILD_DIR=build/test-renderdoc-html-external-gate-bad-file-magic/out REPORT_PATH=build/test-renderdoc-html-external-gate-bad-file-magic/report.md sh scripts/check/check-renderdoc-html-external-host-gate.shs || true"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = rt_file_read_text("build/test-renderdoc-html-external-gate-bad-file-magic/out/evidence.env") ?? ""
+expect(evidence).to_contain("rdoc_html_external_gate_status=fail")
+expect(evidence).to_contain("rdoc_html_external_gate_reason=missing-rdoc-file-magic")
+expect(evidence).to_contain("rdoc_html_external_gate_capture_magic=RDOC")
+expect(evidence).to_contain("rdoc_html_external_gate_capture_file_magic=NOPE")
 ```
 
 </details>
@@ -191,8 +215,8 @@ expect(evidence).to_contain("rdoc_html_external_gate_required_scene=html-css-chr
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
