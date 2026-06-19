@@ -112,7 +112,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
-  llm-catalog: apps=9 features=124 actions=60
+  llm-catalog: apps=9 features=130 actions=60
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 725 lines folded for reproduction.
+Runnable source: 729 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -389,7 +389,7 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=124 actions=60")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=130 actions=60")
 val dispatch_probe = office_catalog_dispatch_probe()
 expect(dispatch_probe.advertised_count).to_equal(60)
 expect(dispatch_probe.recognized_count).to_equal(60)
@@ -1068,10 +1068,14 @@ expect(count_where(updated_base.table, "status", "done")).to_equal(2)
 expect(deleted_base.accepted).to_be(true)
 expect(row_count(deleted_base.table)).to_equal(0)
 expect(catalog[7].features.join(",")).to_contain("mathml")
+expect(catalog[7].features.join(",")).to_contain("xml-escape")
 expect(catalog[7].features.join(",")).to_contain("fraction")
+expect(catalog[7].features.join(",")).to_contain("slash-fraction")
 expect(catalog[7].features.join(",")).to_contain("subscript")
+expect(catalog[7].features.join(",")).to_contain("sqrt-shorthand")
 expect(catalog[7].features.join(",")).to_contain("fenced-group")
 expect(catalog[7].features.join(",")).to_contain("precedence-parser")
+expect(catalog[7].features.join(",")).to_contain("malformed-fallback")
 expect(catalog[7].features.join(",")).to_contain("checked-rendering")
 expect(catalog[7].actions.join(",")).to_contain("render-mathml")
 expect(catalog[7].actions.join(",")).to_contain("render-math-structure")

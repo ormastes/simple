@@ -299,7 +299,8 @@ modes:
   `html-cell-coordinates`, `html-escape`, invalid schema rejection, `query-table`,
   `count-where`, `select-where`, `project-column`, `update-where`,
   `delete-where`, `render-base-table-html`, and `db-edit`; Math has `fraction`,
-  `subscript`, `fenced-group`, `precedence-parser`, `checked-rendering`,
+  `subscript`, `fenced-group`, `precedence-parser`, `xml-escape`,
+  `sqrt-shorthand`, `slash-fraction`, `malformed-fallback`, `checked-rendering`,
   `render-mathml`, `render-math-structure`, and `render-mathml-checked`;
   Counter has `counter-action`; Designer has
   `render-ui-html`, `export-ui-sdd`, and
