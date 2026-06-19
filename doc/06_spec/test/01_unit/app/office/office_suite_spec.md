@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 58 | 58 | 0 | 0 |
+| 59 | 59 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -630,6 +630,22 @@ expect(result.reason).to_equal("row-width-mismatch")
 
 </details>
 
+#### rejects duplicate Base table columns
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("db-edit", "insert|2,done,done\\ntable: Bad\\ncolumns: id,status,status\\nrow: 1,open,open")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("duplicate-column")
+```
+
+</details>
+
 #### rejects unknown headless office actions
 
 <details>
@@ -1159,8 +1175,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 58 |
-| Active scenarios | 58 |
+| Total scenarios | 59 |
+| Active scenarios | 59 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
