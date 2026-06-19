@@ -97,7 +97,7 @@ markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer 
   check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true css_doc=true escaped=true metadata=true
   edit-command: md-edit=true stale-reject=true reason=stale-line
 slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
-  check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true
+  check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true element_meta=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
 draw: SDD Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
   check: draw: sdn_graph format=sdd name="SDD: Simple Diagram Document" nodes=3 edges=2 html=true route=true select=true inspect=true child_meta=true path_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
@@ -894,12 +894,13 @@ expect(counter_overflow_action.reason).to_equal("invalid-args")
 - assert true
 - assert true
 - assert true
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -916,10 +917,12 @@ assert_true(probe.has_outline_transform)
 assert_true(probe.has_ppt_html_render)
 assert_true(probe.has_safe_css_color)
 assert_true(probe.has_positioned_elements)
+assert_true(probe.has_element_metadata)
 expect(summary).to_contain("transform=true")
 expect(summary).to_contain("ppt_html=true")
 expect(summary).to_contain("safe_css=true")
 expect(summary).to_contain("positioned=true")
+expect(summary).to_contain("element_meta=true")
 ```
 
 </details>

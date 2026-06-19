@@ -115,11 +115,14 @@ expect(html).to_contain(">First point</div>")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = render_slide_html(content_slide("s2", "Agenda", "First point"))
+expect(html).to_contain("data-slide-id=\"s2\"")
+expect(html).to_contain("data-element-id=\"s2_title\" data-kind=\"text\"")
+expect(html).to_contain("data-element-id=\"s2_body\" data-kind=\"text\"")
 expect(html).to_contain("left: 50px; top: 30px; width: 860px; height: 60px;")
 expect(html).to_contain("left: 50px; top: 110px; width: 860px; height: 400px;")
 ```
@@ -137,7 +140,7 @@ expect(html).to_contain("left: 50px; top: 110px; width: 860px; height: 400px;")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -171,6 +174,7 @@ expect(slide_safe_css_color("#fff; color:red", "#ffffff")).to_equal("#ffffff")
 expect(html).to_contain("background: #ffffff;")
 expect(html).to_contain("&lt;b onclick=&#39;x&#39;&gt;Title&lt;/b&gt;")
 expect(html).to_contain("[rect&lt;script&gt;]")
+expect(html).to_contain("data-element-id=\"shape\" data-kind=\"shape\"")
 expect(html).to_contain("background: #E5E7EB;")
 expect(html).to_contain("left: 0px; top: 0px;")
 ```

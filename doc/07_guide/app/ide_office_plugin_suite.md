@@ -46,7 +46,8 @@ PPT/Impress rendering must expose Markdown source -> slide-deck HTML through
 object-model slide renderer remains a
 compatibility path and should escape element text, sanitize CSS colors to simple
 `#RGB` or `#RRGGBB` values, clamp negative geometry to `0px`, and emit a fixed
-960x540 relative slide with absolutely positioned element boxes.
+960x540 relative slide with stable slide/element metadata and absolutely
+positioned element boxes.
 
 Headless Office actions are exposed through
 `office_action_dispatch(action, source)` in `app.office.mod`. This is the stable
@@ -206,7 +207,7 @@ IDE feature checks should expose these hardening markers in both TUI and GUI
 modes:
 
 - Markdown: `css_doc=true escaped=true metadata=true`
-- Slides: `ppt_html=true safe_css=true positioned=true`
+- Slides: `ppt_html=true safe_css=true positioned=true element_meta=true`
 - Draw: `format=sdd name="SDD: Simple Diagram Document" html=true route=true select=true inspect=true child_meta=true path_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true`
 - LLM catalog: Markdown has `render-markdown-preview-html` and `md-edit`; Writer has
   `render-writer-markdown-html`; Impress has
