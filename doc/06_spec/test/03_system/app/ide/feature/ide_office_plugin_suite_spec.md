@@ -112,7 +112,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
-  llm-catalog: apps=9 features=131 actions=61
+  llm-catalog: apps=9 features=132 actions=61
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -170,7 +170,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -201,6 +201,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=9")
+expect(tui_report).to_contain("features=132")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -422,7 +423,7 @@ expect(guide).to_contain("`data-node-index`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 775 lines folded for reproduction.
+Runnable source: 776 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -431,7 +432,7 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=131 actions=61")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=132 actions=61")
 val dispatch_probe = office_catalog_dispatch_probe()
 expect(dispatch_probe.advertised_count).to_equal(61)
 expect(dispatch_probe.recognized_count).to_equal(61)
@@ -1014,6 +1015,7 @@ expect(draw_distributed.graph.nodes[2].x).to_equal("60")
 expect(catalog[5].owner_module).to_equal("app.office.ui_editor")
 expect(catalog[5].features.join(",")).to_contain("selection")
 expect(catalog[5].features.join(",")).to_contain("selected-html-render")
+expect(catalog[5].features.join(",")).to_contain("selected-resize-handles")
 expect(catalog[5].features.join(",")).to_contain("inspector")
 expect(catalog[5].features.join(",")).to_contain("style-tokens")
 expect(catalog[5].features.join(",")).to_contain("auto-layout")
