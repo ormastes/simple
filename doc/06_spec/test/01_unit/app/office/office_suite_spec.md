@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 81 | 81 | 0 | 0 |
+| 82 | 82 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1406,6 +1406,25 @@ expect(sdd_result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects blank layout selection headers
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ui_result = office_action_dispatch("ui-align-selection", "left| , , \ndesign: Align\nnode a|A|button|0|0|20|20|primary|1|action")
+val sdd_result = office_action_dispatch("align-sdd-selection", "   |A\ngraph: Align\nA: A x: 0 y: 0 width: 20 height: 20")
+expect(ui_result.ok).to_be(false)
+expect(ui_result.reason).to_equal("invalid-args")
+expect(sdd_result.ok).to_be(false)
+expect(sdd_result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects blank SDD node value action target ids
 
 <details>
@@ -1528,8 +1547,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 81 |
-| Active scenarios | 81 |
+| Total scenarios | 82 |
+| Active scenarios | 82 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
