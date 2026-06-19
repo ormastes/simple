@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -170,12 +170,48 @@ expect(rejected.design.nodes[0].label).to_equal("Sign in")
 
 </details>
 
+#### moves and resizes nodes with guarded layout checks
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = office_ui_design_parse("design: Login\nnode submit|Sign in|button|72|200|120|36|primary|controls|action")
+val accepted = office_ui_design_update_layout_checked(design, "submit", "72", "200", "120", "36", "96", "224", "160", "44")
+expect(accepted.accepted).to_be(true)
+expect(accepted.reason).to_equal("updated")
+expect(accepted.design.nodes[0].x).to_equal("96")
+expect(accepted.design.nodes[0].y).to_equal("224")
+expect(accepted.design.nodes[0].width).to_equal("160")
+expect(accepted.design.nodes[0].height).to_equal("44")
+expect(office_ui_design_render_html(accepted.design)).to_contain("left: 96px")
+expect(office_ui_design_to_sdd(accepted.design)).to_contain("submit, \"Sign in\", primary, action, rounded, 96, 224, 160, 44, controls")
+
+val rejected = office_ui_design_update_layout_checked(design, "submit", "1", "200", "120", "36", "96", "224", "160", "44")
+expect(rejected.accepted).to_be(false)
+expect(rejected.reason).to_equal("stale-node")
+expect(rejected.design.nodes[0].x).to_equal("72")
+expect(rejected.design.nodes[0].y).to_equal("200")
+expect(rejected.design.nodes[0].width).to_equal("120")
+expect(rejected.design.nodes[0].height).to_equal("36")
+expect(rejected.diff).to_contain("actual: 72,200,120,36")
+
+val missing = office_ui_design_update_layout_checked(design, "missing", "0", "0", "1", "1", "2", "2", "3", "3")
+expect(missing.accepted).to_be(false)
+expect(missing.reason).to_equal("missing-node")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

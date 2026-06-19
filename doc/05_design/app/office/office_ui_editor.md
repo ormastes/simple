@@ -23,3 +23,9 @@ Draw-style diagrams and UI design screens on one editable document substrate.
 
 `office_ui_design_update_label_checked` mirrors the suite's guarded edit style:
 updates apply only when the expected label matches the current label.
+
+`office_ui_design_update_layout_checked` is the first Figma-like manipulation
+operation. It moves/resizes a node only when the caller's expected
+x/y/width/height tuple matches the current node geometry, then returns a new
+design plus a compact diff. Stale geometry and missing nodes return rejected
+`OfficeUiEditResult` values without mutating the original design.

@@ -10,6 +10,8 @@
   editing share one diagram substrate.
 - REQ-UI-005: Guard label edits with expected-value checks and stale rejection.
 - REQ-UI-006: Expose the UI editor through the Office LLM catalog.
+- REQ-UI-007: Guard node layout edits with expected x/y/width/height checks so
+  move and resize operations reject stale geometry.
 
 ## Out of Scope
 
