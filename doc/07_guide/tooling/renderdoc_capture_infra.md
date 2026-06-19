@@ -9,6 +9,8 @@ scripts/tool/renderdoc-evidence.shs capture-simple
 scripts/tool/renderdoc-evidence.shs capture-html
 scripts/tool/renderdoc-evidence.shs capture-electron-html
 RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
+RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/electron-html/evidence.env \
+  sh scripts/check/check-renderdoc-electron-html-gate.shs
 ```
 
 ## Interfaces
@@ -99,7 +101,9 @@ The current canonical evidence contract is:
   `rdoc_backend=electron`, `rdoc_capture_status=pass`, `rdoc_capture_magic=RDOC`,
   `rdoc_chromium_requested_api=vulkan`,
   `rdoc_chromium_requested_angle=vulkan`, and an existing `.rdc` file when
-  proving the Electron-backed GUI path.
+  proving the Electron-backed GUI path. The GUI RenderDoc feature audit requires
+  this through `scripts/check/check-renderdoc-electron-html-gate.shs` before it
+  can report `pass`.
 
 ## External Host Gate
 
@@ -127,6 +131,32 @@ Otherwise it writes fail-closed evidence under
 Without `RDOC_EXTERNAL_RUN_CAPTURE=1`, the wrapper performs a readiness-only
 run and writes `rdoc_external_host_capture_status=unavailable` with
 `rdoc_external_host_capture_reason=capture-not-requested`.
+
+## Electron Chromium/Vulkan Gate
+
+Use the Electron gate when the canonical Electron capture or a CI host supplies
+the Electron-backed HTML/CSS `.rdc`:
+
+```sh
+RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe \
+  scripts/tool/renderdoc-evidence.shs capture-electron-html
+
+RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/electron-html/evidence.env \
+  sh scripts/check/check-renderdoc-electron-html-gate.shs
+```
+
+The gate passes only when the source evidence contains:
+
+- `rdoc_backend=electron`
+- `rdoc_capture_status=pass`
+- `rdoc_capture_magic=RDOC`
+- `rdoc_chromium_requested_api=vulkan`
+- `rdoc_chromium_requested_angle=vulkan`
+- an existing `.rdc` path in `rdoc_capture_file`
+
+Missing RenderDoc, missing Electron capture output, non-Electron backend
+evidence, or non-Vulkan Chromium request metadata all keep the gate out of
+`pass`.
 
 ## macOS Notes
 

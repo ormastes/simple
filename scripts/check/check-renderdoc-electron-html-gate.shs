@@ -1,0 +1,124 @@
+#!/bin/sh
+# Validate Electron Chromium/Vulkan RenderDoc HTML/CSS capture evidence.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/renderdoc/electron-html-gate}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/renderdoc_electron_html_gate_$(date -u +%F).md}"
+SOURCE_ENV="${RDOC_ELECTRON_HTML_EVIDENCE_ENV:-build/renderdoc/canonical-probe/electron-html/evidence.env}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+write_evidence() {
+    status="$1"
+    reason="$2"
+    {
+        echo "rdoc_electron_html_gate_status=$status"
+        echo "rdoc_electron_html_gate_reason=$reason"
+        echo "rdoc_electron_html_gate_source_env=$SOURCE_ENV"
+        echo "rdoc_electron_html_gate_backend=${backend:-}"
+        echo "rdoc_electron_html_gate_capture_status=${capture_status:-}"
+        echo "rdoc_electron_html_gate_capture_reason=${capture_reason:-}"
+        echo "rdoc_electron_html_gate_capture_file=${capture_file:-}"
+        echo "rdoc_electron_html_gate_capture_magic=${capture_magic:-}"
+        echo "rdoc_electron_html_gate_html_path=${html_path:-}"
+        echo "rdoc_electron_html_gate_electron=${electron_bin:-}"
+        echo "rdoc_electron_html_gate_capture_script=${capture_script:-}"
+        echo "rdoc_electron_html_gate_requested_api=${requested_api:-}"
+        echo "rdoc_electron_html_gate_requested_angle=${requested_angle:-}"
+        echo "rdoc_electron_html_gate_requested_features=${requested_features:-}"
+        echo "rdoc_electron_html_gate_launch_flags=${launch_flags:-}"
+        echo "rdoc_electron_html_gate_required_backend=electron"
+        echo "rdoc_electron_html_gate_required_status=pass"
+        echo "rdoc_electron_html_gate_required_magic=RDOC"
+        echo "rdoc_electron_html_gate_required_api=vulkan"
+        echo "rdoc_electron_html_gate_required_angle=vulkan"
+    } >"$OUT_ENV"
+    {
+        echo "# RenderDoc Electron HTML Gate"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- source evidence: $SOURCE_ENV"
+        echo "- backend: ${backend:-}"
+        echo "- capture status: ${capture_status:-}"
+        echo "- capture reason: ${capture_reason:-}"
+        echo "- capture file: ${capture_file:-}"
+        echo "- capture magic: ${capture_magic:-}"
+        echo "- requested API: ${requested_api:-}"
+        echo "- requested ANGLE: ${requested_angle:-}"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$OUT_ENV"
+    } >"$REPORT_PATH"
+    cat "$OUT_ENV"
+}
+
+if [ ! -s "$SOURCE_ENV" ]; then
+    backend=""
+    capture_status=""
+    capture_reason="missing-source-evidence"
+    capture_file=""
+    capture_magic=""
+    html_path=""
+    electron_bin=""
+    capture_script=""
+    requested_api=""
+    requested_angle=""
+    requested_features=""
+    launch_flags=""
+    write_evidence "unavailable" "missing-source-evidence"
+    exit 1
+fi
+
+backend="$(value_of rdoc_backend "$SOURCE_ENV")"
+capture_status="$(value_of rdoc_capture_status "$SOURCE_ENV")"
+capture_reason="$(value_of rdoc_capture_reason "$SOURCE_ENV")"
+capture_file="$(value_of rdoc_capture_file "$SOURCE_ENV")"
+capture_magic="$(value_of rdoc_capture_magic "$SOURCE_ENV")"
+html_path="$(value_of rdoc_html_path "$SOURCE_ENV")"
+electron_bin="$(value_of rdoc_electron "$SOURCE_ENV")"
+capture_script="$(value_of rdoc_electron_capture_script "$SOURCE_ENV")"
+requested_api="$(value_of rdoc_chromium_requested_api "$SOURCE_ENV")"
+requested_angle="$(value_of rdoc_chromium_requested_angle "$SOURCE_ENV")"
+requested_features="$(value_of rdoc_chromium_requested_features "$SOURCE_ENV")"
+launch_flags="$(value_of rdoc_chromium_launch_flags "$SOURCE_ENV")"
+
+if [ "$backend" = "electron" ] \
+    && [ "$capture_status" = "pass" ] \
+    && [ "$capture_magic" = "RDOC" ] \
+    && [ -s "$capture_file" ] \
+    && [ "$requested_api" = "vulkan" ] \
+    && [ "$requested_angle" = "vulkan" ]; then
+    write_evidence "pass" "pass"
+    exit 0
+fi
+
+if [ "$capture_status" = "" ]; then
+    write_evidence "unavailable" "missing-capture-status"
+elif [ "$backend" != "electron" ]; then
+    write_evidence "fail" "unexpected-backend"
+elif [ "$capture_status" != "pass" ]; then
+    write_evidence "fail" "${capture_reason:-capture-not-pass}"
+elif [ "$capture_magic" != "RDOC" ]; then
+    write_evidence "fail" "missing-rdoc-magic"
+elif [ ! -s "$capture_file" ]; then
+    write_evidence "fail" "missing-rdc-file"
+elif [ "$requested_api" != "vulkan" ]; then
+    write_evidence "fail" "missing-vulkan-api"
+elif [ "$requested_angle" != "vulkan" ]; then
+    write_evidence "fail" "missing-vulkan-angle"
+else
+    write_evidence "fail" "electron-renderdoc-gate-failed"
+fi
+exit 1

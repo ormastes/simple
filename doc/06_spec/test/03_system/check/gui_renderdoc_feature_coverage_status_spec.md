@@ -27,7 +27,7 @@ gui_renderdoc_feature_coverage_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,6 +82,8 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 - The audit includes current production parity evidence status when present.
 - The audit reports the active RenderDoc goal, Simple `.rdc`, and external
   Chrome/Vulkan `.rdc` gates without treating missing host captures as pass.
+- Electron Chromium/Vulkan `.rdc` evidence is fail-closed and required before
+  the aggregate GUI audit can report `pass`.
 - Strict mode fails closed unless the aggregate audit status is `pass`.
 
 ## Scenarios
@@ -114,13 +116,15 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: rendering_manifest_reason equals `pass`
    - Expected: electron_api equals `vulkan`
    - Expected: electron_angle equals `vulkan`
+   - Expected: electron_api equals `vulkan`
+   - Expected: electron_angle equals `vulkan`
 - Verify the restart-audit report was written
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 90 lines folded for reproduction.
+Runnable source: 106 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -148,6 +152,14 @@ expect(evidence).to_contain("electron_renderdoc_status=")
 expect(evidence).to_contain("electron_renderdoc_reason=")
 expect(evidence).to_contain("electron_renderdoc_requested_api=")
 expect(evidence).to_contain("electron_renderdoc_requested_angle=")
+expect(evidence).to_contain("electron_renderdoc_gate_command=RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/electron-html/evidence.env sh scripts/check/check-renderdoc-electron-html-gate.shs")
+expect(evidence).to_contain("electron_renderdoc_gate_status=")
+expect(evidence).to_contain("electron_renderdoc_gate_reason=")
+expect(evidence).to_contain("electron_renderdoc_gate_required_backend=electron")
+expect(evidence).to_contain("electron_renderdoc_gate_required_status=pass")
+expect(evidence).to_contain("electron_renderdoc_gate_required_magic=RDOC")
+expect(evidence).to_contain("electron_renderdoc_gate_required_api=vulkan")
+expect(evidence).to_contain("electron_renderdoc_gate_required_angle=vulkan")
 
 val status = _value_of(evidence, "gui_renderdoc_feature_coverage_status")
 val widget_count = _value_of(evidence, "widget_kind_count")
@@ -174,6 +186,8 @@ val electron_status = _value_of(evidence, "electron_renderdoc_status")
 val electron_reason = _value_of(evidence, "electron_renderdoc_reason")
 val electron_api = _value_of(evidence, "electron_renderdoc_requested_api")
 val electron_angle = _value_of(evidence, "electron_renderdoc_requested_angle")
+val electron_gate_status = _value_of(evidence, "electron_renderdoc_gate_status")
+val electron_gate_reason = _value_of(evidence, "electron_renderdoc_gate_reason")
 
 step("Assert every WidgetKind has an HTML renderer dispatch entry")
 expect(status.len()).to_be_greater_than(0)
@@ -201,7 +215,12 @@ expect(simple_status.len()).to_be_greater_than(0)
 expect(external_status.len()).to_be_greater_than(0)
 expect(electron_status.len()).to_be_greater_than(0)
 expect(electron_reason.len()).to_be_greater_than(0)
+expect(electron_gate_status.len()).to_be_greater_than(0)
+expect(electron_gate_reason.len()).to_be_greater_than(0)
 if electron_status != "unavailable":
+    expect(electron_api).to_equal("vulkan")
+    expect(electron_angle).to_equal("vulkan")
+if electron_gate_status == "pass":
     expect(electron_api).to_equal("vulkan")
     expect(electron_angle).to_equal("vulkan")
 
@@ -214,6 +233,7 @@ expect(report).to_contain("- Electron layout manifest cases: 50")
 expect(report).to_contain("- HTML/CSS rendering manifest traceability: pass (pass)")
 expect(report).to_contain("- Electron Chromium RenderDoc:")
 expect(report).to_contain("- Electron Chromium/Vulkan RenderDoc:")
+expect(report).to_contain("- Electron Chromium/Vulkan gate:")
 ```
 
 </details>
@@ -255,12 +275,44 @@ else:
 
 </details>
 
+#### requires Electron Vulkan RenderDoc evidence after Simple and external gates pass
+
+- Create controlled Simple and original external RenderDoc evidence but no Electron evidence
+   - Expected: code equals `0`
+- Assert the aggregate audit stays incomplete until Electron Vulkan RDOC passes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create controlled Simple and original external RenderDoc evidence but no Electron evidence")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-electron-required && mkdir -p build/test-gui-renderdoc-feature-coverage-status-electron-required/simple build/test-gui-renderdoc-feature-coverage-status-electron-required/external && printf 'RDOCsynthetic simple capture\\n' > build/test-gui-renderdoc-feature-coverage-status-electron-required/simple/simple.rdc && printf 'rdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-renderdoc-feature-coverage-status-electron-required/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-gui-renderdoc-feature-coverage-status-electron-required/simple/evidence.env && printf 'rdoc_external_host_capture_status=pass\\nrdoc_external_host_capture_reason=pass\\nrdoc_external_host_required_backend=original\\nrdoc_external_host_required_status=pass\\nrdoc_external_host_required_magic=RDOC\\n' > build/test-gui-renderdoc-feature-coverage-status-electron-required/external/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-electron-required/simple/evidence.env RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-electron-required/external/evidence.env RDOC_ELECTRON_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-electron-required/missing-electron/evidence.env BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-electron-required/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-electron-required/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate audit stays incomplete until Electron Vulkan RDOC passes")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-electron-required/out/evidence.env")
+expect(evidence).to_contain("renderdoc_goal_status=pass")
+expect(evidence).to_contain("simple_renderdoc_status=pass")
+expect(evidence).to_contain("external_renderdoc_status=pass")
+expect(evidence).to_contain("electron_renderdoc_gate_status=unavailable")
+expect(evidence).to_contain("electron_renderdoc_gate_reason=missing-source-evidence")
+expect(evidence).to_contain("gui_renderdoc_feature_coverage_status=incomplete")
+expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-source-evidence")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

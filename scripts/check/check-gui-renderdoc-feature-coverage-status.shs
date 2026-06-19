@@ -203,6 +203,38 @@ electron_capture_script = value_of("rdoc_electron_capture_script", electron_env)
 electron_status = electron_capture_status or "unavailable"
 electron_reason = electron_capture_reason or "missing-electron-rdoc"
 
+electron_gate_output = ""
+electron_gate_code = 127
+if Path("scripts/check/check-renderdoc-electron-html-gate.shs").exists():
+    nested_env = os.environ.copy()
+    nested_env["RDOC_ELECTRON_HTML_EVIDENCE_ENV"] = str(electron_env_path)
+    nested_env["BUILD_DIR"] = str(ROOT / "build/gui_renderdoc_feature_coverage_status/electron-html-gate")
+    nested_env["REPORT_PATH"] = str(ROOT / "build/gui_renderdoc_feature_coverage_status/electron-html-gate/report.md")
+    proc = subprocess.run(
+        ["sh", "scripts/check/check-renderdoc-electron-html-gate.shs"],
+        cwd=ROOT,
+        env=nested_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=120,
+        check=False,
+    )
+    electron_gate_output = proc.stdout
+    electron_gate_code = proc.returncode
+
+electron_gate_status = value_of("rdoc_electron_html_gate_status", electron_gate_output)
+electron_gate_reason = value_of("rdoc_electron_html_gate_reason", electron_gate_output)
+electron_gate_required_backend = value_of("rdoc_electron_html_gate_required_backend", electron_gate_output)
+electron_gate_required_status = value_of("rdoc_electron_html_gate_required_status", electron_gate_output)
+electron_gate_required_magic = value_of("rdoc_electron_html_gate_required_magic", electron_gate_output)
+electron_gate_required_api = value_of("rdoc_electron_html_gate_required_api", electron_gate_output)
+electron_gate_required_angle = value_of("rdoc_electron_html_gate_required_angle", electron_gate_output)
+if not electron_gate_status:
+    electron_gate_status = "unavailable"
+if not electron_gate_reason:
+    electron_gate_reason = "missing-electron-renderdoc-gate-evidence"
+
 renderdoc_status = value_of("html_css_renderdoc_goal_status", goal_output)
 renderdoc_reason = value_of("html_css_renderdoc_goal_reason", goal_output)
 rendering_manifest_status = value_of("html_css_rendering_manifest_traceability_status", rendering_manifest_output)
@@ -238,6 +270,9 @@ elif rendering_manifest_status != "pass":
 elif renderdoc_status != "pass":
     coverage_status = "incomplete"
     coverage_reason = renderdoc_reason or "renderdoc-goal-incomplete"
+elif electron_gate_status != "pass":
+    coverage_status = "incomplete"
+    coverage_reason = electron_gate_reason or "missing-electron-rdoc"
 elif production_status and production_status != "pass":
     coverage_status = "incomplete"
     coverage_reason = production_reason or "production-gui-web-renderer-parity-incomplete"
@@ -310,12 +345,24 @@ emit("electron_renderdoc_requested_api", electron_requested_api)
 emit("electron_renderdoc_requested_angle", electron_requested_angle)
 emit("electron_renderdoc_requested_features", electron_requested_features)
 emit("electron_renderdoc_launch_flags", electron_launch_flags)
+emit("electron_renderdoc_gate_command", "RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/electron-html/evidence.env sh scripts/check/check-renderdoc-electron-html-gate.shs")
+emit("electron_renderdoc_gate_exit_code", electron_gate_code)
+emit("electron_renderdoc_gate_status", electron_gate_status)
+emit("electron_renderdoc_gate_reason", electron_gate_reason)
+emit("electron_renderdoc_gate_required_backend", electron_gate_required_backend)
+emit("electron_renderdoc_gate_required_status", electron_gate_required_status)
+emit("electron_renderdoc_gate_required_magic", electron_gate_required_magic)
+emit("electron_renderdoc_gate_required_api", electron_gate_required_api)
+emit("electron_renderdoc_gate_required_angle", electron_gate_required_angle)
 emit("macos_portability_status", macos_status)
 emit("macos_portability_reason", macos_reason)
 emit("simple_renderdoc_capture_command", "RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple")
 emit("html_renderdoc_capture_command", "RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs")
 emit("electron_renderdoc_capture_command", "RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-electron-html")
-emit("blocked_completion_gate", "original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic")
+blocked_gate = "original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic"
+if renderdoc_status == "pass" and electron_gate_status != "pass":
+    blocked_gate = "Electron Chromium/Vulkan RenderDoc .rdc with RDOC magic"
+emit("blocked_completion_gate", blocked_gate)
 PY
 
 status="$(sed -n 's/^gui_renderdoc_feature_coverage_status=//p' "$OUT_ENV" | tail -n 1)"
@@ -334,6 +381,7 @@ reason="$(sed -n 's/^gui_renderdoc_feature_coverage_reason=//p' "$OUT_ENV" | tai
     echo "- Simple RenderDoc: $(sed -n 's/^simple_renderdoc_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^simple_renderdoc_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo "- External Chrome/Vulkan RenderDoc: $(sed -n 's/^external_renderdoc_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^external_renderdoc_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo "- Electron Chromium/Vulkan RenderDoc: $(sed -n 's/^electron_renderdoc_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^electron_renderdoc_reason=//p' "$OUT_ENV" | tail -n 1))"
+    echo "- Electron Chromium/Vulkan gate: $(sed -n 's/^electron_renderdoc_gate_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^electron_renderdoc_gate_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo
     echo "## Commands"
     echo
@@ -344,6 +392,7 @@ reason="$(sed -n 's/^gui_renderdoc_feature_coverage_reason=//p' "$OUT_ENV" | tai
     echo "- Simple RenderDoc: \`$(sed -n 's/^simple_renderdoc_capture_command=//p' "$OUT_ENV" | tail -n 1)\`"
     echo "- Original Chrome/Vulkan RenderDoc: \`$(sed -n 's/^html_renderdoc_capture_command=//p' "$OUT_ENV" | tail -n 1)\`"
     echo "- Electron Chromium RenderDoc: \`$(sed -n 's/^electron_renderdoc_capture_command=//p' "$OUT_ENV" | tail -n 1)\`"
+    echo "- Electron Chromium/Vulkan gate: \`$(sed -n 's/^electron_renderdoc_gate_command=//p' "$OUT_ENV" | tail -n 1)\`"
     echo
     echo "## Raw Evidence"
     sed 's/^/- /' "$OUT_ENV"
