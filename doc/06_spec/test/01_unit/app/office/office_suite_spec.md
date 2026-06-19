@@ -646,7 +646,7 @@ expect(legacy_sdd.output).to_contain("graph: Feature")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -672,6 +672,8 @@ expect(selected_edge.output).to_contain("data-connector-handle=\"waypoint\" data
 expect(selected_edge.output).to_contain("data-y=\"10\" data-from=\"A\" data-to=\"B\"")
 expect(selected_edge.output).to_contain("data-from=\"A\" data-to=\"B\" data-node=\"A\"")
 expect(selected_edge.output).to_contain("data-from=\"A\" data-to=\"B\" data-node=\"B\"")
+expect(selected_edge.output).to_contain("data-start-anchor=\"right\" data-end-anchor=\"left\"")
+expect(selected_edge.output).to_contain("data-from=\"A\" data-to=\"B\" data-start-anchor=\"right\" data-end-anchor=\"left\"")
 expect(invalid.ok).to_be(false)
 expect(invalid.reason).to_equal("invalid-args")
 expect(legacy.action).to_equal("render-sdd-html")
