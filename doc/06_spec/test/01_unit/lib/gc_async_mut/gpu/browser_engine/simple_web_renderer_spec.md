@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 62 | 62 | 0 | 0 |
+| 63 | 63 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -640,6 +640,33 @@ expect(_count_color(pixels, 0xFF14B8A6u32)).to_equal(120)
 expect(_count_color(pixels, 0xFF84CC16u32)).to_equal(140)
 expect(_count_color(pixels, 0xFF0F172Au32)).to_equal(90)
 expect(_count_color(pixels, 0xFF64748Bu32)).to_equal(100)
+```
+
+</details>
+
+#### matches Chrome section heading search and address tag box geometry
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}hgroup,h1,h2,h3,h4,h5,h6,p,search,address{display:block;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}hgroup{background-color:#dbeafe;width:32px;height:14px;padding:2px}h1{background-color:#1d4ed8;width:22px;height:4px}p{background-color:#22c55e;width:18px;height:4px;margin-top:2px}h2{background-color:#f59e0b;width:24px;height:5px;margin-top:3px}h3{background-color:#ef4444;width:20px;height:5px;margin-top:2px}h4{background-color:#334155;width:26px;height:5px}h5{background-color:#a855f7;width:18px;height:5px;margin-top:2px}h6{background-color:#14b8a6;width:22px;height:5px;margin-top:2px}search{background-color:#84cc16;width:28px;height:5px;margin-top:2px}address{background-color:#64748b;width:30px;height:5px;margin-top:2px}</style></head><body><section class='stage'><div class='left'><hgroup><h1></h1><p></p></hgroup><h2></h2><h3></h3></div><div class='right'><h4></h4><h5></h5><h6></h6><search></search><address></address></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+expect(pixels.len()).to_equal(96 * 64)
+expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(4656)
+expect(_count_color(pixels, 0xFFDBEAFEu32)).to_equal(488)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(88)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(72)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(120)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(100)
+expect(_count_color(pixels, 0xFF334155u32)).to_equal(130)
+expect(_count_color(pixels, 0xFFA855F7u32)).to_equal(90)
+expect(_count_color(pixels, 0xFF14B8A6u32)).to_equal(110)
+expect(_count_color(pixels, 0xFF84CC16u32)).to_equal(140)
+expect(_count_color(pixels, 0xFF64748Bu32)).to_equal(150)
 ```
 
 </details>
@@ -1369,8 +1396,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 62 |
-| Active scenarios | 62 |
+| Total scenarios | 63 |
+| Active scenarios | 63 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
