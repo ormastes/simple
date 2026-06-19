@@ -355,3 +355,9 @@ possible so they are runner-verifiable.
   `edit-sdd-node-shape`, `edit-sdd-node-style`, and `edit-sdd-canvas`.
   Each accepts a compact first-line edit header followed by the SDD body and
   returns rendered HTML for the updated document.
+- 2026-06-19 dev: Wired the remaining cataloged Designer/UI edit actions into
+  the headless Office action bridge: `ui-label-edit`, `ui-layout-edit`,
+  `ui-auto-layout-edit`, `ui-constraints-edit`, `ui-layer-edit`,
+  `ui-style-token-read`, `ui-style-token-edit`, and `ui-inspect-node`. The
+  bridge now exposes the existing guarded Figma-like UI editor helpers through
+  compact first-line headers plus rendered HTML or readback text.

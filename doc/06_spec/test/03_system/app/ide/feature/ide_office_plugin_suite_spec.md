@@ -320,7 +320,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 220 lines folded for reproduction.
+Runnable source: 240 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -379,6 +379,15 @@ val ui_action = office_action_dispatch("render-ui-html", "design: Feature\nnode 
 val ui_sdd_action = office_action_dispatch("export-ui-sdd", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val sdd_action = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button_copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val ui_label_action = office_action_dispatch("ui-label-edit", "button|Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val stale_ui_label_action = office_action_dispatch("ui-label-edit", "button|Old|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val ui_layout_action = office_action_dispatch("ui-layout-edit", "button|16|16|80|32|24|32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val ui_auto_layout_action = office_action_dispatch("ui-auto-layout-edit", "frame|off|0|0,0,0,0|vertical|8|4,4,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container\nnode button|Run|button|16|16|80|32|primary|frame|action")
+val ui_constraints_action = office_action_dispatch("ui-constraints-edit", "button|left|top|stretch|top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val ui_layer_action = office_action_dispatch("ui-layer-edit", "button|controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val ui_style_read_action = office_action_dispatch("ui-style-token-read", "button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "button|primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val ui_inspect_action = office_action_dispatch("ui-inspect-node", "button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val sdd_duplicate_action = office_action_dispatch("duplicate-sdd-node", "A|A_copy|20|10\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val ui_align_action = office_action_dispatch("ui-align-selection", "left|a,b\ndesign: Align\nnode a|A|button|0|0|20|20|primary|1|action\nnode b|B|button|40|20|20|20|secondary|2|action")
 val sdd_align_action = office_action_dispatch("align-sdd-selection", "left|A,B\ngraph: Align\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 40 y: 20 width: 20 height: 20")
@@ -399,6 +408,17 @@ expect(ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape")
 expect(sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(sdd_action.output).to_contain("data-selected-edge-index=\"-1\"")
 expect(ui_duplicate_action.output).to_contain("data-id=\"button_copy\"")
+expect(ui_label_action.output).to_contain(">Launch</div>")
+expect(stale_ui_label_action.reason).to_equal("stale-node")
+expect(ui_layout_action.output).to_contain("left: 24px")
+expect(ui_auto_layout_action.output).to_contain("data-layout-mode=\"vertical\"")
+expect(ui_constraints_action.output).to_contain("data-constraint-h=\"stretch\"")
+expect(ui_layer_action.output).to_contain("data-z-index=\"9\"")
+expect(ui_style_read_action.output).to_equal("primary")
+expect(ui_style_edit_action.output).to_contain("office-ui-css-accent")
+expect(ui_inspect_action.output).to_contain("z_index=0")
+expect(ui_inspect_action.output).to_contain("x=16")
+expect(ui_inspect_action.output).to_contain("component=action")
 expect(sdd_duplicate_action.output).to_contain("data-node=\"A_copy\"")
 expect(ui_align_action.output).to_contain("data-id=\"b\"")
 expect(ui_align_action.output).to_contain("left: 0px")

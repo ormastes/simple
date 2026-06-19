@@ -58,6 +58,15 @@ Duplicate actions use a compact first-line edit header:
 `ui-duplicate-node` action returns rendered UI HTML; `duplicate-sdd-node`
 returns rendered SDD HTML.
 
+Designer edit actions use compact first-line edit headers followed by the UI
+design body. `ui-label-edit` uses `node_id|expected_label|new_label`.
+`ui-layout-edit` uses `node_id|expected_x|expected_y|expected_width|expected_height|new_x|new_y|new_width|new_height`.
+`ui-auto-layout-edit` uses `node_id|expected_mode|expected_gap|expected_padding|new_mode|new_gap|new_padding`.
+`ui-constraints-edit` uses `node_id|expected_h|expected_v|new_h|new_v`;
+`ui-layer-edit` and `ui-style-token-edit` use `node_id|expected|new`.
+`ui-style-token-read` and `ui-inspect-node` use `node_id` and return compact
+readback text.
+
 Layout actions use `mode_or_axis|id1,id2,...`, followed by the UI or SDD
 document body. `ui-align-selection`, `ui-distribute-selection`,
 `align-sdd-selection`, and `distribute-sdd-selection` compute the current
