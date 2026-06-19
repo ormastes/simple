@@ -84,6 +84,7 @@ geometry signature and return rendered HTML for the updated document.
 SDD node edit actions use `node_id|value` for label, parent, shape, style, layer, and role edits.
 `add-sdd-node` uses `id|label|css|role|shape|x|y|width|height|layer|parent`.
 `edit-sdd-style-rule` uses `css|target|extends|key|value` and returns canonical SDD text.
+`delete-sdd-style-rule` uses `css|key` and returns canonical SDD text with that reusable rule removed.
 `inspect-sdd-style-rule` uses `css|key` and returns compact style-rule readback text.
 `edit-sdd-node-geometry` uses `node_id|x|y|width|height`.
 `delete-sdd-node` uses `node_id` and removes attached connectors.
@@ -96,8 +97,8 @@ SDD node edit actions use `node_id|value` for label, parent, shape, style, layer
 `delete-sdd-edge` uses `edge_index`.
 `reroute-sdd-connector` uses `edge_index|route|waypoints|start_anchor|end_anchor`.
 Node, edge, canvas, layout, and connector edit actions return rendered SDD HTML
-for the updated document, except `edit-sdd-style-rule`, which returns canonical
-SDD text for round-trip persistence.
+for the updated document. Style-rule edit/delete actions return canonical SDD
+text for round-trip persistence.
 `inspect-sdd-node` uses `node_id`; `inspect-sdd-edge` uses `edge_index`;
 `inspect-sdd-style-rule` uses `css|key`. Inspectors return compact readback
 text for geometry, style, route, path, and style-rule fields.
@@ -185,12 +186,12 @@ modes:
 
 - Markdown: `css_doc=true escaped=true`
 - Slides: `ppt_html=true safe_css=true positioned=true`
-- Draw: `html=true route=true select=true inspect=true edit=true geometry=true layer=true role=true node_create=true style_rule=true style_inspect=true edge_create=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true`
+- Draw: `html=true route=true select=true inspect=true edit=true geometry=true layer=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true`
 - LLM catalog: Markdown has `render-markdown-preview-html` and `md-edit`; Writer has
   `render-writer-markdown-html`; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with
   `render-sdd-html-with-selection`, `reroute-sdd-connector`, `edit-sdd-style-rule`,
-  `inspect-sdd-style-rule`, `add-sdd-node`, `add-sdd-edge`,
+  `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `add-sdd-node`, `add-sdd-edge`,
   `edit-sdd-edge-label`, `edit-sdd-edge-style`, `edit-sdd-edge-kind`, `edit-sdd-edge-endpoints`,
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`,
   `edit-sdd-node-label`, `edit-sdd-node-parent`, `edit-sdd-node-shape`,

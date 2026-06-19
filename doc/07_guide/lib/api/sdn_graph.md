@@ -237,6 +237,10 @@ stable for selection, connectors, and inspectors.
 adds or updates one reusable style-table rule and rejects invalid targets or
 unsafe CSS values.
 
+`sdn_graph_delete_style_rule_checked(graph, css, key)` removes reusable
+style-table rows for one class/key pair and leaves the class definition intact
+so existing node/edge CSS labels continue to round-trip.
+
 `sdn_graph_inspect_style_rule(graph, css, key)` returns one reusable style-rule
 snapshot with target, parent, key, and value metadata, or `missing-style-rule`.
 

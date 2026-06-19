@@ -250,7 +250,7 @@ expect(canon).to_contain("A, B, done, , normal, simple, 56x36, right, left")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -277,12 +277,23 @@ expect(inspected.target).to_equal("node")
 expect(inspected.parent_css).to_equal("base")
 expect(inspected.value).to_equal("#eeeeee")
 expect(missing.reason).to_equal("missing-style-rule")
+val deleted = sdn_graph_delete_style_rule_checked(reparsed, "accent", "fill")
+val deleted_inspect = sdn_graph_inspect_style_rule(deleted.graph, "accent", "fill")
+val missing_delete = sdn_graph_delete_style_rule_checked(deleted.graph, "accent", "fill")
+expect(deleted.accepted).to_be(true)
+expect(deleted.graph.css_defs.len()).to_equal(4)
+expect(deleted.graph.styles.len()).to_equal(6)
+expect(deleted_inspect.reason).to_equal("missing-style-rule")
+expect(sdn_graph_render_html(deleted.graph)).to_contain("background-color:#ffffff")
+expect(missing_delete.reason).to_equal("missing-style-rule")
 val bad_target = sdn_graph_set_style_rule_checked(graph, "accent", "canvas", "base", "fill", "#eeeeee")
 val bad_value = sdn_graph_set_style_rule_checked(graph, "accent", "node", "base", "fill", "red;position:absolute")
 val bad_token = sdn_graph_set_style_rule_checked(graph, "accent,bad", "node", "base", "fill", "#eeeeee")
+val bad_delete = sdn_graph_delete_style_rule_checked(graph, "accent,bad", "fill")
 expect(bad_target.reason).to_equal("invalid-target")
 expect(bad_value.reason).to_equal("invalid-style-value")
 expect(bad_token.reason).to_equal("invalid-style-token")
+expect(bad_delete.reason).to_equal("invalid-style-token")
 ```
 
 </details>

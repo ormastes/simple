@@ -453,3 +453,8 @@ possible so they are runner-verifiable.
   `sdn_graph_inspect_style_rule` returns compact target/parent/key/value
   readback for one style rule, and `inspect-sdd-style-rule` exposes it through
   the headless Office action surface for LLM/editor workflows.
+- 2026-06-19 dev: Added Draw/SDD reusable style-rule deletion.
+  `sdn_graph_delete_style_rule_checked` removes all matching property rows for
+  one `css|key` pair while preserving the class definition for round-trip node
+  references. `delete-sdd-style-rule` exposes the same canonical-SDD persistence
+  bridge through the headless Office action surface.
