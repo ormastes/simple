@@ -592,7 +592,7 @@ expect(edge.edge_index).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 83 lines folded for reproduction.
+Runnable source: 85 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -609,6 +609,7 @@ val bad_anchor = sdn_graph_update_edge_checked(created, 0, "orthogonal", "140x30
 val bad_waypoint = sdn_graph_update_edge_checked(created, 0, "orthogonal", "140,30", "right", "left")
 val missing_edge = sdn_graph_update_edge_checked(created, 8, "orthogonal", "140x30", "right", "left")
 val labeled = sdn_graph_update_edge_label_at(updated, 0, "approved")
+val missing_edge_label = sdn_graph_update_edge_label_checked(updated, 8, "approved")
 val label_pointed = sdn_graph_update_edge_label_point_at(labeled, 0, "155", "55")
 val checked_label_point = sdn_graph_update_edge_label_point_checked(labeled, 0, " 166 ", " 65 ")
 val bad_label_point = sdn_graph_update_edge_label_point_checked(labeled, 0, "bad", "55")
@@ -655,6 +656,7 @@ expect(html).to_contain("data-path=\"M 90,30 L 140,30 L 200,30 L 200,80 L 220,80
 expect(labeled.edges[0].label).to_equal("approved")
 expect(labeled.edges[0].route).to_equal("orthogonal")
 expect(labeled_html).to_contain(">approved</div>")
+expect(missing_edge_label.reason).to_equal("missing-edge")
 expect(label_pointed.edges[0].label_x).to_equal("155")
 expect(label_pointed.edges[0].label_y).to_equal("55")
 expect(sdn_graph_render_html(label_pointed)).to_contain("data-label-x=\"155\" data-label-y=\"55\"")
@@ -718,7 +720,7 @@ expect(unsafe.reason).to_equal("invalid-canvas-number")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 90 lines folded for reproduction.
+Runnable source: 92 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -793,7 +795,9 @@ expect(sdn_graph_render_html(styled)).to_contain("sdn-css-storage sdn-css-highli
 expect(sdn_graph_render_html(styled)).to_contain("border-radius:999px / 24px")
 expect(sdn_graph_render_html(styled)).to_contain("box-shadow:inset 0 8px 0 rgba(15,23,42,0.08)")
 val labeled = sdn_graph_update_node_label_at(styled, 1, "Data Store")
+val missing_node_label = sdn_graph_update_node_label_checked(styled, 8, "Data Store")
 expect(labeled.nodes[1].label).to_equal("Data Store")
+expect(missing_node_label.reason).to_equal("missing-node")
 expect(labeled.nodes[1].shape).to_equal("cylinder")
 expect(labeled.nodes[1].css).to_equal("storage highlight")
 expect(sdn_graph_render_html(labeled)).to_contain(">Data Store</button>")

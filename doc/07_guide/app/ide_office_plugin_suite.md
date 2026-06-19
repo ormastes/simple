@@ -107,7 +107,8 @@ and rejects duplicate IDs, blank IDs, missing parent IDs, and unsafe style, role
 `edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`; numeric fields must be non-negative integers, snap is `true` or `false`, and background must be a safe CSS value.
 `add-sdd-edge` uses `from_id|to_id|label|css|kind|route|waypoints|start|end` and applies the same route, anchor, and waypoint validation as connector reroute.
 `duplicate-sdd-edge` uses `edge_index`.
-`edit-sdd-edge-label` uses `edge_index|new_label`.
+`edit-sdd-node-label` uses `node_id|new_label` and rejects missing node IDs.
+`edit-sdd-edge-label` uses `edge_index|new_label` and rejects missing edge indexes.
 `edit-sdd-edge-label-point` uses `edge_index|label_x|label_y`; label coordinates must be signed integers.
 `edit-sdd-edge-style` uses `edge_index|css_labels`; labels are space-separated safe tokens.
 `edit-sdd-edge-kind` uses `edge_index|kind`; kind is empty or one safe token.
