@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 109 | 109 | 0 | 0 |
+| 110 | 110 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1596,6 +1596,31 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects malformed UI edit target ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val label_result = office_action_dispatch("ui-label-edit", "button bad|Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val layout_result = office_action_dispatch("ui-layout-edit", "button bad|16|16|80|32|24|32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val auto_layout_result = office_action_dispatch("ui-auto-layout-edit", "frame bad|off|0|0,0,0,0|vertical|8|4,4,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
+val constraints_result = office_action_dispatch("ui-constraints-edit", "button bad|left|top|stretch|top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val layer_result = office_action_dispatch("ui-layer-edit", "button bad|controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val style_result = office_action_dispatch("ui-style-token-edit", "button bad|primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+expect(label_result.reason).to_equal("invalid-args")
+expect(layout_result.reason).to_equal("invalid-args")
+expect(auto_layout_result.reason).to_equal("invalid-args")
+expect(constraints_result.reason).to_equal("invalid-args")
+expect(layer_result.reason).to_equal("invalid-args")
+expect(style_result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects malformed UI read target ids
 
 <details>
@@ -2039,8 +2064,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 109 |
-| Active scenarios | 109 |
+| Total scenarios | 110 |
+| Active scenarios | 110 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
