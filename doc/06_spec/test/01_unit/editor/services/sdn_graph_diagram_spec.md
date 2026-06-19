@@ -200,7 +200,7 @@ expect(graph.canvas_background).to_equal("#ffffff")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -209,6 +209,7 @@ val html = sdn_graph_render_html(graph)
 expect(html).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(html).to_contain("data-format=\"sdd\"")
 expect(html).to_contain("data-format-name=\"SDD: Simple Diagram Document\"")
+expect(html).to_contain("data-file-extension=\".sdd.sdn\"")
 expect(html).to_contain("data-node-count=\"3\"")
 expect(html).to_contain("data-edge-count=\"1\"")
 expect(html).to_contain("class=\"sdn-graph-node sdd-node sdn-css-panel\"")
