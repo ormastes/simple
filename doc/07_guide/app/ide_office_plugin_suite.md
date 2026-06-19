@@ -280,7 +280,9 @@ modes:
 - Draw: `format=sdd name="SDD: Simple Diagram Document" html=true route=true select=true inspect=true child_meta=true path_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true`
 - Calc: `display_recalc=true`
 - LLM catalog: Markdown has `render-markdown-preview-html` and `md-edit`; Writer has
-  `render-writer-markdown-html`; Impress has
+  `render-writer-markdown-html` plus Markdown paper features for task lists,
+  tables/table alignment, images, inline links, fenced code, blockquotes,
+  thematic breaks, and URL sanitizing; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with
   `render-sdd-html-with-selection`, `reroute-sdd-connector`, `edit-sdd-style-rule`,
   `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `add-sdd-node`, `add-sdd-edge`,
