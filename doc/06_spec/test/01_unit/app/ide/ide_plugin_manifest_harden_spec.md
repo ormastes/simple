@@ -28,7 +28,7 @@ ide_plugin_manifest_harden_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -117,6 +117,45 @@ expect(probe.entry_count > 0).to_equal(true)
 
 </details>
 
+#### standard IDE plugin entries advertise two well-formed function symbols
+
+- functions = functions + entry functions join
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var functions = ""
+for entry in ide_plugin_entries():
+    expect(entry.functions.len()).to_equal(2)
+    val raw_suffix = entry.name.slice(4, entry.name.len())
+    val suffix = raw_suffix.replace("-", "_")
+    functions = functions + entry.functions.join(",") + "\n"
+    expect(functions).to_contain("ide_capability_" + suffix)
+    expect(functions).to_contain("ide_feature_check_" + suffix)
+```
+
+</details>
+
+#### manifest validation rejects malformed function symbols
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val malformed = plugin_entry_new("ide.markdown", "builtin:std.editor.render.md_renderer", "0.1.0", ["ide_capability_markdown", ""])
+expect(ide_plugin_manifest_validate([malformed])).to_equal("manifest error: entry 'ide.markdown' has empty function")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -136,8 +175,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

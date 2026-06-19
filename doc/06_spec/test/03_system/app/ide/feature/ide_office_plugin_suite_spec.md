@@ -1291,7 +1291,7 @@ expect(summary).to_contain("ppt=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1304,6 +1304,8 @@ expect(probe.names.join(",")).to_contain("ide.draw")
 expect(probe.names.join(",")).to_contain("ide.sheets")
 expect(probe.manifest_text).to_contain("builtin:app.office.slides")
 expect(probe.manifest_text).to_contain("builtin:std.editor.services.sdn_graph")
+expect(probe.manifest_text).to_contain("ide_capability_draw")
+expect(probe.manifest_text).to_contain("ide_feature_check_draw")
 expect(summary).to_contain("roundtrip=6")
 ```
 

@@ -163,6 +163,8 @@ and canvas metadata without starting GUI/browser/host APIs. Legacy SVG shape hel
 compatibility utilities, not the LLM catalog owner for Draw.
 The IDE capability registry must also carry non-empty `feature_check` marker text
 for every capability so plugin metadata cannot silently drift from the report.
+Plugin manifest entries must advertise exactly `ide_capability_<capability>` and
+`ide_feature_check_<capability>` symbols for each IDE capability.
 
 Calc formula hardening should distinguish display-safe functions from the
 f64-returning formula path. `evaluate_formula_display_text` is the verified path

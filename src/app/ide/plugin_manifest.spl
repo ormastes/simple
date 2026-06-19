@@ -45,10 +45,11 @@ fn ide_plugin_manifest_summary() -> text:
     val probe = ide_plugin_manifest_probe()
     "plugins: entries={probe.entry_count} roundtrip={probe.roundtrip_count} names={probe.names.len()}"
 
-# Returns an error description if any entry has an empty name or version,
-# or if there are duplicate names.  Returns "" when the manifest is valid.
+# Returns an error description if any entry has an empty name/version, duplicate
+# name, or malformed IDE function symbols. Returns "" when the manifest is valid.
 fn ide_plugin_manifest_validate(entries: [PluginEntry]) -> text:
     var seen_names: [text] = []
+    var seen_functions: [text] = []
     for entry in entries:
         if entry.name == "":
             return "manifest error: entry with empty name"
@@ -61,6 +62,29 @@ fn ide_plugin_manifest_validate(entries: [PluginEntry]) -> text:
         if dup:
             return "manifest error: duplicate plugin name '" + entry.name + "'"
         seen_names.push(entry.name)
+        if not entry.name.starts_with("ide."):
+            return "manifest error: entry '" + entry.name + "' has invalid IDE name"
+        if entry.functions.len() != 2:
+            return "manifest error: entry '" + entry.name + "' has invalid function count"
+        val raw_cap_id = entry.name.slice(4, entry.name.len())
+        val cap_id = raw_cap_id.replace("-", "_")
+        val capability_fn = "ide_capability_" + cap_id
+        val feature_check_fn = "ide_feature_check_" + cap_id
+        var has_capability_fn = false
+        var has_feature_check_fn = false
+        for function_name in entry.functions:
+            if function_name == "":
+                return "manifest error: entry '" + entry.name + "' has empty function"
+            if function_name == capability_fn:
+                has_capability_fn = true
+            if function_name == feature_check_fn:
+                has_feature_check_fn = true
+            for seen_function in seen_functions:
+                if seen_function == function_name:
+                    return "manifest error: duplicate function '" + function_name + "'"
+            seen_functions.push(function_name)
+        if not has_capability_fn or not has_feature_check_fn:
+            return "manifest error: entry '" + entry.name + "' has malformed function"
     ""
 
 fn ide_plugin_manifest_is_valid() -> bool:
