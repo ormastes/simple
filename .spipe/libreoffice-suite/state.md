@@ -290,3 +290,7 @@ possible so they are runner-verifiable.
   `update_where`, and `delete_where` helpers over the text-table substrate.
   Catalog metadata now exposes `schema-validation`, `count-where`,
   `update-where`, `delete-where`, and `db-edit`.
+- 2026-06-19 dev: Advanced LibreOffice Math structure rendering. Added escaped
+  MathML tokens, `frac(a, b)` shorthand parsing, explicit fraction/subscript/
+  fenced-group helpers, and catalog metadata for `fraction`, `subscript`,
+  `fenced-group`, and `render-math-structure`.

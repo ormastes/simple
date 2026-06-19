@@ -2,9 +2,25 @@
 #
 # Renders a simple math expression to MathML for display. A flat expression
 # (identifiers, numbers, operators) renders to a sequence of <mi>/<mn>/<mo>
-# elements; structured forms (superscript, square root) are produced by the
-# `math_superscript` / `math_sqrt` helpers. Token processing uses for-in
+# elements; structured forms (fraction, superscript, subscript, square root, and
+# fenced groups) are produced by helper functions. Token processing uses for-in
 # iteration (not `.get(index)`) to avoid the array-element corruption.
+
+fn _math_escape(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch == "&":
+            out = out + "&amp;"
+        elif ch == "<":
+            out = out + "&lt;"
+        elif ch == ">":
+            out = out + "&gt;"
+        else:
+            out = out + ch
+        i = i + 1
+    out
 
 fn _is_digit(c: text) -> bool:
     (c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or
@@ -59,22 +75,74 @@ fn _token_to_mathml(token: text) -> text:
         return ""
     val first = token.char_at(0)
     if _is_digit(first):
-        return "<mn>{token}</mn>"
+        return "<mn>{_math_escape(token)}</mn>"
     if _is_alpha(first):
-        return "<mi>{token}</mi>"
-    "<mo>{token}</mo>"
+        return "<mi>{_math_escape(token)}</mi>"
+    "<mo>{_math_escape(token)}</mo>"
 
-fn math_to_mathml(expr: text) -> text:
-    """Render a flat math expression to a MathML document."""
+fn _math_row_body(expr: text) -> text:
     var body = ""
     for token in _tokenize_math(expr):
         body = "{body}{_token_to_mathml(token)}"
+    body
+
+fn _math_atom_to_mathml(value: text) -> text:
+    val tokens = _tokenize_math(value)
+    if tokens.len() == 1:
+        for token in tokens:
+            return _token_to_mathml(token)
+    "<mrow>{_math_row_body(value)}</mrow>"
+
+fn _math_find_top_level_comma(value: text) -> i32:
+    var depth = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+        elif ch == "," and depth == 0:
+            return i
+        i = i + 1
+    0 - 1
+
+fn _math_fraction_shorthand(expr: text) -> text:
+    val trimmed = expr.trim()
+    if not trimmed.starts_with("frac(") or not trimmed.ends_with(")"):
+        return ""
+    val body = trimmed.slice(5, trimmed.len() - 1)
+    val comma = _math_find_top_level_comma(body)
+    if comma < 0:
+        return ""
+    val numerator = body.slice(0, comma).trim()
+    val denominator = body.slice(comma + 1, body.len()).trim()
+    math_fraction(numerator, denominator)
+
+fn math_to_mathml(expr: text) -> text:
+    """Render a flat math expression to a MathML document."""
+    val shorthand = _math_fraction_shorthand(expr)
+    if shorthand != "":
+        return "<math xmlns=\"http://www.w3.org/1998/Math/MathML\">{shorthand}</math>"
+    val body = _math_row_body(expr)
     "<math xmlns=\"http://www.w3.org/1998/Math/MathML\"><mrow>{body}</mrow></math>"
+
+fn math_fraction(numerator: text, denominator: text) -> text:
+    """A MathML fraction: numerator over denominator."""
+    "<mfrac>{_math_atom_to_mathml(numerator)}{_math_atom_to_mathml(denominator)}</mfrac>"
 
 fn math_superscript(base: text, exp: text) -> text:
     """A MathML superscript (e.g. x squared): base^exp."""
-    "<msup><mi>{base}</mi><mn>{exp}</mn></msup>"
+    "<msup>{_math_atom_to_mathml(base)}{_math_atom_to_mathml(exp)}</msup>"
+
+fn math_subscript(base: text, sub: text) -> text:
+    """A MathML subscript (e.g. x_i): base_sub."""
+    "<msub>{_math_atom_to_mathml(base)}{_math_atom_to_mathml(sub)}</msub>"
 
 fn math_sqrt(inner: text) -> text:
     """A MathML square root of an identifier or number."""
-    "<msqrt><mi>{inner}</mi></msqrt>"
+    "<msqrt>{_math_atom_to_mathml(inner)}</msqrt>"
+
+fn math_fenced(open: text, inner: text, close: text) -> text:
+    """A MathML fenced group with explicit opening and closing operators."""
+    "<mrow><mo>{_math_escape(open)}</mo>{_math_row_body(inner)}<mo>{_math_escape(close)}</mo></mrow>"

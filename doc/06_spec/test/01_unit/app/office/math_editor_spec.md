@@ -1,6 +1,6 @@
-# Math Editor Specification
+# math_editor_spec
 
-> _A flat expression renders to a MathML <math><mrow> sequence._
+> Verifies the Math component: a simple math expression renders to MathML (identifiers→<mi>, numbers→<mn>, operators→<mo>), with structured superscript fraction, subscript, fenced group, and square-root helpers. The renderer is the display core of an equation editor.
 
 <!-- sdn-diagram:id=math_editor_spec.arch -->
 <details class="sdn-source">
@@ -28,12 +28,47 @@ math_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Math Editor Specification
+# math_editor_spec
+
+Verifies the Math component: a simple math expression renders to MathML (identifiers→<mi>, numbers→<mn>, operators→<mo>), with structured superscript fraction, subscript, fenced group, and square-root helpers. The renderer is the display core of an equation editor.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Requirements | doc/02_requirements/feature/math_editor.md |
+| Plan | doc/03_plan/sys_test/math_editor.md |
+| Design | doc/07_guide/app/ide_office_plugin_suite.md |
+| Research | N/A |
+| Source | `test/01_unit/app/office/math_editor_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies the Math component: a simple math expression renders to MathML
+(identifiers→<mi>, numbers→<mn>, operators→<mo>), with structured superscript
+fraction, subscript, fenced group, and square-root helpers. The renderer is the
+display core of an equation editor.
+
+## Examples
+
+`math_to_mathml("frac(1, 2)")` renders a MathML `<mfrac>`. `math_fraction("x +
+1", "y")` and `math_fenced("(", "x + y", ")")` produce nested MathML rows for
+equation editor layout.
+
+**Requirements:** doc/02_requirements/feature/math_editor.md
+**NFR:** doc/02_requirements/nfr/math_editor.md
+**Plan:** doc/03_plan/sys_test/math_editor.md
+**Design:** doc/07_guide/app/ide_office_plugin_suite.md
+**Research:** N/A
 
 ## Scenarios
 
@@ -102,8 +137,89 @@ expect(ml).to_contain("<mo>+</mo>")
 
 </details>
 
+#### escapes XML-sensitive operators
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ml = math_to_mathml("a < b & c")
+expect(ml).to_contain("<mo>&lt;</mo>")
+expect(ml).to_contain("<mo>&amp;</mo>")
+```
+
+</details>
+
 ### Math editor: structured forms
-_Superscript and square root produce structured MathML._
+_Fractions, scripts, roots, and fenced groups produce structured MathML._
+
+#### renders fraction shorthand through the public MathML renderer
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ml = math_to_mathml("frac(1, 2)")
+expect(ml).to_contain("<mfrac>")
+expect(ml).to_contain("<mn>1</mn>")
+expect(ml).to_contain("<mn>2</mn>")
+```
+
+</details>
+
+#### renders fraction shorthand rows for compound numerator expressions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ml = math_to_mathml("frac(x + 1, y)")
+expect(ml).to_contain("<mfrac><mrow><mi>x</mi><mo>+</mo><mn>1</mn></mrow><mi>y</mi></mfrac>")
+```
+
+</details>
+
+#### falls back to flat rendering for malformed fraction shorthand
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ml = math_to_mathml("frac(1)")
+expect(ml).to_contain("<mi>frac</mi>")
+expect(ml).to_contain("<mn>1</mn>")
+```
+
+</details>
+
+#### renders explicit fractions with mfrac
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ml = math_fraction("x + 1", "y")
+expect(ml).to_start_with("<mfrac>")
+expect(ml).to_contain("<mrow><mi>x</mi><mo>+</mo><mn>1</mn></mrow>")
+expect(ml).to_contain("<mi>y</mi>")
+```
+
+</details>
 
 #### renders a superscript with msup
 
@@ -118,6 +234,23 @@ val ml = math_superscript("x", "2")
 expect(ml).to_start_with("<msup>")
 expect(ml).to_contain("<mi>x</mi>")
 expect(ml).to_contain("<mn>2</mn>")
+```
+
+</details>
+
+#### renders a subscript with msub
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ml = math_subscript("x", "i")
+expect(ml).to_start_with("<msub>")
+expect(ml).to_contain("<mi>x</mi>")
+expect(ml).to_contain("<mi>i</mi>")
 ```
 
 </details>
@@ -138,31 +271,40 @@ expect(ml).to_contain("<mi>y</mi>")
 
 </details>
 
-## At a Glance
+#### renders fenced expression groups
 
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/office/math_editor_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+<details>
+<summary>Executable SSpec</summary>
 
-## Overview
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-Tests covering:
-- Math editor: flat expression to MathML
-- Math editor: structured forms
+```simple
+val ml = math_fenced("(", "x + y", ")")
+expect(ml).to_start_with("<mrow>")
+expect(ml).to_contain("<mo>(</mo>")
+expect(ml).to_contain("<mi>x</mi><mo>+</mo><mi>y</mi>")
+expect(ml).to_contain("<mo>)</mo>")
+```
+
+</details>
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [doc/02_requirements/feature/math_editor.md](doc/02_requirements/feature/math_editor.md)
+- **Plan:** [doc/03_plan/sys_test/math_editor.md](doc/03_plan/sys_test/math_editor.md)
+- **Design:** [doc/07_guide/app/ide_office_plugin_suite.md](doc/07_guide/app/ide_office_plugin_suite.md)
 
 
 </details>

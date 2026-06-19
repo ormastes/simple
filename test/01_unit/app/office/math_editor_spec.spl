@@ -1,12 +1,28 @@
-"""LibreOffice Math — equation editor spec.
+"""
+LibreOffice Math equation editor specification.
+
+## Overview
 
 Verifies the Math component: a simple math expression renders to MathML
 (identifiers→<mi>, numbers→<mn>, operators→<mo>), with structured superscript
-and square-root helpers. The renderer is the display core of an equation editor.
+fraction, subscript, fenced group, and square-root helpers. The renderer is the
+display core of an equation editor.
+
+## Examples
+
+`math_to_mathml("frac(1, 2)")` renders a MathML `<mfrac>`. `math_fraction("x +
+1", "y")` and `math_fenced("(", "x + y", ")")` produce nested MathML rows for
+equation editor layout.
+
+**Requirements:** doc/02_requirements/feature/math_editor.md
+**NFR:** doc/02_requirements/nfr/math_editor.md
+**Plan:** doc/03_plan/sys_test/math_editor.md
+**Design:** doc/07_guide/app/ide_office_plugin_suite.md
+**Research:** N/A
 """
 
 use std.spec
-use app.office.math_editor.{math_to_mathml, math_superscript, math_sqrt}
+use app.office.math_editor.{math_fenced, math_fraction, math_subscript, math_superscript, math_sqrt, math_to_mathml}
 
 describe "Math editor: flat expression to MathML":
     """A flat expression renders to a MathML <math><mrow> sequence."""
@@ -29,8 +45,34 @@ describe "Math editor: flat expression to MathML":
         val ml = math_to_mathml("a + b")
         expect(ml).to_contain("<mo>+</mo>")
 
+    it "escapes XML-sensitive operators":
+        val ml = math_to_mathml("a < b & c")
+        expect(ml).to_contain("<mo>&lt;</mo>")
+        expect(ml).to_contain("<mo>&amp;</mo>")
+
 describe "Math editor: structured forms":
-    """Superscript and square root produce structured MathML."""
+    """Fractions, scripts, roots, and fenced groups produce structured MathML."""
+
+    it "renders fraction shorthand through the public MathML renderer":
+        val ml = math_to_mathml("frac(1, 2)")
+        expect(ml).to_contain("<mfrac>")
+        expect(ml).to_contain("<mn>1</mn>")
+        expect(ml).to_contain("<mn>2</mn>")
+
+    it "renders fraction shorthand rows for compound numerator expressions":
+        val ml = math_to_mathml("frac(x + 1, y)")
+        expect(ml).to_contain("<mfrac><mrow><mi>x</mi><mo>+</mo><mn>1</mn></mrow><mi>y</mi></mfrac>")
+
+    it "falls back to flat rendering for malformed fraction shorthand":
+        val ml = math_to_mathml("frac(1)")
+        expect(ml).to_contain("<mi>frac</mi>")
+        expect(ml).to_contain("<mn>1</mn>")
+
+    it "renders explicit fractions with mfrac":
+        val ml = math_fraction("x + 1", "y")
+        expect(ml).to_start_with("<mfrac>")
+        expect(ml).to_contain("<mrow><mi>x</mi><mo>+</mo><mn>1</mn></mrow>")
+        expect(ml).to_contain("<mi>y</mi>")
 
     it "renders a superscript with msup":
         val ml = math_superscript("x", "2")
@@ -38,7 +80,20 @@ describe "Math editor: structured forms":
         expect(ml).to_contain("<mi>x</mi>")
         expect(ml).to_contain("<mn>2</mn>")
 
+    it "renders a subscript with msub":
+        val ml = math_subscript("x", "i")
+        expect(ml).to_start_with("<msub>")
+        expect(ml).to_contain("<mi>x</mi>")
+        expect(ml).to_contain("<mi>i</mi>")
+
     it "renders a square root with msqrt":
         val ml = math_sqrt("y")
         expect(ml).to_start_with("<msqrt>")
         expect(ml).to_contain("<mi>y</mi>")
+
+    it "renders fenced expression groups":
+        val ml = math_fenced("(", "x + y", ")")
+        expect(ml).to_start_with("<mrow>")
+        expect(ml).to_contain("<mo>(</mo>")
+        expect(ml).to_contain("<mi>x</mi><mo>+</mo><mi>y</mi>")
+        expect(ml).to_contain("<mo>)</mo>")

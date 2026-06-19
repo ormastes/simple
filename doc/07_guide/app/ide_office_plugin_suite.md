@@ -74,6 +74,13 @@ row insertion validates schema width before appending, while `update_where`,
 filesystem, SQL parser, or GUI dependencies. These helpers preserve the
 iteration-based row access workaround used for non-first columns.
 
+Math editing uses `app.office.math_editor` as a pure MathML rendering substrate.
+The public renderer keeps flat token MathML for simple expressions, escapes
+XML-sensitive operator text, and recognizes `frac(a, b)` shorthand for the same
+fraction form used by the VS Code math preview. Structured helpers expose
+fractions, superscripts, subscripts, square roots, and fenced groups without a
+browser or CAS dependency.
+
 IDE feature checks should expose these hardening markers in both TUI and GUI
 modes:
 
@@ -86,7 +93,8 @@ modes:
   `inspect-sdd-node`, and `inspect-sdd-edge`; Calc has `formula-counta`,
   `formula-text-functions`, `formula-vlookup`, and
   `formula-display-recalc`; Base has `schema-validation`, `count-where`,
-  `update-where`, `delete-where`, and `db-edit`; Designer has
+  `update-where`, `delete-where`, and `db-edit`; Math has `fraction`,
+  `subscript`, `fenced-group`, and `render-math-structure`; Designer has
   `render-ui-html`, `export-ui-sdd`, and
   `ui-label-edit` / `ui-layout-edit` / `ui-auto-layout-edit` /
   `ui-constraints-edit` / `ui-align-selection` /
