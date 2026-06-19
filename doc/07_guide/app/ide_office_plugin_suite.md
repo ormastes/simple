@@ -169,7 +169,8 @@ without delegating to a browser layout engine.
 
 Draw/diagram editing should use the product-facing name `SDD Diagram Draw` and
 prefer the SDD substrate in
-`std.editor.services.sdn_graph` for geometry, layers, connector routes,
+`std.editor.services.sdn_graph` as the Office Draw file model, not a
+relationship-only graph format, for geometry, layers, connector routes,
 waypoints, anchors, rendered SVG connector paths, pure edge reroute operations,
 parent/group metadata, transient selection rendering, pure node/edge inspector
 snapshots, pure node shape/style/parent edit operations, guarded multi-node

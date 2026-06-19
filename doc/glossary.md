@@ -16,6 +16,11 @@ path for HTML UI design documents. Frame nodes with horizontal or vertical
 layout metadata place child nodes using integer gap/padding and child
 constraints, then expose resolved absolute geometry in HTML and SDD output.
 
+## Writer Markdown
+Writer Markdown is the Simple Office Writer surface. Markdown is the source
+format and HTML is the render target; the older `WordApp` rich-text module is a
+compatibility UI path, not the product document model.
+
 ## SDD Diagram Draw
 SDD Diagram Draw is the product-facing Simple IDE Draw capability. It stores
 diagrams as SDD (Simple Diagram Document) `.sdd.sdn` files, renders through the
@@ -608,8 +613,9 @@ Human-readable, version-control-friendly data format used by all Simple database
 
 SDN-backed diagram dialect for Markdown docs and IDE diagram previews. Preferred
 files use `.sdd.sdn`. The product-facing Draw capability name is **SDD Diagram
-Draw**; the app catalog can still show the short app name `Draw`. SDD keeps
-compact graph syntax and adds diagram-editor
+Draw**; the app catalog can still show the short app name `Draw`. SDD is the
+canonical diagram substrate for Office Draw work, not a relationship-only graph
+format. It keeps compact graph syntax and adds diagram-editor
 metadata: root node/edge counts, node shape, x/y position, width/height, layer, document/render order, connector route,
 parent/container membership for draw.io-like groups, node duplication with
 offset geometry, waypoints, start/end anchors, rendered endpoint handle
