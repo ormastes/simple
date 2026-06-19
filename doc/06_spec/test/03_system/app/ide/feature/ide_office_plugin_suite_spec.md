@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 619 lines folded for reproduction.
+Runnable source: 621 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -925,6 +925,7 @@ val base_query_count_action = office_action_dispatch("query-table", "count-where
 val base_query_select_action = office_action_dispatch("query-table", "select-where|status|open\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
 val base_query_project_action = office_action_dispatch("query-table", "project-column|status\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
 val base_missing_query_column_action = office_action_dispatch("query-table", "count-where|missing|open\ntable: Feature\ncolumns: id,status\nrow: 1,open")
+val base_blank_query_column_action = office_action_dispatch("query-table", "count-where|   |open\ntable: Feature\ncolumns: id,status\nrow: 1,open")
 val base_html_action = office_action_dispatch("render-base-table-html", "table: Feature\ncolumns: id,status\nrow: 1,<open>\nrow: 2,done")
 val base_duplicate_column_action = office_action_dispatch("render-base-table-html", "table: Feature\ncolumns: id,status,status\nrow: 1,open,open")
 val base_blank_column_action = office_action_dispatch("render-base-table-html", "table: Feature\ncolumns: id,,status\nrow: 1,open,open")
@@ -938,6 +939,7 @@ expect(base_query_count_action.output).to_equal("1")
 expect(base_query_select_action.output).to_contain("row: 1,open")
 expect(base_query_project_action.output).to_contain("open")
 expect(base_missing_query_column_action.reason).to_equal("missing-column")
+expect(base_blank_query_column_action.reason).to_equal("invalid-args")
 expect(base_html_action.output).to_contain("data-format=\"base-table\"")
 expect(base_html_action.output).to_contain("data-column-count=\"2\"")
 expect(base_html_action.output).to_contain("data-row-count=\"2\"")

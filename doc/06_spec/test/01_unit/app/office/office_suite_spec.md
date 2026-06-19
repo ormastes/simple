@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 94 | 94 | 0 | 0 |
+| 95 | 95 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -730,6 +730,22 @@ Reproduction: this block contains the complete executable scenario source.
 val result = office_action_dispatch("render-base-table-html", "table: \\ncolumns: id,status\\nrow: 1,open")
 expect(result.ok).to_be(false)
 expect(result.reason).to_equal("missing-table-name")
+```
+
+</details>
+
+#### rejects blank Base query columns
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("query-table", "count-where|   |open\ntable: Feature\ncolumns: id,status\nrow: 1,open")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("invalid-args")
 ```
 
 </details>
@@ -1739,8 +1755,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 94 |
-| Active scenarios | 94 |
+| Total scenarios | 95 |
+| Active scenarios | 95 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
