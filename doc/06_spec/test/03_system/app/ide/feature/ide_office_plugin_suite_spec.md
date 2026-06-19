@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 760 lines folded for reproduction.
+Runnable source: 761 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -819,6 +819,7 @@ expect(invalid_sdd_reroute_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_reroute_waypoint_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_reroute_anchor_action.reason).to_equal("invalid-args")
 expect(sdd_add_edge_action.output).to_contain(">return</div>")
+expect(sdd_add_edge_action.output).to_contain("data-label=\"return\"")
 expect(sdd_add_edge_action.output).to_contain("data-kind=\"reply\"")
 expect(sdd_duplicate_edge_action.reason).to_equal("updated")
 expect(sdd_duplicate_edge_action.output).to_contain("data-edge-index=\"1\"")
