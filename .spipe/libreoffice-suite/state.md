@@ -374,3 +374,7 @@ possible so they are runner-verifiable.
   `counter-action` accepts `value|counter_increment`,
   `value|counter_decrement`, or `value|counter_reset`, returns compact value /
   status / changed readback, and keeps unsupported actions fail-closed.
+- 2026-06-19 dev: Wired SDD inspector actions into the headless Office action
+  bridge. `inspect-sdd-node` and `inspect-sdd-edge` now return compact
+  draw.io-like readback text for node geometry/style/group fields and edge
+  route/path fields, including missing-node/edge rejection reasons.

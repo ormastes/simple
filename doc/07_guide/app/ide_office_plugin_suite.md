@@ -76,6 +76,8 @@ SDD node edit actions use `node_id|value` for parent, shape, and style edits.
 `edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`.
 `reroute-sdd-connector` uses `edge_index|route|waypoints|start_anchor|end_anchor`.
 All return rendered SDD HTML for the updated document.
+`inspect-sdd-node` uses `node_id`; `inspect-sdd-edge` uses `edge_index`.
+Both return compact readback text for geometry, style, route, and path fields.
 
 Base table actions use a compact text table body:
 `table: Name`, `columns: id,status`, then `row: 1,open` lines. `query-table`

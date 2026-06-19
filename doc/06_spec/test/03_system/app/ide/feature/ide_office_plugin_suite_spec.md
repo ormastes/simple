@@ -324,7 +324,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 280 lines folded for reproduction.
+Runnable source: 288 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -403,6 +403,9 @@ val sdd_parent_action = office_action_dispatch("edit-sdd-node-parent", "B|A\ngra
 val sdd_canvas_action = office_action_dispatch("edit-sdd-canvas", "640|480|16|true|125|#ffffff\ngraph: Canvas\nA: A")
 val sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60x10;60x40|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val missing_sdd_edge_action = office_action_dispatch("reroute-sdd-connector", "1|orthogonal|60x10|right|left\ngraph: Route\nA: A\nB: B\nA -> B: link")
+val sdd_inspect_node_action = office_action_dispatch("inspect-sdd-node", "A\ngraph: Inspect\nA: Alpha @accent role: actor shape: diamond x: 4 y: 8 width: 80 height: 24 layer: front")
+val sdd_inspect_edge_action = office_action_dispatch("inspect-sdd-edge", "0\ngraph: Inspect\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 80 y: 0 width: 20 height: 20\nA -> B: link route: orthogonal waypoints: 40x10 start: right end: left")
+val missing_sdd_inspect_edge_action = office_action_dispatch("inspect-sdd-edge", "1\ngraph: Inspect\nA: A\nB: B\nA -> B: link")
 expect(md_action.output).to_contain("class=\"wysiwyg-preview\"")
 expect(md_action.output).to_contain("<h1>Markdown</h1>")
 expect(writer_action.output).to_contain("class=\"md-paper\"")
@@ -436,6 +439,11 @@ expect(sdd_parent_action.output).to_contain("data-parent=\"A\"")
 expect(sdd_canvas_action.output).to_contain("data-canvas-width=\"640\"")
 expect(sdd_reroute_action.output).to_contain("data-route=\"orthogonal\"")
 expect(missing_sdd_edge_action.reason).to_equal("missing-edge")
+expect(sdd_inspect_node_action.output).to_contain("shape=diamond")
+expect(sdd_inspect_node_action.output).to_contain("x=4")
+expect(sdd_inspect_edge_action.output).to_contain("route=orthogonal")
+expect(sdd_inspect_edge_action.output).to_contain("path=M")
+expect(missing_sdd_inspect_edge_action.reason).to_equal("missing-edge")
 val draw_graph = sdn_graph_parse("graph: Feature\ncanvas: width: 800 height: 600 grid: 10 snap: false zoom: 100 background: white\nA: A x: 0 y: 0 width: 80 height: 20\nB: B x: 160 y: 0 width: 80 height: 20\nA -> B: flow route: simple start: right end: left")
 val rerouted = sdn_graph_update_edge_at(draw_graph, 0, "orthogonal", "120x10;120x40", "right", "left")
 val shaped = sdn_graph_update_node_at(rerouted, 0, "accent", "decision", "diamond", "12", "8", "96", "48", "front")
