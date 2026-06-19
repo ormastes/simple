@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 585 lines folded for reproduction.
+Runnable source: 589 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -555,6 +555,7 @@ val invalid_sdd_reroute_action = office_action_dispatch("reroute-sdd-connector",
 val sdd_add_edge_action = office_action_dispatch("add-sdd-edge", "B|A|return|secondary|reply|simple||left|right\ngraph: Edge Add\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20")
 val sdd_duplicate_edge_action = office_action_dispatch("duplicate-sdd-edge", "0\ngraph: Edge Copy\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: flow @primary route: simple start: right end: left")
 val invalid_sdd_add_edge_action = office_action_dispatch("add-sdd-edge", "B|A|return|secondary|reply|curve||left|right\ngraph: Edge Add\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20")
+val blank_sdd_add_edge_action = office_action_dispatch("add-sdd-edge", "   |A|return|secondary|reply|simple||left|right\ngraph: Edge Add\nA: A x: 0 y: 0 width: 20 height: 20")
 val missing_sdd_add_edge_action = office_action_dispatch("add-sdd-edge", "B|Nope|return|secondary|reply|simple||left|right\ngraph: Edge Add\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20")
 val missing_sdd_duplicate_edge_action = office_action_dispatch("duplicate-sdd-edge", "8\ngraph: Edge Copy\nA: A\nB: B\nA -> B: flow")
 val sdd_edge_label_action = office_action_dispatch("edit-sdd-edge-label", "0|approved\ngraph: Edge Label\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
@@ -564,6 +565,7 @@ val invalid_sdd_edge_style_action = office_action_dispatch("edit-sdd-edge-style"
 val sdd_edge_kind_action = office_action_dispatch("edit-sdd-edge-kind", "0|async\ngraph: Edge Kind\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link kind: request route: simple start: right end: left")
 val invalid_sdd_edge_kind_action = office_action_dispatch("edit-sdd-edge-kind", "0|async bad\ngraph: Edge Kind\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link kind: request route: simple start: right end: left")
 val sdd_edge_endpoints_action = office_action_dispatch("edit-sdd-edge-endpoints", "0|B|A\ngraph: Edge Endpoints\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
+val blank_sdd_edge_endpoint_action = office_action_dispatch("edit-sdd-edge-endpoints", "0|B|   \ngraph: Edge Endpoints\nA: A\nB: B\nA -> B: link")
 val missing_sdd_edge_endpoint_index_action = office_action_dispatch("edit-sdd-edge-endpoints", "1|B|A\ngraph: Edge Endpoints\nA: A\nB: B\nA -> B: link")
 val sdd_edge_delete_action = office_action_dispatch("delete-sdd-edge", "0\ngraph: Edge Delete\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val missing_sdd_edge_label_action = office_action_dispatch("edit-sdd-edge-label", "1|approved\ngraph: Edge Label\nA: A\nB: B\nA -> B: link")
@@ -693,6 +695,7 @@ expect(sdd_duplicate_edge_action.reason).to_equal("updated")
 expect(sdd_duplicate_edge_action.output).to_contain("data-edge-index=\"1\"")
 expect(sdd_duplicate_edge_action.output).to_contain("sdn-css-primary")
 expect(invalid_sdd_add_edge_action.reason).to_equal("invalid-route")
+expect(blank_sdd_add_edge_action.reason).to_equal("invalid-args")
 expect(missing_sdd_add_edge_action.reason).to_equal("missing-node")
 expect(missing_sdd_duplicate_edge_action.reason).to_equal("missing-edge")
 expect(sdd_edge_label_action.output).to_contain(">approved</div>")
@@ -703,6 +706,7 @@ expect(invalid_sdd_edge_style_action.reason).to_equal("invalid-style-token")
 expect(sdd_edge_kind_action.output).to_contain("data-kind=\"async\"")
 expect(invalid_sdd_edge_kind_action.reason).to_equal("invalid-kind-token")
 expect(sdd_edge_endpoints_action.output).to_contain("data-from=\"B\" data-to=\"A\"")
+expect(blank_sdd_edge_endpoint_action.reason).to_equal("invalid-args")
 expect(missing_sdd_edge_endpoint_index_action.reason).to_equal("missing-edge")
 expect(sdd_edge_delete_action.reason).to_equal("updated")
 expect(sdd_edge_delete_action.output).to_contain("data-selected-edge-index=\"-1\"")
