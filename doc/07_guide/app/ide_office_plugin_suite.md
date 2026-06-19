@@ -38,7 +38,8 @@ and line-addressable `.wysiwyg-preview-line` rows for the escaped styled HTML
 generated from source lines.
 
 Writer rendering must expose Markdown source -> paper/document HTML through
-`render_writer_markdown_html`.
+`render_writer_markdown_html`, with root metadata for format and source line
+count.
 
 PPT/Impress rendering must expose Markdown source -> slide-deck HTML through
 `render_ppt_markdown_html`. The object-model slide renderer remains a

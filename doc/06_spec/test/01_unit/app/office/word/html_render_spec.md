@@ -121,12 +121,14 @@ expect(html).to_contain("class=\"paragraph\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = render_writer_markdown_html("---\npage_view: true\nheader: Draft\n---\n\n# Title\n\nBody")
 expect(html).to_start_with("<article class=\"md-paper-layout\"")
+expect(html).to_contain("data-format=\"markdown-paper\"")
+expect(html).to_contain("data-line-count=\"3\"")
 expect(html).to_contain("<header class=\"md-page-header\">Draft</header>")
 expect(html).to_contain("<h1>Title</h1>")
 expect(html).to_contain("<p>Body</p>")

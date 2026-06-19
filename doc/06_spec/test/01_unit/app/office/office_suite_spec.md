@@ -427,7 +427,7 @@ expect(run_office(["unknown"])).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -435,6 +435,7 @@ val result = office_action_dispatch("render-writer-markdown-html", "# Title\\n\\
 expect(result.ok).to_be(true)
 expect(result.code).to_equal(0)
 expect(result.output).to_contain("class=\"md-paper\"")
+expect(result.output).to_contain("data-format=\"markdown-paper\"")
 expect(result.output).to_contain("Title")
 ```
 
