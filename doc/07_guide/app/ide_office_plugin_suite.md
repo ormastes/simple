@@ -83,11 +83,14 @@ Headless Office actions are exposed through
 `office_action_dispatch(action, source)` in `app.office.mod`. This is the stable
 non-GUI bridge for cataloged render/export actions:
 `render-markdown-preview-html`, `render-writer-markdown-html`,
-`render-ppt-markdown-html`, `render-ui-html`, `export-ui-sdd`, and
+`render-ppt-markdown-html`, `render-ui-html`,
+`render-ui-html-with-selection`, `export-ui-sdd`, and
 `render-sdd-html-with-selection`. The bridge delegates to the canonical
 Markdown, Writer, Impress, Designer, and SDD renderers rather than
 duplicating rendering logic. Legacy aliases `ui-render`, `ui-export-sdd`, and
 `render-sdd` normalize to those canonical action names.
+`render-ui-html-with-selection` accepts either raw UI design source or a
+first-line `select|node_id` header followed by UI design source.
 `render-sdd-html-with-selection` accepts either raw SDD source or a first-line
 `select|node_id|edge_index` header followed by SDD source; leave `edge_index`
 blank to select only a node.
@@ -303,7 +306,7 @@ modes:
   `sqrt-shorthand`, `slash-fraction`, `malformed-fallback`, `checked-rendering`,
   `render-mathml`, `render-math-structure`, and `render-mathml-checked`;
   Counter has `counter-action`; Designer has
-  `render-ui-html`, `export-ui-sdd`, and
+  `render-ui-html`, `render-ui-html-with-selection`, `export-ui-sdd`, and
   `ui-label-edit` / `ui-layout-edit` / `ui-auto-layout-edit` /
   `ui-resolve-auto-layout` / `ui-duplicate-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /

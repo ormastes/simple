@@ -112,7 +112,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
-  llm-catalog: apps=9 features=130 actions=60
+  llm-catalog: apps=9 features=131 actions=61
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 729 lines folded for reproduction.
+Runnable source: 735 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -389,10 +389,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=130 actions=60")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=131 actions=61")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(60)
-expect(dispatch_probe.recognized_count).to_equal(60)
+expect(dispatch_probe.advertised_count).to_equal(61)
+expect(dispatch_probe.recognized_count).to_equal(61)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -494,6 +494,7 @@ val slide_stale_edit_action = office_action_dispatch("slide-edit", "title|Missin
 val slide_duplicate_source_action = office_action_dispatch("slide-edit", "title|New|Next\ntitle=Old;title=New")
 val slide_blank_target_action = office_action_dispatch("slide-edit", "   |Old|New\ntitle=Old")
 val ui_action = office_action_dispatch("render-ui-html", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val selected_ui_action = office_action_dispatch("render-ui-html-with-selection", "select|button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_sdd_action = office_action_dispatch("export-ui-sdd", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val sdd_action = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val selected_sdd_action = office_action_dispatch("render-sdd-html-with-selection", "select|A|\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
@@ -932,6 +933,7 @@ expect(draw_distributed.graph.nodes[0].x).to_equal("120")
 expect(draw_distributed.graph.nodes[2].x).to_equal("60")
 expect(catalog[5].owner_module).to_equal("app.office.ui_editor")
 expect(catalog[5].features.join(",")).to_contain("selection")
+expect(catalog[5].features.join(",")).to_contain("selected-html-render")
 expect(catalog[5].features.join(",")).to_contain("inspector")
 expect(catalog[5].features.join(",")).to_contain("style-tokens")
 expect(catalog[5].features.join(",")).to_contain("auto-layout")
@@ -945,6 +947,7 @@ expect(catalog[5].features.join(",")).to_contain("distribute-layout")
 expect(catalog[5].features.join(",")).to_contain("layer-edit")
 expect(catalog[5].features.join(",")).to_contain("style-token-edit")
 expect(catalog[5].actions.join(",")).to_contain("export-ui-sdd")
+expect(catalog[5].actions.join(",")).to_contain("render-ui-html-with-selection")
 expect(catalog[5].actions.join(",")).to_contain("ui-layout-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-duplicate-node")
 expect(catalog[5].actions.join(",")).to_contain("ui-auto-layout-edit")
@@ -990,6 +993,9 @@ expect(office_ui_design_render_html(distributed_ui.design)).to_contain("office-u
 expect(office_ui_design_render_html(distributed_ui.design)).to_contain("data-layout-mode=\"vertical\"")
 expect(office_ui_design_render_html(distributed_ui.design)).to_contain("data-constraint-h=\"stretch\"")
 expect(office_ui_design_render_html_with_selection(distributed_ui.design, "button")).to_contain("data-selected=\"true\"")
+expect(selected_ui_action.ok).to_be(true)
+expect(selected_ui_action.output).to_contain("data-selected-node-id=\"button\"")
+expect(selected_ui_action.output).to_contain("data-resize-handle=\"se\"")
 val inspected_ui = office_ui_design_inspect_node(distributed_ui.design, "button")
 expect(inspected_ui.found).to_be(true)
 expect(inspected_ui.reason).to_equal("selected")
