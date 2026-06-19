@@ -320,7 +320,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 240 lines folded for reproduction.
+Runnable source: 257 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -537,7 +537,24 @@ expect(catalog[6].features.join(",")).to_contain("schema-validation")
 expect(catalog[6].features.join(",")).to_contain("count-where")
 expect(catalog[6].features.join(",")).to_contain("update-where")
 expect(catalog[6].features.join(",")).to_contain("delete-where")
+expect(catalog[6].actions.join(",")).to_contain("query-table")
 expect(catalog[6].actions.join(",")).to_contain("db-edit")
+val base_query_count_action = office_action_dispatch("query-table", "count-where|status|open\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
+val base_query_select_action = office_action_dispatch("query-table", "select-where|status|open\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
+val base_query_project_action = office_action_dispatch("query-table", "project-column|status\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
+val base_insert_action = office_action_dispatch("db-edit", "insert|3,open\ntable: Feature\ncolumns: id,status\nrow: 1,done")
+val base_update_action = office_action_dispatch("db-edit", "update-where|status|open|status|done\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
+val base_delete_action = office_action_dispatch("db-edit", "delete-where|status|open\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
+val base_bad_insert_action = office_action_dispatch("db-edit", "insert|3\ntable: Feature\ncolumns: id,status\nrow: 1,done")
+val base_empty_cell_action = office_action_dispatch("db-edit", "insert|3,\ntable: Feature\ncolumns: id,status\nrow: 1,done")
+expect(base_query_count_action.output).to_equal("1")
+expect(base_query_select_action.output).to_contain("row: 1,open")
+expect(base_query_project_action.output).to_contain("open")
+expect(base_insert_action.output).to_contain("row: 3,open")
+expect(base_update_action.output).to_contain("row: 1,done")
+expect(base_delete_action.output).to_contain("row: 2,done")
+expect(base_bad_insert_action.reason).to_equal("row-width-mismatch")
+expect(base_empty_cell_action.output).to_contain("row: 3,")
 var base_table = new_table("Feature", ["id", "status"])
 val inserted_base = insert_row_checked(base_table, ["1", "open"])
 base_table = inserted_base.table

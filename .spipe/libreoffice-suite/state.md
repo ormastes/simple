@@ -361,3 +361,8 @@ possible so they are runner-verifiable.
   `ui-style-token-read`, `ui-style-token-edit`, and `ui-inspect-node`. The
   bridge now exposes the existing guarded Figma-like UI editor helpers through
   compact first-line headers plus rendered HTML or readback text.
+- 2026-06-19 dev: Wired Base table actions into the headless Office action
+  bridge. `query-table` now supports `count-where`, `select-where`, and
+  `project-column` over compact `table:`/`columns:`/`row:` text tables, while
+  `db-edit` exposes the existing checked `insert`, `update-where`, and
+  `delete-where` helpers and returns updated table text.

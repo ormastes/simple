@@ -77,6 +77,13 @@ SDD node edit actions use `node_id|value` for parent, shape, and style edits.
 `reroute-sdd-connector` uses `edge_index|route|waypoints|start_anchor|end_anchor`.
 All return rendered SDD HTML for the updated document.
 
+Base table actions use a compact text table body:
+`table: Name`, `columns: id,status`, then `row: 1,open` lines. `query-table`
+uses `count-where|column|value`, `select-where|column|value`, or
+`project-column|column`. `db-edit` uses `insert|v1,v2`,
+`update-where|match_column|match_value|update_column|new_value`, or
+`delete-where|match_column|match_value`, and returns the updated table text.
+
 Designer/UI editing uses `app.office.ui_editor` as a pure HTML design document
 substrate. It parses positioned frame/component records, renders a stable
 `.office-ui-design` HTML surface with inspector metadata, exports nodes to
@@ -149,8 +156,9 @@ modes:
   `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;
   Calc has `formula-counta`,
   `formula-text-functions`, `formula-vlookup`, and
-  `formula-display-recalc`; Base has `schema-validation`, `count-where`,
-  `update-where`, `delete-where`, and `db-edit`; Math has `fraction`,
+  `formula-display-recalc`; Base has `schema-validation`, `query-table`,
+  `count-where`, `select-where`, `project-column`, `update-where`,
+  `delete-where`, and `db-edit`; Math has `fraction`,
   `subscript`, `fenced-group`, `precedence-parser`, `checked-rendering`,
   `render-math-structure`, and `render-mathml-checked`; Designer has
   `render-ui-html`, `export-ui-sdd`, and

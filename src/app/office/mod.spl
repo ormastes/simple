@@ -16,6 +16,7 @@ use app.office.word.html_render.{render_writer_markdown_html}
 use app.office.slides.html_render.{render_ppt_markdown_html}
 use app.office.ui_editor.{OfficeUiEditResult, OfficeUiInspector, office_ui_design_align_checked, office_ui_design_distribute_checked, office_ui_design_duplicate_node_checked, office_ui_design_geometry_signature, office_ui_design_inspect_node, office_ui_design_parse, office_ui_design_read_style_token, office_ui_design_render_html, office_ui_design_to_sdd, office_ui_design_update_auto_layout_checked, office_ui_design_update_constraint_checked, office_ui_design_update_label_checked, office_ui_design_update_layer_checked, office_ui_design_update_layout_checked, office_ui_design_update_style_token_checked}
 use app.office.sheets.spreadsheet.{Sheet}
+use app.office.base_db.{DbEditResult, DbTable, count_where, delete_where, insert_row_checked, new_table, project_column, select_where, update_where}
 use std.editor.services.sdn_graph.{SdnGraph, sdn_graph_align_checked, sdn_graph_distribute_checked, sdn_graph_duplicate_node_checked, sdn_graph_geometry_signature, sdn_graph_parse, sdn_graph_render_html, sdn_graph_render_html_with_selection, sdn_graph_update_canvas, sdn_graph_update_edge_at, sdn_graph_update_node_parent_at, sdn_graph_update_node_shape_at, sdn_graph_update_node_style_at}
 use common.office.file_ops.{RecentFileStore}
 use app.office.sheets.cell.{cell_ref_to_string, parse_cell_ref}
@@ -95,6 +96,10 @@ fn run_office(args: [text]) -> i32:
             return _run_markdown_edit_command(args)
         "sheet-edit" =>
             return _run_sheet_edit_command(args)
+        "query-table" =>
+            return _run_office_action_command(args)
+        "db-edit" =>
+            return _run_office_action_command(args)
         "slide-edit" =>
             return _run_slide_edit_command(args)
         "render-writer-markdown-html" =>
@@ -171,6 +176,10 @@ fn office_action_dispatch(action: text, source: text) -> OfficeActionResult:
             return OfficeActionResult(ok: true, code: 0, action: action, output: render_ppt_markdown_html(decoded), reason: "rendered")
         "render-markdown-preview-html" =>
             return OfficeActionResult(ok: true, code: 0, action: action, output: wysiwyg_preview_document_html(decoded), reason: "rendered")
+        "query-table" =>
+            return _office_action_query_table(decoded)
+        "db-edit" =>
+            return _office_action_db_edit(decoded)
         "render-ui-html" =>
             return OfficeActionResult(ok: true, code: 0, action: action, output: office_ui_design_render_html(office_ui_design_parse(decoded)), reason: "rendered")
         "ui-duplicate-node" =>
@@ -254,6 +263,74 @@ fn _office_action_duplicate_ui_node(source: text) -> OfficeActionResult:
     if not result.accepted:
         return OfficeActionResult(ok: false, code: 1, action: "ui-duplicate-node", output: result.diff, reason: result.reason)
     OfficeActionResult(ok: true, code: 0, action: "ui-duplicate-node", output: office_ui_design_render_html(result.design), reason: result.reason)
+
+fn _office_action_split_csv(value: text) -> [text]:
+    var out: [text] = []
+    for raw in value.split(","):
+        out.push(raw.trim())
+    if value.ends_with(","):
+        out.push("")
+    out
+
+fn _office_action_split_csv_non_empty(value: text) -> [text]:
+    var out: [text] = []
+    for item in _office_action_split_csv(value):
+        if item != "":
+            out.push(item)
+    out
+
+fn _office_action_parse_db_table(source: text) -> DbTable:
+    var name = "Table"
+    var columns: [text] = []
+    var rows: [[text]] = []
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        if line.starts_with("table:"):
+            name = line.slice(6, line.len()).trim()
+        elif line.starts_with("columns:"):
+            columns = _office_action_split_csv_non_empty(line.slice(8, line.len()).trim())
+        elif line.starts_with("row:"):
+            rows.push(_office_action_split_csv(line.slice(4, line.len()).trim()))
+    DbTable(name: name, columns: columns, rows: rows)
+
+fn _office_action_render_db_table(table: DbTable) -> text:
+    var lines: [text] = []
+    lines.push("table: " + table.name)
+    lines.push("columns: " + table.columns.join(","))
+    for row in table.rows:
+        lines.push("row: " + row.join(","))
+    lines.join("\n")
+
+fn _office_action_db_result(action: text, result: DbEditResult) -> OfficeActionResult:
+    if not result.accepted:
+        return OfficeActionResult(ok: false, code: 1, action: action, output: _office_action_render_db_table(result.table), reason: result.reason)
+    OfficeActionResult(ok: true, code: 0, action: action, output: _office_action_render_db_table(result.table), reason: result.reason)
+
+fn _office_action_query_table(source: text) -> OfficeActionResult:
+    val parts = _office_action_split_edit_source(source)
+    val args = parts[0].split("|")
+    val table = _office_action_parse_db_table(parts[1])
+    if args.len() == 3 and args[0].trim() == "count-where":
+        return OfficeActionResult(ok: true, code: 0, action: "query-table", output: count_where(table, args[1].trim(), args[2].trim()).to_text(), reason: "counted")
+    if args.len() == 3 and args[0].trim() == "select-where":
+        return OfficeActionResult(ok: true, code: 0, action: "query-table", output: _office_action_render_db_table(DbTable(name: table.name, columns: table.columns, rows: select_where(table, args[1].trim(), args[2].trim()))), reason: "selected")
+    if args.len() == 2 and args[0].trim() == "project-column":
+        return OfficeActionResult(ok: true, code: 0, action: "query-table", output: project_column(table, args[1].trim()).join("\n"), reason: "projected")
+    OfficeActionResult(ok: false, code: 1, action: "query-table", output: "", reason: "invalid-args")
+
+fn _office_action_db_edit(source: text) -> OfficeActionResult:
+    val parts = _office_action_split_edit_source(source)
+    val args = parts[0].split("|")
+    val table = _office_action_parse_db_table(parts[1])
+    if args.len() == 2 and args[0].trim() == "insert":
+        return _office_action_db_result("db-edit", insert_row_checked(table, _office_action_split_csv(args[1])))
+    if args.len() == 5 and args[0].trim() == "update-where":
+        return _office_action_db_result("db-edit", update_where(table, args[1].trim(), args[2].trim(), args[3].trim(), args[4].trim()))
+    if args.len() == 3 and args[0].trim() == "delete-where":
+        return _office_action_db_result("db-edit", delete_where(table, args[1].trim(), args[2].trim()))
+    OfficeActionResult(ok: false, code: 1, action: "db-edit", output: _office_action_render_db_table(table), reason: "invalid-args")
 
 fn _office_action_ui_result(action: text, result: OfficeUiEditResult) -> OfficeActionResult:
     if not result.accepted:
