@@ -419,3 +419,7 @@ possible so they are runner-verifiable.
   `sdn_graph_delete_node_at` removes one node, prunes attached connectors, and
   clears child parent references; `delete-sdd-node` exposes it through the
   headless Office action bridge and IDE Draw sanity probe.
+- 2026-06-19 dev: Added Draw/SDD node geometry editing.
+  `edit-sdd-node-geometry` exposes `node_id|x|y|width|height` through the
+  headless Office action bridge while preserving node label/style/shape/layer,
+  and the IDE Draw sanity probe now reports `geometry=true`.
