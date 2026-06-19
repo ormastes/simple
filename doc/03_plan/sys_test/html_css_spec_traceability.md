@@ -107,6 +107,13 @@ goal status. It may report `incomplete` while coverage is structurally mapped
 but durable `.rdc` evidence is missing from the local `build/` tree or the
 external Chrome/Vulkan gate has not passed.
 
+The production GUI/web parity gate is also a metadata gate, not just a
+top-level status check. A passing env must include the 50-case Electron layout
+manifest contract and a live Tauri/Chrome surface manifest with Electron,
+Tauri, and Chrome captures passing, 50 Tauri and 50 Chrome cases, 36 pass plus
+14 tracked divergence cases per surface, 0 fail cases, 0 mismatch counts,
+`no_fake_capture=true`, and `blur_or_tolerance_used=false`.
+
 HTML/CSS SSpec inventory traceability command:
 
 ```sh

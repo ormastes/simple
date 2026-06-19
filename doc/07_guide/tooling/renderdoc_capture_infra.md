@@ -118,6 +118,10 @@ The current canonical evidence contract is:
   the top-level parity status and component statuses as `pass`, including the
   renderer matrix, 50-case layout manifest, Tauri/Chrome surface manifest,
   backend parity, font offload/readback, and raw Metal framebuffer readback.
+  The Tauri/Chrome surface manifest must prove live Electron, Tauri, and
+  Chrome captures, 50 Tauri and 50 Chrome cases, 36 pass cases plus 14 tracked
+  divergence cases for each browser surface, 0 fail cases, 0 mismatch counts,
+  `no_fake_capture=true`, and `blur_or_tolerance_used=false`.
   The GUI RenderDoc feature audit requires this through
   `scripts/check/check-production-gui-web-renderer-parity-gate.shs` before it
   can report `pass`; missing parity evidence is not treated as optional.
