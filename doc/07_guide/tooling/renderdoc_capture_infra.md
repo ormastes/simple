@@ -89,6 +89,16 @@ binary, capture script, viewport, and requested Vulkan/ANGLE Chromium launch
 contract even in this unavailable state, so the remaining missing component is
 visible as `renderdoccmd` rather than an ambiguous Electron setup failure.
 
+The top-level GUI RenderDoc feature audit re-emits the HTML/CSS rendering
+manifest traceability details from
+`scripts/check/check-html-css-rendering-manifest-traceability.shs`, including
+the manifest and fixture paths, HTML tag covered/total counts, implemented CSS
+property covered/total counts, missing tag/property lists, fixture scene count,
+and manifest scenes missing fixture HTML. A restart audit should therefore show
+the 105/105 HTML tag coverage and 62/62 implemented CSS property coverage in
+the same evidence env as the Simple, original Chrome, Electron, and production
+parity gates.
+
 The current canonical evidence contract is:
 
 - Simple in-application path:
