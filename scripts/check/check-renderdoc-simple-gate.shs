@@ -19,6 +19,17 @@ value_of() {
     sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
 }
 
+is_positive_int() {
+    case "${1:-}" in
+        ""|*[!0-9]*)
+            return 1
+            ;;
+        *)
+            [ "$1" -gt 0 ]
+            ;;
+    esac
+}
+
 write_evidence() {
     status="$1"
     reason="$2"
@@ -34,11 +45,24 @@ write_evidence() {
         echo "rdoc_simple_gate_capture_file=${capture_file:-}"
         echo "rdoc_simple_gate_capture_magic=${capture_magic:-}"
         echo "rdoc_simple_gate_capture_file_magic=${capture_file_magic:-}"
+        echo "rdoc_simple_gate_runtime_backend=${runtime_backend:-}"
+        echo "rdoc_simple_gate_renderdoc_available=${renderdoc_available:-}"
+        echo "rdoc_simple_gate_renderdoc_start=${renderdoc_start:-}"
+        echo "rdoc_simple_gate_renderdoc_end=${renderdoc_end:-}"
+        echo "rdoc_simple_gate_renderdoc_num_captures=${renderdoc_num_captures:-}"
+        echo "rdoc_simple_gate_pixel_count=${pixel_count:-}"
+        echo "rdoc_simple_gate_unavailable_marker=${unavailable_marker:-}"
         echo "rdoc_simple_gate_required_backend=simple"
         echo "rdoc_simple_gate_required_scene=vulkan-engine2d"
         echo "rdoc_simple_gate_required_program=src/app/test/renderdoc_vulkan_capture.spl"
         echo "rdoc_simple_gate_required_status=pass"
         echo "rdoc_simple_gate_required_magic=RDOC"
+        echo "rdoc_simple_gate_required_runtime_backend=vulkan"
+        echo "rdoc_simple_gate_required_renderdoc_available=1"
+        echo "rdoc_simple_gate_required_renderdoc_start=1"
+        echo "rdoc_simple_gate_required_renderdoc_end_recorded=1"
+        echo "rdoc_simple_gate_required_num_captures_min=1"
+        echo "rdoc_simple_gate_required_pixel_count_min=1"
     } >"$OUT_ENV"
     {
         echo "# RenderDoc Simple Gate"
@@ -54,6 +78,12 @@ write_evidence() {
         echo "- capture file: ${capture_file:-}"
         echo "- capture magic: ${capture_magic:-}"
         echo "- capture file magic: ${capture_file_magic:-}"
+        echo "- runtime backend: ${runtime_backend:-}"
+        echo "- RenderDoc available: ${renderdoc_available:-}"
+        echo "- RenderDoc start: ${renderdoc_start:-}"
+        echo "- RenderDoc end: ${renderdoc_end:-}"
+        echo "- RenderDoc captures: ${renderdoc_num_captures:-}"
+        echo "- pixel count: ${pixel_count:-}"
         echo
         echo "## Raw Evidence"
         sed 's/^/- /' "$OUT_ENV"
@@ -70,6 +100,13 @@ if [ ! -s "$SOURCE_ENV" ]; then
     capture_file=""
     capture_magic=""
     capture_file_magic=""
+    runtime_backend=""
+    renderdoc_available=""
+    renderdoc_start=""
+    renderdoc_end=""
+    renderdoc_num_captures=""
+    pixel_count=""
+    unavailable_marker=""
     write_evidence "unavailable" "missing-source-evidence"
     exit 1
 fi
@@ -81,6 +118,13 @@ capture_status="$(value_of rdoc_capture_status "$SOURCE_ENV")"
 capture_reason="$(value_of rdoc_capture_reason "$SOURCE_ENV")"
 capture_file="$(value_of rdoc_capture_file "$SOURCE_ENV")"
 capture_magic="$(value_of rdoc_capture_magic "$SOURCE_ENV")"
+runtime_backend="$(value_of rdoc_simple_runtime_backend "$SOURCE_ENV")"
+renderdoc_available="$(value_of rdoc_simple_renderdoc_available "$SOURCE_ENV")"
+renderdoc_start="$(value_of rdoc_simple_renderdoc_start "$SOURCE_ENV")"
+renderdoc_end="$(value_of rdoc_simple_renderdoc_end "$SOURCE_ENV")"
+renderdoc_num_captures="$(value_of rdoc_simple_renderdoc_num_captures "$SOURCE_ENV")"
+pixel_count="$(value_of rdoc_simple_pixel_count "$SOURCE_ENV")"
+unavailable_marker="$(value_of rdoc_simple_unavailable_marker "$SOURCE_ENV")"
 capture_file_magic=""
 if [ -s "$capture_file" ]; then
     capture_file_magic="$(dd if="$capture_file" bs=4 count=1 2>/dev/null || true)"
@@ -101,6 +145,12 @@ if [ "$backend" = "simple" ] \
     && [ "$capture_status" = "pass" ] \
     && [ "$capture_magic" = "RDOC" ] \
     && [ "$capture_file_magic" = "RDOC" ] \
+    && [ "$runtime_backend" = "vulkan" ] \
+    && [ "$renderdoc_available" = "1" ] \
+    && [ "$renderdoc_start" = "1" ] \
+    && [ "$renderdoc_end" != "" ] \
+    && is_positive_int "$renderdoc_num_captures" \
+    && is_positive_int "$pixel_count" \
     && [ -s "$capture_file" ]; then
     write_evidence "pass" "pass"
     exit 0
@@ -122,6 +172,20 @@ elif [ ! -s "$capture_file" ]; then
     write_evidence "fail" "missing-rdc-file"
 elif [ "$capture_file_magic" != "RDOC" ]; then
     write_evidence "fail" "missing-rdoc-file-magic"
+elif [ "$runtime_backend" = "" ]; then
+    write_evidence "fail" "missing-vulkan-runtime-backend"
+elif [ "$runtime_backend" != "vulkan" ]; then
+    write_evidence "fail" "unexpected-runtime-backend"
+elif [ "$renderdoc_available" != "1" ]; then
+    write_evidence "fail" "missing-renderdoc-availability"
+elif [ "$renderdoc_start" != "1" ]; then
+    write_evidence "fail" "missing-renderdoc-start"
+elif [ "$renderdoc_end" = "" ]; then
+    write_evidence "fail" "missing-renderdoc-end"
+elif ! is_positive_int "$renderdoc_num_captures"; then
+    write_evidence "fail" "missing-renderdoc-capture-count"
+elif ! is_positive_int "$pixel_count"; then
+    write_evidence "fail" "missing-rendered-pixels"
 else
     write_evidence "fail" "simple-renderdoc-gate-failed"
 fi

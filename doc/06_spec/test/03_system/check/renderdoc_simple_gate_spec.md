@@ -27,7 +27,7 @@ renderdoc_simple_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,6 +78,9 @@ sh scripts/check/check-renderdoc-simple-gate.shs || true
 - Passing gate evidence requires Simple backend, `vulkan-engine2d` scene, pass
   status, `RDOC` magic, an existing `.rdc` file, and the canonical
   `src/app/test/renderdoc_vulkan_capture.spl` probe program.
+- Passing gate evidence also requires the probe log-derived runtime backend to
+  be `vulkan`, RenderDoc availability/start markers, at least one recorded
+  capture, and a positive pixel count.
 
 ## Scenarios
 
@@ -88,7 +91,7 @@ sh scripts/check/check-renderdoc-simple-gate.shs || true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -105,7 +108,16 @@ expect(evidence).to_contain("rdoc_simple_gate_required_scene=vulkan-engine2d")
 expect(evidence).to_contain("rdoc_simple_gate_required_program=src/app/test/renderdoc_vulkan_capture.spl")
 expect(evidence).to_contain("rdoc_simple_gate_required_status=pass")
 expect(evidence).to_contain("rdoc_simple_gate_required_magic=RDOC")
+expect(evidence).to_contain("rdoc_simple_gate_required_runtime_backend=vulkan")
+expect(evidence).to_contain("rdoc_simple_gate_required_renderdoc_available=1")
+expect(evidence).to_contain("rdoc_simple_gate_required_renderdoc_start=1")
+expect(evidence).to_contain("rdoc_simple_gate_required_renderdoc_end_recorded=1")
+expect(evidence).to_contain("rdoc_simple_gate_required_num_captures_min=1")
+expect(evidence).to_contain("rdoc_simple_gate_required_pixel_count_min=1")
 expect(evidence).to_contain("rdoc_simple_gate_capture_file_magic=")
+expect(evidence).to_contain("rdoc_simple_gate_runtime_backend=")
+expect(evidence).to_contain("rdoc_simple_gate_renderdoc_num_captures=")
+expect(evidence).to_contain("rdoc_simple_gate_pixel_count=")
 
 val status = _value_of(evidence, "rdoc_simple_gate_status")
 val reason = _value_of(evidence, "rdoc_simple_gate_reason")
@@ -114,6 +126,7 @@ val scene = _value_of(evidence, "rdoc_simple_gate_scene")
 val program = _value_of(evidence, "rdoc_simple_gate_program")
 val capture_status = _value_of(evidence, "rdoc_simple_gate_capture_status")
 val magic = _value_of(evidence, "rdoc_simple_gate_capture_magic")
+val runtime_backend = _value_of(evidence, "rdoc_simple_gate_runtime_backend")
 
 if status == "pass":
     expect(backend).to_equal("simple")
@@ -121,6 +134,7 @@ if status == "pass":
     expect(program).to_contain("src/app/test/renderdoc_vulkan_capture.spl")
     expect(capture_status).to_equal("pass")
     expect(magic).to_equal("RDOC")
+    expect(runtime_backend).to_equal("vulkan")
 else:
     expect(reason.len()).to_be_greater_than(0)
 ```
@@ -132,11 +146,11 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-renderdoc-simple-gate-pass && mkdir -p build/test-renderdoc-simple-gate-pass/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-pass/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-pass/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-pass/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-pass/out REPORT_PATH=build/test-renderdoc-simple-gate-pass/report.md sh scripts/check/check-renderdoc-simple-gate.shs"
+val command = "rm -rf build/test-renderdoc-simple-gate-pass && mkdir -p build/test-renderdoc-simple-gate-pass/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-pass/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-pass/source/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > build/test-renderdoc-simple-gate-pass/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-pass/out REPORT_PATH=build/test-renderdoc-simple-gate-pass/report.md sh scripts/check/check-renderdoc-simple-gate.shs"
 val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -148,6 +162,12 @@ expect(evidence).to_contain("rdoc_simple_gate_scene=vulkan-engine2d")
 expect(evidence).to_contain("rdoc_simple_gate_program=src/app/test/renderdoc_vulkan_capture.spl")
 expect(evidence).to_contain("rdoc_simple_gate_capture_magic=RDOC")
 expect(evidence).to_contain("rdoc_simple_gate_capture_file_magic=RDOC")
+expect(evidence).to_contain("rdoc_simple_gate_runtime_backend=vulkan")
+expect(evidence).to_contain("rdoc_simple_gate_renderdoc_available=1")
+expect(evidence).to_contain("rdoc_simple_gate_renderdoc_start=1")
+expect(evidence).to_contain("rdoc_simple_gate_renderdoc_end=1")
+expect(evidence).to_contain("rdoc_simple_gate_renderdoc_num_captures=1")
+expect(evidence).to_contain("rdoc_simple_gate_pixel_count=3072")
 ```
 
 </details>
@@ -194,12 +214,33 @@ expect(evidence).to_contain("rdoc_simple_gate_reason=unexpected-program")
 
 </details>
 
+#### rejects Simple captures without Vulkan runtime backend evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-renderdoc-simple-gate-runtime-backend && mkdir -p build/test-renderdoc-simple-gate-runtime-backend/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-runtime-backend/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-runtime-backend/source/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=software\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > build/test-renderdoc-simple-gate-runtime-backend/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-runtime-backend/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-runtime-backend/out REPORT_PATH=build/test-renderdoc-simple-gate-runtime-backend/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = rt_file_read_text("build/test-renderdoc-simple-gate-runtime-backend/out/evidence.env") ?? ""
+expect(evidence).to_contain("rdoc_simple_gate_status=fail")
+expect(evidence).to_contain("rdoc_simple_gate_reason=unexpected-runtime-backend")
+expect(evidence).to_contain("rdoc_simple_gate_runtime_backend=software")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
