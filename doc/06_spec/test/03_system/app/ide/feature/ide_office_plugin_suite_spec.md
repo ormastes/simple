@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 573 lines folded for reproduction.
+Runnable source: 575 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -501,6 +501,7 @@ val blank_ui_auto_layout_action = office_action_dispatch("ui-auto-layout-edit", 
 val ui_constraints_action = office_action_dispatch("ui-constraints-edit", "button|left|top|stretch|top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_constraints_action = office_action_dispatch("ui-constraints-edit", "   |left|top|stretch|top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_layer_action = office_action_dispatch("ui-layer-edit", "button|controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val blank_ui_layer_action = office_action_dispatch("ui-layer-edit", "   |controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_style_read_action = office_action_dispatch("ui-style-token-read", "button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "button|primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_inspect_action = office_action_dispatch("ui-inspect-node", "button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -617,6 +618,7 @@ expect(blank_ui_auto_layout_action.reason).to_equal("invalid-args")
 expect(ui_constraints_action.output).to_contain("data-constraint-h=\"stretch\"")
 expect(blank_ui_constraints_action.reason).to_equal("invalid-args")
 expect(ui_layer_action.output).to_contain("data-z-index=\"9\"")
+expect(blank_ui_layer_action.reason).to_equal("invalid-args")
 expect(ui_style_read_action.output).to_equal("primary")
 expect(ui_style_edit_action.output).to_contain("office-ui-css-accent")
 expect(ui_inspect_action.output).to_contain("z_index=0")
