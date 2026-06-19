@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 87 | 87 | 0 | 0 |
+| 89 | 89 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1406,6 +1406,38 @@ expect(sdd_result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects blank duplicate UI node offsets
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("ui-duplicate-node", "button|button_copy|   |10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("invalid-args")
+```
+
+</details>
+
+#### rejects blank duplicate SDD node offsets
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("duplicate-sdd-node", "A|A_copy|   |10\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects blank layout selection headers
 
 <details>
@@ -1627,8 +1659,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 87 |
-| Active scenarios | 87 |
+| Total scenarios | 89 |
+| Active scenarios | 89 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

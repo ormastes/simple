@@ -79,7 +79,7 @@ Duplicate actions use a compact first-line edit header:
 `source_id|new_id|dx|dy`, followed by the UI or SDD document body. The
 `ui-duplicate-node` action returns rendered UI HTML; `duplicate-sdd-node`
 returns rendered SDD HTML.
-Blank duplicate source or new IDs are rejected as `invalid-args`.
+Blank duplicate source/new IDs or offsets are rejected as `invalid-args`.
 
 Designer edit actions use compact first-line edit headers followed by the UI
 design body. `ui-label-edit` uses `node_id|expected_label|new_label`.

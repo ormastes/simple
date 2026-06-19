@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 607 lines folded for reproduction.
+Runnable source: 611 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -492,6 +492,7 @@ val legacy_ui_sdd_action = office_action_dispatch("ui-export-sdd", "design: Feat
 val legacy_sdd_action = office_action_dispatch("render-sdd", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button_copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "   |button_copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val blank_offset_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button_copy|   |10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_label_action = office_action_dispatch("ui-label-edit", "button|Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val stale_ui_label_action = office_action_dispatch("ui-label-edit", "button|Old|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_label_action = office_action_dispatch("ui-label-edit", "   |Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -527,6 +528,7 @@ val duplicate_sdd_add_node_action = office_action_dispatch("add-sdd-node", "A|Ag
 val invalid_sdd_add_node_action = office_action_dispatch("add-sdd-node", "|Blank|accent|decision|diamond|80|64|48|32|front|\ngraph: Node Add\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val blank_geometry_sdd_add_node_action = office_action_dispatch("add-sdd-node", "C|Choice|accent|decision|diamond|   |64|48|32|front|\ngraph: Node Add\nA: Alpha")
 val self_parent_sdd_add_node_action = office_action_dispatch("add-sdd-node", "C|Choice|accent|decision|diamond|80|64|48|32|front|C\ngraph: Node Add\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+val blank_offset_sdd_duplicate_action = office_action_dispatch("duplicate-sdd-node", "A|A_copy|   |10\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val ui_align_action = office_action_dispatch("ui-align-selection", "left|a,b\ndesign: Align\nnode a|A|button|0|0|20|20|primary|1|action\nnode b|B|button|40|20|20|20|secondary|2|action")
 val sdd_align_action = office_action_dispatch("align-sdd-selection", "left|A,B\ngraph: Align\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 40 y: 20 width: 20 height: 20")
 val blank_ui_align_action = office_action_dispatch("ui-align-selection", "left| , , \ndesign: Align\nnode a|A|button|0|0|20|20|primary|1|action")
@@ -625,6 +627,7 @@ expect(legacy_sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(sdd_action.output).to_contain("data-selected-edge-index=\"-1\"")
 expect(ui_duplicate_action.output).to_contain("data-id=\"button_copy\"")
 expect(blank_ui_duplicate_action.reason).to_equal("invalid-args")
+expect(blank_offset_ui_duplicate_action.reason).to_equal("invalid-args")
 expect(ui_label_action.output).to_contain(">Launch</div>")
 expect(stale_ui_label_action.reason).to_equal("stale-node")
 expect(blank_ui_label_action.reason).to_equal("invalid-args")
@@ -667,6 +670,7 @@ expect(duplicate_sdd_add_node_action.reason).to_equal("duplicate-id")
 expect(invalid_sdd_add_node_action.reason).to_equal("invalid-id")
 expect(blank_geometry_sdd_add_node_action.reason).to_equal("invalid-args")
 expect(self_parent_sdd_add_node_action.reason).to_equal("missing-parent")
+expect(blank_offset_sdd_duplicate_action.reason).to_equal("invalid-args")
 expect(ui_align_action.output).to_contain("data-id=\"b\"")
 expect(ui_align_action.output).to_contain("left: 0px")
 expect(sdd_align_action.output).to_contain("data-node=\"B\"")
