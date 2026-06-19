@@ -232,3 +232,8 @@ possible so they are runner-verifiable.
   transient selected-node rendering with `data-selected` / `aria-selected`
   metadata and a read-only `office_ui_design_inspect_node` snapshot API, exposed
   through catalog metadata as `selection`, `inspector`, and `ui-inspect-node`.
+- 2026-06-19 dev: Advanced Designer style-token editing. Added guarded
+  `office_ui_design_update_style_token_checked` over the node `css` token plus a
+  read alias for style-token inspection; catalog metadata now exposes
+  `style-tokens`, `style-token-edit`, `ui-style-token-read`, and
+  `ui-style-token-edit`.

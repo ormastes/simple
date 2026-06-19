@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -282,12 +282,46 @@ expect(missing.reason).to_equal("missing-node")
 
 </details>
 
+#### updates style tokens with guarded checks
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = office_ui_design_parse("design: Style\nnode button|Run|button|16|16|80|32|primary|2|action")
+val accepted = office_ui_design_update_style_token_checked(design, "button", "primary", "danger")
+expect(accepted.accepted).to_be(true)
+expect(accepted.reason).to_equal("updated")
+expect(accepted.design.nodes[0].css).to_equal("danger")
+expect(office_ui_design_read_style_token(accepted.design, "button").css).to_equal("danger")
+expect(office_ui_design_render_html(accepted.design)).to_contain("office-ui-css-danger")
+expect(office_ui_design_to_sdd(accepted.design)).to_contain("button, Run, danger, action, rounded, 16, 16, 80, 32, 2")
+
+val rejected = office_ui_design_update_style_token_checked(design, "button", "wrong", "danger")
+expect(rejected.accepted).to_be(false)
+expect(rejected.reason).to_equal("stale-node")
+expect(rejected.design.nodes[0].css).to_equal("primary")
+
+val legacy = office_ui_design_update_css_checked(design, "button", "primary", "accent")
+expect(legacy.accepted).to_be(true)
+expect(legacy.design.nodes[0].css).to_equal("accent")
+
+val missing = office_ui_design_update_style_token_checked(design, "missing", "primary", "danger")
+expect(missing.accepted).to_be(false)
+expect(missing.reason).to_equal("missing-node")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

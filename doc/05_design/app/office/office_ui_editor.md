@@ -29,6 +29,10 @@ node id, including label, kind, css token, geometry, layer, component role, and
 resolved z-index. Missing nodes return `found=false` with reason
 `missing-node`; successful reads return reason `selected`.
 
+`office_ui_design_read_style_token` is the style-specific read path over the
+same inspector snapshot. It exposes the node's current style token without
+turning selection or inspection into persisted document state.
+
 ## SDD Bridge
 
 `office_ui_design_to_sdd` serializes nodes to the SDD table shape already used
@@ -49,3 +53,9 @@ design plus a compact diff. Stale geometry and missing nodes return rejected
 `office_ui_design_update_layer_checked` updates semantic or numeric layer
 metadata with the same stale-check contract. Numeric replacements immediately
 affect rendered `data-z-index` and CSS `z-index`.
+
+`office_ui_design_update_style_token_checked` updates the node `css` token with
+the same expected-value guard. Accepted edits change the rendered
+`office-ui-css-*` class and the SDD `css` column; stale or missing nodes return
+the original design unchanged. The compatibility helper
+`office_ui_design_update_css_checked` remains the lower-level implementation.

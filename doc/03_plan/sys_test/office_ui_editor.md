@@ -12,9 +12,11 @@
 - Render numeric layer values as z-index metadata and guard layer updates.
 - Render transient selected-node state and expose read-only inspector metadata
   for found and missing nodes.
+- Accept matching guarded style-token edits, reject stale tokens, and prove the
+  accepted token is visible in HTML classes and SDD export.
 
 ## System Coverage
 
 - IDE Office plugin suite verifies the LLM catalog includes Designer, the UI
-  editor owner module, UI editor label/layout/layer actions, and the read-only
-  `ui-inspect-node` action.
+  editor owner module, UI editor label/layout/layer/style-token actions, and
+  the read-only `ui-inspect-node` / `ui-style-token-read` actions.

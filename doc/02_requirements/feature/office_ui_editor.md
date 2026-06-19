@@ -16,6 +16,8 @@
   with guarded layer updates.
 - REQ-UI-009: Support transient node selection rendering and read-only
   inspector snapshots without persisting selection into the design document.
+- REQ-UI-010: Support guarded style-token edits so component visual classes can
+  change with stale-token rejection and deterministic render/SDD output.
 
 ## Out of Scope
 

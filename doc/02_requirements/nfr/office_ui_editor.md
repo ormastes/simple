@@ -10,3 +10,5 @@
   rendered z-index values, while non-numeric layers fall back to document order.
 - NFR-UI-006: Selection and inspector reads must be pure derived views; they
   must not mutate node data or introduce persisted selection state.
+- NFR-UI-007: Style-token edits must remain token-based and deterministic; they
+  must not introduce arbitrary CSS parsing or host rendering dependencies.
