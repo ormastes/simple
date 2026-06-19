@@ -28,7 +28,7 @@ html_render_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -205,6 +205,22 @@ expect(html).to_contain("data-slide=\"2\"")
 
 </details>
 
+#### drops unsafe markdown slide css class tokens
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_ppt_markdown_html("## Slide @deck @bad&quot;onclick=1 @accent_1\n\nBody")
+expect(html).to_contain("class=\"md-ppt-slide md-css-deck md-css-accent_1\"")
+expect(html.contains("md-css-bad")).to_be(false)
+```
+
+</details>
+
 #### escapes slide markdown content before HTML rendering
 
 <details>
@@ -241,8 +257,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
