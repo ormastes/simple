@@ -359,7 +359,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 483 lines folded for reproduction.
+Runnable source: 485 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -538,6 +538,8 @@ expect(ui_action.output).to_contain("data-format=\"html-ui\"")
 expect(ui_action.output).to_contain("data-node-count=\"1\"")
 expect(ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape")
 expect(sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
+expect(sdd_action.output).to_contain("data-node-count=\"1\"")
+expect(sdd_action.output).to_contain("data-edge-count=\"0\"")
 expect(sdd_action.output).to_contain("data-selected-edge-index=\"-1\"")
 expect(ui_duplicate_action.output).to_contain("data-id=\"button_copy\"")
 expect(ui_label_action.output).to_contain(">Launch</div>")

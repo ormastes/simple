@@ -202,7 +202,8 @@ effective child geometry when every child has numeric geometry.
 Common layer names map to `data-layer-z` and preview `z-index` values:
 `back`/`background` 0, `base`/`default` 10, `controls`/`ui`/`middle` 20, and
 `front`/`foreground`/`overlay` 30.
-The root exposes optional canvas metadata as
+The root exposes graph readback metadata as `data-node-count` and
+`data-edge-count`, plus optional canvas metadata as
 `data-canvas-width`, `data-canvas-height`, `data-canvas-grid`,
 `data-canvas-snap`, `data-canvas-zoom`, and `data-canvas-background`, and maps
 canvas width/height to deterministic root style lengths when present. Safe
