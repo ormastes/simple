@@ -369,7 +369,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 501 lines folded for reproduction.
+Runnable source: 505 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -528,7 +528,7 @@ val missing_sdd_edge_style_action = office_action_dispatch("edit-sdd-edge-style"
 val missing_sdd_edge_endpoint_action = office_action_dispatch("edit-sdd-edge-endpoints", "0|A|Nope\ngraph: Edge Endpoints\nA: A\nB: B\nA -> B: link")
 val missing_sdd_edge_delete_action = office_action_dispatch("delete-sdd-edge", "1\ngraph: Edge Delete\nA: A\nB: B\nA -> B: link")
 val missing_sdd_edge_action = office_action_dispatch("reroute-sdd-connector", "1|orthogonal|60x10|right|left\ngraph: Route\nA: A\nB: B\nA -> B: link")
-val sdd_inspect_node_action = office_action_dispatch("inspect-sdd-node", "A\ngraph: Inspect\nA: Alpha @accent role: actor shape: diamond x: 4 y: 8 width: 80 height: 24 layer: front")
+val sdd_inspect_node_action = office_action_dispatch("inspect-sdd-node", "A\ngraph: Inspect\nA: Alpha @accent role: actor shape: diamond x: 4 y: 8 width: 80 height: 24 layer: front\nB: Beta x: 12 y: 16 width: 20 height: 10 parent: A")
 val sdd_inspect_edge_action = office_action_dispatch("inspect-sdd-edge", "0\ngraph: Inspect\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 80 y: 0 width: 20 height: 20\nA -> B: link route: orthogonal waypoints: 40x10 start: right end: left")
 val missing_sdd_inspect_edge_action = office_action_dispatch("inspect-sdd-edge", "1\ngraph: Inspect\nA: A\nB: B\nA -> B: link")
 expect(md_action.output).to_contain("class=\"wysiwyg-preview\"")
@@ -602,6 +602,8 @@ expect(invalid_sdd_order_action.reason).to_equal("invalid-position")
 expect(sdd_role_action.output).to_contain("data-role=\"database\"")
 expect(stale_sdd_geometry_action.reason).to_equal("missing-node")
 expect(sdd_parent_action.output).to_contain("data-parent=\"A\"")
+expect(sdd_inspect_node_action.output).to_contain("child_count=1")
+expect(sdd_inspect_node_action.output).to_contain("child_bounds=12,16,32,26")
 expect(sdd_node_delete_action.reason).to_equal("updated")
 expect(sdd_node_delete_action.output).to_contain("data-node=\"A\"")
 expect(missing_sdd_node_delete_action.reason).to_equal("missing-node")
@@ -716,6 +718,8 @@ expect(inspected_draw_node.found).to_be(true)
 expect(inspected_draw_node.parent).to_equal("A")
 expect(inspected_draw_node.shape).to_equal("cylinder")
 expect(inspected_draw_node.role).to_equal("database")
+expect(inspected_draw_node.child_count).to_equal("0")
+expect(inspected_draw_node.child_bounds).to_equal("")
 expect(inspected_draw_edge.found).to_be(true)
 expect(inspected_draw_edge.label).to_equal("approved")
 expect(inspected_draw_edge.css).to_equal("warning dashed")

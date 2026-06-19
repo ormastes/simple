@@ -519,7 +519,7 @@ expect(invalid).to_contain("data-edge-index=\"0\" data-selected=\"false\" aria-s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -534,6 +534,8 @@ expect(node.role).to_equal("source")
 expect(node.shape).to_equal("rounded")
 expect(node.x).to_equal("10")
 expect(node.parent).to_equal("Group")
+expect(node.child_count).to_equal("0")
+expect(node.child_bounds).to_equal("")
 expect(edge.found).to_be(true)
 expect(edge.reason).to_equal("selected")
 expect(edge.edge_index).to_equal(0)
@@ -560,7 +562,7 @@ expect(edge.label_y).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -570,6 +572,8 @@ val edge = sdn_graph_inspect_edge(graph, -1)
 expect(node.found).to_be(false)
 expect(node.reason).to_equal("missing-node")
 expect(node.id).to_equal("Nope")
+expect(node.child_count).to_equal("0")
+expect(node.child_bounds).to_equal("")
 expect(edge.found).to_be(false)
 expect(edge.reason).to_equal("missing-edge")
 expect(edge.edge_index).to_equal(-1)
@@ -749,7 +753,7 @@ expect(node_deleted.edges.len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -760,6 +764,8 @@ expect(graph.nodes[1].parent).to_equal("Container")
 expect(sdn_graph_render_html(graph)).to_contain("data-parent=\"Container\"")
 expect(sdn_graph_render_html(graph)).to_contain("data-child-count=\"1\" data-has-children=\"true\"")
 expect(sdn_graph_render_html(graph)).to_contain("data-child-bounds=\"20,24,100,54\"")
+expect(sdn_graph_inspect_node(graph, "Container").child_count).to_equal("1")
+expect(sdn_graph_inspect_node(graph, "Container").child_bounds).to_equal("20,24,100,54")
 expect(sdn_graph_to_canonical_sdn(graph)).to_contain("Child, Child, primary, control, rounded, 20, 24, 80, 30, controls, Container")
 
 val ungrouped = sdn_graph_update_node_parent_at(graph, 1, "")
@@ -771,6 +777,8 @@ expect(sdn_graph_render_html(ungrouped)).to_contain("data-child-bounds=\"\"")
 val multi_child = sdn_graph_parse("graph: multi-group\nnodes |id, label, css, role, shape, x, y, width, height, layer, parent|\n    Container, Container, panel, group, frame, 0, 0, 220, 140, base, \n    A, A, primary, control, rounded, 20, 24, 80, 30, controls, Container\n    B, B, primary, control, rounded, 80, 10, 40, 20, controls, Container")
 expect(sdn_graph_render_html(multi_child)).to_contain("data-child-count=\"2\" data-has-children=\"true\"")
 expect(sdn_graph_render_html(multi_child)).to_contain("data-child-bounds=\"20,10,120,54\"")
+expect(sdn_graph_inspect_node(multi_child, "Container").child_count).to_equal("2")
+expect(sdn_graph_inspect_node(multi_child, "Container").child_bounds).to_equal("20,10,120,54")
 val invalid_child = sdn_graph_parse("graph: invalid-group\nnodes |id, label, css, role, shape, x, y, width, height, layer, parent|\n    Container, Container, panel, group, frame, 0, 0, 220, 140, base, \n    Child, Child, primary, control, rounded, left, 24, 80, 30, controls, Container")
 expect(sdn_graph_render_html(invalid_child)).to_contain("data-child-count=\"1\" data-has-children=\"true\"")
 expect(sdn_graph_render_html(invalid_child)).to_contain("data-child-bounds=\"\"")

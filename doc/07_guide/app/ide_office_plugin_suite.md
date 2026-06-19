@@ -107,7 +107,8 @@ for the updated document. Style-rule edit/delete actions return canonical SDD
 text for round-trip persistence.
 `inspect-sdd-node` uses `node_id`; `inspect-sdd-edge` uses `edge_index`;
 `inspect-sdd-style-rule` uses `css|key`. Inspectors return compact readback
-text for geometry, style, route, rendered path metadata, and style-rule fields.
+text for geometry, style, group child metadata, route, rendered path metadata,
+and style-rule fields.
 
 Base table actions use a compact text table body:
 `table: Name`, `columns: id,status`, then `row: 1,open` lines. `query-table`
