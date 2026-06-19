@@ -354,7 +354,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 460 lines folded for reproduction.
+Runnable source: 461 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -668,7 +668,8 @@ expect(draw_duplicate.accepted).to_be(true)
 expect(draw_duplicate.graph.nodes[2].id).to_equal("B_copy")
 expect(sdn_graph_render_html(draw_duplicate.graph)).to_contain("data-node=\"B_copy\"")
 expect(sdn_graph_render_html(draw_canvas)).to_contain("data-canvas-grid=\"24\"")
-expect(sdn_graph_render_html(draw_canvas)).to_contain("style=\"width:1440px;height:960px;background-color:#f8fafc;\"")
+expect(sdn_graph_render_html(draw_canvas)).to_contain("background-image:radial-gradient(circle,#cbd5e1 1px,transparent 1px)")
+expect(sdn_graph_render_html(draw_canvas)).to_contain("background-size:24px 24px")
 expect(sdn_graph_render_html_with_selection(draw_role_only, "B", 0)).to_contain("data-selected=\"true\" aria-selected=\"true\"")
 expect(inspected_draw_node.found).to_be(true)
 expect(inspected_draw_node.parent).to_equal("A")

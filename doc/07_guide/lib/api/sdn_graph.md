@@ -198,7 +198,7 @@ container membership. The root exposes optional canvas metadata as
 `data-canvas-width`, `data-canvas-height`, `data-canvas-grid`,
 `data-canvas-snap`, `data-canvas-zoom`, and `data-canvas-background`, and maps
 canvas width/height to deterministic root style lengths when present. Safe
-canvas background colors are also rendered as root `background-color` CSS.
+canvas background colors and grid spacing are also rendered as root CSS.
 
 ## Rendered Connector Contract
 

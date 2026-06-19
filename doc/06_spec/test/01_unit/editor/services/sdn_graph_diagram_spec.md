@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 26 | 26 | 0 | 0 |
+| 27 | 27 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -192,7 +192,7 @@ expect(html).to_contain("data-end-anchor=\"left\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -204,7 +204,9 @@ expect(html).to_contain("data-canvas-grid=\"16\"")
 expect(html).to_contain("data-canvas-snap=\"true\"")
 expect(html).to_contain("data-canvas-zoom=\"125\"")
 expect(html).to_contain("data-canvas-background=\"#ffffff\"")
-expect(html).to_contain("style=\"width:1200px;height:800px;background-color:#ffffff;\"")
+expect(html).to_contain("background-color:#ffffff")
+expect(html).to_contain("background-image:radial-gradient(circle,#cbd5e1 1px,transparent 1px)")
+expect(html).to_contain("background-size:16px 16px")
 ```
 
 </details>
@@ -214,13 +216,31 @@ expect(html).to_contain("style=\"width:1200px;height:800px;background-color:#fff
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val graph = sdn_graph_update_canvas(sdn_graph_parse("graph: escaped\nA: A"), "100", "80", "10", "true", "100", "\"<bg>&")
 val html = sdn_graph_render_html(graph)
 expect(html).to_contain("data-canvas-background=\"&quot;&lt;bg&gt;&amp;\"")
+expect(html).to_contain("width:100px;height:80px;")
+expect(html).to_contain("background-size:10px 10px")
+```
+
+</details>
+
+#### rejects unsafe draw canvas grid CSS
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_update_canvas(sdn_graph_parse("graph: unsafe-grid\nA: A"), "100", "80", "10;bad", "true", "100", "")
+val html = sdn_graph_render_html(graph)
+expect(html).to_contain("data-canvas-grid=\"10;bad\"")
 expect(html).to_contain("style=\"width:100px;height:80px;\"")
 ```
 
@@ -533,7 +553,7 @@ expect(sdn_graph_render_html(deleted)).to_contain("data-selected-edge-index=\"-1
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -550,7 +570,8 @@ expect(updated.nodes[0].id).to_equal("A")
 expect(updated.edges[0].from_id).to_equal("A")
 expect(html).to_contain("data-canvas-width=\"1440\"")
 expect(html).to_contain("data-canvas-grid=\"24\"")
-expect(html).to_contain("style=\"width:1440px;height:960px;background-color:#f8fafc;\"")
+expect(html).to_contain("background-color:#f8fafc")
+expect(html).to_contain("background-size:24px 24px")
 ```
 
 </details>
@@ -837,8 +858,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 26 |
-| Active scenarios | 26 |
+| Total scenarios | 27 |
+| Active scenarios | 27 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
