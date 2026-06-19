@@ -197,6 +197,9 @@ classes plus `sdd-diagram`, `sdd-node`, `sdd-connector`, `data-format="sdd"`,
 geometry attributes, connector route/waypoint attributes, and `sdn-css-<name>`
 classes derived from `@name`. Nodes also expose `data-parent`,
 `data-child-count`, and `data-has-children` for group or container membership.
+Common layer names map to `data-layer-z` and preview `z-index` values:
+`back`/`background` 0, `base`/`default` 10, `controls`/`ui`/`middle` 20, and
+`front`/`foreground`/`overlay` 30.
 The root exposes optional canvas metadata as
 `data-canvas-width`, `data-canvas-height`, `data-canvas-grid`,
 `data-canvas-snap`, `data-canvas-zoom`, and `data-canvas-background`, and maps
