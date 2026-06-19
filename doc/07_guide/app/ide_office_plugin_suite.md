@@ -226,6 +226,8 @@ Calc, Draw, and Base. Calc cell references become level/tuning tokens, SDD Draw
 nodes become deterministic sprite records, and Base exact-match query rows
 become `key=value` game state records. The bridge does not import a game loop,
 GUI renderer, browser, filesystem, or host API.
+IDE/LLM callers use `export-sdd-game-sprites` for Draw sprite manifests and
+`export-base-game-state` for Base `key=value` state lines.
 
 Math editing uses `app.office.math_editor` as a pure MathML rendering substrate.
 The public renderer keeps flat token MathML for simple expressions, escapes

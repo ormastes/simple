@@ -16,6 +16,7 @@ use app.office.slides.html_render.{render_ppt_markdown_html}
 use app.office.ui_editor.{OfficeUiEditResult, OfficeUiInspector, office_ui_design_align_checked, office_ui_design_distribute_checked, office_ui_design_duplicate_node_checked, office_ui_design_geometry_signature, office_ui_design_inspect_node, office_ui_design_parse, office_ui_design_read_style_token, office_ui_design_render_html, office_ui_design_to_sdd, office_ui_design_update_auto_layout_checked, office_ui_design_update_constraint_checked, office_ui_design_update_label_checked, office_ui_design_update_layer_checked, office_ui_design_update_layout_checked, office_ui_design_update_style_token_checked}
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.base_db.{DbEditResult, DbTable, column_index, count_where, delete_where, insert_row_checked, new_table, project_column, select_where, update_where}
+use app.office.game_bridge.{base_query_to_game_state, draw_sdd_to_game_sprite_manifest}
 use app.office.math_editor.{MathRenderResult, math_to_mathml, math_to_mathml_checked}
 use std.editor.services.sdn_graph.{SdnGraph, SdnGraphEdgeInspector, SdnGraphNodeInspector, SdnGraphStyleInspector, sdn_graph_add_edge_checked, sdn_graph_add_node_checked, sdn_graph_align_checked, sdn_graph_delete_edge_checked, sdn_graph_delete_node_checked, sdn_graph_delete_style_rule_checked, sdn_graph_distribute_checked, sdn_graph_duplicate_edge_checked, sdn_graph_duplicate_node_checked, sdn_graph_geometry_signature, sdn_graph_inspect_edge, sdn_graph_inspect_node, sdn_graph_inspect_style_rule, sdn_graph_parse, sdn_graph_render_html, sdn_graph_render_html_with_selection, sdn_graph_reorder_node_checked, sdn_graph_set_style_rule_checked, sdn_graph_to_canonical_sdn, sdn_graph_update_canvas_checked, sdn_graph_update_edge_checked, sdn_graph_update_edge_endpoints_checked, sdn_graph_update_edge_kind_checked, sdn_graph_update_edge_label_checked, sdn_graph_update_edge_label_point_checked, sdn_graph_update_edge_style_checked, sdn_graph_update_node_geometry_checked, sdn_graph_update_node_label_checked, sdn_graph_update_node_layer_checked, sdn_graph_update_node_parent_checked, sdn_graph_update_node_role_checked, sdn_graph_update_node_shape_checked, sdn_graph_update_node_style_checked}
 use common.office.file_ops.{RecentFileStore}
@@ -119,6 +120,8 @@ fn run_office(args: [text]) -> i32:
             return _run_sheet_edit_command(args)
         "query-table" =>
             return _run_office_action_command(args)
+        "export-base-game-state" =>
+            return _run_office_action_command(args)
         "render-base-table-html" =>
             return _run_office_action_command(args)
         "db-edit" =>
@@ -168,6 +171,8 @@ fn run_office(args: [text]) -> i32:
         "render-sdd-html" =>
             return _run_office_action_command(args)
         "render-sdd-html-with-selection" =>
+            return _run_office_action_command(args)
+        "export-sdd-game-sprites" =>
             return _run_office_action_command(args)
         "inspect-sdd-node" =>
             return _run_office_action_command(args)
@@ -263,6 +268,8 @@ fn office_action_dispatch(action: text, source: text) -> OfficeActionResult:
             return _office_action_counter_action(decoded)
         "query-table" =>
             return _office_action_query_table(decoded)
+        "export-base-game-state" =>
+            return _office_action_export_base_game_state(decoded)
         "render-base-table-html" =>
             return _office_action_render_base_table_html(decoded)
         "db-edit" =>
@@ -297,6 +304,8 @@ fn office_action_dispatch(action: text, source: text) -> OfficeActionResult:
             return OfficeActionResult(ok: true, code: 0, action: action, output: sdn_graph_render_html(sdn_graph_parse(decoded)), reason: "rendered")
         "render-sdd-html-with-selection" =>
             return OfficeActionResult(ok: true, code: 0, action: action, output: sdn_graph_render_html_with_selection(sdn_graph_parse(decoded), "", -1), reason: "rendered")
+        "export-sdd-game-sprites" =>
+            return OfficeActionResult(ok: true, code: 0, action: action, output: draw_sdd_to_game_sprite_manifest(decoded), reason: "exported")
         "inspect-sdd-node" =>
             return _office_action_inspect_sdd_node(decoded)
         "inspect-sdd-edge" =>
@@ -666,6 +675,19 @@ fn _office_action_db_edit(source: text) -> OfficeActionResult:
             return OfficeActionResult(ok: false, code: 1, action: "db-edit", output: "", reason: "invalid-args")
         return _office_action_db_result("db-edit", delete_where(table, args[1].trim(), args[2].trim()))
     OfficeActionResult(ok: false, code: 1, action: "db-edit", output: _office_action_render_db_table(table), reason: "invalid-args")
+
+fn _office_action_export_base_game_state(source: text) -> OfficeActionResult:
+    val parts = _office_action_split_edit_source(source)
+    val args = parts[0].split("|")
+    val table = _office_action_parse_db_table(parts[1])
+    if args.len() != 4 or args[0].trim() == "" or args[2].trim() == "" or args[3].trim() == "":
+        return OfficeActionResult(ok: false, code: 1, action: "export-base-game-state", output: "", reason: "invalid-args")
+    val match_error = _office_action_db_query_error(table, args[0].trim())
+    if match_error != "":
+        return OfficeActionResult(ok: false, code: 1, action: "export-base-game-state", output: _office_action_render_db_table(table), reason: match_error)
+    if column_index(table, args[2].trim()) < 0 or column_index(table, args[3].trim()) < 0:
+        return OfficeActionResult(ok: false, code: 1, action: "export-base-game-state", output: _office_action_render_db_table(table), reason: "missing-column")
+    OfficeActionResult(ok: true, code: 0, action: "export-base-game-state", output: base_query_to_game_state(table, args[0].trim(), args[1].trim(), args[2].trim(), args[3].trim()), reason: "exported")
 
 fn _office_action_ui_result(action: text, result: OfficeUiEditResult) -> OfficeActionResult:
     if not result.accepted:
