@@ -1,6 +1,6 @@
 # sdn_graph_diagram_spec
 
-> Verifies the SDN-backed diagram dialect used by Markdown docs and the IDE preview. SDD means Simple Diagram Document: a named SDN dialect that extends older relationship-only graph blocks with draw.io/Figma-style geometry, layers, shapes, connector routing, anchors, and waypoints.
+> Verifies the SDN-backed diagram dialect used by Markdown docs and the IDE preview. SDD means Simple Diagram Document: a named SDN dialect that extends older relationship-only graph blocks with draw.io/Figma-style geometry, layers, parent/group membership, shapes, connector routing, anchors, and waypoints.
 
 <!-- sdn-diagram:id=sdn_graph_diagram_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # sdn_graph_diagram_spec
 
-Verifies the SDN-backed diagram dialect used by Markdown docs and the IDE preview. SDD means Simple Diagram Document: a named SDN dialect that extends older relationship-only graph blocks with draw.io/Figma-style geometry, layers, shapes, connector routing, anchors, and waypoints.
+Verifies the SDN-backed diagram dialect used by Markdown docs and the IDE preview. SDD means Simple Diagram Document: a named SDN dialect that extends older relationship-only graph blocks with draw.io/Figma-style geometry, layers, parent/group membership, shapes, connector routing, anchors, and waypoints.
 
 ## At a Glance
 
@@ -55,7 +55,8 @@ Verifies the SDN-backed diagram dialect used by Markdown docs and the IDE previe
 Verifies the SDN-backed diagram dialect used by Markdown docs and the IDE
 preview. SDD means Simple Diagram Document: a named SDN dialect that extends
 older relationship-only graph blocks with draw.io/Figma-style geometry,
-layers, shapes, connector routing, anchors, and waypoints.
+layers, parent/group membership, shapes, connector routing, anchors, and
+waypoints.
 
 ## Examples
 
@@ -94,11 +95,11 @@ expect(sdn_graph_file_extension()).to_equal(".sdd.sdn")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val graph = sdn_graph_parse("graph: editor\nFrame: Canvas @frame role: container shape: frame x: 12 y: 24 width: 320 height: 180 layer: base\nWidget: Button @component role: control shape: rounded x: 48 y: 80 width: 120 height: 40 layer: controls")
+val graph = sdn_graph_parse("graph: editor\nFrame: Canvas @frame role: container shape: frame x: 12 y: 24 width: 320 height: 180 layer: base\nWidget: Button @component role: control shape: rounded x: 48 y: 80 width: 120 height: 40 layer: controls parent: Frame")
 expect(graph.nodes.len()).to_equal(2)
 expect(graph.nodes[0].id).to_equal("Frame")
 expect(graph.nodes[0].shape).to_equal("frame")
@@ -109,6 +110,7 @@ expect(graph.nodes[0].height).to_equal("180")
 expect(graph.nodes[0].layer).to_equal("base")
 expect(graph.nodes[1].shape).to_equal("rounded")
 expect(graph.nodes[1].layer).to_equal("controls")
+expect(graph.nodes[1].parent).to_equal("Frame")
 ```
 
 </details>
@@ -138,17 +140,18 @@ expect(graph.edges[0].end_anchor).to_equal("left")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val graph = sdn_graph_parse("graph: editor\nCard: Card @panel shape: rounded x: 10 y: 20 width: 200 height: 100 layer: base\nAction: Action @button shape: pill x: 40 y: 60 width: 80 height: 28 layer: controls\nCard -> Action: opens route: orthogonal waypoints: 20x40;40x40 start: bottom end: left")
+val graph = sdn_graph_parse("graph: editor\nCard: Card @panel shape: rounded x: 10 y: 20 width: 200 height: 100 layer: base\nAction: Action @button shape: pill x: 40 y: 60 width: 80 height: 28 layer: controls parent: Card\nCard -> Action: opens route: orthogonal waypoints: 20x40;40x40 start: bottom end: left")
 val html = sdn_graph_render_html(graph)
 expect(html).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(html).to_contain("data-format=\"sdd\"")
 expect(html).to_contain("data-format-name=\"SDD: Simple Diagram Document\"")
 expect(html).to_contain("class=\"sdn-graph-node sdd-node sdn-css-panel\"")
 expect(html).to_contain("data-layer=\"base\"")
+expect(html).to_contain("data-parent=\"Card\"")
 expect(html).to_contain("style=\"left:10px;top:20px;width:200px;height:100px\"")
 expect(html).to_contain("class=\"sdd-connector-layer\"")
 expect(html).to_contain("class=\"sdd-connector-path \"")
@@ -175,32 +178,33 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val graph = sdn_graph_parse("graph: flow\nA: Start @start shape: circle x: 8 y: 12 width: 48 height: 48 layer: base\nB: End @end shape: terminator x: 120 y: 12 width: 80 height: 48 layer: base\nA -> B: done route: simple waypoints: 56x36 start: right end: left")
 val canon = sdn_graph_to_canonical_sdn(graph)
-expect(canon).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer|")
-expect(canon).to_contain("A, Start, start, , circle, 8, 12, 48, 48, base")
+expect(canon).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent|")
+expect(canon).to_contain("A, Start, start, , circle, 8, 12, 48, 48, base, ")
 expect(canon).to_contain("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|")
 expect(canon).to_contain("A, B, done, , normal, simple, 56x36, right, left")
 ```
 
 </details>
 
-#### weaves layout and shape edits into matching nodes
+#### weaves layout shape and parent edits into matching nodes
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val graph = sdn_graph_parse("graph: weave\nSvc: Service role: service\nDB: Database role: database\nweave @:\n    node where role = service:\n        add: card\n        shape: rounded\n        x: 20\n        y: 30\n        width: 160\n        height: 70\n        layer: services")
-expect(graph.nodes[0].css).to_equal("card")
-expect(graph.nodes[0].shape).to_equal("rounded")
-expect(graph.nodes[0].x).to_equal("20")
-expect(graph.nodes[0].y).to_equal("30")
-expect(graph.nodes[0].width).to_equal("160")
-expect(graph.nodes[0].height).to_equal("70")
-expect(graph.nodes[0].layer).to_equal("services")
-expect(graph.nodes[1].shape).to_equal("")
+val graph = sdn_graph_parse("graph: weave\nGroup: Services role: group\nSvc: Service role: service\nDB: Database role: database\nweave @:\n    node where role = service:\n        add: card\n        shape: rounded\n        x: 20\n        y: 30\n        width: 160\n        height: 70\n        layer: services\n        parent: Group")
+expect(graph.nodes[1].css).to_equal("card")
+expect(graph.nodes[1].shape).to_equal("rounded")
+expect(graph.nodes[1].x).to_equal("20")
+expect(graph.nodes[1].y).to_equal("30")
+expect(graph.nodes[1].width).to_equal("160")
+expect(graph.nodes[1].height).to_equal("70")
+expect(graph.nodes[1].layer).to_equal("services")
+expect(graph.nodes[1].parent).to_equal("Group")
+expect(graph.nodes[2].shape).to_equal("")
 ```
 
 </details>
@@ -297,12 +301,39 @@ expect(sdn_graph_render_html(styled)).to_contain("sdn-css-storage sdn-css-highli
 
 </details>
 
+#### preserves group membership through tables and pure parent edits
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: groups\nnodes |id, label, css, role, shape, x, y, width, height, layer, parent|\n    Container, Container, panel, group, frame, 0, 0, 220, 140, base, \n    Child, Child, primary, control, rounded, 20, 24, 80, 30, controls, Container")
+expect(graph.nodes.len()).to_equal(2)
+expect(graph.nodes[0].parent).to_equal("")
+expect(graph.nodes[1].parent).to_equal("Container")
+expect(sdn_graph_render_html(graph)).to_contain("data-parent=\"Container\"")
+expect(sdn_graph_to_canonical_sdn(graph)).to_contain("Child, Child, primary, control, rounded, 20, 24, 80, 30, controls, Container")
+
+val ungrouped = sdn_graph_update_node_parent_at(graph, 1, "")
+expect(ungrouped.nodes[1].parent).to_equal("")
+expect(ungrouped.nodes[1].x).to_equal("20")
+expect(ungrouped.nodes[0].id).to_equal("Container")
+
+val regrouped = sdn_graph_update_node_parent_at(ungrouped, 1, "Container")
+expect(regrouped.nodes[1].parent).to_equal("Container")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

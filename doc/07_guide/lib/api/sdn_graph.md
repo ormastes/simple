@@ -3,9 +3,10 @@
 **SDD (Simple Diagram Document)** is the diagram dialect built on SDN. Preferred
 files use `.sdd.sdn`. SDD graph blocks describe renderable graph structure with
 compact node and edge syntax, canonical SDN tables, reusable CSS labels,
-draw.io-style connector metadata, Figma-like geometry, and selector-based
-weaving. The source syntax uses `@foo` for visual CSS names; the normalized
-internal field is named `css`.
+draw.io-style connector metadata and grouping, Figma-like geometry, and
+selector-based weaving. The source syntax uses `@foo` for visual CSS names; the
+normalized internal field is named `css`. Group/container membership uses the
+canonical node field `parent`.
 
 ## Dense Graph
 
@@ -19,6 +20,7 @@ User: User @person
 Auth: Auth Service @card @important
 DB: Database @storage shape: cylinder
 Panel: Settings @card shape: rounded x: 40 y: 80 width: 220 height: 120 layer: ui
+Button: Save @primary shape: rounded x: 72 y: 120 width: 96 height: 32 layer: ui parent: Panel
 
 User -> Auth: Login @primary
 Auth -> DB: Query @db
@@ -30,12 +32,14 @@ UI -x DB: forbidden @violation
 Rules:
 
 - `@foo` attaches visual CSS/tag name `foo` to the current node or edge.
-- `shape:`, `x:`, `y:`, `width:`, `height:`, and `layer:` attach diagram editor
-  metadata to nodes.
+- `shape:`, `x:`, `y:`, `width:`, `height:`, `layer:`, and `parent:` attach
+  diagram editor metadata to nodes. `parent` is the canonical source for
+  draw.io-like group/container membership.
 - Edge metadata `route:`, `waypoints:`, `start:`, and `end:` attach connector
   path and anchor metadata.
 - `css foo:` defines style, shape, or layout hints for `@foo`.
-- `weave @:` injects `@foo` names into matching nodes or edges by selector.
+- `weave @:` injects `@foo` names and selected layout/group fields into
+  matching nodes or edges by selector.
 - Pure edit APIs can update one node's shape/style metadata or one connector's
   route metadata without reparsing or touching unrelated graph entries.
 - `css_file:` imports an external stylesheet for final SVG or HTML output.
@@ -45,11 +49,12 @@ Rules:
 The dense graph above normalizes to SDN tables:
 
 ```sdn
-nodes |id, label, css, role, shape, x, y, width, height, layer|
-    User, User, person, actor, , , , , ,
-    Auth, Auth Service, "card important", service, , , , , ,
-    DB, Database, storage, database, cylinder, , , , ,
-    Panel, Settings, card, , rounded, 40, 80, 220, 120, ui
+nodes |id, label, css, role, shape, x, y, width, height, layer, parent|
+    User, User, person, actor, , , , , , ,
+    Auth, Auth Service, "card important", service, , , , , , ,
+    DB, Database, storage, database, cylinder, , , , , ,
+    Panel, Settings, card, , rounded, 40, 80, 220, 120, ui,
+    Button, Save, primary, , rounded, 72, 120, 96, 32, ui, Panel
 
 edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|
     User, Auth, Login, primary, normal, , , ,
@@ -132,6 +137,7 @@ weave @:
     node where role = database:
         add: storage
         shape: cylinder
+        parent: DataLayer
 
     edge where kind = request:
         add: primary
@@ -145,7 +151,7 @@ After weaving, the graph is equivalent to:
 ```sdn
 User: User role: actor @person
 Auth: Auth Service role: service @card @service
-DB: Database role: database @storage shape: cylinder
+DB: Database role: database @storage shape: cylinder parent: DataLayer
 
 User -> Auth: Login kind: request @primary
 Auth -> DB: Query kind: query
@@ -169,7 +175,8 @@ The TUI preview renders a compact graph summary. The GUI preview emits
 deterministic HTML with `sdn-graph`, `sdn-graph-node`, and `sdn-graph-edge`
 classes plus `sdd-diagram`, `sdd-node`, `sdd-connector`, `data-format="sdd"`,
 geometry attributes, connector route/waypoint attributes, and `sdn-css-<name>`
-classes derived from `@name`.
+classes derived from `@name`. Nodes also expose `data-parent` for group or
+container membership.
 
 ## Rendered Connector Contract
 
@@ -196,3 +203,8 @@ width/height, and layer by index while leaving node id/label, connectors, CSS
 definitions, styles, and graph metadata untouched. `sdn_graph_update_node_shape_at`
 and `sdn_graph_update_node_style_at` are narrow helpers for shape-only and
 style-label-only actions.
+
+`sdn_graph_update_node_parent_at` is the pure group/container edit operation. It
+updates one node's `parent` field by index while preserving geometry, style,
+shape, label, and connector metadata. The field is allowed to be empty for an
+ungrouped node.

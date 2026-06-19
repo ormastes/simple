@@ -146,8 +146,9 @@ possible so they are runner-verifiable.
    Named the SDN-backed diagram dialect **SDD: Simple Diagram Document**
    (`.sdd.sdn`) and started draw.io/Figma-level hardening by adding explicit
    node geometry, layer metadata, connector routes, waypoints, anchors, and
-   weave-based layout edits to `std.editor.services.sdn_graph`. Follow-on slice
-   adds rendered SVG connector paths and a pure reroute operation.
+   weave-based layout edits, rendered SVG connector paths, pure reroute
+   operations, node shape/style edits, and parent/group membership to
+   `std.editor.services.sdn_graph`.
 13. ACTIVE (local 2026-06-19) — **HTML UI editor substrate**:
    Added a pure `app.office.ui_editor` design-document layer for Figma-like
    positioned frames/components, inspector-ready HTML, SDD export, and guarded
@@ -245,6 +246,11 @@ possible so they are runner-verifiable.
   draw.io-like node shape/style/geometry edits, updated Draw catalog metadata
   with `node-shape-edit`, `node-style-edit`, `edit-sdd-node-shape`, and
   `edit-sdd-node-style`, and refreshed glossary/guide language.
+- 2026-06-19 dev: Advanced SDD Draw grouping. Added node `parent` metadata for
+  draw.io-like group/container membership across dense syntax, canonical tables,
+  weave rules, HTML `data-parent`, and a pure `sdn_graph_update_node_parent_at`
+  edit helper. Catalog metadata now exposes `group-containers` and
+  `edit-sdd-node-parent`.
 - 2026-06-19 dev: Advanced Calc formula hardening on the display-safe path.
   Added runner-verifiable `COUNTA`, `LEN`, `LOWER`, `UPPER`, and `TRIM` support
   through `evaluate_formula_display_text`, with catalog features

@@ -12,3 +12,6 @@
   specs remain under `test/`.
 - SDD-NFR-005: Diagram edit operations remain pure transformations over parsed
   SDD graphs and do not depend on GUI, filesystem, shell, or browser state.
+- SDD-NFR-006: Parent/group membership must remain deterministic metadata. The
+  canonical field is `parent`; user-facing "group" terminology must not create
+  a second source of truth.

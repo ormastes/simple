@@ -53,7 +53,8 @@ all-or-nothing edits over selected nodes.
 Draw/diagram editing should prefer the SDD substrate in
 `std.editor.services.sdn_graph` for geometry, layers, connector routes,
 waypoints, anchors, rendered SVG connector paths, pure edge reroute operations,
-and pure node shape/style edit operations. Legacy SVG shape helpers remain
+parent/group metadata, pure edge reroute operations, and pure node
+shape/style/parent edit operations. Legacy SVG shape helpers remain
 compatibility utilities, not the LLM catalog owner for Draw.
 
 Calc formula hardening should distinguish display-safe functions from the
@@ -69,7 +70,7 @@ modes:
 - Slides: `ppt_html=true safe_css=true positioned=true`
 - LLM catalog: Writer has `render-writer-markdown-html`; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with
-  `reroute-sdd-connector`, `edit-sdd-node-shape`, and
+  `reroute-sdd-connector`, `edit-sdd-node-parent`, `edit-sdd-node-shape`, and
   `edit-sdd-node-style`; Calc has `formula-counta`,
   `formula-text-functions`, and `formula-vlookup`; Designer has
   `render-ui-html`, `export-ui-sdd`, and

@@ -15,6 +15,7 @@ struct SdnGraphNode:
     width: text
     height: text
     layer: text
+    parent: text
 
 struct SdnGraphEdge:
     from_id: text
@@ -48,6 +49,7 @@ struct SdnGraphWeave:
     width: text
     height: text
     layer: text
+    parent: text
 
 struct SdnGraph:
     name: text
@@ -93,6 +95,7 @@ fn sdn_graph_parse(content: text) -> SdnGraph:
     var current_weave_width = ""
     var current_weave_height = ""
     var current_weave_layer = ""
+    var current_weave_parent = ""
     var in_weave = false
     var i = 0
     while i < lines.len():
@@ -123,7 +126,7 @@ fn sdn_graph_parse(content: text) -> SdnGraph:
             in_weave = true
         elif in_weave and (line.starts_with("node where ") or line.starts_with("edge where ")):
             if current_weave_target != "":
-                graph.weaves.push(SdnGraphWeave(target: current_weave_target, field: current_weave_field, value: current_weave_value, add_css: current_weave_add, shape: current_weave_shape, x: current_weave_x, y: current_weave_y, width: current_weave_width, height: current_weave_height, layer: current_weave_layer))
+                graph.weaves.push(SdnGraphWeave(target: current_weave_target, field: current_weave_field, value: current_weave_value, add_css: current_weave_add, shape: current_weave_shape, x: current_weave_x, y: current_weave_y, width: current_weave_width, height: current_weave_height, layer: current_weave_layer, parent: current_weave_parent))
             val selector = _sg_parse_weave_selector(line)
             current_weave_target = selector.0
             current_weave_field = selector.1
@@ -135,6 +138,7 @@ fn sdn_graph_parse(content: text) -> SdnGraph:
             current_weave_width = ""
             current_weave_height = ""
             current_weave_layer = ""
+            current_weave_parent = ""
         elif in_weave and line.starts_with("add:"):
             current_weave_add = line.slice(4, line.len()).trim()
         elif in_weave and line.starts_with("shape:"):
@@ -149,6 +153,8 @@ fn sdn_graph_parse(content: text) -> SdnGraph:
             current_weave_height = line.slice(7, line.len()).trim()
         elif in_weave and line.starts_with("layer:"):
             current_weave_layer = line.slice(6, line.len()).trim()
+        elif in_weave and line.starts_with("parent:"):
+            current_weave_parent = line.slice(7, line.len()).trim()
         elif current_css != "" and line.contains(":"):
             val sep = line.index_of(":")
             val key = line.slice(0, sep).trim()
@@ -182,7 +188,7 @@ fn sdn_graph_parse(content: text) -> SdnGraph:
             current_css = ""
         i = i + 1
     if current_weave_target != "":
-        graph.weaves.push(SdnGraphWeave(target: current_weave_target, field: current_weave_field, value: current_weave_value, add_css: current_weave_add, shape: current_weave_shape, x: current_weave_x, y: current_weave_y, width: current_weave_width, height: current_weave_height, layer: current_weave_layer))
+        graph.weaves.push(SdnGraphWeave(target: current_weave_target, field: current_weave_field, value: current_weave_value, add_css: current_weave_add, shape: current_weave_shape, x: current_weave_x, y: current_weave_y, width: current_weave_width, height: current_weave_height, layer: current_weave_layer, parent: current_weave_parent))
     sdn_graph_apply_weave(graph)
 
 fn sdn_graph_apply_weave(graph: SdnGraph) -> SdnGraph:
@@ -208,6 +214,8 @@ fn sdn_graph_apply_weave(graph: SdnGraph) -> SdnGraph:
                         node.height = rule.height
                     if rule.layer != "":
                         node.layer = rule.layer
+                    if rule.parent != "":
+                        node.parent = rule.parent
                     out.nodes[ni] = node
                 ni = ni + 1
         elif rule.target == "edge":
@@ -231,9 +239,9 @@ fn sdn_graph_to_canonical_sdn(graph: SdnGraph) -> text:
     if graph.css_file != "":
         out.push("css_file: \"" + graph.css_file + "\"")
     out.push("")
-    out.push("nodes |id, label, css, role, shape, x, y, width, height, layer|")
+    out.push("nodes |id, label, css, role, shape, x, y, width, height, layer, parent|")
     for node in graph.nodes:
-        out.push("    " + node.id + ", " + node.label + ", " + _sg_quote_if_space(node.css) + ", " + node.role + ", " + node.shape + ", " + node.x + ", " + node.y + ", " + node.width + ", " + node.height + ", " + node.layer)
+        out.push("    " + node.id + ", " + node.label + ", " + _sg_quote_if_space(node.css) + ", " + node.role + ", " + node.shape + ", " + node.x + ", " + node.y + ", " + node.width + ", " + node.height + ", " + node.layer + ", " + node.parent)
     out.push("")
     out.push("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|")
     for edge in graph.edges:
@@ -302,6 +310,20 @@ fn sdn_graph_update_node_style_at(graph: SdnGraph, node_index: i64, css: text) -
     val node = graph.nodes[node_index]
     sdn_graph_update_node_at(graph, node_index, css, node.role, node.shape, node.x, node.y, node.width, node.height, node.layer)
 
+fn sdn_graph_update_node_parent_at(graph: SdnGraph, node_index: i64, parent: text) -> SdnGraph:
+    if node_index < 0 or node_index >= graph.nodes.len():
+        return graph
+    var out_nodes: [SdnGraphNode] = []
+    var i = 0
+    while i < graph.nodes.len():
+        val current = graph.nodes[i]
+        var next = _sg_clone_node(current)
+        if i == node_index:
+            next.parent = parent
+        out_nodes.push(next)
+        i = i + 1
+    SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, nodes: out_nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+
 fn sdn_graph_render_html(graph: SdnGraph) -> text:
     var html: [text] = []
     html.push("<div class=\"sdn-graph sdd-diagram\" data-format=\"sdd\" data-format-name=\"" + sdn_graph_format_name() + "\" data-graph=\"" + _sg_escape_html(graph.name) + "\" data-direction=\"" + _sg_escape_html(graph.direction) + "\" data-theme=\"" + _sg_escape_html(graph.theme) + "\" data-css-file=\"" + _sg_escape_html(graph.css_file) + "\">")
@@ -326,7 +348,7 @@ fn sdn_graph_render_html(graph: SdnGraph) -> text:
             style = style + ";width:" + _sg_safe_length(node.width)
         if node.height != "":
             style = style + ";height:" + _sg_safe_length(node.height)
-        html.push("<button type=\"button\" class=\"sdn-graph-node sdd-node " + _sg_css_classes(node.css) + "\" data-node=\"" + _sg_escape_html(node.id) + "\" data-role=\"" + _sg_escape_html(node.role) + "\" data-shape=\"" + _sg_escape_html(node.shape) + "\" data-layer=\"" + _sg_escape_html(node.layer) + "\" data-x=\"" + _sg_escape_html(node.x) + "\" data-y=\"" + _sg_escape_html(node.y) + "\" data-width=\"" + _sg_escape_html(node.width) + "\" data-height=\"" + _sg_escape_html(node.height) + "\" style=\"" + style + "\">" + _sg_escape_html(node.label) + "</button>")
+        html.push("<button type=\"button\" class=\"sdn-graph-node sdd-node " + _sg_css_classes(node.css) + "\" data-node=\"" + _sg_escape_html(node.id) + "\" data-role=\"" + _sg_escape_html(node.role) + "\" data-shape=\"" + _sg_escape_html(node.shape) + "\" data-layer=\"" + _sg_escape_html(node.layer) + "\" data-parent=\"" + _sg_escape_html(node.parent) + "\" data-x=\"" + _sg_escape_html(node.x) + "\" data-y=\"" + _sg_escape_html(node.y) + "\" data-width=\"" + _sg_escape_html(node.width) + "\" data-height=\"" + _sg_escape_html(node.height) + "\" style=\"" + style + "\">" + _sg_escape_html(node.label) + "</button>")
         i = i + 1
     var edge_div_index = 0
     for edge in graph.edges:
@@ -429,7 +451,8 @@ fn _sg_clone_node(node: SdnGraphNode) -> SdnGraphNode:
         y: node.y,
         width: node.width,
         height: node.height,
-        layer: node.layer
+        layer: node.layer,
+        parent: node.parent
     )
 
 fn _sg_int_length_or(value: text, fallback: i64) -> i64:
@@ -462,7 +485,7 @@ fn _sg_parse_dense_node(line: text) -> SdnGraphNode:
     val id = line.slice(0, sep).trim()
     val rest = line.slice(sep + 1, line.len()).trim()
     val label = _sg_label_before_meta(rest)
-    SdnGraphNode(id: id, label: label, css: _sg_collect_at(rest), role: _sg_meta_value(rest, "role"), shape: _sg_meta_value(rest, "shape"), x: _sg_meta_value(rest, "x"), y: _sg_meta_value(rest, "y"), width: _sg_meta_value(rest, "width"), height: _sg_meta_value(rest, "height"), layer: _sg_meta_value(rest, "layer"))
+    SdnGraphNode(id: id, label: label, css: _sg_collect_at(rest), role: _sg_meta_value(rest, "role"), shape: _sg_meta_value(rest, "shape"), x: _sg_meta_value(rest, "x"), y: _sg_meta_value(rest, "y"), width: _sg_meta_value(rest, "width"), height: _sg_meta_value(rest, "height"), layer: _sg_meta_value(rest, "layer"), parent: _sg_meta_value(rest, "parent"))
 
 fn _sg_parse_dense_edge(line: text) -> SdnGraphEdge:
     val op = _sg_edge_operator(line)
@@ -503,7 +526,8 @@ fn _sg_parse_nodes_table(lines: [text], start: i64) -> ([SdnGraphNode], i64):
             val width = if cols.len() >= 8 then cols[7].trim() else: ""
             val height = if cols.len() >= 9 then cols[8].trim() else: ""
             val layer = if cols.len() >= 10 then cols[9].trim() else: ""
-            nodes.push(SdnGraphNode(id: cols[0].trim(), label: _sg_unquote(cols[1].trim()), css: _sg_unquote(cols[2].trim()), role: cols[3].trim(), shape: shape, x: x, y: y, width: width, height: height, layer: layer))
+            val parent = if cols.len() >= 11 then _sg_unquote(cols[10].trim()) else: ""
+            nodes.push(SdnGraphNode(id: cols[0].trim(), label: _sg_unquote(cols[1].trim()), css: _sg_unquote(cols[2].trim()), role: cols[3].trim(), shape: shape, x: x, y: y, width: width, height: height, layer: layer, parent: parent))
         i = i + 1
     (nodes, i)
 

@@ -12,6 +12,9 @@
 - SDD-007: Pure reroute edits update edge route, waypoint, and anchor metadata.
 - SDD-008: Pure node edits update shape, style labels, role, geometry, and
   layer metadata while preserving non-target nodes and connector metadata.
+- SDD-009: Parent/container membership is parsed from dense syntax and canonical
+  tables, rendered as deterministic HTML metadata, canonicalized, and editable
+  through a pure parent update helper.
 
 ## Evidence
 

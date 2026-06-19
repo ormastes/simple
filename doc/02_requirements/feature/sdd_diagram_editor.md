@@ -22,8 +22,11 @@ First production slice for the SDN-backed diagram editor dialect.
 - SDD-008: Diagram node shape, style label, role, geometry, and layer metadata
   can be updated through pure node edit operations suitable for IDE/editor event
   wiring.
+- SDD-009: Diagram nodes preserve parent/container membership from dense SDN and
+  canonical tables so draw.io-like grouping can be represented without a
+  separate file format.
 
 ## Out of Scope
 
-Interactive drag handles, draw.io XML import/export, and a full browser editor
-remain follow-up slices.
+Interactive drag handles, draw.io XML import/export, cycle-validating group
+trees, and a full browser editor remain follow-up slices.
