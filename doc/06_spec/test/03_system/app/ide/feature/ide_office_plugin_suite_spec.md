@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 767 lines folded for reproduction.
+Runnable source: 768 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -687,6 +687,7 @@ expect(selected_sdd_action.output).to_contain("data-resize-handle=\"se\" data-no
 expect(selected_sdd_edge_action.output).to_contain("data-connector-handle=\"start\" data-edge-index=\"0\" data-label=\"Link\" data-kind=\"\" data-route=\"orthogonal\" data-anchor=\"right\" data-x=\"80\" data-y=\"10\"")
 expect(selected_sdd_edge_action.output).to_contain("data-connector-handle=\"end\" data-edge-index=\"0\" data-label=\"Link\" data-kind=\"\" data-route=\"orthogonal\" data-anchor=\"left\"")
 expect(selected_sdd_edge_action.output).to_contain("data-connector-handle=\"waypoint\" data-waypoint-index=\"0\" data-edge-index=\"0\" data-label=\"Link\" data-kind=\"\" data-route=\"orthogonal\" data-x=\"80\" data-y=\"10\"")
+expect(selected_sdd_edge_action.output).to_contain("data-y=\"10\" data-from=\"A\" data-to=\"B\"")
 expect(sdd_game_action.output).to_contain("sprite player")
 expect(sdd_game_action.output).to_contain("rect=10,20,16,16")
 expect(legacy_ui_action.action).to_equal("render-ui-html")
