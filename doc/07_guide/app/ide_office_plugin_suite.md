@@ -127,6 +127,8 @@ Math actions accept one expression body. `render-mathml` returns MathML,
 `render-mathml-checked` returns MathML with malformed-input rejection reasons,
 and `render-math-structure` returns compact structure readback markers such as
 `contains=fraction`, `contains=superscript`, or `contains=square-root`.
+Full MathML documents expose `data-format="mathml"` and `data-token-count` root
+metadata for IDE/readback parity with the other Office renderers.
 
 Counter actions use `value|counter_increment`, `value|counter_decrement`, or
 `value|counter_reset` and return `value=...`, `status=...`, and

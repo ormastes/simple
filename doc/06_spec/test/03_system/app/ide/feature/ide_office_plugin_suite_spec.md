@@ -366,7 +366,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 492 lines folded for reproduction.
+Runnable source: 494 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -837,6 +837,8 @@ val mathml_action = office_action_dispatch("render-mathml", "frac(1, 2)")
 val math_checked_action = office_action_dispatch("render-mathml-checked", "a + b * c")
 val math_bad_action = office_action_dispatch("render-mathml-checked", "a +")
 val math_structure_action = office_action_dispatch("render-math-structure", "sqrt(x^2)")
+expect(mathml_action.output).to_contain("data-format=\"mathml\"")
+expect(mathml_action.output).to_contain("data-token-count=\"6\"")
 expect(mathml_action.output).to_contain("<mfrac><mn>1</mn><mn>2</mn></mfrac>")
 expect(math_checked_action.output).to_contain("<mi>a</mi><mo>+</mo>")
 expect(math_bad_action.reason).to_equal("syntax-error")

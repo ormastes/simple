@@ -82,12 +82,14 @@ _A flat expression renders to a MathML <math><mrow> sequence._
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ml = math_to_mathml("a + 1")
 expect(ml).to_start_with("<math ")
+expect(ml).to_contain("data-format=\"mathml\"")
+expect(ml).to_contain("data-token-count=\"3\"")
 expect(ml).to_contain("<mrow>")
 expect(ml).to_end_with("</math>")
 ```
