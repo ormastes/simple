@@ -341,3 +341,7 @@ possible so they are runner-verifiable.
   auto-layout, and constraint metadata for nodes outside auto-layout parents.
   Designer catalog metadata now exposes `node-duplicate` and
   `ui-duplicate-node`.
+- 2026-06-19 dev: Wired duplicate actions into the headless Office action
+  bridge. `ui-duplicate-node` and `duplicate-sdd-node` accept a first-line
+  `source_id|new_id|dx|dy` edit header followed by the UI/SDD document body and
+  return rendered HTML for the updated document.

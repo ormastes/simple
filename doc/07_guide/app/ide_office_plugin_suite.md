@@ -53,6 +53,11 @@ duplicating rendering logic.
 suite has a triad of Markdown-source HTML render actions: Markdown preview,
 Writer paper HTML, and PPT deck HTML.
 
+Duplicate actions use a compact first-line edit header:
+`source_id|new_id|dx|dy`, followed by the UI or SDD document body. The
+`ui-duplicate-node` action returns rendered UI HTML; `duplicate-sdd-node`
+returns rendered SDD HTML.
+
 Designer/UI editing uses `app.office.ui_editor` as a pure HTML design document
 substrate. It parses positioned frame/component records, renders a stable
 `.office-ui-design` HTML surface with inspector metadata, exports nodes to
