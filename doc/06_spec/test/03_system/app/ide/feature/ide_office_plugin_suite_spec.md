@@ -29,7 +29,7 @@ ide_office_plugin_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -384,6 +384,22 @@ expect(glossary).to_contain("endpoint/opposite-node ids")
 expect(guide).to_contain("Selected connector handles expose edit actions")
 expect(guide).to_contain("endpoint/opposite-node ids")
 expect(guide).to_contain("handle_meta=true")
+```
+
+</details>
+
+#### documents the Designer resize handle metadata contract
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val guide = file_read("doc/07_guide/app/ide_office_plugin_suite.md")
+expect(guide).to_contain("visible `data-resize-handle` corner handles tagged with `data-node`")
+expect(guide).to_contain("`data-node-index`")
 ```
 
 </details>
@@ -1669,8 +1685,8 @@ expect(summary).to_contain("libre_roundtrip=6")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
