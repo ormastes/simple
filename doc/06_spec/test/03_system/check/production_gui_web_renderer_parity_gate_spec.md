@@ -27,7 +27,7 @@ production_gui_web_renderer_parity_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -93,7 +93,7 @@ sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 67 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -105,6 +105,15 @@ val evidence = file_read("build/test-production-gui-web-renderer-parity-gate/evi
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_exit_code=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_host_uname_s=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_host_uname_m=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_reason=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_backend=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_required_commands=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_missing_commands=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_reason=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_backend=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_source_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_matrix_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_status=pass")
@@ -137,10 +146,49 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_me
 val status = _value_of(evidence, "production_gui_web_renderer_parity_gate_status")
 val reason = _value_of(evidence, "production_gui_web_renderer_parity_gate_reason")
 val source_status = _value_of(evidence, "production_gui_web_renderer_parity_gate_source_status")
+val surface_tauri_status = _value_of(evidence, "production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_status")
+val surface_tauri_backend = _value_of(evidence, "production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_backend")
+val surface_tauri_required = _value_of(evidence, "production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_required_commands")
+val surface_chrome_status = _value_of(evidence, "production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_status")
+val surface_chrome_backend = _value_of(evidence, "production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_backend")
 if status == "pass":
     expect(source_status).to_equal("pass")
 else:
     expect(reason.len()).to_be_greater_than(0)
+if surface_tauri_status.len() > 0:
+    expect(surface_tauri_backend.len()).to_be_greater_than(0)
+    if surface_tauri_backend == "macos-wkwebview-snapshot":
+        expect(surface_tauri_required).to_equal("swift,node")
+    else:
+        expect(surface_tauri_backend).to_equal("x11-xvfb-window-screenshot")
+        expect(surface_tauri_required).to_equal("cargo,xvfb-run,dbus-run-session,xdotool,import,convert,node")
+if surface_chrome_status.len() > 0:
+    expect(surface_chrome_backend.len()).to_be_greater_than(0)
+```
+
+</details>
+
+#### forwards subcheck timeout metadata from controlled parity evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-production-gui-web-renderer-parity-gate-timeout && mkdir -p build/test-production-gui-web-renderer-parity-gate-timeout/source && printf 'production_gui_web_renderer_parity_status=fail\\nproduction_gui_web_renderer_parity_reason=electron-generated-gui-matrix-failed\\nproduction_gui_web_renderer_parity_matrix_exit_code=124\\nproduction_gui_web_renderer_parity_matrix_status=timeout\\nproduction_gui_web_renderer_parity_matrix_reason=matrix-timeout\\nproduction_gui_web_renderer_parity_matrix_timed_out=true\\nproduction_gui_web_renderer_parity_matrix_timeout_secs=3\\nproduction_gui_web_renderer_parity_layout_manifest_status=\\nproduction_gui_web_renderer_parity_surface_manifest_status=\\nproduction_gui_web_renderer_parity_backend_status=\\nproduction_gui_web_renderer_parity_font_offload_status=\\nproduction_gui_web_renderer_parity_metal_readback_status=\\n' > build/test-production-gui-web-renderer-parity-gate-timeout/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-production-gui-web-renderer-parity-gate-timeout/source/evidence.env BUILD_DIR=build/test-production-gui-web-renderer-parity-gate-timeout/out REPORT_PATH=build/test-production-gui-web-renderer-parity-gate-timeout/report.md sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-production-gui-web-renderer-parity-gate-timeout/out/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=electron-generated-gui-matrix-failed")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_exit_code=124")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_status=timeout")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_reason=matrix-timeout")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_timed_out=true")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_timeout_secs=3")
 ```
 
 </details>
@@ -208,12 +256,36 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_su
 
 </details>
 
+#### rejects pass status when raw Metal readback evidence is missing
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-production-gui-web-renderer-parity-gate-metal-missing && mkdir -p build/test-production-gui-web-renderer-parity-gate-metal-missing/source && printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_reason=pass\\nproduction_gui_web_renderer_parity_matrix_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_case_count=50\\nproduction_gui_web_renderer_parity_layout_manifest_pass_count=36\\nproduction_gui_web_renderer_parity_layout_manifest_tracked_count=14\\nproduction_gui_web_renderer_parity_layout_manifest_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_electron_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_blur_or_tolerance_used=false\\nproduction_gui_web_renderer_parity_backend_status=pass\\nproduction_gui_web_renderer_parity_font_offload_status=pass\\nproduction_gui_web_renderer_parity_metal_readback_status=\\n' > build/test-production-gui-web-renderer-parity-gate-metal-missing/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-production-gui-web-renderer-parity-gate-metal-missing/source/evidence.env BUILD_DIR=build/test-production-gui-web-renderer-parity-gate-metal-missing/out REPORT_PATH=build/test-production-gui-web-renderer-parity-gate-metal-missing/report.md sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-production-gui-web-renderer-parity-gate-metal-missing/out/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=metal-readback-not-pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_backend_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_font_offload_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readback_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_readback_status=pass")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
