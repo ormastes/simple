@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 645 lines folded for reproduction.
+Runnable source: 649 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -509,6 +509,8 @@ val invalid_padding_ui_auto_layout_action = office_action_dispatch("ui-auto-layo
 val ui_constraints_action = office_action_dispatch("ui-constraints-edit", "button|left|top|stretch|top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_constraints_action = office_action_dispatch("ui-constraints-edit", "   |left|top|stretch|top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_field_ui_constraints_action = office_action_dispatch("ui-constraints-edit", "button|left|top|   |top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val invalid_h_ui_constraints_action = office_action_dispatch("ui-constraints-edit", "button|left|top|wide|top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val invalid_v_ui_constraints_action = office_action_dispatch("ui-constraints-edit", "button|left|top|stretch|middle\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_layer_action = office_action_dispatch("ui-layer-edit", "button|controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_layer_action = office_action_dispatch("ui-layer-edit", "   |controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_field_ui_layer_action = office_action_dispatch("ui-layer-edit", "button|controls|   \ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -657,6 +659,8 @@ expect(invalid_padding_ui_auto_layout_action.reason).to_equal("invalid-args")
 expect(ui_constraints_action.output).to_contain("data-constraint-h=\"stretch\"")
 expect(blank_ui_constraints_action.reason).to_equal("invalid-args")
 expect(blank_field_ui_constraints_action.reason).to_equal("invalid-args")
+expect(invalid_h_ui_constraints_action.reason).to_equal("invalid-args")
+expect(invalid_v_ui_constraints_action.reason).to_equal("invalid-args")
 expect(ui_layer_action.output).to_contain("data-z-index=\"9\"")
 expect(blank_ui_layer_action.reason).to_equal("invalid-args")
 expect(blank_field_ui_layer_action.reason).to_equal("invalid-args")

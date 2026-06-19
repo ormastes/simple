@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 99 | 99 | 0 | 0 |
+| 100 | 100 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1491,6 +1491,23 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects malformed UI constraint replacement fields
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val horizontal_result = office_action_dispatch("ui-constraints-edit", "button|left|top|wide|top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val vertical_result = office_action_dispatch("ui-constraints-edit", "button|left|top|stretch|middle\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+expect(horizontal_result.reason).to_equal("invalid-args")
+expect(vertical_result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects blank UI layer action target ids
 
 <details>
@@ -1845,8 +1862,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 99 |
-| Active scenarios | 99 |
+| Total scenarios | 100 |
+| Active scenarios | 100 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
