@@ -118,12 +118,12 @@ possible so they are runner-verifiable.
      expressions to MathML (mi/mn/mo) + msup/msqrt helpers. Spec 6/6.
    ALL SIX LibreOffice apps (Writer/Calc/Impress/Draw/Base/Math) now implemented
    and verified (libreoffice spec 6/6, all implemented:true).
-8. DONE (landed origin effc1b1) — **Game-tool connect** (`office/game_bridge.spl`):
-   declares game↔{calc,draw,db} connection targets; implements Calc-as-game-data
-   (`calc_cells_to_game_values`/`calc_row_to_game_tokens` — a game reads level/
-   tuning tokens from a spreadsheet by cell ref, verified via direct run:
-   "wall floor door"). Draw/Base honestly flagged not-yet-implemented (blocked by
-   the same drawing-model/f64 issues as slice 7). Connection-surface spec 2/2.
+8. DONE (landed origin effc1b1; advanced locally 2026-06-19) — **Game-tool connect** (`office/game_bridge.spl`):
+   declares game↔{calc,draw,db} connection targets. Calc exports level/tuning
+   tokens from spreadsheet cell refs; Draw exports SDD nodes as deterministic
+   sprite records; Base exports exact-match query rows as game state records.
+   Connection/spec surface is now 8/8 runner-green for Calc/Draw/Base
+   declarations and adapters.
 9. DONE (landed origin 626f970) — **Rename to "LibreOffice"** (minimal/honest):
    `app.office.libreoffice` brands the suite "LibreOffice" and maps components to
    Writer/Calc/Impress/Draw/Base/Math, with an `implemented` flag reporting only
@@ -317,3 +317,8 @@ possible so they are runner-verifiable.
   export, and selected SDD Draw HTML render. This gives agents and CLI callers
   one stable non-GUI path to execute the suite actions advertised in the LLM
   catalog.
+- 2026-06-19 dev: Advanced the game-tool bridge now that Draw and Base are live.
+  `game_connection_is_implemented` reports Calc/Draw/Base; Calc cells export as
+  level/tuning tokens; SDD Draw nodes export as stable game sprite records; Base
+  exact-match query rows export as `key=value` game state records. Focused
+  `game_bridge_spec` passed 8/0.

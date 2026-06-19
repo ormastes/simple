@@ -15,6 +15,7 @@ sheets, dashboard, DB admin, and LibreOffice-like app catalog checks through
 - IDE slide probe: `src/app/ide/slides_compat.spl`
 - IDE Draw probe: `src/app/ide/draw_sanity.spl`
 - HTML UI editor: `src/app/office/ui_editor.spl`
+- Game data bridge: `src/app/office/game_bridge.spl`
 - SDD diagram substrate: `src/lib/editor/services/sdn_graph.spl`
 - LLM-readable catalog: `src/app/office/llm_catalog.spl`
 - IDE system spec:
@@ -87,6 +88,12 @@ row insertion validates schema width before appending, while `update_where`,
 filesystem, SQL parser, or GUI dependencies. These helpers preserve the
 iteration-based row access workaround used for non-first columns.
 
+Game tool integration uses `app.office.game_bridge` as a pure data bridge over
+Calc, Draw, and Base. Calc cell references become level/tuning tokens, SDD Draw
+nodes become deterministic sprite records, and Base exact-match query rows
+become `key=value` game state records. The bridge does not import a game loop,
+GUI renderer, browser, filesystem, or host API.
+
 Math editing uses `app.office.math_editor` as a pure MathML rendering substrate.
 The public renderer keeps flat token MathML for simple expressions, escapes
 XML-sensitive operator text, and recognizes `frac(a, b)` shorthand for the same
@@ -128,21 +135,25 @@ bin/simple check \
   src/app/office/md_wysiwyg_gui.spl \
   src/app/office/slides/html_render.spl \
   src/app/office/ui_editor.spl \
+  src/app/office/game_bridge.spl \
   src/app/ide/markdown_render.spl \
   src/app/ide/slides_compat.spl \
   test/01_unit/app/office/md_wysiwyg_spec.spl \
   test/01_unit/app/office/md_wysiwyg_render_spec.spl \
   test/01_unit/app/office/slides/html_render_spec.spl \
   test/01_unit/app/office/ui_editor_spec.spl \
+  test/01_unit/app/office/game_bridge_spec.spl \
   test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl
 
 SIMPLE_LIB=src bin/simple test test/01_unit/app/office/md_wysiwyg_spec.spl
 SIMPLE_LIB=src bin/simple test test/01_unit/app/office/md_wysiwyg_render_spec.spl
 SIMPLE_LIB=src bin/simple test test/01_unit/app/office/slides/html_render_spec.spl
 SIMPLE_LIB=src bin/simple test test/01_unit/app/office/ui_editor_spec.spl
+SIMPLE_LIB=src bin/simple test test/01_unit/app/office/game_bridge_spec.spl
 SIMPLE_LIB=src bin/simple test test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl
 bin/simple-interp src/app/ide/main.spl --feature-check --tui
 bin/simple-interp src/app/ide/main.spl --feature-check --gui
+bin/simple spipe-docgen test/01_unit/app/office/game_bridge_spec.spl --output doc/06_spec --no-index
 bin/simple spipe-docgen test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl --output doc/06_spec --no-index
 find doc/06_spec -name '*_spec.spl' | wc -l
 ```

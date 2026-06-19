@@ -5,21 +5,22 @@
 # Calc-as-game-data: a game reads its level layout / tuning table from a
 # spreadsheet by cell reference, getting back the cells' display strings.
 #
-# Draw (sprites from vector graphics) and Base (game state in a DB) are declared
-# connection targets but are pending the drawing vector-shape model + the f64
-# toolchain fix (Draw) and a simple_db query surface (Base); they are NOT claimed
-# as implemented.
+# Draw exports SDD diagram nodes as deterministic sprite records. Base exports
+# exact-match query rows as game state records. The bridge stays pure text data:
+# no GUI, browser, host filesystem, or runtime game loop dependency.
 
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.sheets.cell.{cell_display_text}
+use app.office.base_db.{DbTable, column_index, row_count, select_where}
+use std.editor.services.sdn_graph.{SdnGraph, sdn_graph_parse}
 
 fn game_office_connections() -> [text]:
     """The office data sources the game tool can connect to."""
     ["calc", "draw", "db"]
 
 fn game_connection_is_implemented(target: text) -> bool:
-    """Whether a connection target is wired today (only 'calc' so far)."""
-    target == "calc"
+    """Whether a connection target is wired today."""
+    target == "calc" or target == "draw" or target == "db"
 
 fn game_implemented_connections() -> [text]:
     """The connection targets actually wired today."""
@@ -44,3 +45,52 @@ fn calc_row_to_game_tokens(sheet: Sheet, refs: [text]) -> text:
     (e.g. a level-layout row read from a spreadsheet)."""
     val values = calc_cells_to_game_values(sheet, refs)
     values.join(" ")
+
+fn draw_sdd_to_game_sprites(source: text) -> [text]:
+    """Convert SDD Draw nodes into game sprite records.
+
+    Each record is stable text so a headless game tool can consume Draw-authored
+    sprite/layout metadata without importing any GUI renderer."""
+    draw_graph_to_game_sprites(sdn_graph_parse(source))
+
+fn draw_graph_to_game_sprites(graph: SdnGraph) -> [text]:
+    """Convert an already-parsed SDD graph into game sprite records."""
+    var out: [text] = []
+    for node in graph.nodes:
+        val shape = if node.shape != "" then node.shape else "rect"
+        val css = if node.css != "" then node.css else "default"
+        val layer = if node.layer != "" then node.layer else "0"
+        out.push("sprite {node.id} label={node.label} shape={shape} style={css} rect={node.x},{node.y},{node.width},{node.height} layer={layer}")
+    out
+
+fn draw_sdd_to_game_sprite_manifest(source: text) -> text:
+    """A newline-separated sprite manifest for game tooling."""
+    draw_sdd_to_game_sprites(source).join("\n")
+
+fn _game_bridge_row_get(row: [text], idx: i32) -> text:
+    var i = 0
+    for cell in row:
+        if i == idx:
+            return cell
+        i = i + 1
+    ""
+
+fn base_query_to_game_records(table: DbTable, match_col: text, match_value: text, key_col: text, value_col: text) -> [text]:
+    """Convert Base exact-match query rows into game state key=value records."""
+    var out: [text] = []
+    val key_idx = column_index(table, key_col)
+    val value_idx = column_index(table, value_col)
+    if key_idx < 0 or value_idx < 0:
+        return out
+    val rows = select_where(table, match_col, match_value)
+    for row in rows:
+        out.push("{_game_bridge_row_get(row, key_idx)}={_game_bridge_row_get(row, value_idx)}")
+    out
+
+fn base_query_to_game_state(table: DbTable, match_col: text, match_value: text, key_col: text, value_col: text) -> text:
+    """A compact game state line built from Base query records."""
+    base_query_to_game_records(table, match_col, match_value, key_col, value_col).join(" ")
+
+fn base_table_game_summary(table: DbTable) -> text:
+    """Small readiness marker for a Base table exposed to game tooling."""
+    "db {table.name} rows={row_count(table)}"
