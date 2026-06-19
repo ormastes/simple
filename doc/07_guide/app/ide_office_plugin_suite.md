@@ -52,6 +52,9 @@ duplicating rendering logic.
 `wysiwyg_preview_document_html` route through the same headless bridge, so the
 suite has a triad of Markdown-source HTML render actions: Markdown preview,
 Writer paper HTML, and PPT deck HTML.
+`md-edit` accepts `line_no|expected_source|new_source` followed by the Markdown
+body and returns updated Markdown source, rejecting stale lines with a
+deterministic diff.
 
 Duplicate actions use a compact first-line edit header:
 `source_id|new_id|dx|dy`, followed by the UI or SDD document body. The
@@ -158,7 +161,7 @@ modes:
 - Markdown: `css_doc=true escaped=true`
 - Slides: `ppt_html=true safe_css=true positioned=true`
 - Draw: `html=true route=true select=true inspect=true edit=true layout=true canvas=true`
-- LLM catalog: Markdown has `render-markdown-preview-html`; Writer has
+- LLM catalog: Markdown has `render-markdown-preview-html` and `md-edit`; Writer has
   `render-writer-markdown-html`; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with
   `render-sdd-html-with-selection`, `reroute-sdd-connector`,

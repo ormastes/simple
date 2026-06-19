@@ -378,3 +378,7 @@ possible so they are runner-verifiable.
   bridge. `inspect-sdd-node` and `inspect-sdd-edge` now return compact
   draw.io-like readback text for node geometry/style/group fields and edge
   route/path fields, including missing-node/edge rejection reasons.
+- 2026-06-19 dev: Wired Markdown guarded line editing into the headless Office
+  action bridge. `md-edit` accepts `line_no|expected_source|new_source`
+  followed by the Markdown body, returns updated Markdown source, and rejects
+  stale or missing lines with the existing deterministic WYSIWYG diff.

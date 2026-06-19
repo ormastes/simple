@@ -324,7 +324,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 288 lines folded for reproduction.
+Runnable source: 293 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -377,6 +377,8 @@ expect(catalog[4].actions.join(",")).to_contain("distribute-sdd-selection")
 expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-node")
 expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-edge")
 val md_action = office_action_dispatch("render-markdown-preview-html", "# Markdown")
+val md_edit_action = office_action_dispatch("md-edit", "1|old|new\n# Markdown\nold")
+val md_stale_edit_action = office_action_dispatch("md-edit", "1|missing|new\n# Markdown\nold")
 val writer_action = office_action_dispatch("render-writer-markdown-html", "# Writer")
 val ppt_action = office_action_dispatch("render-ppt-markdown-html", "# Deck\n\n## Slide")
 val ui_action = office_action_dispatch("render-ui-html", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -408,6 +410,9 @@ val sdd_inspect_edge_action = office_action_dispatch("inspect-sdd-edge", "0\ngra
 val missing_sdd_inspect_edge_action = office_action_dispatch("inspect-sdd-edge", "1\ngraph: Inspect\nA: A\nB: B\nA -> B: link")
 expect(md_action.output).to_contain("class=\"wysiwyg-preview\"")
 expect(md_action.output).to_contain("<h1>Markdown</h1>")
+expect(md_edit_action.output).to_contain("new")
+expect(md_edit_action.reason).to_equal("updated")
+expect(md_stale_edit_action.reason).to_equal("stale-line")
 expect(writer_action.output).to_contain("class=\"md-paper\"")
 expect(ppt_action.output).to_contain("class=\"md-ppt-deck\"")
 expect(ui_action.output).to_contain("data-format=\"html-ui\"")
