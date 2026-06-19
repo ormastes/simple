@@ -592,12 +592,15 @@ expect(edge.edge_index).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 55 lines folded for reproduction.
+Runnable source: 61 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val graph = sdn_graph_parse("graph: edit\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nA -> B: c route: simple start: right end: left")
 val created = sdn_graph_add_edge(graph, "B", "A", "return", "secondary", "reply", "simple", "", "left", "right")
+val bad_create_route = sdn_graph_add_edge_checked(graph, "B", "A", "return", "secondary", "reply", "curve", "", "left", "right")
+val bad_create_anchor = sdn_graph_add_edge_checked(graph, "B", "A", "return", "secondary", "reply", "simple", "", "east", "right")
+val bad_create_waypoint = sdn_graph_add_edge_checked(graph, "B", "A", "return", "secondary", "reply", "simple", "10,20", "left", "right")
 val updated = sdn_graph_update_edge_at(created, 0, "orthogonal", "140x30;200x80", "right", "left")
 val bad_route = sdn_graph_update_edge_checked(created, 0, "curve", "140x30", "right", "left")
 val bad_anchor = sdn_graph_update_edge_checked(created, 0, "orthogonal", "140x30", "east", "left")
@@ -622,6 +625,9 @@ expect(created.edges[1].route).to_equal("simple")
 expect(created.edges[1].waypoints).to_equal("")
 expect(created.edges[1].start_anchor).to_equal("left")
 expect(created.edges[1].end_anchor).to_equal("right")
+expect(bad_create_route.reason).to_equal("invalid-route")
+expect(bad_create_anchor.reason).to_equal("invalid-anchor")
+expect(bad_create_waypoint.reason).to_equal("invalid-waypoints")
 expect(sdn_graph_render_html(created)).to_contain(">return</div>")
 expect(sdn_graph_render_html(created)).to_contain("sdn-css-secondary")
 expect(sdn_graph_render_html(created)).to_contain("data-kind=\"reply\"")

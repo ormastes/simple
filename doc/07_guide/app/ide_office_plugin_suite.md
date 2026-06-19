@@ -105,7 +105,7 @@ and rejects duplicate IDs, blank IDs, and missing parent IDs.
 `edit-sdd-node-geometry` uses `node_id|x|y|width|height`.
 `delete-sdd-node` uses `node_id` and removes attached connectors.
 `edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`; numeric fields must be non-negative integers, snap is `true` or `false`, and background must be a safe CSS value.
-`add-sdd-edge` uses `from_id|to_id|label|css|kind|route|waypoints|start|end`.
+`add-sdd-edge` uses `from_id|to_id|label|css|kind|route|waypoints|start|end` and applies the same route, anchor, and waypoint validation as connector reroute.
 `duplicate-sdd-edge` uses `edge_index`.
 `edit-sdd-edge-label` uses `edge_index|new_label`.
 `edit-sdd-edge-label-point` uses `edge_index|label_x|label_y`.
