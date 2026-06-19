@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 96 | 96 | 0 | 0 |
+| 97 | 97 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1720,6 +1720,25 @@ expect(negative_result.ok).to_be(true)
 
 </details>
 
+#### rejects malformed SDD reroute connector fields
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val route_result = office_action_dispatch("reroute-sdd-connector", "0|curve|60x10|right|left\ngraph: Route\nA: A\nB: B\nA -> B: link")
+val waypoint_result = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60xbad|right|left\ngraph: Route\nA: A\nB: B\nA -> B: link")
+val anchor_result = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60x10|side|left\ngraph: Route\nA: A\nB: B\nA -> B: link")
+expect(route_result.reason).to_equal("invalid-args")
+expect(waypoint_result.reason).to_equal("invalid-args")
+expect(anchor_result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects blank SDD add node geometry
 
 <details>
@@ -1788,8 +1807,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 96 |
-| Active scenarios | 96 |
+| Total scenarios | 97 |
+| Active scenarios | 97 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
