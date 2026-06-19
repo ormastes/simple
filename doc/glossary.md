@@ -16,11 +16,13 @@ path for HTML UI design documents. Frame nodes with horizontal or vertical
 layout metadata place child nodes using integer gap/padding and child
 constraints, then expose resolved absolute geometry in HTML and SDD output.
 
-## SDD (Simple Diagram Document)
-SDD is the `.sdd.sdn` diagram dialect for Simple IDE Draw. It extends SDN graph
-blocks with reusable `@css` style labels, draw.io-style connectors and grouping,
-and Figma-like geometry fields (`x`, `y`, `width`, `height`, `layer`, `parent`)
-that render through the pure `std.editor.services.sdn_graph` HTML preview path.
+## SDD Diagram Draw
+SDD Diagram Draw is the product-facing Simple IDE Draw capability. It stores
+diagrams as SDD (Simple Diagram Document) `.sdd.sdn` files, renders through the
+pure `std.editor.services.sdn_graph` HTML preview path, and exposes
+draw.io-style grouping/connectors plus Figma-like geometry fields (`x`, `y`,
+`width`, `height`, `layer`, `parent`) without introducing a separate diagram
+file format.
 
 ## Crate
 Package and module are used in many different meaning across different languages.
