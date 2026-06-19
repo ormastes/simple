@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 599 lines folded for reproduction.
+Runnable source: 601 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -516,6 +516,7 @@ val deleted_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-
 val missing_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent|stroke\ncss |name, extends, target|\n    accent, none, node\nstyles |css, key, value|\n    accent, fill, #eeeeee")
 val blank_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent|   \ncss |name, extends, target|\n    accent, none, node\nstyles |css, key, value|\n    accent, fill, #eeeeee")
 val blank_sdd_style_rule_delete_action = office_action_dispatch("delete-sdd-style-rule", "accent|   \n" + sdd_style_rule_action.output)
+val blank_sdd_style_rule_edit_action = office_action_dispatch("edit-sdd-style-rule", "accent|node|none|   |#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
 val invalid_sdd_style_rule_action = office_action_dispatch("edit-sdd-style-rule", "accent|canvas|none|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
 val invalid_sdd_style_token_action = office_action_dispatch("edit-sdd-style-rule", "accent,bad|node|none|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
 val self_parent_sdd_style_rule_action = office_action_dispatch("edit-sdd-style-rule", "accent|node|accent|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
@@ -651,6 +652,7 @@ expect(missing_sdd_style_rule_inspect_action.reason).to_equal("missing-style-rul
 expect(missing_sdd_style_rule_delete_action.reason).to_equal("missing-style-rule")
 expect(blank_sdd_style_rule_inspect_action.reason).to_equal("invalid-args")
 expect(blank_sdd_style_rule_delete_action.reason).to_equal("invalid-args")
+expect(blank_sdd_style_rule_edit_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_style_rule_action.reason).to_equal("invalid-target")
 expect(invalid_sdd_style_token_action.reason).to_equal("invalid-style-token")
 expect(self_parent_sdd_style_rule_action.reason).to_equal("style-parent-cycle")
