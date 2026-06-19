@@ -76,7 +76,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 
 - The audit writes stable `gui_renderdoc_feature_coverage_*` evidence keys.
 - Every `WidgetKind` wire value has an HTML renderer dispatch entry.
-- The Electron Simple Web layout manifest remains visible with its 41 cases.
+- The Electron Simple Web layout manifest remains visible with its 42 cases.
 - The audit includes current production parity evidence status when present.
 - The audit reports the active RenderDoc goal, Simple `.rdc`, and external
   Chrome/Vulkan `.rdc` gates without treating missing host captures as pass.
@@ -96,17 +96,18 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: widget_count equals `43`
    - Expected: missing equals ``
 - Assert the Electron layout manifest and RenderDoc gates remain visible
-   - Expected: manifest_cases equals `41`
+   - Expected: manifest_cases equals `42`
    - Expected: display_none_flow_cases equals `1`
    - Expected: flex_justify_variant_cases equals `1`
    - Expected: flex_column_cases equals `1`
+   - Expected: flex_wrap_reverse_cases equals `1`
 - Verify the restart-audit report was written
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 49 lines folded for reproduction.
+Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -135,6 +136,7 @@ val manifest_cases = _value_of(evidence, "electron_layout_manifest_case_count")
 val display_none_flow_cases = _value_of(evidence, "electron_layout_manifest_tracked_css_display_none_flow_case_count")
 val flex_justify_variant_cases = _value_of(evidence, "electron_layout_manifest_tracked_css_flex_justify_variants_case_count")
 val flex_column_cases = _value_of(evidence, "electron_layout_manifest_tracked_css_flex_column_case_count")
+val flex_wrap_reverse_cases = _value_of(evidence, "electron_layout_manifest_tracked_css_flex_wrap_reverse_case_count")
 val renderdoc_status = _value_of(evidence, "renderdoc_goal_status")
 val simple_status = _value_of(evidence, "simple_renderdoc_status")
 val external_status = _value_of(evidence, "external_renderdoc_status")
@@ -146,10 +148,11 @@ expect(widget_count).to_equal("43")
 expect(missing).to_equal("")
 
 step("Assert the Electron layout manifest and RenderDoc gates remain visible")
-expect(manifest_cases).to_equal("41")
+expect(manifest_cases).to_equal("42")
 expect(display_none_flow_cases).to_equal("1")
 expect(flex_justify_variant_cases).to_equal("1")
 expect(flex_column_cases).to_equal("1")
+expect(flex_wrap_reverse_cases).to_equal("1")
 expect(renderdoc_status.len()).to_be_greater_than(0)
 expect(simple_status.len()).to_be_greater_than(0)
 expect(external_status.len()).to_be_greater_than(0)
@@ -158,7 +161,7 @@ step("Verify the restart-audit report was written")
 val report = file_read("build/test-gui-renderdoc-feature-coverage-status/report.md")
 expect(report).to_contain("# GUI RenderDoc Feature Coverage Status")
 expect(report).to_contain("- widget HTML renderer dispatch:")
-expect(report).to_contain("- Electron layout manifest cases: 41")
+expect(report).to_contain("- Electron layout manifest cases: 42")
 ```
 
 </details>
