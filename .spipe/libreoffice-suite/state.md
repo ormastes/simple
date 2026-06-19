@@ -427,3 +427,7 @@ possible so they are runner-verifiable.
   `sdn_graph_update_node_layer_at` edits stacking layer metadata without
   changing label/style/shape/geometry, and `edit-sdd-node-layer` exposes
   `node_id|layer` through the headless Office action bridge.
+- 2026-06-19 dev: Added Draw/SDD node role editing.
+  `sdn_graph_update_node_role_at` edits semantic role metadata without changing
+  label/style/shape/geometry/layer, and `edit-sdd-node-role` exposes
+  `node_id|role` through the headless Office action bridge.

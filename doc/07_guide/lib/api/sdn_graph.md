@@ -224,8 +224,9 @@ event wiring. It updates one node's CSS labels, role, shape, x/y geometry,
 width/height, and layer by index while leaving node id/label, connectors, CSS
 definitions, styles, and graph metadata untouched. `sdn_graph_update_node_label_at`,
 `sdn_graph_update_node_shape_at`, `sdn_graph_update_node_style_at`, and
-`sdn_graph_update_node_layer_at` are narrow helpers for label-only, shape-only,
-style-label-only, and layer-only actions.
+`sdn_graph_update_node_layer_at`, and `sdn_graph_update_node_role_at` are narrow
+helpers for label-only, shape-only, style-label-only, layer-only, and role-only
+actions.
 
 `sdn_graph_update_node_parent_at` is the pure group/container edit operation. It
 updates one node's `parent` field by index while preserving geometry, style,

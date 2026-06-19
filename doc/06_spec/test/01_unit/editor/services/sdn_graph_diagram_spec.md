@@ -488,7 +488,7 @@ expect(html).to_contain("data-canvas-grid=\"24\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -525,7 +525,10 @@ expect(sdn_graph_render_html(labeled)).to_contain(">Data Store</button>")
 val layered = sdn_graph_update_node_layer_at(labeled, 1, "front")
 expect(layered.nodes[1].layer).to_equal("front")
 expect(layered.nodes[1].label).to_equal("Data Store")
-val node_deleted = sdn_graph_delete_node_at(layered, 1)
+val roled = sdn_graph_update_node_role_at(layered, 1, "database")
+expect(roled.nodes[1].role).to_equal("database")
+expect(roled.nodes[1].layer).to_equal("front")
+val node_deleted = sdn_graph_delete_node_at(roled, 1)
 expect(node_deleted.nodes.len()).to_equal(1)
 expect(node_deleted.nodes[0].id).to_equal("A")
 expect(node_deleted.edges.len()).to_equal(0)
