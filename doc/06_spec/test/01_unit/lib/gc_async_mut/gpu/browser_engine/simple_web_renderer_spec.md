@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 57 | 57 | 0 | 0 |
+| 60 | 60 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -216,6 +216,48 @@ expect(card.content_rect.height).to_equal(18)
 expect(_draw_ir_style_value(card, "tag")).to_equal("section")
 expect(_draw_ir_style_value(card, "display")).to_equal("block")
 expect(_draw_ir_style_value(card, "padding-left")).to_equal("2")
+```
+
+</details>
+
+#### renders decoded HTML text entities through the same pixels as literal text
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val style = "<style>html,body{margin:0;padding:0;background-color:#ffffff}.label{background-color:#ffffff;color:#111827;font-size:8px;white-space:nowrap}</style>"
+val encoded_html = "<html><head>" + style + "</head><body><div class='label'>A&#32;&amp;&#34;B&#34;</div></body></html>"
+val literal_html = "<html><head>" + style + "</head><body><div class='label'>A &\"B\"</div></body></html>"
+val encoded = simple_web_render_html_to_pixels(encoded_html, 96, 32)
+val literal_pixels = simple_web_render_html_to_pixels(literal_html, 96, 32)
+expect(encoded.len()).to_equal(96 * 32)
+expect(_count_color(encoded, 0xFF111827u32)).to_be_greater_than(0)
+expect(_pixels_equal(encoded, literal_pixels)).to_be(true)
+```
+
+</details>
+
+#### matches CSS attribute selectors against decoded HTML entity attributes
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val amp = "&"
+val ob = "{"
+val cb = "}"
+val html = "<html><head><style>.item" + ob + "background-color:#334155;width:24px;height:12px" + cb + ".item[data-label='A " + amp + " B']" + ob + "background-color:#22c55e" + cb + "</style></head><body><div class='item' data-label='A &amp; B'></div></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+expect(pixels.len()).to_equal(64 * 32)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFF334155u32)).to_equal(0)
 ```
 
 </details>
@@ -744,7 +786,7 @@ val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64
 val pixels = simple_web_render_html_to_pixels(html, 96, 64)
 expect(pixels.len()).to_equal(96 * 64)
 expect(_count_color(pixels, 0xFFF8FAFCu32)).to_equal(5776)
-expect(_count_color(pixels, 0xFF8BA4EAu32)).to_equal(240)
+expect(_count_color(pixels, 0xFF89A3E9u32)).to_equal(240)
 expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(128)
 expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
 ```
@@ -949,6 +991,27 @@ expect(_pixels_equal(simple_pixels, browser_pixels)).to_equal(true)
 
 </details>
 
+#### web render backend pure_simple uses the Engine2D auto backend path
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><div style='width: 64px; height: 24px; background-color: #2563eb'></div><span style='color:#ffffff'>Auto</span></body></html>"
+val simple = SimpleWebRenderer.create(96, 64)
+val web = WebRenderBackend.create("pure_simple", 96, 64)
+val simple_pixels = simple.render_html_to_pixels(html)
+val web_pixels = web.render_html_to_pixels(html)
+expect(simple.backend_name).to_equal(simple_web_resolved_engine2d_backend_name(96, 64, "auto"))
+expect(web.name()).to_equal("pure_simple")
+expect(_pixels_equal(simple_pixels, web_pixels)).to_equal(true)
+```
+
+</details>
+
 #### fallback facade parses rgb() background-color with the shared CSS parser
 
 <details>
@@ -978,7 +1041,7 @@ Reproduction: this block contains the complete executable scenario source.
 val html = "<html><body style='background-color: rgba(0, 0, 0, 0.5)'>Simple Web Renderer</body></html>"
 val pixels = simple_web_render_html_to_pixels(html, 8, 220)
 expect(pixels.len()).to_equal(8 * 220)
-expect(pixels[7 + 210 * 8]).to_equal(0xFF808080u32)
+expect(pixels[7 + 210 * 8]).to_equal(0xFF7F7F7Fu32)
 ```
 
 </details>
@@ -1255,8 +1318,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 57 |
-| Active scenarios | 57 |
+| Total scenarios | 60 |
+| Active scenarios | 60 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

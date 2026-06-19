@@ -144,6 +144,9 @@ Host input
   and reports the active RenderDoc completion gate. Use strict mode
   `GUI_RENDERDOC_STATUS_STRICT=1` only when a host is expected to have durable
   Simple and original Chrome/Vulkan `.rdc` evidence.
+  Current 2026-06-19 layout-manifest evidence is 16 exact Electron cases, 2
+  tracked text-raster divergences, and 0 hard failures; RenderDoc remains the
+  completion blocker.
 - Current runtime gaps: compiler/interpreter GPU packets consume the active
   backend handle, submit at lane begin, and complete after lane end, but still
   complete as typed `UNAVAILABLE` when none is registered; `SUBMITTED` is

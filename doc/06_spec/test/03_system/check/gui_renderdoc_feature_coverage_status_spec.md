@@ -1,0 +1,212 @@
+# GUI RenderDoc feature coverage status gate
+
+> Validates the restart audit for GUI item rendering coverage, HTML/CSS traceability, Electron layout-manifest scope, production GUI/web parity evidence, and RenderDoc completion gates. The audit is intentionally non-launching: it reports current evidence and references the heavy capture commands without starting Electron, Chrome, or RenderDoc.
+
+<!-- sdn-diagram:id=gui_renderdoc_feature_coverage_status_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=gui_renderdoc_feature_coverage_status_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+gui_renderdoc_feature_coverage_status_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=gui_renderdoc_feature_coverage_status_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 2 | 2 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# GUI RenderDoc feature coverage status gate
+
+Validates the restart audit for GUI item rendering coverage, HTML/CSS traceability, Electron layout-manifest scope, production GUI/web parity evidence, and RenderDoc completion gates. The audit is intentionally non-launching: it reports current evidence and references the heavy capture commands without starting Electron, Chrome, or RenderDoc.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/sys_test/html_css_spec_traceability.md |
+| Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
+| Research | doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md |
+| Source | `test/03_system/check/gui_renderdoc_feature_coverage_status_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Validates the restart audit for GUI item rendering coverage, HTML/CSS
+traceability, Electron layout-manifest scope, production GUI/web parity
+evidence, and RenderDoc completion gates. The audit is intentionally
+non-launching: it reports current evidence and references the heavy capture
+commands without starting Electron, Chrome, or RenderDoc.
+
+**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+**Requirements:** N/A
+**Research:** doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md
+**Architecture:** doc/04_architecture/ui/simple_gui_stack.md
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+```sh
+BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status \
+REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status/report.md \
+sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
+```
+
+## Acceptance
+
+- The audit writes stable `gui_renderdoc_feature_coverage_*` evidence keys.
+- Every `WidgetKind` wire value has an HTML renderer dispatch entry.
+- The Electron Simple Web layout manifest remains visible with its 18 cases.
+- The audit includes current production parity evidence status when present.
+- The audit reports the active RenderDoc goal, Simple `.rdc`, and external
+  Chrome/Vulkan `.rdc` gates without treating missing host captures as pass.
+- Strict mode fails closed unless the aggregate audit status is `pass`.
+
+## Scenarios
+
+### GUI RenderDoc feature coverage status gate
+
+#### summarizes widget dispatch, layout manifest, parity, and RenderDoc gates
+
+- Run the GUI RenderDoc feature coverage audit without launching heavy renderers
+   - Expected: code equals `0`
+- Read the emitted GUI coverage evidence contract
+- Assert every WidgetKind has an HTML renderer dispatch entry
+   - Expected: widget_count equals `dispatch_count`
+   - Expected: widget_count equals `43`
+   - Expected: missing equals ``
+- Assert the Electron layout manifest and RenderDoc gates remain visible
+   - Expected: manifest_cases equals `18`
+- Verify the restart-audit report was written
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 43 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the GUI RenderDoc feature coverage audit without launching heavy renderers")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status && BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Read the emitted GUI coverage evidence contract")
+val evidence = rt_file_read_text("build/test-gui-renderdoc-feature-coverage-status/evidence.env") ?? ""
+expect(evidence).to_contain("gui_renderdoc_feature_coverage_status=")
+expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=")
+expect(evidence).to_contain("widget_kind_source=src/lib/common/ui/widget_kind.spl")
+expect(evidence).to_contain("widget_html_renderer_source=src/app/ui.render/html_widgets.spl")
+expect(evidence).to_contain("electron_layout_manifest=tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt")
+expect(evidence).to_contain("production_gui_web_renderer_parity_command=ELECTRON_BITMAP_TIMEOUT_SECS=20 sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
+expect(evidence).to_contain("renderdoc_goal_status_command=sh scripts/check/check-html-css-renderdoc-goal-status.shs")
+expect(evidence).to_contain("simple_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple")
+expect(evidence).to_contain("html_renderdoc_capture_command=RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs")
+
+val status = _value_of(evidence, "gui_renderdoc_feature_coverage_status")
+val widget_count = _value_of(evidence, "widget_kind_count")
+val dispatch_count = _value_of(evidence, "widget_html_renderer_dispatch_count")
+val missing = _value_of(evidence, "widget_html_renderer_missing")
+val manifest_cases = _value_of(evidence, "electron_layout_manifest_case_count")
+val renderdoc_status = _value_of(evidence, "renderdoc_goal_status")
+val simple_status = _value_of(evidence, "simple_renderdoc_status")
+val external_status = _value_of(evidence, "external_renderdoc_status")
+
+step("Assert every WidgetKind has an HTML renderer dispatch entry")
+expect(status.len()).to_be_greater_than(0)
+expect(widget_count).to_equal(dispatch_count)
+expect(widget_count).to_equal("43")
+expect(missing).to_equal("")
+
+step("Assert the Electron layout manifest and RenderDoc gates remain visible")
+expect(manifest_cases).to_equal("18")
+expect(renderdoc_status.len()).to_be_greater_than(0)
+expect(simple_status.len()).to_be_greater_than(0)
+expect(external_status.len()).to_be_greater_than(0)
+
+step("Verify the restart-audit report was written")
+val report = rt_file_read_text("build/test-gui-renderdoc-feature-coverage-status/report.md") ?? ""
+expect(report).to_contain("# GUI RenderDoc Feature Coverage Status")
+expect(report).to_contain("- widget HTML renderer dispatch:")
+expect(report).to_contain("- Electron layout manifest cases: 18")
+```
+
+</details>
+
+#### fails closed in strict mode while RenderDoc evidence is incomplete
+
+- Run the GUI coverage audit in strict mode and capture its exit code
+   - Expected: code equals `0`
+- Assert strict mode passes only when the aggregate audit is complete
+   - Expected: reason equals `pass`
+   - Expected: status equals `incomplete`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the GUI coverage audit in strict mode and capture its exit code")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-strict; BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-strict REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-strict/report.md GUI_RENDERDOC_STATUS_STRICT=1 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs; printf 'strict_exit=%s\\n' \"$?\""
+val (stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert strict mode passes only when the aggregate audit is complete")
+val evidence = rt_file_read_text("build/test-gui-renderdoc-feature-coverage-status-strict/evidence.env") ?? ""
+val status = _value_of(evidence, "gui_renderdoc_feature_coverage_status")
+val reason = _value_of(evidence, "gui_renderdoc_feature_coverage_reason")
+
+if status == "pass":
+    expect(reason).to_equal("pass")
+    expect(stdout).to_contain("strict_exit=0")
+else:
+    expect(status).to_equal("incomplete")
+    expect(reason.len()).to_be_greater_than(0)
+    expect(stdout).to_contain("strict_exit=1")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 2 |
+| Active scenarios | 2 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/sys_test/html_css_spec_traceability.md](doc/03_plan/sys_test/html_css_spec_traceability.md)
+- **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
+- **Research:** [doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md](doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md)
+
+
+</details>

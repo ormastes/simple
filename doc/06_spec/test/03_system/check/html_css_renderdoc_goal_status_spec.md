@@ -1,6 +1,6 @@
 # HTML/CSS RenderDoc goal status gate
 
-> Validates the aggregate status gate for the full HTML/CSS traceability and RenderDoc objective. The current local host should report completed traceability and Simple RenderDoc evidence while failing closed on the missing original Chrome HTML/CSS RenderDoc `.rdc` evidence.
+> Validates the aggregate status gate for the full HTML/CSS traceability and RenderDoc objective. The local host may or may not have durable Simple RenderDoc `.rdc` evidence in `build/`, so the spec checks the current-state failure contract and separately proves the aggregate pass path with controlled fixture evidence.
 
 <!-- sdn-diagram:id=html_css_renderdoc_goal_status_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ html_css_renderdoc_goal_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # HTML/CSS RenderDoc goal status gate
 
-Validates the aggregate status gate for the full HTML/CSS traceability and RenderDoc objective. The current local host should report completed traceability and Simple RenderDoc evidence while failing closed on the missing original Chrome HTML/CSS RenderDoc `.rdc` evidence.
+Validates the aggregate status gate for the full HTML/CSS traceability and RenderDoc objective. The local host may or may not have durable Simple RenderDoc `.rdc` evidence in `build/`, so the spec checks the current-state failure contract and separately proves the aggregate pass path with controlled fixture evidence.
 
 ## At a Glance
 
@@ -53,9 +53,10 @@ Validates the aggregate status gate for the full HTML/CSS traceability and Rende
 ## Overview
 
 Validates the aggregate status gate for the full HTML/CSS traceability and
-RenderDoc objective. The current local host should report completed
-traceability and Simple RenderDoc evidence while failing closed on the missing
-original Chrome HTML/CSS RenderDoc `.rdc` evidence.
+RenderDoc objective. The local host may or may not have durable Simple
+RenderDoc `.rdc` evidence in `build/`, so the spec checks the current-state
+failure contract and separately proves the aggregate pass path with controlled
+fixture evidence.
 
 **Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
 **Requirements:** N/A
@@ -77,24 +78,43 @@ sh scripts/check/check-html-css-renderdoc-goal-status.shs || true
 - Simple RenderDoc evidence is accepted only when `.rdc` magic is `RDOC`.
 - The full goal remains failed until the original external RenderDoc gate
   passes.
+- Controlled Simple and external-host fixtures can drive the aggregate gate to
+  `pass` without depending on stale local build artifacts.
 
 ## Scenarios
 
 ### HTML/CSS RenderDoc goal status gate
 
-#### fails closed until original Chrome RenderDoc evidence passes
+#### reports the current evidence state without assuming stale local captures
+
+- Run the aggregate RenderDoc goal-status gate in an isolated build directory
+   - Expected: code equals `0`
+- Read the current evidence contract emitted by the gate
+- Assert that missing local captures fail closed instead of passing by assumption
+   - Expected: simple_status equals `pass`
+   - Expected: external_status equals `pass`
+   - Expected: goal_status equals `fail`
+   - Expected: goal_reason equals `original-renderdoc-evidence-missing`
+   - Expected: external_status equals `unavailable`
+   - Expected: goal_reason equals `simple_reason`
+   - Expected: simple_status equals `fail`
+   - Expected: simple_reason equals `missing-simple-rdoc`
+- Verify the operator report was written
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Run the aggregate RenderDoc goal-status gate in an isolated build directory")
 val command = "rm -rf build/test-html-css-renderdoc-goal-status && BUILD_DIR=build/test-html-css-renderdoc-goal-status REPORT_PATH=build/test-html-css-renderdoc-goal-status/report.md sh scripts/check/check-html-css-renderdoc-goal-status.shs || true"
 val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
+step("Read the current evidence contract emitted by the gate")
 val evidence = rt_file_read_text("build/test-html-css-renderdoc-goal-status/evidence.env") ?? ""
 expect(evidence).to_contain("html_css_renderdoc_goal_status=")
 expect(evidence).to_contain("html_css_traceability_status=")
@@ -108,19 +128,58 @@ expect(evidence).to_contain("required_external_magic=RDOC")
 val goal_status = _value_of(evidence, "html_css_renderdoc_goal_status")
 val goal_reason = _value_of(evidence, "html_css_renderdoc_goal_reason")
 val simple_status = _value_of(evidence, "simple_renderdoc_status")
+val simple_reason = _value_of(evidence, "simple_renderdoc_reason")
 val external_status = _value_of(evidence, "external_renderdoc_status")
 
+step("Assert that missing local captures fail closed instead of passing by assumption")
 if goal_status == "pass":
     expect(simple_status).to_equal("pass")
     expect(external_status).to_equal("pass")
 else:
     expect(goal_status).to_equal("fail")
-    expect(goal_reason).to_equal("original-renderdoc-evidence-missing")
-    expect(simple_status).to_equal("pass")
-    expect(external_status).to_equal("unavailable")
+    if simple_status == "pass":
+        expect(goal_reason).to_equal("original-renderdoc-evidence-missing")
+        expect(external_status).to_equal("unavailable")
+    else:
+        expect(goal_reason).to_equal(simple_reason)
+        expect(simple_status).to_equal("fail")
+        expect(simple_reason).to_equal("missing-simple-rdoc")
 
+step("Verify the operator report was written")
 val report = rt_file_read_text("build/test-html-css-renderdoc-goal-status/report.md") ?? ""
 expect(report).to_contain("# HTML/CSS RenderDoc Goal Status")
+```
+
+</details>
+
+#### passes with controlled Simple RDOC and original external-host evidence
+
+- Create controlled Simple and external-host RenderDoc evidence fixtures
+   - Expected: code equals `0`
+- Assert the aggregate gate accepts only the complete controlled evidence set
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create controlled Simple and external-host RenderDoc evidence fixtures")
+val command = "rm -rf build/test-html-css-renderdoc-goal-status-pass && mkdir -p build/test-html-css-renderdoc-goal-status-pass/simple build/test-html-css-renderdoc-goal-status-pass/external && printf 'RDOCsynthetic simple capture\\n' > build/test-html-css-renderdoc-goal-status-pass/simple/simple.rdc && printf 'rdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-html-css-renderdoc-goal-status-pass/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-html-css-renderdoc-goal-status-pass/simple/evidence.env && printf 'rdoc_external_host_capture_status=pass\\nrdoc_external_host_capture_reason=pass\\nrdoc_external_host_required_backend=original\\nrdoc_external_host_required_status=pass\\nrdoc_external_host_required_magic=RDOC\\n' > build/test-html-css-renderdoc-goal-status-pass/external/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/simple/evidence.env RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/external/evidence.env BUILD_DIR=build/test-html-css-renderdoc-goal-status-pass/out REPORT_PATH=build/test-html-css-renderdoc-goal-status-pass/report.md sh scripts/check/check-html-css-renderdoc-goal-status.shs"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate gate accepts only the complete controlled evidence set")
+val evidence = rt_file_read_text("build/test-html-css-renderdoc-goal-status-pass/out/evidence.env") ?? ""
+expect(evidence).to_contain("html_css_renderdoc_goal_status=pass")
+expect(evidence).to_contain("html_css_renderdoc_goal_reason=pass")
+expect(evidence).to_contain("simple_renderdoc_status=pass")
+expect(evidence).to_contain("external_renderdoc_status=pass")
+expect(evidence).to_contain("required_external_backend=original")
+expect(evidence).to_contain("required_external_status=pass")
+expect(evidence).to_contain("required_external_magic=RDOC")
 ```
 
 </details>
@@ -129,8 +188,8 @@ expect(report).to_contain("# HTML/CSS RenderDoc Goal Status")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
