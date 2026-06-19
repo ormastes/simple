@@ -237,3 +237,8 @@ possible so they are runner-verifiable.
   read alias for style-token inspection; catalog metadata now exposes
   `style-tokens`, `style-token-edit`, `ui-style-token-read`, and
   `ui-style-token-edit`.
+- 2026-06-19 dev: Advanced SDD Draw node editing. Added pure
+  `sdn_graph_update_node_at` plus shape-only/style-only helpers for direct
+  draw.io-like node shape/style/geometry edits, updated Draw catalog metadata
+  with `node-shape-edit`, `node-style-edit`, `edit-sdd-node-shape`, and
+  `edit-sdd-node-style`, and refreshed glossary/guide language.

@@ -10,6 +10,8 @@
 - SDD-006: Diagram connectors render deterministic SVG `data-path` values from
   anchors and waypoints.
 - SDD-007: Pure reroute edits update edge route, waypoint, and anchor metadata.
+- SDD-008: Pure node edits update shape, style labels, role, geometry, and
+  layer metadata while preserving non-target nodes and connector metadata.
 
 ## Evidence
 

@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -259,12 +259,50 @@ expect(html).to_contain("data-path=\"M 90,30 L 140,30 L 200,30 L 200,80 L 220,80
 
 </details>
 
+#### updates node shape style and geometry through a pure edit operation
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 25 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: edit-node\nA: Alpha @plain role: box shape: rect x: 10 y: 20 width: 80 height: 20 layer: base\nB: Beta @plain role: box shape: rect x: 220 y: 20 width: 80 height: 20 layer: base\nA -> B: c route: simple start: right end: left")
+val updated = sdn_graph_update_node_at(graph, 0, "accent selected", "decision", "diamond", "32", "48", "96", "64", "foreground")
+val html = sdn_graph_render_html(updated)
+val canon = sdn_graph_to_canonical_sdn(updated)
+expect(updated.nodes[0].css).to_equal("accent selected")
+expect(updated.nodes[0].role).to_equal("decision")
+expect(updated.nodes[0].shape).to_equal("diamond")
+expect(updated.nodes[0].x).to_equal("32")
+expect(updated.nodes[0].y).to_equal("48")
+expect(updated.nodes[0].width).to_equal("96")
+expect(updated.nodes[0].height).to_equal("64")
+expect(updated.nodes[0].layer).to_equal("foreground")
+expect(updated.nodes[1].shape).to_equal("rect")
+expect(updated.edges[0].from_id).to_equal("A")
+expect(html).to_contain("class=\"sdn-graph-node sdd-node sdn-css-accent sdn-css-selected\"")
+expect(html).to_contain("data-shape=\"diamond\"")
+expect(html).to_contain("style=\"left:32px;top:48px;width:96px;height:64px\"")
+expect(canon).to_contain("A, Alpha, \"accent selected\", decision, diamond, 32, 48, 96, 64, foreground")
+
+val shaped = sdn_graph_update_node_shape_at(graph, 1, "cylinder")
+val styled = sdn_graph_update_node_style_at(shaped, 1, "storage highlight")
+expect(styled.nodes[1].shape).to_equal("cylinder")
+expect(styled.nodes[1].css).to_equal("storage highlight")
+expect(styled.nodes[1].x).to_equal("220")
+expect(sdn_graph_render_html(styled)).to_contain("sdn-css-storage sdn-css-highlight")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -19,6 +19,9 @@ First production slice for the SDN-backed diagram editor dialect.
   node geometry, start/end anchors, route mode, and waypoints.
 - SDD-007: Diagram routing can be updated through a pure edge reroute operation
   suitable for IDE/editor event wiring.
+- SDD-008: Diagram node shape, style label, role, geometry, and layer metadata
+  can be updated through pure node edit operations suitable for IDE/editor event
+  wiring.
 
 ## Out of Scope
 

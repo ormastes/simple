@@ -10,3 +10,5 @@
   labels and attributes.
 - SDD-NFR-004: Generated manuals remain under `doc/06_spec`, and executable
   specs remain under `test/`.
+- SDD-NFR-005: Diagram edit operations remain pure transformations over parsed
+  SDD graphs and do not depend on GUI, filesystem, shell, or browser state.

@@ -36,6 +36,8 @@ Rules:
   path and anchor metadata.
 - `css foo:` defines style, shape, or layout hints for `@foo`.
 - `weave @:` injects `@foo` names into matching nodes or edges by selector.
+- Pure edit APIs can update one node's shape/style metadata or one connector's
+  route metadata without reparsing or touching unrelated graph entries.
 - `css_file:` imports an external stylesheet for final SVG or HTML output.
 
 ## Canonical Tables
@@ -187,3 +189,10 @@ vertical to waypoint y, then horizontal/vertical to the target anchor.
 `sdn_graph_update_edge_at` is the pure reroute operation for editor event
 wiring. It updates an edge's route, waypoint string, and anchors by index while
 leaving node geometry and graph metadata untouched.
+
+`sdn_graph_update_node_at` is the broad pure node edit operation for editor
+event wiring. It updates one node's CSS labels, role, shape, x/y geometry,
+width/height, and layer by index while leaving node id/label, connectors, CSS
+definitions, styles, and graph metadata untouched. `sdn_graph_update_node_shape_at`
+and `sdn_graph_update_node_style_at` are narrow helpers for shape-only and
+style-label-only actions.
