@@ -268,7 +268,10 @@ RDOC_HTML_EVIDENCE_ENV=<path-to-original-chrome-renderdoc-evidence.env> \
 ```
 
 The gate passes only for original RenderDoc+Chrome evidence with
-`rdoc_capture_status=pass`, `rdoc_capture_magic=RDOC`, and a real `.rdc` file.
+`rdoc_scene=html-css-chrome`, `rdoc_capture_status=pass`,
+`rdoc_capture_magic=RDOC`, an `rdoc_html_path` ending in
+`test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html`, and a
+real `.rdc` file.
 
 ## macOS Portability Probe
 

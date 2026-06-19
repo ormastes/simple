@@ -73,8 +73,8 @@ sh scripts/check/check-renderdoc-external-host-capture.shs
 
 - Readiness-only mode writes stable `rdoc_external_host_*` evidence keys.
 - Readiness-only mode records `capture-not-requested`.
-- The pass requirement is explicit: original backend, pass status, and `RDOC`
-  magic.
+- The pass requirement is explicit: original backend, `html-css-chrome` scene,
+  pass status, `RDOC` magic, and canonical HTML fixture metadata.
 
 ## Scenarios
 
@@ -85,7 +85,7 @@ sh scripts/check/check-renderdoc-external-host-capture.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -99,8 +99,10 @@ expect(evidence).to_contain("rdoc_external_host_capture_reason=")
 expect(evidence).to_contain("rdoc_external_host_setup_status=")
 expect(evidence).to_contain("rdoc_external_host_run_capture=0")
 expect(evidence).to_contain("rdoc_external_host_required_backend=original")
+expect(evidence).to_contain("rdoc_external_host_required_scene=html-css-chrome")
 expect(evidence).to_contain("rdoc_external_host_required_status=pass")
 expect(evidence).to_contain("rdoc_external_host_required_magic=RDOC")
+expect(evidence).to_contain("rdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 
 val status = _value_of(evidence, "rdoc_external_host_capture_status")
 val reason = _value_of(evidence, "rdoc_external_host_capture_reason")
@@ -123,11 +125,11 @@ expect(report).to_contain("# RenderDoc External Host Capture")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-renderdoc-external-host-capture-pass && mkdir -p build/test-renderdoc-external-host-capture-pass/source && printf 'RDOCsynthetic external host capture\\n' > build/test-renderdoc-external-host-capture-pass/source/synthetic.rdc && printf 'rdoc_backend=original\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-external-host-capture-pass/source/synthetic.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-external-host-capture-pass/source/evidence.env && RDOC_HTML_EVIDENCE_ENV=build/test-renderdoc-external-host-capture-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-external-host-capture-pass REPORT_PATH=build/test-renderdoc-external-host-capture-pass/report.md sh scripts/check/check-renderdoc-external-host-capture.shs"
+val command = "rm -rf build/test-renderdoc-external-host-capture-pass && mkdir -p build/test-renderdoc-external-host-capture-pass/source && printf 'RDOCsynthetic external host capture\\n' > build/test-renderdoc-external-host-capture-pass/source/synthetic.rdc && printf 'rdoc_backend=original\\nrdoc_scene=html-css-chrome\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-external-host-capture-pass/source/synthetic.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\n' > build/test-renderdoc-external-host-capture-pass/source/evidence.env && RDOC_HTML_EVIDENCE_ENV=build/test-renderdoc-external-host-capture-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-external-host-capture-pass REPORT_PATH=build/test-renderdoc-external-host-capture-pass/report.md sh scripts/check/check-renderdoc-external-host-capture.shs"
 val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -135,9 +137,13 @@ val evidence = rt_file_read_text("build/test-renderdoc-external-host-capture-pas
 expect(evidence).to_contain("rdoc_external_host_capture_status=pass")
 expect(evidence).to_contain("rdoc_external_host_capture_reason=pass")
 expect(evidence).to_contain("rdoc_external_host_gate_status=pass")
+expect(evidence).to_contain("rdoc_external_host_gate_scene=html-css-chrome")
+expect(evidence).to_contain("rdoc_external_host_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 expect(evidence).to_contain("rdoc_external_host_required_backend=original")
+expect(evidence).to_contain("rdoc_external_host_required_scene=html-css-chrome")
 expect(evidence).to_contain("rdoc_external_host_required_status=pass")
 expect(evidence).to_contain("rdoc_external_host_required_magic=RDOC")
+expect(evidence).to_contain("rdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 
 val status = _value_of(evidence, "rdoc_external_host_capture_status")
 val gate_status = _value_of(evidence, "rdoc_external_host_gate_status")

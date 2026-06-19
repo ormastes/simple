@@ -101,7 +101,9 @@ The current canonical evidence contract is:
   incomplete.
 - Original Chrome HTML/CSS path:
   `build/renderdoc/canonical-probe/html/evidence.env`, or an external-host
-  evidence env, must pass the original-backend gate with `RDOC` magic. A local
+  evidence env, must pass the original-backend gate with `rdoc_scene=html-css-chrome`,
+  `RDOC` magic, and an `rdoc_html_path` ending in
+  `test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html`. A local
   failed capture or missing env is not completion evidence.
 - Electron Chromium HTML/CSS path:
   `build/renderdoc/canonical-probe/electron-html/evidence.env` should report
@@ -136,8 +138,11 @@ The external-host wrapper runs setup, capture, and the gate. The low-level gate
 passes only when the source evidence contains:
 
 - `rdoc_backend=original`
+- `rdoc_scene=html-css-chrome`
 - `rdoc_capture_status=pass`
 - `rdoc_capture_magic=RDOC`
+- `rdoc_html_path` ending in
+  `test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html`
 - an existing `.rdc` path in `rdoc_capture_file`
 
 Otherwise it writes fail-closed evidence under

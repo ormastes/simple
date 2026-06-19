@@ -27,7 +27,7 @@ renderdoc_html_external_host_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,8 +78,10 @@ Passing external-host evidence must include:
 
 ```text
 rdoc_backend=original
+rdoc_scene=html-css-chrome
 rdoc_capture_status=pass
 rdoc_capture_magic=RDOC
+rdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 ```
 
 Local unavailable/fail evidence is acceptable only when it records a concrete
@@ -89,8 +91,9 @@ reason and keeps the gate status out of `pass`.
 
 - Missing or failed Chrome RenderDoc evidence produces typed non-pass gate
   evidence.
-- Passing gate evidence requires original backend, pass status, `RDOC` magic,
-  and an existing `.rdc` file.
+- Passing gate evidence requires original backend, the `html-css-chrome` scene,
+  pass status, `RDOC` magic, the canonical HTML fixture path, and an existing
+  `.rdc` file.
 
 ## Scenarios
 
@@ -101,7 +104,7 @@ reason and keeps the gate status out of `pass`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -114,21 +117,72 @@ expect(evidence).to_contain("rdoc_html_external_gate_status=")
 expect(evidence).to_contain("rdoc_html_external_gate_reason=")
 expect(evidence).to_contain("rdoc_html_external_gate_source_env=")
 expect(evidence).to_contain("rdoc_html_external_gate_required_backend=original")
+expect(evidence).to_contain("rdoc_html_external_gate_required_scene=html-css-chrome")
 expect(evidence).to_contain("rdoc_html_external_gate_required_status=pass")
 expect(evidence).to_contain("rdoc_html_external_gate_required_magic=RDOC")
+expect(evidence).to_contain("rdoc_html_external_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 
 val status = _value_of(evidence, "rdoc_html_external_gate_status")
 val reason = _value_of(evidence, "rdoc_html_external_gate_reason")
 val backend = _value_of(evidence, "rdoc_html_external_gate_backend")
+val scene = _value_of(evidence, "rdoc_html_external_gate_scene")
 val capture_status = _value_of(evidence, "rdoc_html_external_gate_capture_status")
 val magic = _value_of(evidence, "rdoc_html_external_gate_capture_magic")
+val html_path = _value_of(evidence, "rdoc_html_external_gate_html_path")
 
 if status == "pass":
     expect(backend).to_equal("original")
+    expect(scene).to_equal("html-css-chrome")
     expect(capture_status).to_equal("pass")
     expect(magic).to_equal("RDOC")
+    expect(html_path).to_contain("test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 else:
     expect(reason.len()).to_be_greater_than(0)
+```
+
+</details>
+
+#### passes only with controlled canonical HTML/CSS Chrome RDOC evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-renderdoc-html-external-gate-pass && mkdir -p build/test-renderdoc-html-external-gate-pass/source && printf 'RDOCsynthetic original html capture\\n' > build/test-renderdoc-html-external-gate-pass/source/html.rdc && printf 'rdoc_backend=original\\nrdoc_scene=html-css-chrome\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-html-external-gate-pass/source/html.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\n' > build/test-renderdoc-html-external-gate-pass/source/evidence.env && RDOC_HTML_EVIDENCE_ENV=build/test-renderdoc-html-external-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-html-external-gate-pass/out REPORT_PATH=build/test-renderdoc-html-external-gate-pass/report.md sh scripts/check/check-renderdoc-html-external-host-gate.shs"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = rt_file_read_text("build/test-renderdoc-html-external-gate-pass/out/evidence.env") ?? ""
+expect(evidence).to_contain("rdoc_html_external_gate_status=pass")
+expect(evidence).to_contain("rdoc_html_external_gate_reason=pass")
+expect(evidence).to_contain("rdoc_html_external_gate_backend=original")
+expect(evidence).to_contain("rdoc_html_external_gate_scene=html-css-chrome")
+expect(evidence).to_contain("rdoc_html_external_gate_capture_magic=RDOC")
+expect(evidence).to_contain("rdoc_html_external_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+```
+
+</details>
+
+#### rejects generic original RDOC evidence that is not the HTML/CSS Chrome scene
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-renderdoc-html-external-gate-generic && mkdir -p build/test-renderdoc-html-external-gate-generic/source && printf 'RDOCsynthetic generic capture\\n' > build/test-renderdoc-html-external-gate-generic/source/generic.rdc && printf 'rdoc_backend=original\\nrdoc_scene=generic\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-html-external-gate-generic/source/generic.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\n' > build/test-renderdoc-html-external-gate-generic/source/evidence.env && RDOC_HTML_EVIDENCE_ENV=build/test-renderdoc-html-external-gate-generic/source/evidence.env BUILD_DIR=build/test-renderdoc-html-external-gate-generic/out REPORT_PATH=build/test-renderdoc-html-external-gate-generic/report.md sh scripts/check/check-renderdoc-html-external-host-gate.shs || true"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = rt_file_read_text("build/test-renderdoc-html-external-gate-generic/out/evidence.env") ?? ""
+expect(evidence).to_contain("rdoc_html_external_gate_status=fail")
+expect(evidence).to_contain("rdoc_html_external_gate_reason=unexpected-scene")
+expect(evidence).to_contain("rdoc_html_external_gate_required_scene=html-css-chrome")
 ```
 
 </details>
@@ -137,8 +191,8 @@ else:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

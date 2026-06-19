@@ -27,13 +27,17 @@ write_evidence() {
         echo "rdoc_html_external_gate_reason=$reason"
         echo "rdoc_html_external_gate_source_env=$SOURCE_ENV"
         echo "rdoc_html_external_gate_backend=${backend:-}"
+        echo "rdoc_html_external_gate_scene=${scene:-}"
         echo "rdoc_html_external_gate_capture_status=${capture_status:-}"
         echo "rdoc_html_external_gate_capture_reason=${capture_reason:-}"
         echo "rdoc_html_external_gate_capture_file=${capture_file:-}"
         echo "rdoc_html_external_gate_capture_magic=${capture_magic:-}"
+        echo "rdoc_html_external_gate_html_path=${html_path:-}"
         echo "rdoc_html_external_gate_required_backend=original"
+        echo "rdoc_html_external_gate_required_scene=html-css-chrome"
         echo "rdoc_html_external_gate_required_status=pass"
         echo "rdoc_html_external_gate_required_magic=RDOC"
+        echo "rdoc_html_external_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html"
     } >"$OUT_ENV"
     {
         echo "# RenderDoc HTML External Host Gate"
@@ -42,10 +46,12 @@ write_evidence() {
         echo "- reason: $reason"
         echo "- source evidence: $SOURCE_ENV"
         echo "- backend: ${backend:-}"
+        echo "- scene: ${scene:-}"
         echo "- capture status: ${capture_status:-}"
         echo "- capture reason: ${capture_reason:-}"
         echo "- capture file: ${capture_file:-}"
         echo "- capture magic: ${capture_magic:-}"
+        echo "- HTML fixture: ${html_path:-}"
         echo
         echo "## Raw Evidence"
         sed 's/^/- /' "$OUT_ENV"
@@ -55,28 +61,58 @@ write_evidence() {
 
 if [ ! -s "$SOURCE_ENV" ]; then
     backend=""
+    scene=""
     capture_status=""
     capture_reason="missing-source-evidence"
     capture_file=""
     capture_magic=""
+    html_path=""
     write_evidence "unavailable" "missing-source-evidence"
     exit 1
 fi
 
 backend="$(value_of rdoc_backend "$SOURCE_ENV")"
+scene="$(value_of rdoc_scene "$SOURCE_ENV")"
 capture_status="$(value_of rdoc_capture_status "$SOURCE_ENV")"
 capture_reason="$(value_of rdoc_capture_reason "$SOURCE_ENV")"
 capture_file="$(value_of rdoc_capture_file "$SOURCE_ENV")"
 capture_magic="$(value_of rdoc_capture_magic "$SOURCE_ENV")"
+html_path="$(value_of rdoc_html_path "$SOURCE_ENV")"
 
-if [ "$backend" = "original" ] && [ "$capture_status" = "pass" ] && [ "$capture_magic" = "RDOC" ] && [ -s "$capture_file" ]; then
+case "$html_path" in
+    *test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html)
+        html_path_matches="1"
+        ;;
+    *)
+        html_path_matches="0"
+        ;;
+esac
+
+if [ "$backend" = "original" ] \
+    && [ "$scene" = "html-css-chrome" ] \
+    && [ "$capture_status" = "pass" ] \
+    && [ "$capture_magic" = "RDOC" ] \
+    && [ -s "$capture_file" ] \
+    && [ "$html_path_matches" = "1" ]; then
     write_evidence "pass" "pass"
     exit 0
 fi
 
 if [ "$capture_status" = "" ]; then
     write_evidence "unavailable" "missing-capture-status"
-else
+elif [ "$backend" != "original" ]; then
+    write_evidence "fail" "unexpected-backend"
+elif [ "$scene" != "html-css-chrome" ]; then
+    write_evidence "fail" "unexpected-scene"
+elif [ "$capture_status" != "pass" ]; then
     write_evidence "fail" "${capture_reason:-capture-not-pass}"
+elif [ "$capture_magic" != "RDOC" ]; then
+    write_evidence "fail" "missing-rdoc-magic"
+elif [ ! -s "$capture_file" ]; then
+    write_evidence "fail" "missing-rdc-file"
+elif [ "$html_path_matches" != "1" ]; then
+    write_evidence "fail" "unexpected-html-fixture"
+else
+    write_evidence "fail" "html-external-gate-failed"
 fi
 exit 1
