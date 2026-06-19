@@ -48,7 +48,7 @@ Validates that IDE-facing Markdown, presentation, spreadsheet, dashboard, databa
 | Plan | doc/03_plan/sys_test/ide_office_plugin_suite.md |
 | Design | doc/05_design/app/office/libreoffice_llm_access.md |
 | Research | doc/01_research/app/office/libreoffice_llm_access.md |
-| Source | `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
+| Source | `/tmp/simple-office-next47/test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
@@ -359,7 +359,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 478 lines folded for reproduction.
+Runnable source: 479 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -519,6 +519,7 @@ val missing_sdd_inspect_edge_action = office_action_dispatch("inspect-sdd-edge",
 expect(md_action.output).to_contain("class=\"wysiwyg-preview\"")
 expect(md_action.output).to_contain("data-format=\"markdown-wysiwyg\"")
 expect(md_action.output).to_contain("data-line-count=\"1\"")
+expect(md_action.output).to_contain("data-line-no=\"0\"")
 expect(md_action.output).to_contain("<h1>Markdown</h1>")
 expect(md_edit_action.output).to_contain("new")
 expect(md_edit_action.reason).to_equal("updated")

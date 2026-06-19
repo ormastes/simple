@@ -76,7 +76,7 @@ expect(pane).to_equal("alpha\nbeta")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -85,6 +85,7 @@ val pane = wysiwyg_preview_pane(view)
 expect(pane).to_start_with("<div class=\"wysiwyg-preview\"")
 expect(pane).to_contain("data-format=\"markdown-wysiwyg\"")
 expect(pane).to_contain("data-line-count=\"1\"")
+expect(pane).to_contain("class=\"wysiwyg-preview-line\" data-line-no=\"0\"")
 expect(pane).to_contain("line-height: 1.5;")
 expect(pane).to_contain(">hello</p>")
 ```
@@ -96,7 +97,7 @@ expect(pane).to_contain(">hello</p>")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -104,8 +105,10 @@ val html = wysiwyg_preview_document_html("# Title\n<script>alert(1)</script>")
 expect(wysiwyg_preview_css()).to_contain(".wysiwyg-preview")
 expect(html).to_start_with("<style>.wysiwyg-preview")
 expect(html).to_contain("box-sizing: border-box")
+expect(html).to_contain(".wysiwyg-preview-line")
 expect(html).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
 expect(html).to_contain("data-line-count=\"2\"")
+expect(html).to_contain("data-line-no=\"1\"")
 expect(html).to_contain("style=\"font-family:")
 ```
 
@@ -213,7 +216,7 @@ expect(wysiwyg_source_pane(result.view)).to_equal("first")
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Source | `test/01_unit/app/office/md_wysiwyg_spec.spl` |
+| Source | `/tmp/simple-office-next47/test/01_unit/app/office/md_wysiwyg_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 

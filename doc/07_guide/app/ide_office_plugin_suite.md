@@ -34,7 +34,8 @@ older rich-text `WordApp` remains only as a compatibility UI module.
 
 Markdown GUI rendering must use `wysiwyg_preview_document_html`, not a bare
 preview pane. The document helper owns the stable `.wysiwyg-preview` CSS wrapper
-and the escaped styled HTML generated from source lines.
+and line-addressable `.wysiwyg-preview-line` rows for the escaped styled HTML
+generated from source lines.
 
 Writer rendering must expose Markdown source -> paper/document HTML through
 `render_writer_markdown_html`.
