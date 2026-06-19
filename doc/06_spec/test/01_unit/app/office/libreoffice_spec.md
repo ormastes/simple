@@ -91,13 +91,14 @@ expect(libreoffice_app_name("math")).to_equal("Math")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(is_office_component("word")).to_be(true)
 expect(is_office_component("sheets")).to_be(true)
 expect(is_office_component("counter")).to_be(true)
+expect(libreoffice_app_name_checked("writer")).to_equal("Writer")
 expect(libreoffice_app_name_checked("counter")).to_equal("Counter")
 expect(libreoffice_app_name_checked("unknown")).to_equal("error: unknown LibreOffice component: unknown")
 val route = lookup_office_component("counter")
@@ -113,7 +114,7 @@ expect(route.component).to_equal("counter")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -123,6 +124,7 @@ expect(sheets.unwrap()).to_equal("sheets")
 val counter = office_component_for_action("open_counter")
 expect(counter.is_some()).to_be(true)
 expect(counter.unwrap()).to_equal("counter")
+expect(office_component_for_action("open_writer").is_none()).to_be(true)
 ```
 
 </details>

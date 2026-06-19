@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 50 | 50 | 0 | 0 |
+| 51 | 51 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -44,7 +44,7 @@ Office suite unit specification.
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Source | `/tmp/simple-office-next2/test/01_unit/app/office/office_suite_spec.spl` |
+| Source | `test/01_unit/app/office/office_suite_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
@@ -79,6 +79,20 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(run_office(["word"])).to_equal(0)
+```
+
+</details>
+
+#### loads writer as the markdown-backed word processor
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["writer"])).to_equal(0)
 ```
 
 </details>
@@ -988,8 +1002,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 50 |
-| Active scenarios | 50 |
+| Total scenarios | 51 |
+| Active scenarios | 51 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

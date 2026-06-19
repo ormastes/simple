@@ -391,3 +391,7 @@ possible so they are runner-verifiable.
   LibreOffice suite name. The launcher now presents Writer, Calc, and Impress
   labels plus a LibreOffice window/status title while preserving existing
   `open_word`/`open_sheets`/`open_slides` compatibility actions.
+- 2026-06-19 dev: Pointed the CLI Writer route at the Markdown-backed Writer
+  surface. `word` and the new `writer` alias now load the existing WYSIWYG
+  Markdown model (`source=markdown`, `render=html`), while the older rich-text
+  `WordApp` remains available as a compatibility UI module.

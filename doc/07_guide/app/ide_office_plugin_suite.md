@@ -29,6 +29,8 @@ the generated render target.
 The launcher-visible product name is `LibreOffice`; cards should use the
 LibreOffice app names Writer, Calc, and Impress even while the legacy compatible
 actions remain `open_word`, `open_sheets`, and `open_slides`.
+The CLI `word` and `writer` routes load the Markdown-backed Writer surface; the
+older rich-text `WordApp` remains only as a compatibility UI module.
 
 Markdown GUI rendering must use `wysiwyg_preview_document_html`, not a bare
 preview pane. The document helper owns the stable `.wysiwyg-preview` CSS wrapper
