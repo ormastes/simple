@@ -29,7 +29,7 @@ html_render_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -219,6 +219,23 @@ expect(html).to_contain("<li>Second &lt;safe&gt;</li>")
 
 </details>
 
+#### renders Writer Markdown ordered lists as document HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("1. First **item**\n10. Second <safe>")
+expect(html).to_contain("<ol class=\"md-writer-list md-writer-ordered-list\">")
+expect(html).to_contain("<li>First <strong>item</strong></li>")
+expect(html).to_contain("<li>Second &lt;safe&gt;</li>")
+```
+
+</details>
+
 #### preserves Markdown table alignment markers in Writer HTML
 
 <details>
@@ -257,8 +274,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

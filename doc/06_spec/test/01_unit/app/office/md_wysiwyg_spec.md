@@ -28,7 +28,7 @@ md_wysiwyg_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -222,6 +222,22 @@ expect(html).to_contain("<li>First <strong>item</strong></li>")
 
 </details>
 
+#### renders Markdown ordered list lines as HTML lists
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = wysiwyg_preview_document_html("10. First **item**")
+expect(html).to_contain("<ol class=\"markdown-list markdown-ordered-list\"")
+expect(html).to_contain("<li>First <strong>item</strong></li>")
+```
+
+</details>
+
 ### markdown WYSIWYG view: beside-the-line editing
 _Editing one line updates only that row's source and preview._
 
@@ -360,8 +376,8 @@ expect(wysiwyg_source_pane(result.view)).to_equal("first")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
