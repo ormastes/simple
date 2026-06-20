@@ -618,7 +618,7 @@ expect(stacked.nodes[2].width).to_equal("100")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -647,6 +647,10 @@ expect(resolved.design.nodes[1].y).to_equal("8")
 val stale = office_ui_design_update_auto_layout_checked(parented.design, "frame", "vertical", "0", "0,0,0,0", "horizontal", "6", "8,8,8,8")
 expect(stale.accepted).to_be(false)
 expect(stale.reason).to_equal("stale-node")
+val negative_spacing = office_ui_design_update_auto_layout_checked(parented.design, "frame", "off", "0", "0,0,0,0", "horizontal", "6", "8,-1,8,8")
+expect(negative_spacing.accepted).to_be(false)
+expect(negative_spacing.reason).to_equal("invalid-layout")
+expect(negative_spacing.design.nodes[0].layout_padding).to_equal("0,0,0,0")
 val invalid = office_ui_design_update_constraint_checked(layout.design, "child", "left", "top", "diagonal", "top")
 expect(invalid.accepted).to_be(false)
 expect(invalid.reason).to_equal("invalid-layout")
