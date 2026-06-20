@@ -195,7 +195,7 @@ expect(invalid.design.width).to_equal("800")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -204,6 +204,10 @@ val invalid = office_ui_design_add_node_checked(design, OfficeUiNode(id: "bad", 
 expect(invalid.accepted).to_be(false)
 expect(invalid.reason).to_equal("invalid-geometry")
 expect(invalid.design.nodes.len()).to_equal(0)
+val bad_layout = office_ui_design_add_node_checked(design, OfficeUiNode(id: "bad_layout", label: "Bad Layout", kind: "button", css: "primary", x: "10", y: "20", width: "80", height: "32", layer: "controls", component: "action", parent: "", layout_mode: "diagonal", layout_gap: "0", layout_padding: "0,0,0,0", constraint_horizontal: "left", constraint_vertical: "top"))
+expect(bad_layout.accepted).to_be(false)
+expect(bad_layout.reason).to_equal("invalid-layout")
+expect(bad_layout.design.nodes.len()).to_equal(0)
 ```
 
 </details>
