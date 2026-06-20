@@ -7,6 +7,9 @@
 - SDD-002: Diagram nodes preserve shape, explicit x/y position, width/height,
   and layer metadata.
 - SDD-003: Diagram connectors preserve route, waypoints, and start/end anchors.
+- SDD-004: HTML rendering exposes deterministic editor metadata for SDD
+  diagrams, nodes, and connectors.
+- SDD-005: Weave rules can apply node layout and shape edits by selector.
 - SDD-006: Diagram connectors render deterministic SVG `data-path` values from
   anchors and waypoints.
 - SDD-007: Pure reroute edits update edge route, waypoint, and anchor metadata.
