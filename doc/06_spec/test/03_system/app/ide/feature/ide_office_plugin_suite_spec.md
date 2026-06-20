@@ -531,7 +531,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1321 lines folded for reproduction.
+Runnable source: 1322 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -542,6 +542,7 @@ expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mai
 expect(office_llm_catalog_is_valid()).to_be(true)
 expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=12 features=210 actions=137")
 expect(office_llm_action_input_schemas_are_complete()).to_be(true)
+expect(office_llm_action_input_schema("ui-order-node")).to_equal("node_id|front_or_back\\nhtml_ui_source")
 expect(office_llm_action_input_schema("query-table")).to_equal("count-where|column|value or select-where|column|value or project-column|column\\ntable: Name\\ncolumns: ...\\nrow: ...")
 expect(office_llm_action_input_schema("export-base-game-state")).to_equal("scope_column|scope_value|key_column|value_column\\ntable: Name\\ncolumns: ...\\nrow: ...")
 expect(office_llm_action_input_schema("order-sdd-node")).to_equal("node_id|front_or_back\\nsdd_source")
