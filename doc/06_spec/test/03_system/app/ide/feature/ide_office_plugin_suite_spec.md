@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=7 roundtrip=7 names=7 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=181 actions=102
+  llm-catalog: apps=11 features=182 actions=103
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=181")
+expect(tui_report).to_contain("features=182")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -439,7 +439,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1011 lines folded for reproduction.
+Runnable source: 1017 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -448,10 +448,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=181 actions=102")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=182 actions=103")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(102)
-expect(dispatch_probe.recognized_count).to_equal(102)
+expect(dispatch_probe.advertised_count).to_equal(103)
+expect(dispatch_probe.recognized_count).to_equal(103)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -561,6 +561,8 @@ expect(catalog[4].actions.join(",")).to_contain("edit-sdd-edge-kind")
 expect(catalog[4].actions.join(",")).to_contain("sdd-edge-kind-read")
 expect(catalog[4].features.join(",")).to_contain("edge-route-readback")
 expect(catalog[4].actions.join(",")).to_contain("sdd-edge-route-read")
+expect(catalog[4].features.join(",")).to_contain("edge-path-readback")
+expect(catalog[4].actions.join(",")).to_contain("sdd-edge-path-read")
 expect(catalog[4].features.join(",")).to_contain("edge-endpoints-readback")
 expect(catalog[4].actions.join(",")).to_contain("sdd-edge-endpoints-read")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-edge-endpoints")
@@ -792,6 +794,7 @@ val sdd_edge_kind_action = office_action_dispatch("edit-sdd-edge-kind", "0|async
 val sdd_edge_kind_read_action = office_action_dispatch("sdd-edge-kind-read", "0\ngraph: Edge Kind\nA: A\nB: B\nA -> B: link kind: async")
 val invalid_sdd_edge_kind_action = office_action_dispatch("edit-sdd-edge-kind", "0|async bad\ngraph: Edge Kind\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link kind: request route: simple start: right end: left")
 val sdd_edge_route_read_action = office_action_dispatch("sdd-edge-route-read", "0\ngraph: Edge Route\nA: A\nB: B\nA -> B: link route: orthogonal waypoints: 40x10 start: right end: left")
+val sdd_edge_path_read_action = office_action_dispatch("sdd-edge-path-read", "0\ngraph: Edge Path\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 80 y: 0 width: 20 height: 20\nA -> B: link route: orthogonal waypoints: 40x10 start: right end: left")
 val sdd_edge_endpoints_read_action = office_action_dispatch("sdd-edge-endpoints-read", "0\ngraph: Edge Endpoints\nA: A\nB: B\nA -> B: link")
 val sdd_edge_endpoints_action = office_action_dispatch("edit-sdd-edge-endpoints", "0|B|A\ngraph: Edge Endpoints\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val blank_sdd_edge_endpoint_action = office_action_dispatch("edit-sdd-edge-endpoints", "0|B|   \ngraph: Edge Endpoints\nA: A\nB: B\nA -> B: link")
@@ -1085,6 +1088,9 @@ expect(sdd_edge_kind_read_action.reason).to_equal("selected")
 expect(invalid_sdd_edge_kind_action.reason).to_equal("invalid-kind-token")
 expect(sdd_edge_route_read_action.output).to_equal("orthogonal|40x10|right|left")
 expect(sdd_edge_route_read_action.reason).to_equal("selected")
+expect(sdd_edge_path_read_action.output).to_contain("M")
+expect(sdd_edge_path_read_action.output).to_contain("|20,10,80,10|2")
+expect(sdd_edge_path_read_action.reason).to_equal("selected")
 expect(sdd_edge_endpoints_read_action.output).to_equal("A,B")
 expect(sdd_edge_endpoints_read_action.reason).to_equal("selected")
 expect(sdd_edge_endpoints_action.output).to_contain("data-from=\"B\" data-to=\"A\"")
