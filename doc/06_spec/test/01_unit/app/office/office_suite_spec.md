@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 164 | 164 | 0 | 0 |
+| 165 | 165 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1919,6 +1919,25 @@ expect(result.output).to_contain("data-design=\"Feature|Two\"")
 
 </details>
 
+#### preserves escaped pipe SDD add labels
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val node = office_action_dispatch("add-sdd-node", "C|Choice\\|Ready|accent|decision|diamond|96|64|80|32|front|\ngraph: Add\nA: Alpha")
+val edge = office_action_dispatch("add-sdd-edge", "A|B|open\\|closed|primary|flow|orthogonal||right|left\ngraph: Add\nA: Alpha\nB: Beta")
+expect(node.ok).to_be(true)
+expect(node.output).to_contain("data-label=\"Choice|Ready\"")
+expect(edge.ok).to_be(true)
+expect(edge.output).to_contain("data-label=\"open|closed\"")
+```
+
+</details>
+
 #### rejects blank UI layout action target ids
 
 <details>
@@ -3204,8 +3223,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 164 |
-| Active scenarios | 164 |
+| Total scenarios | 165 |
+| Active scenarios | 165 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
