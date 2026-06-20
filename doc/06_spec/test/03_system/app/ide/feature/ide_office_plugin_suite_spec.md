@@ -530,7 +530,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1269 lines folded for reproduction.
+Runnable source: 1273 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -976,6 +976,7 @@ val sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|orth
 val invalid_sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|curve|60x10|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val invalid_sdd_reroute_waypoint_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60xbad|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val invalid_sdd_reroute_anchor_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60x10|side|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
+val short_sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60x10\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val sdd_add_edge_action = office_action_dispatch("add-sdd-edge", "B|A|return|secondary|reply|simple||left|right\ngraph: Edge Add\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20")
 val sdd_duplicate_edge_action = office_action_dispatch("duplicate-sdd-edge", "0\ngraph: Edge Copy\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: flow @primary route: simple start: right end: left")
 val invalid_sdd_add_edge_action = office_action_dispatch("add-sdd-edge", "B|A|return|secondary|reply|curve||left|right\ngraph: Edge Add\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20")
@@ -983,6 +984,7 @@ val invalid_sdd_add_edge_waypoint_action = office_action_dispatch("add-sdd-edge"
 val invalid_sdd_add_edge_anchor_action = office_action_dispatch("add-sdd-edge", "B|A|return|secondary|reply|orthogonal|60x10|side|right\ngraph: Edge Add\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20")
 val invalid_sdd_add_edge_endpoint_action = office_action_dispatch("add-sdd-edge", "B bad|A|return|secondary|reply|simple||left|right\ngraph: Edge Add\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20")
 val blank_sdd_add_edge_action = office_action_dispatch("add-sdd-edge", "   |A|return|secondary|reply|simple||left|right\ngraph: Edge Add\nA: A x: 0 y: 0 width: 20 height: 20")
+val short_sdd_add_edge_action = office_action_dispatch("add-sdd-edge", "B|A|return|secondary\ngraph: Edge Add\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20")
 val missing_sdd_add_edge_action = office_action_dispatch("add-sdd-edge", "B|Nope|return|secondary|reply|simple||left|right\ngraph: Edge Add\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20")
 val missing_sdd_duplicate_edge_action = office_action_dispatch("duplicate-sdd-edge", "8\ngraph: Edge Copy\nA: A\nB: B\nA -> B: flow")
 val sdd_edge_label_action = office_action_dispatch("edit-sdd-edge-label", "0|approved\ngraph: Edge Label\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
@@ -1362,6 +1364,7 @@ expect(sdd_reroute_action.output).to_contain("data-route=\"orthogonal\"")
 expect(invalid_sdd_reroute_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_reroute_waypoint_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_reroute_anchor_action.reason).to_equal("invalid-args")
+expect(short_sdd_reroute_action.reason).to_equal("invalid-args")
 expect(sdd_add_edge_action.output).to_contain(">return</div>")
 expect(sdd_add_edge_action.output).to_contain("data-label=\"return\"")
 expect(sdd_add_edge_action.output).to_contain("data-kind=\"reply\"")
@@ -1373,6 +1376,7 @@ expect(invalid_sdd_add_edge_waypoint_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_add_edge_anchor_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_add_edge_endpoint_action.reason).to_equal("invalid-args")
 expect(blank_sdd_add_edge_action.reason).to_equal("invalid-args")
+expect(short_sdd_add_edge_action.reason).to_equal("invalid-args")
 expect(missing_sdd_add_edge_action.reason).to_equal("missing-node")
 expect(missing_sdd_duplicate_edge_action.reason).to_equal("missing-edge")
 expect(sdd_edge_label_action.output).to_contain(">approved</div>")
