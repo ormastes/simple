@@ -530,7 +530,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1237 lines folded for reproduction.
+Runnable source: 1243 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -813,7 +813,9 @@ val ui_layout_action = office_action_dispatch("ui-layout-edit", "button|16|16|80
 val ui_resize_action = office_action_dispatch("ui-resize-node", "button|16|16|80|32|16|16|120|48\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_layout_action = office_action_dispatch("ui-layout-edit", "   |16|16|80|32|24|32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_resize_action = office_action_dispatch("ui-resize-node", "button|16|16|80|32|16|16|wide|48\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val short_ui_resize_action = office_action_dispatch("ui-resize-node", "button|16|16|80|32|16\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_layout_action = office_action_dispatch("ui-layout-edit", "button bad|16|16|80|32|24|32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val short_ui_layout_action = office_action_dispatch("ui-layout-edit", "button|16|16|80|32|24\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_geometry_ui_layout_action = office_action_dispatch("ui-layout-edit", "button|16|16|80|32|   |32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_auto_layout_action = office_action_dispatch("ui-auto-layout-edit", "frame|off|0|0,0,0,0|vertical|8|4,4,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container\nnode button|Run|button|16|16|80|32|primary|frame|action")
 val blank_ui_auto_layout_action = office_action_dispatch("ui-auto-layout-edit", "   |off|0|0,0,0,0|vertical|8|4,4,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
@@ -822,6 +824,7 @@ val blank_field_ui_auto_layout_action = office_action_dispatch("ui-auto-layout-e
 val invalid_mode_ui_auto_layout_action = office_action_dispatch("ui-auto-layout-edit", "frame|off|0|0,0,0,0|diagonal|8|4,4,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
 val invalid_gap_ui_auto_layout_action = office_action_dispatch("ui-auto-layout-edit", "frame|off|0|0,0,0,0|vertical|wide|4,4,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
 val invalid_padding_ui_auto_layout_action = office_action_dispatch("ui-auto-layout-edit", "frame|off|0|0,0,0,0|vertical|8|4,bad,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
+val short_ui_auto_layout_action = office_action_dispatch("ui-auto-layout-edit", "frame|off|0|0,0,0,0|vertical\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
 val ui_auto_layout_signature_action = office_action_dispatch("ui-auto-layout-signature", "design: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container||vertical|8|4,4,4,4\nnode button|Run|button|16|16|80|32|primary|frame|action")
 val ui_resolve_layout_action = office_action_dispatch("ui-resolve-auto-layout", "frame:,vertical,8,4,4,4,4,left,top,0,0,200,120;button:frame,off,0,0,0,0,left,top,16,16,80,32\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container||vertical|8|4,4,4,4\nnode button|Run|button|16|16|80|32|primary|frame|action")
 val ui_resolved_layout_read_action = office_action_dispatch("ui-resolved-layout-read", "design: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container||vertical|8|4,4,4,4\nnode button|Run|button|16|16|80|32|primary|2|action|frame")
@@ -1132,7 +1135,9 @@ expect(ui_resize_action.action).to_equal("ui-resize-node")
 expect(ui_resize_action.output).to_contain("width: 120px")
 expect(blank_ui_layout_action.reason).to_equal("invalid-args")
 expect(invalid_ui_resize_action.reason).to_equal("invalid-args")
+expect(short_ui_resize_action.reason).to_equal("invalid-args")
 expect(invalid_ui_layout_action.reason).to_equal("invalid-args")
+expect(short_ui_layout_action.reason).to_equal("invalid-args")
 expect(blank_geometry_ui_layout_action.reason).to_equal("invalid-args")
 expect(ui_auto_layout_action.output).to_contain("data-layout-mode=\"vertical\"")
 expect(blank_ui_auto_layout_action.reason).to_equal("invalid-args")
@@ -1141,6 +1146,7 @@ expect(blank_field_ui_auto_layout_action.reason).to_equal("invalid-args")
 expect(invalid_mode_ui_auto_layout_action.reason).to_equal("invalid-args")
 expect(invalid_gap_ui_auto_layout_action.reason).to_equal("invalid-args")
 expect(invalid_padding_ui_auto_layout_action.reason).to_equal("invalid-args")
+expect(short_ui_auto_layout_action.reason).to_equal("invalid-args")
 expect(ui_auto_layout_signature_action.output).to_equal("frame:,vertical,8,4,4,4,4,left,top,0,0,200,120;button:frame,off,0,0,0,0,left,top,16,16,80,32")
 expect(ui_resolve_layout_action.output).to_contain("left: 4px")
 expect(ui_resolve_layout_action.output).to_contain("top: 4px")
