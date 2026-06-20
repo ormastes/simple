@@ -29,7 +29,7 @@ ide_office_plugin_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -128,6 +128,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   plugin-manifest: plugins: entries=13 roundtrip=13 names=13 kinds=4 libre=6 libre_roundtrip=6
   llm-catalog: apps=12 features=210 actions=137
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter,Launcher
+  llm-formats: markdown,markdown,sheet,slides,sdd,html-ui,table,math,mail,planner,counter,launcher
 ```
 
 </details>
@@ -184,7 +185,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 60 lines folded for reproduction.
+Runnable source: 61 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -231,6 +232,7 @@ expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=12")
 expect(tui_report).to_contain("features=210")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter,Launcher")
+expect(tui_report).to_contain("llm-formats: markdown,markdown,sheet,slides,sdd,html-ui,table,math,mail,planner,counter,launcher")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
 expect(tui_report).to_contain("libre=6")
@@ -257,12 +259,12 @@ expect(registry_checks).to_contain("contracts=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val lines = ide_feature_check_report("tui")
-expect(lines.len()).to_equal(38)
+expect(lines.len()).to_equal(39)
 expect(lines[0]).to_equal("Simple IDE feature check")
 expect(lines[1]).to_equal("mode: tui")
 expect(lines[2]).to_equal("capabilities: 13")
@@ -293,6 +295,7 @@ expect(lines[31]).to_start_with("db-admin:")
 expect(lines[35]).to_start_with("  plugin-manifest:")
 expect(lines[36]).to_start_with("  llm-catalog:")
 expect(lines[37]).to_start_with("  llm-apps:")
+expect(lines[38]).to_start_with("  llm-formats:")
 ```
 
 </details>
@@ -471,6 +474,28 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 
 </details>
 
+#### rejects Office action contexts with spoofed evidence provenance
+
+- office plugin context
+   - Expected: writer_bad_evidence.reason equals `context-mismatch`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val writer_bad_evidence = office_action_dispatch_with_context(
+    office_plugin_context("render-writer-markdown-html", "writer", "markdown", "word/html_render_wrong"),
+    "# Deck"
+)
+expect(writer_bad_evidence.reason).to_equal("context-mismatch")
+```
+
+</details>
+
 #### exposes a complete LLM-readable app feature catalog
 
 - var base table = new table
@@ -491,7 +516,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1160 lines folded for reproduction.
+Runnable source: 1163 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1004,6 +1029,9 @@ expect(invalid_ui_selection_geometry_action.reason).to_equal("invalid-args")
 expect(missing_ui_selection_geometry_action.reason).to_equal("missing-node")
 expect(ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape")
 expect(sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
+expect(sdd_action.output).to_contain("data-format=\"sdd\"")
+expect(sdd_action.output).to_contain("data-format-name=\"SDD: Simple Diagram Document\"")
+expect(sdd_action.output).to_contain("data-file-extension=\".sdd.sdn\"")
 expect(sdd_action.output).to_contain("data-node-count=\"1\"")
 expect(sdd_action.output).to_contain("data-edge-count=\"0\"")
 expect(sdd_summary_action.output).to_equal("name=Feature\nnodes=2\nedges=1\ncss_rules=1\nstyle_rows=1\ncanvas=true")
@@ -2154,8 +2182,8 @@ expect(summary).to_contain("libre_roundtrip=6")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
