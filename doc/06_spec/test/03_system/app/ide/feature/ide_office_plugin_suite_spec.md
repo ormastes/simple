@@ -548,7 +548,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1339 lines folded for reproduction.
+Runnable source: 1342 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1788,8 +1788,11 @@ expect(base_duplicate_column_action.reason).to_equal("duplicate-column")
 expect(base_blank_column_action.reason).to_equal("blank-column")
 expect(base_blank_name_action.reason).to_equal("missing-table-name")
 expect(base_insert_action.output).to_contain("row: 3,open")
+expect(base_insert_action.reason).to_equal("inserted")
 expect(base_update_action.output).to_contain("row: 1,done")
+expect(base_update_action.reason).to_equal("updated")
 expect(base_delete_action.output).to_contain("row: 2,done")
+expect(base_delete_action.reason).to_equal("deleted")
 expect(base_blank_edit_column_action.reason).to_equal("invalid-args")
 expect(base_missing_edit_column_action.reason).to_equal("missing-match-column")
 expect(base_bad_insert_action.reason).to_equal("row-width-mismatch")
