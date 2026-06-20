@@ -29,7 +29,7 @@ html_render_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -216,6 +216,21 @@ expect(html).to_contain("<link rel=\"stylesheet\" href=\"#\">")
 
 </details>
 
+#### sanitizes protocol-relative Writer Markdown stylesheet URLs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("---\ncss_file: //evil.example/style.css\n---\n\nBody")
+expect(html).to_contain("<link rel=\"stylesheet\" href=\"#\">")
+```
+
+</details>
+
 #### renders Writer Markdown tables and images as document HTML
 
 <details>
@@ -266,20 +281,36 @@ expect(html).to_contain("<img src=\"#\" alt=\"Bad\">")
 
 </details>
 
+#### sanitizes protocol-relative Writer Markdown image URLs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("![Bad](//evil.example/image.png)")
+expect(html).to_contain("<img src=\"#\" alt=\"Bad\">")
+```
+
+</details>
+
 #### renders Writer Markdown inline links in paper HTML
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val html = render_writer_markdown_html("# [Docs](docs.md)\n\nSee [Guide <x>](guide.md?a=1&b=2)\n\nFormula [Calc](calc(sum(1,2)))\n\nNo [Script](javascript:alert(1))")
+val html = render_writer_markdown_html("# [Docs](docs.md)\n\nSee [Guide <x>](guide.md?a=1&b=2)\n\nFormula [Calc](calc(sum(1,2)))\n\nNo [Script](javascript:alert(1))\n\nNo [Host](//evil.example/path)")
 expect(html).to_contain("<h1 data-source-line=\"1\"><a href=\"docs.md\">Docs</a></h1>")
 expect(html).to_contain("<p data-source-line=\"3\">See <a href=\"guide.md?a=1&amp;b=2\">Guide &lt;x&gt;</a></p>")
 expect(html).to_contain("<p data-source-line=\"5\">Formula <a href=\"calc(sum(1,2))\">Calc</a></p>")
 expect(html).to_contain("<p data-source-line=\"7\">No <a href=\"#\">Script</a></p>")
+expect(html).to_contain("<p data-source-line=\"9\">No <a href=\"#\">Host</a></p>")
 ```
 
 </details>
@@ -424,8 +455,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

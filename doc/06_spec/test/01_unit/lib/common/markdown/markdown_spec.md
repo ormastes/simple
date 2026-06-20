@@ -141,11 +141,12 @@ expect(markdown_inline_text("[Docs <x>](docs?a=1&b=2)")).to_equal("<a href=\"doc
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(markdown_inline_text("[bad](javascript:alert)")).to_equal("<a href=\"#\">bad</a>")
+expect(markdown_inline_text("[bad](//evil.example/doc)")).to_equal("<a href=\"#\">bad</a>")
 ```
 
 </details>
