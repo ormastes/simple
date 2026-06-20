@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -201,6 +201,25 @@ expect(html).to_contain("data-layout-mode=\"off\"")
 expect(html).to_contain("data-constraint-h=\"left\"")
 expect(html).to_contain("left: 72px")
 expect(html).to_contain("Sign &lt;in&gt;")
+```
+
+</details>
+
+#### sanitizes direct-render length units before style emission
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = OfficeUiDesign(name: "Unsafe", width: "calc(1px);color:red", height: "480", nodes: [OfficeUiNode(id: "bad", label: "Bad", kind: "button", css: "primary", x: "1);color:redpx", y: "20", width: "120", height: "36", layer: "1", component: "action", parent: "", layout_mode: "off", layout_gap: "0", layout_padding: "0,0,0,0", constraint_horizontal: "left", constraint_vertical: "top")])
+val html = office_ui_design_render_html(design)
+expect(html).to_contain("width: 0px; height: 480px;")
+expect(html).to_contain("left: 0px; top: 20px;")
+expect(html.contains("width: calc")).to_be(false)
+expect(html.contains("left: 1);")).to_be(false)
 ```
 
 </details>
@@ -781,8 +800,8 @@ expect(cycle.reason).to_equal("cycle-parent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
