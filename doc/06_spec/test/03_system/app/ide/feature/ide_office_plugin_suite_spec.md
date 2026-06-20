@@ -530,7 +530,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1257 lines folded for reproduction.
+Runnable source: 1263 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -935,11 +935,13 @@ val invalid_sdd_style_action = office_action_dispatch("edit-sdd-node-style", "A|
 val sdd_label_action = office_action_dispatch("edit-sdd-node-label", "A|Renamed\ngraph: Label\nA: Old x: 0 y: 0 width: 20 height: 20")
 val sdd_label_read_action = office_action_dispatch("sdd-node-label-read", "A\ngraph: Label\nA: Renamed x: 0 y: 0 width: 20 height: 20")
 val missing_sdd_label_action = office_action_dispatch("edit-sdd-node-label", "Nope|Renamed\ngraph: Label\nA: Old x: 0 y: 0 width: 20 height: 20")
+val short_sdd_label_action = office_action_dispatch("edit-sdd-node-label", "A\ngraph: Label\nA: Old x: 0 y: 0 width: 20 height: 20")
 val sdd_geometry_action = office_action_dispatch("edit-sdd-node-geometry", "A|-8|12|64|32\ngraph: Geometry\nA: Old @accent role: actor shape: diamond x: 0 y: 0 width: 20 height: 20 layer: front")
 val sdd_geometry_read_action = office_action_dispatch("sdd-node-geometry-read", "A\ngraph: Geometry\nA: Old x: -8 y: 12 width: 64 height: 32")
 val invalid_sdd_geometry_action = office_action_dispatch("edit-sdd-node-geometry", "A|0|0|-1|32\ngraph: Geometry\nA: Old x: 0 y: 0 width: 20 height: 20")
 val invalid_sdd_geometry_id_action = office_action_dispatch("edit-sdd-node-geometry", "A bad|0|0|20|20\ngraph: Geometry\nA: Old x: 0 y: 0 width: 20 height: 20")
 val blank_sdd_geometry_action = office_action_dispatch("edit-sdd-node-geometry", "   |0|0|20|20\ngraph: Geometry\nA: A x: 0 y: 0 width: 20 height: 20")
+val short_sdd_geometry_action = office_action_dispatch("edit-sdd-node-geometry", "A|0|0\ngraph: Geometry\nA: Old x: 0 y: 0 width: 20 height: 20")
 val sdd_layer_action = office_action_dispatch("edit-sdd-node-layer", "A|front\ngraph: Layer\nA: Old x: 0 y: 0 width: 20 height: 20 layer: back")
 val sdd_layer_read_action = office_action_dispatch("sdd-node-layer-read", "A\ngraph: Layer\nA: Old x: 0 y: 0 width: 20 height: 20 layer: front")
 val invalid_sdd_layer_action = office_action_dispatch("edit-sdd-node-layer", "A|front layer\ngraph: Layer\nA: Old x: 0 y: 0 width: 20 height: 20 layer: back")
@@ -947,6 +949,7 @@ val sdd_order_action = office_action_dispatch("order-sdd-node", "A|front\ngraph:
 val sdd_order_read_action = office_action_dispatch("sdd-node-order-read", "B\ngraph: Order\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 40 y: 0 width: 20 height: 20")
 val blank_sdd_order_action = office_action_dispatch("order-sdd-node", "   |front\ngraph: Order\nA: A\nB: B")
 val invalid_sdd_order_action = office_action_dispatch("order-sdd-node", "A|middle\ngraph: Order\nA: A\nB: B")
+val short_sdd_order_action = office_action_dispatch("order-sdd-node", "A\ngraph: Order\nA: A\nB: B")
 val sdd_role_action = office_action_dispatch("edit-sdd-node-role", "A|database\ngraph: Role\nA: Old role: actor x: 0 y: 0 width: 20 height: 20")
 val sdd_role_read_action = office_action_dispatch("sdd-node-role-read", "A\ngraph: Role\nA: Old role: database x: 0 y: 0 width: 20 height: 20")
 val invalid_sdd_role_action = office_action_dispatch("edit-sdd-node-role", "A|data base\ngraph: Role\nA: Old role: actor x: 0 y: 0 width: 20 height: 20")
@@ -1303,12 +1306,14 @@ expect(sdd_label_action.output).to_contain(">Renamed</button>")
 expect(sdd_label_read_action.output).to_equal("Renamed")
 expect(sdd_label_read_action.reason).to_equal("selected")
 expect(missing_sdd_label_action.reason).to_equal("missing-node")
+expect(short_sdd_label_action.reason).to_equal("invalid-args")
 expect(sdd_geometry_action.output).to_contain("style=\"left:-8px;top:12px;width:64px;height:32px\"")
 expect(sdd_geometry_read_action.output).to_equal("-8,12,64,32")
 expect(sdd_geometry_read_action.reason).to_equal("selected")
 expect(invalid_sdd_geometry_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_geometry_id_action.reason).to_equal("invalid-args")
 expect(blank_sdd_geometry_action.reason).to_equal("invalid-args")
+expect(short_sdd_geometry_action.reason).to_equal("invalid-args")
 expect(sdd_layer_action.output).to_contain("data-layer=\"front\"")
 expect(sdd_layer_read_action.output).to_equal("front")
 expect(sdd_layer_read_action.reason).to_equal("selected")
@@ -1319,6 +1324,7 @@ expect(sdd_order_read_action.output).to_equal("1")
 expect(sdd_order_read_action.reason).to_equal("selected")
 expect(blank_sdd_order_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_order_action.reason).to_equal("invalid-position")
+expect(short_sdd_order_action.reason).to_equal("invalid-args")
 expect(sdd_role_action.output).to_contain("data-role=\"database\"")
 expect(sdd_role_read_action.output).to_equal("database")
 expect(sdd_role_read_action.reason).to_equal("selected")
