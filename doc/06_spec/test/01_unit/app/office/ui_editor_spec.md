@@ -465,7 +465,7 @@ expect(invalid.design.nodes[0].width).to_equal("120")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -483,11 +483,13 @@ expect(office_ui_design_render_html(copied.design)).to_contain("left: 54px")
 expect(office_ui_design_to_sdd(copied.design)).to_contain("action_copy, Action, primary, action, rounded, 54, 52, 80, 32, 2, card")
 
 val duplicate_id = office_ui_design_duplicate_node_checked(design, "action", "card", "1", "1")
+val unsafe_id = office_ui_design_duplicate_node_checked(design, "action", "bad id", "1", "1")
 val missing = office_ui_design_duplicate_node_checked(design, "missing", "missing_copy", "1", "1")
 val ambiguous = office_ui_design_duplicate_node_checked(office_ui_design_parse("design: Ambiguous\nnode a|A|button|0|0|20|20|primary|1|action\nnode a|A2|button|10|10|20|20|primary|2|action"), "a", "a_copy", "1", "1")
 val auto_layout_child = office_ui_design_duplicate_node_checked(office_ui_design_parse("design: Auto\nnode frame|Frame|frame|0|0|200|120|panel|1|container||vertical|4|4,4,4,4|left|top\nnode child|Child|button|10|10|40|20|primary|2|action|frame"), "child", "child_copy", "1", "1")
 val invalid_geometry = office_ui_design_duplicate_node_checked(office_ui_design_parse("design: Invalid\nnode bad|Bad|button|0|0|0|20|primary|1|action"), "bad", "bad_copy", "1", "1")
 expect(duplicate_id.reason).to_equal("duplicate-id")
+expect(unsafe_id.reason).to_equal("invalid-id")
 expect(missing.reason).to_equal("missing-node")
 expect(ambiguous.reason).to_equal("ambiguous-source")
 expect(auto_layout_child.reason).to_equal("auto-layout-child")
