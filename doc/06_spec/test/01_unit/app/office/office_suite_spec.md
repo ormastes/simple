@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 128 | 128 | 0 | 0 |
+| 129 | 129 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1123,8 +1123,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(97)
-expect(probe.recognized_count).to_equal(97)
+expect(probe.advertised_count).to_equal(98)
+expect(probe.recognized_count).to_equal(98)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2114,6 +2114,26 @@ expect(missing.reason).to_equal("missing-edge")
 
 </details>
 
+#### reads SDD edge kind tokens
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("sdd-edge-kind-read", "0\ngraph: Kind\nA: A\nB: B\nA -> B: link kind: async")
+val invalid = office_action_dispatch("sdd-edge-kind-read", "bad\ngraph: Kind\nA: A\nB: B\nA -> B: link kind: async")
+val missing = office_action_dispatch("sdd-edge-kind-read", "2\ngraph: Kind\nA: A\nB: B\nA -> B: link kind: async")
+expect(result.ok).to_be(true)
+expect(result.output).to_equal("async")
+expect(invalid.reason).to_equal("invalid-args")
+expect(missing.reason).to_equal("missing-edge")
+```
+
+</details>
+
 #### rejects blank SDD node geometry action target ids
 
 <details>
@@ -2439,8 +2459,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 128 |
-| Active scenarios | 128 |
+| Total scenarios | 129 |
+| Active scenarios | 129 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
