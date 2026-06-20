@@ -117,6 +117,7 @@ Blank duplicate source/new IDs or offsets are rejected as `invalid-args`.
 
 Designer edit actions use compact first-line edit headers followed by the UI
 design body. `ui-label-edit` uses `node_id|expected_label|new_label`.
+`ui-name-edit` uses `expected_name|new_name`; the new name is required.
 `ui-canvas-edit` uses `expected_width|expected_height|new_width|new_height`;
 all fields are required non-negative integers.
 `ui-layout-edit` and `ui-resize-node` use `node_id|expected_x|expected_y|expected_width|expected_height|new_x|new_y|new_width|new_height`; x/y fields are signed integers and width/height fields are non-negative integers.
@@ -324,7 +325,7 @@ modes:
   `render-mathml`, `render-math-structure`, and `render-mathml-checked`;
   Counter has `counter-action`; Designer has `selected-resize-handles`,
   `resize-handle-metadata`, `render-ui-html`, `render-ui-html-with-selection`, `export-ui-sdd`, and
-  `ui-label-edit` / `ui-kind-edit` / `ui-canvas-edit` / `ui-layout-edit` / `ui-resize-node` / `ui-auto-layout-edit` /
+  `ui-label-edit` / `ui-name-edit` / `ui-kind-edit` / `ui-canvas-edit` / `ui-layout-edit` / `ui-resize-node` / `ui-auto-layout-edit` /
   `ui-resolve-auto-layout` / `ui-duplicate-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` / `ui-component-edit` /
