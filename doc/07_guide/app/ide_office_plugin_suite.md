@@ -441,7 +441,8 @@ modes:
   wrong component, source-format, or evidence metadata is rejected instead of
   counted as valid. `unknown-action`,
   `context-mismatch`, and `source-format-mismatch` all count as missing catalog
-  actions.
+  actions. Catalog validation rejects unsupported source formats before they
+  reach dispatch.
 
 ## Verification
 

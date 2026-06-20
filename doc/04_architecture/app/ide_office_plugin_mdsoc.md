@@ -64,6 +64,8 @@ existing pure metadata/action surface, not a new framework:
    component, source-format, and evidence drift is caught by the dispatcher
    gate. The probe treats `unknown-action`,
    `context-mismatch`, and `source-format-mismatch` as missing catalog actions.
+   `office_llm_catalog_validate` rejects source formats outside the supported
+   Office substrate allowlist.
 
 ## Layer List
 

@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 157 | 157 | 0 | 0 |
+| 158 | 158 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1226,6 +1226,29 @@ expect(formats).to_contain("draw:sdd")
 expect(formats).to_contain("ui:html-ui")
 expect(formats).to_contain("db:table")
 expect(formats).to_contain("launcher:launcher")
+```
+
+</details>
+
+#### rejects unsupported LLM catalog source formats
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val bad_rows = [OfficeLlmFeature(
+    app_name: "Bad",
+    component: "bad",
+    source_format: "binary",
+    owner_module: "app.office.bad",
+    features: ["feature"],
+    actions: ["bad-action"],
+    evidence_key: "bad_spec"
+)]
+expect(office_llm_catalog_validate(bad_rows)).to_contain("invalid source format")
 ```
 
 </details>
@@ -3047,8 +3070,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 157 |
-| Active scenarios | 157 |
+| Total scenarios | 158 |
+| Active scenarios | 158 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
