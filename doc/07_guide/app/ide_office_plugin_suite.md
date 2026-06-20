@@ -215,7 +215,7 @@ Blank or malformed SDD order node ids are rejected as `invalid-args`.
 `sdd-style-target-read` uses `css|key` and returns the selected style rule's target token.
 `sdd-style-value-read` uses `css|key` and returns the selected style rule value.
 `sdd-style-resolved-read` uses `css|node_or_edge` and returns the inherited/cascaded declaration string for `node` or `edge`.
-`sdd-style-resolved-value-read` uses `css|node_or_edge|key` and returns the inherited/cascaded style value for `node` or `edge`; `node_or_edge` is a literal selector, not an angle-bracketed array type.
+`sdd-style-resolved-value-read` uses `css|node_or_edge|key` and returns the inherited/cascaded style value for `node` or `edge`; `node_or_edge` is a literal selector field, not an array type.
 `sdd-node-resolved-style-read` uses `node_id` and returns the selected node's inherited/cascaded declaration string.
 `sdd-node-resolved-style-value-read` uses `node_id|key` and returns the selected node's inherited/cascaded style value.
 `sdd-edge-resolved-style-read` uses `edge_index` and returns the selected edge's inherited/cascaded declaration string.
