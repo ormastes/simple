@@ -472,7 +472,7 @@ expect(sdn_graph_resolved_style_value(deleted.graph, "accent", "node", "stroke")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -482,6 +482,11 @@ expect(sdn_graph_resolved_style_value(graph, "bad", "node", "fill")).to_equal(""
 expect(sdn_graph_resolved_style_value(graph, "bad", "node", "stroke")).to_equal("var(--safe-stroke)")
 expect(html.contains("expression(alert(1))")).to_be(false)
 expect(html).to_contain("border-color:var(--safe-stroke)")
+
+val bad_token = sdn_graph_parse("graph: style\ncss bad;token:\n    fill: #ff0000\nA: Alpha @bad;token")
+val bad_token_html = sdn_graph_render_html(bad_token)
+expect(sdn_graph_resolved_style_value(bad_token, "bad;token", "node", "fill")).to_equal("")
+expect(bad_token_html.contains("background-color:#ff0000")).to_be(false)
 ```
 
 </details>
