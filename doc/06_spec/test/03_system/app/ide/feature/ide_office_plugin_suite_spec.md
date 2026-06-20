@@ -530,7 +530,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1227 lines folded for reproduction.
+Runnable source: 1229 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -862,6 +862,7 @@ val blank_ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "
 val invalid_ui_style_target_action = office_action_dispatch("ui-style-token-edit", "button bad|primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_field_ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "button|primary|   \ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "button|primary|accent,bad\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val short_ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "button|primary\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_inspect_action = office_action_dispatch("ui-inspect-node", "button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_inspect_action = office_action_dispatch("ui-inspect-node", "button bad\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_layers_action = office_action_dispatch("ui-list-layers", "design: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container\nnode button|Run|button|16|16|80|32|primary|9|action|frame")
@@ -1182,6 +1183,7 @@ expect(blank_ui_style_edit_action.reason).to_equal("invalid-args")
 expect(invalid_ui_style_target_action.reason).to_equal("invalid-args")
 expect(blank_field_ui_style_edit_action.reason).to_equal("invalid-args")
 expect(invalid_ui_style_edit_action.reason).to_equal("invalid-args")
+expect(short_ui_style_edit_action.reason).to_equal("invalid-args")
 expect(ui_inspect_action.output).to_contain("z_index=0")
 expect(invalid_ui_inspect_action.reason).to_equal("invalid-args")
 expect(ui_inspect_action.output).to_contain("x=16")
