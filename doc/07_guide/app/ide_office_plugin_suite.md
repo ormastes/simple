@@ -20,6 +20,9 @@ sheets, dashboard, DB admin, and LibreOffice-like app catalog checks through
 - LLM-readable catalog: `src/app/office/llm_catalog.spl`
 - Plugin/MDSOC architecture:
   `doc/04_architecture/app/ide_office_plugin_mdsoc.md`
+- Plugin architecture requirements:
+  `doc/02_requirements/feature/ide_plugin_architecture.md`,
+  `doc/02_requirements/nfr/ide_plugin_architecture.md`
 - IDE system spec:
   `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl`
 
