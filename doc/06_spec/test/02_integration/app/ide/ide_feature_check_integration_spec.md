@@ -71,7 +71,7 @@ Display policy: `embed_tui`
 ```text
 Simple IDE feature check
 mode: tui
-capabilities: 9
+capabilities: 11
 markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
   check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true task_list=true strike=true link=true list=true ordered_list=true quote=true code=true css_doc=true escaped=true metadata=true
   edit-command: md-edit=true stale-reject=true reason=stale-line
@@ -86,6 +86,10 @@ designer: UI Designer [office-app] -> app.office.ui_editor (figma, html, sdd, ui
   check: designer: app.office.ui_editor html=true sdd=true selection=true resize_handle_metadata=true
 math: Formula Math [office-app] -> app.office.math_editor (math, formula, mathml, equation)
   check: math: app.office.math_editor mathml=true checked=true fraction=true escaped=true
+mail: Mail [office-app] -> app.office.mail.mail_app (mail, email, inbox)
+  check: mail: app.office.mail.mail_app folders=4 messages=5 unread=2 filtered=2
+planner: Planner [office-app] -> app.office.planner.planner_app (planner, tasks, kanban, calendar)
+  check: planner: app.office.planner.planner_app tasks=1 view=calendar calendar=2026-1 modified=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true display_recalc=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
@@ -96,7 +100,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
-  plugin-manifest: plugins: entries=9 roundtrip=9 names=9 kinds=4 libre=6 libre_roundtrip=6
+  plugin-manifest: plugins: entries=11 roundtrip=11 names=11 kinds=4 libre=6 libre_roundtrip=6
   llm-catalog: apps=11 features=206 actions=128
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
@@ -121,7 +125,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -132,7 +136,7 @@ expect(code).to_equal(0)
 step("Review the feature-check header and TUI mode")
 expect(out).to_start_with("Simple IDE feature check")
 expect(out).to_contain("mode: tui")
-expect(out).to_contain("capabilities: 9")
+expect(out).to_contain("capabilities: 11")
 
 step("Confirm every Office plugin capability is visible")
 expect(out).to_contain("markdown: Markdown Preview")
@@ -144,6 +148,10 @@ expect(out).to_contain("designer: UI Designer")
 expect(out).to_contain("designer: app.office.ui_editor html=true sdd=true selection=true resize_handle_metadata=true")
 expect(out).to_contain("math: Formula Math")
 expect(out).to_contain("math: app.office.math_editor mathml=true checked=true fraction=true escaped=true")
+expect(out).to_contain("mail: Mail")
+expect(out).to_contain("mail: app.office.mail.mail_app folders=4 messages=5 unread=2 filtered=2")
+expect(out).to_contain("planner: Planner")
+expect(out).to_contain("planner: app.office.planner.planner_app tasks=1 view=calendar")
 expect(out).to_contain("node_create=true")
 expect(out).to_contain("style_rule=true")
 expect(out).to_contain("style_delete=true")
@@ -155,7 +163,7 @@ expect(out).to_contain("canvas=true")
 expect(out).to_contain("sheets: Spreadsheet")
 expect(out).to_contain("agent-dashboard: Agent Dashboard")
 expect(out).to_contain("db-admin: Database Admin")
-expect(out).to_contain("plugin-manifest: plugins: entries=9")
+expect(out).to_contain("plugin-manifest: plugins: entries=11")
 expect(out).to_contain("llm-catalog: apps=11 features=206 actions=128")
 
 step("Capture the TUI report so the manual shows the CLI surface")

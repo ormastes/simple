@@ -146,7 +146,7 @@ expect(all_ok).to_be(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -159,6 +159,8 @@ expect(markers).to_contain("slides:")
 expect(markers).to_contain("draw:")
 expect(markers).to_contain("designer:")
 expect(markers).to_contain("math:")
+expect(markers).to_contain("mail:")
+expect(markers).to_contain("planner:")
 expect(markers).to_contain("sheets:")
 expect(markers).to_contain("agent-dashboard:")
 expect(markers).to_contain("db-admin:")
