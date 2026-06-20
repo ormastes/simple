@@ -99,7 +99,7 @@ markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer 
 slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true element_meta=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
-draw: Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
+draw: SDD Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
   check: draw: sdn_graph format=sdd name="SDD: Simple Diagram Document" extension=.sdd.sdn nodes=3 edges=2 html=true route=true select=true inspect=true child_meta=true path_meta=true handle_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true display_recalc=true
@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=7 roundtrip=7 names=7 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=204 actions=125
+  llm-catalog: apps=11 features=205 actions=126
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=204")
+expect(tui_report).to_contain("features=205")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -439,7 +439,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1133 lines folded for reproduction.
+Runnable source: 1139 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -448,10 +448,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=204 actions=125")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=205 actions=126")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(125)
-expect(dispatch_probe.recognized_count).to_equal(125)
+expect(dispatch_probe.advertised_count).to_equal(126)
+expect(dispatch_probe.recognized_count).to_equal(126)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -735,6 +735,7 @@ val blank_field_ui_layer_action = office_action_dispatch("ui-layer-edit", "butto
 val ui_component_action = office_action_dispatch("ui-component-edit", "button|action|primary_action\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_component_action = office_action_dispatch("ui-component-edit", "button|action|primary action\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_style_read_action = office_action_dispatch("ui-style-token-read", "button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val ui_style_tokens_action = office_action_dispatch("ui-style-tokens-read", "design: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container\nnode button|Run|button|16|16|80|32|primary|9|action|frame")
 val invalid_ui_style_read_action = office_action_dispatch("ui-style-token-read", "button bad\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "button|primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_css_edit_action = office_action_dispatch("ui-css-edit", "button|primary|accent warning\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -1019,6 +1020,9 @@ expect(blank_field_ui_layer_action.reason).to_equal("invalid-args")
 expect(ui_component_action.output).to_contain("data-component=\"primary_action\"")
 expect(invalid_ui_component_action.reason).to_equal("invalid-args")
 expect(ui_style_read_action.output).to_equal("primary")
+expect(ui_style_tokens_action.output).to_contain("nodes=2")
+expect(ui_style_tokens_action.output).to_contain("frame=surface")
+expect(ui_style_tokens_action.output).to_contain("button=primary")
 expect(invalid_ui_style_read_action.reason).to_equal("invalid-args")
 expect(ui_style_edit_action.output).to_contain("office-ui-css-accent")
 expect(ui_css_edit_action.output).to_contain("office-ui-css-accent")
@@ -1338,6 +1342,7 @@ expect(catalog[5].features.join(",")).to_contain("kind-edit")
 expect(catalog[5].features.join(",")).to_contain("component-edit")
 expect(catalog[5].features.join(",")).to_contain("layers-readback")
 expect(catalog[5].features.join(",")).to_contain("style-tokens")
+expect(catalog[5].features.join(",")).to_contain("style-tokens-readback")
 expect(catalog[5].features.join(",")).to_contain("auto-layout")
 expect(catalog[5].features.join(",")).to_contain("auto-layout-signature")
 expect(catalog[5].features.join(",")).to_contain("auto-layout-resolve")
@@ -1380,6 +1385,7 @@ expect(catalog[5].actions.join(",")).to_contain("ui-distribute-selection")
 expect(catalog[5].actions.join(",")).to_contain("ui-layer-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-component-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-style-token-read")
+expect(catalog[5].actions.join(",")).to_contain("ui-style-tokens-read")
 expect(catalog[5].actions.join(",")).to_contain("ui-style-token-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-css-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-inspect-node")

@@ -404,11 +404,12 @@ expect(missing.reason).to_equal("missing-node")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val design = office_ui_design_parse("design: Style\nnode button|Run|button|16|16|80|32|primary|2|action")
+expect(office_ui_design_style_tokens_summary(design)).to_equal("nodes=1\nbutton=primary")
 val accepted = office_ui_design_update_style_token_checked(design, "button", "primary", "danger")
 expect(accepted.accepted).to_be(true)
 expect(accepted.reason).to_equal("updated")

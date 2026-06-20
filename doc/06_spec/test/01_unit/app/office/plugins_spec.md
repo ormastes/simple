@@ -118,7 +118,7 @@ expect(err).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 59 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -178,6 +178,7 @@ expect(manifest).to_contain("export-sdd-canonical")
 expect(manifest).to_contain("render-ui-html")
 expect(manifest).to_contain("render-ui-html-with-selection")
 expect(manifest).to_contain("ui-resolved-layout-read")
+expect(manifest).to_contain("ui-style-tokens-read")
 expect(manifest).to_contain("ui-css-edit")
 expect(manifest).to_contain("mail-summary")
 expect(manifest).to_contain("planner-summary")

@@ -780,7 +780,7 @@ expect(result.output).to_equal("1|2|Intro\n2|7|Roadmap")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -789,6 +789,7 @@ val html = office_action_dispatch("render-ui-html", source)
 val selected_html = office_action_dispatch("render-ui-html-with-selection", "select|button\\n" + source)
 val invalid_selected_html = office_action_dispatch("render-ui-html-with-selection", "select|button bad\\n" + source)
 val sdd = office_action_dispatch("export-ui-sdd", source)
+val style_tokens = office_action_dispatch("ui-style-tokens-read", source)
 val legacy_html = office_action_dispatch("ui-render", source)
 val legacy_sdd = office_action_dispatch("ui-export-sdd", source)
 expect(html.ok).to_be(true)
@@ -804,6 +805,7 @@ expect(invalid_selected_html.reason).to_equal("invalid-args")
 expect(sdd.ok).to_be(true)
 expect(sdd.output).to_contain("graph: Feature")
 expect(sdd.output).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent")
+expect(style_tokens.output).to_equal("nodes=1\nbutton=primary")
 expect(legacy_html.action).to_equal("render-ui-html")
 expect(legacy_html.output).to_contain("data-format=\"html-ui\"")
 expect(legacy_sdd.action).to_equal("export-ui-sdd")
@@ -1137,8 +1139,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(125)
-expect(probe.recognized_count).to_equal(125)
+expect(probe.advertised_count).to_equal(126)
+expect(probe.recognized_count).to_equal(126)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 

@@ -31,6 +31,9 @@
   `sdd-style-target-read`, `sdd-style-value-read`, `sdd-style-resolved-read`,
   `sdd-style-resolved-value-read`, `inspect-sdd-node`,
   and `inspect-sdd-edge`.
+- Designer rows advertise HTML UI read/edit actions including
+  `render-ui-html`, `render-ui-html-with-selection`, `ui-style-token-read`,
+  `ui-style-tokens-read`, `ui-style-token-edit`, and `ui-css-edit`.
 
 ## Constraints
 

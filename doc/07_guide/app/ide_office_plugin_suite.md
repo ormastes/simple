@@ -155,6 +155,8 @@ malformed replacement kind/style-token fields are `invalid-args`.
 a safe token to set it.
 `ui-style-token-read` and `ui-inspect-node` use `node_id`, reject malformed IDs
 as `invalid-args`, and return compact readback text.
+`ui-style-tokens-read` returns all current Designer node ids and style-token
+strings.
 `ui-list-layers` takes the UI design body and returns document-order layer rows
 with node id, label, kind, layer, z-index, parent, and component metadata.
 `sdd-list-layers` does the same for Draw nodes with id, label, role, shape,
@@ -416,7 +418,8 @@ modes:
   `ui-auto-layout-signature` / `ui-resolve-auto-layout` / `ui-resolved-layout-read` / `ui-select-node` / `ui-selection-geometry` / `ui-add-node` / `ui-duplicate-node` / `ui-delete-node` / `ui-order-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` / `ui-component-edit` /
-  `ui-style-token-read` / `ui-style-token-edit` / `ui-css-edit` / `ui-inspect-node` / `ui-list-layers`; the IDE
+  `ui-style-token-read` / `ui-style-tokens-read` / `ui-style-token-edit` /
+  `ui-css-edit` / `ui-inspect-node` / `ui-list-layers`; the IDE
   feature check reports `designer: resize_handle_metadata=true` from a pure
   selected-node render.
   `office_llm_action_input_schema(action)` must return a non-empty compact
