@@ -1,6 +1,6 @@
 # llm_catalog_harden_spec
 
-> Verifies that the LLM-facing Office catalog rejects malformed app/action rows before agents use the metadata as an automation surface. The catalog is the small boundary between advertised Office capabilities and agent-dispatchable actions for Markdown, Writer, Calc, Impress, Draw, Designer, Base, Math, and Counter.
+> Verifies that the LLM-facing Office catalog rejects malformed app/action rows before agents use the metadata as an automation surface. The catalog is the small boundary between advertised Office capabilities and agent-dispatchable actions for Markdown, Writer, Calc, Impress, Draw, Designer, Base, Math, Mail, Planner, and Counter.
 
 <!-- sdn-diagram:id=llm_catalog_harden_spec.arch -->
 <details class="sdn-source">
@@ -35,7 +35,7 @@ llm_catalog_harden_spec -> app
 
 # llm_catalog_harden_spec
 
-Verifies that the LLM-facing Office catalog rejects malformed app/action rows before agents use the metadata as an automation surface. The catalog is the small boundary between advertised Office capabilities and agent-dispatchable actions for Markdown, Writer, Calc, Impress, Draw, Designer, Base, Math, and Counter.
+Verifies that the LLM-facing Office catalog rejects malformed app/action rows before agents use the metadata as an automation surface. The catalog is the small boundary between advertised Office capabilities and agent-dispatchable actions for Markdown, Writer, Calc, Impress, Draw, Designer, Base, Math, Mail, Planner, and Counter.
 
 ## At a Glance
 
@@ -56,8 +56,8 @@ Verifies that the LLM-facing Office catalog rejects malformed app/action rows be
 Verifies that the LLM-facing Office catalog rejects malformed app/action rows
 before agents use the metadata as an automation surface. The catalog is the
 small boundary between advertised Office capabilities and agent-dispatchable
-actions for Markdown, Writer, Calc, Impress, Draw, Designer, Base, Math, and
-Counter.
+actions for Markdown, Writer, Calc, Impress, Draw, Designer, Base, Math, Mail,
+Planner, and Counter.
 
 ## Examples
 
