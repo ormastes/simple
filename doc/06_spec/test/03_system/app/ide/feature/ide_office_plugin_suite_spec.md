@@ -516,7 +516,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1184 lines folded for reproduction.
+Runnable source: 1190 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -746,6 +746,8 @@ val sheet_edit_action = office_action_dispatch("sheet-edit", "A1|old|new\nA1=old
 val sheet_format_action = office_action_dispatch("format-cell-value", "1234.5|currency:$:2")
 val invalid_sheet_format_action = office_action_dispatch("format-cell-value", "12x|number:2")
 val sheet_formula_action = office_action_dispatch("evaluate-sheet-formula", "=A1+B1\nA1=2;B1=3")
+val sheet_counta_action = office_action_dispatch("evaluate-sheet-formula", "=COUNTA(A1:A3,B1,\"x\",\"\")\nA1=one;A2=;A3=3;B1=x")
+val sheet_vlookup_action = office_action_dispatch("evaluate-sheet-formula", "=VLOOKUP(D1,A6:C7,3,FALSE)\nD1=k2;A6=k1;B6=old;C6=First;A7=k2;B7=mid;C7=Second")
 val invalid_sheet_formula_action = office_action_dispatch("evaluate-sheet-formula", "   \nA1=2")
 val sheet_stale_edit_action = office_action_dispatch("sheet-edit", "A1|missing|new\nA1=old")
 val sheet_duplicate_source_action = office_action_dispatch("sheet-edit", "A1|new|next\nA1=old;A01=new")
@@ -1021,6 +1023,10 @@ expect(sheet_format_action.reason).to_equal("formatted")
 expect(invalid_sheet_format_action.reason).to_equal("invalid-args")
 expect(sheet_formula_action.output).to_equal("5")
 expect(sheet_formula_action.reason).to_equal("evaluated")
+expect(sheet_counta_action.output).to_equal("4")
+expect(sheet_counta_action.reason).to_equal("evaluated")
+expect(sheet_vlookup_action.output).to_equal("Second")
+expect(sheet_vlookup_action.reason).to_equal("evaluated")
 expect(invalid_sheet_formula_action.reason).to_equal("invalid-args")
 expect(sheet_duplicate_source_action.reason).to_equal("duplicate-source-ref")
 expect(sheet_blank_target_action.reason).to_equal("invalid-args")
