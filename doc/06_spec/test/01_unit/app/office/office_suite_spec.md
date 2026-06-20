@@ -732,17 +732,20 @@ expect(result.output).to_equal("0|1|1|| A | B |\n1|2|2||---|---|\n2|3|3|| 1 | 2 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = office_action_dispatch("writer-markdown-replace", "draft|final\n# Title\nfirst draft\nsecond draft")
 val invalid = office_action_dispatch("writer-markdown-replace", "   |final\n# Title")
+val extra = office_action_dispatch("writer-markdown-replace", "draft|final|ignored\n# Title\nfirst draft")
 expect(result.ok).to_be(true)
 expect(result.reason).to_equal("updated")
 expect(result.output).to_equal("# Title\nfirst final\nsecond final")
 expect(invalid.ok).to_be(false)
 expect(invalid.reason).to_equal("invalid-args")
+expect(extra.ok).to_be(false)
+expect(extra.reason).to_equal("invalid-args")
 ```
 
 </details>
@@ -752,17 +755,20 @@ expect(invalid.reason).to_equal("invalid-args")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = office_action_dispatch("writer-markdown-insert", "1|## Added\n# Title\nBody")
 val invalid = office_action_dispatch("writer-markdown-insert", "9|Late\n# Title")
+val extra = office_action_dispatch("writer-markdown-insert", "1|## Added|ignored\n# Title\nBody")
 expect(result.ok).to_be(true)
 expect(result.reason).to_equal("updated")
 expect(result.output).to_equal("# Title\n## Added\nBody")
 expect(invalid.ok).to_be(false)
 expect(invalid.reason).to_equal("invalid-args")
+expect(extra.ok).to_be(false)
+expect(extra.reason).to_equal("invalid-args")
 ```
 
 </details>
