@@ -330,7 +330,7 @@ expect(canon).to_contain("A, B, done, , normal, simple, 56x36, right, left")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -346,11 +346,13 @@ expect(parsed.edges[0].waypoints).to_equal("56x36,80x36")
 val bad_label_points = sdn_graph_parse("graph: bad\nnodes |id, label, css, role, shape, x, y, width, height, layer, parent|\n    A, A, , , , , , , , , \n    B, B, , , , , , , , , \nedges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|\n    A, B, bad, , normal, simple, , , , 1px, nope")
 expect(bad_label_points.edges[0].label_x).to_equal("")
 expect(bad_label_points.edges[0].label_y).to_equal("")
-val styled = sdn_graph_parse("graph: style\ncss fancy:\n    note: \"quoted\", value\nA: Alpha @fancy")
+val styled = sdn_graph_parse("graph: style\ncss fancy:\n    note: \"quoted\", value\n    title: A|B\\C\nA: Alpha @fancy")
 val style_canon = sdn_graph_to_canonical_sdn(styled)
 val reparsed_style = sdn_graph_parse(style_canon)
 expect(style_canon).to_contain("fancy, note, \"\"\"quoted\"\", value\"")
+expect(style_canon).to_contain("fancy, title, \"A|B\\C\"")
 expect(sdn_graph_inspect_style_rule(reparsed_style, "fancy", "note").value).to_equal("\"quoted\", value")
+expect(sdn_graph_inspect_style_rule(reparsed_style, "fancy", "title").value).to_equal("A|B\\C")
 ```
 
 </details>
