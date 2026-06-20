@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=170 actions=91
+  llm-catalog: apps=11 features=171 actions=92
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=170")
+expect(tui_report).to_contain("features=171")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -439,7 +439,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 960 lines folded for reproduction.
+Runnable source: 964 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -448,10 +448,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=170 actions=91")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=171 actions=92")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(91)
-expect(dispatch_probe.recognized_count).to_equal(91)
+expect(dispatch_probe.advertised_count).to_equal(92)
+expect(dispatch_probe.recognized_count).to_equal(92)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -463,6 +463,7 @@ expect(catalog[1].features.join(",")).to_contain("markdown-source")
 expect(catalog[1].features.join(",")).to_contain("source-summary")
 expect(catalog[1].features.join(",")).to_contain("document-stats")
 expect(catalog[1].features.join(",")).to_contain("document-search")
+expect(catalog[1].features.join(",")).to_contain("document-replace")
 expect(catalog[1].features.join(",")).to_contain("document-outline")
 expect(catalog[1].features.join(",")).to_contain("task-lists")
 expect(catalog[1].features.join(",")).to_contain("table-alignment")
@@ -471,6 +472,7 @@ expect(catalog[1].actions.join(",")).to_contain("render-writer-markdown-html")
 expect(catalog[1].actions.join(",")).to_contain("writer-markdown-summary")
 expect(catalog[1].actions.join(",")).to_contain("writer-markdown-stats")
 expect(catalog[1].actions.join(",")).to_contain("writer-markdown-search")
+expect(catalog[1].actions.join(",")).to_contain("writer-markdown-replace")
 expect(catalog[1].actions.join(",")).to_contain("writer-markdown-outline")
 expect(catalog[2].owner_module).to_equal("app.office.sheets")
 expect(catalog[2].features.join(",")).to_contain("formulas")
@@ -570,6 +572,7 @@ val writer_action = office_action_dispatch("render-writer-markdown-html", "# Wri
 val writer_summary_action = office_action_dispatch("writer-markdown-summary", "# Writer\n\nBody")
 val writer_stats_action = office_action_dispatch("writer-markdown-stats", "# Writer\n\nBody words")
 val writer_search_action = office_action_dispatch("writer-markdown-search", "Body\n# Writer\n\nBody words")
+val writer_replace_action = office_action_dispatch("writer-markdown-replace", "Body|Final\n# Writer\n\nBody words")
 val writer_outline_action = office_action_dispatch("writer-markdown-outline", "# Writer\n\n## Section")
 val ppt_action = office_action_dispatch("render-ppt-markdown-html", "# Deck\n\n## Slide")
 val ppt_outline_action = office_action_dispatch("ppt-markdown-outline", "# Deck\n\n## Slide\n\n## Next")
@@ -794,6 +797,7 @@ expect(writer_summary_action.output).to_contain("format=Writer Markdown")
 expect(writer_summary_action.output).to_contain("lines=3")
 expect(writer_stats_action.output).to_equal("lines=3\nblocks=2\nheadings=1\nwords=3")
 expect(writer_search_action.output).to_equal("2|0|Body words")
+expect(writer_replace_action.output).to_equal("# Writer\n\nFinal words")
 expect(writer_outline_action.output).to_equal("0|1|Writer\n2|2|Section")
 expect(writer_outline_action.reason).to_equal("listed")
 expect(ppt_action.output).to_contain("class=\"md-ppt-deck\"")
