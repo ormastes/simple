@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=7 roundtrip=7 names=7 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=186 actions=107
+  llm-catalog: apps=11 features=187 actions=108
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=186")
+expect(tui_report).to_contain("features=187")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -439,7 +439,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1037 lines folded for reproduction.
+Runnable source: 1042 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -448,10 +448,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=186 actions=107")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=187 actions=108")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(107)
-expect(dispatch_probe.recognized_count).to_equal(107)
+expect(dispatch_probe.advertised_count).to_equal(108)
+expect(dispatch_probe.recognized_count).to_equal(108)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -585,6 +585,8 @@ expect(catalog[4].features.join(",")).to_contain("node-layer-readback")
 expect(catalog[4].actions.join(",")).to_contain("sdd-node-layer-read")
 expect(catalog[4].actions.join(",")).to_contain("order-sdd-node")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-role")
+expect(catalog[4].features.join(",")).to_contain("node-role-readback")
+expect(catalog[4].actions.join(",")).to_contain("sdd-node-role-read")
 expect(catalog[4].actions.join(",")).to_contain("duplicate-sdd-node")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-canvas")
 expect(catalog[4].actions.join(",")).to_contain("sdd-canvas-read")
@@ -765,6 +767,7 @@ val sdd_order_action = office_action_dispatch("order-sdd-node", "A|front\ngraph:
 val blank_sdd_order_action = office_action_dispatch("order-sdd-node", "   |front\ngraph: Order\nA: A\nB: B")
 val invalid_sdd_order_action = office_action_dispatch("order-sdd-node", "A|middle\ngraph: Order\nA: A\nB: B")
 val sdd_role_action = office_action_dispatch("edit-sdd-node-role", "A|database\ngraph: Role\nA: Old role: actor x: 0 y: 0 width: 20 height: 20")
+val sdd_role_read_action = office_action_dispatch("sdd-node-role-read", "A\ngraph: Role\nA: Old role: database x: 0 y: 0 width: 20 height: 20")
 val invalid_sdd_role_action = office_action_dispatch("edit-sdd-node-role", "A|data base\ngraph: Role\nA: Old role: actor x: 0 y: 0 width: 20 height: 20")
 val stale_sdd_geometry_action = office_action_dispatch("edit-sdd-node-geometry", "Nope|0|0|10|10\ngraph: Geometry\nA: A")
 val sdd_parent_action = office_action_dispatch("edit-sdd-node-parent", "B|A\ngraph: Parent\nA: A x: 0 y: 0 width: 80 height: 80\nB: B x: 10 y: 10 width: 20 height: 20")
@@ -1052,6 +1055,8 @@ expect(sdd_order_action.output.index_of("data-node=\"A\"")).to_be_greater_than(s
 expect(blank_sdd_order_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_order_action.reason).to_equal("invalid-position")
 expect(sdd_role_action.output).to_contain("data-role=\"database\"")
+expect(sdd_role_read_action.output).to_equal("database")
+expect(sdd_role_read_action.reason).to_equal("selected")
 expect(invalid_sdd_role_action.reason).to_equal("invalid-role-token")
 expect(stale_sdd_geometry_action.reason).to_equal("missing-node")
 expect(sdd_parent_action.output).to_contain("data-parent=\"A\"")
