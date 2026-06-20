@@ -92,7 +92,7 @@ Display policy: `embed_tui`
 ```text
 Simple IDE feature check
 mode: tui
-capabilities: 11
+capabilities: 12
 markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
   check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true task_list=true strike=true link=true list=true ordered_list=true quote=true code=true css_doc=true escaped=true metadata=true
   edit-command: md-edit=true stale-reject=true reason=stale-line
@@ -111,6 +111,8 @@ mail: Mail [office-app] -> app.office.mail.mail_app (mail, email, inbox)
   check: mail: app.office.mail.mail_app folders=4 messages=5 unread=2 filtered=2
 planner: Planner [office-app] -> app.office.planner.planner_app (planner, tasks, kanban, calendar)
   check: planner: app.office.planner.planner_app tasks=1 view=calendar calendar=2026-1 modified=true
+counter: Counter [office-app] -> app.office.counter (counter, state, action)
+  check: counter: app.office.counter increment=true decrement=true fail_closed=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true display_recalc=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
@@ -121,7 +123,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
-  plugin-manifest: plugins: entries=11 roundtrip=11 names=11 kinds=4 libre=6 libre_roundtrip=6
+  plugin-manifest: plugins: entries=12 roundtrip=12 names=12 kinds=4 libre=6 libre_roundtrip=6
   llm-catalog: apps=11 features=206 actions=128
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
@@ -180,7 +182,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 57 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -203,6 +205,8 @@ expect(tui_report).to_contain("mail: Mail")
 expect(tui_report).to_contain("mail: app.office.mail.mail_app folders=4 messages=5 unread=2 filtered=2")
 expect(tui_report).to_contain("planner: Planner")
 expect(tui_report).to_contain("planner: app.office.planner.planner_app tasks=1 view=calendar")
+expect(tui_report).to_contain("counter: Counter")
+expect(tui_report).to_contain("counter: app.office.counter increment=true decrement=true fail_closed=true")
 expect(tui_report).to_contain("name=\"SDD: Simple Diagram Document\"")
 expect(tui_report).to_contain("extension=.sdd.sdn")
 expect(tui_report).to_contain("draw: sdn_graph")
@@ -236,6 +240,7 @@ expect(registry_checks).to_contain("handle_meta=true")
 expect(registry_checks).to_contain("mathml=true")
 expect(registry_checks).to_contain("folders=true")
 expect(registry_checks).to_contain("tasks=true")
+expect(registry_checks).to_contain("fail_closed=true")
 expect(registry_checks).to_contain("display_recalc=true")
 expect(registry_checks).to_contain("contracts=true")
 ```
@@ -247,15 +252,15 @@ expect(registry_checks).to_contain("contracts=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val lines = ide_feature_check_report("tui")
-expect(lines.len()).to_equal(34)
+expect(lines.len()).to_equal(36)
 expect(lines[0]).to_equal("Simple IDE feature check")
 expect(lines[1]).to_equal("mode: tui")
-expect(lines[2]).to_equal("capabilities: 11")
+expect(lines[2]).to_equal("capabilities: 12")
 expect(lines[3]).to_start_with("markdown:")
 expect(lines[5]).to_start_with("  edit-command:")
 expect(lines[6]).to_start_with("writer:")
@@ -272,13 +277,15 @@ expect(lines[17]).to_start_with("mail:")
 expect(lines[18]).to_start_with("  check:")
 expect(lines[19]).to_start_with("planner:")
 expect(lines[20]).to_start_with("  check:")
-expect(lines[21]).to_start_with("sheets:")
-expect(lines[23]).to_start_with("  edit-command:")
-expect(lines[25]).to_start_with("agent-dashboard:")
-expect(lines[27]).to_start_with("db-admin:")
-expect(lines[31]).to_start_with("  plugin-manifest:")
-expect(lines[32]).to_start_with("  llm-catalog:")
-expect(lines[33]).to_start_with("  llm-apps:")
+expect(lines[21]).to_start_with("counter:")
+expect(lines[22]).to_start_with("  check:")
+expect(lines[23]).to_start_with("sheets:")
+expect(lines[25]).to_start_with("  edit-command:")
+expect(lines[27]).to_start_with("agent-dashboard:")
+expect(lines[29]).to_start_with("db-admin:")
+expect(lines[33]).to_start_with("  plugin-manifest:")
+expect(lines[34]).to_start_with("  llm-catalog:")
+expect(lines[35]).to_start_with("  llm-apps:")
 ```
 
 </details>
@@ -288,7 +295,7 @@ expect(lines[33]).to_start_with("  llm-apps:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -301,6 +308,7 @@ expect(capture).to_contain("slides: Presentation Slides")
 expect(capture).to_contain("math: Formula Math")
 expect(capture).to_contain("mail: Mail")
 expect(capture).to_contain("planner: Planner")
+expect(capture).to_contain("counter: Counter")
 expect(capture).to_contain("draw: SDD Diagram Draw")
 expect(capture).to_contain("sheets: Spreadsheet")
 expect(capture).to_contain("db-admin: Database Admin")
@@ -2083,14 +2091,14 @@ expect(summary).to_contain("ppt=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = ide_plugin_manifest_probe()
 val summary = ide_plugin_manifest_summary()
-expect(probe.entry_count).to_equal(11)
-expect(probe.roundtrip_count).to_equal(11)
+expect(probe.entry_count).to_equal(12)
+expect(probe.roundtrip_count).to_equal(12)
 expect(probe.libreoffice_entry_count).to_equal(6)
 expect(probe.libreoffice_roundtrip_count).to_equal(6)
 expect(probe.names.join(",")).to_contain("ide.slides")
@@ -2100,6 +2108,7 @@ expect(probe.names.join(",")).to_contain("ide.designer")
 expect(probe.names.join(",")).to_contain("ide.math")
 expect(probe.names.join(",")).to_contain("ide.mail")
 expect(probe.names.join(",")).to_contain("ide.planner")
+expect(probe.names.join(",")).to_contain("ide.counter")
 expect(probe.names.join(",")).to_contain("ide.sheets")
 expect(probe.manifest_text).to_contain("builtin:app.office.slides")
 expect(probe.manifest_text).to_contain("builtin:app.office.word.html_render")
@@ -2108,9 +2117,10 @@ expect(probe.manifest_text).to_contain("builtin:app.office.ui_editor")
 expect(probe.manifest_text).to_contain("builtin:app.office.math_editor")
 expect(probe.manifest_text).to_contain("builtin:app.office.mail.mail_app")
 expect(probe.manifest_text).to_contain("builtin:app.office.planner.planner_app")
+expect(probe.manifest_text).to_contain("builtin:app.office.counter")
 expect(probe.manifest_text).to_contain("ide_capability_draw")
 expect(probe.manifest_text).to_contain("ide_feature_check_draw")
-expect(summary).to_contain("roundtrip=11")
+expect(summary).to_contain("roundtrip=12")
 expect(summary).to_contain("kinds=4")
 expect(summary).to_contain("libre=6")
 expect(summary).to_contain("libre_roundtrip=6")
