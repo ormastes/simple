@@ -329,7 +329,8 @@ it proves render, selection, inspection, reroute, node edit, multi-node layout,
 and canvas metadata without starting GUI/browser/host APIs. Legacy SVG shape helpers remain
 compatibility utilities, not the LLM catalog owner for Draw.
 Rendered SDD `css_file` metadata follows the same unsafe-resource policy as
-Markdown stylesheet metadata: `javascript:` and `data:` values render as `#`.
+Markdown stylesheet metadata: `javascript:`, `data:`, and protocol-relative
+`//host/path` values render as `#`.
 The IDE capability registry must also carry non-empty `feature_check` marker text
 for every capability so plugin metadata cannot silently drift from the report.
 Plugin manifest and LLM catalog entries must keep non-empty libraries/modules,

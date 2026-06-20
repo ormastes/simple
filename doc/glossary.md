@@ -647,9 +647,11 @@ files use `.sdd.sdn`. The product-facing Draw capability name is **SDD Diagram
 Draw**; the app catalog can still show the short app name `Draw`. SDD is the
 canonical diagram substrate for Office Draw work, not a relationship-only graph
 format. It keeps compact graph syntax and adds diagram-editor
-metadata: root node/edge counts, node shape, x/y position, width/height, layer, document/render order, connector route,
-parent/container membership for draw.io-like groups, node duplication with
-offset geometry, waypoints, start/end anchors, rendered endpoint handle
+metadata: root node/edge counts, node shape, x/y position, width/height, layer,
+document/render order, parent/container membership for draw.io-like groups,
+canvas/page metadata, connector route, waypoints, start/end anchors, label
+points, rendered endpoint/waypoint/label handles, node duplication with offset
+geometry, guarded multi-node layout, and safe stylesheet resource metadata.
 coordinates, selected connector handle edit actions, stable handle indexes,
 endpoint/opposite-node ids, connector segment counts/endpoints/midpoints/orientations, connector label points, draw canvas/page metadata,
 rendered SVG connector paths, reusable CSS labels, connector duplication, style-rule delete/inspection, and resolved style-table paint
