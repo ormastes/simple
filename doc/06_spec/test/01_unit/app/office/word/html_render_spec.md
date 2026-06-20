@@ -499,7 +499,7 @@ expect(html).to_contain("<pre class=\"md-writer-code\" data-source-line=\"1\" da
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -507,6 +507,8 @@ val html = render_writer_markdown_html("| Name | Score | Note |\n| :--- | ---: |
 expect(html).to_contain("<th data-row-index=\"0\" data-column-index=\"0\" data-align=\"left\" style=\"text-align:left\">Name</th>")
 expect(html).to_contain("<th data-row-index=\"0\" data-column-index=\"1\" data-align=\"right\" style=\"text-align:right\">Score</th>")
 expect(html).to_contain("<td data-row-index=\"1\" data-column-index=\"2\" data-align=\"center\" style=\"text-align:center\">ok</td>")
+val escaped = render_writer_markdown_html("| Name | Note |\n| --- | --- |\n| Alpha | A\\|B |")
+expect(escaped).to_contain("<td data-row-index=\"1\" data-column-index=\"1\">A|B</td>")
 ```
 
 </details>

@@ -27,7 +27,7 @@ md_services_hardening2_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 65 | 65 | 0 | 0 |
+| 66 | 66 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1057,6 +1057,23 @@ expect(result).to_equal(doc)
 
 </details>
 
+#### replace escapes pipe values so table width stays stable
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val doc = "| Name | Note |\n| --- | --- |\n| Alpha | old |"
+val result = md_document_replace_sheet_cell_value(doc, "B2", "A|B")
+expect(result).to_contain("| Alpha | A\\|B |")
+expect(md_document_sheet_cells(result)[3].raw).to_equal("A|B")
+```
+
+</details>
+
 ### md_document_decor: unterminated CSS fence is safe
 
 #### unclosed css fence does not crash decor parse
@@ -1186,8 +1203,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 65 |
-| Active scenarios | 65 |
+| Total scenarios | 66 |
+| Active scenarios | 66 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
