@@ -649,7 +649,7 @@ expect(invalid_add.graph.nodes.len()).to_equal(2)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -667,6 +667,15 @@ expect(ungrouped.nodes[0].id).to_equal("Container")
 
 val regrouped = sdn_graph_update_node_parent_at(ungrouped, 1, "Container")
 expect(regrouped.nodes[1].parent).to_equal("Container")
+
+val checked_parent = sdn_graph_update_node_parent_checked(ungrouped, " Child ", " Container ")
+expect(checked_parent.accepted).to_be(true)
+expect(checked_parent.graph.nodes[1].parent).to_equal("Container")
+expect(sdn_graph_update_node_parent_checked(graph, "Child bad", "Container").reason).to_equal("invalid-id")
+
+val ordered = sdn_graph_reorder_node_checked(graph, " Child ", " back ")
+expect(ordered.accepted).to_be(true)
+expect(ordered.graph.nodes[0].id).to_equal("Child")
 ```
 
 </details>
