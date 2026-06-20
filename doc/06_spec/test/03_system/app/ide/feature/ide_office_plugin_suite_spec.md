@@ -530,7 +530,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1221 lines folded for reproduction.
+Runnable source: 1223 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -844,6 +844,7 @@ val invalid_ui_kind_action = office_action_dispatch("ui-kind-edit", "button|butt
 val ui_canvas_action = office_action_dispatch("ui-canvas-edit", "960|540|1280|720\ndesign: Feature\nsize: 960x540\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_canvas_read_action = office_action_dispatch("ui-canvas-read", "design: Feature\nsize: 960x540\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_canvas_action = office_action_dispatch("ui-canvas-edit", "960|540|wide|720\ndesign: Feature\nsize: 960x540")
+val short_ui_canvas_action = office_action_dispatch("ui-canvas-edit", "960|540|720\ndesign: Feature\nsize: 960x540")
 val ui_layer_action = office_action_dispatch("ui-layer-edit", "button|controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_layer_action = office_action_dispatch("ui-layer-edit", "   |controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_layer_action = office_action_dispatch("ui-layer-edit", "button bad|controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -1158,6 +1159,7 @@ expect(invalid_ui_kind_action.reason).to_equal("invalid-args")
 expect(ui_canvas_action.output).to_contain("data-canvas-width=\"1280\"")
 expect(ui_canvas_read_action.output).to_equal("name=Feature width=960 height=540")
 expect(invalid_ui_canvas_action.reason).to_equal("invalid-args")
+expect(short_ui_canvas_action.reason).to_equal("invalid-args")
 expect(ui_layer_action.output).to_contain("data-z-index=\"9\"")
 expect(blank_ui_layer_action.reason).to_equal("invalid-args")
 expect(invalid_ui_layer_action.reason).to_equal("invalid-args")
