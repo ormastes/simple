@@ -30,8 +30,15 @@
   `test/01_unit/editor/services/sdn_graph_diagram_spec.spl`
 - Generated manual:
   `doc/06_spec/test/01_unit/editor/services/sdn_graph_diagram_spec.md`
+- IDE system spec:
+  `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl`
+- IDE generated manual:
+  `doc/06_spec/test/03_system/app/ide/feature/ide_office_plugin_suite_spec.md`
 
 ## Follow-Up
 
-Future system specs should cover interactive editor commands for create, move,
-resize, connect, reroute, layer, and export once those commands exist.
+Current IDE system coverage exercises SDD render/export, node create, geometry
+resize/move, connect, reroute, layer, delete, and metadata readback through the
+headless Office action dispatcher. Add a narrower feature-owned
+`sdd_diagram_editor` system spec only when this coverage needs to move out of
+the IDE Office suite.
