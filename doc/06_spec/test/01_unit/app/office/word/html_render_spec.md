@@ -29,7 +29,7 @@ html_render_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -149,6 +149,23 @@ expect(html).to_contain("data-line-count=\"3\"")
 expect(html).to_contain("<header class=\"md-page-header\">Draft</header>")
 expect(html).to_contain("<h1 data-source-line=\"1\">Title</h1>")
 expect(html).to_contain("<p data-source-line=\"3\">Body</p>")
+```
+
+</details>
+
+#### renders Writer Markdown heading levels four through six
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("#### Four\n##### Five\n###### Six")
+expect(html).to_contain("<h4 data-source-line=\"1\">Four</h4>")
+expect(html).to_contain("<h5 data-source-line=\"2\">Five</h5>")
+expect(html).to_contain("<h6 data-source-line=\"3\">Six</h6>")
 ```
 
 </details>
@@ -377,8 +394,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
