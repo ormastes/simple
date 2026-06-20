@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 146 | 146 | 0 | 0 |
+| 147 | 147 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1123,8 +1123,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(115)
-expect(probe.recognized_count).to_equal(115)
+expect(probe.advertised_count).to_equal(116)
+expect(probe.recognized_count).to_equal(116)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2411,6 +2411,26 @@ expect(missing.reason).to_equal("missing-node")
 
 </details>
 
+#### reads SDD node child counts
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("sdd-node-child-count-read", "A\ngraph: Parent\nA: A x: 0 y: 0 width: 100 height: 100\nB: B x: 10 y: 20 width: 30 height: 40 parent: A\nC: C x: 50 y: 5 width: 10 height: 10 parent: A")
+val invalid = office_action_dispatch("sdd-node-child-count-read", "A bad\ngraph: Parent\nA: A")
+val missing = office_action_dispatch("sdd-node-child-count-read", "Nope\ngraph: Parent\nA: A")
+expect(result.ok).to_be(true)
+expect(result.output).to_equal("2")
+expect(invalid.reason).to_equal("invalid-args")
+expect(missing.reason).to_equal("missing-node")
+```
+
+</details>
+
 #### rejects blank SDD node order target ids
 
 <details>
@@ -2800,8 +2820,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 146 |
-| Active scenarios | 146 |
+| Total scenarios | 147 |
+| Active scenarios | 147 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
