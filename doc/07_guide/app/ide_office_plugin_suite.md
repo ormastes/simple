@@ -118,6 +118,8 @@ rejects malformed source or new node IDs as `invalid-args`.
 Blank duplicate source/new IDs or offsets are rejected as `invalid-args`.
 `ui-delete-node` uses `node_id`, returns rendered UI HTML, removes descendant
 nodes with the target, and rejects malformed IDs as `invalid-args`.
+`ui-order-node` uses `node_id|front` or `node_id|back` to change Designer
+document/render order.
 
 Designer edit actions use compact first-line edit headers followed by the UI
 design body. `ui-label-edit` uses `node_id|expected_label|new_label`.
@@ -330,7 +332,7 @@ modes:
   Counter has `counter-action`; Designer has `selected-resize-handles`,
   `resize-handle-metadata`, `render-ui-html`, `render-ui-html-with-selection`, `export-ui-sdd`, and
   `ui-label-edit` / `ui-name-edit` / `ui-kind-edit` / `ui-canvas-edit` / `ui-layout-edit` / `ui-resize-node` / `ui-auto-layout-edit` /
-  `ui-resolve-auto-layout` / `ui-add-node` / `ui-duplicate-node` / `ui-delete-node` /
+  `ui-resolve-auto-layout` / `ui-add-node` / `ui-duplicate-node` / `ui-delete-node` / `ui-order-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` / `ui-component-edit` /
   `ui-style-token-read` / `ui-style-token-edit` / `ui-inspect-node`; the IDE
