@@ -132,7 +132,7 @@ expect(design.nodes[1].component).to_equal("action")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -159,6 +159,11 @@ expect(unsafe.nodes[0].css).to_equal("primary accent_1")
 expect(unsafe.nodes[0].layer).to_equal("")
 expect(unsafe.nodes[0].component).to_equal("")
 expect(unsafe.nodes[0].parent).to_equal("")
+val bad_geometry = office_ui_design_parse("design: Geometry\nnode bad|Bad|button|40px|-10|0|tall|primary|1|action")
+expect(bad_geometry.nodes[0].x).to_equal("0")
+expect(bad_geometry.nodes[0].y).to_equal("-10")
+expect(bad_geometry.nodes[0].width).to_equal("120")
+expect(bad_geometry.nodes[0].height).to_equal("40")
 val bad_gap = office_ui_design_parse("design: Gap\nnode frame|Frame|frame|0|0|100|40|panel|1|container||horizontal|-1|0,0,0,0|left|top")
 expect(bad_gap.nodes[0].layout_gap).to_equal("0")
 val bad_padding = office_ui_design_parse("design: Padding\nnode frame|Frame|frame|0|0|100|40|panel|1|container||horizontal|0|0,-1,0,0|left|top")
@@ -499,7 +504,7 @@ expect(invalid.design.nodes[0].width).to_equal("120")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -521,7 +526,8 @@ val unsafe_id = office_ui_design_duplicate_node_checked(design, "action", "bad i
 val missing = office_ui_design_duplicate_node_checked(design, "missing", "missing_copy", "1", "1")
 val ambiguous = office_ui_design_duplicate_node_checked(office_ui_design_parse("design: Ambiguous\nnode a|A|button|0|0|20|20|primary|1|action\nnode a|A2|button|10|10|20|20|primary|2|action"), "a", "a_copy", "1", "1")
 val auto_layout_child = office_ui_design_duplicate_node_checked(office_ui_design_parse("design: Auto\nnode frame|Frame|frame|0|0|200|120|panel|1|container||vertical|4|4,4,4,4|left|top\nnode child|Child|button|10|10|40|20|primary|2|action|frame"), "child", "child_copy", "1", "1")
-val invalid_geometry = office_ui_design_duplicate_node_checked(office_ui_design_parse("design: Invalid\nnode bad|Bad|button|0|0|0|20|primary|1|action"), "bad", "bad_copy", "1", "1")
+val invalid_geometry_design = OfficeUiDesign(name: "Invalid", width: "960", height: "540", nodes: [OfficeUiNode(id: "bad", label: "Bad", kind: "button", css: "primary", x: "0", y: "0", width: "0", height: "20", layer: "1", component: "action", parent: "", layout_mode: "off", layout_gap: "0", layout_padding: "0,0,0,0", constraint_horizontal: "left", constraint_vertical: "top")])
+val invalid_geometry = office_ui_design_duplicate_node_checked(invalid_geometry_design, "bad", "bad_copy", "1", "1")
 expect(duplicate_id.reason).to_equal("duplicate-id")
 expect(unsafe_id.reason).to_equal("invalid-id")
 expect(missing.reason).to_equal("missing-node")
@@ -714,7 +720,7 @@ val too_few = office_ui_design_distribute_checked(design, ["a", "b"], office_ui_
 expect(too_few.accepted).to_be(false)
 expect(too_few.reason).to_equal("invalid-selection")
 
-val invalid = office_ui_design_parse("design: Invalid\nnode a|A|button|0|10|20|20|primary|1|action\nnode b|B|button|40px|20|20|20|secondary|2|action\nnode c|C|button|100|30|20|20|ghost|3|action")
+val invalid = OfficeUiDesign(name: "Invalid", width: "960", height: "540", nodes: [OfficeUiNode(id: "a", label: "A", kind: "button", css: "primary", x: "0", y: "10", width: "20", height: "20", layer: "1", component: "action", parent: "", layout_mode: "off", layout_gap: "0", layout_padding: "0,0,0,0", constraint_horizontal: "left", constraint_vertical: "top"), OfficeUiNode(id: "b", label: "B", kind: "button", css: "secondary", x: "40px", y: "20", width: "20", height: "20", layer: "2", component: "action", parent: "", layout_mode: "off", layout_gap: "0", layout_padding: "0,0,0,0", constraint_horizontal: "left", constraint_vertical: "top"), OfficeUiNode(id: "c", label: "C", kind: "button", css: "ghost", x: "100", y: "30", width: "20", height: "20", layer: "3", component: "action", parent: "", layout_mode: "off", layout_gap: "0", layout_padding: "0,0,0,0", constraint_horizontal: "left", constraint_vertical: "top")])
 val invalid_result = office_ui_design_distribute_checked(invalid, ids, office_ui_design_geometry_signature(invalid, ids), "horizontal")
 expect(invalid_result.accepted).to_be(false)
 expect(invalid_result.reason).to_equal("invalid-geometry")
