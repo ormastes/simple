@@ -142,8 +142,8 @@ signature used as the guard header for `ui-resolve-auto-layout`.
 `ui-constraints-edit` uses `node_id|expected_h|expected_v|new_h|new_v`; all compact header fields are required, and malformed replacement constraint fields are `invalid-args`.
 Blank or malformed `ui-label-edit`, `ui-layout-edit`, `ui-resize-node`,
 `ui-auto-layout-edit`, and `ui-constraints-edit` / `ui-layer-edit` /
-`ui-style-token-edit` node ids are rejected as `invalid-args`.
-`ui-kind-edit`, `ui-layer-edit`, `ui-component-edit`, and `ui-style-token-edit`
+`ui-style-token-edit` / `ui-css-edit` node ids are rejected as `invalid-args`.
+`ui-kind-edit`, `ui-layer-edit`, `ui-component-edit`, `ui-style-token-edit`, and `ui-css-edit`
 use `node_id|expected|new`; blank expected kind/layer/style fields and blank or
 malformed replacement kind/style-token fields are `invalid-args`.
 `ui-component-edit` accepts a blank replacement to clear component metadata, or
@@ -247,8 +247,8 @@ visible `data-resize-handle` corner handles tagged with stable
 `data-anchor-x`/`data-anchor-y`, `data-opposite-anchor-x`/`data-opposite-anchor-y`,
 `data-delta-x`/`data-delta-y`, `data-cursor`, `data-node`, and
 `data-node-index`, and `ui-inspect-node` returns a node
-snapshot without mutating the design document. Style-token reads and guarded
-style-token edits expose the node `css` token as a deterministic visual class;
+snapshot without mutating the design document. Style-token reads plus guarded
+style-token and CSS edits expose the node `css` token as deterministic visual classes;
 they do not accept arbitrary CSS blocks. Rendered Designer classes are emitted
 only for safe space-separated style tokens as `office-ui-css-*`; unsafe parsed
 tokens remain inspectable metadata but do not become CSS classes. Multi-node
@@ -362,7 +362,7 @@ modes:
   `ui-auto-layout-signature` / `ui-resolve-auto-layout` / `ui-select-node` / `ui-selection-geometry` / `ui-add-node` / `ui-duplicate-node` / `ui-delete-node` / `ui-order-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` / `ui-component-edit` /
-  `ui-style-token-read` / `ui-style-token-edit` / `ui-inspect-node` / `ui-list-layers`; the IDE
+  `ui-style-token-read` / `ui-style-token-edit` / `ui-css-edit` / `ui-inspect-node` / `ui-list-layers`; the IDE
   feature check reports `designer: resize_handle_metadata=true` from a pure
   selected-node render.
   `office_llm_action_input_schema(action)` must return a non-empty compact

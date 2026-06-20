@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=159 actions=80
+  llm-catalog: apps=11 features=160 actions=81
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=159")
+expect(tui_report).to_contain("features=160")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -436,7 +436,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 903 lines folded for reproduction.
+Runnable source: 908 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -445,10 +445,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=159 actions=80")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=160 actions=81")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(80)
-expect(dispatch_probe.recognized_count).to_equal(80)
+expect(dispatch_probe.advertised_count).to_equal(81)
+expect(dispatch_probe.recognized_count).to_equal(81)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -632,6 +632,7 @@ val invalid_ui_component_action = office_action_dispatch("ui-component-edit", "b
 val ui_style_read_action = office_action_dispatch("ui-style-token-read", "button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_style_read_action = office_action_dispatch("ui-style-token-read", "button bad\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "button|primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val ui_css_edit_action = office_action_dispatch("ui-css-edit", "button|primary|accent warning\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "   |primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_style_target_action = office_action_dispatch("ui-style-token-edit", "button bad|primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_field_ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "button|primary|   \ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -866,6 +867,8 @@ expect(invalid_ui_component_action.reason).to_equal("invalid-args")
 expect(ui_style_read_action.output).to_equal("primary")
 expect(invalid_ui_style_read_action.reason).to_equal("invalid-args")
 expect(ui_style_edit_action.output).to_contain("office-ui-css-accent")
+expect(ui_css_edit_action.output).to_contain("office-ui-css-accent")
+expect(ui_css_edit_action.output).to_contain("office-ui-css-warning")
 expect(blank_ui_style_edit_action.reason).to_equal("invalid-args")
 expect(invalid_ui_style_target_action.reason).to_equal("invalid-args")
 expect(blank_field_ui_style_edit_action.reason).to_equal("invalid-args")
@@ -1128,6 +1131,7 @@ expect(catalog[5].features.join(",")).to_contain("align-layout")
 expect(catalog[5].features.join(",")).to_contain("distribute-layout")
 expect(catalog[5].features.join(",")).to_contain("layer-edit")
 expect(catalog[5].features.join(",")).to_contain("style-token-edit")
+expect(catalog[5].features.join(",")).to_contain("css-edit")
 expect(catalog[5].actions.join(",")).to_contain("export-ui-sdd")
 expect(catalog[5].actions.join(",")).to_contain("render-ui-html-with-selection")
 expect(catalog[5].actions.join(",")).to_contain("ui-name-edit")
@@ -1154,6 +1158,7 @@ expect(catalog[5].actions.join(",")).to_contain("ui-layer-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-component-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-style-token-read")
 expect(catalog[5].actions.join(",")).to_contain("ui-style-token-edit")
+expect(catalog[5].actions.join(",")).to_contain("ui-css-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-inspect-node")
 val ui_design = office_ui_design_parse("design: Feature Check\nnode button|Run|button|16|16|80|32|primary|controls|action\nnode label|Label|text|140|24|60|20|secondary|controls|copy\nnode icon|Icon|icon|240|36|24|24|ghost|controls|symbol")
 val added_ui = office_ui_design_add_node_checked(ui_design, office_ui_node("field", "Field", "input", "320", "24", "100", "28"))
