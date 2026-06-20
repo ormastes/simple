@@ -725,7 +725,7 @@ Reproduction: this block contains the complete executable scenario source.
 val result = office_action_dispatch("writer-markdown-tables", "# Title\n| A | B |\n|---|---|\n| 1 | 2 |")
 expect(result.ok).to_be(true)
 expect(result.reason).to_equal("listed")
-expect(result.output).to_equal("0|1|1|| A | B |\n1|2|2||---|---|\n2|3|3|| 1 | 2 |")
+expect(result.output).to_equal("0|1|1|\\| A \\| B \\|\n1|2|2|\\|---\\|---\\|\n2|3|3|\\| 1 \\| 2 \\|")
 ```
 
 </details>
