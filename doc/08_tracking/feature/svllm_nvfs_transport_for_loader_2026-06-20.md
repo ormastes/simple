@@ -1,8 +1,9 @@
 # svllm NvfsClient transport for load_model_from_pack
 
 **Filed:** 2026-06-20
-**Updated:** 2026-06-20 (in-memory transport landed)
-**Status:** partial — in-memory adapter done; read-capable std.fs/native adapter pending
+**Updated:** 2026-06-20 (in-memory + std.fs read transports landed)
+**Status:** mostly done — in-memory + std.fs read transports implemented;
+native byte FS I/O blocked by a separate SFFI bug
 **Priority:** P2
 
 ## Summary
@@ -45,8 +46,17 @@ transport** is now implemented (`transport.spl`): `MemNvfsClient` +
 `load_model_from_pack_via` fetch the manifest text + chunk bytes off an in-memory
 image and drive the streaming loader end to end (Option 1, in-memory variant).
 
-Remaining: a **read-capable std.fs / native adapter**. The std.fs bring-up
-adapter's `read_range` returns `Unsupported`, and the real `NvfsClient` contract
-reads ranges into registered `BufHandle` buffers — a *different* entry shape than
-`MemNvfsClient`'s `read_text`/`read_bytes`, so it needs its own transport entry
-(not a drop-in). That adapter + entry is the open work.
+The **std.fs read adapter** now exists too: `StdFsNvfsClient` gained
+`read_text` / `read_bytes` (whole-object reads via SFFI), and
+`std_fs_transport.load_model_from_pack_fs` loads a pack from real on-disk files
+end to end (interpreter-verified incl. byte values). `read_range` into a
+`BufHandle` stays native-only (DMA into pinned memory) and remains `Unsupported`
+in the bring-up adapter.
+
+Remaining:
+- Native byte FS I/O is blocked by an SFFI `[u8]` marshalling bug, tracked in
+  `doc/08_tracking/bug/native_sffi_file_byte_io_u8_marshalling_2026-06-20.md`;
+  the FS-transport byte-happy-path tests are gated (visible, bug-referenced)
+  under `--compile` until it is fixed. Text-read + error-path assertions run
+  natively.
+- A native nvfs adapter honoring the full `read_range`/`BufHandle` contract.

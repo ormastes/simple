@@ -17,7 +17,7 @@
 # see FS-REQ-001).
 
 use std.nogc_async_mut.svllm.nvfs_client.{ObjHandle, ObjClass, CreateFlags, NvfsError, SyncScope, OpenMode, BufHandle, NvfsCaps}
-use std.nogc_sync_mut.sffi.io.{file_exists, file_move, file_write_bytes}
+use std.nogc_sync_mut.sffi.io.{file_exists, file_move, file_write_bytes, file_read_text, file_read_bytes}
 
 # Monotonic handle-id counter. Handles are integers; the real path is carried
 # in the handle itself (advisory field). Native nvfs adapters ignore it.
@@ -69,7 +69,25 @@ struct StdFsNvfsClient:
         Ok(bytes.len() as i64)
 
     fn read_range(self, obj: ObjHandle, off: i64, len: i64, buf: BufHandle) -> Result<i64, NvfsError>:
+        # Range-into-BufHandle reads are a native-nvfs concern (DMA into pinned
+        # registered memory); the path-based bring-up backend cannot surface
+        # bytes through an opaque BufHandle. Whole-object reads use read_bytes /
+        # read_text below, which is what the model_loader transport consumes.
         Err(NvfsError.Unsupported)
+
+    # Whole-object read as raw bytes (used for chunk data). NotFound if the
+    # path does not exist. This is the read capability the model_loader's
+    # FS transport needs; range-into-buffer reads stay native-only.
+    fn read_bytes(self, path: text) -> Result<[u8], NvfsError>:
+        if not file_exists(path):
+            return Err(NvfsError.NotFound)
+        Ok(file_read_bytes(path))
+
+    # Whole-object read as text (used for the manifest). NotFound if absent.
+    fn read_text(self, path: text) -> Result<text, NvfsError>:
+        if not file_exists(path):
+            return Err(NvfsError.NotFound)
+        Ok(file_read_text(path))
 
     fn publish_atomic(self, temp_obj: ObjHandle, final_path: text) -> Result<(), NvfsError>:
         if temp_obj.path == "":
