@@ -658,15 +658,17 @@ expect(result.output).to_equal("lines=8\nblocks=3\nheadings=2\nwords=6")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = office_action_dispatch("writer-markdown-search", "draft\n# Title\nfirst draft\nsecond")
+val escaped = office_action_dispatch("writer-markdown-search", "draft\n# Title\nfirst draft|old\\path")
 val invalid = office_action_dispatch("writer-markdown-search", "   \n# Title")
 expect(result.ok).to_be(true)
 expect(result.reason).to_equal("listed")
 expect(result.output).to_equal("1|6|first draft")
+expect(escaped.output).to_equal("1|6|first draft\\|old\\\\path")
 expect(invalid.ok).to_be(false)
 expect(invalid.reason).to_equal("invalid-args")
 ```
