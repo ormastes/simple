@@ -49,7 +49,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(office_plugin_names().len()).to_equal(9)
+expect(office_plugin_names().len()).to_equal(11)
 ```
 
 </details>
@@ -59,7 +59,7 @@ expect(office_plugin_names().len()).to_equal(9)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -72,6 +72,8 @@ expect(names).to_contain("office-draw")
 expect(names).to_contain("office-designer")
 expect(names).to_contain("office-base")
 expect(names).to_contain("office-math")
+expect(names).to_contain("office-mail")
+expect(names).to_contain("office-planner")
 expect(names).to_contain("office-counter")
 ```
 
@@ -89,9 +91,9 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # plugin_count is the number of entries parsed back out of the manifest;
-# equalling the 9 input entries proves the manifest round-trips.
+# equalling the 11 input entries proves the manifest round-trips.
 val probe = office_plugin_manifest_probe()
-expect(probe.plugin_count).to_equal(9)
+expect(probe.plugin_count).to_equal(11)
 ```
 
 </details>
@@ -116,7 +118,7 @@ expect(err).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -125,10 +127,14 @@ val manifest = probe.manifest_text
 expect(manifest).to_contain("office-writer")
 expect(manifest).to_contain("office-draw")
 expect(manifest).to_contain("office-designer")
+expect(manifest).to_contain("office-mail")
+expect(manifest).to_contain("office-planner")
 expect(manifest).to_contain("render-writer-markdown-html")
 expect(manifest).to_contain("render-sdd-html-with-selection")
 expect(manifest).to_contain("render-ui-html")
 expect(manifest).to_contain("render-ui-html-with-selection")
+expect(manifest).to_contain("mail-summary")
+expect(manifest).to_contain("planner-summary")
 ```
 
 </details>
