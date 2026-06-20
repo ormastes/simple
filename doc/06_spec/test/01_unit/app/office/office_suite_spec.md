@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 163 | 163 | 0 | 0 |
+| 164 | 164 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1068,6 +1068,34 @@ expect(edit.ok).to_be(true)
 expect(edit.output).to_contain("row: 2,open|closed")
 expect(query.ok).to_be(true)
 expect(query.output).to_equal("1")
+```
+
+</details>
+
+#### preserves escaped pipe document edit action values
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val replace = office_action_dispatch("writer-markdown-replace", "draft\\|old|draft\\|new\n# Title\nfirst draft|old")
+val insert = office_action_dispatch("writer-markdown-insert", "1|added\\|line\n# Title\nBody")
+val markdown = office_action_dispatch("md-edit", "1|old\\|value|new\\|value\n# Title\nold|value")
+val sheet = office_action_dispatch("sheet-edit", "A1|old\\|value|new\\|value\nA1=old|value")
+val slide = office_action_dispatch("slide-edit", "title|old\\|value|new\\|value\ntitle=old|value")
+expect(replace.ok).to_be(true)
+expect(replace.output).to_contain("draft|new")
+expect(insert.ok).to_be(true)
+expect(insert.output).to_contain("added|line")
+expect(markdown.ok).to_be(true)
+expect(markdown.output).to_contain("new|value")
+expect(sheet.ok).to_be(true)
+expect(sheet.output).to_equal("A1=new|value")
+expect(slide.ok).to_be(true)
+expect(slide.output).to_equal("title=new|value")
 ```
 
 </details>
@@ -3170,8 +3198,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 163 |
-| Active scenarios | 163 |
+| Total scenarios | 164 |
+| Active scenarios | 164 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
