@@ -155,6 +155,8 @@ signature used as the guard header for `ui-resolve-auto-layout`.
 `ui-resolved-layout-read` takes the UI design body and returns rendered Designer
 HTML after applying auto-layout, without requiring or mutating a stale guard.
 `ui-constraints-edit` uses `node_id|expected_h|expected_v|new_h|new_v`; all compact header fields are required, and malformed replacement constraint fields are `invalid-args`.
+`ui-parent-edit` uses `node_id|expected_parent|new_parent`; missing parents,
+stale expected parents, and parent cycles are rejected.
 Blank or malformed `ui-label-edit`, `ui-layout-edit`, `ui-resize-node`,
 `ui-auto-layout-edit`, and `ui-constraints-edit` / `ui-layer-edit` /
 `ui-style-token-edit` / `ui-css-edit` node ids are rejected as `invalid-args`.
