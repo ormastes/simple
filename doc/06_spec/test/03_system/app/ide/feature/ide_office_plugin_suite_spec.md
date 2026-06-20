@@ -431,7 +431,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -448,6 +448,7 @@ expect(glossary).to_contain("connectors carry route, anchors, waypoints")
 expect(guide).to_contain("Selected connector handles expose edit actions")
 expect(guide).to_contain("endpoint/opposite-node ids")
 expect(guide).to_contain("handle_meta=true")
+expect(guide).to_contain("Align accepts\n`left|center|right|top|middle|bottom`; distribute accepts\n`horizontal|vertical`")
 ```
 
 </details>

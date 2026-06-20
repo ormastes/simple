@@ -180,8 +180,10 @@ Draw style inspector panels.
 `sdd-weave-summary` uses SDD source and lists parsed `weave @:` and `weave css:`
 rules that apply CSS, shape, and geometry changes.
 
-Layout actions use `mode_or_axis|id1,id2,...`, followed by the UI or SDD
-document body. `ui-align-selection`, `ui-distribute-selection`,
+Layout actions use an explicit first token followed by `id1,id2,...` and the
+UI or SDD document body. Align accepts
+`left|center|right|top|middle|bottom`; distribute accepts
+`horizontal|vertical`. `ui-align-selection`, `ui-distribute-selection`,
 `align-sdd-selection`, and `distribute-sdd-selection` compute the current
 geometry signature and return rendered HTML for the updated document.
 `ui-selection-geometry` and `sdd-selection-geometry` return the same current
