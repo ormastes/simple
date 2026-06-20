@@ -21,7 +21,7 @@ Selected NFR option: **Option 2, VS Code-Style Host Targets**. Full dynamic inst
 | NFR-IPA-001 | Covered by `test/01_unit/app/ide/ide_plugin_architecture_nfr_spec.spl`. |
 | NFR-IPA-002 | Covered by `test/01_unit/app/ide/ide_plugin_architecture_nfr_spec.spl`. |
 | NFR-IPA-003 | Covered by `test/01_unit/app/ide/ide_plugin_architecture_nfr_spec.spl`. |
-| NFR-IPA-004 | Requires a registry invalidation timing probe before marking this lane done. |
+| NFR-IPA-004 | Covered by `test/01_unit/app/ide/ide_plugin_architecture_nfr_spec.spl`. |
 | NFR-IPA-005 | Covered structurally by `OfficePluginContext` checks and `ide_office_plugin_suite_spec.spl` context-mismatch assertions. |
 | NFR-IPA-006 | Covered by `bin/simple-interp src/app/ide/main.spl --feature-check --tui` and `--gui` pure feature checks. |
 | NFR-IPA-007 | Covered by `doc/04_architecture/ide_plugin_architecture.md` migration step 7. |

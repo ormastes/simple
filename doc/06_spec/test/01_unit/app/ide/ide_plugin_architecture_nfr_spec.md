@@ -28,7 +28,7 @@ ide_plugin_architecture_nfr_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -45,6 +45,8 @@ IDE plugin architecture NFR spec.
 | Status | Active |
 | Requirements | doc/02_requirements/nfr/ide_plugin_architecture.md |
 | Plan | doc/03_plan/sys_test/ide_office_plugin_suite.md |
+| Design | doc/05_design/ide_plugin_architecture.md |
+| Research | doc/01_research/local/ide_plugin_architecture.md |
 | Source | `test/01_unit/app/ide/ide_plugin_architecture_nfr_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -134,12 +136,37 @@ expect(elapsed / 5).to_be_less_than(2000)
 
 </details>
 
+#### refreshes the built-in registry after invalidation within the propagation budget
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val warmup = ide_plugin_registry_invalidation_probe(0)
+expect(warmup.valid).to_be(true)
+
+val start = rt_time_now_unix_micros()
+val probe = ide_plugin_registry_invalidation_probe(warmup.generation)
+val elapsed = elapsed_micros(start)
+
+expect(probe.generation).to_equal(warmup.generation + 1)
+expect(probe.entry_count).to_equal(13)
+expect(probe.roundtrip_count).to_equal(13)
+expect(probe.valid).to_be(true)
+expect(elapsed).to_be_less_than(100000)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -149,6 +176,8 @@ expect(elapsed / 5).to_be_less_than(2000)
 
 - **Requirements:** [doc/02_requirements/nfr/ide_plugin_architecture.md](doc/02_requirements/nfr/ide_plugin_architecture.md)
 - **Plan:** [doc/03_plan/sys_test/ide_office_plugin_suite.md](doc/03_plan/sys_test/ide_office_plugin_suite.md)
+- **Design:** [doc/05_design/ide_plugin_architecture.md](doc/05_design/ide_plugin_architecture.md)
+- **Research:** [doc/01_research/local/ide_plugin_architecture.md](doc/01_research/local/ide_plugin_architecture.md)
 
 
 </details>
