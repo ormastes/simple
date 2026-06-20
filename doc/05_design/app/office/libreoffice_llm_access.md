@@ -22,7 +22,7 @@
   `sdd-document-summary`, `render-sdd-html-with-selection`,
   `edit-sdd-node-label`, `sdd-node-label-read`,
   `edit-sdd-node-style`, `sdd-node-style-read`, `sdd-node-geometry-read`,
-  `sdd-node-resolved-style-read`, `sdd-node-parent-read`, `sdd-node-child-bounds-read`, `sdd-node-child-count-read`, `sdd-node-shape-read`, `sdd-node-layer-read`,
+  `sdd-node-resolved-style-read`, `sdd-node-resolved-style-value-read`, `sdd-node-parent-read`, `sdd-node-child-bounds-read`, `sdd-node-child-count-read`, `sdd-node-shape-read`, `sdd-node-layer-read`,
   `sdd-node-order-read`, `sdd-node-role-read`,
   `edit-sdd-edge-label`, `sdd-edge-label-read`, `sdd-edge-label-point-read`, `edit-sdd-edge-style`,
   `sdd-edge-style-read`, `sdd-edge-resolved-style-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`,

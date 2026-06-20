@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 151 | 151 | 0 | 0 |
+| 152 | 152 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1123,8 +1123,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(120)
-expect(probe.recognized_count).to_equal(120)
+expect(probe.advertised_count).to_equal(121)
+expect(probe.recognized_count).to_equal(121)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2473,6 +2473,26 @@ expect(missing.reason).to_equal("missing-node")
 
 </details>
 
+#### reads resolved SDD node style values
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("sdd-node-resolved-style-value-read", "A|stroke\ngraph: Style\ncss base:\n    stroke: #111111\ncss accent:\n    extends: base\n    fill: #eeeeee\nA: A @accent")
+val invalid = office_action_dispatch("sdd-node-resolved-style-value-read", "A|bad key\ngraph: Style\nA: A @accent")
+val missing = office_action_dispatch("sdd-node-resolved-style-value-read", "Nope|stroke\ngraph: Style\nA: A @accent")
+expect(result.ok).to_be(true)
+expect(result.output).to_equal("#111111")
+expect(invalid.reason).to_equal("invalid-args")
+expect(missing.reason).to_equal("missing-node")
+```
+
+</details>
+
 #### rejects blank SDD node order target ids
 
 <details>
@@ -2899,8 +2919,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 151 |
-| Active scenarios | 151 |
+| Total scenarios | 152 |
+| Active scenarios | 152 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
