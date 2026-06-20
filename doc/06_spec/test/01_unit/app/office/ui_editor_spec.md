@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -168,6 +168,24 @@ expect(html).to_contain("data-layout-mode=\"off\"")
 expect(html).to_contain("data-constraint-h=\"left\"")
 expect(html).to_contain("left: 72px")
 expect(html).to_contain("Sign &lt;in&gt;")
+```
+
+</details>
+
+#### rejects invalid canvas sizes
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = office_ui_design_parse("design: Login\nsize: 800x480")
+val invalid = office_ui_design_update_canvas_checked(design, "800", "480", "0", "480")
+expect(invalid.accepted).to_be(false)
+expect(invalid.reason).to_equal("invalid-canvas")
+expect(invalid.design.width).to_equal("800")
 ```
 
 </details>
@@ -625,8 +643,8 @@ expect(cycle.reason).to_equal("cycle-parent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
