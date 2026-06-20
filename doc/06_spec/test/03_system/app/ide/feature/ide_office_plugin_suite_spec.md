@@ -548,7 +548,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1335 lines folded for reproduction.
+Runnable source: 1337 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1115,6 +1115,8 @@ expect(writer_outline_action.reason).to_equal("listed")
 expect(ppt_action.output).to_contain("class=\"md-ppt-deck\"")
 expect(ppt_action.output).to_contain("data-format=\"markdown-ppt\"")
 expect(ppt_action.output).to_contain("data-format-name=\"Impress Markdown\"")
+expect(ppt_action.output).to_contain("data-slide-count=\"1\"")
+expect(ppt_action.output).to_contain("data-slide=\"1\" data-source-line=\"2\"")
 expect(ppt_escape_action.output).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
 expect(ppt_outline_action.output).to_equal("1|2|Slide\n2|4|Next")
 expect(ppt_outline_action.reason).to_equal("listed")
