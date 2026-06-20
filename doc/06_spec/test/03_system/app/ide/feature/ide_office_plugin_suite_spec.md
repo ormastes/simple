@@ -530,7 +530,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1243 lines folded for reproduction.
+Runnable source: 1247 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -797,10 +797,12 @@ val legacy_sdd_action = office_action_dispatch("render-sdd", "graph: Feature\nA:
 val ui_add_action = office_action_dispatch("ui-add-node", "button|Run|button|16|16|80|32|primary|controls|action\ndesign: Feature")
 val duplicate_ui_add_action = office_action_dispatch("ui-add-node", "button|Again|button|16|16|80|32|primary|controls|action\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_add_action = office_action_dispatch("ui-add-node", "button bad|Run|button|16|16|80|32|primary|controls|action\ndesign: Feature")
+val short_ui_add_action = office_action_dispatch("ui-add-node", "button|Run|button|16\ndesign: Feature")
 val ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button_copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "   |button_copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_offset_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button_copy|   |10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val short_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button_copy|20\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_delete_action = office_action_dispatch("ui-delete-node", "frame\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|controls|container\nnode button|Run|button|16|16|80|32|primary|controls|action|frame")
 val invalid_ui_delete_action = office_action_dispatch("ui-delete-node", "button bad\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_order_action = office_action_dispatch("ui-order-node", "a|front\ndesign: Feature\nnode a|A|button|0|0|20|20|primary|1|action\nnode b|B|button|40|0|20|20|secondary|2|action")
@@ -1118,10 +1120,12 @@ expect(sdd_action.output).to_contain("data-selected-edge-index=\"-1\"")
 expect(ui_add_action.output).to_contain("data-node-count=\"1\"")
 expect(duplicate_ui_add_action.reason).to_equal("duplicate-id")
 expect(invalid_ui_add_action.reason).to_equal("invalid-args")
+expect(short_ui_add_action.reason).to_equal("invalid-args")
 expect(ui_duplicate_action.output).to_contain("data-id=\"button_copy\"")
 expect(blank_ui_duplicate_action.reason).to_equal("invalid-args")
 expect(invalid_ui_duplicate_action.reason).to_equal("invalid-args")
 expect(blank_offset_ui_duplicate_action.reason).to_equal("invalid-args")
+expect(short_ui_duplicate_action.reason).to_equal("invalid-args")
 expect(ui_delete_action.output).to_contain("data-node-count=\"0\"")
 expect(invalid_ui_delete_action.reason).to_equal("invalid-args")
 expect(ui_order_action.output).to_contain("data-id=\"a\" data-node-index=\"1\"")
