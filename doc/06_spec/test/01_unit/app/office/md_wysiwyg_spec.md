@@ -28,7 +28,7 @@ md_wysiwyg_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -222,6 +222,21 @@ expect(html).to_contain("<a href=\"#\">Bad</a>")
 
 </details>
 
+#### sanitizes whitespace-obfuscated unsafe inline links
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = wysiwyg_preview_document_html("Read [Bad](java\tscript:alert(1))")
+expect(html).to_contain("<a href=\"#\">Bad</a>")
+```
+
+</details>
+
 #### renders Markdown bullet list lines as HTML lists
 
 <details>
@@ -408,8 +423,8 @@ expect(wysiwyg_source_pane(result.view)).to_equal("first")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
