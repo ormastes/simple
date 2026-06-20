@@ -526,8 +526,12 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
    - Expected: math_bad_action.reason equals `syntax-error`
    - Expected: math_to_mathml_checked("a +").reason equals `syntax-error`
    - Expected: catalog[8].owner_module equals `app.office.mail.mail_app`
+   - Expected: mail_summary_action.reason equals `summarized`
    - Expected: catalog[9].owner_module equals `app.office.planner.planner_app`
+   - Expected: planner_summary_action.reason equals `summarized`
    - Expected: counter_inc_action.reason equals `incremented`
+   - Expected: counter_dec_action.reason equals `decremented`
+   - Expected: counter_reset_action.reason equals `reset`
    - Expected: counter_bad_action.reason equals `unsupported`
    - Expected: counter_blank_action.reason equals `invalid-args`
    - Expected: counter_short_action.reason equals `invalid-args`
@@ -549,7 +553,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1343 lines folded for reproduction.
+Runnable source: 1347 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1849,6 +1853,7 @@ val mail_summary_action = office_action_dispatch("mail-summary", "")
 expect(mail_summary_action.output).to_contain("folder=Inbox")
 expect(mail_summary_action.output).to_contain("emails=5")
 expect(mail_summary_action.output).to_contain("unread=2")
+expect(mail_summary_action.reason).to_equal("summarized")
 expect(catalog[9].owner_module).to_equal("app.office.planner.planner_app")
 expect(catalog[9].features.join(",")).to_contain("task-count-summary")
 expect(catalog[9].actions.join(",")).to_contain("planner-summary")
@@ -1856,6 +1861,7 @@ val planner_summary_action = office_action_dispatch("planner-summary", "")
 expect(planner_summary_action.output).to_contain("project=My Project")
 expect(planner_summary_action.output).to_contain("view=kanban")
 expect(planner_summary_action.output).to_contain("tasks=0")
+expect(planner_summary_action.reason).to_equal("summarized")
 expect(catalog[10].actions.join(",")).to_contain("counter-action")
 val counter_inc_action = office_action_dispatch("counter-action", "41|counter_increment")
 val counter_dec_action = office_action_dispatch("counter-action", "41|counter_decrement")
@@ -1867,7 +1873,9 @@ val counter_overflow_action = office_action_dispatch("counter-action", "92233720
 expect(counter_inc_action.output).to_contain("value=42")
 expect(counter_inc_action.reason).to_equal("incremented")
 expect(counter_dec_action.output).to_contain("value=40")
+expect(counter_dec_action.reason).to_equal("decremented")
 expect(counter_reset_action.output).to_contain("value=0")
+expect(counter_reset_action.reason).to_equal("reset")
 expect(counter_bad_action.reason).to_equal("unsupported")
 expect(counter_bad_action.output).to_contain("changed=false")
 expect(counter_blank_action.reason).to_equal("invalid-args")
