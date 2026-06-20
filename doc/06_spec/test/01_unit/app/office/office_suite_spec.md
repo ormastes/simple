@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 161 | 161 | 0 | 0 |
+| 162 | 162 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1847,6 +1847,28 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### preserves escaped pipe label edit values
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ui = office_action_dispatch("ui-label-edit", "button|Run\\|Now|Launch\\|Now\ndesign: Feature\nnode button|Run\\|Now|button|16|16|80|32|primary|controls|action")
+val node = office_action_dispatch("edit-sdd-node-label", "A|Alpha\\|Ready\ngraph: Label\nA: Alpha")
+val edge = office_action_dispatch("edit-sdd-edge-label", "0|open\\|closed\ngraph: Label\nA: A\nB: B\nA -> B: open")
+expect(ui.ok).to_be(true)
+expect(ui.output).to_contain("data-label=\"Launch|Now\"")
+expect(node.ok).to_be(true)
+expect(node.output).to_contain("data-label=\"Alpha|Ready\"")
+expect(edge.ok).to_be(true)
+expect(edge.output).to_contain("data-label=\"open|closed\"")
+```
+
+</details>
+
 #### rejects blank UI layout action target ids
 
 <details>
@@ -3132,8 +3154,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 161 |
-| Active scenarios | 161 |
+| Total scenarios | 162 |
+| Active scenarios | 162 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
