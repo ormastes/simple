@@ -28,7 +28,7 @@ formula_harden_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -213,6 +213,27 @@ expect(evaluate_formula_display_text("=UNKNOWN(\"x\")", sheet)).to_equal("")
 
 </details>
 
+#### display functions reject trailing formula tokens
+
+- var sheet = Sheet new
+   - Expected: evaluate_formula_display_text("=LEN(\"Office\")+999", sheet) equals ``
+   - Expected: evaluate_formula_display_text("=TRIM(\" Office \") & \"x\"", sheet) equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sheet = Sheet.new("S1")
+expect(evaluate_formula_display_text("=LEN(\"Office\")+999", sheet)).to_equal("")
+expect(evaluate_formula_display_text("=TRIM(\" Office \") & \"x\"", sheet)).to_equal("")
+```
+
+</details>
+
 #### VLOOKUP returns exact-match display text and fails closed
 
 - var sheet = Sheet new
@@ -258,8 +279,8 @@ expect(evaluate_formula_display_text("=VLOOKUP(\"A-1\",A2:C3,2,TRUE)", sheet)).t
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
