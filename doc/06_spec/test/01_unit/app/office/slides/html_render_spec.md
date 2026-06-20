@@ -28,7 +28,7 @@ html_render_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -125,6 +125,38 @@ expect(html).to_contain("data-element-id=\"s2_title\" data-kind=\"text\"")
 expect(html).to_contain("data-element-id=\"s2_body\" data-kind=\"text\"")
 expect(html).to_contain("left: 50px; top: 30px; width: 860px; height: 60px;")
 expect(html).to_contain("left: 50px; top: 110px; width: 860px; height: 400px;")
+```
+
+</details>
+
+#### renders slide image elements as sanitized img HTML
+
+- SlideElement
+- SlideElement
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val slide = Slide(
+    id: "image_slide",
+    layout: SlideLayout.Blank,
+    elements: [
+        SlideElement(id: "logo", kind: SlideElementKind.ImageEl(src: "assets/logo.png", alt: "Logo <safe>"), x: 10, y: 20, width: 120, height: 80),
+        SlideElement(id: "bad", kind: SlideElementKind.ImageEl(src: "java\tscript:alert(1)", alt: "Bad"), x: 20, y: 120, width: 120, height: 80)
+    ],
+    notes: "",
+    background: "#ffffff"
+)
+val html = render_slide_html(slide)
+expect(html).to_contain("data-element-id=\"logo\" data-kind=\"image\"")
+expect(html).to_contain("<img src=\"assets/logo.png\" alt=\"Logo &lt;safe&gt;\">")
+expect(html).to_contain("data-element-id=\"bad\" data-kind=\"image\"")
+expect(html).to_contain("<img src=\"#\" alt=\"Bad\">")
 ```
 
 </details>
@@ -291,8 +323,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
