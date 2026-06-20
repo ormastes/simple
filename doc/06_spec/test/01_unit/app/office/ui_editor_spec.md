@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -186,6 +186,24 @@ val invalid = office_ui_design_update_canvas_checked(design, "800", "480", "0", 
 expect(invalid.accepted).to_be(false)
 expect(invalid.reason).to_equal("invalid-canvas")
 expect(invalid.design.width).to_equal("800")
+```
+
+</details>
+
+#### rejects added nodes with invalid geometry
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = office_ui_design_parse("design: Login\nsize: 800x480")
+val invalid = office_ui_design_add_node_checked(design, OfficeUiNode(id: "bad", label: "Bad", kind: "button", css: "primary", x: "10", y: "20", width: "0", height: "32", layer: "controls", component: "action", parent: "", layout_mode: "off", layout_gap: "0", layout_padding: "0,0,0,0", constraint_horizontal: "left", constraint_vertical: "top"))
+expect(invalid.accepted).to_be(false)
+expect(invalid.reason).to_equal("invalid-geometry")
+expect(invalid.design.nodes.len()).to_equal(0)
 ```
 
 </details>
@@ -643,8 +661,8 @@ expect(cycle.reason).to_equal("cycle-parent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
