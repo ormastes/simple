@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 26 | 26 | 0 | 0 |
+| 27 | 27 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -223,6 +223,22 @@ val graph = sdn_graph_update_canvas(sdn_graph_parse("graph: escaped\nA: A"), "10
 val html = sdn_graph_render_html(graph)
 expect(html).to_contain("data-canvas-background=\"&quot;&lt;bg&gt;&amp;\"")
 expect(html).to_contain("style=\"width:100px;height:80px;")
+```
+
+</details>
+
+#### sanitizes whitespace-obfuscated SDD css_file URLs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: escaped\ncss_file: \"java\tscript:alert(1)\"\nA: A")
+val html = sdn_graph_render_html(graph)
+expect(html).to_contain("data-css-file=\"#\"")
 ```
 
 </details>
@@ -694,8 +710,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 26 |
-| Active scenarios | 26 |
+| Total scenarios | 27 |
+| Active scenarios | 27 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
