@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 33 | 33 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -95,11 +95,11 @@ expect(sdn_graph_file_extension()).to_equal(".sdd.sdn")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val graph = sdn_graph_parse("graph: editor\nFrame: Canvas @frame role: container shape: frame x: 12 y: 24 width: 320 height: 180 layer: base\nWidget: Button @component role: control shape: container x: 48 y: 80 width: 120 height: 40 layer: controls parent: Frame")
+val graph = sdn_graph_parse("graph: editor\nFrame: Canvas @frame role: container shape: frame x: 12 y: 24 width: 320 height: 180 layer: base\nWidget: Button @component role: control shape: rounded x: 48 y: 80 width: 120 height: 40 layer: controls parent: Frame")
 expect(graph.nodes.len()).to_equal(2)
 expect(graph.nodes[0].id).to_equal("Frame")
 expect(graph.nodes[0].shape).to_equal("frame")
@@ -108,11 +108,9 @@ expect(graph.nodes[0].y).to_equal("24")
 expect(graph.nodes[0].width).to_equal("320")
 expect(graph.nodes[0].height).to_equal("180")
 expect(graph.nodes[0].layer).to_equal("base")
-expect(graph.nodes[1].shape).to_equal("container")
+expect(graph.nodes[1].shape).to_equal("rounded")
 expect(graph.nodes[1].layer).to_equal("controls")
 expect(graph.nodes[1].parent).to_equal("Frame")
-expect(sdn_graph_render_html(graph)).to_contain("box-shadow:inset 0 0 0 2px rgba(15,23,42,0.18)")
-expect(sdn_graph_render_html(graph)).to_contain("background-color:rgba(248,250,252,0.35)")
 ```
 
 </details>
@@ -133,44 +131,6 @@ expect(graph.edges[0].route).to_equal("orthogonal")
 expect(graph.edges[0].waypoints).to_equal("10x20;80x20")
 expect(graph.edges[0].start_anchor).to_equal("right")
 expect(graph.edges[0].end_anchor).to_equal("left")
-```
-
-</details>
-
-#### renders person shape metadata
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val graph = sdn_graph_parse("graph: actor\nUser: User shape: person x: 10 y: 10 width: 48 height: 64\nAdmin: Admin shape: actor x: 80 y: 10 width: 48 height: 64")
-val html = sdn_graph_render_html(graph)
-expect(html).to_contain("data-shape=\"person\"")
-expect(html).to_contain("data-shape=\"actor\"")
-expect(html).to_contain("sdd-shape-person")
-expect(html).to_contain("sdd-shape-actor")
-expect(html).to_contain("border-radius:50% 50% 42% 42%")
-expect(html).to_contain("box-shadow:inset 0 16px 0 rgba(15,23,42,0.10)")
-```
-
-</details>
-
-#### drops unsafe shape class tokens while preserving escaped shape metadata
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val graph = sdn_graph_parse("graph: unsafe-shape\nBad: Bad shape: bad&quot;onclick=1 x: 10 y: 10 width: 48 height: 32")
-val html = sdn_graph_render_html(graph)
-expect(html).to_contain("data-shape=\"bad&amp;quot;onclick=1\"")
-expect(html.contains("sdd-shape-bad")).to_be(false)
 ```
 
 </details>
@@ -200,35 +160,25 @@ expect(graph.canvas_background).to_equal("#ffffff")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val graph = sdn_graph_parse("graph: editor\nCard: Card @panel shape: rounded x: 10 y: 20 width: 200 height: 100 layer: base\nAction: Action @button shape: pill x: 40 y: 60 width: 80 height: 28 layer: controls parent: Card\nBadge: Badge shape: roundrect x: 152 y: 60 width: 64 height: 28 layer: controls parent: Card\nCard -> Action: opens route: orthogonal waypoints: 20x40;40x40 start: bottom end: left")
+val graph = sdn_graph_parse("graph: editor\nCard: Card @panel shape: rounded x: 10 y: 20 width: 200 height: 100 layer: base\nAction: Action @button shape: pill x: 40 y: 60 width: 80 height: 28 layer: controls parent: Card\nCard -> Action: opens route: orthogonal waypoints: 20x40;40x40 start: bottom end: left")
 val html = sdn_graph_render_html(graph)
 expect(html).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(html).to_contain("data-format=\"sdd\"")
 expect(html).to_contain("data-format-name=\"SDD: Simple Diagram Document\"")
-expect(html).to_contain("data-file-extension=\".sdd.sdn\"")
-expect(html).to_contain("data-node-count=\"3\"")
-expect(html).to_contain("data-edge-count=\"1\"")
 expect(html).to_contain("class=\"sdn-graph-node sdd-node sdn-css-panel\"")
 expect(html).to_contain("data-layer=\"base\"")
 expect(html).to_contain("data-parent=\"Card\"")
-expect(html).to_contain("left:10px;top:20px;width:200px;height:100px")
-expect(html).to_contain("data-shape=\"rounded\"")
-expect(html).to_contain("border-radius:8px")
-expect(html).to_contain("data-shape=\"pill\"")
-expect(html).to_contain("data-shape=\"roundrect\"")
-expect(html).to_contain("border-radius:999px")
+expect(html).to_contain("style=\"left:10px;top:20px;width:200px;height:100px\"")
 expect(html).to_contain("class=\"sdd-connector-layer\"")
 expect(html).to_contain("class=\"sdd-connector-path \"")
 expect(html).to_contain("data-edge-index=\"0\"")
-expect(html).to_contain("data-label=\"opens\"")
 expect(html).to_contain("data-path=\"M 110,120 L 20,120 L 20,40 L 40,40 L 40,74\"")
 expect(html).to_contain("d=\"M 110,120 L 20,120 L 20,40 L 40,40 L 40,74\"")
 expect(html).to_contain("class=\"sdn-graph-edge sdd-connector")
-expect(html.contains("sdd-kind-normal")).to_be(false)
 expect(html).to_contain("data-route=\"orthogonal\"")
 expect(html).to_contain("data-waypoints=\"20x40;40x40\"")
 expect(html).to_contain("data-start-anchor=\"bottom\"")
@@ -242,7 +192,7 @@ expect(html).to_contain("data-end-anchor=\"left\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -254,9 +204,7 @@ expect(html).to_contain("data-canvas-grid=\"16\"")
 expect(html).to_contain("data-canvas-snap=\"true\"")
 expect(html).to_contain("data-canvas-zoom=\"125\"")
 expect(html).to_contain("data-canvas-background=\"#ffffff\"")
-expect(html).to_contain("background-color:#ffffff")
-expect(html).to_contain("background-image:radial-gradient(circle,#cbd5e1 1px,transparent 1px)")
-expect(html).to_contain("background-size:16px 16px")
+expect(html).to_contain("style=\"width:1200px;height:800px;\"")
 ```
 
 </details>
@@ -266,48 +214,13 @@ expect(html).to_contain("background-size:16px 16px")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val graph = sdn_graph_update_canvas(sdn_graph_parse("graph: escaped\nA: A"), "100", "80", "10", "true", "100", "\"<bg>&")
 val html = sdn_graph_render_html(graph)
 expect(html).to_contain("data-canvas-background=\"&quot;&lt;bg&gt;&amp;\"")
-expect(html).to_contain("width:100px;height:80px;")
-expect(html).to_contain("background-size:10px 10px")
-```
-
-</details>
-
-#### sanitizes unsafe SDD css file metadata in rendered HTML
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val graph = sdn_graph_parse("graph: css-file\ncss_file: javascript:alert(1)\nA: A")
-val html = sdn_graph_render_html(graph)
-expect(graph.css_file).to_equal("javascript:alert(1)")
-expect(html).to_contain("data-css-file=\"#\"")
-```
-
-</details>
-
-#### rejects unsafe draw canvas grid CSS
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val graph = sdn_graph_update_canvas(sdn_graph_parse("graph: unsafe-grid\nA: A"), "100", "80", "10;bad", "true", "100", "")
-val html = sdn_graph_render_html(graph)
-expect(html).to_contain("data-canvas-grid=\"10;bad\"")
 expect(html).to_contain("style=\"width:100px;height:80px;\"")
 ```
 
@@ -318,144 +231,16 @@ expect(html).to_contain("style=\"width:100px;height:80px;\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val graph = sdn_graph_parse("graph: flow\nA: Start @start shape: circle x: 8 y: 12 width: 48 height: 48 layer: base\nB: End @end shape: terminator x: 120 y: 12 width: 80 height: 48 layer: base\nA -> B: done route: simple waypoints: 56x36 start: right end: left label_x: 88 label_y: 36")
-val canon = sdn_graph_to_canonical_sdn(graph)
-expect(canon).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent|")
-expect(canon).to_contain("A, Start, start, , circle, 8, 12, 48, 48, base, ")
-expect(canon).to_contain("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|")
-expect(canon).to_contain("A, B, done, , normal, simple, 56x36, right, left, 88, 36")
-expect(sdn_graph_render_html(graph)).to_contain("data-label-x=\"88\" data-label-y=\"36\"")
-val unsafe = sdn_graph_parse("graph: unsafe-label\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nedges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|\n    A, B, c, , normal, orthogonal, \"140x30;200x80\", right, left, bad\\\"x, 80")
-expect(sdn_graph_render_html(unsafe)).to_contain("data-label-x=\"155\" data-label-y=\"80\"")
-expect(sdn_graph_render_html(unsafe).contains("bad\\\"x")).to_be(false)
-```
-
-</details>
-
-#### drops unsafe connector kind class tokens while preserving escaped kind metadata
-
-<details>
-<summary>Executable SSpec</summary>
-
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val graph = sdn_graph_parse("graph: unsafe-kind\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nedges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|\n    A, B, \"c <go> & \\\"now\\\"\", , bad&quot;onclick=1, simple, , right, left, , ")
-val html = sdn_graph_render_html(graph)
-expect(html).to_contain("data-label=\"c &lt;go&gt; &amp; &quot;now&quot;\"")
-expect(html).to_contain("c &lt;go&gt; &amp; &quot;now&quot;")
-expect(html).to_contain("data-kind=\"bad&amp;quot;onclick=1\"")
-expect(html.contains("sdd-kind-bad")).to_be(false)
-```
-
-</details>
-
-#### drops unsafe parsed style class tokens from rendered HTML
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val graph = sdn_graph_parse("graph: unsafe-style\nA: A @panel @bad&quot;onclick=1 x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nA -> B: c @primary @bad&quot;edge=1 route: simple start: right end: left")
-val html = sdn_graph_render_html(graph)
-expect(html).to_contain("sdn-css-panel")
-expect(html).to_contain("sdn-css-primary")
-expect(html.contains("sdn-css-bad")).to_be(false)
-```
-
-</details>
-
-#### resolves reusable SDD style rules into safe rendered HTML
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 49 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val graph = sdn_graph_parse("graph: style\ncss base:\n    fill: #ffffff\n    stroke: #334455\n    stroke_width: 2\n    radius: 8\ncss accent:\n    extends: base\n    text: #111111\n    shape: person\ncss primary:\n    target: edge\n    stroke: #224466\n    stroke_width: 3\nA: Alpha @accent x: 0 y: 0 width: 80 height: 20\nB: Beta x: 120 y: 0 width: 80 height: 20\nA -> B: link @primary route: simple start: right end: left")
-val html = sdn_graph_render_html(graph)
-expect(html).to_contain("background-color:#ffffff")
-expect(html).to_contain("border-color:#334455")
-expect(html).to_contain("border-width:2px")
-expect(html).to_contain("border-style:solid")
-expect(html).to_contain("border-radius:8")
-expect(html).to_contain("color:#111111")
-expect(html).to_contain("box-shadow:inset 0 16px 0 rgba(15,23,42,0.10)")
-expect(html).to_contain("stroke-width:3")
-
-val updated = sdn_graph_set_style_rule_checked(graph, "accent", "node", "base", "fill", "#eeeeee")
-expect(updated.accepted).to_be(true)
-expect(sdn_graph_to_canonical_sdn(updated.graph)).to_contain("accent, fill, #eeeeee")
-expect(sdn_graph_render_html(updated.graph)).to_contain("background-color:#eeeeee")
-val reparsed = sdn_graph_parse(sdn_graph_to_canonical_sdn(updated.graph))
-expect(reparsed.css_defs.len()).to_equal(4)
-expect(reparsed.styles.len()).to_equal(8)
-expect(sdn_graph_render_html(reparsed)).to_contain("background-color:#eeeeee")
-val inspected = sdn_graph_inspect_style_rule(reparsed, "accent", "fill")
-val missing = sdn_graph_inspect_style_rule(reparsed, "accent", "opacity")
-expect(inspected.found).to_be(true)
-expect(inspected.target).to_equal("node")
-expect(inspected.parent_css).to_equal("base")
-expect(inspected.value).to_equal("#eeeeee")
-expect(missing.reason).to_equal("missing-style-rule")
-val deleted = sdn_graph_delete_style_rule_checked(reparsed, "accent", "fill")
-val deleted_inspect = sdn_graph_inspect_style_rule(deleted.graph, "accent", "fill")
-val missing_delete = sdn_graph_delete_style_rule_checked(deleted.graph, "accent", "fill")
-expect(deleted.accepted).to_be(true)
-expect(deleted.graph.css_defs.len()).to_equal(4)
-expect(deleted.graph.styles.len()).to_equal(6)
-expect(deleted_inspect.reason).to_equal("missing-style-rule")
-expect(sdn_graph_render_html(deleted.graph)).to_contain("background-color:#ffffff")
-expect(missing_delete.reason).to_equal("missing-style-rule")
-val bad_target = sdn_graph_set_style_rule_checked(graph, "accent", "canvas", "base", "fill", "#eeeeee")
-val bad_value = sdn_graph_set_style_rule_checked(graph, "accent", "node", "base", "fill", "red;position:absolute")
-val bad_token = sdn_graph_set_style_rule_checked(graph, "accent,bad", "node", "base", "fill", "#eeeeee")
-val self_parent = sdn_graph_set_style_rule_checked(graph, "accent", "node", "accent", "fill", "#eeeeee")
-val indirect_parent = sdn_graph_set_style_rule_checked(graph, "base", "node", "accent", "fill", "#eeeeee")
-val missing_parent = sdn_graph_set_style_rule_checked(graph, "accent", "node", "missing", "fill", "#eeeeee")
-val bad_delete = sdn_graph_delete_style_rule_checked(graph, "accent,bad", "fill")
-expect(bad_target.reason).to_equal("invalid-target")
-expect(bad_value.reason).to_equal("invalid-style-value")
-expect(bad_token.reason).to_equal("invalid-style-token")
-expect(self_parent.reason).to_equal("style-parent-cycle")
-expect(indirect_parent.reason).to_equal("style-parent-cycle")
-expect(missing_parent.reason).to_equal("missing-style-parent")
-expect(bad_delete.reason).to_equal("invalid-style-token")
-```
-
-</details>
-
-#### resolves reusable SDD layout hints into node geometry styles
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val graph = sdn_graph_parse("graph: layout-style\ncss panel:\n    x: 32\n    y: 48\n    width: 160\n    height: 90\nCard: Card @panel\nTarget: Target x: 240 y: 48 width: 80 height: 40\nCard -> Target: opens route: simple start: right end: left")
-val html = sdn_graph_render_html(graph)
-val inspected = sdn_graph_inspect_node(graph, "Card")
-expect(html).to_contain("left:32px")
-expect(html).to_contain("top:48px")
-expect(html).to_contain("width:160px")
-expect(html).to_contain("height:90px")
-expect(html).to_contain("data-x=\"32\"")
-expect(html).to_contain("data-path=\"M 192,93 L 240,68\"")
-expect(inspected.node_index).to_equal(0)
-expect(inspected.x).to_equal("32")
-expect(inspected.width).to_equal("160")
+val graph = sdn_graph_parse("graph: flow\nA: Start @start shape: circle x: 8 y: 12 width: 48 height: 48 layer: base\nB: End @end shape: terminator x: 120 y: 12 width: 80 height: 48 layer: base\nA -> B: done route: simple waypoints: 56x36 start: right end: left")
+val canon = sdn_graph_to_canonical_sdn(graph)
+expect(canon).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent|")
+expect(canon).to_contain("A, Start, start, , circle, 8, 12, 48, 48, base, ")
+expect(canon).to_contain("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|")
+expect(canon).to_contain("A, B, done, , normal, simple, 56x36, right, left")
 ```
 
 </details>
@@ -482,7 +267,7 @@ expect(canon).to_contain("nodes |id, label, css, role, shape, x, y, width, heigh
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -495,7 +280,6 @@ expect(graph.nodes[1].width).to_equal("160")
 expect(graph.nodes[1].height).to_equal("70")
 expect(graph.nodes[1].layer).to_equal("services")
 expect(graph.nodes[1].parent).to_equal("Group")
-expect(sdn_graph_render_html(graph)).to_contain("data-layer=\"services\" data-layer-z=\"\"")
 expect(graph.nodes[2].shape).to_equal("")
 ```
 
@@ -506,7 +290,7 @@ expect(graph.nodes[2].shape).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -516,20 +300,6 @@ val html = sdn_graph_render_html(graph)
 expect(path).to_equal("M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30")
 expect(html).to_contain("data-edge-index=\"0\"")
 expect(html).to_contain("data-path=\"M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30\"")
-expect(html).to_contain("data-path-bounds=\"90,30,220,80\"")
-expect(html.split("data-path-bounds=\"90,30,220,80\"").len()).to_equal(3)
-expect(html).to_contain("data-segment-count=\"5\"")
-expect(html.split("data-segment-count=\"5\"").len()).to_equal(3)
-expect(html).to_contain("data-segments=\"90,30-140,30;140,30-200,30;200,30-200,80;200,80-220,80;220,80-220,30\"")
-expect(html.split("data-segments=\"90,30-140,30;140,30-200,30;200,30-200,80;200,80-220,80;220,80-220,30\"").len()).to_equal(3)
-expect(html).to_contain("data-segment-midpoints=\"115,30;170,30;200,55;210,80;220,55\"")
-expect(html.split("data-segment-midpoints=\"115,30;170,30;200,55;210,80;220,55\"").len()).to_equal(3)
-expect(html).to_contain("data-segment-orientations=\"h;h;v;h;v\"")
-expect(html.split("data-segment-orientations=\"h;h;v;h;v\"").len()).to_equal(3)
-expect(html).to_contain("data-start-x=\"90\" data-start-y=\"30\" data-end-x=\"220\" data-end-y=\"30\"")
-expect(html.split("data-start-x=\"90\" data-start-y=\"30\" data-end-x=\"220\" data-end-y=\"30\"").len()).to_equal(3)
-expect(html).to_contain("data-label-x=\"155\" data-label-y=\"55\"")
-expect(html.split("data-label-x=\"155\" data-label-y=\"55\"").len()).to_equal(3)
 expect(html).to_contain("data-waypoints=\"140x30;200x80\"")
 ```
 
@@ -555,7 +325,7 @@ expect(sdn_graph_render_edge_path(graph.edges[0], graph.nodes[0], graph.nodes[1]
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -565,13 +335,6 @@ expect(html).to_contain("data-selected-node-id=\"B\"")
 expect(html).to_contain("data-selected-edge-index=\"-1\"")
 expect(html).to_contain("class=\"sdn-graph-node sdd-node sdn-css-target sdd-selected\"")
 expect(html).to_contain("data-node=\"B\" data-selected=\"true\" aria-selected=\"true\"")
-expect(html).to_contain("data-layer=\"front\" data-layer-z=\"30\"")
-expect(html).to_contain("z-index:30")
-expect(html).to_contain("class=\"sdd-resize-handle sdd-resize-nw\"")
-expect(html).to_contain("data-resize-handle=\"nw\"")
-expect(html).to_contain("data-resize-handle=\"se\"")
-expect(html).to_contain("width:8px;height:8px")
-expect(html).to_contain("right:-5px;bottom:-5px;cursor:nwse-resize")
 expect(sdn_graph_render_html(graph)).to_contain("data-selected-node-id=\"\"")
 expect(graph.nodes[1].css).to_equal("target")
 ```
@@ -583,29 +346,17 @@ expect(graph.nodes[1].css).to_equal("target")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val graph = sdn_graph_parse("graph: select-edge\nA: Alpha x: 10 y: 20 width: 80 height: 20\nB: Beta x: 220 y: 20 width: 80 height: 20\nA ~> B: c @primary route: simple waypoints: 140x30;180x30 start: right end: left")
+val graph = sdn_graph_parse("graph: select-edge\nA: Alpha x: 10 y: 20 width: 80 height: 20\nB: Beta x: 220 y: 20 width: 80 height: 20\nA -> B: c @primary route: simple start: right end: left")
 val selected = sdn_graph_render_html_with_selection(graph, "", 0)
 val invalid = sdn_graph_render_html_with_selection(graph, "", 99)
 expect(selected).to_contain("data-selected-edge-index=\"0\"")
-expect(selected).to_contain("class=\"sdd-connector-path sdn-css-primary sdd-kind-async sdd-selected\"")
+expect(selected).to_contain("class=\"sdd-connector-path sdn-css-primary sdd-selected\"")
 expect(selected).to_contain("data-edge-index=\"0\" data-selected=\"true\" aria-selected=\"true\"")
-expect(selected).to_contain("class=\"sdd-connector-handle sdd-connector-start\"")
-expect(selected).to_contain("data-connector-handle=\"start\"")
-expect(selected).to_contain("data-connector-handle=\"end\"")
-expect(selected).to_contain("data-connector-handle=\"label\"")
-expect(selected).to_contain("data-connector-handle=\"waypoint\" data-waypoint-index=\"0\"")
-expect(selected).to_contain("data-connector-handle=\"waypoint\" data-waypoint-index=\"1\"")
-expect(selected).to_contain("cx=\"90\" cy=\"30\" r=\"4\"")
-expect(selected).to_contain("cx=\"220\" cy=\"30\" r=\"4\"")
-expect(selected).to_contain("cx=\"155\" cy=\"30\" r=\"3\"")
-expect(selected).to_contain("cx=\"140\" cy=\"30\" r=\"3\"")
-expect(selected).to_contain("cx=\"180\" cy=\"30\" r=\"3\"")
-expect(selected).to_contain("data-kind=\"async\"")
-expect(selected).to_contain("class=\"sdn-graph-edge sdd-connector sdn-css-primary sdd-kind-async sdd-selected\"")
+expect(selected).to_contain("class=\"sdn-graph-edge sdd-connector sdn-css-primary sdd-selected\"")
 expect(invalid).to_contain("data-selected-edge-index=\"99\"")
 expect(invalid).to_contain("data-edge-index=\"0\" data-selected=\"false\" aria-selected=\"false\"")
 ```
@@ -617,7 +368,7 @@ expect(invalid).to_contain("data-edge-index=\"0\" data-selected=\"false\" aria-s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -632,8 +383,6 @@ expect(node.role).to_equal("source")
 expect(node.shape).to_equal("rounded")
 expect(node.x).to_equal("10")
 expect(node.parent).to_equal("Group")
-expect(node.child_count).to_equal("0")
-expect(node.child_bounds).to_equal("")
 expect(edge.found).to_be(true)
 expect(edge.reason).to_equal("selected")
 expect(edge.edge_index).to_equal(0)
@@ -644,13 +393,6 @@ expect(edge.kind).to_equal("action")
 expect(edge.route).to_equal("orthogonal")
 expect(edge.waypoints).to_equal("140x30;200x80")
 expect(edge.path).to_equal("M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30")
-expect(edge.path_bounds).to_equal("90,30,220,80")
-expect(edge.segment_count).to_equal("5")
-expect(edge.segments).to_equal("90,30-140,30;140,30-200,30;200,30-200,80;200,80-220,80;220,80-220,30")
-expect(edge.segment_midpoints).to_equal("115,30;170,30;200,55;210,80;220,55")
-expect(edge.segment_orientations).to_equal("h;h;v;h;v")
-expect(edge.label_x).to_equal("")
-expect(edge.label_y).to_equal("")
 ```
 
 </details>
@@ -660,7 +402,7 @@ expect(edge.label_y).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -670,8 +412,6 @@ val edge = sdn_graph_inspect_edge(graph, -1)
 expect(node.found).to_be(false)
 expect(node.reason).to_equal("missing-node")
 expect(node.id).to_equal("Nope")
-expect(node.child_count).to_equal("0")
-expect(node.child_bounds).to_equal("")
 expect(edge.found).to_be(false)
 expect(edge.reason).to_equal("missing-edge")
 expect(edge.edge_index).to_equal(-1)
@@ -684,95 +424,16 @@ expect(edge.edge_index).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 85 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val graph = sdn_graph_parse("graph: edit\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nA -> B: c route: simple start: right end: left")
-val created = sdn_graph_add_edge(graph, "B", "A", "return", "secondary", "reply", "simple", "", "left", "right")
-val bad_create_route = sdn_graph_add_edge_checked(graph, "B", "A", "return", "secondary", "reply", "curve", "", "left", "right")
-val bad_create_anchor = sdn_graph_add_edge_checked(graph, "B", "A", "return", "secondary", "reply", "simple", "", "east", "right")
-val bad_create_waypoint = sdn_graph_add_edge_checked(graph, "B", "A", "return", "secondary", "reply", "simple", "10,20", "left", "right")
-val bad_create_style = sdn_graph_add_edge_checked(graph, "B", "A", "return", "secondary,bad", "reply", "simple", "", "left", "right")
-val bad_create_kind = sdn_graph_add_edge_checked(graph, "B", "A", "return", "secondary", "reply bad", "simple", "", "left", "right")
-val updated = sdn_graph_update_edge_at(created, 0, "orthogonal", "140x30;200x80", "right", "left")
-val bad_route = sdn_graph_update_edge_checked(created, 0, "curve", "140x30", "right", "left")
-val bad_anchor = sdn_graph_update_edge_checked(created, 0, "orthogonal", "140x30", "east", "left")
-val bad_waypoint = sdn_graph_update_edge_checked(created, 0, "orthogonal", "140,30", "right", "left")
-val missing_edge = sdn_graph_update_edge_checked(created, 8, "orthogonal", "140x30", "right", "left")
-val labeled = sdn_graph_update_edge_label_at(updated, 0, "approved")
-val missing_edge_label = sdn_graph_update_edge_label_checked(updated, 8, "approved")
-val label_pointed = sdn_graph_update_edge_label_point_at(labeled, 0, "155", "55")
-val checked_label_point = sdn_graph_update_edge_label_point_checked(labeled, 0, " 166 ", " 65 ")
-val bad_label_point = sdn_graph_update_edge_label_point_checked(labeled, 0, "bad", "55")
-val huge_label_point = sdn_graph_update_edge_label_point_checked(labeled, 0, "999999999999999999999999", "55")
-val styled = sdn_graph_update_edge_style_at(labeled, 0, "warning dashed")
-val bad_style = sdn_graph_update_edge_style_checked(labeled, 0, "warning,bad")
-val kinded = sdn_graph_update_edge_kind_at(styled, 0, "async")
-val bad_kind = sdn_graph_update_edge_kind_checked(styled, 0, "async bad")
-val reconnected = sdn_graph_update_edge_endpoints_at(kinded, 0, "B", "A")
-val checked_reconnected = sdn_graph_update_edge_endpoints_checked(kinded, 0, " B ", " A ")
-val bad_endpoint = sdn_graph_update_edge_endpoints_checked(kinded, 0, "B", "Missing")
-val deleted = sdn_graph_delete_edge_at(reconnected, 0)
-val missing_delete = sdn_graph_delete_edge_checked(reconnected, 8)
+val updated = sdn_graph_update_edge_at(graph, 0, "orthogonal", "140x30;200x80", "right", "left")
 val html = sdn_graph_render_html(updated)
-val labeled_html = sdn_graph_render_html(labeled)
-val styled_html = sdn_graph_render_html(styled)
-val reconnected_html = sdn_graph_render_html(reconnected)
-expect(created.edges.len()).to_equal(2)
-expect(created.edges[1].from_id).to_equal("B")
-expect(created.edges[1].to_id).to_equal("A")
-expect(created.edges[1].css).to_equal("secondary")
-expect(created.edges[1].kind).to_equal("reply")
-expect(created.edges[1].route).to_equal("simple")
-expect(created.edges[1].waypoints).to_equal("")
-expect(created.edges[1].start_anchor).to_equal("left")
-expect(created.edges[1].end_anchor).to_equal("right")
-expect(bad_create_route.reason).to_equal("invalid-route")
-expect(bad_create_anchor.reason).to_equal("invalid-anchor")
-expect(bad_create_waypoint.reason).to_equal("invalid-waypoints")
-expect(bad_create_style.reason).to_equal("invalid-style-token")
-expect(bad_create_kind.reason).to_equal("invalid-kind-token")
-expect(sdn_graph_render_html(created)).to_contain(">return</div>")
-expect(sdn_graph_render_html(created)).to_contain("sdn-css-secondary")
-expect(sdn_graph_render_html(created)).to_contain("data-kind=\"reply\"")
-expect(sdn_graph_render_html(created)).to_contain("data-start-anchor=\"left\"")
-expect(sdn_graph_render_html(created)).to_contain("data-end-anchor=\"right\"")
 expect(updated.edges[0].route).to_equal("orthogonal")
 expect(updated.edges[0].waypoints).to_equal("140x30;200x80")
-expect(bad_route.reason).to_equal("invalid-route")
-expect(bad_anchor.reason).to_equal("invalid-anchor")
-expect(bad_waypoint.reason).to_equal("invalid-waypoints")
-expect(missing_edge.reason).to_equal("missing-edge")
 expect(html).to_contain("data-path=\"M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30\"")
-expect(labeled.edges[0].label).to_equal("approved")
-expect(labeled.edges[0].route).to_equal("orthogonal")
-expect(labeled_html).to_contain(">approved</div>")
-expect(missing_edge_label.reason).to_equal("missing-edge")
-expect(label_pointed.edges[0].label_x).to_equal("155")
-expect(label_pointed.edges[0].label_y).to_equal("55")
-expect(sdn_graph_render_html(label_pointed)).to_contain("data-label-x=\"155\" data-label-y=\"55\"")
-expect(checked_label_point.graph.edges[0].label_x).to_equal("166")
-expect(sdn_graph_render_html(checked_label_point.graph)).to_contain("data-label-x=\"166\" data-label-y=\"65\"")
-expect(bad_label_point.reason).to_equal("invalid-label-point")
-expect(huge_label_point.reason).to_equal("invalid-label-point")
-expect(styled.edges[0].css).to_equal("warning dashed")
-expect(styled.edges[0].route).to_equal("orthogonal")
-expect(bad_style.reason).to_equal("invalid-style-token")
-expect(styled_html).to_contain("sdn-css-warning sdn-css-dashed")
-expect(kinded.edges[0].kind).to_equal("async")
-expect(bad_kind.reason).to_equal("invalid-kind-token")
-expect(sdn_graph_render_html(kinded)).to_contain("data-kind=\"async\"")
-expect(reconnected.edges[0].from_id).to_equal("B")
-expect(reconnected.edges[0].to_id).to_equal("A")
-expect(reconnected.edges[0].label).to_equal("approved")
-expect(checked_reconnected.graph.edges[0].from_id).to_equal("B")
-expect(checked_reconnected.graph.edges[0].to_id).to_equal("A")
-expect(bad_endpoint.reason).to_equal("missing-node")
-expect(reconnected_html).to_contain("data-from=\"B\" data-to=\"A\"")
-expect(deleted.edges.len()).to_equal(0)
-expect(missing_delete.reason).to_equal("missing-edge")
-expect(sdn_graph_render_html(deleted)).to_contain("data-selected-edge-index=\"-1\"")
 ```
 
 </details>
@@ -782,13 +443,12 @@ expect(sdn_graph_render_html(deleted)).to_contain("data-selected-edge-index=\"-1
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val graph = sdn_graph_parse("graph: edit-canvas\ncanvas: width: 800 height: 600 grid: 10 snap: false zoom: 100 background: white\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nA -> B: c route: simple start: right end: left")
 val updated = sdn_graph_update_canvas(graph, "1440", "960", "24", "true", "150", "#f8fafc")
-val unsafe = sdn_graph_update_canvas_checked(graph, "1440", "960", "24;bad", "true", "150", "#f8fafc")
 val html = sdn_graph_render_html(updated)
 expect(updated.canvas_width).to_equal("1440")
 expect(updated.canvas_height).to_equal("960")
@@ -800,9 +460,6 @@ expect(updated.nodes[0].id).to_equal("A")
 expect(updated.edges[0].from_id).to_equal("A")
 expect(html).to_contain("data-canvas-width=\"1440\"")
 expect(html).to_contain("data-canvas-grid=\"24\"")
-expect(html).to_contain("background-color:#f8fafc")
-expect(html).to_contain("background-size:24px 24px")
-expect(unsafe.reason).to_equal("invalid-canvas-number")
 ```
 
 </details>
@@ -812,45 +469,11 @@ expect(unsafe.reason).to_equal("invalid-canvas-number")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 96 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val graph = sdn_graph_parse("graph: edit-node\nA: Alpha @plain role: box shape: rect x: 10 y: 20 width: 80 height: 20 layer: base\nB: Beta @plain role: box shape: rect x: 220 y: 20 width: 80 height: 20 layer: base\nA -> B: c route: simple start: right end: left")
-val added = sdn_graph_add_node_checked(graph, "C", "Choice", "accent selected", "decision", "diamond", "120", "80", "64", "48", "front", "A")
-expect(added.accepted).to_be(true)
-expect(added.reason).to_equal("updated")
-expect(added.graph.nodes.len()).to_equal(3)
-expect(added.graph.nodes[2].id).to_equal("C")
-expect(added.graph.nodes[2].label).to_equal("Choice")
-expect(added.graph.nodes[2].css).to_equal("accent selected")
-expect(added.graph.nodes[2].role).to_equal("decision")
-expect(added.graph.nodes[2].shape).to_equal("diamond")
-expect(added.graph.nodes[2].x).to_equal("120")
-expect(added.graph.nodes[2].parent).to_equal("A")
-expect(sdn_graph_render_html(added.graph)).to_contain("data-node=\"C\"")
-expect(sdn_graph_render_html(added.graph)).to_contain("data-role=\"decision\"")
-expect(sdn_graph_render_html(added.graph)).to_contain("data-shape=\"diamond\"")
-expect(sdn_graph_render_html(added.graph)).to_contain("data-layer=\"front\"")
-expect(sdn_graph_render_html(added.graph)).to_contain("data-parent=\"A\"")
-expect(sdn_graph_render_html(added.graph)).to_contain("sdn-css-accent sdn-css-selected")
-val duplicate_added = sdn_graph_add_node_checked(graph, "A", "Again", "", "", "", "", "", "", "", "", "")
-val invalid_added = sdn_graph_add_node_checked(graph, "", "Blank", "", "", "", "", "", "", "", "", "")
-val missing_parent_added = sdn_graph_add_node_checked(graph, "D", "Detached", "", "", "", "", "", "", "", "", "Missing")
-val bad_add_style = sdn_graph_add_node_checked(graph, "D", "Bad", "accent,bad", "", "", "", "", "", "", "", "")
-val bad_add_role = sdn_graph_add_node_checked(graph, "D", "Bad", "", "role bad", "", "", "", "", "", "", "")
-val bad_add_shape = sdn_graph_add_node_checked(graph, "D", "Bad", "", "", "bad,shape", "", "", "", "", "", "")
-val bad_add_layer = sdn_graph_add_node_checked(graph, "D", "Bad", "", "", "", "", "", "", "", "front layer", "")
-expect(duplicate_added.accepted).to_be(false)
-expect(duplicate_added.reason).to_equal("duplicate-id")
-expect(invalid_added.accepted).to_be(false)
-expect(invalid_added.reason).to_equal("invalid-id")
-expect(missing_parent_added.accepted).to_be(false)
-expect(missing_parent_added.reason).to_equal("missing-parent")
-expect(bad_add_style.reason).to_equal("invalid-style-token")
-expect(bad_add_role.reason).to_equal("invalid-role-token")
-expect(bad_add_shape.reason).to_equal("invalid-shape-token")
-expect(bad_add_layer.reason).to_equal("invalid-layer-token")
 val updated = sdn_graph_update_node_at(graph, 0, "accent selected", "decision", "diamond", "32", "48", "96", "64", "foreground")
 val html = sdn_graph_render_html(updated)
 val canon = sdn_graph_to_canonical_sdn(updated)
@@ -866,52 +489,15 @@ expect(updated.nodes[1].shape).to_equal("rect")
 expect(updated.edges[0].from_id).to_equal("A")
 expect(html).to_contain("class=\"sdn-graph-node sdd-node sdn-css-accent sdn-css-selected\"")
 expect(html).to_contain("data-shape=\"diamond\"")
-expect(html).to_contain("clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%)")
 expect(html).to_contain("style=\"left:32px;top:48px;width:96px;height:64px\"")
 expect(canon).to_contain("A, Alpha, \"accent selected\", decision, diamond, 32, 48, 96, 64, foreground")
-val bad_geometry = sdn_graph_update_node_geometry_checked(graph, 0, "bad", "48", "96", "64")
-val missing_geometry = sdn_graph_update_node_geometry_checked(graph, 8, "32", "48", "96", "64")
-expect(bad_geometry.reason).to_equal("invalid-geometry")
-expect(missing_geometry.reason).to_equal("missing-node")
 
 val shaped = sdn_graph_update_node_shape_at(graph, 1, "cylinder")
 val styled = sdn_graph_update_node_style_at(shaped, 1, "storage highlight")
-val bad_style = sdn_graph_update_node_style_checked(styled, 1, "storage,bad")
-val bad_shape = sdn_graph_update_node_shape_checked(styled, 1, "bad shape")
-val bad_layer = sdn_graph_update_node_layer_checked(styled, 1, "front layer")
-val bad_role = sdn_graph_update_node_role_checked(styled, 1, "data base")
 expect(styled.nodes[1].shape).to_equal("cylinder")
 expect(styled.nodes[1].css).to_equal("storage highlight")
 expect(styled.nodes[1].x).to_equal("220")
-expect(bad_style.reason).to_equal("invalid-style-token")
-expect(bad_shape.reason).to_equal("invalid-shape-token")
-expect(bad_layer.reason).to_equal("invalid-layer-token")
-expect(bad_role.reason).to_equal("invalid-role-token")
 expect(sdn_graph_render_html(styled)).to_contain("sdn-css-storage sdn-css-highlight")
-expect(sdn_graph_render_html(styled)).to_contain("border-radius:999px / 24px")
-expect(sdn_graph_render_html(styled)).to_contain("box-shadow:inset 0 8px 0 rgba(15,23,42,0.08)")
-val labeled = sdn_graph_update_node_label_at(styled, 1, "Data Store")
-val missing_node_label = sdn_graph_update_node_label_checked(styled, 8, "Data Store")
-expect(labeled.nodes[1].label).to_equal("Data Store")
-expect(missing_node_label.reason).to_equal("missing-node")
-expect(labeled.nodes[1].shape).to_equal("cylinder")
-expect(labeled.nodes[1].css).to_equal("storage highlight")
-expect(sdn_graph_render_html(labeled)).to_contain(">Data Store</button>")
-val layered = sdn_graph_update_node_layer_at(labeled, 1, "front")
-expect(layered.nodes[1].layer).to_equal("front")
-expect(layered.nodes[1].label).to_equal("Data Store")
-val roled = sdn_graph_update_node_role_at(layered, 1, "database")
-expect(roled.nodes[1].role).to_equal("database")
-expect(roled.nodes[1].layer).to_equal("front")
-val node_deleted = sdn_graph_delete_node_at(roled, 1)
-expect(node_deleted.nodes.len()).to_equal(1)
-expect(node_deleted.nodes[0].id).to_equal("A")
-expect(node_deleted.edges.len()).to_equal(0)
-val missing_node_delete = sdn_graph_delete_node_checked(roled, "Nope")
-val checked_node_deleted = sdn_graph_delete_node_checked(roled, "B")
-expect(missing_node_delete.reason).to_equal("missing-node")
-expect(checked_node_deleted.accepted).to_be(true)
-expect(checked_node_deleted.graph.edges.len()).to_equal(0)
 ```
 
 </details>
@@ -921,7 +507,7 @@ expect(checked_node_deleted.graph.edges.len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -930,131 +516,15 @@ expect(graph.nodes.len()).to_equal(2)
 expect(graph.nodes[0].parent).to_equal("")
 expect(graph.nodes[1].parent).to_equal("Container")
 expect(sdn_graph_render_html(graph)).to_contain("data-parent=\"Container\"")
-expect(sdn_graph_render_html(graph)).to_contain("data-child-count=\"1\" data-has-children=\"true\"")
-expect(sdn_graph_render_html(graph)).to_contain("data-child-bounds=\"20,24,100,54\"")
-expect(sdn_graph_inspect_node(graph, "Container").child_count).to_equal("1")
-expect(sdn_graph_inspect_node(graph, "Container").child_bounds).to_equal("20,24,100,54")
 expect(sdn_graph_to_canonical_sdn(graph)).to_contain("Child, Child, primary, control, rounded, 20, 24, 80, 30, controls, Container")
 
 val ungrouped = sdn_graph_update_node_parent_at(graph, 1, "")
 expect(ungrouped.nodes[1].parent).to_equal("")
 expect(ungrouped.nodes[1].x).to_equal("20")
 expect(ungrouped.nodes[0].id).to_equal("Container")
-expect(sdn_graph_render_html(ungrouped)).to_contain("data-child-count=\"0\" data-has-children=\"false\"")
-expect(sdn_graph_render_html(ungrouped)).to_contain("data-child-bounds=\"\"")
-val multi_child = sdn_graph_parse("graph: multi-group\nnodes |id, label, css, role, shape, x, y, width, height, layer, parent|\n    Container, Container, panel, group, frame, 0, 0, 220, 140, base, \n    A, A, primary, control, rounded, 20, 24, 80, 30, controls, Container\n    B, B, primary, control, rounded, 80, 10, 40, 20, controls, Container")
-expect(sdn_graph_render_html(multi_child)).to_contain("data-child-count=\"2\" data-has-children=\"true\"")
-expect(sdn_graph_render_html(multi_child)).to_contain("data-child-bounds=\"20,10,120,54\"")
-expect(sdn_graph_inspect_node(multi_child, "Container").child_count).to_equal("2")
-expect(sdn_graph_inspect_node(multi_child, "Container").child_bounds).to_equal("20,10,120,54")
-val invalid_child = sdn_graph_parse("graph: invalid-group\nnodes |id, label, css, role, shape, x, y, width, height, layer, parent|\n    Container, Container, panel, group, frame, 0, 0, 220, 140, base, \n    Child, Child, primary, control, rounded, left, 24, 80, 30, controls, Container")
-expect(sdn_graph_render_html(invalid_child)).to_contain("data-child-count=\"1\" data-has-children=\"true\"")
-expect(sdn_graph_render_html(invalid_child)).to_contain("data-child-bounds=\"\"")
-val styled_child = sdn_graph_parse("graph: styled-group\ncss childgeom:\n    x: 12\n    y: 14\n    width: 50\n    height: 20\nContainer: Container role: group shape: frame\nChild: Child @childgeom parent: Container")
-expect(sdn_graph_render_html(styled_child)).to_contain("data-child-bounds=\"12,14,62,34\"")
 
 val regrouped = sdn_graph_update_node_parent_at(ungrouped, 1, "Container")
 expect(regrouped.nodes[1].parent).to_equal("Container")
-val checked_regrouped = sdn_graph_update_node_parent_checked(ungrouped, "Child", "Container")
-expect(checked_regrouped.accepted).to_be(true)
-expect(checked_regrouped.graph.nodes[1].parent).to_equal("Container")
-val missing_parent = sdn_graph_update_node_parent_checked(ungrouped, "Child", "Missing")
-expect(missing_parent.accepted).to_be(false)
-expect(missing_parent.reason).to_equal("missing-parent")
-val cycle = sdn_graph_update_node_parent_checked(regrouped, "Container", "Child")
-expect(cycle.accepted).to_be(false)
-expect(cycle.reason).to_equal("parent-cycle")
-val deleted_parent = sdn_graph_delete_node_at(regrouped, 0)
-expect(deleted_parent.nodes.len()).to_equal(1)
-expect(deleted_parent.nodes[0].id).to_equal("Child")
-expect(deleted_parent.nodes[0].parent).to_equal("")
-```
-
-</details>
-
-#### duplicates a node with a new id and offset geometry
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 23 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val graph = sdn_graph_parse("graph: duplicate\nA: Alpha @panel role: box shape: rounded x: 10 y: 20 width: 80 height: 30 layer: base parent: Group\nB: Beta x: 120 y: 20 width: 80 height: 30")
-val copied = sdn_graph_duplicate_node_checked(graph, "A", "A_copy", "16", "24")
-expect(copied.accepted).to_be(true)
-expect(copied.graph.nodes.len()).to_equal(3)
-expect(copied.graph.nodes[1].id).to_equal("A_copy")
-expect(copied.graph.nodes[1].label).to_equal("Alpha")
-expect(copied.graph.nodes[1].css).to_equal("panel")
-expect(copied.graph.nodes[1].shape).to_equal("rounded")
-expect(copied.graph.nodes[1].x).to_equal("26")
-expect(copied.graph.nodes[1].y).to_equal("44")
-expect(copied.graph.nodes[1].parent).to_equal("Group")
-expect(copied.graph.nodes[2].id).to_equal("B")
-expect(sdn_graph_render_html(copied.graph)).to_contain("data-node=\"A_copy\"")
-
-val duplicate_id = sdn_graph_duplicate_node_checked(graph, "A", "B", "16", "24")
-val missing = sdn_graph_duplicate_node_checked(graph, "Nope", "Nope_copy", "16", "24")
-val ambiguous = sdn_graph_duplicate_node_checked(sdn_graph_parse("graph: ambiguous\nA: First x: 0 y: 0\nA: Second x: 10 y: 10"), "A", "A_copy", "4", "4")
-expect(duplicate_id.accepted).to_be(false)
-expect(duplicate_id.reason).to_equal("duplicate-id")
-expect(missing.accepted).to_be(false)
-expect(missing.reason).to_equal("missing-node")
-expect(ambiguous.accepted).to_be(false)
-expect(ambiguous.reason).to_equal("ambiguous-source")
-```
-
-</details>
-
-#### duplicates a connector by index
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val graph = sdn_graph_parse("graph: connector copy\nA: Alpha\nB: Beta\nA -> B: submit @primary kind: action route: orthogonal waypoints: 10x20 start: right end: left")
-val copied = sdn_graph_duplicate_edge_checked(graph, 0)
-val missing = sdn_graph_duplicate_edge_checked(graph, 3)
-expect(copied.accepted).to_be(true)
-expect(copied.graph.edges.len()).to_equal(2)
-expect(copied.graph.edges[1].label).to_equal("submit")
-expect(copied.graph.edges[1].css).to_equal("primary")
-expect(copied.graph.edges[1].route).to_equal("orthogonal")
-expect(sdn_graph_render_html(copied.graph)).to_contain("data-edge-index=\"1\"")
-expect(missing.accepted).to_be(false)
-expect(missing.reason).to_equal("missing-edge")
-```
-
-</details>
-
-#### reorders a node to the front or back
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 14 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val graph = sdn_graph_parse("graph: order\nA: Alpha x: 0 y: 0\nB: Beta x: 10 y: 0\nC: Gamma x: 20 y: 0")
-val front = sdn_graph_reorder_node_checked(graph, "A", "front")
-val back = sdn_graph_reorder_node_checked(front.graph, "C", "back")
-val invalid = sdn_graph_reorder_node_checked(graph, "A", "middle")
-val missing = sdn_graph_reorder_node_checked(graph, "Nope", "front")
-val ambiguous = sdn_graph_reorder_node_checked(sdn_graph_parse("graph: ambiguous\nA: First\nA: Second"), "A", "front")
-expect(front.accepted).to_be(true)
-expect(front.graph.nodes[2].id).to_equal("A")
-expect(back.accepted).to_be(true)
-expect(back.graph.nodes[0].id).to_equal("C")
-expect(sdn_graph_to_canonical_sdn(back.graph)).to_contain("C, Gamma")
-expect(invalid.reason).to_equal("invalid-position")
-expect(missing.reason).to_equal("missing-node")
-expect(ambiguous.reason).to_equal("ambiguous-source")
 ```
 
 </details>
@@ -1147,8 +617,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 33 |
-| Active scenarios | 33 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

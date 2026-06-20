@@ -68,12 +68,12 @@ nodes |id, label, css, role, shape, x, y, width, height, layer, parent|
     Panel, Settings, card, , rounded, 40, 80, 220, 120, ui,
     Button, Save, primary, , rounded, 72, 120, 96, 32, ui, Panel
 
-edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|
-    User, Auth, Login, primary, normal, , , , , ,
-    Auth, DB, Query, db, normal, , , , , ,
-    Panel, Auth, config, , normal, orthogonal, "150x100;150x40", right, left, 180, 70
-    Auth, Log, Event, async, async, , , , , ,
-    UI, DB, forbidden, violation, forbidden, , , , , ,
+edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|
+    User, Auth, Login, primary, normal, , , ,
+    Auth, DB, Query, db, normal, , , ,
+    Panel, Auth, config, , normal, orthogonal, "150x100;150x40", right, left
+    Auth, Log, Event, async, async, , , ,
+    UI, DB, forbidden, violation, forbidden, , , ,
 ```
 
 ## CSS Definitions
@@ -195,49 +195,19 @@ The TUI preview renders a compact graph summary. The GUI preview emits
 deterministic HTML with `sdn-graph`, `sdn-graph-node`, and `sdn-graph-edge`
 classes plus `sdd-diagram`, `sdd-node`, `sdd-connector`, `data-format="sdd"`,
 geometry attributes, connector route/waypoint attributes, and `sdn-css-<name>`
-classes derived from `@name`. Nodes also expose `data-parent`,
-`data-child-count`, `data-has-children`, and `data-child-bounds` for group or
-container membership. `data-child-bounds` uses `min_x,min_y,max_x,max_y` from
-effective child geometry when every child has numeric geometry.
-Common layer names map to `data-layer-z` and preview `z-index` values:
-`back`/`background` 0, `base`/`default` 10, `controls`/`ui`/`middle` 20, and
-`front`/`foreground`/`overlay` 30.
-The root exposes graph readback metadata as `data-node-count` and
-`data-edge-count`, plus optional canvas metadata as
+classes derived from `@name`. Nodes also expose `data-parent` for group or
+container membership. The root exposes optional canvas metadata as
 `data-canvas-width`, `data-canvas-height`, `data-canvas-grid`,
 `data-canvas-snap`, `data-canvas-zoom`, and `data-canvas-background`, and maps
-canvas width/height to deterministic root style lengths when present. Safe
-canvas background colors and grid spacing are also rendered as root CSS.
-Known node shapes such as `person`, `frame`, `container`, `rounded`, `pill`,
-`circle`, `terminator`, `diamond`, and `cylinder` map to deterministic inline CSS in the HTML preview. SDD style rules are
-appended after built-in shape CSS so document styles can intentionally override
-the default preview shape.
+canvas width/height to deterministic root style lengths when present.
 
 ## Rendered Connector Contract
 
 SDD HTML includes an SVG `.sdd-connector-layer` overlay before node buttons.
-Each rendered connector path and matching `.sdn-graph-edge.sdd-connector`
-metadata div has:
+Each rendered connector path has:
 
 - `data-edge-index`: stable edge index in canonical graph order.
 - `data-path`: the exact SVG path string used in `d`.
-- `data-path-bounds`: `min_x,min_y,max_x,max_y` derived from the rendered path
-  points when numeric.
-- `data-segment-count`: rendered connector segment count derived from the path,
-  for segment handle overlays.
-- `data-segments`: semicolon-separated rendered segment endpoints as
-  `x1,y1-x2,y2`, derived from the path for drag handles and hit testing.
-- `data-segment-midpoints`: semicolon-separated `x,y` segment centers for
-  handle placement.
-- `data-segment-orientations`: semicolon-separated `h`, `v`, or `d` flags for
-  each rendered segment.
-- `data-start-x`, `data-start-y`, `data-end-x`, and `data-end-y`: numeric
-  endpoint coordinates derived from the rendered path for connector handles.
-- `data-label-x` and `data-label-y`: explicit connector label point from the
-  edge row when present, otherwise the center derived from rendered path bounds
-  when numeric.
-- `data-kind`: connector kind metadata, also reflected as `sdd-kind-<kind>` for
-  non-`normal` kinds.
 - `data-route`, `data-waypoints`, `data-start-anchor`, and `data-end-anchor`:
   editable routing metadata.
 
@@ -249,49 +219,13 @@ vertical to waypoint y, then horizontal/vertical to the target anchor.
 `sdn_graph_update_edge_at` is the pure reroute operation for editor event
 wiring. It updates an edge's route, waypoint string, and anchors by index while
 leaving node geometry and graph metadata untouched.
-`sdn_graph_add_edge` appends one connector with caller-provided endpoint, label,
-CSS labels, kind, route, waypoint, and anchor metadata.
-`sdn_graph_update_edge_label_at` updates only the visible connector label.
-`sdn_graph_update_edge_label_point_at` updates only the persisted connector
-label point used by editor drag handles.
-`sdn_graph_update_edge_style_at` updates only connector CSS labels.
-`sdn_graph_update_edge_kind_at` updates only connector kind metadata.
-`sdn_graph_update_edge_endpoints_at` reconnects a connector's source and target
-node ids.
-`sdn_graph_delete_edge_at` removes one connector by canonical edge index.
-`sdn_graph_delete_node_at` removes one node by canonical node index, drops
-attached connectors, and clears child parent references to that node id.
-
-`sdn_graph_add_node_checked(graph, id, label, css, role, shape, x, y, width,
-height, layer, parent)` appends one diagram node with caller-provided SDD
-metadata. It fails closed with `invalid-id` or `duplicate-id` so node ids remain
-stable for selection, connectors, and inspectors.
-
-`sdn_graph_duplicate_edge_checked(graph, edge_index)` appends an exact copy of
-one connector and fails closed with `missing-edge` for out-of-range indexes.
-
-`sdn_graph_reorder_node_checked(graph, node_id, position)` moves one node to
-`front` or `back` document/render order without changing its layer metadata.
-
-`sdn_graph_set_style_rule_checked(graph, css, target, parent_css, key, value)`
-adds or updates one reusable style-table rule and rejects invalid targets or
-unsafe CSS values.
-
-`sdn_graph_delete_style_rule_checked(graph, css, key)` removes reusable
-style-table rows for one class/key pair and leaves the class definition intact
-so existing node/edge CSS labels continue to round-trip.
-
-`sdn_graph_inspect_style_rule(graph, css, key)` returns one reusable style-rule
-snapshot with target, parent, key, and value metadata, or `missing-style-rule`.
 
 `sdn_graph_update_node_at` is the broad pure node edit operation for editor
 event wiring. It updates one node's CSS labels, role, shape, x/y geometry,
 width/height, and layer by index while leaving node id/label, connectors, CSS
-definitions, styles, and graph metadata untouched. `sdn_graph_update_node_label_at`,
-`sdn_graph_update_node_shape_at`, `sdn_graph_update_node_style_at`, and
-`sdn_graph_update_node_layer_at`, and `sdn_graph_update_node_role_at` are narrow
-helpers for label-only, shape-only, style-label-only, layer-only, and role-only
-actions.
+definitions, styles, and graph metadata untouched. `sdn_graph_update_node_shape_at`
+and `sdn_graph_update_node_style_at` are narrow helpers for shape-only and
+style-label-only actions.
 
 `sdn_graph_update_node_parent_at` is the pure group/container edit operation. It
 updates one node's `parent` field by index while preserving geometry, style,
@@ -301,12 +235,6 @@ ungrouped node.
 `sdn_graph_update_canvas` is the pure canvas/page edit operation. It updates
 document-level width, height, grid, snap, zoom, and background metadata while
 preserving all node, connector, CSS, and weave state.
-
-`sdn_graph_duplicate_node_checked(graph, source_id, new_id, dx, dy)` copies one
-node with a caller-provided unique id and integer x/y offset. It preserves the
-node label, style, role, shape, size, layer, and parent metadata, and fails
-closed with `invalid-id`, `duplicate-id`, `invalid-offset`,
-`ambiguous-source`, `invalid-geometry`, or `missing-node`.
 
 `sdn_graph_geometry_signature(graph, node_ids)` returns the stable
 `id:x,y,width,height` signature for a selected node set in canonical graph
@@ -336,8 +264,5 @@ the existing `data-edge-index` canonical graph order.
 Use `sdn_graph_inspect_node(graph, node_id)` and
 `sdn_graph_inspect_edge(graph, edge_index)` for read-only editor sidebars.
 Inspectors return deterministic found/missing snapshots without mutating the
-graph. Node inspection includes effective geometry plus child count and child
-bounds for group/container sidebars. Edge inspection includes the computed SVG
-path when both endpoints can be resolved, plus rendered path bounds, segment
-count, segment endpoints, segment midpoints, and segment orientations for
-editor sidebars.
+graph. Edge inspection includes the computed SVG path when both endpoints can
+be resolved.

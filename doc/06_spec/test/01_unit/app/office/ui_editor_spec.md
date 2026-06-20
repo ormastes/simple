@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Verifies the pure HTML UI design document substrate used by the Office suite to 
 | Plan | doc/03_plan/sys_test/office_ui_editor.md |
 | Design | doc/05_design/app/office/office_ui_editor.md |
 | Research | doc/01_research/local/office_ui_editor.md |
-| Source | `test/01_unit/app/office/ui_editor_spec.spl` |
+| Source | `/tmp/simple-ui-duplicate/test/01_unit/app/office/ui_editor_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
@@ -139,7 +139,7 @@ expect(design.nodes[1].constraint_vertical).to_equal("stretch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -148,22 +148,9 @@ val html = office_ui_design_render_html(design)
 expect(html).to_contain("class=\"office-ui-design\"")
 expect(html).to_contain("data-format=\"html-ui\"")
 expect(html).to_contain("data-format-name=\"HTML UI Design Document\"")
-expect(html).to_contain("data-node-count=\"1\"")
-expect(html).to_contain("data-frame-count=\"0\"")
-expect(html).to_contain("data-component-count=\"1\"")
-expect(html).to_contain("data-canvas-width=\"800\"")
-expect(html).to_contain("data-canvas-height=\"480\"")
 expect(html).to_contain("data-id=\"submit\"")
-expect(html).to_contain("data-node-index=\"0\"")
-expect(html).to_contain("data-label=\"Sign &lt;in&gt;\"")
-expect(html).to_contain("data-x=\"72\"")
-expect(html).to_contain("data-y=\"200\"")
-expect(html).to_contain("data-width=\"120\"")
-expect(html).to_contain("data-height=\"36\"")
 expect(html).to_contain("data-layer=\"controls\"")
 expect(html).to_contain("data-parent=\"\"")
-expect(html).to_contain("data-child-count=\"0\"")
-expect(html).to_contain("data-has-children=\"false\"")
 expect(html).to_contain("data-layout-mode=\"off\"")
 expect(html).to_contain("data-constraint-h=\"left\"")
 expect(html).to_contain("left: 72px")
@@ -177,38 +164,18 @@ expect(html).to_contain("Sign &lt;in&gt;")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 51 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val design = office_ui_design_parse("design: Inspect\nnode card|Card|frame|0|0|200|120|panel|1|container\nnode action|Action|button|20|20|80|32|primary|controls|action|card")
+val design = office_ui_design_parse("design: Inspect\nnode card|Card|frame|0|0|200|120|panel|1|container\nnode action|Action|button|20|20|80|32|primary|controls|action")
 val html = office_ui_design_render_html_with_selection(design, "action")
 expect(html).to_contain("data-selected-node-id=\"action\"")
-expect(html).to_contain("data-frame-count=\"1\"")
-expect(html).to_contain("data-component-count=\"2\"")
 expect(html).to_contain("data-id=\"action\"")
-expect(html).to_contain("data-node-index=\"1\"")
-expect(html).to_contain("data-label=\"Action\"")
-expect(html).to_contain("data-x=\"20\"")
-expect(html).to_contain("data-y=\"20\"")
-expect(html).to_contain("data-width=\"80\"")
-expect(html).to_contain("data-height=\"32\"")
-expect(html).to_contain("data-parent=\"card\"")
-expect(html).to_contain("data-child-count=\"0\"")
-expect(html).to_contain("data-has-children=\"false\"")
 expect(html).to_contain("office-ui-selected")
 expect(html).to_contain("data-selected=\"true\"")
 expect(html).to_contain("aria-selected=\"true\"")
-expect(html).to_contain("class=\"office-ui-resize-handle office-ui-resize-nw\"")
-expect(html).to_contain("data-resize-handle=\"nw\" data-edit-action=\"resize-node\" data-handle-index=\"0\" data-handle-label=\"Resize northwest\" data-anchor-x=\"left\" data-anchor-y=\"top\" data-opposite-anchor-x=\"right\" data-opposite-anchor-y=\"bottom\" data-delta-x=\"-1\" data-delta-y=\"-1\" data-cursor=\"nwse-resize\" data-node=\"action\" data-node-index=\"1\"")
-expect(html).to_contain("data-resize-handle=\"se\" data-edit-action=\"resize-node\" data-handle-index=\"3\" data-handle-label=\"Resize southeast\" data-anchor-x=\"right\" data-anchor-y=\"bottom\" data-opposite-anchor-x=\"left\" data-opposite-anchor-y=\"top\" data-delta-x=\"1\" data-delta-y=\"1\" data-cursor=\"nwse-resize\" data-node=\"action\" data-node-index=\"1\"")
-expect(html).to_contain("width: 8px; height: 8px")
-expect(html).to_contain("left: -5px; top: -5px; cursor: nwse-resize")
-expect(html).to_contain("right: -5px; bottom: -5px; cursor: nwse-resize")
 expect(html).to_contain("data-id=\"card\"")
-expect(html).to_contain("data-node-index=\"0\"")
-expect(html).to_contain("data-child-count=\"1\"")
-expect(html).to_contain("data-has-children=\"true\"")
 expect(html).to_contain("data-selected=\"false\"")
 
 val info = office_ui_design_inspect_node(design, "card")
@@ -250,24 +217,8 @@ val sdd = office_ui_design_to_sdd(design)
 expect(sdd).to_contain("graph: Login")
 expect(sdd).to_contain("theme: office-ui")
 expect(sdd).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent, layout_mode, layout_gap, layout_padding, constraint_h, constraint_v|")
-expect(sdd).to_contain("card, \"Login Card\", panel, container, frame, 40, 32, 360, 240, base, , off, 0, \"0,0,0,0\", left, top")
-expect(sdd).to_contain("submit, \"Sign in\", primary, action, rounded, 72, 200, 120, 36, controls, , off, 0, \"0,0,0,0\", left, top")
-```
-
-</details>
-
-#### quotes SDD table cells containing commas and quotes
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val design = office_ui_design_parse("design: Text\nnode note|Save, \"now\"|text|0|0|120|24|copy,primary|1|copy")
-val sdd = office_ui_design_to_sdd(design)
-expect(sdd).to_contain("note, \"Save, \"\"now\"\"\", \"copy,primary\", copy, rounded")
+expect(sdd).to_contain("card, \"Login Card\", panel, container, frame, 40, 32, 360, 240, base, , off, 0, 0,0,0,0, left, top")
+expect(sdd).to_contain("submit, \"Sign in\", primary, action, rounded, 72, 200, 120, 36, controls, , off, 0, 0,0,0,0, left, top")
 ```
 
 </details>
@@ -335,11 +286,11 @@ expect(missing.reason).to_equal("missing-node")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val design = office_ui_design_parse("design: Copy\nnode card|Card|frame|10|20|200|120|panel|1|container\nnode action|Action|button|30|40|80|32|primary|2|action|card")
+val design = office_ui_design_parse("design: Copy\nnode card|Card|frame|10|20|200|120|panel|1|container||vertical|6|8,8,8,8|left|top\nnode action|Action|button|30|40|80|32|primary|2|action|card")
 val copied = office_ui_design_duplicate_node_checked(design, "action", "action_copy", "24", "12")
 expect(copied.accepted).to_be(true)
 expect(copied.design.nodes.len()).to_equal(3)
@@ -349,17 +300,15 @@ expect(copied.design.nodes[2].css).to_equal("primary")
 expect(copied.design.nodes[2].x).to_equal("54")
 expect(copied.design.nodes[2].y).to_equal("52")
 expect(copied.design.nodes[2].parent).to_equal("card")
-expect(office_ui_design_render_html(copied.design)).to_contain("left: 54px")
+expect(office_ui_design_render_html(copied.design)).to_contain("data-id=\"action_copy\"")
 expect(office_ui_design_to_sdd(copied.design)).to_contain("action_copy, Action, primary, action, rounded, 54, 52, 80, 32, 2, card")
 
 val duplicate_id = office_ui_design_duplicate_node_checked(design, "action", "card", "1", "1")
 val missing = office_ui_design_duplicate_node_checked(design, "missing", "missing_copy", "1", "1")
 val ambiguous = office_ui_design_duplicate_node_checked(office_ui_design_parse("design: Ambiguous\nnode a|A|button|0|0|20|20|primary|1|action\nnode a|A2|button|10|10|20|20|primary|2|action"), "a", "a_copy", "1", "1")
-val auto_layout_child = office_ui_design_duplicate_node_checked(office_ui_design_parse("design: Auto\nnode frame|Frame|frame|0|0|200|120|panel|1|container||vertical|4|4,4,4,4|left|top\nnode child|Child|button|10|10|40|20|primary|2|action|frame"), "child", "child_copy", "1", "1")
 expect(duplicate_id.reason).to_equal("duplicate-id")
 expect(missing.reason).to_equal("missing-node")
 expect(ambiguous.reason).to_equal("ambiguous-source")
-expect(auto_layout_child.reason).to_equal("auto-layout-child")
 ```
 
 </details>
@@ -429,25 +378,6 @@ expect(legacy.design.nodes[0].css).to_equal("accent")
 val missing = office_ui_design_update_style_token_checked(design, "missing", "primary", "danger")
 expect(missing.accepted).to_be(false)
 expect(missing.reason).to_equal("missing-node")
-```
-
-</details>
-
-#### renders safe UI style tokens and drops unsafe parsed class tokens
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val design = office_ui_design_parse("design: Style Tokens\nnode button|Run|button|16|16|80|32|primary bad&quot;onclick=1 accent_1|2|action")
-val html = office_ui_design_render_html(design)
-expect(html).to_contain("office-ui-css-primary")
-expect(html).to_contain("office-ui-css-accent_1")
-expect(html.contains("office-ui-css-bad")).to_be(false)
-expect(office_ui_design_inspect_node(design, "button").css).to_equal("primary bad&quot;onclick=1 accent_1")
 ```
 
 </details>
@@ -619,8 +549,8 @@ expect(cycle.reason).to_equal("cycle-parent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

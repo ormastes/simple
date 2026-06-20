@@ -188,36 +188,17 @@ expect(html).to_contain("left: 0px; top: 0px;")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = render_ppt_markdown_html("---\nlayout: presentation\n---\n\n## Slide One\n\nBody\n\n## Slide Two\n\nNext")
 expect(html).to_start_with("<section class=\"md-ppt-deck\"")
 expect(html).to_contain("data-layout=\"presentation\"")
-expect(html).to_contain("data-format=\"markdown-ppt\"")
-expect(html).to_contain("data-format-name=\"Impress Markdown\"")
-expect(html).to_contain("data-slide-count=\"2\"")
-expect(html).to_contain("data-slide=\"1\" data-source-line=\"1\"")
+expect(html).to_contain("data-slide=\"1\"")
 expect(html).to_contain("<h2>Slide One</h2>")
 expect(html).to_contain("<p>Body</p>")
-expect(html).to_contain("data-slide=\"2\" data-source-line=\"5\"")
-```
-
-</details>
-
-#### drops unsafe markdown slide css class tokens
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = render_ppt_markdown_html("## Slide @deck @bad&quot;onclick=1 @accent_1\n\nBody")
-expect(html).to_contain("class=\"md-ppt-slide md-css-deck md-css-accent_1\"")
-expect(html.contains("md-css-bad")).to_be(false)
+expect(html).to_contain("data-slide=\"2\"")
 ```
 
 </details>

@@ -3,7 +3,7 @@
 - **ID:** jit_globally_disabled_unresolved_rt_native_profile_count_2026-06-19
 - **Severity:** P1 (global performance regression — JIT off for every Simple program)
 - **Found:** 2026-06-19, while pursuing within-arch perf optimization of the 8K scroll showcase.
-- **Status:** FIXED 2026-06-19 (JIT restored + verified; see Resolution)
+- **Status:** OPEN
 
 ## Symptom
 
@@ -69,54 +69,5 @@ counter work (see sibling docs `native_build_function_profile_counters_2026-06-1
 
 Any of these requires a Rust-seed change + `bin/simple` rebuild
 (`cd src/compiler_rust && cargo build --release --bin simple --features simple-compiler/vulkan,simple-runtime/vulkan`).
-
-## Resolution (2026-06-19, user-authorized "full fix")
-
-Applied option 1, properly (real impl, not a no-op stub):
-
-- Added `rt_native_profile_count` + `rt_native_profile_event` to the JIT
-  runtime-symbol list `src/compiler_rust/common/src/runtime_symbols.rs` (so the
-  build-generated symbol table registers them in the provider; `jit.rs`
-  `jit_import_resolves` now finds them via `provider.get_symbol`).
-- Added real implementations in new module
-  `src/compiler_rust/runtime/src/native_profile.rs` (declared in `runtime/src/lib.rs`):
-  a `parking_lot::Mutex<HashMap<name,count>>` with `atexit` TSV dump to
-  `SIMPLE_NATIVE_PROFILE_OUT`, mirroring `runtime_native.c`'s format
-  (`count\tfunction` + summary lines). Default (env unset) = cheap no-op. Two
-  unit tests cover accumulation and null/empty-name handling.
-- Rebuilt + redeployed `bin/release/x86_64-unknown-linux-gnu/simple`.
-
-**Verified:** trivial program no longer logs the JIT fallback; JIT is active
-(`SIMPLE_JIT_TRACE_ADDR=1` shows compiled functions). Measured impact on the 8K
-scroll showcase full-repaint render (1280×800, 1.02M px/frame):
-**interpreter 2,857 ms/frame (0.35 fps) → JIT 93 ms/frame (10.7 fps) = ~30.6× faster.**
-Smoke: `bin/simple -c "print(1+1)"`=2, `bin/simple lint` exits 0 (no coredump).
-
-## Blast-radius of restoring JIT-default (verified 2026-06-19)
-
-`ExecutionMode::Jit` is the *intended* default (`driver/src/exec_core.rs:76`,
-"JIT default (Stage 2+)"); this regression had been silently forcing every
-program to the interpreter fallback since today. Restoring JIT therefore returns
-the host to its designed behavior — it is **not** a new speed-for-correctness
-flip. Confirmed scope:
-
-- **`bin/simple test` runs specs under the interpreter**
-  (`src/app/test_runner_new` → `run_test_file_interpreter`), so the suite — the
-  correctness gate parallel agents rely on — is **unaffected** by this change.
-- **`bin/simple run` / `-c` use JIT** (now restored). These are ~30× faster but
-  again subject to the repo's *pre-existing, already-tracked* JIT correctness
-  bugs that the interpreter fallback had been masking for the last few hours —
-  notably `jit_string_method_on_var_receiver_folds_2026-06-13` (`"abc".length()`
-  on a val/global receiver folds to `true` under JIT). These bugs predate this
-  change and are codegen issues, not caused by the symbol registration here.
-
-Net: safe to keep (restores intended default; test gate is interpreter). The
-re-exposed JIT codegen bugs are separate pre-existing work.
-
-**Remaining (separate, lower-priority) gap:** JIT/`run`-mode profiling does not
-yet *emit* the counter call — `codegen/instr/body.rs:477` only emits when
-`runtime_funcs` already contains `rt_native_profile_count`, which the JIT backend
-does not populate for it (the feature's stated target is `native-build` AOT with
-`--runtime-bundle core-c-bootstrap`, which already works). The runtime impl here
-is correct and unit-tested, so wiring that emission later needs no runtime change.
-Tracked as a codegen follow-up, not a blocker.
+Per project rule "fix Simple source first; don't modify Rust seed unless explicitly
+asked," this is recorded rather than applied unilaterally.
