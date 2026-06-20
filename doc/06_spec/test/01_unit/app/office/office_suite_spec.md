@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 148 | 148 | 0 | 0 |
+| 149 | 149 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1123,8 +1123,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(117)
-expect(probe.recognized_count).to_equal(117)
+expect(probe.advertised_count).to_equal(118)
+expect(probe.recognized_count).to_equal(118)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2601,6 +2601,25 @@ expect(invalid.reason).to_equal("invalid-args")
 
 </details>
 
+#### reads resolved SDD style declarations
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("sdd-style-resolved-read", "accent|node\ngraph: Style\ncss base:\n    stroke: #111111\ncss accent:\n    extends: base\n    fill: #eeeeee\nA: A @accent")
+val invalid = office_action_dispatch("sdd-style-resolved-read", "accent|canvas\ngraph: Style\ncss accent:\n    fill: #eeeeee")
+expect(result.ok).to_be(true)
+expect(result.output).to_contain("border-color:#111111")
+expect(result.output).to_contain("background-color:#eeeeee")
+expect(invalid.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects malformed SDD inspect ids
 
 <details>
@@ -2838,8 +2857,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 148 |
-| Active scenarios | 148 |
+| Total scenarios | 149 |
+| Active scenarios | 149 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -369,11 +369,13 @@ expect(invalid).to_contain("data-edge-index=\"0\" data-selected=\"false\" aria-s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val graph = sdn_graph_parse("graph: style\ncss base:\n    fill: #ffffff\n    stroke: #111111\ncss accent:\n    extends: base\n    fill: #eeeeee\nA: Alpha @accent")
+expect(sdn_graph_resolved_style(graph, "accent", "node")).to_contain("background-color:#ffffff")
+expect(sdn_graph_resolved_style(graph, "accent", "node")).to_contain("background-color:#eeeeee")
 expect(sdn_graph_resolved_style_value(graph, "accent", "node", "fill")).to_equal("#eeeeee")
 expect(sdn_graph_resolved_style_value(graph, "accent", "node", "stroke")).to_equal("#111111")
 ```
