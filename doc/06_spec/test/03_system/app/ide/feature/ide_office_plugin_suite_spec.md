@@ -530,7 +530,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1229 lines folded for reproduction.
+Runnable source: 1231 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -858,6 +858,7 @@ val ui_style_tokens_action = office_action_dispatch("ui-style-tokens-read", "des
 val invalid_ui_style_read_action = office_action_dispatch("ui-style-token-read", "button bad\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "button|primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_css_edit_action = office_action_dispatch("ui-css-edit", "button|primary|accent warning\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val short_ui_css_edit_action = office_action_dispatch("ui-css-edit", "button|primary\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "   |primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_style_target_action = office_action_dispatch("ui-style-token-edit", "button bad|primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_field_ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "button|primary|   \ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -1179,6 +1180,7 @@ expect(invalid_ui_style_read_action.reason).to_equal("invalid-args")
 expect(ui_style_edit_action.output).to_contain("office-ui-css-accent")
 expect(ui_css_edit_action.output).to_contain("office-ui-css-accent")
 expect(ui_css_edit_action.output).to_contain("office-ui-css-warning")
+expect(short_ui_css_edit_action.reason).to_equal("invalid-args")
 expect(blank_ui_style_edit_action.reason).to_equal("invalid-args")
 expect(invalid_ui_style_target_action.reason).to_equal("invalid-args")
 expect(blank_field_ui_style_edit_action.reason).to_equal("invalid-args")
