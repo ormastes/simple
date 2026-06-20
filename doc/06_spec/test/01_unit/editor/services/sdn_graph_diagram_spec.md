@@ -533,7 +533,7 @@ expect(edge.edge_index).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -543,6 +543,16 @@ val html = sdn_graph_render_html(updated)
 expect(updated.edges[0].route).to_equal("orthogonal")
 expect(updated.edges[0].waypoints).to_equal("140x30;200x80")
 expect(html).to_contain("data-path=\"M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30\"")
+
+val checked = sdn_graph_update_edge_checked(graph, 0, " orthogonal ", " 140x30;200x80 ", " right ", " left ")
+expect(checked.accepted).to_be(true)
+expect(checked.graph.edges[0].route).to_equal("orthogonal")
+expect(checked.graph.edges[0].start_anchor).to_equal("right")
+
+val added = sdn_graph_add_edge_checked(graph, " A ", " B ", "new", " primary ", " action ", " simple ", " 90x30 ", " right ", " left ")
+expect(added.accepted).to_be(true)
+expect(added.graph.edges[1].from_id).to_equal("A")
+expect(added.graph.edges[1].css).to_equal("primary")
 ```
 
 </details>
