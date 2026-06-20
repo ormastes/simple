@@ -28,9 +28,9 @@ the generated render target.
 
 The launcher-visible product name is `LibreOffice`; cards should use the
 LibreOffice app names Writer, Calc, Impress, Draw, Base, and Math while
-compatible actions remain `open_word`, `open_sheets`, `open_slides`,
-`open_draw`, `open_db`, and `open_math`. `run_office` accepts those launcher
-action names and normalizes them to the same app routes. It also accepts direct
+compatible actions are `open_word`, `open_sheets`, `open_slides`, `open_draw`,
+`open_db`, `open_math`, `open_mail`, `open_planner`, and `open_counter`.
+`run_office` accepts those launcher action names and normalizes them to the same app routes. It also accepts direct
 LibreOffice/file-format aliases: `calc`/`excel`, `impress`/`ppt`, and
 `base`/`db`. IDE launch feature checks report both Office launcher action and
 card counts so launcher metadata cannot drift from the product surface.

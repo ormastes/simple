@@ -240,7 +240,7 @@ expect(run_office(["counter"])).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -250,6 +250,8 @@ expect(run_office(["open_slides"])).to_equal(0)
 expect(run_office(["open_draw"])).to_equal(0)
 expect(run_office(["open_db"])).to_equal(0)
 expect(run_office(["open_math"])).to_equal(0)
+expect(run_office(["open_mail"])).to_equal(0)
+expect(run_office(["open_planner"])).to_equal(0)
 expect(run_office(["open_counter"])).to_equal(0)
 ```
 
@@ -1213,7 +1215,7 @@ expect(launcher_app_cards().len()).to_equal(9)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1223,6 +1225,8 @@ expect(is_valid_launcher_action("open_word")).to_be(true)
 expect(is_valid_launcher_action("open_draw")).to_be(true)
 expect(is_valid_launcher_action("open_db")).to_be(true)
 expect(is_valid_launcher_action("open_math")).to_be(true)
+expect(is_valid_launcher_action("open_mail")).to_be(true)
+expect(is_valid_launcher_action("open_planner")).to_be(true)
 expect(is_valid_launcher_action("open_counter")).to_be(true)
 val slides = launcher_action_to_component("open_slides")
 expect(slides.is_some()).to_be(true)
@@ -1230,6 +1234,12 @@ expect(slides.unwrap()).to_equal("slides")
 val draw = launcher_action_to_component("open_draw")
 expect(draw.is_some()).to_be(true)
 expect(draw.unwrap()).to_equal("draw")
+val mail = launcher_action_to_component("open_mail")
+expect(mail.is_some()).to_be(true)
+expect(mail.unwrap()).to_equal("mail")
+val planner = launcher_action_to_component("open_planner")
+expect(planner.is_some()).to_be(true)
+expect(planner.unwrap()).to_equal("planner")
 val counter = launcher_action_to_component("open_counter")
 expect(counter.is_some()).to_be(true)
 expect(counter.unwrap()).to_equal("counter")
