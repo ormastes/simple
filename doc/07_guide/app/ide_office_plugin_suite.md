@@ -108,7 +108,9 @@ Writer paper HTML, and PPT deck HTML.
 body and returns updated Markdown source, rejecting stale lines with a
 deterministic diff.
 
-Duplicate actions use a compact first-line edit header:
+Creation and duplicate actions use compact first-line edit headers. `ui-add-node`
+uses `id|label|kind|x|y|width|height|css|layer|component` followed by the UI
+design body and returns rendered UI HTML. Duplicate actions use:
 `source_id|new_id|dx|dy`, followed by the UI or SDD document body. The
 `ui-duplicate-node` action returns rendered UI HTML and rejects malformed new
 node IDs as `invalid-args`; `duplicate-sdd-node` returns rendered SDD HTML and
@@ -328,7 +330,7 @@ modes:
   Counter has `counter-action`; Designer has `selected-resize-handles`,
   `resize-handle-metadata`, `render-ui-html`, `render-ui-html-with-selection`, `export-ui-sdd`, and
   `ui-label-edit` / `ui-name-edit` / `ui-kind-edit` / `ui-canvas-edit` / `ui-layout-edit` / `ui-resize-node` / `ui-auto-layout-edit` /
-  `ui-resolve-auto-layout` / `ui-duplicate-node` / `ui-delete-node` /
+  `ui-resolve-auto-layout` / `ui-add-node` / `ui-duplicate-node` / `ui-delete-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` / `ui-component-edit` /
   `ui-style-token-read` / `ui-style-token-edit` / `ui-inspect-node`; the IDE

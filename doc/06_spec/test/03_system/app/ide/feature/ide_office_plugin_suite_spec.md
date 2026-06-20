@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=9 features=138 actions=67
+  llm-catalog: apps=9 features=139 actions=68
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -434,7 +434,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 813 lines folded for reproduction.
+Runnable source: 824 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -443,10 +443,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=138 actions=67")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=139 actions=68")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(67)
-expect(dispatch_probe.recognized_count).to_equal(67)
+expect(dispatch_probe.advertised_count).to_equal(68)
+expect(dispatch_probe.recognized_count).to_equal(68)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -557,6 +557,9 @@ val sdd_game_action = office_action_dispatch("export-sdd-game-sprites", "graph: 
 val legacy_ui_action = office_action_dispatch("ui-render", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val legacy_ui_sdd_action = office_action_dispatch("ui-export-sdd", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val legacy_sdd_action = office_action_dispatch("render-sdd", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+val ui_add_action = office_action_dispatch("ui-add-node", "button|Run|button|16|16|80|32|primary|controls|action\ndesign: Feature")
+val duplicate_ui_add_action = office_action_dispatch("ui-add-node", "button|Again|button|16|16|80|32|primary|controls|action\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val invalid_ui_add_action = office_action_dispatch("ui-add-node", "button bad|Run|button|16|16|80|32|primary|controls|action\ndesign: Feature")
 val ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button_copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "   |button_copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -770,6 +773,9 @@ expect(legacy_ui_sdd_action.output).to_contain("nodes |id, label, css, role, sha
 expect(legacy_sdd_action.action).to_equal("render-sdd-html")
 expect(legacy_sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(sdd_action.output).to_contain("data-selected-edge-index=\"-1\"")
+expect(ui_add_action.output).to_contain("data-node-count=\"1\"")
+expect(duplicate_ui_add_action.reason).to_equal("duplicate-id")
+expect(invalid_ui_add_action.reason).to_equal("invalid-args")
 expect(ui_duplicate_action.output).to_contain("data-id=\"button_copy\"")
 expect(blank_ui_duplicate_action.reason).to_equal("invalid-args")
 expect(invalid_ui_duplicate_action.reason).to_equal("invalid-args")
@@ -1066,6 +1072,7 @@ expect(catalog[5].features.join(",")).to_contain("parent-edit")
 expect(catalog[5].features.join(",")).to_contain("layout-edit")
 expect(catalog[5].features.join(",")).to_contain("node-duplicate")
 expect(catalog[5].features.join(",")).to_contain("node-delete")
+expect(catalog[5].features.join(",")).to_contain("node-create")
 expect(catalog[5].features.join(",")).to_contain("align-layout")
 expect(catalog[5].features.join(",")).to_contain("distribute-layout")
 expect(catalog[5].features.join(",")).to_contain("layer-edit")
@@ -1077,6 +1084,7 @@ expect(catalog[5].actions.join(",")).to_contain("ui-kind-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-canvas-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-layout-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-resize-node")
+expect(catalog[5].actions.join(",")).to_contain("ui-add-node")
 expect(catalog[5].actions.join(",")).to_contain("ui-duplicate-node")
 expect(catalog[5].actions.join(",")).to_contain("ui-delete-node")
 expect(catalog[5].actions.join(",")).to_contain("ui-auto-layout-edit")
@@ -1091,6 +1099,7 @@ expect(catalog[5].actions.join(",")).to_contain("ui-style-token-read")
 expect(catalog[5].actions.join(",")).to_contain("ui-style-token-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-inspect-node")
 val ui_design = office_ui_design_parse("design: Feature Check\nnode button|Run|button|16|16|80|32|primary|controls|action\nnode label|Label|text|140|24|60|20|secondary|controls|copy\nnode icon|Icon|icon|240|36|24|24|ghost|controls|symbol")
+val added_ui = office_ui_design_add_node_checked(ui_design, office_ui_node("field", "Field", "input", "320", "24", "100", "28"))
 val moved_ui = office_ui_design_update_layout_checked(ui_design, "button", "16", "16", "80", "32", "24", "32", "96", "40")
 val layered_ui = office_ui_design_update_layer_checked(moved_ui.design, "button", "controls", "3")
 val styled_ui = office_ui_design_update_style_token_checked(layered_ui.design, "button", "primary", "accent")
@@ -1109,6 +1118,8 @@ expect(office_ui_design_render_html(ui_design)).to_contain("data-format=\"html-u
 expect(office_ui_design_render_html(ui_design)).to_contain("data-canvas-width=\"960\"")
 expect(office_ui_design_render_html(ui_design)).to_contain("data-frame-count=\"0\"")
 expect(office_ui_design_render_html(ui_design)).to_contain("data-component-count=\"3\"")
+expect(added_ui.reason).to_equal("updated")
+expect(added_ui.design.nodes[3].id).to_equal("field")
 expect(layered_ui.reason).to_equal("updated")
 expect(styled_ui.reason).to_equal("updated")
 expect(duplicated_ui.reason).to_equal("updated")
