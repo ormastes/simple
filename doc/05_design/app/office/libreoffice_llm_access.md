@@ -11,7 +11,8 @@
   manuals, and tests.
 - Writer and Impress rows advertise Markdown-source actions:
   `render-writer-markdown-html`, `writer-markdown-summary`,
-  `writer-markdown-outline`, and `render-ppt-markdown-html`.
+  `writer-markdown-outline`, `render-ppt-markdown-html`, and
+  `ppt-markdown-outline`.
 
 ## Constraints
 

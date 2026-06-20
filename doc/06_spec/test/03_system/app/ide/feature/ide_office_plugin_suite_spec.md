@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=165 actions=86
+  llm-catalog: apps=11 features=166 actions=87
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=165")
+expect(tui_report).to_contain("features=166")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -436,7 +436,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 938 lines folded for reproduction.
+Runnable source: 943 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -445,10 +445,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=165 actions=86")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=166 actions=87")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(86)
-expect(dispatch_probe.recognized_count).to_equal(86)
+expect(dispatch_probe.advertised_count).to_equal(87)
+expect(dispatch_probe.recognized_count).to_equal(87)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -478,10 +478,12 @@ expect(catalog[2].actions.join(",")).to_contain("format-cell-value")
 expect(catalog[2].actions.join(",")).to_contain("evaluate-sheet-formula")
 expect(catalog[3].owner_module).to_equal("app.office.slides")
 expect(catalog[3].features.join(",")).to_contain("markdown-source")
+expect(catalog[3].features.join(",")).to_contain("outline-readback")
 expect(catalog[3].features.join(",")).to_contain("css-like-design")
 expect(catalog[3].features.join(",")).to_contain("ppt-html")
 expect(catalog[3].features.join(",")).to_contain("safe-css")
 expect(catalog[3].features.join(",")).to_contain("element-metadata")
+expect(catalog[3].actions.join(",")).to_contain("ppt-markdown-outline")
 expect(catalog[3].actions.join(",")).to_contain("render-ppt-markdown-html")
 expect(catalog[3].actions.join(",")).to_contain("slide-edit")
 expect(catalog[4].owner_module).to_equal("std.editor.services.sdn_graph")
@@ -559,6 +561,7 @@ val writer_action = office_action_dispatch("render-writer-markdown-html", "# Wri
 val writer_summary_action = office_action_dispatch("writer-markdown-summary", "# Writer\n\nBody")
 val writer_outline_action = office_action_dispatch("writer-markdown-outline", "# Writer\n\n## Section")
 val ppt_action = office_action_dispatch("render-ppt-markdown-html", "# Deck\n\n## Slide")
+val ppt_outline_action = office_action_dispatch("ppt-markdown-outline", "# Deck\n\n## Slide\n\n## Next")
 val sheet_edit_action = office_action_dispatch("sheet-edit", "A1|old|new\nA1=old")
 val sheet_format_action = office_action_dispatch("format-cell-value", "1234.5|currency:$:2")
 val invalid_sheet_format_action = office_action_dispatch("format-cell-value", "12x|number:2")
@@ -782,6 +785,8 @@ expect(writer_outline_action.reason).to_equal("listed")
 expect(ppt_action.output).to_contain("class=\"md-ppt-deck\"")
 expect(ppt_action.output).to_contain("data-format=\"markdown-ppt\"")
 expect(ppt_action.output).to_contain("data-format-name=\"Impress Markdown\"")
+expect(ppt_outline_action.output).to_equal("1|2|Slide\n2|4|Next")
+expect(ppt_outline_action.reason).to_equal("listed")
 expect(sheet_edit_action.output).to_equal("A1=new")
 expect(sheet_edit_action.reason).to_equal("updated")
 expect(sheet_format_action.output).to_equal("$1,234.50")

@@ -175,7 +175,7 @@ expect(missing.join(",")).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -186,6 +186,7 @@ expect(office_llm_action_input_schema("reroute-sdd-connector")).to_contain("edge
 expect(office_llm_action_input_schema("db-edit")).to_contain("update-where|match_col")
 expect(office_llm_action_input_schema("md-edit")).to_contain("line_no|expected_source|new_source")
 expect(office_llm_action_input_schema("writer-markdown-outline")).to_equal("markdown_source")
+expect(office_llm_action_input_schema("ppt-markdown-outline")).to_equal("markdown_source")
 ```
 
 </details>

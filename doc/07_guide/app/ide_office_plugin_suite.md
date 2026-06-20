@@ -89,7 +89,7 @@ Headless Office actions are exposed through
 non-GUI bridge for cataloged render/export actions:
 `render-markdown-preview-html`, `render-writer-markdown-html`,
 `writer-markdown-summary`, `writer-markdown-outline`,
-`render-ppt-markdown-html`, `render-ui-html`,
+`render-ppt-markdown-html`, `ppt-markdown-outline`, `render-ui-html`,
 `render-ui-html-with-selection`, `export-ui-sdd`, and
 `render-sdd-html-with-selection` / `export-sdd-canonical`. The bridge delegates to the canonical
 Markdown, Writer, Impress, Designer, and SDD renderers rather than
@@ -346,8 +346,9 @@ modes:
   `writer-markdown-outline` plus Markdown paper features for document outline,
   task lists, tables/table alignment, images, inline links,
   fenced code, blockquotes, thematic breaks, and URL sanitizing; Impress has
-  `render-ppt-markdown-html` plus PPT HTML, slide-count metadata, safe CSS,
-  positioned elements, element metadata, class sanitizing, and text escaping; Draw is SDD-backed with
+  `render-ppt-markdown-html` and `ppt-markdown-outline` plus PPT HTML,
+  slide-count metadata, outline readback, safe CSS, positioned elements,
+  element metadata, class sanitizing, and text escaping; Draw is SDD-backed with
   `render-sdd-html-with-selection`, `export-sdd-canonical`, `reroute-sdd-connector`, `edit-sdd-style-rule`,
   `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `add-sdd-node`, `add-sdd-edge`,
   `duplicate-sdd-edge`, `edit-sdd-edge-label`, `edit-sdd-edge-label-point`, `edit-sdd-edge-style`, `edit-sdd-edge-kind`, `edit-sdd-edge-endpoints`,

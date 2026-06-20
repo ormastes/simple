@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 118 | 118 | 0 | 0 |
+| 119 | 119 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -641,6 +641,23 @@ expect(result.output).to_contain("Slide")
 
 </details>
 
+#### lists PPT Markdown slides as an Impress outline
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("ppt-markdown-outline", "# Deck\\n\\n## Intro\\nBody\\n```\\n## Hidden\\n```\\n## Roadmap")
+expect(result.ok).to_be(true)
+expect(result.reason).to_equal("listed")
+expect(result.output).to_equal("1|2|Intro\n2|7|Roadmap")
+```
+
+</details>
+
 #### dispatches UI render and SDD export catalog actions
 
 <details>
@@ -965,8 +982,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(86)
-expect(probe.recognized_count).to_equal(86)
+expect(probe.advertised_count).to_equal(87)
+expect(probe.recognized_count).to_equal(87)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2239,8 +2256,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 118 |
-| Active scenarios | 118 |
+| Total scenarios | 119 |
+| Active scenarios | 119 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
