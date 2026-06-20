@@ -111,9 +111,9 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
-  plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
+  plugin-manifest: plugins: entries=7 roundtrip=7 names=7 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=178 actions=99
+  llm-catalog: apps=11 features=179 actions=100
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=178")
+expect(tui_report).to_contain("features=179")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -439,7 +439,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 996 lines folded for reproduction.
+Runnable source: 1001 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -448,10 +448,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=178 actions=99")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=179 actions=100")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(99)
-expect(dispatch_probe.recognized_count).to_equal(99)
+expect(dispatch_probe.advertised_count).to_equal(100)
+expect(dispatch_probe.recognized_count).to_equal(100)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -553,6 +553,8 @@ expect(catalog[4].actions.join(",")).to_contain("add-sdd-edge")
 expect(catalog[4].actions.join(",")).to_contain("duplicate-sdd-edge")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-edge-label")
 expect(catalog[4].actions.join(",")).to_contain("sdd-edge-label-read")
+expect(catalog[4].features.join(",")).to_contain("edge-label-point-readback")
+expect(catalog[4].actions.join(",")).to_contain("sdd-edge-label-point-read")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-edge-style")
 expect(catalog[4].actions.join(",")).to_contain("sdd-edge-style-read")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-edge-kind")
@@ -776,6 +778,7 @@ val missing_sdd_duplicate_edge_action = office_action_dispatch("duplicate-sdd-ed
 val sdd_edge_label_action = office_action_dispatch("edit-sdd-edge-label", "0|approved\ngraph: Edge Label\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val sdd_edge_label_read_action = office_action_dispatch("sdd-edge-label-read", "0\ngraph: Edge Label\nA: A\nB: B\nA -> B: approved")
 val sdd_edge_label_point_action = office_action_dispatch("edit-sdd-edge-label-point", "0|66|12\ngraph: Edge Label Point\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
+val sdd_edge_label_point_read_action = office_action_dispatch("sdd-edge-label-point-read", "0\ngraph: Edge Label Point\nA: A\nB: B\nA -> B: link label_x: 66 label_y: 12")
 val signed_sdd_edge_label_point_action = office_action_dispatch("edit-sdd-edge-label-point", "0|-6|12\ngraph: Edge Label Point\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val blank_sdd_edge_label_point_action = office_action_dispatch("edit-sdd-edge-label-point", "0|   |12\ngraph: Edge Label Point\nA: A\nB: B\nA -> B: link")
 val sdd_edge_style_action = office_action_dispatch("edit-sdd-edge-style", "0|warning dashed\ngraph: Edge Style\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
@@ -1061,6 +1064,8 @@ expect(sdd_edge_label_action.output).to_contain(">approved</div>")
 expect(sdd_edge_label_read_action.output).to_equal("approved")
 expect(sdd_edge_label_read_action.reason).to_equal("selected")
 expect(sdd_edge_label_point_action.output).to_contain("data-label-x=\"66\" data-label-y=\"12\"")
+expect(sdd_edge_label_point_read_action.output).to_equal("66,12")
+expect(sdd_edge_label_point_read_action.reason).to_equal("selected")
 expect(signed_sdd_edge_label_point_action.output).to_contain("data-label-x=\"-6\" data-label-y=\"12\"")
 expect(blank_sdd_edge_label_point_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_edge_label_point_action.reason).to_equal("invalid-args")
