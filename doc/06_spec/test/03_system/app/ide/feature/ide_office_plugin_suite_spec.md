@@ -516,7 +516,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1163 lines folded for reproduction.
+Runnable source: 1164 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1023,6 +1023,7 @@ expect(slide_duplicate_source_action.reason).to_equal("duplicate-source-id")
 expect(slide_blank_target_action.reason).to_equal("invalid-args")
 expect(slide_stale_edit_action.reason).to_equal("stale-slide-element")
 expect(ui_action.output).to_contain("data-format=\"html-ui\"")
+expect(ui_action.output).to_contain("data-format-name=\"HTML UI Design Document\"")
 expect(ui_action.output).to_contain("data-node-count=\"1\"")
 expect(ui_selection_geometry_action.output).to_equal("a:0,0,20,20;b:40,20,20,20")
 expect(invalid_ui_selection_geometry_action.reason).to_equal("invalid-args")
