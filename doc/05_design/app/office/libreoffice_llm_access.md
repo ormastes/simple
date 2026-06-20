@@ -11,7 +11,8 @@
   manuals, and tests.
 - Writer and Impress rows advertise Markdown-source actions:
   `render-writer-markdown-html`, `writer-markdown-summary`,
-  `writer-markdown-stats`, `writer-markdown-outline`,
+  `writer-markdown-stats`, `writer-markdown-search`,
+  `writer-markdown-outline`,
   `render-ppt-markdown-html`, and
   `ppt-markdown-outline`.
 - Base rows advertise table read/query/edit actions including

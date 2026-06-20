@@ -88,7 +88,8 @@ Headless Office actions are exposed through
 `office_action_dispatch(action, source)` in `app.office.mod`. This is the stable
 non-GUI bridge for cataloged render/export actions:
 `render-markdown-preview-html`, `render-writer-markdown-html`,
-`writer-markdown-summary`, `writer-markdown-stats`, `writer-markdown-outline`,
+`writer-markdown-summary`, `writer-markdown-stats`, `writer-markdown-search`,
+`writer-markdown-outline`,
 `render-ppt-markdown-html`, `ppt-markdown-outline`, `render-ui-html`,
 `render-ui-html-with-selection`, `export-ui-sdd`, and
 `sdd-document-summary`, `render-sdd-html-with-selection` /
@@ -347,8 +348,9 @@ modes:
 - Calc: `display_recalc=true`
 - LLM catalog: Markdown has `render-markdown-preview-html` and `md-edit`; Writer has
   `render-writer-markdown-html`, `writer-markdown-summary`,
-  `writer-markdown-stats`, and `writer-markdown-outline` plus Markdown paper
-  features for document statistics, document outline,
+  `writer-markdown-stats`, `writer-markdown-search`, and
+  `writer-markdown-outline` plus Markdown paper
+  features for document statistics, source search, document outline,
   task lists, tables/table alignment, images, inline links,
   fenced code, blockquotes, thematic breaks, and URL sanitizing; Impress has
   `render-ppt-markdown-html` and `ppt-markdown-outline` plus PPT HTML,
