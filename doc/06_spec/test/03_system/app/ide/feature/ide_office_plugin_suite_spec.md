@@ -548,7 +548,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1333 lines folded for reproduction.
+Runnable source: 1335 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1091,6 +1091,8 @@ expect(short_md_edit_action.reason).to_equal("invalid-args")
 expect(writer_action.output).to_contain("class=\"md-paper\"")
 expect(writer_action.output).to_contain("data-format=\"markdown-paper\"")
 expect(writer_action.output).to_contain("data-format-name=\"Writer Markdown\"")
+expect(writer_action.output).to_contain("data-line-count=\"1\"")
+expect(writer_action.output).to_contain("<h1 data-source-line=\"1\">Writer</h1>")
 expect(writer_escape_action.output).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
 expect(writer_summary_action.output).to_contain("source=markdown")
 expect(writer_summary_action.output).to_contain("format=Writer Markdown")
