@@ -623,7 +623,7 @@ expect(edge.edge_index).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -663,6 +663,14 @@ expect(styled.graph.edges[0].css).to_equal("primary dashed")
 val kinded = sdn_graph_update_edge_kind_checked(graph, 0, " async ")
 expect(kinded.accepted).to_be(true)
 expect(kinded.graph.edges[0].kind).to_equal("async")
+
+val label_point = sdn_graph_update_edge_label_point_checked(graph, 0, " 42 ", " -7 ")
+expect(label_point.accepted).to_be(true)
+expect(label_point.graph.edges[0].label_x).to_equal("42")
+val cleared_label_point = sdn_graph_update_edge_label_point_checked(label_point.graph, 0, "", "")
+expect(cleared_label_point.accepted).to_be(true)
+expect(cleared_label_point.graph.edges[0].label_x).to_equal("")
+expect(sdn_graph_update_edge_label_point_checked(graph, 0, "", "7").reason).to_equal("invalid-label-point")
 ```
 
 </details>
