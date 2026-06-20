@@ -28,7 +28,7 @@ html_render_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -238,6 +238,22 @@ expect(html.contains("onclick=\"alert(1)")).to_be(false)
 
 </details>
 
+#### renders and sanitizes inline links in PPT markdown
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_ppt_markdown_html("## Intro\n\nSee [Docs](docs.md?a=1&b=2)\n\nNo [Script](javascript:alert(1))")
+expect(html).to_contain("<a href=\"docs.md?a=1&amp;b=2\">Docs</a>")
+expect(html).to_contain("<a href=\"#\">Script</a>")
+```
+
+</details>
+
 #### escapes slide markdown content before HTML rendering
 
 <details>
@@ -274,8 +290,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
