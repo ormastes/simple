@@ -132,7 +132,7 @@ expect(design.nodes[1].component).to_equal("action")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -151,11 +151,12 @@ expect(design.nodes[0].layout_padding).to_equal("10,12,10,12")
 expect(design.nodes[1].parent).to_equal("frame")
 expect(design.nodes[1].constraint_horizontal).to_equal("center")
 expect(design.nodes[1].constraint_vertical).to_equal("stretch")
-val unsafe = office_ui_design_parse("design: Unsafe\nnode bad id|Bad|button|0|0|40|20|primary|1|action\nnode child|Child|bad kind|0|0|40|20|primary bad&quot;onclick=1 accent_1|2|bad component|bad parent")
+val unsafe = office_ui_design_parse("design: Unsafe\nnode bad id|Bad|button|0|0|40|20|primary|1|action\nnode child|Child|bad kind|0|0|40|20|primary bad&quot;onclick=1 accent_1|bad layer|bad component|bad parent")
 expect(unsafe.nodes.len()).to_equal(1)
 expect(unsafe.nodes[0].id).to_equal("child")
 expect(unsafe.nodes[0].kind).to_equal("component")
 expect(unsafe.nodes[0].css).to_equal("primary accent_1")
+expect(unsafe.nodes[0].layer).to_equal("")
 expect(unsafe.nodes[0].component).to_equal("")
 expect(unsafe.nodes[0].parent).to_equal("")
 ```
