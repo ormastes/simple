@@ -139,6 +139,8 @@ malformed replacement kind/style-token fields are `invalid-args`.
 a safe token to set it.
 `ui-style-token-read` and `ui-inspect-node` use `node_id`, reject malformed IDs
 as `invalid-args`, and return compact readback text.
+`ui-list-layers` takes the UI design body and returns document-order layer rows
+with node id, label, kind, layer, z-index, parent, and component metadata.
 
 Layout actions use `mode_or_axis|id1,id2,...`, followed by the UI or SDD
 document body. `ui-align-selection`, `ui-distribute-selection`,
@@ -335,7 +337,7 @@ modes:
   `ui-resolve-auto-layout` / `ui-add-node` / `ui-duplicate-node` / `ui-delete-node` / `ui-order-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` / `ui-component-edit` /
-  `ui-style-token-read` / `ui-style-token-edit` / `ui-inspect-node`; the IDE
+  `ui-style-token-read` / `ui-style-token-edit` / `ui-inspect-node` / `ui-list-layers`; the IDE
   feature check reports `designer: resize_handle_metadata=true` from a pure
   selected-node render.
   `office_llm_action_input_schema(action)` must return a non-empty compact
