@@ -601,7 +601,7 @@ expect(edge.path).to_equal("M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -611,6 +611,7 @@ val edge = sdn_graph_inspect_edge(graph, -1)
 expect(node.found).to_be(false)
 expect(node.reason).to_equal("missing-node")
 expect(node.id).to_equal("Nope")
+expect(sdn_graph_inspect_node(graph, "Bad ID").reason).to_equal("invalid-id")
 expect(edge.found).to_be(false)
 expect(edge.reason).to_equal("missing-edge")
 expect(edge.edge_index).to_equal(-1)
