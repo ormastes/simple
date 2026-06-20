@@ -28,7 +28,10 @@ diagrams as SDD (Simple Diagram Document) `.sdd.sdn` files, renders through the
 pure `std.editor.services.sdn_graph` HTML preview path, and exposes
 draw.io-style grouping/connectors plus Figma-like geometry fields (`x`, `y`,
 `width`, `height`, `layer`, `parent`) without introducing a separate diagram
-file format.
+file format. The stored SDN is a diagram document, not a relationship-only
+graph: nodes carry shape, CSS label, role, absolute location, size, layer, and
+parent/container data; connectors carry route, anchors, waypoints, labels,
+style, kind, and editable handle metadata.
 
 ## Crate
 Package and module are used in many different meaning across different languages.

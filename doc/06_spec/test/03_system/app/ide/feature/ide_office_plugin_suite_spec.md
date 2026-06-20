@@ -376,7 +376,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -385,6 +385,9 @@ val guide = file_read("doc/07_guide/app/ide_office_plugin_suite.md")
 expect(glossary).to_contain("selected connector handle edit actions")
 expect(glossary).to_contain("stable handle indexes")
 expect(glossary).to_contain("endpoint/opposite-node ids")
+expect(glossary).to_contain("not a relationship-only graph")
+expect(glossary).to_contain("nodes carry shape, CSS label, role, absolute location")
+expect(glossary).to_contain("connectors carry route, anchors, waypoints")
 expect(guide).to_contain("Selected connector handles expose edit actions")
 expect(guide).to_contain("endpoint/opposite-node ids")
 expect(guide).to_contain("handle_meta=true")
