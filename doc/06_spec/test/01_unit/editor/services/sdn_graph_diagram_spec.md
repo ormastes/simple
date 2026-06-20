@@ -803,7 +803,7 @@ expect(ordered.graph.nodes[0].id).to_equal("Child")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -833,6 +833,10 @@ expect(stale.reason).to_equal("stale-selection")
 val missing = sdn_graph_align_checked(graph, ["A", "Missing"], sdn_graph_geometry_signature(graph, ["A", "Missing"]), "left")
 expect(missing.accepted).to_be(false)
 expect(missing.reason).to_equal("missing-node")
+
+val invalid_id = sdn_graph_align_checked(graph, ["A bad", "B"], "", "left")
+expect(invalid_id.accepted).to_be(false)
+expect(invalid_id.reason).to_equal("invalid-selection-id")
 
 val unsupported = sdn_graph_align_checked(graph, ids, signature, "diagonal")
 expect(unsupported.accepted).to_be(false)
