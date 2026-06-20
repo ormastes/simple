@@ -299,7 +299,7 @@ expect(rejected.design.nodes[0].label).to_equal("Sign in")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -326,6 +326,11 @@ expect(rejected.diff).to_contain("actual: 72,200,120,36")
 val missing = office_ui_design_update_layout_checked(design, "missing", "0", "0", "1", "1", "2", "2", "3", "3")
 expect(missing.accepted).to_be(false)
 expect(missing.reason).to_equal("missing-node")
+
+val invalid = office_ui_design_update_layout_checked(design, "submit", "72", "200", "120", "36", "96", "224", "0", "44")
+expect(invalid.accepted).to_be(false)
+expect(invalid.reason).to_equal("invalid-layout")
+expect(invalid.design.nodes[0].width).to_equal("120")
 ```
 
 </details>
