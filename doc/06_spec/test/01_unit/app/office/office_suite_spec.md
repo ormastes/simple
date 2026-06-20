@@ -2854,7 +2854,7 @@ expect(result.reason).to_equal("invalid-args")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2862,10 +2862,12 @@ val number_result = office_action_dispatch("edit-sdd-canvas", "640|480|16;bad|tr
 val long_number_result = office_action_dispatch("edit-sdd-canvas", "1000000000|480|16|true|125|#ffffff\ngraph: Canvas\nA: A")
 val snap_result = office_action_dispatch("edit-sdd-canvas", "640|480|16|yes|125|#ffffff\ngraph: Canvas\nA: A")
 val background_result = office_action_dispatch("edit-sdd-canvas", "640|480|16|true|125|url(javascript:bad)\ngraph: Canvas\nA: A")
+val escaped_pipe_result = office_action_dispatch("edit-sdd-canvas", "640|480|16|true|125|#fff\\|#000\ngraph: Canvas\nA: A")
 expect(number_result.reason).to_equal("invalid-canvas-number")
 expect(long_number_result.reason).to_equal("invalid-canvas-number")
 expect(snap_result.reason).to_equal("invalid-canvas-snap")
 expect(background_result.reason).to_equal("invalid-canvas-background")
+expect(escaped_pipe_result.reason).to_equal("invalid-canvas-background")
 ```
 
 </details>
