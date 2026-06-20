@@ -6,7 +6,7 @@ DATA_ROOT="$BUILD_DIR/data"
 LOG_DIR="$BUILD_DIR/logs"
 SIMPLE_SERVER="$BUILD_DIR/simple_static_server"
 PRODUCER_ROWS="$BUILD_DIR/static-external-measured-rows.env"
-SIMPLE_PORT="${SIMPLE_PORT:-19080}"
+SIMPLE_PORT="${SIMPLE_PORT:-18195}"
 CADDY_PORT="${CADDY_PORT:-19082}"
 H2O_PORT="${H2O_PORT:-19083}"
 WRK_DURATION="${WRK_DURATION:-1s}"
@@ -97,7 +97,7 @@ def line(workload, size, baseline_tool, simple_rps, external_rps, simple_p99, ex
         "WEB_SERVER_EXTERNAL_COMPARE_MEASURED="
         f"{workload}|native_simple_static_{size}|{baseline_tool}_static_{size}|"
         f"{simple_rps:.2f}|{external_rps:.2f}|{simple_p99:.3f}|{external_p99:.3f}|"
-        f"{throughput:.3f}|{failures}|{reason}"
+        f"{throughput:.3f}|{failures}|{reason}|full-url-routed-native-simple"
     )
 
 rows = [
@@ -105,8 +105,8 @@ rows = [
     line("static_1mb", 1048576, "h2o", 300.0, 250.0, 3.0, 4.0, 2516.582, 2097.152, 2),
 ]
 expected = [
-    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1kb|native_simple_static_1024|caddy_static_1024|100.00|200.00|1.000|2.000|1.638|0|live-simple-caddy-wrk",
-    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1mb|native_simple_static_1048576|h2o_static_1048576|300.00|250.00|3.000|4.000|2516.582|2|wrk-errors-or-missing-rps",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1kb|native_simple_static_1024|caddy_static_1024|100.00|200.00|1.000|2.000|1.638|0|live-simple-caddy-wrk|full-url-routed-native-simple",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1mb|native_simple_static_1048576|h2o_static_1048576|300.00|250.00|3.000|4.000|2516.582|2|wrk-errors-or-missing-rps|full-url-routed-native-simple",
 ]
 if rows != expected:
     raise SystemExit(f"unexpected rows: {rows}")
@@ -168,16 +168,31 @@ root = Path("build/perf/web_server_nginx_compare/data")
 root.mkdir(parents=True, exist_ok=True)
 (root / "1kb.html").write_text("A" * 1024, encoding="utf-8")
 (root / "1mb.txt").write_text("B" * 1048576, encoding="utf-8")
+fixture_root = Path("/tmp/simple-live-static")
+fixture_root.mkdir(parents=True, exist_ok=True)
+(fixture_root / "1kb.html").write_text("A" * 1024, encoding="utf-8")
+(fixture_root / "1mb.txt").write_text("B" * 1048576, encoding="utf-8")
 PY
 
 SIMPLE_LIB=src:test/05_perf "$SIMPLE_BIN" native-build \
     --runtime-bundle core-c-bootstrap \
     --source src/lib \
-    --source test/05_perf/web_server_nginx_compare \
-    --entry test/05_perf/web_server_nginx_compare/live_static_native_server.spl \
+    --source test/05_perf/web \
+    --entry test/05_perf/web/httpserver_live_static_fixture.spl \
     --entry-closure \
-    --strip \
     --output "$SIMPLE_SERVER" >/tmp/simple_web_static_external_live_build.log 2>&1
+
+if nm -g "$SIMPLE_SERVER" 2>/dev/null | grep -E ' U (rt_channel_|rt_io_tcp_bind_fd|rt_io_tcp_socket_create|rt_io_tcp_listen)' >/tmp/simple_web_static_external_live_unresolved.txt; then
+    echo "STATUS: FAIL web server static external live compare: unresolved critical runtime externs"
+    cat /tmp/simple_web_static_external_live_unresolved.txt
+    exit 1
+fi
+
+if nm -g "$SIMPLE_SERVER" 2>/dev/null | grep -E ' W (spl_thread_cpu_count|spl_mutex_|spl_condvar_)' >/tmp/simple_web_static_external_live_stubs.txt; then
+    echo "STATUS: FAIL web server static external live compare: critical runtime primitives linked as weak stubs"
+    cat /tmp/simple_web_static_external_live_stubs.txt
+    exit 1
+fi
 
 SIMPLE_PID=""
 CADDY_PID=""
@@ -356,7 +371,8 @@ with Path(os.environ["TMP_ROWS"]).open(newline="", encoding="utf-8") as fh:
             "WEB_SERVER_EXTERNAL_COMPARE_MEASURED="
             f"{row['workload']}|native_simple_static_{size}|{row['baseline_tool']}_static_{size}|"
             f"{simple_rps:.2f}|{external_rps:.2f}|{float(row['simple_p99_ms']):.3f}|"
-            f"{float(row['external_p99_ms']):.3f}|{throughput:.3f}|{failures}|{reason}"
+            f"{float(row['external_p99_ms']):.3f}|{throughput:.3f}|{failures}|{reason}|"
+            "full-url-routed-native-simple"
         )
 
 Path(os.environ["PRODUCER_ROWS"]).write_text("\n".join(rows) + "\n", encoding="utf-8")

@@ -252,7 +252,15 @@ fn execute_function_body(
                 payload: Some(Box::new(result)),
             },
         }
-    } else if let (Some(rt), Value::Enum { enum_name, variant, payload }) = (&func.return_type, &result) {
+    } else if let (
+        Some(rt),
+        Value::Enum {
+            enum_name,
+            variant,
+            payload,
+        },
+    ) = (&func.return_type, &result)
+    {
         // Symmetric counterpart to the auto-wrap above. When `-> T?` functions
         // Some-wrap their plain returns, callers that funnel that value into a
         // CONCRETE non-Optional return — e.g. `fn require() -> T:

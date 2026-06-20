@@ -191,9 +191,20 @@ impl NativeProjectBuilder {
                 }
                 NativeRuntimeLane::CoreCBootstrap => {
                     if let Some(runtime) = build_core_c_runtime_library(&temp_dir.join("core_c_runtime")) {
+                        if self.config.verbose {
+                            eprintln!("native-build core-c runtime archive: {}", runtime.display());
+                        }
                         candidates.push((runtime, false));
+                    } else if self.config.verbose {
+                        eprintln!(
+                            "native-build core-c runtime archive unavailable under {}",
+                            temp_dir.join("core_c_runtime").display()
+                        );
                     }
                     if let Some(runtime) = find_runtime_library() {
+                        if self.config.verbose {
+                            eprintln!("native-build discovered runtime archive: {}", runtime.display());
+                        }
                         if !candidates.iter().any(|(p, _)| p == &runtime) {
                             candidates.push((runtime, false));
                         }

@@ -4,18 +4,31 @@ set -eu
 BUILD_DIR="build/perf/httpserver_live_static"
 SRC="test/05_perf/web/httpserver_live_static_fixture.spl"
 BIN="$BUILD_DIR/httpserver_live_static_fixture"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 
 mkdir -p "$BUILD_DIR" /tmp/simple-live-static
 printf 'static-ok\n' > /tmp/simple-live-static/hello.txt
 
-bin/simple check "$SRC"
-SIMPLE_LIB=src bin/simple native-build \
+"$SIMPLE_BIN" check "$SRC"
+SIMPLE_LIB=src "$SIMPLE_BIN" native-build \
+  --runtime-bundle core-c-bootstrap \
   --source src/lib \
   --source test/05_perf/web \
   --entry "$SRC" \
   --entry-closure \
-  --strip \
   --output "$BIN"
+
+if nm -g "$BIN" 2>/dev/null | grep -E ' U (rt_channel_|rt_io_tcp_bind_fd|rt_io_tcp_socket_create|rt_io_tcp_listen)' >/tmp/simple_httpserver_live_static_unresolved.txt; then
+  echo "STATUS: FAIL HttpServer live static: unresolved critical runtime externs"
+  cat /tmp/simple_httpserver_live_static_unresolved.txt
+  exit 1
+fi
+
+if nm -g "$BIN" 2>/dev/null | grep -E ' W (spl_thread_cpu_count|spl_mutex_|spl_condvar_)' >/tmp/simple_httpserver_live_static_stubs.txt; then
+  echo "STATUS: FAIL HttpServer live static: critical runtime primitives linked as weak stubs"
+  cat /tmp/simple_httpserver_live_static_stubs.txt
+  exit 1
+fi
 
 python3 - "$BIN" <<'PY'
 import os, signal, socket, subprocess, sys, time
@@ -72,12 +85,52 @@ def request():
             time.sleep(0.05)
     raise RuntimeError(f"static request failed: {last}")
 
+def read_response(client):
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = client.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    head, _, rest = data.partition(b"\r\n\r\n")
+    content_length = 0
+    for line in head.decode("latin1", "replace").split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            content_length = int(line.split(":", 1)[1].strip())
+    while len(rest) < content_length:
+        chunk = client.recv(4096)
+        if not chunk:
+            break
+        rest += chunk
+    return (head + b"\r\n\r\n" + rest).decode("latin1", "replace")
+
+def request_keepalive_pair():
+    with socket.create_connection(addr, timeout=1) as client:
+        client.settimeout(3)
+        client.sendall(b"GET /hello.txt HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
+        first = read_response(client)
+        client.sendall(b"GET /hello.txt HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        second = read_response(client)
+        closed = False
+        try:
+            closed = client.recv(1) == b""
+        except (socket.timeout, ConnectionResetError):
+            closed = True
+        return first, second, closed
+
 proc = subprocess.Popen([bin_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
 try:
     wait_for_line(proc, "[SimpleServer] Listening")
     resp = request()
     if "HTTP/1.1 200 OK" not in resp or "static-ok" not in resp:
         raise RuntimeError(f"bad static response: {resp!r}")
+    first, second, closed = request_keepalive_pair()
+    if "HTTP/1.1 200 OK" not in first or "static-ok" not in first:
+        raise RuntimeError(f"bad keepalive first response: {first!r}")
+    if "HTTP/1.1 200 OK" not in second or "static-ok" not in second:
+        raise RuntimeError(f"bad keepalive second response: {second!r}")
+    if not closed:
+        raise RuntimeError("keepalive close request did not close after response")
     print("STATUS: PASS HttpServer live static")
 except Exception as exc:
     stop_process(proc)

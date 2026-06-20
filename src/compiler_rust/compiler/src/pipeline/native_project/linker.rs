@@ -1537,8 +1537,7 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
         }
         // Bridge module-qualified cross-module references onto the bare symbol
         // names that `@export`/ambiguous definitions actually emit.
-        let qualified_bare_defsyms =
-            Self::freestanding_qualified_to_bare_defsyms(object_paths, &boot_objects)?;
+        let qualified_bare_defsyms = Self::freestanding_qualified_to_bare_defsyms(object_paths, &boot_objects)?;
         if !qualified_bare_defsyms.is_empty() {
             eprintln!(
                 "Freestanding qualified->bare alias bridge: {} symbol(s)",
@@ -1548,8 +1547,7 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
         // Reverse bridge: an undefined bare reference onto a unique qualified
         // definition sharing its suffix (e.g. `char_from_code` ->
         // `lib__common__string_core__char_from_code`).
-        let bare_qualified_defsyms =
-            Self::freestanding_bare_to_qualified_defsyms(object_paths, &boot_objects)?;
+        let bare_qualified_defsyms = Self::freestanding_bare_to_qualified_defsyms(object_paths, &boot_objects)?;
         if !bare_qualified_defsyms.is_empty() {
             eprintln!(
                 "Freestanding bare->qualified alias bridge: {} symbol(s)",

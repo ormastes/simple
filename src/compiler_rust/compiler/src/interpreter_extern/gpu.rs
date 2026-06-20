@@ -3848,10 +3848,7 @@ mod renderdoc_dlopen {
             // librenderdoc is normally already resident (injected by renderdoccmd).
             // RTLD_NOLOAD returns the existing handle without loading a new copy;
             // fall back to loading the repo-local library if not present.
-            let names = [
-                "librenderdoc.so\0",
-                "build/tools/renderdoc/lib/librenderdoc.so\0",
-            ];
+            let names = ["librenderdoc.so\0", "build/tools/renderdoc/lib/librenderdoc.so\0"];
             let mut handle = std::ptr::null_mut();
             for n in names {
                 handle = libc::dlopen(n.as_ptr() as *const c_char, libc::RTLD_NOW | libc::RTLD_NOLOAD);
@@ -3895,8 +3892,7 @@ mod renderdoc_dlopen {
             unsafe {
                 let f = *api.offset(IDX_START_FRAME_CAPTURE);
                 if !f.is_null() {
-                    let func: unsafe extern "C" fn(*const c_void, *const c_void) =
-                        std::mem::transmute(f);
+                    let func: unsafe extern "C" fn(*const c_void, *const c_void) = std::mem::transmute(f);
                     func(std::ptr::null(), std::ptr::null());
                     return true;
                 }
@@ -3910,8 +3906,7 @@ mod renderdoc_dlopen {
             unsafe {
                 let f = *api.offset(IDX_END_FRAME_CAPTURE);
                 if !f.is_null() {
-                    let func: unsafe extern "C" fn(*const c_void, *const c_void) -> u32 =
-                        std::mem::transmute(f);
+                    let func: unsafe extern "C" fn(*const c_void, *const c_void) -> u32 = std::mem::transmute(f);
                     return func(std::ptr::null(), std::ptr::null());
                 }
             }
@@ -3935,7 +3930,11 @@ mod renderdoc_dlopen {
 
 /// `rt_renderdoc_available() -> i64` (1 if the RENDERDOC API resolved)
 pub fn rt_renderdoc_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(if renderdoc_dlopen::num_captures() != u32::MAX { 1 } else { 0 }))
+    Ok(Value::Int(if renderdoc_dlopen::num_captures() != u32::MAX {
+        1
+    } else {
+        0
+    }))
 }
 
 /// `rt_renderdoc_start_capture() -> i64` (1 if a frame capture was started)

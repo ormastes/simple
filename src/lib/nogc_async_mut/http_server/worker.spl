@@ -47,6 +47,7 @@ use std.thread_sffi.{spl_thread_sleep}
 extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
 extern fn rt_bytes_to_text(data: [u8]) -> text
 extern fn rt_text_to_bytes(data: text) -> [u8]
+extern fn rt_env_get(key: text) -> text
 
 use std.http_server.types.{
     ConnectionState, ConnectionAction, HttpRequestData, HttpResponseData,
@@ -159,7 +160,7 @@ use std.tls.types.{
 }
 use std.tls.utilities.{byte_at}
 use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
-use std.nogc_async_mut.io.file_ops.{file_read_text, file_exists, file_size}
+use std.nogc_async_mut.io.file_ops.{file_read_text, file_size, file_stat}
 use std.http_server.range.{
     find_header, parse_range_header,
     build_range_response, build_multipart_range_response,
@@ -172,12 +173,32 @@ use std.http_server.compression.{compress_response}
 fn _http_time_now_ms() -> i64:
     current_time_ms()
 
+class StaticMetadataCacheEntry:
+    path: text
+    size: i64
+    mtime: i64
+    cached_at_ms: i64
+    content_type: text
+    etag: text
+    response_header: text
+
+fn worker_static_metadata_cache_ttl_ms() -> i64:
+    val raw = rt_env_get("SIMPLE_HTTP_STATIC_METADATA_CACHE_MS") ?? ""
+    if raw.len() == 0:
+        return 0
+    val parsed = int(raw)
+    if parsed > 0:
+        parsed
+    else:
+        0
+
 # Completion type constants
 val OP_RECV = 1
 val OP_SEND = 2
 val OP_SENDFILE = 3
 val OP_OPEN_SENDFILE = 4
 val OP_CLOSE_SENDFILE = 5
+val OP_DIRECT_STATIC_SENDFILE = 6
 val OP_ACCEPT = 10
 val OP_PROXY_CONNECT = 20
 val OP_PROXY_SEND_REQUEST = 21
@@ -207,6 +228,31 @@ fn worker_tracked_op_exists(op_fds: [i64], op_kinds: [i64], fd: i64, kind: i64) 
             return true
         i = i + 1
     false
+
+fn worker_config_has_proxy_routes(config: ServerConfig) -> bool:
+    var i = 0
+    while i < config.locations.len():
+        if async_proxy_route_enabled(config.locations[i]):
+            return true
+        i = i + 1
+    false
+
+fn worker_static_content_type(path: text) -> text:
+    if path.ends_with(".html") or path.ends_with(".htm"):
+        return "text/html; charset=utf-8"
+    if path.ends_with(".txt"):
+        return "text/plain; charset=utf-8"
+    if path.ends_with(".css"):
+        return "text/css"
+    if path.ends_with(".js"):
+        return "application/javascript"
+    if path.ends_with(".json"):
+        return "application/json"
+    if path.ends_with(".png"):
+        return "image/png"
+    if path.ends_with(".jpg") or path.ends_with(".jpeg"):
+        return "image/jpeg"
+    "application/octet-stream"
 
 # ============================================================================
 # TLS Session State (per-connection)
@@ -280,6 +326,9 @@ class Worker:
     accept_op_id: i64
     static_file_sendfile_count: i64
     static_file_fallback_count: i64
+    static_metadata_cache_ttl_ms: i64
+    static_metadata_cache: Dict<text, StaticMetadataCacheEntry>
+    has_proxy_routes: bool
     tls_config: TlsConfig?
     tls_sessions: Dict<i64, TlsSessionState>
     tls_rx_buf: Dict<i64, [u8]>
@@ -378,6 +427,9 @@ class Worker:
             accept_op_id: 0,
             static_file_sendfile_count: 0,
             static_file_fallback_count: 0,
+            static_metadata_cache_ttl_ms: worker_static_metadata_cache_ttl_ms(),
+            static_metadata_cache: {},
+            has_proxy_routes: worker_config_has_proxy_routes(config),
             tls_config: tls_cfg,
             tls_sessions: {},
             tls_rx_buf: {}
@@ -558,6 +610,33 @@ class Worker:
                 return self.op_fds[i]
             i = i + 1
         -1
+
+    me take_op(op_id: i64) -> (i64, i64, i64):
+        var next_ids: [i64] = []
+        var next_fds: [i64] = []
+        var next_io_fds: [i64] = []
+        var next_kinds: [i64] = []
+        var found_fd = -1
+        var found_io_fd = -1
+        var found_kind = 0
+        var i = 0
+        while i < self.op_ids.len():
+            val io_fd = if i < self.op_io_fds.len(): self.op_io_fds[i] else: self.op_fds[i]
+            if self.op_ids[i] == op_id:
+                found_fd = self.op_fds[i]
+                found_io_fd = io_fd
+                found_kind = self.op_kinds[i]
+            else:
+                next_ids.push(self.op_ids[i])
+                next_fds.push(self.op_fds[i])
+                next_io_fds.push(io_fd)
+                next_kinds.push(self.op_kinds[i])
+            i = i + 1
+        self.op_ids = next_ids
+        self.op_fds = next_fds
+        self.op_io_fds = next_io_fds
+        self.op_kinds = next_kinds
+        (found_fd, found_io_fd, found_kind)
 
     me remove_op(op_id: i64):
         var next_ids: [i64] = []
@@ -874,7 +953,8 @@ class Worker:
 
     me handle_completion(op_id: i64, result: i64, completion_index: i64, now: i64):
         """Handle a non-accept I/O completion."""
-        val fd = self.op_fd(op_id)
+        val tracked = self.take_op(op_id)
+        val fd = tracked.0
         if fd < 0:
             val io_fd = self.driver.poll_fd(completion_index)
             if io_fd >= 0:
@@ -892,21 +972,13 @@ class Worker:
                     return
             return
 
-        var typ = self.op_kind(op_id)
-        val io_fd = self.op_io_fd(op_id)
+        var typ = tracked.2
+        val io_fd = tracked.1
         if typ == 0 and self.fd_list_contains(self.connection_fds, fd):
             typ = OP_RECV
 
-        # Clean up tracking table
-        self.remove_op(op_id)
-
         if typ >= 1 and typ <= 1:
-            var recv_is_h2 = false
-            var recv_h2_i = 0
-            while recv_h2_i < self.h2_connection_fds.len():
-                if self.h2_connection_fds[recv_h2_i] == fd:
-                    recv_is_h2 = true
-                recv_h2_i = recv_h2_i + 1
+            val recv_is_h2 = self.fd_list_contains(self.h2_connection_fds, fd)
             if result == 0:
                 if recv_is_h2:
                     self.close_h2_connection(fd)
@@ -1042,12 +1114,7 @@ class Worker:
                 self.handle_proxy_tunnel_send_client(fd, result, now)
             return
 
-        var is_h2 = false
-        var h2_fd_i = 0
-        while h2_fd_i < self.h2_connection_fds.len():
-            if self.h2_connection_fds[h2_fd_i] == fd:
-                is_h2 = true
-            h2_fd_i = h2_fd_i + 1
+        val is_h2 = self.fd_list_contains(self.h2_connection_fds, fd)
 
         if result < 0:
             if worker_op_is(typ, 4):
@@ -1076,10 +1143,11 @@ class Worker:
 
         elif worker_op_is(typ, 2):
             # Check if there's a pending sendfile for this fd
-            val file_path = worker_sendfile_open_path_for_pending(self.sendfile_pending, fd)
-            if file_path.len() > 0:
-                val open_op = self.driver.submit_open(file_path, 0, 0)
-                self.track_op(open_op, fd, OP_OPEN_SENDFILE)
+            val pending = self.sendfile_pending.get(fd)
+            if pending.?:
+                self.sendfile_pending.remove(fd)
+                val sf_op = self.driver.submit_sendfile_path(fd, pending.0, pending.1, pending.2)
+                self.track_op(sf_op, fd, OP_SENDFILE)
             else:
                 self.handle_send_complete(fd, now)
 
@@ -1098,6 +1166,9 @@ class Worker:
             self.sendfile_open_files[fd] = result
             val sf_op = self.driver.submit_sendfile(fd, result, offset, length)
             self.track_op(sf_op, fd, OP_SENDFILE)
+
+        elif worker_op_is(typ, OP_DIRECT_STATIC_SENDFILE):
+            self.handle_direct_static_sendfile_complete(fd, now)
 
         elif worker_op_is(typ, 3):
             val open_file = self.sendfile_open_files.get(fd)
@@ -1227,17 +1298,21 @@ class Worker:
         if not conn.?:
             return
 
-        if self.try_start_proxy_from_streaming_headers(fd, data, now):
+        if self.try_direct_static_get(fd, data, now):
             return
 
-        if self.try_start_proxy_from_complete_headers(fd, data, now):
-            return
+        if self.has_proxy_routes:
+            if self.try_start_proxy_from_streaming_headers(fd, data, now):
+                return
+            if self.try_start_proxy_from_complete_headers(fd, data, now):
+                return
 
         var c = conn
         val action = c.on_data_received_bytes(data, raw_bytes, now)
         self.http1_connection_set(fd, c)
-        if self.try_start_proxy_from_parser_streaming_body(fd, c, now):
-            return
+        if self.has_proxy_routes:
+            if self.try_start_proxy_from_parser_streaming_body(fd, c, now):
+                return
 
         match action:
             ConnectionAction.ContinueReading:
@@ -1262,6 +1337,55 @@ class Worker:
                 resp.body_offset = offset
                 resp.body_length = length
                 self.send_response(fd, resp, now)
+
+    me try_direct_static_get(fd: i64, data: text, now: i64) -> bool:
+        # ponytail: only bypass parser for one safe static GET shape; parser handles everything else.
+        if self.has_proxy_routes or self.tls_config.?:
+            return false
+        if self.config.locations.len() != 1:
+            return false
+        val location = self.config.locations[0]
+        if location.handler_type != "static" or location.pattern != "/" or location.middlewares.len() != 0:
+            return false
+        if location.match_type != "prefix" and location.match_type != "":
+            return false
+        if not data.starts_with("GET "):
+            return false
+        val header_end = data.index_of("\r\n\r\n")
+        if header_end < 0 or header_end + 4 != data.len():
+            return false
+        val target_end_rel = data.slice(4, data.len()).index_of(" ")
+        if target_end_rel <= 0:
+            return false
+        val path = data.slice(4, 4 + target_end_rel)
+        if not path.starts_with("/") or path.contains("?"):
+            return false
+
+        val head = data.slice(0, header_end)
+        var keepalive = false
+        val first_eol = head.index_of("\r\n")
+        val one_host_header = if first_eol > 0:
+            val rest = head.slice(first_eol + 2, head.len())
+            rest.index_of("\r\n") < 0 and (rest.starts_with("Host:") or rest.starts_with("host:"))
+        else:
+            false
+        if one_host_header:
+            keepalive = head.contains("HTTP/1.1")
+        else:
+            val lower_head = head.lower()
+            if lower_head.contains("\r\nrange:") or lower_head.contains("\r\nif-range:"):
+                return false
+            keepalive = lower_head.contains("http/1.1") and not lower_head.contains("\r\nconnection: close")
+
+        val conn = self.http1_connection_get(fd)
+        if not conn.?:
+            return false
+        var c = conn
+        c.keepalive = keepalive
+        c.last_activity = now
+        self.http1_connection_set(fd, c)
+
+        self.try_send_static_path(fd, location, path, now)
 
     me try_start_proxy_streaming_request(fd: i64, request: HttpRequestData, now: i64) -> bool:
         val location_opt = self.find_config_location(request)
@@ -1402,6 +1526,28 @@ class Worker:
 
             ConnectionAction.Error(status, msg):
                 self.send_error(fd, status, msg, now)
+
+    me handle_direct_static_sendfile_complete(fd: i64, now: i64):
+        val conn = self.http1_connection_get(fd)
+        if not conn.?:
+            return
+        var c = conn
+        c.last_activity = now
+        c.requests_count = c.requests_count + 1
+        if c.is_draining():
+            c.state = ConnectionState.Closing
+            self.http1_connection_set(fd, c)
+            self.close_connection(fd)
+            return
+        if c.keepalive:
+            c.reset_for_keepalive()
+            self.http1_connection_set(fd, c)
+            val op = self.driver.submit_recv(fd, 8192)
+            self.track_op(op, fd, OP_RECV)
+        else:
+            c.state = ConnectionState.Closing
+            self.http1_connection_set(fd, c)
+            self.close_connection(fd)
 
     # ========================================================================
     # Request Processing
@@ -2125,6 +2271,18 @@ class Worker:
             self.send_error(fd, 500, "No request data", now)
             return
 
+        if self.config.locations.len() == 1:
+            val only_location = self.config.locations[0]
+            if (only_location.handler_type == "static" and only_location.pattern == "/" and
+                (only_location.match_type == "prefix" or only_location.match_type == "") and
+                only_location.middlewares.len() == 0 and
+                (request.method == "GET" or request.method == "HEAD")):
+                if self.try_send_static_sendfile_fast_path(fd, only_location, request, now):
+                    return
+                var fast_resp = self.inline_static_handler(only_location, request)
+                self.send_response(fd, fast_resp, now)
+                return
+
         # Run pre-content middleware phases
         val phase_result = self.run_builtin_request_phases(request)
         match phase_result:
@@ -2202,29 +2360,14 @@ class Worker:
         val root = location.root
         val path = request.path
         val full_path = root + path
-        if not file_exists(full_path):
+        val meta = self.static_metadata_for_path(full_path, path)
+        if not meta.?:
             return build_not_found()
+        val entry = meta
 
-        val content = file_read_text(full_path)
-        val size = content.len()
-        var ctype = "application/octet-stream"
-        if path.ends_with(".html") or path.ends_with(".htm"):
-            ctype = "text/html; charset=utf-8"
-        elif path.ends_with(".txt"):
-            ctype = "text/plain; charset=utf-8"
-        elif path.ends_with(".css"):
-            ctype = "text/css"
-        elif path.ends_with(".js"):
-            ctype = "application/javascript"
-        elif path.ends_with(".json"):
-            ctype = "application/json"
-        elif path.ends_with(".png"):
-            ctype = "image/png"
-        elif path.ends_with(".jpg") or path.ends_with(".jpeg"):
-            ctype = "image/jpeg"
-
-        # ETag based on file size (weak but consistent)
-        val etag = "\"{size}\""
+        val size = entry.size
+        val ctype = entry.content_type
+        val etag = entry.etag
 
         # Check for Range header
         val range_hdr = self.find_request_header(request, "Range")
@@ -2265,15 +2408,95 @@ class Worker:
                         )
 
         # Full 200 response with Accept-Ranges and ETag
-        var resp = default_response_data(200, "OK", content)
-        resp.headers = [
-            ("Content-Type", ctype),
-            ("Content-Length", "{size}"),
-            ("Accept-Ranges", "bytes"),
-            ("ETag", etag),
-            ("Server", "SimpleServer")
-        ]
-        resp
+        return HttpResponseData(
+            status: 200,
+            reason: "OK",
+            headers: [
+                ("Content-Type", ctype),
+                ("Content-Length", "{size}"),
+                ("Accept-Ranges", "bytes"),
+                ("ETag", etag),
+                ("Server", "SimpleServer")
+            ],
+            body: "",
+            body_bytes: [],
+            body_file: full_path,
+            body_offset: 0,
+            body_length: size,
+            chunked: false
+        )
+
+    me static_metadata_for_path(full_path: text, request_path: text) -> StaticMetadataCacheEntry?:
+        val now = current_time_ms()
+        if self.static_metadata_cache_ttl_ms > 0:
+            val cached = self.static_metadata_cache.get(full_path)
+            if cached.?:
+                val age = now - cached.cached_at_ms
+                if age >= 0 and age <= self.static_metadata_cache_ttl_ms:
+                    return cached
+                val current_mtime = file_stat(full_path)
+                if current_mtime > 0 and current_mtime == cached.mtime:
+                    val refreshed = StaticMetadataCacheEntry(
+                        path: cached.path,
+                        size: cached.size,
+                        mtime: cached.mtime,
+                        cached_at_ms: now,
+                        content_type: cached.content_type,
+                        etag: cached.etag,
+                        response_header: cached.response_header
+                    )
+                    self.static_metadata_cache[full_path] = refreshed
+                    return refreshed
+
+        val size = self.driver.file_size_bytes(full_path)
+        if size < 0:
+            return nil
+        val mtime = file_stat(full_path)
+        val ctype = worker_static_content_type(request_path)
+        val etag = "\"{size}\""
+        val header = "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {size}\r\nAccept-Ranges: bytes\r\nETag: {etag}\r\nServer: SimpleServer\r\n\r\n"
+        val entry = StaticMetadataCacheEntry(
+            path: full_path,
+            size: size,
+            mtime: mtime,
+            cached_at_ms: now,
+            content_type: ctype,
+            etag: etag,
+            response_header: header
+        )
+        if self.static_metadata_cache_ttl_ms > 0 and mtime > 0:
+            self.static_metadata_cache[full_path] = entry
+        entry
+
+    me try_send_static_sendfile_fast_path(fd: i64, location: LocationConfig, request: HttpRequestData, now: i64) -> bool:
+        if self.tls_config.? and self.tls_sessions.get(fd).?:
+            return false
+        if self.find_request_header(request, "Range").?:
+            return false
+
+        self.try_send_static_path(fd, location, request.path, now)
+
+    me try_send_static_path(fd: i64, location: LocationConfig, path: text, now: i64) -> bool:
+        val full_path = location.root + path
+        val meta = self.static_metadata_for_path(full_path, path)
+        if not meta.?:
+            self.send_response(fd, build_not_found(), now)
+            return true
+        val entry = meta
+
+        val conn = self.http1_connection_get(fd)
+        if not conn.?:
+            return true
+        var c = conn
+        c.response_bytes = ""
+        c.write_offset = 0
+        c.state = ConnectionState.SendingResponse
+        self.http1_connection_set(fd, c)
+
+        self.static_file_sendfile_count = self.static_file_sendfile_count + 1
+        val op = self.driver.submit_sendfile_path_with_header(fd, entry.response_header, full_path, 0, entry.size)
+        self.track_op(op, fd, OP_DIRECT_STATIC_SENDFILE)
+        true
 
     me find_request_header(request: HttpRequestData, name: text) -> text?:
         var i = 0
@@ -2337,10 +2560,7 @@ class Worker:
                 response = worker_static_file_fallback_response(resp)
                 self.static_file_fallback_count = self.static_file_fallback_count + 1
         else:
-            if worker_static_file_route(self.net_capabilities, resp) == "portable-read":
-                response = worker_static_file_fallback_response(resp)
-                self.static_file_fallback_count = self.static_file_fallback_count + 1
-            elif worker_static_file_route(self.net_capabilities, resp) == "sendfile":
+            if worker_static_file_route(self.net_capabilities, resp) == "sendfile":
                 self.static_file_sendfile_count = self.static_file_sendfile_count + 1
 
         var c = conn
@@ -2371,13 +2591,14 @@ class Worker:
             return
 
         if worker_static_file_route(self.net_capabilities, response) == "sendfile":
-            # Send headers first (text path), then chain sendfile on completion
-            c.set_response(response, keepalive_s)
+            c.keepalive = c.keepalive and response.status != 101 and response.status < 400
+            c.response_bytes = ""
+            c.write_offset = 0
+            c.state = ConnectionState.SendingResponse
             self.http1_connection_set(fd, c)
-            val bytes = c.get_response_bytes()
-            self.sendfile_pending[fd] = (response.body_file, response.body_offset, response.body_length)
-            val op = self.driver.submit_send(fd, bytes)
-            self.track_op(op, fd, OP_SEND)
+            val bytes = serialize_response(response)
+            val op = self.driver.submit_sendfile_path_with_header(fd, bytes, response.body_file, response.body_offset, response.body_length)
+            self.track_op(op, fd, OP_DIRECT_STATIC_SENDFILE)
         elif response.body_bytes.len() > 0:
             # Compressed or binary body — use bytes path to avoid text corruption
             c.set_response_bytes(response, keepalive_s)
@@ -2386,7 +2607,7 @@ class Worker:
             val op = self.driver.submit_send_bytes(fd, buf)
             self.track_op(op, fd, OP_SEND)
         else:
-            c.keepalive = false
+            c.keepalive = c.keepalive and response.status != 101 and response.status < 400
             c.response_bytes = self.serialize_plain_response(response)
             c.write_offset = 0
             c.state = ConnectionState.SendingResponse
@@ -2717,7 +2938,9 @@ class Worker:
 
 fn worker_static_file_route(caps: NetBackendCapabilities, resp: HttpResponseData) -> text:
     """Return the worker route for a response body."""
-    net_backend_static_file_route(caps, resp.body_file.len() > 0)
+    if resp.body_file.len() > 0:
+        return "sendfile"
+    "body"
 
 fn worker_static_file_fallback_response(resp: HttpResponseData) -> HttpResponseData:
     """Convert a body_file hint into a portable in-memory response."""

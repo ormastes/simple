@@ -2154,6 +2154,17 @@ mod tests {
     }
 
     #[test]
+    fn backend_does_not_declare_native_profile_counter_without_instrumentation() {
+        let mut module = MirModule::new();
+        module.functions.push(main_returning_zero());
+
+        let mut backend = test_backend();
+        backend.compile_all_functions(&module).expect("compile");
+
+        assert!(!backend.runtime_funcs.contains_key("rt_native_profile_count"));
+    }
+
+    #[test]
     fn backend_generated_interp_bridge_helpers_are_declared_without_source_reference() {
         let mut main = MirFunction::new("main".to_string(), TypeId::I64, Visibility::Public);
         let arg = main.new_vreg();
@@ -2169,7 +2180,7 @@ mod tests {
                 dest: Some(dest),
                 func_name: "fallback_function".to_string(),
                 args: vec![arg],
-            boxed_result: false,
+                boxed_result: false,
             });
         main.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(dest));
 

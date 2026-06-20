@@ -99,6 +99,7 @@ class Connection:
                 match result:
                     Ok(_):
                         if self.parser.is_complete():
+                            self.keepalive = data.lower().contains("http/1.1") and not data.lower().contains("connection: close")
                             self.request = self.parser.to_request(self.peer_addr)
                             self.state = ConnectionState.Routing
                             return ConnectionAction.RequestReady
@@ -114,6 +115,7 @@ class Connection:
                 match result:
                     Ok(_):
                         if self.parser.is_complete():
+                            self.keepalive = data.lower().contains("http/1.1") and not data.lower().contains("connection: close")
                             self.request = self.parser.to_request(self.peer_addr)
                             self.state = ConnectionState.Routing
                             return ConnectionAction.RequestReady
@@ -142,8 +144,12 @@ class Connection:
                 match result:
                     Ok(consumed):
                         if self.parser.is_complete():
+                            self.keepalive = data.lower().contains("http/1.1") and not data.lower().contains("connection: close")
                             self.request = self.parser.to_request(self.peer_addr)
-                            self.pending_tunnel_bytes = self.raw_bytes_after_consumed(raw_bytes, consumed)
+                            if consumed < raw_bytes.len():
+                                self.pending_tunnel_bytes = self.raw_bytes_after_consumed(raw_bytes, consumed)
+                            else:
+                                self.pending_tunnel_bytes = []
                             self.state = ConnectionState.Routing
                             return ConnectionAction.RequestReady
                         else:
@@ -157,8 +163,12 @@ class Connection:
                 match result:
                     Ok(consumed):
                         if self.parser.is_complete():
+                            self.keepalive = data.lower().contains("http/1.1") and not data.lower().contains("connection: close")
                             self.request = self.parser.to_request(self.peer_addr)
-                            self.pending_tunnel_bytes = self.raw_bytes_after_consumed(raw_bytes, consumed)
+                            if consumed < raw_bytes.len():
+                                self.pending_tunnel_bytes = self.raw_bytes_after_consumed(raw_bytes, consumed)
+                            else:
+                                self.pending_tunnel_bytes = []
                             self.state = ConnectionState.Routing
                             return ConnectionAction.RequestReady
                         else:
@@ -191,9 +201,7 @@ class Connection:
             resp: Response to send
             keepalive_timeout_s: Keep-alive timeout in seconds for header
         """
-        # Native response hot path: close after response until header tuple
-        # scanning is reliable in compiled mode.
-        self.keepalive = false
+        self.keepalive = self.keepalive and resp.status != 101 and resp.status < 400
 
         self.response_bytes = serialize_response(resp)
         self.write_offset = 0
@@ -212,7 +220,7 @@ class Connection:
             resp: Response to send (must have body_bytes populated)
             keepalive_timeout_s: Keep-alive timeout in seconds for header
         """
-        self.keepalive = false
+        self.keepalive = self.keepalive and resp.status != 101 and resp.status < 400
         self.response_bytes_buf = serialize_response_bytes(resp)
         self.response_bytes = ""
         self.write_offset = 0

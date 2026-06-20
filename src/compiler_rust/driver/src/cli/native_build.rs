@@ -21,6 +21,8 @@
 //!   --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap)
 //!   --emit-archive      Emit a static archive from Simple objects instead of linking an executable
 //!   --entry-closure     Compile only modules reachable from --entry
+//!   --profile-counters  Instrument generated LLVM functions with runtime counters
+//!   --profile-filter <csv> Instrument only generated functions whose names contain a listed substring
 //!   --help              Show help
 
 use std::path::PathBuf;
@@ -49,6 +51,13 @@ fn is_removed_runtime_bundle(value: &str) -> bool {
     matches!(
         value,
         "hosted" | "rust-hosted" | "rust_hosted" | "hosted-runtime" | "rust-runtime" | "all"
+    )
+}
+
+fn is_core_c_bootstrap_runtime_bundle(value: &str) -> bool {
+    matches!(
+        value,
+        "core-c-bootstrap" | "core_c_bootstrap" | "runtime" | "core" | "core-c" | "core_c"
     )
 }
 
@@ -92,6 +101,8 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut target_triple: Option<String> = None;
     let mut linker_script: Option<PathBuf> = None;
     let mut opt_level = NativeOptimizationLevel::default_for_native_executable();
+    let mut profile_counters = false;
+    let mut profile_filter: Option<String> = None;
 
     // Parse arguments
     let mut i = 1; // Skip "native-build"
@@ -270,6 +281,27 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 emit_archive = true;
                 i += 1;
             }
+            "--profile-counters" | "--simple-profile-counters" => {
+                profile_counters = true;
+                i += 1;
+            }
+            "--profile-filter" | "--simple-profile-filter" => {
+                if i + 1 < args.len() {
+                    profile_filter = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("error: --profile-filter requires a comma-separated substring list");
+                    return 1;
+                }
+            }
+            other if other.starts_with("--profile-filter=") || other.starts_with("--simple-profile-filter=") => {
+                let value = other
+                    .strip_prefix("--profile-filter=")
+                    .or_else(|| other.strip_prefix("--simple-profile-filter="))
+                    .unwrap_or("");
+                profile_filter = Some(value.to_string());
+                i += 1;
+            }
             "--target" => {
                 if i + 1 < args.len() {
                     target_triple = Some(args[i + 1].clone());
@@ -343,6 +375,12 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         );
         return 1;
     }
+    if profile_counters && !is_core_c_bootstrap_runtime_bundle(&runtime_bundle) {
+        eprintln!(
+            "error: --profile-counters requires --runtime-bundle core-c-bootstrap because default/simple-core runtimes do not currently provide rt_native_profile_count"
+        );
+        return 1;
+    }
 
     // Defaults
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -352,6 +390,15 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         source_dirs.push(project_root.join("src/lib"));
     }
     let output = output.unwrap_or_else(|| project_root.join("bin/simple_native"));
+    let effective_profile_filter = if profile_counters {
+        profile_filter.or_else(|| {
+            std::env::var("SIMPLE_NATIVE_PROFILE_FILTER")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
+    } else {
+        None
+    };
 
     // Auto-default entry file: if not specified and src/app/cli/main.spl exists, use it
     let entry_file = entry_file.or_else(|| {
@@ -408,6 +455,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         eprintln!("  Entry closure: {}", entry_closure);
         eprintln!("  Emit archive: {}", emit_archive);
         eprintln!("  Opt level: {}", opt_level.as_str());
+        eprintln!("  Profile counters: {}", profile_counters);
     }
 
     // Set runtime path override before building
@@ -449,6 +497,8 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         linker_script,
         opt_level,
         emit_archive,
+        profile_counters,
+        profile_filter: effective_profile_filter.clone(),
         ..Default::default()
     };
     // cranelift has no rv32 codegen backend; default rv32 targets to LLVM when the
@@ -471,6 +521,17 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     }
     if let Some(selected_cpu) = cpu {
         std::env::set_var("SIMPLE_NATIVE_CPU", selected_cpu.as_str());
+    }
+    if profile_counters {
+        std::env::set_var("SIMPLE_NATIVE_PROFILE_COUNTERS", "1");
+        if let Some(filter) = effective_profile_filter {
+            std::env::set_var("SIMPLE_NATIVE_PROFILE_FILTER", filter);
+        } else {
+            std::env::remove_var("SIMPLE_NATIVE_PROFILE_FILTER");
+        }
+    } else {
+        std::env::remove_var("SIMPLE_NATIVE_PROFILE_COUNTERS");
+        std::env::remove_var("SIMPLE_NATIVE_PROFILE_FILTER");
     }
 
     // Set target override for compile_file_to_object (thread-safe global)
@@ -597,6 +658,8 @@ fn print_help() {
     println!("  --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap)");
     println!("  --emit-archive     Emit a static archive from Simple objects instead of linking an executable");
     println!("  --entry-closure     Compile only modules reachable from --entry");
+    println!("  --profile-counters Instrument generated LLVM functions with runtime counters");
+    println!("  --profile-filter <csv> Instrument only functions matching listed substrings");
     println!("  --help, -h          Show this help");
     println!();
     println!("Examples:");

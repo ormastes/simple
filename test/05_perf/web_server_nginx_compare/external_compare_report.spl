@@ -31,6 +31,12 @@ class ExternalBenchmarkNormalization:
     logging_policy: text
     cpu_affinity_policy: text
 
+class ExternalProfileEvidence:
+    status: text
+    emitted: i64
+    dropped: i64
+    capacity: i64
+
 fn external_tool_status(tool: text, available: bool, path: text, reason: text) -> ExternalToolStatus:
     ExternalToolStatus(tool: tool, available: available, path: path, reason: reason)
 
@@ -188,6 +194,66 @@ fn external_comparison_row_ready(row: ExternalComparisonRow) -> bool:
 
 fn external_comparison_row_claims_speedup(row: ExternalComparisonRow) -> bool:
     row.status == "measured" and row.rps_ratio > 1.0
+
+fn external_profile_evidence(status: text, emitted: i64, dropped: i64, capacity: i64) -> ExternalProfileEvidence:
+    ExternalProfileEvidence(status: status, emitted: emitted, dropped: dropped, capacity: capacity)
+
+fn _external_profile_summary_value(line: text, key: text) -> i64:
+    val prefix = "{key}="
+    val parts = line.split(" ")
+    var i = 0
+    while i < parts.len():
+        val part = parts[i].trim()
+        if part.starts_with(prefix):
+            return part.substring(prefix.len(), part.len()).to_i64() ?? -1
+        i = i + 1
+    -1
+
+fn external_profile_evidence_from_text(profile_text: text) -> ExternalProfileEvidence:
+    var emitted: i64 = 0
+    var dropped: i64 = 0
+    var capacity: i64 = 0
+    var found = false
+    val lines = profile_text.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line.starts_with("# profile_summary "):
+            val e = _external_profile_summary_value(line, "emitted")
+            val d = _external_profile_summary_value(line, "dropped")
+            val c = _external_profile_summary_value(line, "capacity")
+            if e >= 0 and d >= 0 and c >= 0:
+                emitted = emitted + e
+                dropped = dropped + d
+                capacity = capacity + c
+                found = true
+        i = i + 1
+    if not found:
+        return external_profile_evidence("not-provided", 0, 0, 0)
+    if dropped > 0:
+        return external_profile_evidence("drops-present", emitted, dropped, capacity)
+    external_profile_evidence("clean", emitted, 0, capacity)
+
+fn external_profile_evidence_invalidates_speedup(evidence: ExternalProfileEvidence, row: ExternalComparisonRow) -> bool:
+    evidence.dropped > 0 and external_comparison_row_claims_speedup(row)
+
+fn external_profile_guarded_row(row: ExternalComparisonRow, evidence: ExternalProfileEvidence) -> ExternalComparisonRow:
+    if not external_profile_evidence_invalidates_speedup(evidence, row):
+        return row
+    external_comparison_row(
+        row.workload,
+        row.simple_target,
+        row.external_baseline,
+        row.load_tool,
+        "measured_profile_dropped",
+        row.simple_rps,
+        row.external_rps,
+        row.simple_p99_ms,
+        row.external_p99_ms,
+        row.throughput_mbps,
+        row.failure_count,
+        "profile-drops-invalid-speedup:dropped={evidence.dropped}:capacity={evidence.capacity}"
+    )
 
 fn external_comparison_markdown(rows: [ExternalComparisonRow]) -> text:
     var out = "| workload | simple_target | external_baseline | load_tool | status | simple_rps | external_rps | rps_ratio | simple_p99_ms | external_p99_ms | throughput_mbps | failures | reason |\n"

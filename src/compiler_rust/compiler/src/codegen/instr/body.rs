@@ -463,6 +463,45 @@ pub fn compile_function_body<M: Module>(
     builder.append_block_params_for_function_params(entry_block);
     builder.switch_to_block(entry_block);
 
+    let profile_counters_enabled = std::env::var("SIMPLE_NATIVE_PROFILE_COUNTERS").ok().as_deref() == Some("1");
+    let profile_filter = std::env::var("SIMPLE_NATIVE_PROFILE_FILTER").ok();
+    let profile_selected = profile_filter
+        .as_deref()
+        .map(|needles| {
+            needles
+                .split(',')
+                .any(|needle| !needle.is_empty() && func.name.contains(needle))
+        })
+        .unwrap_or(true);
+    if profile_counters_enabled && profile_selected {
+        if let Some(counter_id) = runtime_funcs.get("rt_native_profile_count") {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for &b in func.name.as_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            h ^= func.params.len() as u64;
+            h = h.wrapping_mul(0x100000001b3);
+            h ^= func.locals.len() as u64;
+            h = h.wrapping_mul(0x100000001b3);
+            let data_name = format!(".Lnative_profile_{h:016x}");
+            let data_id = module
+                .declare_data(&data_name, cranelift_module::Linkage::Local, false, false)
+                .map_err(|e| format!("declare native profile name: {e}"))?;
+            let mut bytes = func.name.as_bytes().to_vec();
+            bytes.push(0);
+            let mut data_desc = cranelift_module::DataDescription::new();
+            data_desc.define(bytes.into_boxed_slice());
+            module
+                .define_data(data_id, &data_desc)
+                .map_err(|e| format!("define native profile name: {e}"))?;
+            let data_ref = module.declare_data_in_func(data_id, builder.func);
+            let name_ptr = builder.ins().global_value(types::I64, data_ref);
+            let counter_ref = module.declare_func_in_func(*counter_id, builder.func);
+            builder.ins().call(counter_ref, &[name_ptr]);
+        }
+    }
+
     // Initialize parameter variables.
     // Function signatures normally use uniform I64 params; exact-ABI runtime
     // helpers can use narrower params. Convert block params to variable types.

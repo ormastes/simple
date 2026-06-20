@@ -8,7 +8,7 @@ DATA_ROOT="$BUILD_DIR/data"
 LOG_DIR="$BUILD_DIR/logs"
 SIMPLE_SERVER="$BUILD_DIR/simple_static_server"
 PRODUCER_ROWS="$BUILD_DIR/live-nginx-measured-rows.env"
-SIMPLE_PORT="${SIMPLE_PORT:-19080}"
+SIMPLE_PORT="${SIMPLE_PORT:-18195}"
 NGINX_PORT="${NGINX_PORT:-19081}"
 WRK_DURATION="${WRK_DURATION:-1s}"
 WRK_THREADS="${WRK_THREADS:-1}"
@@ -133,7 +133,8 @@ def producer_lines(csv_text):
                 "WEB_SERVER_EXTERNAL_COMPARE_MEASURED="
                 f"{row['workload']}|native_simple_static_{size}|nginx_static_{size}|"
                 f"{simple_rps:.2f}|{nginx_rps:.2f}|{float(row['simple_p99_ms']):.3f}|"
-                f"{float(row['nginx_p99_ms']):.3f}|{throughput:.3f}|{failures}|{reason}"
+                f"{float(row['nginx_p99_ms']):.3f}|{throughput:.3f}|{failures}|{reason}|"
+                "full-url-routed-native-simple"
             )
     return lines
 
@@ -143,8 +144,8 @@ static_1mb,1048576,900.00,3.000,7549.747,1,1000.00,2.500,8388.608,2
 """
 lines = producer_lines(csv_text)
 expected = [
-    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1kb|native_simple_static_1024|nginx_static_1024|1200.00|1000.00|1.500|2.000|9.830|0|live-simple-nginx-wrk",
-    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1mb|native_simple_static_1048576|nginx_static_1048576|900.00|1000.00|3.000|2.500|8388.608|3|wrk-errors-or-missing-rps",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1kb|native_simple_static_1024|nginx_static_1024|1200.00|1000.00|1.500|2.000|9.830|0|live-simple-nginx-wrk|full-url-routed-native-simple",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1mb|native_simple_static_1048576|nginx_static_1048576|900.00|1000.00|3.000|2.500|8388.608|3|wrk-errors-or-missing-rps|full-url-routed-native-simple",
 ]
 if lines != expected:
     raise SystemExit(f"unexpected producer rows: {lines}")
@@ -170,15 +171,31 @@ root = Path("build/perf/web_server_nginx_compare/data")
 root.mkdir(parents=True, exist_ok=True)
 (root / "1kb.html").write_text("A" * 1024, encoding="utf-8")
 (root / "1mb.txt").write_text("B" * 1048576, encoding="utf-8")
+fixture_root = Path("/tmp/simple-live-static")
+fixture_root.mkdir(parents=True, exist_ok=True)
+(fixture_root / "1kb.html").write_text("A" * 1024, encoding="utf-8")
+(fixture_root / "1mb.txt").write_text("B" * 1048576, encoding="utf-8")
 PY
 
 SIMPLE_LIB=src:test/05_perf "$SIMPLE_BIN" native-build \
+    --runtime-bundle core-c-bootstrap \
     --source src/lib \
-    --source test/05_perf/web_server_nginx_compare \
-    --entry test/05_perf/web_server_nginx_compare/live_static_native_server.spl \
+    --source test/05_perf/web \
+    --entry test/05_perf/web/httpserver_live_static_fixture.spl \
     --entry-closure \
-    --strip \
     --output "$SIMPLE_SERVER" >/tmp/simple_web_server_nginx_live_build.log 2>&1
+
+if nm -g "$SIMPLE_SERVER" 2>/dev/null | grep -E ' U (rt_channel_|rt_io_tcp_bind_fd|rt_io_tcp_socket_create|rt_io_tcp_listen)' >/tmp/simple_web_server_nginx_live_unresolved.txt; then
+    echo "STATUS: FAIL web server nginx live compare: unresolved critical runtime externs"
+    cat /tmp/simple_web_server_nginx_live_unresolved.txt
+    exit 1
+fi
+
+if nm -g "$SIMPLE_SERVER" 2>/dev/null | grep -E ' W (spl_thread_cpu_count|spl_mutex_|spl_condvar_)' >/tmp/simple_web_server_nginx_live_stubs.txt; then
+    echo "STATUS: FAIL web server nginx live compare: critical runtime primitives linked as weak stubs"
+    cat /tmp/simple_web_server_nginx_live_stubs.txt
+    exit 1
+fi
 
 NGINX_CONF="$BUILD_DIR/nginx.conf"
 cat > "$NGINX_CONF" <<EOF
@@ -246,7 +263,7 @@ run_wrk() {
 }
 
 run_simple_workload() {
-    "$SIMPLE_SERVER" >"$LOG_DIR/simple.log" 2>&1 &
+    SIMPLE_HTTP_STATIC_METADATA_CACHE_MS="${SIMPLE_HTTP_STATIC_METADATA_CACHE_MS:-60000}" "$SIMPLE_SERVER" >"$LOG_DIR/simple.log" 2>&1 &
     SIMPLE_PID="$!"
     wait_http "http://127.0.0.1:$SIMPLE_PORT/1kb.html"
 }
@@ -301,8 +318,8 @@ report = Path(os.environ["REPORT"])
 table = Path(os.environ["TABLE"])
 csv_path = Path(os.environ["CSV"])
 producer_rows = Path(os.environ["PRODUCER_ROWS"])
-header = "| workload | simple_target | external_baseline | load_tool | status | simple_rps | external_rps | rps_ratio | simple_p99_ms | external_p99_ms | throughput_mbps | failures | reason |\n"
-sep = "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|\n"
+header = "| workload | simple_target | external_baseline | load_tool | status | simple_rps | external_rps | rps_ratio | simple_p99_ms | external_p99_ms | throughput_mbps | failures | reason | provenance |\n"
+sep = "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|\n"
 rows = []
 producer_lines = []
 with csv_path.open(newline="", encoding="utf-8") as fh:
@@ -321,13 +338,14 @@ with csv_path.open(newline="", encoding="utf-8") as fh:
             f"| {row['workload']} | native_simple_static_{size} | nginx_static_{size} | wrk | {status} | "
             f"{simple_rps:.2f} | {nginx_rps:.2f} | {ratio:.3f} | {float(row['simple_p99_ms']):.3f} | "
             f"{float(row['nginx_p99_ms']):.3f} | {throughput:.3f} | "
-            f"{failures} | {reason} |\n"
+            f"{failures} | {reason} | full-url-routed-native-simple |\n"
         )
         producer_lines.append(
             "WEB_SERVER_EXTERNAL_COMPARE_MEASURED="
             f"{row['workload']}|native_simple_static_{size}|nginx_static_{size}|"
             f"{simple_rps:.2f}|{nginx_rps:.2f}|{float(row['simple_p99_ms']):.3f}|"
-            f"{float(row['nginx_p99_ms']):.3f}|{throughput:.3f}|{failures}|{reason}"
+            f"{float(row['nginx_p99_ms']):.3f}|{throughput:.3f}|{failures}|{reason}|"
+            "full-url-routed-native-simple"
         )
 
 def command_output(args):
@@ -380,6 +398,7 @@ body = (
     "This report is generated by `scripts/check/check-web-server-nginx-live-compare.shs`.\n"
     "It measures native Simple static-file serving against a local NGINX static baseline with wrk. "
     "Rows marked `measured` contain live RPS and p99 latency values; speedup claims still require separate review of failure counts and workload parity.\n\n"
+    "The static rows are stamped `full-url-routed-native-simple` because this wrapper builds and runs the URL-routed native static fixture, not the older raw TCP hardcoded-response benchmark.\n\n"
     "## Run Configuration\n\n"
     f"- Simple URL: `http://127.0.0.1:{os.environ['SIMPLE_PORT']}`\n"
     f"- NGINX URL: `http://127.0.0.1:{os.environ['NGINX_PORT']}`\n"

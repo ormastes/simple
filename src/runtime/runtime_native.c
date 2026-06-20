@@ -50,11 +50,25 @@ typedef struct {
     uint64_t count;
 } RtNativeProfileSlot;
 
+#ifndef RT_NATIVE_PROFILE_MAX
 #define RT_NATIVE_PROFILE_MAX 8192
-static RtNativeProfileSlot rt_native_profile_slots[RT_NATIVE_PROFILE_MAX];
-static size_t rt_native_profile_used = 0;
+#endif
+typedef struct RtNativeProfileOwner {
+    RtNativeProfileSlot slots[RT_NATIVE_PROFILE_MAX];
+    size_t used;
+    uint64_t emitted;
+    uint64_t dropped;
+    struct RtNativeProfileOwner* next;
+} RtNativeProfileOwner;
+
+static RtNativeProfileOwner* rt_native_profile_owners = NULL;
 static int rt_native_profile_atexit_registered = 0;
 static int rt_native_profile_dumped = 0;
+#if defined(_MSC_VER)
+static __declspec(thread) RtNativeProfileOwner* rt_native_profile_owner = NULL;
+#else
+static _Thread_local RtNativeProfileOwner* rt_native_profile_owner = NULL;
+#endif
 #if !defined(_WIN32)
 static pthread_mutex_t rt_native_profile_lock = PTHREAD_MUTEX_INITIALIZER;
 #define RT_NATIVE_PROFILE_LOCK() pthread_mutex_lock(&rt_native_profile_lock)
@@ -69,8 +83,10 @@ static void rt_native_profile_dump(void);
 static void rt_native_profile_signal_dump(int sig);
 #endif
 
-void rt_native_profile_count(const char* name) {
-    if (!name || !*name) return;
+static RtNativeProfileOwner* rt_native_profile_register_owner(void) {
+    RtNativeProfileOwner* owner = (RtNativeProfileOwner*)calloc(1, sizeof(RtNativeProfileOwner));
+    if (!owner) return NULL;
+
     RT_NATIVE_PROFILE_LOCK();
     if (!rt_native_profile_atexit_registered) {
         atexit(rt_native_profile_dump);
@@ -80,19 +96,36 @@ void rt_native_profile_count(const char* name) {
 #endif
         rt_native_profile_atexit_registered = 1;
     }
-    for (size_t i = 0; i < rt_native_profile_used; i++) {
-        if (strcmp(rt_native_profile_slots[i].name, name) == 0) {
-            rt_native_profile_slots[i].count++;
-            RT_NATIVE_PROFILE_UNLOCK();
+    owner->next = rt_native_profile_owners;
+    rt_native_profile_owners = owner;
+    RT_NATIVE_PROFILE_UNLOCK();
+
+    rt_native_profile_owner = owner;
+    return owner;
+}
+
+void rt_native_profile_count(const char* name) {
+    if (!name || !*name) return;
+    RtNativeProfileOwner* owner = rt_native_profile_owner;
+    if (!owner) {
+        owner = rt_native_profile_register_owner();
+        if (!owner) return;
+    }
+    for (size_t i = 0; i < owner->used; i++) {
+        if (strcmp(owner->slots[i].name, name) == 0) {
+            owner->slots[i].count++;
+            owner->emitted++;
             return;
         }
     }
-    if (rt_native_profile_used < RT_NATIVE_PROFILE_MAX) {
-        rt_native_profile_slots[rt_native_profile_used].name = name;
-        rt_native_profile_slots[rt_native_profile_used].count = 1;
-        rt_native_profile_used++;
+    if (owner->used < RT_NATIVE_PROFILE_MAX) {
+        owner->slots[owner->used].name = name;
+        owner->slots[owner->used].count = 1;
+        owner->used++;
+        owner->emitted++;
+    } else {
+        owner->dropped++;
     }
-    RT_NATIVE_PROFILE_UNLOCK();
 }
 
 static int rt_native_profile_slot_cmp(const void* lhs, const void* rhs) {
@@ -103,25 +136,70 @@ static int rt_native_profile_slot_cmp(const void* lhs, const void* rhs) {
     return strcmp(a->name, b->name);
 }
 
+static size_t rt_native_profile_merge_slots(RtNativeProfileSlot* rows, uint64_t* dropped) {
+    size_t used = 0;
+    if (dropped) *dropped = 0;
+    for (RtNativeProfileOwner* owner = rt_native_profile_owners; owner; owner = owner->next) {
+        if (dropped) *dropped += owner->dropped;
+        for (size_t i = 0; i < owner->used; i++) {
+            const char* name = owner->slots[i].name;
+            uint64_t count = owner->slots[i].count;
+            int found = 0;
+            for (size_t j = 0; j < used; j++) {
+                if (strcmp(rows[j].name, name) == 0) {
+                    rows[j].count += count;
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found && used < RT_NATIVE_PROFILE_MAX) {
+                rows[used].name = name;
+                rows[used].count = count;
+                used++;
+            } else if (!found && dropped) {
+                (*dropped)++;
+            }
+        }
+    }
+    return used;
+}
+
+static void rt_native_profile_report_summary(FILE* fp, uint64_t dropped) {
+    uint64_t emitted = 0;
+    uint64_t capacity = 0;
+    for (RtNativeProfileOwner* owner = rt_native_profile_owners; owner; owner = owner->next) {
+        emitted += owner->emitted;
+        capacity += RT_NATIVE_PROFILE_MAX;
+    }
+    fprintf(fp, "# profile_summary emitted=%llu dropped=%llu capacity=%llu\n",
+            (unsigned long long)emitted,
+            (unsigned long long)dropped,
+            (unsigned long long)capacity);
+}
+
 static void rt_native_profile_dump(void) {
     const char* out = getenv("SIMPLE_NATIVE_PROFILE_OUT");
-    if (!out || !*out || rt_native_profile_used == 0) return;
+    if (!out || !*out || !rt_native_profile_owners) return;
     if (rt_native_profile_dumped) return;
     rt_native_profile_dumped = 1;
     FILE* fp = strcmp(out, "stderr") == 0 ? stderr : fopen(out, "w");
     if (!fp) return;
 
     RT_NATIVE_PROFILE_LOCK();
-    size_t used = rt_native_profile_used;
-    RtNativeProfileSlot** rows = (RtNativeProfileSlot**)malloc(sizeof(RtNativeProfileSlot*) * used);
-    if (rows) {
-        for (size_t i = 0; i < used; i++) rows[i] = &rt_native_profile_slots[i];
-        qsort(rows, used, sizeof(RtNativeProfileSlot*), rt_native_profile_slot_cmp);
+    RtNativeProfileSlot* merged = (RtNativeProfileSlot*)calloc(RT_NATIVE_PROFILE_MAX, sizeof(RtNativeProfileSlot));
+    if (merged) {
+        uint64_t dropped = 0;
+        size_t used = rt_native_profile_merge_slots(merged, &dropped);
+        RtNativeProfileSlot** rows = (RtNativeProfileSlot**)malloc(sizeof(RtNativeProfileSlot*) * used);
+        for (size_t i = 0; rows && i < used; i++) rows[i] = &merged[i];
+        if (rows) qsort(rows, used, sizeof(RtNativeProfileSlot*), rt_native_profile_slot_cmp);
         fputs("count\tfunction\n", fp);
-        for (size_t i = 0; i < used; i++) {
+        for (size_t i = 0; rows && i < used; i++) {
             fprintf(fp, "%llu\t%s\n", (unsigned long long)rows[i]->count, rows[i]->name);
         }
+        rt_native_profile_report_summary(fp, dropped);
         free(rows);
+        free(merged);
     }
     RT_NATIVE_PROFILE_UNLOCK();
 
@@ -131,16 +209,19 @@ static void rt_native_profile_dump(void) {
 #if !defined(_WIN32)
 static void rt_native_profile_signal_dump(int sig) {
     const char* out = getenv("SIMPLE_NATIVE_PROFILE_OUT");
-    if (out && *out && !rt_native_profile_dumped && rt_native_profile_used > 0) {
+    if (out && *out && !rt_native_profile_dumped && rt_native_profile_owners) {
         rt_native_profile_dumped = 1;
         FILE* fp = strcmp(out, "stderr") == 0 ? stderr : fopen(out, "w");
         if (fp) {
             fputs("count\tfunction\n", fp);
-            for (size_t i = 0; i < rt_native_profile_used; i++) {
-                fprintf(fp, "%llu\t%s\n",
-                        (unsigned long long)rt_native_profile_slots[i].count,
-                        rt_native_profile_slots[i].name);
+            RtNativeProfileSlot merged[RT_NATIVE_PROFILE_MAX];
+            memset(merged, 0, sizeof(merged));
+            uint64_t dropped = 0;
+            size_t used = rt_native_profile_merge_slots(merged, &dropped);
+            for (size_t i = 0; i < used; i++) {
+                fprintf(fp, "%llu\t%s\n", (unsigned long long)merged[i].count, merged[i].name);
             }
+            rt_native_profile_report_summary(fp, dropped);
             if (fp != stderr) fclose(fp);
         }
     }

@@ -355,8 +355,7 @@ impl SpirvModule {
 
             Terminator::Switch { .. } => {
                 return Err(CompileError::Codegen(
-                    "switch terminator is not yet supported in SPIR-V/Vulkan compute codegen"
-                        .to_string(),
+                    "switch terminator is not yet supported in SPIR-V/Vulkan compute codegen".to_string(),
                 ));
             }
         }

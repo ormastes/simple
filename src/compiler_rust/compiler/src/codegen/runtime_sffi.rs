@@ -1341,6 +1341,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cranelift_end_function", &[I64], &[I64]),                  // ctx -> func_id
     RuntimeFuncSpec::new("rt_cranelift_define_function", &[I64, I64, I64], &[I8]), // module, func_id, ctx -> success (JIT)
     RuntimeFuncSpec::new("rt_cranelift_aot_define_function", &[I64, I64, I64, I64], &[I8]), // module, name_ptr, name_len, ctx -> success (AOT)
+    RuntimeFuncSpec::new("rt_native_profile_count", &[I64], &[]),                           // name_ptr -> ()
     // Block management
     RuntimeFuncSpec::new("rt_cranelift_create_block", &[I64], &[I64]), // ctx -> block
     RuntimeFuncSpec::new("rt_cranelift_switch_to_block", &[I64, I64], &[]), // ctx, block -> ()

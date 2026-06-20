@@ -85,11 +85,14 @@ def measured_rows(text):
         if not line.startswith(prefix):
             continue
         parts = line[len(prefix):].split("|")
-        if len(parts) != 10:
+        if len(parts) not in (10, 11):
             continue
-        workload, simple_target, baseline, simple_rps, external_rps, simple_p99, external_p99, throughput, failures, reason = parts
+        workload, simple_target, baseline, simple_rps, external_rps, simple_p99, external_p99, throughput, failures, reason = parts[:10]
+        provenance = parts[10] if len(parts) == 11 else ""
         key = (workload, baseline)
         if known.get(key) != simple_target:
+            continue
+        if workload.startswith("static_") and provenance != "full-url-routed-native-simple":
             continue
         try:
             simple_rps = float(simple_rps)
@@ -119,11 +122,12 @@ def measured_rows(text):
             "throughput_mbps": f"{throughput:.3f}",
             "failures": str(failures),
             "reason": reason,
+            "provenance": provenance or "legacy-unclassified",
         }
     return parsed
 
 sample = "\n".join([
-    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1kb|native_simple_static_1024|nginx_static_1024|1200|1000|1.5|2.0|9.8|0|live-simple-nginx-wrk",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1kb|native_simple_static_1024|nginx_static_1024|1200|1000|1.5|2.0|9.8|0|live-simple-nginx-wrk|full-url-routed-native-simple",
     "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=cached_reverse_proxy|native_simple_cached_proxy|haproxy_cached_reverse_proxy|900|1000|3|2|7.2|4|wrk-socket-errors",
     "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=cached_reverse_proxy|native_simple_cached_proxy|envoy_cached_reverse_proxy|850|1000|4|3|6.8|1|wrk-errors-or-missing-rps",
     "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=upload_streaming_proxy|native_simple_upload_proxy|haproxy_upload_streaming_proxy|120|100|8|7|95.5|0|live-simple-haproxy-upload-wrk",
@@ -135,6 +139,7 @@ sample = "\n".join([
     "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1kb|wrong_target|nginx_static_1024|1|1|1|1|1|0|bad-target",
     "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=unknown|native_simple_static_1024|nginx_static_1024|1|1|1|1|1|0|bad-workload",
     "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1kb|native_simple_static_1024|nginx_static_1024|0|1|1|1|1|0|zero-rps",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1mb|native_simple_static_1048576|nginx_static_1048576|1300|1000|1.5|2.0|9.8|0|raw-tcp-faster-than-nginx",
 ])
 rows = measured_rows(sample)
 nginx = rows.get(("static_1kb", "nginx_static_1024"))
@@ -150,6 +155,8 @@ if len(rows) != 9:
     raise SystemExit(f"unexpected measured row count: {rows}")
 if nginx["status"] != "measured" or nginx["rps_ratio"] != "1.200" or nginx["failures"] != "0":
     raise SystemExit(f"unexpected nginx measured row: {nginx}")
+if nginx["provenance"] != "full-url-routed-native-simple":
+    raise SystemExit(f"static nginx row missing full URL-routed provenance: {nginx}")
 if haproxy["status"] != "measured_with_failures" or haproxy["reason"] != "wrk-socket-errors":
     raise SystemExit(f"unexpected haproxy measured row: {haproxy}")
 if envoy["status"] != "measured_with_failures" or envoy["external_baseline"] != "envoy_cached_reverse_proxy":
@@ -171,10 +178,48 @@ PY
     exit 0
 fi
 
+if [ "${1:-}" = "--self-test-profile-summary-invalidation" ]; then
+    SIMPLE_RUN_BIN="${SIMPLE_BIN:-}"
+    if [ -z "$SIMPLE_RUN_BIN" ]; then
+        if [ -x "bin/simple" ]; then
+            SIMPLE_RUN_BIN="bin/simple"
+        else
+            SIMPLE_RUN_BIN="$(command -v simple)"
+        fi
+    fi
+    err_file="$(mktemp)"
+    trap 'rm -f "$err_file"' EXIT INT TERM
+    if ! out="$(
+        SIMPLE_LIB=src:test/05_perf \
+        WEB_SERVER_EXTERNAL_COMPARE_PROFILE_TEXT='# profile_summary emitted=2 dropped=1 capacity=2' \
+        "$SIMPLE_RUN_BIN" run test/05_perf/web_server_nginx_compare/profile_guard_cli.spl \
+            --simple-rps=1200 --external-rps=1000 2>"$err_file"
+    )"; then
+        cat "$err_file" >&2
+        exit 1
+    fi
+    printf '%s\n' "$out" | grep -q '^profile_status=drops-present$'
+    printf '%s\n' "$out" | grep -q '^row_status=measured_profile_dropped$'
+    printf '%s\n' "$out" | grep -q '^row_reason=profile-drops-invalid-speedup:dropped=1:capacity=2$'
+
+    if ! out_no_speedup="$(
+        SIMPLE_LIB=src:test/05_perf \
+        WEB_SERVER_EXTERNAL_COMPARE_PROFILE_TEXT='# profile_summary emitted=2 dropped=1 capacity=2' \
+        "$SIMPLE_RUN_BIN" run test/05_perf/web_server_nginx_compare/profile_guard_cli.spl \
+            --simple-rps=800 --external-rps=1000 2>"$err_file"
+    )"; then
+        cat "$err_file" >&2
+        exit 1
+    fi
+    printf '%s\n' "$out_no_speedup" | grep -q '^row_status=measured$'
+    echo "STATUS: PASS profile summary invalidation self-test"
+    exit 0
+fi
+
 SPEC="test/05_perf/web_server_nginx_compare/external_compare_report_spec.spl"
 DOC="doc/06_spec/test/05_perf/web_server_nginx_compare/external_compare_report_spec.md"
-REPORT="doc/09_report/perf/web_server_nginx_compare_2026-06-17.md"
-TABLE="doc/10_metrics/perf/web_server_nginx_compare.md"
+REPORT="${REPORT:-doc/09_report/perf/web_server_nginx_compare_2026-06-17.md}"
+TABLE="${TABLE:-doc/10_metrics/perf/web_server_nginx_compare.md}"
 SIMPLE_BIN="${SIMPLE_BIN:-}"
 if [ -z "$SIMPLE_BIN" ]; then
     if [ -x "bin/simple" ]; then
@@ -273,8 +318,8 @@ def normalization_markdown():
         "| same bytes per compared workload | wrk default keep-alive | 1 | 1 | 1 | one measured server worker unless wrapper overrides both sides | access logging disabled for measured hot path | not pinned on this host; report must say so |\n\n"
     )
 
-header = "| workload | simple_target | external_baseline | load_tool | status | simple_rps | external_rps | rps_ratio | simple_p99_ms | external_p99_ms | throughput_mbps | failures | reason |\n"
-sep = "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|\n"
+header = "| workload | simple_target | external_baseline | load_tool | status | simple_rps | external_rps | rps_ratio | simple_p99_ms | external_p99_ms | throughput_mbps | failures | reason | provenance |\n"
+sep = "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|\n"
 columns = [
     "workload",
     "simple_target",
@@ -289,6 +334,7 @@ columns = [
     "throughput_mbps",
     "failures",
     "reason",
+    "provenance",
 ]
 
 def parse_existing_preserved(path):
@@ -299,9 +345,13 @@ def parse_existing_preserved(path):
         if not line.startswith("| ") or line.startswith("| workload ") or line.startswith("|---"):
             continue
         parts = [p.strip() for p in line.strip().strip("|").split("|")]
+        if len(parts) == len(columns) - 1:
+            parts.append("legacy-unclassified")
         if len(parts) != len(columns):
             continue
         row = dict(zip(columns, parts))
+        if row["workload"].startswith("static_") and row["provenance"] != "full-url-routed-native-simple":
+            continue
         if row["status"].startswith("measured") or row["status"] == "live-fixture-unavailable":
             preserved[(row["workload"], row["external_baseline"])] = row
     return preserved
@@ -331,11 +381,14 @@ def parse_external_measured_rows(text):
         if not line.startswith(prefix):
             continue
         parts = line[len(prefix):].split("|")
-        if len(parts) != 10:
+        if len(parts) not in (10, 11):
             continue
-        workload, simple_target, baseline, simple_rps, external_rps, simple_p99, external_p99, throughput, failures, reason = parts
+        workload, simple_target, baseline, simple_rps, external_rps, simple_p99, external_p99, throughput, failures, reason = parts[:10]
+        provenance = parts[10] if len(parts) == 11 else ""
         key = (workload, baseline)
         if known_rows.get(key) != simple_target:
+            continue
+        if workload.startswith("static_") and provenance != "full-url-routed-native-simple":
             continue
         try:
             simple_rps = float(simple_rps)
@@ -365,6 +418,7 @@ def parse_external_measured_rows(text):
             "throughput_mbps": f"{throughput:.3f}",
             "failures": str(failures),
             "reason": reason,
+            "provenance": provenance or "legacy-unclassified",
         }
     return measured
 
@@ -381,6 +435,58 @@ def measured_input_text():
     chunks.append(os.environ.get("WEB_SERVER_EXTERNAL_COMPARE_MEASURED_OUTPUT", ""))
     return "\n".join(chunks)
 
+def parse_profile_summaries(text):
+    summaries = []
+    prefix = "# profile_summary "
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith(prefix):
+            continue
+        fields = {}
+        for part in line[len(prefix):].split():
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            try:
+                fields[key] = int(value)
+            except ValueError:
+                fields[key] = -1
+        if {"emitted", "dropped", "capacity"} <= set(fields):
+            summaries.append(fields)
+    return summaries
+
+def profile_evidence():
+    summaries = []
+    raw_paths = os.environ.get("WEB_SERVER_EXTERNAL_COMPARE_PROFILE_PATHS", "")
+    for raw_path in raw_paths.split(":"):
+        path_text = raw_path.strip()
+        if not path_text:
+            continue
+        path = Path(path_text)
+        if path.exists():
+            summaries.extend(parse_profile_summaries(path.read_text(encoding="utf-8", errors="replace")))
+    summaries.extend(parse_profile_summaries(os.environ.get("WEB_SERVER_EXTERNAL_COMPARE_PROFILE_TEXT", "")))
+    emitted = sum(max(0, s["emitted"]) for s in summaries)
+    dropped = sum(max(0, s["dropped"]) for s in summaries)
+    capacity = sum(max(0, s["capacity"]) for s in summaries)
+    if not summaries:
+        return {"status": "not-provided", "emitted": 0, "dropped": 0, "capacity": 0}
+    if dropped > 0:
+        return {"status": "drops-present", "emitted": emitted, "dropped": dropped, "capacity": capacity}
+    return {"status": "clean", "emitted": emitted, "dropped": 0, "capacity": capacity}
+
+def apply_profile_evidence(rows, evidence):
+    if evidence["dropped"] <= 0:
+        return
+    for row in rows:
+        try:
+            ratio = float(row["rps_ratio"])
+        except ValueError:
+            ratio = 0.0
+        if row["status"] == "measured" and ratio > 1.0:
+            row["status"] = "measured_profile_dropped"
+            row["reason"] = f"profile-drops-invalid-speedup:dropped={evidence['dropped']}:capacity={evidence['capacity']}"
+
 def blank_row(workload, simple_target, baseline, status, reason):
     return {
         "workload": workload,
@@ -396,6 +502,7 @@ def blank_row(workload, simple_target, baseline, status, reason):
         "throughput_mbps": 0,
         "failures": 0,
         "reason": reason,
+        "provenance": "unmeasured",
     }
 
 def planned_row(workload, simple_target, tool, baseline):
@@ -449,11 +556,14 @@ for workload, simple, baseline in [
     else:
         rows.append(blank_row(workload, simple, baseline, "live-fixture-unavailable", "reference-fixture-url-not-configured"))
 
+profile_guard = profile_evidence()
+apply_profile_evidence(rows, profile_guard)
+
 def fmt(value):
     return str(value)
 
 body_rows = "".join(
-    f"| {r['workload']} | {r['simple_target']} | {r['external_baseline']} | {r['load_tool']} | {r['status']} | {fmt(r['simple_rps'])} | {fmt(r['external_rps'])} | {fmt(r['rps_ratio'])} | {fmt(r['simple_p99_ms'])} | {fmt(r['external_p99_ms'])} | {fmt(r['throughput_mbps'])} | {fmt(r['failures'])} | {r['reason']} |\n"
+    f"| {r['workload']} | {r['simple_target']} | {r['external_baseline']} | {r['load_tool']} | {r['status']} | {fmt(r['simple_rps'])} | {fmt(r['external_rps'])} | {fmt(r['rps_ratio'])} | {fmt(r['simple_p99_ms'])} | {fmt(r['external_p99_ms'])} | {fmt(r['throughput_mbps'])} | {fmt(r['failures'])} | {r['reason']} | {r.get('provenance', 'legacy-unclassified')} |\n"
     for r in rows
 )
 
@@ -462,11 +572,17 @@ body = (
     "This report is generated by `scripts/check/check-web-server-nginx-compare-report.shs`.\n"
     "It is the first external-comparison gate for the GPU Web/DB optimization lane. "
     "Rows marked `ready_unmeasured` prove installed baseline/load-tool readiness and required report shape; they do not claim Simple speedup.\n\n"
+    "Static measured rows must carry `full-url-routed-native-simple` provenance. Raw TCP, interpreter-backed, and legacy-unclassified rows are not accepted as faster-than-nginx evidence.\n\n"
     "## Tool Availability\n\n"
     + "".join(f"- {name}: {'available at `' + path + '`' if path else 'missing'}\n" for name, path in tools.items())
     + "\n"
     + environment_markdown()
     + normalization_markdown()
+    + "## Profile Evidence\n\n"
+    + f"- status: `{profile_guard['status']}`\n"
+    + f"- emitted: `{profile_guard['emitted']}`\n"
+    + f"- dropped: `{profile_guard['dropped']}`\n"
+    + f"- capacity: `{profile_guard['capacity']}`\n\n"
     + header + sep + body_rows
 )
 metrics = "# Web Server NGINX Comparison Metrics\n\n" + normalization_markdown() + header + sep + body_rows

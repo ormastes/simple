@@ -350,10 +350,26 @@ sandbox plugin_sandbox:
 #[test]
 fn test_object_cache_key_separates_simd_tiers() {
     let scalar = with_simd_tier_env("scalar", || {
-        object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
+        object_cache_key(
+            "fn main(): return 42",
+            true,
+            "cranelift",
+            false,
+            "app__main",
+            false,
+            None,
+        )
     });
     let avx2 = with_simd_tier_env("x86_64_avx2", || {
-        object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
+        object_cache_key(
+            "fn main(): return 42",
+            true,
+            "cranelift",
+            false,
+            "app__main",
+            false,
+            None,
+        )
     });
 
     assert_ne!(scalar, avx2);
@@ -386,13 +402,162 @@ fn test_object_cache_key_separates_configured_active_tiers_without_override() {
     }
 
     let high = with_simd_envs(None, Some(&high_path), || {
-        object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
+        object_cache_key(
+            "fn main(): return 42",
+            true,
+            "cranelift",
+            false,
+            "app__main",
+            false,
+            None,
+        )
     });
     let low = with_simd_envs(None, Some(&low_path), || {
-        object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
+        object_cache_key(
+            "fn main(): return 42",
+            true,
+            "cranelift",
+            false,
+            "app__main",
+            false,
+            None,
+        )
     });
 
     assert_ne!(high, low);
+}
+
+#[test]
+fn test_object_cache_key_separates_profile_counter_mode() {
+    let normal = object_cache_key(
+        "fn main(): return 42",
+        true,
+        "cranelift",
+        false,
+        "app__main",
+        false,
+        None,
+    );
+    let profiled_all = object_cache_key(
+        "fn main(): return 42",
+        true,
+        "cranelift",
+        false,
+        "app__main",
+        true,
+        None,
+    );
+    let profiled_filtered = object_cache_key(
+        "fn main(): return 42",
+        true,
+        "cranelift",
+        false,
+        "app__main",
+        true,
+        Some("main"),
+    );
+
+    assert_ne!(normal, profiled_all);
+    assert_ne!(profiled_all, profiled_filtered);
+}
+
+#[test]
+fn test_native_profile_count_hot_path_has_no_global_lock() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let runtime_path = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("runtime")
+        .join("runtime_native.c");
+    let source = fs::read_to_string(runtime_path).unwrap();
+    let start = source.find("void rt_native_profile_count").unwrap();
+    let end = source[start..].find("\n}\n\nstatic int").unwrap() + start;
+    let body = &source[start..end];
+
+    assert!(!body.contains("RT_NATIVE_PROFILE_LOCK"));
+    assert!(!body.contains("pthread_mutex"));
+    assert!(body.contains("rt_native_profile_owner"));
+}
+
+#[test]
+fn test_native_profile_report_includes_observability_summary() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let runtime_path = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("runtime")
+        .join("runtime_native.c");
+    let source = fs::read_to_string(runtime_path).unwrap();
+
+    assert!(source.contains("# profile_summary emitted=%llu dropped=%llu capacity=%llu"));
+    assert!(source.contains("owner->emitted++"));
+    assert!(source.contains("owner->dropped++"));
+    assert!(source.contains("RT_NATIVE_PROFILE_MAX"));
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_native_profile_full_capacity_reports_drops() {
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    if std::process::Command::new(&cc).arg("--version").output().is_err() {
+        return;
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap().parent().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("profile_overflow.c");
+    let output_path = temp.path().join("profile.tsv");
+    let binary_path = temp.path().join("profile_overflow");
+    let output_literal = output_path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+
+    fs::write(
+        &source_path,
+        format!(
+            r#"#define RT_NATIVE_PROFILE_MAX 2
+#include "{runtime}"
+
+int main(void) {{
+    setenv("SIMPLE_NATIVE_PROFILE_OUT", "{output}", 1);
+    rt_native_profile_count("a");
+    rt_native_profile_count("b");
+    rt_native_profile_count("c");
+    rt_native_profile_dump();
+    return 0;
+}}
+"#,
+            runtime = repo_root.join("src/runtime/runtime_native.c").display(),
+            output = output_literal
+        ),
+    )
+    .unwrap();
+
+    let status = std::process::Command::new(&cc)
+        .args(["-O2", "-std=gnu11", "-ffunction-sections", "-fdata-sections"])
+        .arg("-I")
+        .arg(repo_root)
+        .arg("-I")
+        .arg(repo_root.join("src/runtime"))
+        .arg("-I")
+        .arg(repo_root.join("src/runtime/platform"))
+        .arg(&source_path)
+        .args(["-Wl,--gc-sections", "-pthread", "-lm", "-o"])
+        .arg(&binary_path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert!(std::process::Command::new(&binary_path).status().unwrap().success());
+    let report = fs::read_to_string(output_path).unwrap();
+
+    assert!(report.contains("1\ta\n"));
+    assert!(report.contains("1\tb\n"));
+    assert!(!report.contains("1\tc\n"));
+    assert!(report.contains("# profile_summary emitted=2 dropped=1 capacity=2\n"));
 }
 
 #[test]
@@ -1549,6 +1714,64 @@ int main(int argc, char** argv) {
 
 #[cfg(not(target_os = "windows"))]
 #[test]
+fn test_stub_generation_rejects_unresolved_critical_runtime_symbol() {
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    if std::process::Command::new(&cc).arg("--version").output().is_err() {
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let main_c = temp.path().join("main.c");
+    let runtime_c = temp.path().join("runtime.c");
+    let main_o = temp.path().join("main.o");
+    let runtime_o = temp.path().join("runtime.o");
+
+    std::fs::write(
+        &main_c,
+        r#"
+extern long spl_mutex_create(void);
+int main(void) {
+    return (int)spl_mutex_create();
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(&runtime_c, "void unrelated_runtime_symbol(void) {}\n").unwrap();
+
+    for (src, obj) in [(&main_c, &main_o), (&runtime_c, &runtime_o)] {
+        assert!(std::process::Command::new(&cc)
+            .args(["-c", "-ffunction-sections", "-fdata-sections"])
+            .arg(src)
+            .arg("-o")
+            .arg(obj)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    let imports = ModuleImports {
+        import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+        ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+        all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
+        re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
+        fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        populate_global_struct_defs: false,
+        populate_global_enum_defs: false,
+    };
+
+    let err = super::stubs::generate_stub_object(temp.path(), &[], &main_o, Some(&runtime_o), &imports)
+        .expect_err("critical runtime symbols must not be weak-stubbed");
+    assert!(err.contains("unresolved critical runtime symbols"));
+    assert!(err.contains("spl_mutex_create"));
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
 fn test_no_stub_fallback_rejects_unresolved_host_symbols() {
     let _guard = no_stub_fallback_env_lock().lock().unwrap();
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
@@ -2274,8 +2497,7 @@ fn test_freestanding_qualified_to_bare_alias_bridges_export_symbol() {
             .success());
     }
 
-    let aliases =
-        NativeProjectBuilder::freestanding_qualified_to_bare_defsyms(&[def_o, caller_o], &[]).unwrap();
+    let aliases = NativeProjectBuilder::freestanding_qualified_to_bare_defsyms(&[def_o, caller_o], &[]).unwrap();
 
     assert_eq!(
         aliases,

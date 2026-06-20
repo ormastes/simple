@@ -258,6 +258,10 @@ pub struct NativeBuildConfig {
     /// Emit a static archive from compiled Simple objects instead of linking
     /// an executable.
     pub emit_archive: bool,
+    /// Instrument generated functions with runtime counters.
+    pub profile_counters: bool,
+    /// Optional comma-separated profile counter filter.
+    pub profile_filter: Option<String>,
 }
 
 impl Default for NativeBuildConfig {
@@ -284,6 +288,8 @@ impl Default for NativeBuildConfig {
             linker_script: None,
             opt_level: NativeOptimizationLevel::default_for_native_executable(),
             emit_archive: false,
+            profile_counters: false,
+            profile_filter: None,
         }
     }
 }
@@ -552,6 +558,8 @@ impl NativeProjectBuilder {
                         &self.config.backend,
                         self.config.no_mangle,
                         &module_prefix,
+                        self.config.profile_counters,
+                        self.config.profile_filter.as_deref(),
                     );
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
                     if cached_o.exists() {
@@ -882,6 +890,8 @@ impl NativeProjectBuilder {
                         &self.config.backend,
                         self.config.no_mangle,
                         &module_prefix,
+                        self.config.profile_counters,
+                        self.config.profile_filter.as_deref(),
                     );
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
                     let _copy_result = std::fs::copy(obj_path, cached_o);
@@ -1148,6 +1158,8 @@ pub(crate) fn object_cache_key(
     backend: &str,
     no_mangle: bool,
     module_prefix: &str,
+    profile_counters: bool,
+    profile_filter: Option<&str>,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1156,6 +1168,8 @@ pub(crate) fn object_cache_key(
     backend.hash(&mut hasher);
     no_mangle.hash(&mut hasher);
     module_prefix.hash(&mut hasher);
+    profile_counters.hash(&mut hasher);
+    profile_filter.unwrap_or("").hash(&mut hasher);
     std::env::var("SIMPLE_NATIVE_CPU").unwrap_or_default().hash(&mut hasher);
     active_simd_tier_name().hash(&mut hasher);
     hasher.finish()

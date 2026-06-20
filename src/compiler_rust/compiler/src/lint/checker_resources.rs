@@ -840,9 +840,9 @@ fn source_path_is_privileged(source_file: &Path) -> bool {
         .map(|component| component.as_os_str().to_string_lossy().to_string())
         .collect();
 
-    components.windows(2).any(|pair| {
-        pair[0] == "src" && (pair[1] == "lib" || pair[1] == "runtime" || pair[1] == "compiler")
-    })
+    components
+        .windows(2)
+        .any(|pair| pair[0] == "src" && (pair[1] == "lib" || pair[1] == "runtime" || pair[1] == "compiler"))
 }
 
 /// Returns true when a module opts out of the `raw_rt_access` lint via a

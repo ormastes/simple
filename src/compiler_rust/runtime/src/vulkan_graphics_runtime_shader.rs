@@ -44,6 +44,7 @@ pub extern "C" fn rt_vulkan_compile_spirv(spirv_ptr: i64) -> i64 {
             h
         }
         Err(e) => {
+            eprintln!("[diag] runtime compile_spirv: ShaderModule::new failed: {e}");
             state.set_error(format!("compile_spirv: {e}"));
             0
         }

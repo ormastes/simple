@@ -186,3 +186,17 @@ fn read_sample_count() -> i64:
     let result = unsafe { jit.call_i64_void("read_sample_count").unwrap() };
     assert_eq!(result, 0);
 }
+
+#[test]
+fn test_jit_static_provider_resolves_generic_rt_len() {
+    simple_runtime::register_static_runtime_symbols();
+    let provider = static_provider();
+    assert!(
+        provider.get_symbol("rt_len").is_some(),
+        "rt_len must be registered so dynamic len() lowering does not NULL-jump in JIT"
+    );
+    assert!(
+        provider.get_symbol("rt_time_now_unix_micros").is_some(),
+        "rt_time_now_unix_micros must be registered so timing helpers do not NULL-jump in JIT"
+    );
+}
