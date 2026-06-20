@@ -27,10 +27,13 @@ struct SdnGraphEdge:
     waypoints: text
     start_anchor: text
     end_anchor: text
+    label_x: text
+    label_y: text
 
 struct SdnGraphNodeInspector:
     found: bool
     reason: text
+    node_index: i64
     id: text
     label: text
     css: text
@@ -42,6 +45,8 @@ struct SdnGraphNodeInspector:
     height: text
     layer: text
     parent: text
+    child_count: text
+    child_bounds: text
 
 struct SdnGraphEdgeInspector:
     found: bool
@@ -56,7 +61,23 @@ struct SdnGraphEdgeInspector:
     waypoints: text
     start_anchor: text
     end_anchor: text
+    label_x: text
+    label_y: text
     path: text
+    path_bounds: text
+    segment_count: text
+    segments: text
+    segment_midpoints: text
+    segment_orientations: text
+
+struct SdnGraphStyleInspector:
+    found: bool
+    reason: text
+    css: text
+    target: text
+    parent_css: text
+    key: text
+    value: text
 
 struct SdnGraphCss:
     name: text
@@ -227,7 +248,7 @@ fn sdn_graph_parse(content: text) -> SdnGraph:
             current_weave_layer = line.slice(6, line.len()).trim()
         elif in_weave and line.starts_with("parent:"):
             current_weave_parent = line.slice(7, line.len()).trim()
-        elif current_css != "" and line.contains(":"):
+        elif current_css != "" and line.contains(":") and (raw.starts_with(" ") or raw.starts_with("\t")):
             val sep = line.index_of(":")
             val key = line.slice(0, sep).trim()
             val value = line.slice(sep + 1, line.len()).trim()
@@ -329,9 +350,9 @@ fn sdn_graph_to_canonical_sdn(graph: SdnGraph) -> text:
     for node in graph.nodes:
         out.push("    " + node.id + ", " + node.label + ", " + _sg_quote_if_space(node.css) + ", " + node.role + ", " + node.shape + ", " + node.x + ", " + node.y + ", " + node.width + ", " + node.height + ", " + node.layer + ", " + node.parent)
     out.push("")
-    out.push("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|")
+    out.push("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|")
     for edge in graph.edges:
-        out.push("    " + edge.from_id + ", " + edge.to_id + ", " + edge.label + ", " + _sg_quote_if_space(edge.css) + ", " + edge.kind + ", " + edge.route + ", " + _sg_quote_if_space(edge.waypoints) + ", " + edge.start_anchor + ", " + edge.end_anchor)
+        out.push("    " + edge.from_id + ", " + edge.to_id + ", " + edge.label + ", " + _sg_quote_if_space(edge.css) + ", " + edge.kind + ", " + edge.route + ", " + _sg_quote_if_space(edge.waypoints) + ", " + edge.start_anchor + ", " + edge.end_anchor + ", " + edge.label_x + ", " + edge.label_y)
     out.push("")
     out.push("css |name, extends, target|")
     for css in graph.css_defs:
@@ -365,6 +386,266 @@ fn sdn_graph_update_edge_at(graph: SdnGraph, edge_index: i64, route: text, waypo
         i = i + 1
     SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: graph.nodes, edges: out_edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
 
+fn sdn_graph_update_edge_checked(graph: SdnGraph, edge_index: i64, route: text, waypoints: text, start_anchor: text, end_anchor: text) -> SdnGraphEditResult:
+    if edge_index < 0 or edge_index >= graph.edges.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-edge", diff: "@@ sdd-reroute-edge @@\nexpected: edge index\nactual: " + edge_index.to_text(), graph: graph)
+    if route != "" and route != "simple" and route != "orthogonal":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-route", diff: "@@ sdd-reroute-edge @@\nexpected: simple, orthogonal, or empty\nactual: " + route, graph: graph)
+    if not _sg_anchor_token_valid(start_anchor) or not _sg_anchor_token_valid(end_anchor):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-anchor", diff: "@@ sdd-reroute-edge @@\nexpected: left|right|top|bottom or empty\nactual: " + start_anchor + "|" + end_anchor, graph: graph)
+    if not _sg_waypoints_token_valid(waypoints):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-waypoints", diff: "@@ sdd-reroute-edge @@\nexpected: integer x/y waypoints\nactual: " + waypoints, graph: graph)
+    val updated = sdn_graph_update_edge_at(graph, edge_index, route, waypoints, start_anchor, end_anchor)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-reroute-edge @@\nupdated: " + edge_index.to_text(), graph: updated)
+
+fn sdn_graph_add_edge(graph: SdnGraph, from_id: text, to_id: text, label: text, css: text, kind: text, route: text, waypoints: text, start_anchor: text, end_anchor: text) -> SdnGraph:
+    var out_edges: [SdnGraphEdge] = []
+    for edge in graph.edges:
+        out_edges.push(_sg_clone_edge(edge))
+    out_edges.push(SdnGraphEdge(from_id: from_id, to_id: to_id, label: label, css: css, kind: kind, route: route, waypoints: waypoints, start_anchor: start_anchor, end_anchor: end_anchor, label_x: "", label_y: ""))
+    SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: graph.nodes, edges: out_edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+
+fn sdn_graph_add_edge_checked(graph: SdnGraph, from_id: text, to_id: text, label: text, css: text, kind: text, route: text, waypoints: text, start_anchor: text, end_anchor: text) -> SdnGraphEditResult:
+    if not _sg_node_id_exists(graph, from_id) or not _sg_node_id_exists(graph, to_id):
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-add-edge @@\nexpected: existing endpoints\nactual: " + from_id + " -> " + to_id, graph: graph)
+    if not _sg_safe_style_token_list(css):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-style-token", diff: "@@ sdd-add-edge @@\nexpected: space-separated style tokens\nactual: " + css, graph: graph)
+    if kind != "" and not _sg_safe_style_token(kind):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-kind-token", diff: "@@ sdd-add-edge @@\nexpected: kind token\nactual: " + kind, graph: graph)
+    if route != "" and route != "simple" and route != "orthogonal":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-route", diff: "@@ sdd-add-edge @@\nexpected: simple, orthogonal, or empty\nactual: " + route, graph: graph)
+    if not _sg_anchor_token_valid(start_anchor) or not _sg_anchor_token_valid(end_anchor):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-anchor", diff: "@@ sdd-add-edge @@\nexpected: left|right|top|bottom or empty\nactual: " + start_anchor + "|" + end_anchor, graph: graph)
+    if not _sg_waypoints_token_valid(waypoints):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-waypoints", diff: "@@ sdd-add-edge @@\nexpected: integer x/y waypoints\nactual: " + waypoints, graph: graph)
+    val updated = sdn_graph_add_edge(graph, from_id, to_id, label, css, kind, route, waypoints, start_anchor, end_anchor)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-add-edge @@\nadded: " + from_id + " -> " + to_id, graph: updated)
+
+fn sdn_graph_update_edge_label_point_at(graph: SdnGraph, edge_index: i64, label_x: text, label_y: text) -> SdnGraph:
+    var out_edges: [SdnGraphEdge] = []
+    var i = 0
+    while i < graph.edges.len():
+        val current = graph.edges[i]
+        var next = _sg_clone_edge(current)
+        if i == edge_index:
+            next.label_x = label_x
+            next.label_y = label_y
+        out_edges.push(next)
+        i = i + 1
+    SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: graph.nodes, edges: out_edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+
+fn sdn_graph_update_edge_label_point_checked(graph: SdnGraph, edge_index: i64, label_x: text, label_y: text) -> SdnGraphEditResult:
+    if edge_index < 0 or edge_index >= graph.edges.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-edge", diff: "@@ sdd-edge-label-point @@\nexpected: edge index\nactual: " + edge_index.to_text(), graph: graph)
+    val x = label_x.trim()
+    val y = label_y.trim()
+    if not _sg_signed_i64_token(x) or not _sg_signed_i64_token(y):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-label-point", diff: "@@ sdd-edge-label-point @@\nexpected: integer label x/y\nactual: " + label_x + "," + label_y, graph: graph)
+    val updated = sdn_graph_update_edge_label_point_at(graph, edge_index, x, y)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-edge-label-point @@\nupdated: " + edge_index.to_text(), graph: updated)
+
+fn sdn_graph_duplicate_edge_checked(graph: SdnGraph, edge_index: i64) -> SdnGraphEditResult:
+    if edge_index < 0 or edge_index >= graph.edges.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-edge", diff: "@@ sdd-duplicate-edge @@\nexpected: edge index\nactual: " + edge_index.to_text(), graph: graph)
+    var out_edges: [SdnGraphEdge] = []
+    var i = 0
+    while i < graph.edges.len():
+        out_edges.push(_sg_clone_edge(graph.edges[i]))
+        i = i + 1
+    out_edges.push(_sg_clone_edge(graph.edges[edge_index]))
+    val updated = SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: graph.nodes, edges: out_edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-duplicate-edge @@\n+ " + edge_index.to_text(), graph: updated)
+
+fn sdn_graph_add_node_checked(graph: SdnGraph, id: text, label: text, css: text, role: text, shape: text, x: text, y: text, width: text, height: text, layer: text, parent: text) -> SdnGraphEditResult:
+    if id == "":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-id", diff: "@@ sdd-add-node @@\nexpected: non-empty id\nactual: " + id, graph: graph)
+    if _sg_node_id_exists(graph, id):
+        return SdnGraphEditResult(accepted: false, reason: "duplicate-id", diff: "@@ sdd-add-node @@\nexpected: unused id\nactual: " + id, graph: graph)
+    if parent != "" and not _sg_node_id_exists(graph, parent):
+        return SdnGraphEditResult(accepted: false, reason: "missing-parent", diff: "@@ sdd-add-node @@\nexpected: existing parent or empty\nactual: " + parent, graph: graph)
+    if not _sg_safe_style_token_list(css):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-style-token", diff: "@@ sdd-add-node @@\nexpected: space-separated style tokens\nactual: " + css, graph: graph)
+    if role != "" and not _sg_safe_style_token(role):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-role-token", diff: "@@ sdd-add-node @@\nexpected: role token\nactual: " + role, graph: graph)
+    if shape != "" and not _sg_safe_style_token(shape):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-shape-token", diff: "@@ sdd-add-node @@\nexpected: shape token\nactual: " + shape, graph: graph)
+    if layer != "" and not _sg_safe_style_token(layer):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-layer-token", diff: "@@ sdd-add-node @@\nexpected: layer token\nactual: " + layer, graph: graph)
+    var out_nodes: [SdnGraphNode] = []
+    for node in graph.nodes:
+        out_nodes.push(_sg_clone_node(node))
+    out_nodes.push(SdnGraphNode(id: id, label: label, css: css, role: role, shape: shape, x: x, y: y, width: width, height: height, layer: layer, parent: parent))
+    val updated = SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: out_nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-add-node @@\nadded: " + id, graph: updated)
+
+fn sdn_graph_set_style_rule_checked(graph: SdnGraph, css: text, target: text, parent_css: text, key: text, value: text) -> SdnGraphEditResult:
+    if css == "" or key == "":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-style-rule", diff: "@@ sdd-style-rule @@\nexpected: non-empty css and key\nactual: " + css + "|" + key, graph: graph)
+    if not _sg_safe_style_token(css) or not _sg_safe_style_token(key) or (parent_css != "" and not _sg_safe_style_token(parent_css)):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-style-token", diff: "@@ sdd-style-rule @@\nexpected: table-safe css, parent, and key\nactual: " + css + "|" + parent_css + "|" + key, graph: graph)
+    if target != "" and target != "node" and target != "edge":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-target", diff: "@@ sdd-style-rule @@\nexpected: node or edge\nactual: " + target, graph: graph)
+    if value.trim() != "" and _sg_safe_css_value(value) == "":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-style-value", diff: "@@ sdd-style-rule @@\nexpected: safe CSS value\nactual: " + value, graph: graph)
+    if parent_css != "" and parent_css != "none":
+        if _sg_css_parent_chain_reaches(graph, parent_css, css):
+            return SdnGraphEditResult(accepted: false, reason: "style-parent-cycle", diff: "@@ sdd-style-rule @@\nexpected: non-self parent css\nactual: " + parent_css, graph: graph)
+        if not _sg_css_name_exists(graph, parent_css):
+            return SdnGraphEditResult(accepted: false, reason: "missing-style-parent", diff: "@@ sdd-style-rule @@\nexpected: existing parent css\nactual: " + parent_css, graph: graph)
+    var out_defs: [SdnGraphCss] = []
+    var found_def = false
+    for css_def in graph.css_defs:
+        if css_def.name == css:
+            val next_target = if target != "" then target else: css_def.target
+            val next_parent = if parent_css != "" then parent_css else: css_def.parent_css
+            out_defs.push(SdnGraphCss(name: css, parent_css: next_parent, target: next_target))
+            found_def = true
+        else:
+            out_defs.push(css_def)
+    if not found_def:
+        val new_target = if target != "" then target else: "node"
+        val new_parent = if parent_css != "" then parent_css else: "none"
+        out_defs.push(SdnGraphCss(name: css, parent_css: new_parent, target: new_target))
+    var out_styles: [SdnGraphStyle] = []
+    var found_style = false
+    for style in graph.styles:
+        if style.css == css and style.key == key:
+            out_styles.push(SdnGraphStyle(css: css, key: key, value: value))
+            found_style = true
+        else:
+            out_styles.push(style)
+    if not found_style:
+        out_styles.push(SdnGraphStyle(css: css, key: key, value: value))
+    val updated = SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: graph.nodes, edges: graph.edges, css_defs: out_defs, styles: out_styles, weaves: graph.weaves)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-style-rule @@\nupdated: " + css + "." + key, graph: updated)
+
+fn sdn_graph_delete_style_rule_checked(graph: SdnGraph, css: text, key: text) -> SdnGraphEditResult:
+    if css == "" or key == "":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-style-rule", diff: "@@ sdd-delete-style-rule @@\nexpected: non-empty css and key\nactual: " + css + "|" + key, graph: graph)
+    if not _sg_safe_style_token(css) or not _sg_safe_style_token(key):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-style-token", diff: "@@ sdd-delete-style-rule @@\nexpected: table-safe css and key\nactual: " + css + "|" + key, graph: graph)
+    var out_styles: [SdnGraphStyle] = []
+    var found_style = false
+    for style in graph.styles:
+        if style.css == css and style.key == key:
+            found_style = true
+        else:
+            out_styles.push(style)
+    if not found_style:
+        return SdnGraphEditResult(accepted: false, reason: "missing-style-rule", diff: "@@ sdd-delete-style-rule @@\nexpected: existing rule\nactual: " + css + "." + key, graph: graph)
+    val updated = SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: graph.nodes, edges: graph.edges, css_defs: graph.css_defs, styles: out_styles, weaves: graph.weaves)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-delete-style-rule @@\ndeleted: " + css + "." + key, graph: updated)
+
+fn sdn_graph_inspect_style_rule(graph: SdnGraph, css: text, key: text) -> SdnGraphStyleInspector:
+    if css == "" or key == "":
+        return SdnGraphStyleInspector(found: false, reason: "invalid-args", css: css, target: "", parent_css: "", key: key, value: "")
+    var target = ""
+    var parent_css = ""
+    for css_def in graph.css_defs:
+        if css_def.name == css:
+            target = css_def.target
+            parent_css = css_def.parent_css
+    for style in graph.styles:
+        if style.css == css and style.key == key:
+            return SdnGraphStyleInspector(found: true, reason: "selected", css: css, target: target, parent_css: parent_css, key: key, value: style.value)
+    SdnGraphStyleInspector(found: false, reason: "missing-style-rule", css: css, target: target, parent_css: parent_css, key: key, value: "")
+
+fn sdn_graph_update_edge_label_at(graph: SdnGraph, edge_index: i64, label: text) -> SdnGraph:
+    var out_edges: [SdnGraphEdge] = []
+    var i = 0
+    while i < graph.edges.len():
+        val current = graph.edges[i]
+        var next = _sg_clone_edge(current)
+        if i == edge_index:
+            next.label = label
+        out_edges.push(next)
+        i = i + 1
+    SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: graph.nodes, edges: out_edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+
+fn sdn_graph_update_edge_label_checked(graph: SdnGraph, edge_index: i64, label: text) -> SdnGraphEditResult:
+    if edge_index < 0 or edge_index >= graph.edges.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-edge", diff: "@@ sdd-edge-label @@\nexpected: edge index\nactual: " + edge_index.to_text(), graph: graph)
+    val updated = sdn_graph_update_edge_label_at(graph, edge_index, label)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-edge-label @@\nupdated: " + edge_index.to_text(), graph: updated)
+
+fn sdn_graph_update_edge_style_at(graph: SdnGraph, edge_index: i64, css: text) -> SdnGraph:
+    var out_edges: [SdnGraphEdge] = []
+    var i = 0
+    while i < graph.edges.len():
+        val current = graph.edges[i]
+        var next = _sg_clone_edge(current)
+        if i == edge_index:
+            next.css = css
+        out_edges.push(next)
+        i = i + 1
+    SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: graph.nodes, edges: out_edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+
+fn sdn_graph_update_edge_style_checked(graph: SdnGraph, edge_index: i64, css: text) -> SdnGraphEditResult:
+    if edge_index < 0 or edge_index >= graph.edges.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-edge", diff: "@@ sdd-edge-style @@\nexpected: edge index\nactual: " + edge_index.to_text(), graph: graph)
+    if not _sg_safe_style_token_list(css):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-style-token", diff: "@@ sdd-edge-style @@\nexpected: space-separated style tokens\nactual: " + css, graph: graph)
+    val updated = sdn_graph_update_edge_style_at(graph, edge_index, css)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-edge-style @@\nupdated: " + edge_index.to_text(), graph: updated)
+
+fn sdn_graph_update_edge_kind_at(graph: SdnGraph, edge_index: i64, kind: text) -> SdnGraph:
+    var out_edges: [SdnGraphEdge] = []
+    var i = 0
+    while i < graph.edges.len():
+        val current = graph.edges[i]
+        var next = _sg_clone_edge(current)
+        if i == edge_index:
+            next.kind = kind
+        out_edges.push(next)
+        i = i + 1
+    SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: graph.nodes, edges: out_edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+
+fn sdn_graph_update_edge_kind_checked(graph: SdnGraph, edge_index: i64, kind: text) -> SdnGraphEditResult:
+    if edge_index < 0 or edge_index >= graph.edges.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-edge", diff: "@@ sdd-edge-kind @@\nexpected: edge index\nactual: " + edge_index.to_text(), graph: graph)
+    if kind != "" and not _sg_safe_style_token(kind):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-kind-token", diff: "@@ sdd-edge-kind @@\nexpected: kind token\nactual: " + kind, graph: graph)
+    val updated = sdn_graph_update_edge_kind_at(graph, edge_index, kind)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-edge-kind @@\nupdated: " + edge_index.to_text(), graph: updated)
+
+fn sdn_graph_update_edge_endpoints_at(graph: SdnGraph, edge_index: i64, from_id: text, to_id: text) -> SdnGraph:
+    var out_edges: [SdnGraphEdge] = []
+    var i = 0
+    while i < graph.edges.len():
+        val current = graph.edges[i]
+        var next = _sg_clone_edge(current)
+        if i == edge_index:
+            next.from_id = from_id
+            next.to_id = to_id
+        out_edges.push(next)
+        i = i + 1
+    SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: graph.nodes, edges: out_edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+
+fn sdn_graph_update_edge_endpoints_checked(graph: SdnGraph, edge_index: i64, from_id: text, to_id: text) -> SdnGraphEditResult:
+    if edge_index < 0 or edge_index >= graph.edges.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-edge", diff: "@@ sdd-edge-endpoints @@\nexpected: edge index\nactual: " + edge_index.to_text(), graph: graph)
+    val from = from_id.trim()
+    val to = to_id.trim()
+    if not _sg_node_id_exists(graph, from) or not _sg_node_id_exists(graph, to):
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-edge-endpoints @@\nexpected: existing endpoints\nactual: " + from + " -> " + to, graph: graph)
+    val updated = sdn_graph_update_edge_endpoints_at(graph, edge_index, from, to)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-edge-endpoints @@\nupdated: " + edge_index.to_text(), graph: updated)
+
+fn sdn_graph_delete_edge_at(graph: SdnGraph, edge_index: i64) -> SdnGraph:
+    var out_edges: [SdnGraphEdge] = []
+    var i = 0
+    while i < graph.edges.len():
+        if i != edge_index:
+            out_edges.push(_sg_clone_edge(graph.edges[i]))
+        i = i + 1
+    SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: graph.nodes, edges: out_edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+
+fn sdn_graph_delete_edge_checked(graph: SdnGraph, edge_index: i64) -> SdnGraphEditResult:
+    if edge_index < 0 or edge_index >= graph.edges.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-edge", diff: "@@ sdd-delete-edge @@\nexpected: edge index\nactual: " + edge_index.to_text(), graph: graph)
+    val updated = sdn_graph_delete_edge_at(graph, edge_index)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-delete-edge @@\ndeleted: " + edge_index.to_text(), graph: updated)
+
 fn sdn_graph_update_node_at(graph: SdnGraph, node_index: i64, css: text, role: text, shape: text, x: text, y: text, width: text, height: text, layer: text) -> SdnGraph:
     var out_nodes: [SdnGraphNode] = []
     var i = 0
@@ -384,17 +665,128 @@ fn sdn_graph_update_node_at(graph: SdnGraph, node_index: i64, css: text, role: t
         i = i + 1
     SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: out_nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
 
+fn sdn_graph_update_node_geometry_checked(graph: SdnGraph, node_index: i64, x: text, y: text, width: text, height: text) -> SdnGraphEditResult:
+    if node_index < 0 or node_index >= graph.nodes.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-node-geometry @@\nexpected: node index\nactual: " + node_index.to_text(), graph: graph)
+    val clean_x = x.trim()
+    val clean_y = y.trim()
+    val clean_width = width.trim()
+    val clean_height = height.trim()
+    if not _sg_signed_i64_token(clean_x) or not _sg_signed_i64_token(clean_y) or not _sg_non_negative_i32_token(clean_width) or not _sg_non_negative_i32_token(clean_height):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-node-geometry @@\nexpected: integer x/y and non-negative width/height\nactual: " + x + "," + y + "," + width + "," + height, graph: graph)
+    val node = graph.nodes[node_index]
+    val updated = sdn_graph_update_node_at(graph, node_index, node.css, node.role, node.shape, clean_x, clean_y, clean_width, clean_height, node.layer)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-node-geometry @@\nupdated: " + node_index.to_text(), graph: updated)
+
+fn sdn_graph_delete_node_at(graph: SdnGraph, node_index: i64) -> SdnGraph:
+    if node_index < 0 or node_index >= graph.nodes.len():
+        return graph
+    val deleted_id = graph.nodes[node_index].id
+    var out_nodes: [SdnGraphNode] = []
+    var ni = 0
+    while ni < graph.nodes.len():
+        if ni != node_index:
+            var node = _sg_clone_node(graph.nodes[ni])
+            if node.parent == deleted_id:
+                node.parent = ""
+            out_nodes.push(node)
+        ni = ni + 1
+    var out_edges: [SdnGraphEdge] = []
+    var ei = 0
+    while ei < graph.edges.len():
+        val edge = graph.edges[ei]
+        if edge.from_id != deleted_id and edge.to_id != deleted_id:
+            out_edges.push(_sg_clone_edge(edge))
+        ei = ei + 1
+    SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: out_nodes, edges: out_edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+
+fn sdn_graph_delete_node_checked(graph: SdnGraph, node_id: text) -> SdnGraphEditResult:
+    val id = node_id.trim()
+    if id == "":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-id", diff: "@@ sdd-delete-node @@\nexpected: node id\nactual: empty", graph: graph)
+    if _sg_node_id_count(graph, id) > 1:
+        return SdnGraphEditResult(accepted: false, reason: "ambiguous-source", diff: "@@ sdd-delete-node @@\nexpected: one node\nactual: " + id, graph: graph)
+    val node_index = _sg_find_node_index(graph, id)
+    if node_index < 0:
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-delete-node @@\nexpected: " + id + "\nactual: missing", graph: graph)
+    val updated = sdn_graph_delete_node_at(graph, node_index)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-delete-node @@\ndeleted: " + id, graph: updated)
+
 fn sdn_graph_update_node_shape_at(graph: SdnGraph, node_index: i64, shape: text) -> SdnGraph:
     if node_index < 0 or node_index >= graph.nodes.len():
         return graph
     val node = graph.nodes[node_index]
     sdn_graph_update_node_at(graph, node_index, node.css, node.role, shape, node.x, node.y, node.width, node.height, node.layer)
 
+fn sdn_graph_update_node_shape_checked(graph: SdnGraph, node_index: i64, shape: text) -> SdnGraphEditResult:
+    if node_index < 0 or node_index >= graph.nodes.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-node-shape @@\nexpected: node index\nactual: " + node_index.to_text(), graph: graph)
+    if shape != "" and not _sg_safe_style_token(shape):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-shape-token", diff: "@@ sdd-node-shape @@\nexpected: shape token\nactual: " + shape, graph: graph)
+    val updated = sdn_graph_update_node_shape_at(graph, node_index, shape)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-node-shape @@\nupdated: " + node_index.to_text(), graph: updated)
+
 fn sdn_graph_update_node_style_at(graph: SdnGraph, node_index: i64, css: text) -> SdnGraph:
     if node_index < 0 or node_index >= graph.nodes.len():
         return graph
     val node = graph.nodes[node_index]
     sdn_graph_update_node_at(graph, node_index, css, node.role, node.shape, node.x, node.y, node.width, node.height, node.layer)
+
+fn sdn_graph_update_node_style_checked(graph: SdnGraph, node_index: i64, css: text) -> SdnGraphEditResult:
+    if node_index < 0 or node_index >= graph.nodes.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-node-style @@\nexpected: node index\nactual: " + node_index.to_text(), graph: graph)
+    if not _sg_safe_style_token_list(css):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-style-token", diff: "@@ sdd-node-style @@\nexpected: space-separated style tokens\nactual: " + css, graph: graph)
+    val updated = sdn_graph_update_node_style_at(graph, node_index, css)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-node-style @@\nupdated: " + node_index.to_text(), graph: updated)
+
+fn sdn_graph_update_node_layer_at(graph: SdnGraph, node_index: i64, layer: text) -> SdnGraph:
+    if node_index < 0 or node_index >= graph.nodes.len():
+        return graph
+    val node = graph.nodes[node_index]
+    sdn_graph_update_node_at(graph, node_index, node.css, node.role, node.shape, node.x, node.y, node.width, node.height, layer)
+
+fn sdn_graph_update_node_layer_checked(graph: SdnGraph, node_index: i64, layer: text) -> SdnGraphEditResult:
+    if node_index < 0 or node_index >= graph.nodes.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-node-layer @@\nexpected: node index\nactual: " + node_index.to_text(), graph: graph)
+    if layer != "" and not _sg_safe_style_token(layer):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-layer-token", diff: "@@ sdd-node-layer @@\nexpected: layer token\nactual: " + layer, graph: graph)
+    val updated = sdn_graph_update_node_layer_at(graph, node_index, layer)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-node-layer @@\nupdated: " + node_index.to_text(), graph: updated)
+
+fn sdn_graph_update_node_role_at(graph: SdnGraph, node_index: i64, role: text) -> SdnGraph:
+    if node_index < 0 or node_index >= graph.nodes.len():
+        return graph
+    val node = graph.nodes[node_index]
+    sdn_graph_update_node_at(graph, node_index, node.css, role, node.shape, node.x, node.y, node.width, node.height, node.layer)
+
+fn sdn_graph_update_node_role_checked(graph: SdnGraph, node_index: i64, role: text) -> SdnGraphEditResult:
+    if node_index < 0 or node_index >= graph.nodes.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-node-role @@\nexpected: node index\nactual: " + node_index.to_text(), graph: graph)
+    if role != "" and not _sg_safe_style_token(role):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-role-token", diff: "@@ sdd-node-role @@\nexpected: role token\nactual: " + role, graph: graph)
+    val updated = sdn_graph_update_node_role_at(graph, node_index, role)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-node-role @@\nupdated: " + node_index.to_text(), graph: updated)
+
+fn sdn_graph_update_node_label_at(graph: SdnGraph, node_index: i64, label: text) -> SdnGraph:
+    if node_index < 0 or node_index >= graph.nodes.len():
+        return graph
+    var out_nodes: [SdnGraphNode] = []
+    var i = 0
+    while i < graph.nodes.len():
+        val current = graph.nodes[i]
+        var next = _sg_clone_node(current)
+        if i == node_index:
+            next.label = label
+        out_nodes.push(next)
+        i = i + 1
+    SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: out_nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+
+fn sdn_graph_update_node_label_checked(graph: SdnGraph, node_index: i64, label: text) -> SdnGraphEditResult:
+    if node_index < 0 or node_index >= graph.nodes.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-node-label @@\nexpected: node index\nactual: " + node_index.to_text(), graph: graph)
+    val updated = sdn_graph_update_node_label_at(graph, node_index, label)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-node-label @@\nupdated: " + node_index.to_text(), graph: updated)
 
 fn sdn_graph_update_node_parent_at(graph: SdnGraph, node_index: i64, parent: text) -> SdnGraph:
     if node_index < 0 or node_index >= graph.nodes.len():
@@ -410,8 +802,113 @@ fn sdn_graph_update_node_parent_at(graph: SdnGraph, node_index: i64, parent: tex
         i = i + 1
     SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: out_nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
 
+fn _sg_node_parent_by_id(graph: SdnGraph, id: text) -> text:
+    for node in graph.nodes:
+        if node.id == id:
+            return node.parent
+    ""
+
+fn _sg_parent_would_cycle(graph: SdnGraph, node_id: text, parent: text) -> bool:
+    var current = parent
+    var depth = 0
+    while current != "" and depth < graph.nodes.len():
+        if current == node_id:
+            return true
+        current = _sg_node_parent_by_id(graph, current)
+        depth = depth + 1
+    false
+
+fn sdn_graph_update_node_parent_checked(graph: SdnGraph, node_id: text, parent: text) -> SdnGraphEditResult:
+    if node_id == "":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-id", diff: "@@ sdd-node-parent @@\nexpected: node id\nactual: empty", graph: graph)
+    if _sg_node_id_count(graph, node_id) > 1:
+        return SdnGraphEditResult(accepted: false, reason: "ambiguous-source", diff: "@@ sdd-node-parent @@\nexpected: one node\nactual: " + node_id, graph: graph)
+    var node_index: i64 = -1
+    var i = 0
+    while i < graph.nodes.len():
+        if graph.nodes[i].id == node_id:
+            node_index = i
+        i = i + 1
+    if node_index < 0:
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-node-parent @@\nexpected: " + node_id + "\nactual: missing", graph: graph)
+    if parent != "" and not _sg_node_id_exists(graph, parent):
+        return SdnGraphEditResult(accepted: false, reason: "missing-parent", diff: "@@ sdd-node-parent @@\nexpected: existing parent or empty\nactual: " + parent, graph: graph)
+    if _sg_parent_would_cycle(graph, node_id, parent):
+        return SdnGraphEditResult(accepted: false, reason: "parent-cycle", diff: "@@ sdd-node-parent @@\nexpected: acyclic parent\nactual: " + node_id + " -> " + parent, graph: graph)
+    val updated = sdn_graph_update_node_parent_at(graph, node_index, parent)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-node-parent @@\nupdated: " + node_id + " parent=" + parent, graph: updated)
+
+fn sdn_graph_reorder_node_checked(graph: SdnGraph, node_id: text, position: text) -> SdnGraphEditResult:
+    if node_id == "":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-id", diff: "@@ sdd-node-order @@\nexpected: node id\nactual: empty", graph: graph)
+    if position != "front" and position != "back":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-position", diff: "@@ sdd-node-order @@\nexpected: front or back\nactual: " + position, graph: graph)
+    if _sg_node_id_count(graph, node_id) > 1:
+        return SdnGraphEditResult(accepted: false, reason: "ambiguous-source", diff: "@@ sdd-node-order @@\nexpected: one node\nactual: " + node_id, graph: graph)
+    var moving = SdnGraphNode(id: "", label: "", css: "", role: "", shape: "", x: "", y: "", width: "", height: "", layer: "", parent: "")
+    var found = false
+    var rest: [SdnGraphNode] = []
+    for node in graph.nodes:
+        if node.id == node_id:
+            moving = _sg_clone_node(node)
+            found = true
+        else:
+            rest.push(_sg_clone_node(node))
+    if not found:
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-node-order @@\nexpected: " + node_id + "\nactual: missing", graph: graph)
+    var out_nodes: [SdnGraphNode] = []
+    if position == "back":
+        out_nodes.push(moving)
+    for node in rest:
+        out_nodes.push(node)
+    if position == "front":
+        out_nodes.push(moving)
+    val updated = SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: out_nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-node-order @@\n" + node_id + " -> " + position, graph: updated)
+
+fn sdn_graph_duplicate_node_checked(graph: SdnGraph, source_id: text, new_id: text, dx: text, dy: text) -> SdnGraphEditResult:
+    if source_id == "" or new_id == "":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-id", diff: "@@ sdd-duplicate-node @@\nexpected: non-empty source and new id\nactual: " + source_id + " -> " + new_id, graph: graph)
+    if _sg_node_id_exists(graph, new_id):
+        return SdnGraphEditResult(accepted: false, reason: "duplicate-id", diff: "@@ sdd-duplicate-node @@\nexpected: unused id\nactual: " + new_id, graph: graph)
+    if _sg_node_id_count(graph, source_id) > 1:
+        return SdnGraphEditResult(accepted: false, reason: "ambiguous-source", diff: "@@ sdd-duplicate-node @@\nexpected: one source node\nactual: " + source_id, graph: graph)
+    val x_offset = _sg_parse_i64_result(dx)
+    val y_offset = _sg_parse_i64_result(dy)
+    if not x_offset.ok or not y_offset.ok:
+        return SdnGraphEditResult(accepted: false, reason: "invalid-offset", diff: "@@ sdd-duplicate-node @@\nexpected: integer dx/dy\nactual: " + dx + "," + dy, graph: graph)
+    var out_nodes: [SdnGraphNode] = []
+    var found = false
+    for node in graph.nodes:
+        out_nodes.push(_sg_clone_node(node))
+        if node.id == source_id:
+            val x = _sg_parse_i64_result(node.x)
+            val y = _sg_parse_i64_result(node.y)
+            if not x.ok or not y.ok:
+                return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-duplicate-node @@\nexpected: integer source x/y\nactual: " + node.x + "," + node.y, graph: graph)
+            var copy = _sg_clone_node(node)
+            copy.id = new_id
+            copy.x = (x.value + x_offset.value).to_text()
+            copy.y = (y.value + y_offset.value).to_text()
+            out_nodes.push(copy)
+            found = true
+    if not found:
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-duplicate-node @@\nexpected: " + source_id + "\nactual: missing", graph: graph)
+    val out = _sg_graph_with_nodes(graph, out_nodes)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-duplicate-node @@\n+ " + new_id, graph: out)
+
 fn sdn_graph_update_canvas(graph: SdnGraph, new_width: text, new_height: text, new_grid: text, new_snap: text, new_zoom: text, new_background: text) -> SdnGraph:
     SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: new_width, canvas_height: new_height, canvas_grid: new_grid, canvas_snap: new_snap, canvas_zoom: new_zoom, canvas_background: new_background, nodes: graph.nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+
+fn sdn_graph_update_canvas_checked(graph: SdnGraph, new_width: text, new_height: text, new_grid: text, new_snap: text, new_zoom: text, new_background: text) -> SdnGraphEditResult:
+    if not _sg_non_negative_i32_token(new_width) or not _sg_non_negative_i32_token(new_height) or not _sg_non_negative_i32_token(new_grid) or not _sg_non_negative_i32_token(new_zoom):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-canvas-number", diff: "@@ sdd-canvas @@\nexpected: non-negative integer width height grid zoom\nactual: " + new_width + "|" + new_height + "|" + new_grid + "|" + new_zoom, graph: graph)
+    if new_snap != "true" and new_snap != "false":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-canvas-snap", diff: "@@ sdd-canvas @@\nexpected: true or false\nactual: " + new_snap, graph: graph)
+    if new_background.trim() != "" and _sg_safe_css_value(new_background) == "":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-canvas-background", diff: "@@ sdd-canvas @@\nexpected: safe CSS background\nactual: " + new_background, graph: graph)
+    val updated = sdn_graph_update_canvas(graph, new_width, new_height, new_grid, new_snap, new_zoom, new_background)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-canvas @@\nupdated: " + new_width + "x" + new_height, graph: updated)
 
 fn sdn_graph_geometry_signature(graph: SdnGraph, node_ids: [text]) -> text:
     var parts: [text] = []
@@ -496,15 +993,16 @@ fn sdn_graph_distribute_checked(graph: SdnGraph, node_ids: [text], expected_sign
 fn sdn_graph_inspect_node(graph: SdnGraph, node_id: text) -> SdnGraphNodeInspector:
     val node_index = _sg_find_node_index(graph, node_id)
     if node_index < 0:
-        return SdnGraphNodeInspector(found: false, reason: "missing-node", id: node_id, label: "", css: "", role: "", shape: "", x: "", y: "", width: "", height: "", layer: "", parent: "")
-    val node = graph.nodes[node_index]
-    SdnGraphNodeInspector(found: true, reason: "selected", id: node.id, label: node.label, css: node.css, role: node.role, shape: node.shape, x: node.x, y: node.y, width: node.width, height: node.height, layer: node.layer, parent: node.parent)
+        return SdnGraphNodeInspector(found: false, reason: "missing-node", node_index: -1, id: node_id, label: "", css: "", role: "", shape: "", x: "", y: "", width: "", height: "", layer: "", parent: "", child_count: "0", child_bounds: "")
+    val node = _sg_effective_node_geometry(graph, graph.nodes[node_index])
+    SdnGraphNodeInspector(found: true, reason: "selected", node_index: node_index, id: node.id, label: node.label, css: node.css, role: node.role, shape: node.shape, x: node.x, y: node.y, width: node.width, height: node.height, layer: node.layer, parent: node.parent, child_count: _sg_child_count(graph, node.id).to_text(), child_bounds: _sg_child_bounds_text(graph, node.id))
 
 fn sdn_graph_inspect_edge(graph: SdnGraph, edge_index: i64) -> SdnGraphEdgeInspector:
     if edge_index < 0 or edge_index >= graph.edges.len():
-        return SdnGraphEdgeInspector(found: false, reason: "missing-edge", edge_index: edge_index, from_id: "", to_id: "", label: "", css: "", kind: "", route: "", waypoints: "", start_anchor: "", end_anchor: "", path: "")
+        return SdnGraphEdgeInspector(found: false, reason: "missing-edge", edge_index: edge_index, from_id: "", to_id: "", label: "", css: "", kind: "", route: "", waypoints: "", start_anchor: "", end_anchor: "", label_x: "", label_y: "", path: "", path_bounds: "", segment_count: "", segments: "", segment_midpoints: "", segment_orientations: "")
     val edge = graph.edges[edge_index]
-    SdnGraphEdgeInspector(found: true, reason: "selected", edge_index: edge_index, from_id: edge.from_id, to_id: edge.to_id, label: edge.label, css: edge.css, kind: edge.kind, route: edge.route, waypoints: edge.waypoints, start_anchor: edge.start_anchor, end_anchor: edge.end_anchor, path: _sg_edge_svg_path(graph, edge))
+    val path = _sg_edge_svg_path(graph, edge)
+    SdnGraphEdgeInspector(found: true, reason: "selected", edge_index: edge_index, from_id: edge.from_id, to_id: edge.to_id, label: edge.label, css: edge.css, kind: edge.kind, route: edge.route, waypoints: edge.waypoints, start_anchor: edge.start_anchor, end_anchor: edge.end_anchor, label_x: edge.label_x, label_y: edge.label_y, path: path, path_bounds: _sg_path_bounds_text(path), segment_count: _sg_path_segment_count_text(path), segments: _sg_path_segments_text(path), segment_midpoints: _sg_path_segment_midpoints_text(path), segment_orientations: _sg_path_segment_orientations_text(path))
 
 fn sdn_graph_render_html(graph: SdnGraph) -> text:
     sdn_graph_render_html_with_selection(graph, "", -1)
@@ -516,26 +1014,52 @@ fn sdn_graph_render_html_with_selection(graph: SdnGraph, selected_node_id: text,
         canvas_style = canvas_style + "width:" + _sg_safe_length(graph.canvas_width) + ";"
     if graph.canvas_height != "":
         canvas_style = canvas_style + "height:" + _sg_safe_length(graph.canvas_height) + ";"
+    if graph.canvas_background != "":
+        val safe_background = _sg_safe_css_value(graph.canvas_background)
+        if safe_background != "":
+            canvas_style = canvas_style + "background-color:" + safe_background + ";"
+    if graph.canvas_grid != "":
+        val safe_grid = _sg_safe_length(graph.canvas_grid)
+        if safe_grid != "" and safe_grid != "0px":
+            canvas_style = canvas_style + "background-image:radial-gradient(circle,#cbd5e1 1px,transparent 1px);background-size:" + safe_grid + " " + safe_grid + ";"
     val style_attr = if canvas_style != "" then " style=\"" + canvas_style + "\"" else: ""
-    html.push("<div class=\"sdn-graph sdd-diagram\" data-format=\"sdd\" data-format-name=\"" + sdn_graph_format_name() + "\" data-graph=\"" + _sg_escape_html(graph.name) + "\" data-direction=\"" + _sg_escape_html(graph.direction) + "\" data-theme=\"" + _sg_escape_html(graph.theme) + "\" data-css-file=\"" + _sg_escape_html(graph.css_file) + "\" data-canvas-width=\"" + _sg_escape_html(graph.canvas_width) + "\" data-canvas-height=\"" + _sg_escape_html(graph.canvas_height) + "\" data-canvas-grid=\"" + _sg_escape_html(graph.canvas_grid) + "\" data-canvas-snap=\"" + _sg_escape_html(graph.canvas_snap) + "\" data-canvas-zoom=\"" + _sg_escape_html(graph.canvas_zoom) + "\" data-canvas-background=\"" + _sg_escape_html(graph.canvas_background) + "\" data-selected-node-id=\"" + _sg_escape_html(selected_node_id) + "\" data-selected-edge-index=\"" + selected_edge_index.to_text() + "\"" + style_attr + ">")
+    html.push("<div class=\"sdn-graph sdd-diagram\" data-format=\"sdd\" data-format-name=\"" + sdn_graph_format_name() + "\" data-file-extension=\"" + sdn_graph_file_extension() + "\" data-graph=\"" + _sg_escape_html(graph.name) + "\" data-node-count=\"" + graph.nodes.len().to_text() + "\" data-edge-count=\"" + graph.edges.len().to_text() + "\" data-direction=\"" + _sg_escape_html(graph.direction) + "\" data-theme=\"" + _sg_escape_html(graph.theme) + "\" data-css-file=\"" + _sg_escape_html(_sg_safe_resource_url(graph.css_file)) + "\" data-canvas-width=\"" + _sg_escape_html(graph.canvas_width) + "\" data-canvas-height=\"" + _sg_escape_html(graph.canvas_height) + "\" data-canvas-grid=\"" + _sg_escape_html(graph.canvas_grid) + "\" data-canvas-snap=\"" + _sg_escape_html(graph.canvas_snap) + "\" data-canvas-zoom=\"" + _sg_escape_html(graph.canvas_zoom) + "\" data-canvas-background=\"" + _sg_escape_html(graph.canvas_background) + "\" data-selected-node-id=\"" + _sg_escape_html(selected_node_id) + "\" data-selected-edge-index=\"" + selected_edge_index.to_text() + "\"" + style_attr + ">")
     if graph.edges.len() > 0:
         html.push("<svg class=\"sdd-connector-layer\" aria-hidden=\"true\" focusable=\"false\">")
         var edge_index = 0
         for edge in graph.edges:
             val path = _sg_edge_svg_path(graph, edge)
+            val path_bounds = _sg_path_bounds_text(path)
+            val label_x = _sg_edge_label_axis_text(edge, path, "x")
+            val label_y = _sg_edge_label_axis_text(edge, path, "y")
+            val start_x = _sg_path_endpoint_axis_text(path, "start", "x")
+            val start_y = _sg_path_endpoint_axis_text(path, "start", "y")
+            val end_x = _sg_path_endpoint_axis_text(path, "end", "x")
+            val end_y = _sg_path_endpoint_axis_text(path, "end", "y")
+            val segment_count = _sg_path_segment_count_text(path)
+            val segments = _sg_path_segments_text(path)
+            val segment_midpoints = _sg_path_segment_midpoints_text(path)
+            val segment_orientations = _sg_path_segment_orientations_text(path)
             val edge_selected = edge_index == selected_edge_index
             val edge_selected_text = _sg_bool_text(edge_selected)
             val edge_selected_class = if edge_selected then " sdd-selected" else: ""
+            val edge_style = _sg_resolved_style_attr(graph, edge.css, "edge")
+            val edge_kind_class = _sg_kind_class(edge.kind)
             if path != "":
-                html.push("<path class=\"sdd-connector-path " + _sg_css_classes(edge.css) + edge_selected_class + "\" data-edge-index=\"" + edge_index.to_text() + "\" data-selected=\"" + edge_selected_text + "\" aria-selected=\"" + edge_selected_text + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\" data-path=\"" + path + "\" d=\"" + path + "\" fill=\"none\" stroke=\"currentColor\"><title>" + _sg_escape_html(edge.label) + "</title></path>")
+                html.push("<path class=\"sdd-connector-path " + _sg_css_classes(edge.css) + edge_kind_class + edge_selected_class + "\" data-edge-index=\"" + edge_index.to_text() + "\" data-selected=\"" + edge_selected_text + "\" aria-selected=\"" + edge_selected_text + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-label=\"" + _sg_escape_html(edge.label) + "\" data-kind=\"" + _sg_escape_html(edge.kind) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\" data-path=\"" + path + "\" data-path-bounds=\"" + path_bounds + "\" data-segment-count=\"" + segment_count + "\" data-segments=\"" + segments + "\" data-segment-midpoints=\"" + segment_midpoints + "\" data-segment-orientations=\"" + segment_orientations + "\" data-start-x=\"" + start_x + "\" data-start-y=\"" + start_y + "\" data-end-x=\"" + end_x + "\" data-end-y=\"" + end_y + "\" data-label-x=\"" + label_x + "\" data-label-y=\"" + label_y + "\" d=\"" + path + "\" fill=\"none\" stroke=\"currentColor\"" + edge_style + "><title>" + _sg_escape_html(edge.label) + "</title></path>")
+                html.push(_sg_connector_handles(edge_selected, edge_index, edge.from_id, edge.to_id, edge.label, edge.kind, edge.route, edge.start_anchor, edge.end_anchor, start_x, start_y, end_x, end_y, edge.waypoints, label_x, label_y))
             edge_index = edge_index + 1
         html.push("</svg>")
     var i = 0
     while i < graph.nodes.len():
-        val node = graph.nodes[i]
+        val node = _sg_effective_node_geometry(graph, graph.nodes[i])
         val node_selected = selected_node_id != "" and node.id == selected_node_id
         val node_selected_text = _sg_bool_text(node_selected)
         val node_selected_class = if node_selected then " sdd-selected" else: ""
+        val child_count = _sg_child_count(graph, node.id)
+        val has_children = _sg_bool_text(child_count > 0)
+        val child_bounds = _sg_child_bounds_text(graph, node.id)
+        val layer_z = _sg_layer_z_index(node.layer)
         val auto_x = (8 + (i % 4) * 23).to_text() + "%"
         val auto_y = (12 + (i / 4) * 22).to_text() + "%"
         val x = if node.x != "" then _sg_safe_length(node.x) else: auto_x
@@ -545,23 +1069,86 @@ fn sdn_graph_render_html_with_selection(graph: SdnGraph, selected_node_id: text,
             style = style + ";width:" + _sg_safe_length(node.width)
         if node.height != "":
             style = style + ";height:" + _sg_safe_length(node.height)
-        html.push("<button type=\"button\" class=\"sdn-graph-node sdd-node " + _sg_css_classes(node.css) + node_selected_class + "\" data-node=\"" + _sg_escape_html(node.id) + "\" data-selected=\"" + node_selected_text + "\" aria-selected=\"" + node_selected_text + "\" data-role=\"" + _sg_escape_html(node.role) + "\" data-shape=\"" + _sg_escape_html(node.shape) + "\" data-layer=\"" + _sg_escape_html(node.layer) + "\" data-parent=\"" + _sg_escape_html(node.parent) + "\" data-x=\"" + _sg_escape_html(node.x) + "\" data-y=\"" + _sg_escape_html(node.y) + "\" data-width=\"" + _sg_escape_html(node.width) + "\" data-height=\"" + _sg_escape_html(node.height) + "\" style=\"" + style + "\">" + _sg_escape_html(node.label) + "</button>")
+        val shape_style = _sg_shape_style(node.shape)
+        if shape_style != "":
+            style = style + ";" + shape_style
+        val node_style = _sg_resolved_style(graph, node.css, "node")
+        if node_style != "":
+            style = style + ";" + node_style
+        if layer_z != "":
+            style = style + ";z-index:" + layer_z
+        html.push("<button type=\"button\" class=\"sdn-graph-node sdd-node " + _sg_css_classes(node.css) + _sg_shape_class(node.shape) + node_selected_class + "\" data-node=\"" + _sg_escape_html(node.id) + "\" data-node-index=\"" + i.to_text() + "\" data-label=\"" + _sg_escape_html(node.label) + "\" data-selected=\"" + node_selected_text + "\" aria-selected=\"" + node_selected_text + "\" data-role=\"" + _sg_escape_html(node.role) + "\" data-shape=\"" + _sg_escape_html(node.shape) + "\" data-layer=\"" + _sg_escape_html(node.layer) + "\" data-layer-z=\"" + layer_z + "\" data-parent=\"" + _sg_escape_html(node.parent) + "\" data-child-count=\"" + child_count.to_text() + "\" data-has-children=\"" + has_children + "\" data-child-bounds=\"" + child_bounds + "\" data-x=\"" + _sg_escape_html(node.x) + "\" data-y=\"" + _sg_escape_html(node.y) + "\" data-width=\"" + _sg_escape_html(node.width) + "\" data-height=\"" + _sg_escape_html(node.height) + "\" style=\"" + style + "\">" + _sg_escape_html(node.label) + _sg_selection_handles(node_selected, node.id, i) + "</button>")
         i = i + 1
     var edge_div_index = 0
     for edge in graph.edges:
         val path = _sg_edge_svg_path(graph, edge)
+        val path_bounds = _sg_path_bounds_text(path)
+        val label_x = _sg_edge_label_axis_text(edge, path, "x")
+        val label_y = _sg_edge_label_axis_text(edge, path, "y")
+        val start_x = _sg_path_endpoint_axis_text(path, "start", "x")
+        val start_y = _sg_path_endpoint_axis_text(path, "start", "y")
+        val end_x = _sg_path_endpoint_axis_text(path, "end", "x")
+        val end_y = _sg_path_endpoint_axis_text(path, "end", "y")
+        val segment_count = _sg_path_segment_count_text(path)
+        val segments = _sg_path_segments_text(path)
+        val segment_midpoints = _sg_path_segment_midpoints_text(path)
+        val segment_orientations = _sg_path_segment_orientations_text(path)
         val edge_selected = edge_div_index == selected_edge_index
         val edge_selected_text = _sg_bool_text(edge_selected)
         val edge_selected_class = if edge_selected then " sdd-selected" else: ""
-        html.push("<div class=\"sdn-graph-edge sdd-connector " + _sg_css_classes(edge.css) + edge_selected_class + "\" data-edge-index=\"" + edge_div_index.to_text() + "\" data-selected=\"" + edge_selected_text + "\" aria-selected=\"" + edge_selected_text + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-kind=\"" + _sg_escape_html(edge.kind) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\" data-path=\"" + path + "\">" + _sg_escape_html(edge.label) + "</div>")
+        html.push("<div class=\"sdn-graph-edge sdd-connector " + _sg_css_classes(edge.css) + _sg_kind_class(edge.kind) + edge_selected_class + "\" data-edge-index=\"" + edge_div_index.to_text() + "\" data-selected=\"" + edge_selected_text + "\" aria-selected=\"" + edge_selected_text + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-label=\"" + _sg_escape_html(edge.label) + "\" data-kind=\"" + _sg_escape_html(edge.kind) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\" data-path=\"" + path + "\" data-path-bounds=\"" + path_bounds + "\" data-segment-count=\"" + segment_count + "\" data-segments=\"" + segments + "\" data-segment-midpoints=\"" + segment_midpoints + "\" data-segment-orientations=\"" + segment_orientations + "\" data-start-x=\"" + start_x + "\" data-start-y=\"" + start_y + "\" data-end-x=\"" + end_x + "\" data-end-y=\"" + end_y + "\" data-label-x=\"" + label_x + "\" data-label-y=\"" + label_y + "\"" + _sg_resolved_style_attr(graph, edge.css, "edge") + ">" + _sg_escape_html(edge.label) + "</div>")
         edge_div_index = edge_div_index + 1
     html.push("</div>")
     html.join("")
+
+fn _sg_selection_handles(selected: bool, node_id: text, node_index: i64) -> text:
+    if not selected:
+        return ""
+    val base = "position:absolute;width:8px;height:8px;box-sizing:border-box;border:1px solid #2563eb;background:#ffffff;"
+    val node_attr = _sg_escape_html(node_id)
+    val index_attr = node_index.to_text()
+    "<span class=\"sdd-resize-handle sdd-resize-nw\" data-resize-handle=\"nw\" data-node=\"" + node_attr + "\" data-node-index=\"" + index_attr + "\" aria-hidden=\"true\" style=\"" + base + "left:-5px;top:-5px;cursor:nwse-resize;\"></span><span class=\"sdd-resize-handle sdd-resize-ne\" data-resize-handle=\"ne\" data-node=\"" + node_attr + "\" data-node-index=\"" + index_attr + "\" aria-hidden=\"true\" style=\"" + base + "right:-5px;top:-5px;cursor:nesw-resize;\"></span><span class=\"sdd-resize-handle sdd-resize-sw\" data-resize-handle=\"sw\" data-node=\"" + node_attr + "\" data-node-index=\"" + index_attr + "\" aria-hidden=\"true\" style=\"" + base + "left:-5px;bottom:-5px;cursor:nesw-resize;\"></span><span class=\"sdd-resize-handle sdd-resize-se\" data-resize-handle=\"se\" data-node=\"" + node_attr + "\" data-node-index=\"" + index_attr + "\" aria-hidden=\"true\" style=\"" + base + "right:-5px;bottom:-5px;cursor:nwse-resize;\"></span>"
+
+fn _sg_connector_handles(selected: bool, edge_index: i64, from_id: text, to_id: text, label: text, kind: text, route: text, start_anchor: text, end_anchor: text, start_x: text, start_y: text, end_x: text, end_y: text, waypoints: text, label_x: text, label_y: text) -> text:
+    if not selected:
+        return ""
+    val edge_meta = "\" data-label=\"" + _sg_escape_html(label) + "\" data-kind=\"" + _sg_escape_html(kind) + "\" data-route=\"" + _sg_escape_html(route)
+    val endpoint_meta = "\" data-from=\"" + _sg_escape_html(from_id) + "\" data-to=\"" + _sg_escape_html(to_id)
+    val anchor_meta = "\" data-start-anchor=\"" + _sg_escape_html(start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(end_anchor)
+    var out = "<circle class=\"sdd-connector-handle sdd-connector-start\" data-connector-handle=\"start\" data-edit-action=\"reconnect-start\" data-handle-index=\"0\" data-edge-index=\"" + edge_index.to_text() + edge_meta + "\" data-anchor=\"" + _sg_escape_html(start_anchor) + "\" data-x=\"" + start_x + "\" data-y=\"" + start_y + endpoint_meta + "\" data-node=\"" + _sg_escape_html(from_id) + "\" data-opposite-node=\"" + _sg_escape_html(to_id) + anchor_meta + "\" cx=\"" + start_x + "\" cy=\"" + start_y + "\" r=\"4\" fill=\"#ffffff\" stroke=\"#2563eb\"></circle><circle class=\"sdd-connector-handle sdd-connector-end\" data-connector-handle=\"end\" data-edit-action=\"reconnect-end\" data-handle-index=\"1\" data-edge-index=\"" + edge_index.to_text() + edge_meta + "\" data-anchor=\"" + _sg_escape_html(end_anchor) + "\" data-x=\"" + end_x + "\" data-y=\"" + end_y + endpoint_meta + "\" data-node=\"" + _sg_escape_html(to_id) + "\" data-opposite-node=\"" + _sg_escape_html(from_id) + anchor_meta + "\" cx=\"" + end_x + "\" cy=\"" + end_y + "\" r=\"4\" fill=\"#ffffff\" stroke=\"#2563eb\"></circle>"
+    out = out + "<circle class=\"sdd-connector-handle sdd-connector-label\" data-connector-handle=\"label\" data-edit-action=\"move-label\" data-handle-index=\"2\" data-edge-index=\"" + edge_index.to_text() + edge_meta + "\" data-x=\"" + label_x + "\" data-y=\"" + label_y + endpoint_meta + anchor_meta + "\" cx=\"" + label_x + "\" cy=\"" + label_y + "\" r=\"3\" fill=\"#ffffff\" stroke=\"#2563eb\"></circle>"
+    var waypoint_index = 0
+    for point in _sg_parse_waypoints(waypoints):
+        out = out + "<circle class=\"sdd-connector-handle sdd-connector-waypoint\" data-connector-handle=\"waypoint\" data-edit-action=\"move-waypoint\" data-handle-index=\"" + (waypoint_index + 3).to_text() + "\" data-waypoint-index=\"" + waypoint_index.to_text() + "\" data-edge-index=\"" + edge_index.to_text() + edge_meta + "\" data-x=\"" + point.0.to_text() + "\" data-y=\"" + point.1.to_text() + endpoint_meta + anchor_meta + "\" cx=\"" + point.0.to_text() + "\" cy=\"" + point.1.to_text() + "\" r=\"3\" fill=\"#ffffff\" stroke=\"#2563eb\"></circle>"
+        waypoint_index = waypoint_index + 1
+    out
 
 fn _sg_bool_text(value: bool) -> text:
     if value:
         return "true"
     "false"
+
+fn _sg_shape_style(shape: text) -> text:
+    val normalized = shape.trim().to_lower()
+    if normalized == "circle":
+        return "border-radius:50%;clip-path:circle(50%)"
+    if normalized == "ellipse":
+        return "border-radius:50%"
+    if normalized == "rounded" or normalized == "roundrect":
+        return "border-radius:8px"
+    if normalized == "pill":
+        return "border-radius:999px"
+    if normalized == "frame" or normalized == "container":
+        return "box-shadow:inset 0 0 0 2px rgba(15,23,42,0.18);background-color:rgba(248,250,252,0.35)"
+    if normalized == "person" or normalized == "actor":
+        return "border-radius:50% 50% 42% 42%;box-shadow:inset 0 16px 0 rgba(15,23,42,0.10)"
+    if normalized == "terminator":
+        return "border-radius:999px"
+    if normalized == "diamond":
+        return "clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%)"
+    if normalized == "cylinder" or normalized == "database":
+        return "border-radius:999px / 24px;box-shadow:inset 0 8px 0 rgba(15,23,42,0.08),inset 0 -8px 0 rgba(15,23,42,0.08)"
+    ""
 
 fn _sg_has_canvas(graph: SdnGraph) -> bool:
     graph.canvas_width != "" or graph.canvas_height != "" or graph.canvas_grid != "" or graph.canvas_snap != "" or graph.canvas_zoom != "" or graph.canvas_background != ""
@@ -571,7 +1158,7 @@ fn _sg_edge_svg_path(graph: SdnGraph, edge: SdnGraphEdge) -> text:
     val to_idx = _sg_find_node_index(graph, edge.to_id)
     if from_idx < 0 or to_idx < 0:
         return ""
-    sdn_graph_render_edge_path(edge, graph.nodes[from_idx], graph.nodes[to_idx])
+    sdn_graph_render_edge_path(edge, _sg_effective_node_geometry(graph, graph.nodes[from_idx]), _sg_effective_node_geometry(graph, graph.nodes[to_idx]))
 
 fn _sg_find_node_index(graph: SdnGraph, id: text) -> i64:
     var i = 0
@@ -580,6 +1167,73 @@ fn _sg_find_node_index(graph: SdnGraph, id: text) -> i64:
             return i
         i = i + 1
     -1
+
+fn _sg_child_count(graph: SdnGraph, parent_id: text) -> i64:
+    var count: i64 = 0
+    if parent_id == "":
+        return count
+    for node in graph.nodes:
+        if node.parent == parent_id:
+            count = count + 1
+    count
+
+fn _sg_child_bounds_text(graph: SdnGraph, parent_id: text) -> text:
+    val bounds = _sg_child_bounds(graph, parent_id)
+    if not bounds.ok:
+        return ""
+    bounds.min_x.to_text() + "," + bounds.min_y.to_text() + "," + bounds.max_x.to_text() + "," + bounds.max_y.to_text()
+
+fn _sg_child_bounds(graph: SdnGraph, parent_id: text) -> SdnGraphBounds:
+    var initialized = false
+    var min_x: i64 = 0
+    var min_y: i64 = 0
+    var max_x: i64 = 0
+    var max_y: i64 = 0
+    if parent_id == "":
+        return SdnGraphBounds(ok: false, min_x: 0, min_y: 0, max_x: 0, max_y: 0)
+    for raw_node in graph.nodes:
+        val node = _sg_effective_node_geometry(graph, raw_node)
+        if node.parent == parent_id:
+            val x = _sg_parse_i64_result(node.x)
+            val y = _sg_parse_i64_result(node.y)
+            val w = _sg_parse_i64_result(node.width)
+            val h = _sg_parse_i64_result(node.height)
+            if not x.ok or not y.ok or not w.ok or not h.ok:
+                return SdnGraphBounds(ok: false, min_x: 0, min_y: 0, max_x: 0, max_y: 0)
+            val right = x.value + w.value
+            val bottom = y.value + h.value
+            if not initialized:
+                min_x = x.value
+                min_y = y.value
+                max_x = right
+                max_y = bottom
+                initialized = true
+            else:
+                if x.value < min_x:
+                    min_x = x.value
+                if y.value < min_y:
+                    min_y = y.value
+                if right > max_x:
+                    max_x = right
+                if bottom > max_y:
+                    max_y = bottom
+    if not initialized:
+        return SdnGraphBounds(ok: false, min_x: 0, min_y: 0, max_x: 0, max_y: 0)
+    SdnGraphBounds(ok: true, min_x: min_x, min_y: min_y, max_x: max_x, max_y: max_y)
+
+fn _sg_layer_z_index(layer: text) -> text:
+    val normalized = layer.trim().to_lower()
+    if normalized == "":
+        return ""
+    if normalized == "background" or normalized == "back":
+        return "0"
+    if normalized == "base" or normalized == "default":
+        return "10"
+    if normalized == "controls" or normalized == "ui" or normalized == "middle":
+        return "20"
+    if normalized == "front" or normalized == "foreground" or normalized == "overlay":
+        return "30"
+    ""
 
 fn _sg_anchor_point(node: SdnGraphNode, anchor: text) -> tuple:
     val x = _sg_int_length(node.x)
@@ -635,6 +1289,147 @@ fn _sg_build_orthogonal_path(points: [tuple], start: tuple, finish: tuple) -> te
         d = d + " L " + current_x.to_text() + "," + finish.1.to_text()
     d
 
+fn _sg_path_bounds_text(path: text) -> text:
+    val bounds = _sg_path_bounds(path)
+    if not bounds.ok:
+        return ""
+    bounds.min_x.to_text() + "," + bounds.min_y.to_text() + "," + bounds.max_x.to_text() + "," + bounds.max_y.to_text()
+
+fn _sg_path_segment_count_text(path: text) -> text:
+    var point_count = 0
+    for token in path.split(" "):
+        if token.trim().contains(","):
+            point_count = point_count + 1
+    if point_count < 2:
+        return ""
+    (point_count - 1).to_text()
+
+fn _sg_path_segments_text(path: text) -> text:
+    var out: [text] = []
+    var previous = ""
+    for token in path.split(" "):
+        val point = token.trim()
+        if point.contains(","):
+            if previous != "":
+                out.push(previous + "-" + point)
+            previous = point
+    out.join(";")
+
+fn _sg_path_segment_midpoints_text(path: text) -> text:
+    var out: [text] = []
+    var previous = ""
+    for token in path.split(" "):
+        val point = token.trim()
+        if point.contains(","):
+            if previous != "":
+                val prev_sep = previous.index_of(",")
+                val point_sep = point.index_of(",")
+                if prev_sep >= 0 and point_sep >= 0:
+                    val x1 = previous.slice(0, prev_sep)
+                    val y1 = previous.slice(prev_sep + 1, previous.len())
+                    val x2 = point.slice(0, point_sep)
+                    val y2 = point.slice(point_sep + 1, point.len())
+                    if _sg_is_i64_token(x1) and _sg_is_i64_token(y1) and _sg_is_i64_token(x2) and _sg_is_i64_token(y2):
+                        out.push(((x1.to_i64() + x2.to_i64()) / 2).to_text() + "," + ((y1.to_i64() + y2.to_i64()) / 2).to_text())
+            previous = point
+    out.join(";")
+
+fn _sg_path_segment_orientations_text(path: text) -> text:
+    var out: [text] = []
+    var previous = ""
+    for token in path.split(" "):
+        val point = token.trim()
+        if point.contains(","):
+            if previous != "":
+                val prev_sep = previous.index_of(",")
+                val point_sep = point.index_of(",")
+                if prev_sep >= 0 and point_sep >= 0:
+                    val x1 = previous.slice(0, prev_sep)
+                    val y1 = previous.slice(prev_sep + 1, previous.len())
+                    val x2 = point.slice(0, point_sep)
+                    val y2 = point.slice(point_sep + 1, point.len())
+                    if x1 == x2:
+                        out.push("v")
+                    else if y1 == y2:
+                        out.push("h")
+                    else:
+                        out.push("d")
+            previous = point
+    out.join(";")
+
+fn _sg_edge_label_axis_text(edge: SdnGraphEdge, path: text, axis: text) -> text:
+    if axis == "x" and _sg_is_i64_token(edge.label_x):
+        return edge.label_x
+    if axis == "y" and _sg_is_i64_token(edge.label_y):
+        return edge.label_y
+    _sg_path_label_axis_text(path, axis)
+
+fn _sg_path_endpoint_axis_text(path: text, endpoint: text, axis: text) -> text:
+    var first = ""
+    var last = ""
+    for token in path.split(" "):
+        val trimmed = token.trim()
+        if trimmed.contains(","):
+            if first == "":
+                first = trimmed
+            last = trimmed
+    val point = if endpoint == "start" then first else: last
+    if point == "":
+        return ""
+    val sep = point.index_of(",")
+    if sep < 0:
+        return ""
+    if axis == "x":
+        val x = point.slice(0, sep)
+        if _sg_is_i64_token(x):
+            return x
+        return ""
+    val y = point.slice(sep + 1, point.len())
+    if _sg_is_i64_token(y):
+        return y
+    ""
+
+fn _sg_path_label_axis_text(path: text, axis: text) -> text:
+    val bounds = _sg_path_bounds(path)
+    if not bounds.ok:
+        return ""
+    if axis == "x":
+        return ((bounds.min_x + bounds.max_x) / 2).to_text()
+    ((bounds.min_y + bounds.max_y) / 2).to_text()
+
+fn _sg_path_bounds(path: text) -> SdnGraphBounds:
+    var initialized = false
+    var min_x: i64 = 0
+    var min_y: i64 = 0
+    var max_x: i64 = 0
+    var max_y: i64 = 0
+    for token in path.split(" "):
+        val trimmed = token.trim()
+        if trimmed.contains(","):
+            val sep = trimmed.index_of(",")
+            val x = _sg_parse_i64_result(trimmed.slice(0, sep))
+            val y = _sg_parse_i64_result(trimmed.slice(sep + 1, trimmed.len()))
+            if not x.ok or not y.ok:
+                return SdnGraphBounds(ok: false, min_x: 0, min_y: 0, max_x: 0, max_y: 0)
+            if not initialized:
+                min_x = x.value
+                min_y = y.value
+                max_x = x.value
+                max_y = y.value
+                initialized = true
+            else:
+                if x.value < min_x:
+                    min_x = x.value
+                if y.value < min_y:
+                    min_y = y.value
+                if x.value > max_x:
+                    max_x = x.value
+                if y.value > max_y:
+                    max_y = y.value
+    if not initialized:
+        return SdnGraphBounds(ok: false, min_x: 0, min_y: 0, max_x: 0, max_y: 0)
+    SdnGraphBounds(ok: true, min_x: min_x, min_y: min_y, max_x: max_x, max_y: max_y)
+
 fn _sg_clone_edge(edge: SdnGraphEdge) -> SdnGraphEdge:
     SdnGraphEdge(
         from_id: edge.from_id,
@@ -645,7 +1440,9 @@ fn _sg_clone_edge(edge: SdnGraphEdge) -> SdnGraphEdge:
         route: edge.route,
         waypoints: edge.waypoints,
         start_anchor: edge.start_anchor,
-        end_anchor: edge.end_anchor
+        end_anchor: edge.end_anchor,
+        label_x: edge.label_x,
+        label_y: edge.label_y
     )
 
 fn _sg_clone_node(node: SdnGraphNode) -> SdnGraphNode:
@@ -663,6 +1460,18 @@ fn _sg_clone_node(node: SdnGraphNode) -> SdnGraphNode:
         parent: node.parent
     )
 
+fn _sg_effective_node_geometry(graph: SdnGraph, node: SdnGraphNode) -> SdnGraphNode:
+    var out = _sg_clone_node(node)
+    if out.x == "":
+        out.x = _sg_resolved_style_value(graph, out.css, "node", "x")
+    if out.y == "":
+        out.y = _sg_resolved_style_value(graph, out.css, "node", "y")
+    if out.width == "":
+        out.width = _sg_resolved_style_value(graph, out.css, "node", "width")
+    if out.height == "":
+        out.height = _sg_resolved_style_value(graph, out.css, "node", "height")
+    out
+
 fn _sg_graph_with_nodes(graph: SdnGraph, nodes: [SdnGraphNode]) -> SdnGraph:
     SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
 
@@ -671,6 +1480,65 @@ fn _sg_id_in_list(id: text, ids: [text]) -> bool:
         if item == id:
             return true
     false
+
+fn _sg_node_id_exists(graph: SdnGraph, id: text) -> bool:
+    for node in graph.nodes:
+        if node.id == id:
+            return true
+    false
+
+fn _sg_css_name_exists(graph: SdnGraph, css: text) -> bool:
+    for css_def in graph.css_defs:
+        if css_def.name == css:
+            return true
+    false
+
+fn _sg_css_parent_chain_reaches(graph: SdnGraph, start: text, target: text) -> bool:
+    var current = start
+    var depth: i64 = 0
+    while current != "" and current != "none" and depth <= graph.css_defs.len():
+        if current == target:
+            return true
+        current = _sg_css_parent_for(graph, current)
+        depth = depth + 1
+    false
+
+fn _sg_node_id_count(graph: SdnGraph, id: text) -> i64:
+    var count: i64 = 0
+    for node in graph.nodes:
+        if node.id == id:
+            count = count + 1
+    count
+
+fn _sg_non_negative_i32_token(value: text) -> bool:
+    val trimmed = value.trim()
+    if trimmed == "" or trimmed.len() > 9:
+        return false
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.char_at(i)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
+
+fn _sg_anchor_token_valid(value: text) -> bool:
+    value == "" or value == "left" or value == "right" or value == "top" or value == "bottom"
+
+fn _sg_waypoints_token_valid(value: text) -> bool:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return true
+    for token in trimmed.split(";"):
+        val t = token.trim()
+        val sep = t.index_of("x")
+        if sep <= 0:
+            return false
+        val x_text = t.slice(0, sep).trim()
+        val y_text = t.slice(sep + 1, t.len()).trim()
+        if not _sg_is_i64_token(x_text) or not _sg_is_i64_token(y_text):
+            return false
+    true
 
 fn _sg_selected_count(graph: SdnGraph, node_ids: [text]) -> i64:
     var count: i64 = 0
@@ -809,6 +1677,22 @@ fn _sg_is_i64_token(value: text) -> bool:
         i = i + 1
     true
 
+fn _sg_signed_i64_token(value: text) -> bool:
+    val trimmed = value.trim()
+    if not _sg_is_i64_token(trimmed):
+        return false
+    var start = 0
+    if trimmed.starts_with("-"):
+        start = 1
+    val digits = trimmed.slice(start, trimmed.len())
+    if digits.len() > 19:
+        return false
+    if digits.len() == 19:
+        val limit = if start == 1 then "9223372036854775808" else: "9223372036854775807"
+        if digits > limit:
+            return false
+    true
+
 fn _sg_int_length_or(value: text, fallback: i64) -> i64:
     val parsed = _sg_int_length(value)
     if parsed == 0 and value.trim() == "":
@@ -853,8 +1737,8 @@ fn _sg_parse_dense_edge(line: text) -> SdnGraphEdge:
         to_id = rest.slice(0, colon).trim()
         val after = rest.slice(colon + 1, rest.len()).trim()
         label = _sg_label_before_meta(after)
-        return SdnGraphEdge(from_id: from_id, to_id: to_id, label: label, css: _sg_collect_at(after), kind: _sg_edge_kind(op, _sg_meta_value(after, "kind")), route: _sg_meta_value(after, "route"), waypoints: _sg_meta_value(after, "waypoints"), start_anchor: _sg_meta_value(after, "start"), end_anchor: _sg_meta_value(after, "end"))
-    SdnGraphEdge(from_id: from_id, to_id: to_id, label: "", css: "", kind: _sg_edge_kind(op, ""), route: "", waypoints: "", start_anchor: "", end_anchor: "")
+        return SdnGraphEdge(from_id: from_id, to_id: to_id, label: label, css: _sg_collect_at(after), kind: _sg_edge_kind(op, _sg_meta_value(after, "kind")), route: _sg_meta_value(after, "route"), waypoints: _sg_meta_value(after, "waypoints"), start_anchor: _sg_meta_value(after, "start"), end_anchor: _sg_meta_value(after, "end"), label_x: _sg_meta_value(after, "label_x"), label_y: _sg_meta_value(after, "label_y"))
+    SdnGraphEdge(from_id: from_id, to_id: to_id, label: "", css: "", kind: _sg_edge_kind(op, ""), route: "", waypoints: "", start_anchor: "", end_anchor: "", label_x: "", label_y: "")
 
 fn _sg_parse_weave_selector(line: text) -> tuple:
     val target = if line.starts_with("node where ") then "node" else: "edge"
@@ -898,7 +1782,9 @@ fn _sg_parse_edges_table(lines: [text], start: i64) -> ([SdnGraphEdge], i64):
             val waypoints = if cols.len() >= 7 then _sg_unquote(cols[6].trim()) else: ""
             val start_anchor = if cols.len() >= 8 then cols[7].trim() else: ""
             val end_anchor = if cols.len() >= 9 then cols[8].trim() else: ""
-            edges.push(SdnGraphEdge(from_id: cols[0].trim(), to_id: cols[1].trim(), label: _sg_unquote(cols[2].trim()), css: _sg_unquote(cols[3].trim()), kind: cols[4].trim(), route: route, waypoints: waypoints, start_anchor: start_anchor, end_anchor: end_anchor))
+            val label_x = if cols.len() >= 10 then cols[9].trim() else: ""
+            val label_y = if cols.len() >= 11 then cols[10].trim() else: ""
+            edges.push(SdnGraphEdge(from_id: cols[0].trim(), to_id: cols[1].trim(), label: _sg_unquote(cols[2].trim()), css: _sg_unquote(cols[3].trim()), kind: cols[4].trim(), route: route, waypoints: waypoints, start_anchor: start_anchor, end_anchor: end_anchor, label_x: label_x, label_y: label_y))
         i = i + 1
     (edges, i)
 
