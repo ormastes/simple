@@ -147,6 +147,8 @@ a safe token to set it.
 as `invalid-args`, and return compact readback text.
 `ui-list-layers` takes the UI design body and returns document-order layer rows
 with node id, label, kind, layer, z-index, parent, and component metadata.
+`sdd-list-layers` does the same for Draw nodes with id, label, role, shape,
+layer, z-index, and parent metadata.
 
 Layout actions use `mode_or_axis|id1,id2,...`, followed by the UI or SDD
 document body. `ui-align-selection`, `ui-distribute-selection`,
@@ -328,7 +330,7 @@ modes:
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`,
   `edit-sdd-node-label`, `edit-sdd-node-parent`, `edit-sdd-node-shape`,
   `edit-sdd-node-style`, `edit-sdd-node-layer`, `order-sdd-node`, `edit-sdd-node-role`,
-  `duplicate-sdd-node`, `edit-sdd-canvas`, `sdd-selection-geometry`, `align-sdd-selection`,
+  `duplicate-sdd-node`, `edit-sdd-canvas`, `sdd-selection-geometry`, `sdd-list-layers`, `align-sdd-selection`,
   `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;
   Calc has `formula-counta`,
   `formula-text-functions`, `formula-vlookup`, and

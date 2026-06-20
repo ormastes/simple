@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=9 features=143 actions=73
+  llm-catalog: apps=9 features=144 actions=74
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -434,7 +434,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 866 lines folded for reproduction.
+Runnable source: 871 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -443,10 +443,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=143 actions=73")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=144 actions=74")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(73)
-expect(dispatch_probe.recognized_count).to_equal(73)
+expect(dispatch_probe.advertised_count).to_equal(74)
+expect(dispatch_probe.recognized_count).to_equal(74)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -501,6 +501,7 @@ expect(catalog[4].features.join(",")).to_contain("node-duplicate")
 expect(catalog[4].features.join(",")).to_contain("canvas-metadata")
 expect(catalog[4].features.join(",")).to_contain("selection")
 expect(catalog[4].features.join(",")).to_contain("selection-geometry")
+expect(catalog[4].features.join(",")).to_contain("layers-readback")
 expect(catalog[4].features.join(",")).to_contain("inspector")
 expect(catalog[4].features.join(",")).to_contain("align-layout")
 expect(catalog[4].features.join(",")).to_contain("distribute-layout")
@@ -531,6 +532,7 @@ expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-role")
 expect(catalog[4].actions.join(",")).to_contain("duplicate-sdd-node")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-canvas")
 expect(catalog[4].actions.join(",")).to_contain("sdd-selection-geometry")
+expect(catalog[4].actions.join(",")).to_contain("sdd-list-layers")
 expect(catalog[4].actions.join(",")).to_contain("align-sdd-selection")
 expect(catalog[4].actions.join(",")).to_contain("distribute-sdd-selection")
 expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-node")
@@ -628,6 +630,7 @@ val invalid_ui_style_edit_action = office_action_dispatch("ui-style-token-edit",
 val ui_inspect_action = office_action_dispatch("ui-inspect-node", "button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_inspect_action = office_action_dispatch("ui-inspect-node", "button bad\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_layers_action = office_action_dispatch("ui-list-layers", "design: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container\nnode button|Run|button|16|16|80|32|primary|9|action|frame")
+val sdd_layers_action = office_action_dispatch("sdd-list-layers", "graph: Layers\nA: Alpha role: actor shape: diamond x: 0 y: 0 width: 80 height: 20 layer: front\nB: Beta role: database shape: cylinder x: 20 y: 20 width: 80 height: 20 layer: back parent: A")
 val sdd_duplicate_action = office_action_dispatch("duplicate-sdd-node", "A|A_copy|20|10\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val blank_sdd_duplicate_action = office_action_dispatch("duplicate-sdd-node", "A|   |20|10\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val sdd_style_rule_action = office_action_dispatch("edit-sdd-style-rule", "accent|node|none|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent x: 0 y: 0 width: 80 height: 20")
@@ -859,6 +862,8 @@ expect(ui_inspect_action.output).to_contain("component=action")
 expect(ui_layers_action.output).to_contain("index=0 id=frame")
 expect(ui_layers_action.output).to_contain("index=1 id=button")
 expect(ui_layers_action.output).to_contain("parent=frame")
+expect(sdd_layers_action.output).to_contain("index=0 id=A label=Alpha role=actor shape=diamond layer=front z_index=30 parent=")
+expect(sdd_layers_action.output).to_contain("index=1 id=B label=Beta role=database shape=cylinder layer=back z_index=0 parent=A")
 expect(sdd_duplicate_action.output).to_contain("data-node=\"A_copy\"")
 expect(blank_sdd_duplicate_action.reason).to_equal("invalid-args")
 expect(sdd_style_rule_action.output).to_contain("css |name, extends, target|")
