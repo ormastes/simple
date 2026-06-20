@@ -1200,13 +1200,16 @@ expect(result.reason).to_equal("unknown-action")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = office_action_dispatch("counter-action", "5|   ")
+val escaped = office_action_dispatch("counter-action", "5|counter\\|increment")
 expect(result.ok).to_be(false)
 expect(result.reason).to_equal("invalid-args")
+expect(escaped.ok).to_be(false)
+expect(escaped.reason).to_equal("unsupported")
 ```
 
 </details>
