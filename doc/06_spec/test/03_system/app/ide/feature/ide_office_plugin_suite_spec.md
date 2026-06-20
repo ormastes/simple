@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=9 features=141 actions=71
+  llm-catalog: apps=9 features=142 actions=72
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -434,7 +434,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 850 lines folded for reproduction.
+Runnable source: 858 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -443,10 +443,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=141 actions=71")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=142 actions=72")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(71)
-expect(dispatch_probe.recognized_count).to_equal(71)
+expect(dispatch_probe.advertised_count).to_equal(72)
+expect(dispatch_probe.recognized_count).to_equal(72)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -552,6 +552,9 @@ val selected_ui_action = office_action_dispatch("render-ui-html-with-selection",
 val ui_select_action = office_action_dispatch("ui-select-node", "button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_select_action = office_action_dispatch("ui-select-node", "button bad\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val missing_ui_select_action = office_action_dispatch("ui-select-node", "missing\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val ui_selection_geometry_action = office_action_dispatch("ui-selection-geometry", "a,b\ndesign: Geometry\nnode a|A|button|0|0|20|20|primary|1|action\nnode b|B|button|40|20|20|20|secondary|2|action")
+val invalid_ui_selection_geometry_action = office_action_dispatch("ui-selection-geometry", "a,b bad\ndesign: Geometry\nnode a|A|button|0|0|20|20|primary|1|action")
+val missing_ui_selection_geometry_action = office_action_dispatch("ui-selection-geometry", "missing\ndesign: Geometry\nnode a|A|button|0|0|20|20|primary|1|action")
 val ui_sdd_action = office_action_dispatch("export-ui-sdd", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val sdd_action = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val selected_sdd_action = office_action_dispatch("render-sdd-html-with-selection", "select|A|\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
@@ -752,6 +755,9 @@ expect(slide_blank_target_action.reason).to_equal("invalid-args")
 expect(slide_stale_edit_action.reason).to_equal("stale-slide-element")
 expect(ui_action.output).to_contain("data-format=\"html-ui\"")
 expect(ui_action.output).to_contain("data-node-count=\"1\"")
+expect(ui_selection_geometry_action.output).to_equal("a:0,0,20,20;b:40,20,20,20")
+expect(invalid_ui_selection_geometry_action.reason).to_equal("invalid-args")
+expect(missing_ui_selection_geometry_action.reason).to_equal("missing-node")
 expect(ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape")
 expect(sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(sdd_action.output).to_contain("data-node-count=\"1\"")
@@ -1067,6 +1073,7 @@ expect(draw_distributed.graph.nodes[0].x).to_equal("120")
 expect(draw_distributed.graph.nodes[2].x).to_equal("60")
 expect(catalog[5].owner_module).to_equal("app.office.ui_editor")
 expect(catalog[5].features.join(",")).to_contain("selection")
+expect(catalog[5].features.join(",")).to_contain("selection-geometry")
 expect(catalog[5].features.join(",")).to_contain("selected-html-render")
 expect(catalog[5].features.join(",")).to_contain("selected-resize-handles")
 expect(catalog[5].features.join(",")).to_contain("resize-handle-metadata")
@@ -1098,6 +1105,7 @@ expect(catalog[5].actions.join(",")).to_contain("ui-canvas-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-layout-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-resize-node")
 expect(catalog[5].actions.join(",")).to_contain("ui-select-node")
+expect(catalog[5].actions.join(",")).to_contain("ui-selection-geometry")
 expect(catalog[5].actions.join(",")).to_contain("ui-add-node")
 expect(catalog[5].actions.join(",")).to_contain("ui-duplicate-node")
 expect(catalog[5].actions.join(",")).to_contain("ui-delete-node")
