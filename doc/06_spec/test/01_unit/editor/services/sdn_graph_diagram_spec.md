@@ -689,7 +689,7 @@ expect(html).to_contain("data-canvas-grid=\"24\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 51 lines folded for reproduction.
+Runnable source: 59 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -725,8 +725,16 @@ expect(checked_shape.graph.nodes[0].shape).to_equal("diamond")
 val checked_style = sdn_graph_update_node_style_checked(checked_shape.graph, 0, " primary selected ")
 expect(checked_style.accepted).to_be(true)
 expect(checked_style.graph.nodes[0].css).to_equal("primary selected")
+val checked_layer = sdn_graph_update_node_layer_checked(graph, 0, " foreground ")
+expect(checked_layer.accepted).to_be(true)
+expect(checked_layer.graph.nodes[0].layer).to_equal("foreground")
+val checked_role = sdn_graph_update_node_role_checked(graph, 0, " decision ")
+expect(checked_role.accepted).to_be(true)
+expect(checked_role.graph.nodes[0].role).to_equal("decision")
 expect(sdn_graph_update_node_shape_checked(graph, 0, "bad shape").reason).to_equal("invalid-shape-token")
 expect(sdn_graph_update_node_style_checked(graph, 0, "primary bad\"onclick=1").reason).to_equal("invalid-style-token")
+expect(sdn_graph_update_node_layer_checked(graph, 0, "bad layer").reason).to_equal("invalid-layer-token")
+expect(sdn_graph_update_node_role_checked(graph, 0, "bad role").reason).to_equal("invalid-role-token")
 
 val added = sdn_graph_add_node_checked(graph, "C", "Choice", "accent", "decision", "diamond", " 80 ", " 80 ", "64", "48", "front", "")
 expect(added.accepted).to_be(true)
