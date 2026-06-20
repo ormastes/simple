@@ -522,6 +522,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
    - Expected: updated_base.affected_count equals `2`
    - Expected: count_where(updated_base.table, "status", "done") equals `2`
    - Expected: row_count(deleted_base.table) equals `0`
+   - Expected: math_checked_action.reason equals `rendered`
    - Expected: math_bad_action.reason equals `syntax-error`
    - Expected: math_to_mathml_checked("a +").reason equals `syntax-error`
    - Expected: catalog[8].owner_module equals `app.office.mail.mail_app`
@@ -548,7 +549,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1342 lines folded for reproduction.
+Runnable source: 1343 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1830,6 +1831,7 @@ expect(mathml_action.output).to_contain("data-format-name=\"MathML\"")
 expect(mathml_action.output).to_contain("data-token-count=\"6\"")
 expect(mathml_action.output).to_contain("<mfrac><mn>1</mn><mn>2</mn></mfrac>")
 expect(math_checked_action.output).to_contain("<mi>a</mi><mo>+</mo>")
+expect(math_checked_action.reason).to_equal("rendered")
 expect(math_bad_action.reason).to_equal("syntax-error")
 expect(math_bad_action.output).to_contain("<math")
 expect(math_structure_action.output).to_contain("contains=square-root")
