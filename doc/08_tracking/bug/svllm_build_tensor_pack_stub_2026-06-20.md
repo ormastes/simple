@@ -1,7 +1,8 @@
 # svllm build_tensor_pack Permanent Stub
 
 **Filed:** 2026-06-20
-**Status:** open
+**Resolved:** 2026-06-20
+**Status:** resolved (Option 1 implemented)
 **Priority:** P2
 
 ## Problem
@@ -36,5 +37,11 @@ and keeps the existing API surface stable.
 
 ## Status
 
-Open. `build_tensor_pack` is stubbed with `Err(ManifestError.Malformed)` and
-the unit spec pins that behavior (`build_tensor_pack (stub — deferred)`).
+Resolved 2026-06-20 via **Option 1**. `TensorPackManifest` now carries
+`tensors: [TensorInfo]` and `chunks: [ChunkInfo]`; `parse_manifest` parses each
+array element into those lists, and `build_tensor_pack` constructs a `TensorPack`
+from them while validating invariants (chunk_id in range, `offset_in_chunk`/
+`byte_len` fit within the referenced chunk, tensors-without-chunks rejected) —
+returning `Err(ManifestError.TensorChunkMismatch)` on violation. Covered by
+`manifest_spec.spl` (full round-trip + validation-failure tests) and
+`test/03_system/tools/svllm_build_tensor_pack_system_spec.spl`.
