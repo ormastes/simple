@@ -516,7 +516,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1168 lines folded for reproduction.
+Runnable source: 1171 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1028,7 +1028,9 @@ expect(ui_action.output).to_contain("data-node-count=\"1\"")
 expect(ui_selection_geometry_action.output).to_equal("a:0,0,20,20;b:40,20,20,20")
 expect(invalid_ui_selection_geometry_action.reason).to_equal("invalid-args")
 expect(missing_ui_selection_geometry_action.reason).to_equal("missing-node")
+expect(ui_sdd_action.output).to_contain("theme: office-ui")
 expect(ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape")
+expect(ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent, layout_mode, layout_gap, layout_padding, constraint_h, constraint_v|")
 expect(sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(sdd_action.output).to_contain("data-format=\"sdd\"")
 expect(sdd_action.output).to_contain("data-format-name=\"SDD: Simple Diagram Document\"")
@@ -1058,6 +1060,7 @@ expect(legacy_ui_action.action).to_equal("render-ui-html")
 expect(legacy_ui_action.output).to_contain("data-format=\"html-ui\"")
 expect(legacy_ui_action.output).to_contain("data-format-name=\"HTML UI Design Document\"")
 expect(legacy_ui_sdd_action.action).to_equal("export-ui-sdd")
+expect(legacy_ui_sdd_action.output).to_contain("theme: office-ui")
 expect(legacy_ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape")
 expect(legacy_sdd_action.action).to_equal("render-sdd-html")
 expect(legacy_sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
