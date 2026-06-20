@@ -268,6 +268,7 @@ Base table actions use a compact text table body:
 `table: Name`, `columns: id,status`, then `row: 1,open` lines. `query-table`
 uses `count-where|column|value`, `select-where|column|value`, or
 `project-column|column`; blank query columns are `invalid-args`, and table bodies reject blank table names plus missing, blank, duplicate, or row-width-mismatched columns.
+The compact LLM query schema is `count-where|column|value or select-where|column|value or project-column|column`.
 `base-table-summary` returns validated table name, column list, and row count.
 `render-base-table-html` renders that same table body as escaped HTML with
 `data-format="base-table"`, `data-column-count`, `data-row-count`,
@@ -276,6 +277,7 @@ table names plus missing, blank, duplicate, or row-width-mismatched columns. `db
 `update-where|match_column|match_value|update_column|new_value`, or
 `delete-where|match_column|match_value`, rejects blank edit columns as
 `invalid-args`, rejects invalid schemas, and returns the updated table text.
+The compact LLM edit schema is `insert|v1,v2 or update-where|match_col|match_value|update_col|new_value or delete-where|match_col|match_value`.
 `export-base-game-state` uses `scope_column|scope_value|key_column|value_column`.
 
 Calc and Impress edit actions use `cell_ref|expected_display|new_value` or
