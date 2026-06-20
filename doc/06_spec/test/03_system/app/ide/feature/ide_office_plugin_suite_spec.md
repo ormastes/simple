@@ -548,7 +548,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1327 lines folded for reproduction.
+Runnable source: 1333 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -563,8 +563,14 @@ expect(office_llm_action_input_schema("ui-order-node")).to_equal("node_id|front_
 expect(office_llm_action_input_schema("ui-align-selection")).to_equal("left|center|right|top|middle|bottom|id1,id2,...\\nhtml_ui_source")
 expect(office_llm_action_input_schema("query-table")).to_equal("count-where|column|value or select-where|column|value or project-column|column\\ntable: Name\\ncolumns: ...\\nrow: ...")
 expect(office_llm_action_input_schema("export-base-game-state")).to_equal("scope_column|scope_value|key_column|value_column\\ntable: Name\\ncolumns: ...\\nrow: ...")
+expect(office_llm_action_input_schema("sheet-edit")).to_equal("cell_ref|expected_display|new_value\\nA1=value;B1=value")
+expect(office_llm_action_input_schema("slide-edit")).to_equal("element_id|expected_text|new_text\\nelement_id=value;...")
+expect(office_llm_action_input_schema("db-edit")).to_equal("insert|v1,v2 or update-where|match_col|match_value|update_col|new_value or delete-where|match_col|match_value\\ntable: ...")
+expect(office_llm_action_input_schema("counter-action")).to_equal("value|counter_increment|counter_decrement|counter_reset")
+expect(office_llm_action_input_schema("ui-resolve-auto-layout")).to_equal("expected_auto_layout_signature\\nhtml_ui_source")
 expect(office_llm_action_input_schema("order-sdd-node")).to_equal("node_id|front_or_back\\nsdd_source")
 expect(office_llm_action_input_schema("add-sdd-edge")).to_equal("from_id|to_id|label|css|kind|route|waypoints|start_anchor|end_anchor\\nsdd_source")
+expect(office_llm_action_input_schema("edit-sdd-edge-style")).to_equal("edge_index|value\\nsdd_source")
 expect(office_llm_action_input_schema("sdd-style-resolved-read")).to_equal("css|node_or_edge\\nsdd_source")
 expect(office_llm_action_input_schema("sdd-style-resolved-value-read")).to_equal("css|node_or_edge|key\\nsdd_source")
 expect(office_llm_action_input_schema("distribute-sdd-selection")).to_equal("horizontal|vertical|id1,id2,...\\nsdd_source")
