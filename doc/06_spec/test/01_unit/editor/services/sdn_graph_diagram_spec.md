@@ -362,7 +362,7 @@ expect(canon).to_contain("nodes |id, label, css, role, shape, x, y, width, heigh
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -376,6 +376,11 @@ expect(graph.nodes[1].height).to_equal("70")
 expect(graph.nodes[1].layer).to_equal("services")
 expect(graph.nodes[1].parent).to_equal("Group")
 expect(graph.nodes[2].shape).to_equal("")
+val unsafe = sdn_graph_parse("graph: weave\nSvc: Service role: service x: 1 y: 2 width: 80 height: 40\nweave @:\n    node where role = service:\n        x: left\n        y: -10\n        width: -1\n        height: tall")
+expect(unsafe.nodes[0].x).to_equal("1")
+expect(unsafe.nodes[0].y).to_equal("-10")
+expect(unsafe.nodes[0].width).to_equal("80")
+expect(unsafe.nodes[0].height).to_equal("40")
 ```
 
 </details>
