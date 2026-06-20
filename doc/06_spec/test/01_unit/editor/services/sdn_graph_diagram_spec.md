@@ -120,7 +120,7 @@ expect(graph.nodes[1].parent).to_equal("Frame")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -131,6 +131,11 @@ expect(graph.edges[0].route).to_equal("orthogonal")
 expect(graph.edges[0].waypoints).to_equal("10x20;80x20")
 expect(graph.edges[0].start_anchor).to_equal("right")
 expect(graph.edges[0].end_anchor).to_equal("left")
+val labeled = sdn_graph_parse("graph: labels\nA: A\nB: B\nA -> B: note label_x: 42 label_y: -7\nB -> A: bad label_x: left label_y: 9px")
+expect(labeled.edges[0].label_x).to_equal("42")
+expect(labeled.edges[0].label_y).to_equal("-7")
+expect(labeled.edges[1].label_x).to_equal("")
+expect(labeled.edges[1].label_y).to_equal("")
 ```
 
 </details>
@@ -325,7 +330,7 @@ expect(canon).to_contain("A, B, done, , normal, simple, 56x36, right, left")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -336,6 +341,9 @@ expect(canon).to_contain("\"Alpha \"\"One\"\", Inc\"")
 expect(parsed.nodes[0].label).to_equal("Alpha \"One\", Inc")
 expect(parsed.edges[0].label).to_equal("flow,fast")
 expect(parsed.edges[0].waypoints).to_equal("56x36,80x36")
+val bad_label_points = sdn_graph_parse("graph: bad\nnodes |id, label, css, role, shape, x, y, width, height, layer, parent|\n    A, A, , , , , , , , , \n    B, B, , , , , , , , , \nedges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|\n    A, B, bad, , normal, simple, , , , 1px, nope")
+expect(bad_label_points.edges[0].label_x).to_equal("")
+expect(bad_label_points.edges[0].label_y).to_equal("")
 ```
 
 </details>
