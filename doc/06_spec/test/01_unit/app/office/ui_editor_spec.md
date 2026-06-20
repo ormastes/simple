@@ -195,7 +195,7 @@ expect(invalid.design.width).to_equal("800")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -212,6 +212,10 @@ val bad_spacing = office_ui_design_add_node_checked(design, OfficeUiNode(id: "ba
 expect(bad_spacing.accepted).to_be(false)
 expect(bad_spacing.reason).to_equal("invalid-layout")
 expect(bad_spacing.design.nodes.len()).to_equal(0)
+val bad_token = office_ui_design_add_node_checked(design, OfficeUiNode(id: "bad_token", label: "Bad Token", kind: "button", css: "primary", x: "10", y: "20", width: "80", height: "32", layer: "controls", component: "bad component", parent: "", layout_mode: "off", layout_gap: "0", layout_padding: "0,0,0,0", constraint_horizontal: "left", constraint_vertical: "top"))
+expect(bad_token.accepted).to_be(false)
+expect(bad_token.reason).to_equal("invalid-token")
+expect(bad_token.design.nodes.len()).to_equal(0)
 ```
 
 </details>
