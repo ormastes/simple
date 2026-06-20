@@ -512,6 +512,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
    - Expected: counter_inc_action.reason equals `incremented`
    - Expected: counter_bad_action.reason equals `unsupported`
    - Expected: counter_blank_action.reason equals `invalid-args`
+   - Expected: counter_short_action.reason equals `invalid-args`
    - Expected: counter_overflow_action.reason equals `invalid-args`
    - Expected: catalog[11].owner_module equals `app.office.launcher`
    - Expected: launcher_word_action.output equals `launcher-open: word`
@@ -530,7 +531,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1305 lines folded for reproduction.
+Runnable source: 1309 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1704,6 +1705,7 @@ val base_summary_action = office_action_dispatch("base-table-summary", "table: F
 val base_missing_query_column_action = office_action_dispatch("query-table", "count-where|missing|open\ntable: Feature\ncolumns: id,status\nrow: 1,open")
 val base_game_action = office_action_dispatch("export-base-game-state", "scope|level1|key|value\ntable: Game\ncolumns: scope,key,value\nrow: level1,hp,100\nrow: level1,spawn,gate\nrow: level2,hp,200")
 val base_game_missing_column_action = office_action_dispatch("export-base-game-state", "scope|level1|missing|value\ntable: Game\ncolumns: scope,key,value\nrow: level1,hp,100")
+val base_game_short_action = office_action_dispatch("export-base-game-state", "scope|level1|key\ntable: Game\ncolumns: scope,key,value\nrow: level1,hp,100")
 val base_blank_query_column_action = office_action_dispatch("query-table", "count-where|   |open\ntable: Feature\ncolumns: id,status\nrow: 1,open")
 val base_html_action = office_action_dispatch("render-base-table-html", "table: Feature\ncolumns: id,status\nrow: 1,<open>\nrow: 2,done")
 val base_duplicate_column_action = office_action_dispatch("render-base-table-html", "table: Feature\ncolumns: id,status,status\nrow: 1,open,open")
@@ -1725,6 +1727,7 @@ expect(base_missing_query_column_action.reason).to_equal("missing-column")
 expect(base_game_action.output).to_contain("hp=100")
 expect(base_game_action.output).to_contain("spawn=gate")
 expect(base_game_missing_column_action.reason).to_equal("missing-column")
+expect(base_game_short_action.reason).to_equal("invalid-args")
 expect(base_blank_query_column_action.reason).to_equal("invalid-args")
 expect(base_html_action.output).to_contain("data-format=\"base-table\"")
 expect(base_html_action.output).to_contain("data-format-name=\"Base Table\"")
@@ -1807,6 +1810,7 @@ val counter_dec_action = office_action_dispatch("counter-action", "41|counter_de
 val counter_reset_action = office_action_dispatch("counter-action", "5|counter_reset")
 val counter_bad_action = office_action_dispatch("counter-action", "5|counter_spin")
 val counter_blank_action = office_action_dispatch("counter-action", "5|   ")
+val counter_short_action = office_action_dispatch("counter-action", "5")
 val counter_overflow_action = office_action_dispatch("counter-action", "9223372036854775808|counter_increment")
 expect(counter_inc_action.output).to_contain("value=42")
 expect(counter_inc_action.reason).to_equal("incremented")
@@ -1815,6 +1819,7 @@ expect(counter_reset_action.output).to_contain("value=0")
 expect(counter_bad_action.reason).to_equal("unsupported")
 expect(counter_bad_action.output).to_contain("changed=false")
 expect(counter_blank_action.reason).to_equal("invalid-args")
+expect(counter_short_action.reason).to_equal("invalid-args")
 expect(counter_overflow_action.reason).to_equal("invalid-args")
 expect(catalog[11].owner_module).to_equal("app.office.launcher")
 expect(catalog[11].actions.join(",")).to_contain("open_sheets")
