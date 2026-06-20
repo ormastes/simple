@@ -1,6 +1,6 @@
 ---
 name: ide-office
-description: "Work on the Simple IDE Office plugin suite: markdown, slides, sheets, dashboard, DB admin, plugin manifests, and feature-check verification."
+description: "Work on the Simple IDE Office plugin suite: Markdown/Writer, Impress, Calc, Draw/SDD, Designer, Base, Math, Mail, Planner, dashboard, DB admin, plugin manifests, and feature-check verification."
 ---
 
 # IDE Office
@@ -16,8 +16,10 @@ Office apps under `src/app/office/` as they appear in the IDE.
 - IDE plugin metadata: `src/app/ide/plugin_manifest.spl`
 - Markdown decoration: `src/app/ide/markdown_render.spl`
 - Office apps: `src/app/office/slides/`, `src/app/office/sheets/`,
-  `src/app/office/launcher.spl`, `src/app/office/ui_editor.spl`,
-  `src/app/office/llm_catalog.spl`
+  `src/app/office/word/`, `src/app/office/ui_editor.spl`,
+  `src/app/office/launcher.spl`, `src/app/office/llm_catalog.spl`
+- Office catalog apps: Markdown/Writer, Calc, Impress, Draw, Designer, Base,
+  Math, Mail, Planner, Counter
 - SDD Draw substrate: `src/lib/editor/services/sdn_graph.spl`
 - Rendering guide: `doc/07_guide/app/ide_office_plugin_suite.md`
 - System coverage:
@@ -44,6 +46,8 @@ Office apps under `src/app/office/` as they appear in the IDE.
    assert shape, geometry, route, style-rule, selection, and inspector metadata.
 9. For Designer work, keep HTML/CSS rendering and SDD export pure; assert
    resolved geometry, class sanitizing, and exported node tables.
+10. For Mail and Planner catalog work, keep summaries read-only unless a real
+    persistence path exists; assert action routing through `llm_catalog.spl`.
 
 ## Verification
 
