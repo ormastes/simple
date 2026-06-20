@@ -616,7 +616,7 @@ expect(edge.edge_index).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -641,6 +641,8 @@ val added = sdn_graph_add_edge_checked(graph, " A ", " B ", "new", " primary ", 
 expect(added.accepted).to_be(true)
 expect(added.graph.edges[1].from_id).to_equal("A")
 expect(added.graph.edges[1].css).to_equal("primary")
+expect(sdn_graph_add_edge_checked(graph, "A bad", "B", "new", "", "", "", "", "", "").reason).to_equal("invalid-id")
+expect(sdn_graph_add_edge_checked(graph, "A", "Missing", "new", "", "", "", "", "", "").reason).to_equal("missing-node")
 
 val endpoints = sdn_graph_update_edge_endpoints_checked(graph, 0, " B ", " A ")
 expect(endpoints.accepted).to_be(true)
