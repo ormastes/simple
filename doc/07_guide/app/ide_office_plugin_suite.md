@@ -190,6 +190,7 @@ Blank SDD style-rule css or key arguments are rejected as `invalid-args`.
 `sdd-node-geometry-read` uses `node_id` and returns `x,y,width,height`.
 Blank or malformed SDD geometry node ids are rejected as `invalid-args`.
 `sdd-node-parent-read` uses `node_id` and returns the selected node parent id.
+`sdd-node-child-bounds-read` uses `node_id` and returns `min_x,min_y,max_x,max_y` for direct children.
 `sdd-node-shape-read` uses `node_id` and returns the selected node shape token.
 `sdd-node-layer-read` uses `node_id` and returns the selected node layer token.
 `sdd-node-order-read` uses `node_id` and returns the selected node order index.
@@ -382,7 +383,7 @@ modes:
   `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `sdd-style-extends-read`, `sdd-style-target-read`, `sdd-style-value-read`, `add-sdd-node`, `add-sdd-edge`,
   `duplicate-sdd-edge`, `edit-sdd-edge-label`, `sdd-edge-label-read`, `edit-sdd-edge-label-point`, `sdd-edge-label-point-read`, `edit-sdd-edge-style`, `sdd-edge-style-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`, `sdd-edge-route-read`, `sdd-edge-path-read`, `sdd-edge-segments-read`, `sdd-edge-endpoints-read`, `edit-sdd-edge-endpoints`,
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`, `sdd-node-geometry-read`,
-  `edit-sdd-node-label`, `sdd-node-label-read`, `edit-sdd-node-parent`, `sdd-node-parent-read`, `edit-sdd-node-shape`, `sdd-node-shape-read`,
+  `edit-sdd-node-label`, `sdd-node-label-read`, `edit-sdd-node-parent`, `sdd-node-parent-read`, `sdd-node-child-bounds-read`, `edit-sdd-node-shape`, `sdd-node-shape-read`,
   `edit-sdd-node-style`, `sdd-node-style-read`, `edit-sdd-node-layer`, `sdd-node-layer-read`, `order-sdd-node`, `sdd-node-order-read`, `edit-sdd-node-role`, `sdd-node-role-read`,
   `duplicate-sdd-node`, `edit-sdd-canvas`, `sdd-canvas-read`, `sdd-selection-geometry`, `sdd-list-layers`, `align-sdd-selection`,
   `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;

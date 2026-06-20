@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=7 roundtrip=7 names=7 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=193 actions=114
+  llm-catalog: apps=11 features=194 actions=115
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=193")
+expect(tui_report).to_contain("features=194")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -439,7 +439,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1072 lines folded for reproduction.
+Runnable source: 1077 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -448,10 +448,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=193 actions=114")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=194 actions=115")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(114)
-expect(dispatch_probe.recognized_count).to_equal(114)
+expect(dispatch_probe.advertised_count).to_equal(115)
+expect(dispatch_probe.recognized_count).to_equal(115)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -585,6 +585,8 @@ expect(catalog[4].actions.join(",")).to_contain("sdd-node-geometry-read")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-parent")
 expect(catalog[4].features.join(",")).to_contain("node-parent-readback")
 expect(catalog[4].actions.join(",")).to_contain("sdd-node-parent-read")
+expect(catalog[4].features.join(",")).to_contain("node-child-bounds-readback")
+expect(catalog[4].actions.join(",")).to_contain("sdd-node-child-bounds-read")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-shape")
 expect(catalog[4].features.join(",")).to_contain("node-shape-readback")
 expect(catalog[4].actions.join(",")).to_contain("sdd-node-shape-read")
@@ -789,6 +791,7 @@ val invalid_sdd_role_action = office_action_dispatch("edit-sdd-node-role", "A|da
 val stale_sdd_geometry_action = office_action_dispatch("edit-sdd-node-geometry", "Nope|0|0|10|10\ngraph: Geometry\nA: A")
 val sdd_parent_action = office_action_dispatch("edit-sdd-node-parent", "B|A\ngraph: Parent\nA: A x: 0 y: 0 width: 80 height: 80\nB: B x: 10 y: 10 width: 20 height: 20")
 val sdd_parent_read_action = office_action_dispatch("sdd-node-parent-read", "B\ngraph: Parent\nA: A x: 0 y: 0 width: 80 height: 80\nB: B x: 10 y: 10 width: 20 height: 20 parent: A")
+val sdd_child_bounds_read_action = office_action_dispatch("sdd-node-child-bounds-read", "A\ngraph: Parent\nA: A x: 0 y: 0 width: 80 height: 80\nB: B x: 10 y: 10 width: 20 height: 20 parent: A\nC: C x: 50 y: 5 width: 10 height: 10 parent: A")
 val invalid_sdd_parent_id_action = office_action_dispatch("edit-sdd-node-parent", "B|Bad Parent\ngraph: Parent\nA: A x: 0 y: 0 width: 80 height: 80\nB: B x: 10 y: 10 width: 20 height: 20")
 val sdd_parent_cycle_action = office_action_dispatch("edit-sdd-node-parent", "A|B\ngraph: Parent Cycle\nA: A x: 0 y: 0 width: 80 height: 80\nB: B x: 10 y: 10 width: 20 height: 20 parent: A")
 val sdd_node_delete_action = office_action_dispatch("delete-sdd-node", "B\ngraph: Node Delete\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
@@ -1090,6 +1093,8 @@ expect(stale_sdd_geometry_action.reason).to_equal("missing-node")
 expect(sdd_parent_action.output).to_contain("data-parent=\"A\"")
 expect(sdd_parent_read_action.output).to_equal("A")
 expect(sdd_parent_read_action.reason).to_equal("selected")
+expect(sdd_child_bounds_read_action.output).to_equal("10,5,60,30")
+expect(sdd_child_bounds_read_action.reason).to_equal("selected")
 expect(invalid_sdd_parent_id_action.reason).to_equal("invalid-args")
 expect(sdd_parent_cycle_action.reason).to_equal("parent-cycle")
 expect(sdd_inspect_node_action.output).to_contain("node_index=0")
