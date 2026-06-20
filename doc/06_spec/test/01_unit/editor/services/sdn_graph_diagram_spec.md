@@ -578,7 +578,7 @@ expect(html).to_contain("data-canvas-grid=\"24\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -607,6 +607,16 @@ expect(styled.nodes[1].shape).to_equal("cylinder")
 expect(styled.nodes[1].css).to_equal("storage highlight")
 expect(styled.nodes[1].x).to_equal("220")
 expect(sdn_graph_render_html(styled)).to_contain("sdn-css-storage sdn-css-highlight")
+
+val added = sdn_graph_add_node_checked(graph, "C", "Choice", "accent", "decision", "diamond", " 80 ", " 80 ", "64", "48", "front", "")
+expect(added.accepted).to_be(true)
+expect(added.graph.nodes[2].x).to_equal("80")
+expect(added.graph.nodes[2].y).to_equal("80")
+
+val invalid_add = sdn_graph_add_node_checked(graph, "D", "Bad", "accent", "decision", "diamond", "left", "80", "-1", "48", "front", "")
+expect(invalid_add.accepted).to_be(false)
+expect(invalid_add.reason).to_equal("invalid-geometry")
+expect(invalid_add.graph.nodes.len()).to_equal(2)
 ```
 
 </details>
