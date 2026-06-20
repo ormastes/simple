@@ -60,8 +60,8 @@ existing pure metadata/action surface, not a new framework:
 6. Cross-cutting concerns use DI/AOP-style wrappers at dispatch/reporting
    boundaries instead of being copied into every app.
 7. `office_catalog_dispatch_probe()` must exercise catalog actions through
-   `OfficePluginContext`, so catalog component/evidence drift is caught by the
-   dispatcher gate.
+   `OfficePluginContext`, so catalog component, source-format, and evidence
+   drift is caught by the dispatcher gate.
 
 ## Layer List
 

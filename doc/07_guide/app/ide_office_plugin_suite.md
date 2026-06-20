@@ -437,8 +437,8 @@ modes:
   Base, Math, Mail, Planner, Markdown, Writer, Calc, Impress, Counter, and Launcher without scraping this
   guide.
 - `office_catalog_dispatch_probe()` dispatches each advertised catalog action
-  with `OfficePluginContext`, so wrong component/evidence metadata is rejected
-  instead of counted as valid.
+  with `OfficePluginContext`, so wrong component, source-format, or evidence
+  metadata is rejected instead of counted as valid.
 
 ## Verification
 
