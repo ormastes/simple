@@ -96,6 +96,8 @@ duplicating rendering logic. Legacy aliases `ui-render`, `ui-export-sdd`, and
 `render-sdd` normalize to those canonical action names.
 `render-ui-html-with-selection` accepts either raw UI design source or a
 first-line `select|node_id` header followed by UI design source.
+`ui-select-node` uses `node_id`, rejects malformed or missing node IDs, and
+returns selected-node HTML.
 `render-sdd-html-with-selection` accepts either raw SDD source or a first-line
 `select|node_id|edge_index` header followed by SDD source; leave `edge_index`
 blank to select only a node.
@@ -334,7 +336,7 @@ modes:
   Counter has `counter-action`; Designer has `selected-resize-handles`,
   `resize-handle-metadata`, `render-ui-html`, `render-ui-html-with-selection`, `export-ui-sdd`, and
   `ui-label-edit` / `ui-name-edit` / `ui-kind-edit` / `ui-canvas-edit` / `ui-layout-edit` / `ui-resize-node` / `ui-auto-layout-edit` /
-  `ui-resolve-auto-layout` / `ui-add-node` / `ui-duplicate-node` / `ui-delete-node` / `ui-order-node` /
+  `ui-resolve-auto-layout` / `ui-select-node` / `ui-add-node` / `ui-duplicate-node` / `ui-delete-node` / `ui-order-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` / `ui-component-edit` /
   `ui-style-token-read` / `ui-style-token-edit` / `ui-inspect-node` / `ui-list-layers`; the IDE
