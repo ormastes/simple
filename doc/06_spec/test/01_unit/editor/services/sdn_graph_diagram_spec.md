@@ -192,7 +192,7 @@ expect(html).to_contain("data-end-anchor=\"left\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -206,6 +206,12 @@ expect(html).to_contain("data-canvas-zoom=\"125\"")
 expect(html).to_contain("data-canvas-background=\"#ffffff\"")
 expect(html).to_contain("style=\"width:1200px;height:800px;background-color:#ffffff")
 expect(html).to_contain("background-size:16px 16px;")
+
+val checked = sdn_graph_update_canvas_checked(graph, " 1440 ", " 960 ", " 24 ", " false ", " 150 ", " #f8fafc ")
+expect(checked.accepted).to_be(true)
+expect(checked.graph.canvas_width).to_equal("1440")
+expect(checked.graph.canvas_snap).to_equal("false")
+expect(checked.graph.canvas_background).to_equal("#f8fafc")
 ```
 
 </details>
