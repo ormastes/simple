@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 165 | 165 | 0 | 0 |
+| 166 | 166 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -3061,6 +3061,23 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects escaped pipe SDD style rule values as unsafe CSS
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("edit-sdd-style-rule", "accent|node||stroke-dasharray|4\\|2\ngraph: Style\nA: A @accent")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("invalid-style-value")
+expect(result.output).to_contain("actual: 4|2")
+```
+
+</details>
+
 #### rejects blank SDD edge endpoint ids
 
 <details>
@@ -3226,8 +3243,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 165 |
-| Active scenarios | 165 |
+| Total scenarios | 166 |
+| Active scenarios | 166 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
