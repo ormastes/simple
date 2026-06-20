@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=7 roundtrip=7 names=7 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=201 actions=122
+  llm-catalog: apps=11 features=202 actions=123
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=201")
+expect(tui_report).to_contain("features=202")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -439,7 +439,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1115 lines folded for reproduction.
+Runnable source: 1121 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -448,10 +448,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=201 actions=122")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=202 actions=123")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(122)
-expect(dispatch_probe.recognized_count).to_equal(122)
+expect(dispatch_probe.advertised_count).to_equal(123)
+expect(dispatch_probe.recognized_count).to_equal(123)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -540,8 +540,10 @@ expect(catalog[4].features.join(",")).to_contain("align-layout")
 expect(catalog[4].features.join(",")).to_contain("distribute-layout")
 expect(catalog[4].features.join(",")).to_contain("game-sprite-export")
 expect(catalog[4].features.join(",")).to_contain("document-summary")
+expect(catalog[4].features.join(",")).to_contain("weave-readback")
 expect(catalog[4].actions.join(",")).to_contain("render-sdd-html-with-selection")
 expect(catalog[4].actions.join(",")).to_contain("sdd-document-summary")
+expect(catalog[4].actions.join(",")).to_contain("sdd-weave-summary")
 expect(catalog[4].actions.join(",")).to_contain("export-sdd-canonical")
 expect(catalog[4].actions.join(",")).to_contain("export-sdd-game-sprites")
 expect(catalog[4].actions.join(",")).to_contain("reroute-sdd-connector")
@@ -662,6 +664,7 @@ val missing_ui_selection_geometry_action = office_action_dispatch("ui-selection-
 val ui_sdd_action = office_action_dispatch("export-ui-sdd", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val sdd_action = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val sdd_summary_action = office_action_dispatch("sdd-document-summary", "graph: Feature\ncanvas: width: 640 height: 480 grid: 16 snap: true zoom: 100 background: white\ncss accent:\n    fill: #eeeeee\nA: Alpha @accent x: 0 y: 0 width: 80 height: 20\nB: Beta x: 120 y: 0 width: 80 height: 20\nA -> B: Link")
+val sdd_weave_summary_action = office_action_dispatch("sdd-weave-summary", "graph: Weave\nweave @:\n    node where role=actor:\n        add: accent\n        shape: diamond\n        x: 10\n        y: 20\n    edge where kind=async:\n        add: dashed\nA: Alpha role: actor\nB: Beta\nA -> B: link kind: async")
 val selected_sdd_action = office_action_dispatch("render-sdd-html-with-selection", "select|A|\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val selected_sdd_edge_action = office_action_dispatch("render-sdd-html-with-selection", "select||0\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20\nB: Beta x: 120 y: 0 width: 80 height: 20\nA -> B: Link route: orthogonal waypoints: 80x10 start: right end: left")
 val canonical_sdd_action = office_action_dispatch("export-sdd-canonical", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
@@ -1036,6 +1039,9 @@ expect(sdd_style_rule_delete_action.reason).to_equal("updated")
 expect(deleted_sdd_style_rule_inspect_action.reason).to_equal("missing-style-rule")
 expect(sdd_style_rule_inspect_action.output).to_contain("value=#eeeeee")
 expect(sdd_style_rule_inspect_action.output).to_contain("target=node")
+expect(sdd_weave_summary_action.output).to_contain("weaves=2")
+expect(sdd_weave_summary_action.output).to_contain("0:target=node field=role value=actor add=accent shape=diamond x=10 y=20")
+expect(sdd_weave_summary_action.output).to_contain("1:target=edge field=kind value=async add=dashed")
 expect(sdd_style_extends_read_action.output).to_equal("base")
 expect(sdd_style_extends_read_action.reason).to_equal("selected")
 expect(sdd_style_target_read_action.output).to_equal("edge")

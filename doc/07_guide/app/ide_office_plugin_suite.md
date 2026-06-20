@@ -94,7 +94,7 @@ non-GUI bridge for cataloged render/export actions:
 `render-ppt-markdown-html`, `ppt-markdown-outline`, `render-ui-html`,
 `render-ui-html-with-selection`, `export-ui-sdd`, and
 `sdd-document-summary`, `render-sdd-html-with-selection` /
-`export-sdd-canonical`. The bridge delegates to the canonical
+`sdd-weave-summary`, `export-sdd-canonical`. The bridge delegates to the canonical
 Markdown, Writer, Impress, Designer, and SDD renderers rather than
 duplicating rendering logic. Legacy aliases `ui-render`, `ui-export-sdd`, and
 `render-sdd` normalize to those canonical action names.
@@ -161,6 +161,8 @@ with node id, label, kind, layer, z-index, parent, and component metadata.
 layer, z-index, and parent metadata.
 `sdd-document-summary` returns the Draw document name, node count, edge count,
 CSS rule count, style row count, and whether canvas metadata is present.
+`sdd-weave-summary` uses SDD source and lists parsed `weave @:` and `weave css:`
+rules that apply CSS, shape, and geometry changes.
 
 Layout actions use `mode_or_axis|id1,id2,...`, followed by the UI or SDD
 document body. `ui-align-selection`, `ui-distribute-selection`,
@@ -386,7 +388,7 @@ modes:
   `render-ppt-markdown-html` and `ppt-markdown-outline` plus PPT HTML,
   slide-count metadata, outline readback, safe CSS, positioned elements,
   element metadata, class sanitizing, and text escaping; Draw is SDD-backed with
-  `sdd-document-summary`, `render-sdd-html-with-selection`, `export-sdd-canonical`, `reroute-sdd-connector`, `edit-sdd-style-rule`,
+  `sdd-document-summary`, `sdd-weave-summary`, `render-sdd-html-with-selection`, `export-sdd-canonical`, `reroute-sdd-connector`, `edit-sdd-style-rule`,
   `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `sdd-style-extends-read`, `sdd-style-target-read`, `sdd-style-value-read`, `sdd-style-resolved-read`, `sdd-style-resolved-value-read`, `sdd-node-resolved-style-read`, `sdd-node-resolved-style-value-read`, `sdd-edge-resolved-style-read`, `sdd-edge-resolved-style-value-read`, `add-sdd-node`, `add-sdd-edge`,
   `duplicate-sdd-edge`, `edit-sdd-edge-label`, `sdd-edge-label-read`, `edit-sdd-edge-label-point`, `sdd-edge-label-point-read`, `edit-sdd-edge-style`, `sdd-edge-style-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`, `sdd-edge-route-read`, `sdd-edge-path-read`, `sdd-edge-segments-read`, `sdd-edge-endpoints-read`, `edit-sdd-edge-endpoints`,
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`, `sdd-node-geometry-read`,
