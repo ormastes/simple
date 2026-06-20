@@ -28,7 +28,7 @@ ide_plugin_manifest_harden_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -79,6 +79,21 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val probe = ide_plugin_manifest_probe()
 expect(probe.roundtrip_count).to_equal(probe.entry_count)
+```
+
+</details>
+
+#### manifest entry count follows the capability registry
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val probe = ide_plugin_manifest_probe()
+expect(probe.entry_count).to_equal(ide_capability_count())
 ```
 
 </details>
@@ -190,8 +205,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

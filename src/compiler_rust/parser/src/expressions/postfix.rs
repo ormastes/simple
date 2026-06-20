@@ -996,6 +996,7 @@ impl<'a> Parser<'a> {
         let saved_previous = self.previous.clone();
         let saved_pending = self.pending_tokens.clone();
         let saved_lexer = self.lexer.clone();
+        let saved_error_hints_len = self.error_hints.len();
 
         // Try to parse generic args
         self.advance(); // consume '<'
@@ -1068,6 +1069,7 @@ impl<'a> Parser<'a> {
             self.previous = saved_previous;
             self.pending_tokens = saved_pending;
             self.lexer = saved_lexer;
+            self.error_hints.truncate(saved_error_hints_len);
             Vec::new()
         }
     }
@@ -1088,6 +1090,7 @@ impl<'a> Parser<'a> {
         let saved_previous = self.previous.clone();
         let saved_pending = self.pending_tokens.clone();
         let saved_lexer = self.lexer.clone();
+        let saved_error_hints_len = self.error_hints.len();
 
         self.advance(); // consume '<'
 
@@ -1182,6 +1185,7 @@ impl<'a> Parser<'a> {
             self.previous = saved_previous;
             self.pending_tokens = saved_pending;
             self.lexer = saved_lexer;
+            self.error_hints.truncate(saved_error_hints_len);
         }
         // If ok: the generic args were consumed and discarded; caller's expr is unchanged.
     }

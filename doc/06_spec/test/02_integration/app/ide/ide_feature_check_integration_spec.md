@@ -91,8 +91,9 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
-  llm-catalog: apps=9 features=132 actions=61
-  llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
+  designer: resize_handle_metadata=true
+  llm-catalog: apps=11 features=206 actions=128
+  llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
 </details>
@@ -144,7 +145,7 @@ expect(out).to_contain("sheets: Spreadsheet")
 expect(out).to_contain("agent-dashboard: Agent Dashboard")
 expect(out).to_contain("db-admin: Database Admin")
 expect(out).to_contain("plugin-manifest: plugins: entries=6")
-expect(out).to_contain("llm-catalog: apps=9 features=132 actions=61")
+expect(out).to_contain("llm-catalog: apps=11 features=206 actions=128")
 
 step("Capture the TUI report so the manual shows the CLI surface")
 expect(_write_tui_capture(out)).to_equal(0)
