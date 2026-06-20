@@ -278,8 +278,9 @@ table names plus missing, blank, duplicate, or row-width-mismatched columns. `db
 `invalid-args`, rejects invalid schemas, and returns the updated table text.
 `export-base-game-state` uses `scope_column|scope_value|key_column|value_column`.
 
-Calc and Impress edit actions use `target_id|expected|replacement` followed by
-the compact `A1=value;B1=value` or `element_id=value;...` body. `sheet-edit`
+Calc and Impress edit actions use `cell_ref|expected_display|new_value` or
+`element_id|expected_text|new_text` followed by the compact `A1=value;B1=value`
+or `element_id=value;...` body. `sheet-edit`
 rejects blank target refs and malformed, invalid, or duplicate source cell refs.
 `slide-edit` rejects blank target ids and malformed, missing, or duplicate source element ids.
 `sheet-edit` and `slide-edit` return the updated target assignment and reject stale
