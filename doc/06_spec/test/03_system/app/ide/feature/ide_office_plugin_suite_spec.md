@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=7 roundtrip=7 names=7 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=190 actions=111
+  llm-catalog: apps=11 features=191 actions=112
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=190")
+expect(tui_report).to_contain("features=191")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -439,7 +439,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1057 lines folded for reproduction.
+Runnable source: 1062 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -448,10 +448,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=190 actions=111")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=191 actions=112")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(111)
-expect(dispatch_probe.recognized_count).to_equal(111)
+expect(dispatch_probe.advertised_count).to_equal(112)
+expect(dispatch_probe.recognized_count).to_equal(112)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -548,6 +548,8 @@ expect(catalog[4].actions.join(",")).to_contain("reroute-sdd-connector")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-style-rule")
 expect(catalog[4].actions.join(",")).to_contain("delete-sdd-style-rule")
 expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-style-rule")
+expect(catalog[4].features.join(",")).to_contain("style-extends-readback")
+expect(catalog[4].actions.join(",")).to_contain("sdd-style-extends-read")
 expect(catalog[4].actions.join(",")).to_contain("add-sdd-node")
 expect(catalog[4].actions.join(",")).to_contain("add-sdd-edge")
 expect(catalog[4].actions.join(",")).to_contain("duplicate-sdd-edge")
@@ -720,6 +722,7 @@ val blank_sdd_duplicate_action = office_action_dispatch("duplicate-sdd-node", "A
 val sdd_style_rule_action = office_action_dispatch("edit-sdd-style-rule", "accent|node|none|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent x: 0 y: 0 width: 80 height: 20")
 val sdd_style_rule_delete_action = office_action_dispatch("delete-sdd-style-rule", "accent|fill\n" + sdd_style_rule_action.output)
 val sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent|fill\ncss |name, extends, target|\n    accent, none, node\nstyles |css, key, value|\n    accent, fill, #eeeeee")
+val sdd_style_extends_read_action = office_action_dispatch("sdd-style-extends-read", "accent|fill\ncss |name, extends, target|\n    base, none, node\n    accent, base, node\nstyles |css, key, value|\n    accent, fill, #eeeeee")
 val deleted_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent|fill\n" + sdd_style_rule_delete_action.output)
 val missing_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent|stroke\ncss |name, extends, target|\n    accent, none, node\nstyles |css, key, value|\n    accent, fill, #eeeeee")
 val blank_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent|   \ncss |name, extends, target|\n    accent, none, node\nstyles |css, key, value|\n    accent, fill, #eeeeee")
@@ -1003,6 +1006,8 @@ expect(sdd_style_rule_delete_action.reason).to_equal("updated")
 expect(deleted_sdd_style_rule_inspect_action.reason).to_equal("missing-style-rule")
 expect(sdd_style_rule_inspect_action.output).to_contain("value=#eeeeee")
 expect(sdd_style_rule_inspect_action.output).to_contain("target=node")
+expect(sdd_style_extends_read_action.output).to_equal("base")
+expect(sdd_style_extends_read_action.reason).to_equal("selected")
 expect(missing_sdd_style_rule_inspect_action.reason).to_equal("missing-style-rule")
 expect(missing_sdd_style_rule_delete_action.reason).to_equal("missing-style-rule")
 expect(blank_sdd_style_rule_inspect_action.reason).to_equal("invalid-args")

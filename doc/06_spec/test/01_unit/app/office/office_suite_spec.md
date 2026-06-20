@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 142 | 142 | 0 | 0 |
+| 143 | 143 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1123,8 +1123,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(111)
-expect(probe.recognized_count).to_equal(111)
+expect(probe.advertised_count).to_equal(112)
+expect(probe.recognized_count).to_equal(112)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2483,6 +2483,26 @@ expect(delete_result.reason).to_equal("invalid-args")
 
 </details>
 
+#### reads SDD style rule extends
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("sdd-style-extends-read", "accent|fill\ngraph: Style\ncss base:\n    fill: #ffffff\ncss accent:\n    extends: base\n    fill: #eeeeee\nA: A @accent")
+val invalid = office_action_dispatch("sdd-style-extends-read", "accent,bad|fill\ngraph: Style\ncss accent:\n    fill: #eeeeee")
+val missing = office_action_dispatch("sdd-style-extends-read", "accent|stroke\ngraph: Style\ncss accent:\n    fill: #eeeeee")
+expect(result.ok).to_be(true)
+expect(result.output).to_equal("base")
+expect(invalid.reason).to_equal("invalid-args")
+expect(missing.reason).to_equal("missing-style-rule")
+```
+
+</details>
+
 #### rejects malformed SDD inspect ids
 
 <details>
@@ -2720,8 +2740,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 142 |
-| Active scenarios | 142 |
+| Total scenarios | 143 |
+| Active scenarios | 143 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
