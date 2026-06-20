@@ -20,8 +20,8 @@
   `base-table-summary`, `query-table`, `render-base-table-html`, and `db-edit`.
 - Draw rows advertise SDD-backed read/edit actions including
   `sdd-document-summary`, `render-sdd-html-with-selection`,
-  `edit-sdd-node-style`, `sdd-node-style-read`, `edit-sdd-edge-label`,
-  `sdd-edge-label-read`, `sdd-edge-label-point-read`, `edit-sdd-edge-style`,
+  `edit-sdd-node-style`, `sdd-node-style-read`, `sdd-node-geometry-read`,
+  `edit-sdd-edge-label`, `sdd-edge-label-read`, `sdd-edge-label-point-read`, `edit-sdd-edge-style`,
   `sdd-edge-style-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`,
   `sdd-edge-route-read`, `sdd-edge-path-read`,
   `sdd-edge-segments-read`, `sdd-edge-endpoints-read`, `inspect-sdd-node`,

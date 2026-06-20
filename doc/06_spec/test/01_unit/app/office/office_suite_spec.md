@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 135 | 135 | 0 | 0 |
+| 136 | 136 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1123,8 +1123,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(104)
-expect(probe.recognized_count).to_equal(104)
+expect(probe.advertised_count).to_equal(105)
+expect(probe.recognized_count).to_equal(105)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2271,6 +2271,26 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### reads SDD node geometry
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("sdd-node-geometry-read", "A\ngraph: Geometry\nA: A x: -4 y: 8 width: 40 height: 24")
+val invalid = office_action_dispatch("sdd-node-geometry-read", "A bad\ngraph: Geometry\nA: A")
+val missing = office_action_dispatch("sdd-node-geometry-read", "Nope\ngraph: Geometry\nA: A")
+expect(result.ok).to_be(true)
+expect(result.output).to_equal("-4,8,40,24")
+expect(invalid.reason).to_equal("invalid-args")
+expect(missing.reason).to_equal("missing-node")
+```
+
+</details>
+
 #### rejects blank SDD node order target ids
 
 <details>
@@ -2580,8 +2600,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 135 |
-| Active scenarios | 135 |
+| Total scenarios | 136 |
+| Active scenarios | 136 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
