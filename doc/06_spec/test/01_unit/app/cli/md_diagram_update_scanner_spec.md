@@ -27,7 +27,7 @@ md_diagram_update_scanner_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -100,6 +100,25 @@ expect(whitespace.len()).to_equal(0)
 
 </details>
 
+#### ignores diagram marker ids with fence syntax injection characters
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val quote = scan_diagram_regions(_region("doc\"arch"))
+val backtick = scan_diagram_regions(_region("doc`arch"))
+val equals = scan_diagram_regions(_region("doc=arch"))
+expect(quote.len()).to_equal(0)
+expect(backtick.len()).to_equal(0)
+expect(equals.len()).to_equal(0)
+```
+
+</details>
+
 #### ignores diagram marker ids without a comment close
 
 <details>
@@ -134,8 +153,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
