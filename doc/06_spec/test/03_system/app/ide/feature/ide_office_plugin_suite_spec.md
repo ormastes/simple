@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=161 actions=82
+  llm-catalog: apps=11 features=162 actions=83
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=161")
+expect(tui_report).to_contain("features=162")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -436,7 +436,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 914 lines folded for reproduction.
+Runnable source: 919 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -445,10 +445,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=161 actions=82")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=162 actions=83")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(82)
-expect(dispatch_probe.recognized_count).to_equal(82)
+expect(dispatch_probe.advertised_count).to_equal(83)
+expect(dispatch_probe.recognized_count).to_equal(83)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -480,6 +480,7 @@ expect(catalog[3].actions.join(",")).to_contain("render-ppt-markdown-html")
 expect(catalog[3].actions.join(",")).to_contain("slide-edit")
 expect(catalog[4].owner_module).to_equal("std.editor.services.sdn_graph")
 expect(catalog[4].features.join(",")).to_contain("sdd-source")
+expect(catalog[4].features.join(",")).to_contain("canonical-export")
 expect(catalog[4].features.join(",")).to_contain("connector-paths")
 expect(catalog[4].features.join(",")).to_contain("group-containers")
 expect(catalog[4].features.join(",")).to_contain("style-rule-edit")
@@ -512,6 +513,7 @@ expect(catalog[4].features.join(",")).to_contain("align-layout")
 expect(catalog[4].features.join(",")).to_contain("distribute-layout")
 expect(catalog[4].features.join(",")).to_contain("game-sprite-export")
 expect(catalog[4].actions.join(",")).to_contain("render-sdd-html-with-selection")
+expect(catalog[4].actions.join(",")).to_contain("export-sdd-canonical")
 expect(catalog[4].actions.join(",")).to_contain("export-sdd-game-sprites")
 expect(catalog[4].actions.join(",")).to_contain("reroute-sdd-connector")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-style-rule")
@@ -570,6 +572,7 @@ val ui_sdd_action = office_action_dispatch("export-ui-sdd", "design: Feature\nno
 val sdd_action = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val selected_sdd_action = office_action_dispatch("render-sdd-html-with-selection", "select|A|\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val selected_sdd_edge_action = office_action_dispatch("render-sdd-html-with-selection", "select||0\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20\nB: Beta x: 120 y: 0 width: 80 height: 20\nA -> B: Link route: orthogonal waypoints: 80x10 start: right end: left")
+val canonical_sdd_action = office_action_dispatch("export-sdd-canonical", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val sdd_game_action = office_action_dispatch("export-sdd-game-sprites", "graph: Level\nplayer: Player @hero shape: circle x: 10 y: 20 width: 16 height: 16 layer: 2")
 val legacy_ui_action = office_action_dispatch("ui-render", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val legacy_ui_sdd_action = office_action_dispatch("ui-export-sdd", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -799,6 +802,8 @@ expect(selected_sdd_edge_action.output).to_contain("data-node=\"A\" data-opposit
 expect(selected_sdd_edge_action.output).to_contain("data-node=\"B\" data-opposite-node=\"A\"")
 expect(selected_sdd_edge_action.output).to_contain("data-start-anchor=\"right\" data-end-anchor=\"left\"")
 expect(selected_sdd_edge_action.output).to_contain("data-from=\"A\" data-to=\"B\" data-start-anchor=\"right\" data-end-anchor=\"left\"")
+expect(canonical_sdd_action.output).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent|")
+expect(canonical_sdd_action.output).to_contain("    A, Alpha")
 expect(sdd_game_action.output).to_contain("sprite player")
 expect(sdd_game_action.output).to_contain("rect=10,20,16,16")
 expect(legacy_ui_action.action).to_equal("render-ui-html")

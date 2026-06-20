@@ -91,7 +91,7 @@ non-GUI bridge for cataloged render/export actions:
 `writer-markdown-summary`,
 `render-ppt-markdown-html`, `render-ui-html`,
 `render-ui-html-with-selection`, `export-ui-sdd`, and
-`render-sdd-html-with-selection`. The bridge delegates to the canonical
+`render-sdd-html-with-selection` / `export-sdd-canonical`. The bridge delegates to the canonical
 Markdown, Writer, Impress, Designer, and SDD renderers rather than
 duplicating rendering logic. Legacy aliases `ui-render`, `ui-export-sdd`, and
 `render-sdd` normalize to those canonical action names.
@@ -309,6 +309,7 @@ nodes become deterministic sprite records, and Base exact-match query rows
 become `key=value` game state records. The bridge does not import a game loop,
 GUI renderer, browser, filesystem, or host API.
 IDE/LLM callers use `export-sdd-game-sprites` for Draw sprite manifests and
+`export-sdd-canonical` for normalized `.sdd.sdn` source, and
 `export-base-game-state` for Base `key=value` state lines.
 
 Math editing uses `app.office.math_editor` as a pure MathML rendering substrate.
@@ -341,7 +342,7 @@ modes:
   fenced code, blockquotes, thematic breaks, and URL sanitizing; Impress has
   `render-ppt-markdown-html` plus PPT HTML, slide-count metadata, safe CSS,
   positioned elements, element metadata, class sanitizing, and text escaping; Draw is SDD-backed with
-  `render-sdd-html-with-selection`, `reroute-sdd-connector`, `edit-sdd-style-rule`,
+  `render-sdd-html-with-selection`, `export-sdd-canonical`, `reroute-sdd-connector`, `edit-sdd-style-rule`,
   `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `add-sdd-node`, `add-sdd-edge`,
   `duplicate-sdd-edge`, `edit-sdd-edge-label`, `edit-sdd-edge-label-point`, `edit-sdd-edge-style`, `edit-sdd-edge-kind`, `edit-sdd-edge-endpoints`,
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`,
