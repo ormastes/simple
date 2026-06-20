@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 159 | 159 | 0 | 0 |
+| 160 | 160 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -962,16 +962,19 @@ expect(result.reason).to_equal("row-width-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = office_action_dispatch("render-base-table-html", "table: Feature\\ncolumns: id,status\\nrow: 1,<open>")
+val quoted = office_action_dispatch("render-base-table-html", "table: Feature\\ncolumns: id,status\\nrow: 1,\"open,ready\"")
 expect(result.ok).to_be(true)
 expect(result.output).to_contain("data-format-name=\"Base Table\"")
 expect(result.output).to_contain("scope=\"col\" data-column=\"status\"")
 expect(result.output).to_contain("<tr data-row-index=\"0\">")
 expect(result.output).to_contain("<td data-row-index=\"0\" data-column=\"status\">&lt;open&gt;</td>")
+expect(quoted.ok).to_be(true)
+expect(quoted.output).to_contain("<td data-row-index=\"0\" data-column=\"status\">open,ready</td>")
 ```
 
 </details>
@@ -1024,6 +1027,23 @@ Reproduction: this block contains the complete executable scenario source.
 val result = office_action_dispatch("db-edit", "insert|2,done,done\\ntable: Bad\\ncolumns: id,status,status\\nrow: 1,open,open")
 expect(result.ok).to_be(false)
 expect(result.reason).to_equal("duplicate-column")
+```
+
+</details>
+
+#### preserves quoted comma Base cells through edits
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("db-edit", "insert|2,\"done,ready\"\\ntable: Feature\\ncolumns: id,status\\nrow: 1,\"open,ready\"")
+expect(result.ok).to_be(true)
+expect(result.output).to_contain("row: 1,\"open,ready\"")
+expect(result.output).to_contain("row: 2,\"done,ready\"")
 ```
 
 </details>
@@ -3085,8 +3105,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 159 |
-| Active scenarios | 159 |
+| Total scenarios | 160 |
+| Active scenarios | 160 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
