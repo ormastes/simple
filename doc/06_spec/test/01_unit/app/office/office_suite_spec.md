@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 116 | 116 | 0 | 0 |
+| 117 | 117 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -898,6 +898,27 @@ expect(invalid.reason).to_equal("invalid-args")
 
 </details>
 
+#### evaluates Calc formulas as read-only display values
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sum = office_action_dispatch("evaluate-sheet-formula", "=A1+B1\nA1=2;B1=3")
+val counta = office_action_dispatch("evaluate-sheet-formula", "COUNTA(A1:B1)\nA1=2;B1=text")
+val invalid = office_action_dispatch("evaluate-sheet-formula", "   \nA1=2")
+expect(sum.output).to_equal("5")
+expect(sum.reason).to_equal("evaluated")
+expect(counta.output).to_equal("2")
+expect(invalid.ok).to_be(false)
+expect(invalid.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### dispatches Designer resolved auto-layout readback
 
 <details>
@@ -927,8 +948,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(84)
-expect(probe.recognized_count).to_equal(84)
+expect(probe.advertised_count).to_equal(85)
+expect(probe.recognized_count).to_equal(85)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2201,8 +2222,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 116 |
-| Active scenarios | 116 |
+| Total scenarios | 117 |
+| Active scenarios | 117 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

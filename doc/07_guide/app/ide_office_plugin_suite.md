@@ -222,6 +222,9 @@ rejects blank target refs and malformed, invalid, or duplicate source cell refs.
 values with deterministic diffs.
 `format-cell-value` uses `numeric_value|format` and returns the same Calc
 display text used by the sheet formatter without mutating a sheet.
+`evaluate-sheet-formula` uses `formula_expression` followed by the compact
+`A1=value;B1=value` sheet body and returns display-safe Calc formula text without
+mutating the sheet.
 
 Math actions accept one expression body. `render-mathml` returns MathML,
 `render-mathml-checked` returns MathML with malformed-input rejection reasons,
@@ -352,9 +355,10 @@ modes:
   `edit-sdd-node-style`, `edit-sdd-node-layer`, `order-sdd-node`, `edit-sdd-node-role`,
   `duplicate-sdd-node`, `edit-sdd-canvas`, `sdd-canvas-read`, `sdd-selection-geometry`, `sdd-list-layers`, `align-sdd-selection`,
   `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;
-  Calc has `formula-counta`,
+  Calc has `formula-evaluate-read`, `formula-counta`,
   `formula-text-functions`, `formula-vlookup`, and
-  `formula-display-recalc`, plus `format-cell-value`; Base has `schema-validation`, `html-render`,
+  `formula-display-recalc`, plus `format-cell-value` and
+  `evaluate-sheet-formula`; Base has `schema-validation`, `html-render`,
   `html-cell-coordinates`, `html-escape`, invalid schema rejection, `query-table`,
   `count-where`, `select-where`, `project-column`, `update-where`,
   `delete-where`, `render-base-table-html`, and `db-edit`; Math has `fraction`,

@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=163 actions=84
+  llm-catalog: apps=11 features=164 actions=85
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=163")
+expect(tui_report).to_contain("features=164")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -436,7 +436,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 926 lines folded for reproduction.
+Runnable source: 933 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -445,10 +445,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=163 actions=84")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=164 actions=85")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(84)
-expect(dispatch_probe.recognized_count).to_equal(84)
+expect(dispatch_probe.advertised_count).to_equal(85)
+expect(dispatch_probe.recognized_count).to_equal(85)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -465,6 +465,7 @@ expect(catalog[1].actions.join(",")).to_contain("render-writer-markdown-html")
 expect(catalog[1].actions.join(",")).to_contain("writer-markdown-summary")
 expect(catalog[2].owner_module).to_equal("app.office.sheets")
 expect(catalog[2].features.join(",")).to_contain("formulas")
+expect(catalog[2].features.join(",")).to_contain("formula-evaluate-read")
 expect(catalog[2].features.join(",")).to_contain("formula-counta")
 expect(catalog[2].features.join(",")).to_contain("formula-text-functions")
 expect(catalog[2].features.join(",")).to_contain("formula-vlookup")
@@ -472,6 +473,7 @@ expect(catalog[2].features.join(",")).to_contain("formula-display-recalc")
 expect(catalog[2].features.join(",")).to_contain("cell-format-display")
 expect(catalog[2].actions.join(",")).to_contain("sheet-edit")
 expect(catalog[2].actions.join(",")).to_contain("format-cell-value")
+expect(catalog[2].actions.join(",")).to_contain("evaluate-sheet-formula")
 expect(catalog[3].owner_module).to_equal("app.office.slides")
 expect(catalog[3].features.join(",")).to_contain("markdown-source")
 expect(catalog[3].features.join(",")).to_contain("css-like-design")
@@ -557,6 +559,8 @@ val ppt_action = office_action_dispatch("render-ppt-markdown-html", "# Deck\n\n#
 val sheet_edit_action = office_action_dispatch("sheet-edit", "A1|old|new\nA1=old")
 val sheet_format_action = office_action_dispatch("format-cell-value", "1234.5|currency:$:2")
 val invalid_sheet_format_action = office_action_dispatch("format-cell-value", "12x|number:2")
+val sheet_formula_action = office_action_dispatch("evaluate-sheet-formula", "=A1+B1\nA1=2;B1=3")
+val invalid_sheet_formula_action = office_action_dispatch("evaluate-sheet-formula", "   \nA1=2")
 val sheet_stale_edit_action = office_action_dispatch("sheet-edit", "A1|missing|new\nA1=old")
 val sheet_duplicate_source_action = office_action_dispatch("sheet-edit", "A1|new|next\nA1=old;A01=new")
 val sheet_blank_target_action = office_action_dispatch("sheet-edit", "   |old|new\nA1=old")
@@ -778,6 +782,9 @@ expect(sheet_edit_action.reason).to_equal("updated")
 expect(sheet_format_action.output).to_equal("$1,234.50")
 expect(sheet_format_action.reason).to_equal("formatted")
 expect(invalid_sheet_format_action.reason).to_equal("invalid-args")
+expect(sheet_formula_action.output).to_equal("5")
+expect(sheet_formula_action.reason).to_equal("evaluated")
+expect(invalid_sheet_formula_action.reason).to_equal("invalid-args")
 expect(sheet_duplicate_source_action.reason).to_equal("duplicate-source-ref")
 expect(sheet_blank_target_action.reason).to_equal("invalid-args")
 expect(sheet_stale_edit_action.reason).to_equal("stale-cell")
