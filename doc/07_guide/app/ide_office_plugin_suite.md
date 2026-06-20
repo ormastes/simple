@@ -123,10 +123,11 @@ design body. `ui-label-edit` uses `node_id|expected_label|new_label`.
 Blank or malformed `ui-label-edit`, `ui-layout-edit`, `ui-resize-node`,
 `ui-auto-layout-edit`, and `ui-constraints-edit` / `ui-layer-edit` /
 `ui-style-token-edit` node ids are rejected as `invalid-args`.
-`ui-layer-edit`, `ui-component-edit`, and `ui-style-token-edit` use
-`node_id|expected|new`; blank expected layer/style fields and blank or malformed
-replacement style-token fields are `invalid-args`. `ui-component-edit` accepts
-a blank replacement to clear component metadata, or a safe token to set it.
+`ui-kind-edit`, `ui-layer-edit`, `ui-component-edit`, and `ui-style-token-edit`
+use `node_id|expected|new`; blank expected kind/layer/style fields and blank or
+malformed replacement kind/style-token fields are `invalid-args`.
+`ui-component-edit` accepts a blank replacement to clear component metadata, or
+a safe token to set it.
 `ui-style-token-read` and `ui-inspect-node` use `node_id`, reject malformed IDs
 as `invalid-args`, and return compact readback text.
 
@@ -321,7 +322,7 @@ modes:
   `render-mathml`, `render-math-structure`, and `render-mathml-checked`;
   Counter has `counter-action`; Designer has `selected-resize-handles`,
   `resize-handle-metadata`, `render-ui-html`, `render-ui-html-with-selection`, `export-ui-sdd`, and
-  `ui-label-edit` / `ui-layout-edit` / `ui-resize-node` / `ui-auto-layout-edit` /
+  `ui-label-edit` / `ui-kind-edit` / `ui-layout-edit` / `ui-resize-node` / `ui-auto-layout-edit` /
   `ui-resolve-auto-layout` / `ui-duplicate-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` / `ui-component-edit` /
