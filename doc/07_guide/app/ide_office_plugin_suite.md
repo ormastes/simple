@@ -152,6 +152,8 @@ mutating the document.
 `ui-auto-layout-edit` uses `node_id|expected_mode|expected_gap|expected_padding|new_mode|new_gap|new_padding`; all compact header fields are required, and malformed replacement mode, gap, or padding fields are `invalid-args`.
 `ui-auto-layout-signature` takes the UI design body and returns the canonical
 signature used as the guard header for `ui-resolve-auto-layout`.
+`ui-resolve-auto-layout` uses `expected_auto_layout_signature` followed by the
+UI design body and rejects stale or blank signatures.
 `ui-resolved-layout-read` takes the UI design body and returns rendered Designer
 HTML after applying auto-layout, without requiring or mutating a stale guard.
 `ui-constraints-edit` uses `node_id|expected_h|expected_v|new_h|new_v`; all compact header fields are required, and malformed replacement constraint fields are `invalid-args`.

@@ -431,7 +431,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -455,6 +455,7 @@ expect(guide).to_contain("css|node_or_edge|key")
 expect(guide).to_contain("node_id|front_or_back")
 expect(guide).to_contain("node_id|expected_parent|new_parent")
 expect(guide).to_contain("edge_index|value")
+expect(guide).to_contain("expected_auto_layout_signature")
 ```
 
 </details>
