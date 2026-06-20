@@ -516,7 +516,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1165 lines folded for reproduction.
+Runnable source: 1168 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1061,6 +1061,9 @@ expect(legacy_ui_sdd_action.action).to_equal("export-ui-sdd")
 expect(legacy_ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape")
 expect(legacy_sdd_action.action).to_equal("render-sdd-html")
 expect(legacy_sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
+expect(legacy_sdd_action.output).to_contain("data-format=\"sdd\"")
+expect(legacy_sdd_action.output).to_contain("data-format-name=\"SDD: Simple Diagram Document\"")
+expect(legacy_sdd_action.output).to_contain("data-file-extension=\".sdd.sdn\"")
 expect(sdd_action.output).to_contain("data-selected-edge-index=\"-1\"")
 expect(ui_add_action.output).to_contain("data-node-count=\"1\"")
 expect(duplicate_ui_add_action.reason).to_equal("duplicate-id")
