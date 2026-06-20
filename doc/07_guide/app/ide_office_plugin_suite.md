@@ -108,6 +108,9 @@ non-GUI bridge for cataloged render/export actions:
 Markdown, Writer, Impress, Designer, and SDD renderers rather than
 duplicating rendering logic. Legacy aliases `ui-render`, `ui-export-sdd`, and
 `render-sdd` normalize to those canonical action names.
+Writer Markdown range/replace/insert/delete actions use compact first-line
+headers `start|count`, `query|replacement`, `line|text`, and `line`, followed
+by Markdown source.
 Body-only Designer actions use `html_ui_source`; body-only Draw actions use
 `sdd_source`.
 `render-ui-html-with-selection` accepts either raw UI design source or a
