@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 162 | 162 | 0 | 0 |
+| 163 | 163 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1869,6 +1869,22 @@ expect(edge.output).to_contain("data-label=\"open|closed\"")
 
 </details>
 
+#### preserves escaped pipe UI design name edits
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("ui-name-edit", "Feature\\|One|Feature\\|Two\ndesign: Feature|One\nnode button|Run|button|16|16|80|32|primary|controls|action")
+expect(result.ok).to_be(true)
+expect(result.output).to_contain("data-design=\"Feature|Two\"")
+```
+
+</details>
+
 #### rejects blank UI layout action target ids
 
 <details>
@@ -3154,8 +3170,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 162 |
-| Active scenarios | 162 |
+| Total scenarios | 163 |
+| Active scenarios | 163 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
