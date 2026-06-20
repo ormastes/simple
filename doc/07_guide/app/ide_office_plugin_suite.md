@@ -174,6 +174,8 @@ Blank SDD style-rule css or key arguments are rejected as `invalid-args`.
 Blank or malformed SDD geometry node ids are rejected as `invalid-args`.
 `delete-sdd-node` uses `node_id`, rejects blank or malformed IDs, and removes attached connectors.
 `edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`; every field is required, numeric fields must be non-negative integers, snap is `true` or `false`, and background must be a safe CSS value.
+`sdd-canvas-read` returns the current Draw canvas width, height, grid, snap,
+zoom, and background metadata without mutating the document.
 `add-sdd-edge` uses `from_id|to_id|label|css|kind|route|waypoints|start|end` and applies the same route, anchor, waypoint, and `invalid-args` validation as connector reroute.
 `duplicate-sdd-edge` uses `edge_index`.
 `edit-sdd-node-label` uses `node_id|new_label` and rejects missing node IDs.
@@ -330,7 +332,7 @@ modes:
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`,
   `edit-sdd-node-label`, `edit-sdd-node-parent`, `edit-sdd-node-shape`,
   `edit-sdd-node-style`, `edit-sdd-node-layer`, `order-sdd-node`, `edit-sdd-node-role`,
-  `duplicate-sdd-node`, `edit-sdd-canvas`, `sdd-selection-geometry`, `sdd-list-layers`, `align-sdd-selection`,
+  `duplicate-sdd-node`, `edit-sdd-canvas`, `sdd-canvas-read`, `sdd-selection-geometry`, `sdd-list-layers`, `align-sdd-selection`,
   `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;
   Calc has `formula-counta`,
   `formula-text-functions`, `formula-vlookup`, and
