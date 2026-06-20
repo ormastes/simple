@@ -206,11 +206,14 @@ expect(html).to_contain("Sign &lt;in&gt;")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val design = office_ui_design_parse("design: Login\nsize: 800x480")
+val parsed = office_ui_design_parse("design: Bad Canvas\nsize: 0x480")
+expect(parsed.width).to_equal("960")
+expect(parsed.height).to_equal("540")
 val invalid = office_ui_design_update_canvas_checked(design, "800", "480", "0", "480")
 expect(invalid.accepted).to_be(false)
 expect(invalid.reason).to_equal("invalid-canvas")
