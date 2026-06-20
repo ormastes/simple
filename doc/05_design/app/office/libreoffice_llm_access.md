@@ -19,7 +19,7 @@
 - Base rows advertise table read/query/edit actions including
   `base-table-summary`, `query-table`, `render-base-table-html`, and `db-edit`.
 - Draw rows advertise SDD-backed read/edit actions including
-  `sdd-document-summary`, `sdd-weave-summary`, `render-sdd-html-with-selection`,
+  `sdd-document-summary`, `sdd-outline-read`, `sdd-weave-summary`, `render-sdd-html-with-selection`,
   `edit-sdd-node-label`, `sdd-node-label-read`,
   `edit-sdd-node-style`, `sdd-node-style-read`, `sdd-node-geometry-read`,
   `sdd-node-resolved-style-read`, `sdd-node-resolved-style-value-read`, `sdd-node-parent-read`, `sdd-node-child-bounds-read`, `sdd-node-child-count-read`, `sdd-node-shape-read`, `sdd-node-layer-read`,
