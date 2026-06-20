@@ -27,7 +27,7 @@ svllm_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 49 | 49 | 0 | 0 |
+| 70 | 70 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -634,7 +634,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val s = svllm_status_default()
 val sum = svllm_status_summary(s)
-expect(sum).contains("phase=A1")
+expect(sum).to_contain("phase=A1")
 ```
 
 </details>
@@ -650,7 +650,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val s = svllm_status_default()
 val sum = svllm_status_summary(s)
-expect(sum).contains("readiness=offline")
+expect(sum).to_contain("readiness=offline")
 ```
 
 </details>
@@ -666,7 +666,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val s = svllm_status_from(true, true, true, true, true, "llama3")
 val sum = svllm_status_summary(s)
-expect(sum).contains("readiness=ready")
+expect(sum).to_contain("readiness=ready")
 ```
 
 </details>
@@ -682,7 +682,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val s = svllm_status_from(true, true, true, true, true, "llama3")
 val sum = svllm_status_summary(s)
-expect(sum).contains("model=llama3")
+expect(sum).to_contain("model=llama3")
 ```
 
 </details>
@@ -698,7 +698,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val s = svllm_status_default()
 val sum = svllm_status_summary(s)
-expect(sum).contains("svllm:")
+expect(sum).to_contain("svllm:")
 ```
 
 </details>
@@ -813,6 +813,415 @@ expect(s.readiness).to_equal("offline")
 
 </details>
 
+### svllm_status_from counts are zero (no pack)
+
+#### tensor_count is 0 for default
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = svllm_status_default()
+expect(s.tensor_count).to_equal(0)
+```
+
+</details>
+
+#### chunk_count is 0 for default
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = svllm_status_default()
+expect(s.chunk_count).to_equal(0)
+```
+
+</details>
+
+#### tensor_count is 0 for all-true svllm_status_from
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = svllm_status_from(true, true, true, true, true, "llama3")
+expect(s.tensor_count).to_equal(0)
+```
+
+</details>
+
+#### chunk_count is 0 for all-true svllm_status_from
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = svllm_status_from(true, true, true, true, true, "llama3")
+expect(s.chunk_count).to_equal(0)
+```
+
+</details>
+
+### svllm_status_from_pack empty pack
+
+#### pack_available is false for empty pack
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val empty = TensorPack.empty("")
+val s = svllm_status_from_pack(empty, false, false, false, false, "")
+expect(s.pack_available).to_equal(false)
+```
+
+</details>
+
+#### tensor_count is 0 for empty pack
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val empty = TensorPack.empty("")
+val s = svllm_status_from_pack(empty, false, false, false, false, "")
+expect(s.tensor_count).to_equal(0)
+```
+
+</details>
+
+#### chunk_count is 0 for empty pack
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val empty = TensorPack.empty("")
+val s = svllm_status_from_pack(empty, false, false, false, false, "")
+expect(s.chunk_count).to_equal(0)
+```
+
+</details>
+
+#### readiness is offline when empty pack and all flags false
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val empty = TensorPack.empty("")
+val s = svllm_status_from_pack(empty, false, false, false, false, "")
+expect(s.readiness).to_equal("offline")
+```
+
+</details>
+
+### svllm_status_from_pack with plan_chunks pack
+
+#### chunk_count matches pack.chunks.len()
+
+- tensors push
+- tensors push
+   - Expected: s.chunk_count equals `pack.chunks.len()`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var tensors: [TensorInfo] = []
+tensors.push(TensorInfo(name: "embed", shape: [128, 64], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 32768))
+tensors.push(TensorInfo(name: "proj", shape: [64, 32], dtype: Dtype.F16, chunk_id: 0, offset_in_chunk: 0, byte_len: 4096))
+val pack = plan_chunks(tensors, 4096, 4194304)
+val s = svllm_status_from_pack(pack, false, false, false, false, "test-model")
+expect(s.chunk_count).to_equal(pack.chunks.len())
+```
+
+</details>
+
+#### tensor_count matches pack.tensors.len()
+
+- tensors push
+- tensors push
+   - Expected: s.tensor_count equals `pack.tensors.len()`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var tensors: [TensorInfo] = []
+tensors.push(TensorInfo(name: "embed", shape: [128, 64], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 32768))
+tensors.push(TensorInfo(name: "proj", shape: [64, 32], dtype: Dtype.F16, chunk_id: 0, offset_in_chunk: 0, byte_len: 4096))
+val pack = plan_chunks(tensors, 4096, 4194304)
+val s = svllm_status_from_pack(pack, false, false, false, false, "test-model")
+expect(s.tensor_count).to_equal(pack.tensors.len())
+```
+
+</details>
+
+#### tensor_count is 2 for 2-tensor pack
+
+- tensors push
+- tensors push
+   - Expected: s.tensor_count equals `2`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var tensors: [TensorInfo] = []
+tensors.push(TensorInfo(name: "embed", shape: [128, 64], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 32768))
+tensors.push(TensorInfo(name: "proj", shape: [64, 32], dtype: Dtype.F16, chunk_id: 0, offset_in_chunk: 0, byte_len: 4096))
+val pack = plan_chunks(tensors, 4096, 4194304)
+val s = svllm_status_from_pack(pack, false, false, false, false, "test-model")
+expect(s.tensor_count).to_equal(2)
+```
+
+</details>
+
+#### chunk_count is at least 1 for non-empty tensor list
+
+- tensors push
+   - Expected: s.chunk_count equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var tensors: [TensorInfo] = []
+tensors.push(TensorInfo(name: "w", shape: [4], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 16))
+val pack = plan_chunks(tensors, 4096, 4194304)
+val s = svllm_status_from_pack(pack, false, false, false, false, "")
+expect(s.chunk_count).to_equal(1)
+```
+
+</details>
+
+#### pack_available is true for non-empty tensor list
+
+- tensors push
+   - Expected: s.pack_available is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var tensors: [TensorInfo] = []
+tensors.push(TensorInfo(name: "w", shape: [4], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 16))
+val pack = plan_chunks(tensors, 4096, 4194304)
+val s = svllm_status_from_pack(pack, false, false, false, false, "")
+expect(s.pack_available).to_equal(true)
+```
+
+</details>
+
+### svllm_status_from_pack readiness orthogonality
+
+#### pack-available-only status is degraded not ready
+
+- tensors push
+   - Expected: s.pack_available is true
+   - Expected: s.readiness equals `degraded`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# counts do NOT affect readiness: having a pack with tensors but all
+# other flags false yields degraded, not ready.
+var tensors: [TensorInfo] = []
+tensors.push(TensorInfo(name: "w", shape: [4], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 16))
+val pack = plan_chunks(tensors, 4096, 4194304)
+val s = svllm_status_from_pack(pack, false, false, false, false, "")
+expect(s.pack_available).to_equal(true)
+expect(s.readiness).to_equal("degraded")
+```
+
+</details>
+
+#### pack-available-only status is not servable
+
+- tensors push
+   - Expected: svllm_status_is_servable(s) is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var tensors: [TensorInfo] = []
+tensors.push(TensorInfo(name: "w", shape: [4], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 16))
+val pack = plan_chunks(tensors, 4096, 4194304)
+val s = svllm_status_from_pack(pack, false, false, false, false, "")
+expect(svllm_status_is_servable(s)).to_equal(false)
+```
+
+</details>
+
+#### all flags true + pack with tensors is ready
+
+- tensors push
+   - Expected: s.readiness equals `ready`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var tensors: [TensorInfo] = []
+tensors.push(TensorInfo(name: "w", shape: [4], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 16))
+val pack = plan_chunks(tensors, 4096, 4194304)
+val s = svllm_status_from_pack(pack, true, true, true, true, "model")
+expect(s.readiness).to_equal("ready")
+```
+
+</details>
+
+### svllm_status_summary chunks and tensors tokens
+
+#### summary contains chunks= token
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = svllm_status_default()
+val sum = svllm_status_summary(s)
+expect(sum).to_contain("chunks=")
+```
+
+</details>
+
+#### summary contains tensors= token
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = svllm_status_default()
+val sum = svllm_status_summary(s)
+expect(sum).to_contain("tensors=")
+```
+
+</details>
+
+#### summary has chunks=0 for default status
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = svllm_status_default()
+val sum = svllm_status_summary(s)
+expect(sum).to_contain("chunks=0")
+```
+
+</details>
+
+#### summary has tensors=0 for default status
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = svllm_status_default()
+val sum = svllm_status_summary(s)
+expect(sum).to_contain("tensors=0")
+```
+
+</details>
+
+#### summary chunk and tensor counts match pack after from_pack
+
+- tensors push
+- tensors push
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var tensors: [TensorInfo] = []
+tensors.push(TensorInfo(name: "a", shape: [8], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 32))
+tensors.push(TensorInfo(name: "b", shape: [8], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 32))
+val pack = plan_chunks(tensors, 4096, 4194304)
+val s = svllm_status_from_pack(pack, false, false, false, false, "")
+val sum = svllm_status_summary(s)
+expect(sum).to_contain("chunks=1")
+expect(sum).to_contain("tensors=2")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -839,13 +1248,18 @@ Tests covering:
 - svllm_status_consumer_module
 - svllm_status_is_servable
 - svllm_status_from served_model boundary
+- svllm_status_from counts are zero (no pack)
+- svllm_status_from_pack empty pack
+- svllm_status_from_pack with plan_chunks pack
+- svllm_status_from_pack readiness orthogonality
+- svllm_status_summary chunks and tensors tokens
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 49 |
-| Active scenarios | 49 |
+| Total scenarios | 70 |
+| Active scenarios | 70 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

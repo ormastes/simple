@@ -28,7 +28,7 @@ agent_dashboard_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 35 | 35 | 0 | 0 |
+| 41 | 41 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -691,9 +691,162 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val s = ide_agent_dashboard_summary_svllm()
 expect(s.starts_with("agent-dashboard:")).to_equal(true)
-# default is offline
+# default is offline; metrics tokens precede svllm= so ends_with still holds
 val found = s.ends_with("svllm=offline")
 expect(found).to_equal(true)
+```
+
+</details>
+
+#### summary_svllm_for ready status ends_with svllm=ready
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ready_status = svllm_status_from(true, true, true, true, true, "llama3")
+val s = ide_agent_dashboard_summary_svllm_for(ready_status)
+expect(s.ends_with("svllm=ready")).to_equal(true)
+```
+
+</details>
+
+#### summary_svllm_for offline status contains svllm_chunks= and svllm_tensors=
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = ide_agent_dashboard_summary_svllm()
+expect(s).to_contain("svllm_chunks=")
+expect(s).to_contain("svllm_tensors=")
+```
+
+</details>
+
+#### summary_svllm_for offline status has zero chunk and tensor counts
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = ide_agent_dashboard_summary_svllm()
+expect(s).to_contain("svllm_chunks=0")
+expect(s).to_contain("svllm_tensors=0")
+```
+
+</details>
+
+### ide_agent_dashboard — svllm metrics_line
+
+#### metrics_line offline status has chunks=0 tensors=0
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val offline_status = svllm_status_default()
+val line = ide_agent_dashboard_svllm_metrics_line(offline_status)
+expect(line.starts_with("svllm-metrics:")).to_equal(true)
+expect(line).to_contain("chunks=0")
+expect(line).to_contain("tensors=0")
+expect(line).to_contain("pack_available=false")
+```
+
+</details>
+
+#### metrics_line from real pack reflects pack cardinality
+
+- tensors push
+- tensors push
+   - Expected: line.starts_with("svllm-metrics:") is true
+   - Expected: status.chunk_count equals `expected_chunks`
+   - Expected: status.tensor_count equals `expected_tensors`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# Build a minimal 2-tensor pack via plan_chunks, derive status from it,
+# then verify the metrics line reflects the actual chunk/tensor counts.
+val t1 = TensorInfo(
+    name: "embed.weight",
+    shape: [32000, 4096],
+    dtype: Dtype.F16,
+    chunk_id: 0,
+    offset_in_chunk: 0,
+    byte_len: 262144000
+)
+val t2 = TensorInfo(
+    name: "lm_head.weight",
+    shape: [32000, 4096],
+    dtype: Dtype.F16,
+    chunk_id: 0,
+    offset_in_chunk: 0,
+    byte_len: 262144000
+)
+var tensors: [TensorInfo] = []
+tensors.push(t1)
+tensors.push(t2)
+val pack = plan_chunks(tensors, 4096, 2097152)
+val status = svllm_status_from_pack(pack, false, false, false, false, "")
+val line = ide_agent_dashboard_svllm_metrics_line(status)
+expect(line.starts_with("svllm-metrics:")).to_equal(true)
+expect(line).to_contain("pack_available=true")
+val expected_chunks = pack.chunks.len()
+val expected_tensors = pack.tensors.len()
+expect(status.chunk_count).to_equal(expected_chunks)
+expect(status.tensor_count).to_equal(expected_tensors)
+```
+
+</details>
+
+#### summary_svllm_for with pack status contains svllm_chunks and svllm_tensors
+
+- tensors push
+   - Expected: s.ends_with("svllm=ready") is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val t1 = TensorInfo(
+    name: "weight",
+    shape: [128, 64],
+    dtype: Dtype.F32,
+    chunk_id: 0,
+    offset_in_chunk: 0,
+    byte_len: 32768
+)
+var tensors: [TensorInfo] = []
+tensors.push(t1)
+val pack = plan_chunks(tensors, 4096, 2097152)
+val status = svllm_status_from_pack(pack, true, true, true, true, "test-model")
+val s = ide_agent_dashboard_summary_svllm_for(status)
+expect(s).to_contain("svllm_chunks=")
+expect(s).to_contain("svllm_tensors=")
+# ends_with contract: line still ends with svllm=ready
+expect(s.ends_with("svllm=ready")).to_equal(true)
 ```
 
 </details>
@@ -717,13 +870,14 @@ Tests covering:
 - ide_agent_dashboard — svllm gate
 - ide_agent_dashboard — surface_with_svllm blocked-count semantics
 - ide_agent_dashboard — svllm summary
+- ide_agent_dashboard — svllm metrics_line
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 35 |
-| Active scenarios | 35 |
+| Total scenarios | 41 |
+| Active scenarios | 41 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

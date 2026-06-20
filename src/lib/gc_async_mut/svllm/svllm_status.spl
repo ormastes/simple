@@ -21,7 +21,14 @@
 #                          ⟺   reasons list is empty
 #                          ⟺   svllm_status_is_servable(status) == true
 #
+# Metrics note: tensor_count and chunk_count are observability metrics derived
+# from the TensorPack (via svllm_status_from_pack). They are ORTHOGONAL to
+# readiness — high or zero counts do not affect the readiness partition.
+# svllm_status_from always sets both to 0 (no pack was inspected).
+#
 # Design: doc/05_design/ml/svllm/svllm_master_plan.md (Phase A1 surface).
+
+use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack}
 
 # Readiness snapshot for the svllm engine. Pure value type; safe to build from
 # any tier and pass across module boundaries.
@@ -34,6 +41,8 @@ struct SvllmStatus:
     nvfs_ready: bool         # nvfs client contract is wired
     kv_cache_ready: bool     # paged kv cache is allocated
     model_loaded: bool       # weights resident and servable
+    tensor_count: i64        # tensors in the available pack (0 when no pack)
+    chunk_count: i64         # chunks in the available pack (0 when no pack)
     readiness: text          # "ready" | "degraded" | "offline"
     reasons: [text]          # human-readable degradation/offline reasons
     consumer_module: text    # cross-ref: who consumes this surface
@@ -65,7 +74,11 @@ fn svllm_status_readiness(pack_available: bool, loader_ready: bool, nvfs_ready: 
         return "degraded"
     "offline"
 
-fn svllm_status_from(pack_available: bool, loader_ready: bool, nvfs_ready: bool, kv_cache_ready: bool, model_loaded: bool, served_model: text) -> SvllmStatus:
+# Private helper: compute readiness+reasons and assemble the SvllmStatus struct.
+# Both public constructors delegate here; counts are caller-supplied so each
+# constructor can pass the appropriate values (0 for the flag-only path,
+# pack.tensors.len()/pack.chunks.len() for the pack path).
+fn _svllm_status_build(pack_available: bool, loader_ready: bool, nvfs_ready: bool, kv_cache_ready: bool, model_loaded: bool, tensor_count: i64, chunk_count: i64, served_model: text) -> SvllmStatus:
     val readiness = svllm_status_readiness(pack_available, loader_ready, nvfs_ready, kv_cache_ready, model_loaded)
     val reasons = svllm_status_reasons(pack_available, loader_ready, nvfs_ready, kv_cache_ready, model_loaded)
     SvllmStatus(
@@ -77,17 +90,35 @@ fn svllm_status_from(pack_available: bool, loader_ready: bool, nvfs_ready: bool,
         nvfs_ready: nvfs_ready,
         kv_cache_ready: kv_cache_ready,
         model_loaded: model_loaded,
+        tensor_count: tensor_count,
+        chunk_count: chunk_count,
         readiness: readiness,
         reasons: reasons,
         consumer_module: svllm_status_consumer_module()
     )
+
+fn svllm_status_from(pack_available: bool, loader_ready: bool, nvfs_ready: bool, kv_cache_ready: bool, model_loaded: bool, served_model: text) -> SvllmStatus:
+    _svllm_status_build(pack_available, loader_ready, nvfs_ready, kv_cache_ready, model_loaded, 0, 0, served_model)
+
+# Build a status from a real TensorPack — the metric-flow source. This is what
+# lets live pack cardinality (chunk/tensor counts) flow into the IDE dashboard:
+#   TensorPack (plan_chunks / parse_manifest) -> SvllmStatus -> agent_dashboard.
+#
+# pack_available is derived from pack.chunks.len() > 0 (chunks carry the
+# servable binary data). tensor_count comes from pack.tensors.len(). A
+# manifest-only / hand-built pack (tensors present but no chunks) will therefore
+# show tensor_count > 0 with pack_available = false — this is the correct
+# "parsed but not servable" signal, not a bug.
+fn svllm_status_from_pack(pack: TensorPack, loader_ready: bool, nvfs_ready: bool, kv_cache_ready: bool, model_loaded: bool, served_model: text) -> SvllmStatus:
+    val pack_available = pack.chunks.len() > 0
+    _svllm_status_build(pack_available, loader_ready, nvfs_ready, kv_cache_ready, model_loaded, pack.tensors.len(), pack.chunks.len(), served_model)
 
 # Default A1 status: contract wired but nothing loaded yet (offline).
 fn svllm_status_default() -> SvllmStatus:
     svllm_status_from(false, false, false, false, false, "")
 
 fn svllm_status_summary(status: SvllmStatus) -> text:
-    "svllm: phase={status.phase} model={status.served_model} pack={status.pack_available} loader={status.loader_ready} nvfs={status.nvfs_ready} kv={status.kv_cache_ready} loaded={status.model_loaded} readiness={status.readiness}"
+    "svllm: phase={status.phase} model={status.served_model} pack={status.pack_available} chunks={status.chunk_count} tensors={status.tensor_count} loader={status.loader_ready} nvfs={status.nvfs_ready} kv={status.kv_cache_ready} loaded={status.model_loaded} readiness={status.readiness}"
 
 # True iff this status snapshot indicates the engine is fully ready to serve
 # inference requests (all 5 component flags true, readiness=="ready", no

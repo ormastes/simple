@@ -6,9 +6,13 @@
 #   - Each single-flag-false case → degraded, exactly 1 reason
 #   - kv_cache_ready-only-true case (validates the degraded-OR fix)
 #   - reasons content correctness per flag
-#   - summary string stable substrings
+#   - summary string stable substrings (including chunks= and tensors=)
 #   - consumer_module constant
 #   - served_model propagation (empty vs set)
+#   - svllm_status_from default has tensor_count==0 and chunk_count==0
+#   - svllm_status_from_pack: counts follow pack.tensors/chunks.len()
+#   - empty pack → pack_available false, counts 0
+#   - readiness orthogonality: counts do NOT affect readiness
 #
 # NOTE: reasons array indexing beyond [0] is known-buggy in interpreter mode
 # (array.get(n>=1) corruption). All multi-reason checks use .len() only.
@@ -17,12 +21,15 @@ use std.gc_async_mut.svllm.svllm_status.{
     SvllmStatus,
     svllm_status_default,
     svllm_status_from,
+    svllm_status_from_pack,
     svllm_status_readiness,
     svllm_status_reasons,
     svllm_status_summary,
     svllm_status_consumer_module,
     svllm_status_is_servable
 }
+use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack, TensorInfo, plan_chunks}
+use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
 use std.spec.{describe, it, expect}
 
 describe "svllm_status_default":
@@ -198,27 +205,27 @@ describe "svllm_status_summary":
     it "contains phase=A1":
         val s = svllm_status_default()
         val sum = svllm_status_summary(s)
-        expect(sum).contains("phase=A1")
+        expect(sum).to_contain("phase=A1")
 
     it "contains readiness=offline for default":
         val s = svllm_status_default()
         val sum = svllm_status_summary(s)
-        expect(sum).contains("readiness=offline")
+        expect(sum).to_contain("readiness=offline")
 
     it "contains readiness=ready for all-true":
         val s = svllm_status_from(true, true, true, true, true, "llama3")
         val sum = svllm_status_summary(s)
-        expect(sum).contains("readiness=ready")
+        expect(sum).to_contain("readiness=ready")
 
     it "contains model name in summary when served_model is set":
         val s = svllm_status_from(true, true, true, true, true, "llama3")
         val sum = svllm_status_summary(s)
-        expect(sum).contains("model=llama3")
+        expect(sum).to_contain("model=llama3")
 
     it "starts with svllm:":
         val s = svllm_status_default()
         val sum = svllm_status_summary(s)
-        expect(sum).contains("svllm:")
+        expect(sum).to_contain("svllm:")
 
 describe "svllm_status_consumer_module":
     it "returns the IDE dashboard module path":
@@ -249,3 +256,136 @@ describe "svllm_status_from served_model boundary":
         val s = svllm_status_from(false, false, false, false, false, "stale-model")
         expect(s.served_model).to_equal("stale-model")
         expect(s.readiness).to_equal("offline")
+
+describe "svllm_status_from counts are zero (no pack)":
+    it "tensor_count is 0 for default":
+        val s = svllm_status_default()
+        expect(s.tensor_count).to_equal(0)
+
+    it "chunk_count is 0 for default":
+        val s = svllm_status_default()
+        expect(s.chunk_count).to_equal(0)
+
+    it "tensor_count is 0 for all-true svllm_status_from":
+        val s = svllm_status_from(true, true, true, true, true, "llama3")
+        expect(s.tensor_count).to_equal(0)
+
+    it "chunk_count is 0 for all-true svllm_status_from":
+        val s = svllm_status_from(true, true, true, true, true, "llama3")
+        expect(s.chunk_count).to_equal(0)
+
+describe "svllm_status_from_pack empty pack":
+    it "pack_available is false for empty pack":
+        val empty = TensorPack.empty("")
+        val s = svllm_status_from_pack(empty, false, false, false, false, "")
+        expect(s.pack_available).to_equal(false)
+
+    it "tensor_count is 0 for empty pack":
+        val empty = TensorPack.empty("")
+        val s = svllm_status_from_pack(empty, false, false, false, false, "")
+        expect(s.tensor_count).to_equal(0)
+
+    it "chunk_count is 0 for empty pack":
+        val empty = TensorPack.empty("")
+        val s = svllm_status_from_pack(empty, false, false, false, false, "")
+        expect(s.chunk_count).to_equal(0)
+
+    it "readiness is offline when empty pack and all flags false":
+        val empty = TensorPack.empty("")
+        val s = svllm_status_from_pack(empty, false, false, false, false, "")
+        expect(s.readiness).to_equal("offline")
+
+describe "svllm_status_from_pack with plan_chunks pack":
+    it "chunk_count matches pack.chunks.len()":
+        var tensors: [TensorInfo] = []
+        tensors.push(TensorInfo(name: "embed", shape: [128, 64], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 32768))
+        tensors.push(TensorInfo(name: "proj", shape: [64, 32], dtype: Dtype.F16, chunk_id: 0, offset_in_chunk: 0, byte_len: 4096))
+        val pack = plan_chunks(tensors, 4096, 4194304)
+        val s = svllm_status_from_pack(pack, false, false, false, false, "test-model")
+        expect(s.chunk_count).to_equal(pack.chunks.len())
+
+    it "tensor_count matches pack.tensors.len()":
+        var tensors: [TensorInfo] = []
+        tensors.push(TensorInfo(name: "embed", shape: [128, 64], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 32768))
+        tensors.push(TensorInfo(name: "proj", shape: [64, 32], dtype: Dtype.F16, chunk_id: 0, offset_in_chunk: 0, byte_len: 4096))
+        val pack = plan_chunks(tensors, 4096, 4194304)
+        val s = svllm_status_from_pack(pack, false, false, false, false, "test-model")
+        expect(s.tensor_count).to_equal(pack.tensors.len())
+
+    it "tensor_count is 2 for 2-tensor pack":
+        var tensors: [TensorInfo] = []
+        tensors.push(TensorInfo(name: "embed", shape: [128, 64], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 32768))
+        tensors.push(TensorInfo(name: "proj", shape: [64, 32], dtype: Dtype.F16, chunk_id: 0, offset_in_chunk: 0, byte_len: 4096))
+        val pack = plan_chunks(tensors, 4096, 4194304)
+        val s = svllm_status_from_pack(pack, false, false, false, false, "test-model")
+        expect(s.tensor_count).to_equal(2)
+
+    it "chunk_count is at least 1 for non-empty tensor list":
+        var tensors: [TensorInfo] = []
+        tensors.push(TensorInfo(name: "w", shape: [4], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 16))
+        val pack = plan_chunks(tensors, 4096, 4194304)
+        val s = svllm_status_from_pack(pack, false, false, false, false, "")
+        expect(s.chunk_count).to_equal(1)
+
+    it "pack_available is true for non-empty tensor list":
+        var tensors: [TensorInfo] = []
+        tensors.push(TensorInfo(name: "w", shape: [4], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 16))
+        val pack = plan_chunks(tensors, 4096, 4194304)
+        val s = svllm_status_from_pack(pack, false, false, false, false, "")
+        expect(s.pack_available).to_equal(true)
+
+describe "svllm_status_from_pack readiness orthogonality":
+    it "pack-available-only status is degraded not ready":
+        # counts do NOT affect readiness: having a pack with tensors but all
+        # other flags false yields degraded, not ready.
+        var tensors: [TensorInfo] = []
+        tensors.push(TensorInfo(name: "w", shape: [4], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 16))
+        val pack = plan_chunks(tensors, 4096, 4194304)
+        val s = svllm_status_from_pack(pack, false, false, false, false, "")
+        expect(s.pack_available).to_equal(true)
+        expect(s.readiness).to_equal("degraded")
+
+    it "pack-available-only status is not servable":
+        var tensors: [TensorInfo] = []
+        tensors.push(TensorInfo(name: "w", shape: [4], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 16))
+        val pack = plan_chunks(tensors, 4096, 4194304)
+        val s = svllm_status_from_pack(pack, false, false, false, false, "")
+        expect(svllm_status_is_servable(s)).to_equal(false)
+
+    it "all flags true + pack with tensors is ready":
+        var tensors: [TensorInfo] = []
+        tensors.push(TensorInfo(name: "w", shape: [4], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 16))
+        val pack = plan_chunks(tensors, 4096, 4194304)
+        val s = svllm_status_from_pack(pack, true, true, true, true, "model")
+        expect(s.readiness).to_equal("ready")
+
+describe "svllm_status_summary chunks and tensors tokens":
+    it "summary contains chunks= token":
+        val s = svllm_status_default()
+        val sum = svllm_status_summary(s)
+        expect(sum).to_contain("chunks=")
+
+    it "summary contains tensors= token":
+        val s = svllm_status_default()
+        val sum = svllm_status_summary(s)
+        expect(sum).to_contain("tensors=")
+
+    it "summary has chunks=0 for default status":
+        val s = svllm_status_default()
+        val sum = svllm_status_summary(s)
+        expect(sum).to_contain("chunks=0")
+
+    it "summary has tensors=0 for default status":
+        val s = svllm_status_default()
+        val sum = svllm_status_summary(s)
+        expect(sum).to_contain("tensors=0")
+
+    it "summary chunk and tensor counts match pack after from_pack":
+        var tensors: [TensorInfo] = []
+        tensors.push(TensorInfo(name: "a", shape: [8], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 32))
+        tensors.push(TensorInfo(name: "b", shape: [8], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 32))
+        val pack = plan_chunks(tensors, 4096, 4194304)
+        val s = svllm_status_from_pack(pack, false, false, false, false, "")
+        val sum = svllm_status_summary(s)
+        expect(sum).to_contain("chunks=1")
+        expect(sum).to_contain("tensors=2")
