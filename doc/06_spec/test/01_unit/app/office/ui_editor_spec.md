@@ -132,7 +132,7 @@ expect(design.nodes[1].component).to_equal("action")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -159,6 +159,8 @@ expect(unsafe.nodes[0].css).to_equal("primary accent_1")
 expect(unsafe.nodes[0].layer).to_equal("")
 expect(unsafe.nodes[0].component).to_equal("")
 expect(unsafe.nodes[0].parent).to_equal("")
+val bad_gap = office_ui_design_parse("design: Gap\nnode frame|Frame|frame|0|0|100|40|panel|1|container||horizontal|-1|0,0,0,0|left|top")
+expect(bad_gap.nodes[0].layout_gap).to_equal("0")
 ```
 
 </details>
