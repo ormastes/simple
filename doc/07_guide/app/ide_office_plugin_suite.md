@@ -199,6 +199,7 @@ zoom, and background metadata without mutating the document.
 `sdd-edge-style-read` uses `edge_index` and returns the connector CSS/style token string.
 `edit-sdd-edge-kind` uses `edge_index|kind`; kind is empty or one safe token.
 `sdd-edge-kind-read` uses `edge_index` and returns the connector kind token.
+`sdd-edge-route-read` uses `edge_index` and returns `route|waypoints|start_anchor|end_anchor`.
 `sdd-edge-endpoints-read` uses `edge_index` and returns `from_id,to_id`.
 `edit-sdd-edge-endpoints` uses `edge_index|from_id|to_id`; endpoint IDs must exist.
 Blank or malformed SDD edge endpoint IDs are rejected as `invalid-args`.
@@ -367,7 +368,7 @@ modes:
   element metadata, class sanitizing, and text escaping; Draw is SDD-backed with
   `sdd-document-summary`, `render-sdd-html-with-selection`, `export-sdd-canonical`, `reroute-sdd-connector`, `edit-sdd-style-rule`,
   `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `add-sdd-node`, `add-sdd-edge`,
-  `duplicate-sdd-edge`, `edit-sdd-edge-label`, `sdd-edge-label-read`, `edit-sdd-edge-label-point`, `sdd-edge-label-point-read`, `edit-sdd-edge-style`, `sdd-edge-style-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`, `sdd-edge-endpoints-read`, `edit-sdd-edge-endpoints`,
+  `duplicate-sdd-edge`, `edit-sdd-edge-label`, `sdd-edge-label-read`, `edit-sdd-edge-label-point`, `sdd-edge-label-point-read`, `edit-sdd-edge-style`, `sdd-edge-style-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`, `sdd-edge-route-read`, `sdd-edge-endpoints-read`, `edit-sdd-edge-endpoints`,
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`,
   `edit-sdd-node-label`, `edit-sdd-node-parent`, `edit-sdd-node-shape`,
   `edit-sdd-node-style`, `sdd-node-style-read`, `edit-sdd-node-layer`, `order-sdd-node`, `edit-sdd-node-role`,

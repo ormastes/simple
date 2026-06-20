@@ -175,7 +175,7 @@ expect(missing.join(",")).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -188,6 +188,7 @@ expect(office_llm_action_input_schema("sdd-edge-label-read")).to_equal("edge_ind
 expect(office_llm_action_input_schema("sdd-edge-label-point-read")).to_equal("edge_index\\nsdd_source")
 expect(office_llm_action_input_schema("sdd-edge-style-read")).to_equal("edge_index\\nsdd_source")
 expect(office_llm_action_input_schema("sdd-edge-kind-read")).to_equal("edge_index\\nsdd_source")
+expect(office_llm_action_input_schema("sdd-edge-route-read")).to_equal("edge_index\\nsdd_source")
 expect(office_llm_action_input_schema("sdd-edge-endpoints-read")).to_equal("edge_index\\nsdd_source")
 expect(office_llm_action_input_schema("reroute-sdd-connector")).to_contain("edge_index|route|waypoints")
 expect(office_llm_action_input_schema("db-edit")).to_contain("update-where|match_col")
