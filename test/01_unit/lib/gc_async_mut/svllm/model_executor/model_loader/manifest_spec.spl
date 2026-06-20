@@ -1,5 +1,4 @@
-# svllm manifest — parser + A2 serializer surface
-# A2 adds serialize_manifest(). Parser round-trip deferred to A3.
+# svllm manifest — real parser + serializer surface (A3)
 
 use std.gc_async_mut.svllm.model_executor.model_loader.manifest.{TensorPackManifest, ManifestError, parse_manifest, build_tensor_pack, serialize_manifest}
 use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack, TensorInfo, ChunkInfo}
@@ -14,25 +13,152 @@ describe "TensorPackManifest.empty":
         val m = TensorPackManifest.empty()
         expect(m.schema_version).to_equal(0)
 
-describe "parse_manifest (A1 stub)":
-    # These tests pin the target API. They will fail until the real
-    # parser lands in the next slice; that is the intended TDD state.
+describe "parse_manifest — malformed inputs":
     it "rejects empty input":
         val r = parse_manifest("")
         expect(r.is_err()).to_equal(true)
 
-    it "TODO: returns Ok on a well-formed v0 manifest":
-        val sdn = "schema_version: 0\nmodel_id: \"demo\"\nrevision: \"v0\"\npreferred_chunk_bytes: 2097152\nchunks: []\ntensors: []\n"
-        val r = parse_manifest(sdn)
-        # Intentionally failing until the parser is implemented.
+    it "rejects whitespace-only input":
+        val r = parse_manifest("   ")
+        expect(r.is_err()).to_equal(true)
+
+    it "rejects garbage input":
+        val r = parse_manifest("garbage")
+        expect(r.is_err()).to_equal(true)
+
+    it "rejects input missing schema_version key":
+        val r = parse_manifest("\"model_id\":\"x\"")
+        expect(r.is_err()).to_equal(true)
+
+    it "rejects input missing model_id key":
+        val r = parse_manifest("\"schema_version\":0")
+        expect(r.is_err()).to_equal(true)
+
+    it "empty input returns Malformed not some other error":
+        val r = parse_manifest("")
+        match r:
+            Ok(_) => expect(false).to_equal(true)
+            Err(e) =>
+                match e:
+                    ManifestError.Malformed => expect(true).to_equal(true)
+                    _ => expect(false).to_equal(true)
+
+    it "garbage input returns Malformed":
+        val r = parse_manifest("garbage")
+        match r:
+            Ok(_) => expect(false).to_equal(true)
+            Err(e) =>
+                match e:
+                    ManifestError.Malformed => expect(true).to_equal(true)
+                    _ => expect(false).to_equal(true)
+
+describe "parse_manifest — unsupported version":
+    it "returns UnsupportedVersion when schema_version is 1":
+        # Build input without brace interpolation — keys inline
+        val bad = "\"schema_version\":1,\"model_id\":\"x\""
+        val r = parse_manifest(bad)
+        expect(r.is_err()).to_equal(true)
+        match r:
+            Ok(_) => expect(false).to_equal(true)
+            Err(e) =>
+                match e:
+                    ManifestError.UnsupportedVersion => expect(true).to_equal(true)
+                    _ => expect(false).to_equal(true)
+
+    it "returns UnsupportedVersion when schema_version is 99":
+        val bad = "\"schema_version\":99,\"model_id\":\"m\""
+        val r = parse_manifest(bad)
+        match r:
+            Ok(_) => expect(false).to_equal(true)
+            Err(e) =>
+                match e:
+                    ManifestError.UnsupportedVersion => expect(true).to_equal(true)
+                    _ => expect(false).to_equal(true)
+
+describe "parse_manifest — round-trip via serialize_manifest":
+    it "parse_manifest(serialize_manifest(pack)) returns Ok":
+        val pack = _demo_pack()
+        val serialized = serialize_manifest(pack)
+        val r = parse_manifest(serialized)
         expect(r.is_ok()).to_equal(true)
 
-describe "build_tensor_pack (A1 stub)":
-    it "TODO: materialises a pack from a parsed manifest":
+    it "round-trip preserves model_id":
+        val pack = _demo_pack()
+        val serialized = serialize_manifest(pack)
+        val r = parse_manifest(serialized)
+        match r:
+            Ok(m) => expect(m.model_id).to_equal(pack.model_id)
+            Err(_) => expect(false).to_equal(true)
+
+    it "round-trip preserves revision":
+        val pack = _demo_pack()
+        val serialized = serialize_manifest(pack)
+        val r = parse_manifest(serialized)
+        match r:
+            Ok(m) => expect(m.revision).to_equal(pack.revision)
+            Err(_) => expect(false).to_equal(true)
+
+    it "round-trip preserves preferred_chunk_bytes":
+        val pack = _demo_pack()
+        val serialized = serialize_manifest(pack)
+        val r = parse_manifest(serialized)
+        match r:
+            Ok(m) => expect(m.preferred_chunk_bytes).to_equal(pack.preferred_chunk_bytes)
+            Err(_) => expect(false).to_equal(true)
+
+    it "round-trip reports schema_version 0":
+        val pack = _demo_pack()
+        val serialized = serialize_manifest(pack)
+        val r = parse_manifest(serialized)
+        match r:
+            Ok(m) => expect(m.schema_version).to_equal(0)
+            Err(_) => expect(false).to_equal(true)
+
+    it "round-trip tensor_count matches pack.tensors.len()":
+        val pack = _demo_pack()
+        val serialized = serialize_manifest(pack)
+        val r = parse_manifest(serialized)
+        match r:
+            Ok(m) => expect(m.tensor_count).to_equal(pack.tensors.len())
+            Err(_) => expect(false).to_equal(true)
+
+    it "round-trip chunk_count matches pack.chunks.len()":
+        val pack = _demo_pack()
+        val serialized = serialize_manifest(pack)
+        val r = parse_manifest(serialized)
+        match r:
+            Ok(m) => expect(m.chunk_count).to_equal(pack.chunks.len())
+            Err(_) => expect(false).to_equal(true)
+
+describe "parse_manifest — escape round-trip":
+    it "round-trip preserves model_id with embedded quote and backslash":
+        # Build a pack whose model_id contains a literal " and \
+        # _esc in serialize + _find_str_after in parse must be symmetric.
+        var p = TensorPack.empty("/tmp/pack")
+        p.model_id = "a\"b\\c"
+        p.revision = "v0"
+        p.chunks.push(ChunkInfo(
+            id: 0,
+            relative_path: "data-000.bin",
+            byte_len: 4096,
+            digest_hex: "0011aabb00000000000000000000000000000000000000000000000000000000"
+        ))
+        p.tensors.push(TensorInfo(
+            name: "w", shape: [2, 2], dtype: Dtype.F32,
+            chunk_id: 0, offset_in_chunk: 0, byte_len: 16
+        ))
+        val serialized = serialize_manifest(p)
+        val r = parse_manifest(serialized)
+        match r:
+            Ok(m) => expect(m.model_id).to_equal("a\"b\\c")
+            Err(_) => expect(false).to_equal(true)
+
+describe "build_tensor_pack (stub — deferred)":
+    # build_tensor_pack is still a stub returning Err; this pins the behavior.
+    it "returns Err until build is implemented":
         val m = TensorPackManifest.empty()
         val r = build_tensor_pack("/tmp/pack", m)
-        # Intentionally failing until build is implemented.
-        expect(r.is_ok()).to_equal(true)
+        expect(r.is_err()).to_equal(true)
 
 # ----- A2 serializer specs (failing until Phase 5) -----
 

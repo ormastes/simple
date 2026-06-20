@@ -47,10 +47,175 @@ struct TensorPackManifest:
     fn is_empty(self) -> bool:
         self.model_id == "" and self.chunk_count == 0
 
-# Stub parser: real implementation lives in the next slice. Returns an
-# error so tests written against the target API fail until implemented.
+# Returns true if needle appears in t starting at position pos.
+# Uses char_at exclusively — no substring/index_of semantics to guess.
+fn _match_at(t: text, needle: text, pos: i64) -> bool:
+    val tlen = t.len()
+    val nlen = needle.len()
+    if pos + nlen > tlen:
+        return false
+    var k = 0
+    while k < nlen:
+        if t.char_at(pos + k) != needle.char_at(k):
+            return false
+        k = k + 1
+    true
+
+# Returns the position of the first occurrence of needle in t at or after
+# from_pos, or -1 if not found.
+fn _find_in(t: text, needle: text, from_pos: i64) -> i64:
+    val tlen = t.len()
+    val nlen = needle.len()
+    var i = from_pos
+    while i + nlen <= tlen:
+        if _match_at(t, needle, i):
+            return i
+        i = i + 1
+    -1
+
+# Counts non-overlapping occurrences of needle in t.
+fn _count_occurrences(t: text, needle: text) -> i64:
+    val nlen = needle.len()
+    if nlen == 0:
+        return 0
+    var count: i64 = 0
+    var pos: i64 = 0
+    var found = _find_in(t, needle, pos)
+    while found >= 0:
+        count = count + 1
+        pos = found + nlen
+        found = _find_in(t, needle, pos)
+    count
+
+# Returns the integer value that follows key in t, or -1 if key is absent
+# or no digit immediately follows the key. Parses until a non-digit is seen.
+fn _find_int_after(t: text, key: text) -> i64:
+    val kpos = _find_in(t, key, 0)
+    if kpos < 0:
+        return -1
+    var i = kpos + key.len()
+    val tlen = t.len()
+    # skip any optional whitespace after the key (up to 4 chars for safety)
+    var spaces = 0
+    while i < tlen and spaces < 4:
+        val ch = t.char_at(i)
+        if ch == " " or ch == "\t":
+            i = i + 1
+            spaces = spaces + 1
+        else:
+            spaces = 99
+    # must have a digit next
+    if i >= tlen:
+        return -1
+    val first = t.char_at(i)
+    val digits = "0123456789"
+    var dpos = _find_in(digits, first, 0)
+    if dpos < 0:
+        return -1
+    var result: i64 = dpos
+    i = i + 1
+    var running = true
+    while running and i < tlen:
+        val ch2 = t.char_at(i)
+        var dp2 = _find_in(digits, ch2, 0)
+        if dp2 >= 0:
+            result = result * 10 + dp2
+            i = i + 1
+        else:
+            running = false
+    result
+
+# Returns the quoted-string value that follows key (which must end with `":"`
+# or similar so that the next char is `"`). Returns "" if key not found or
+# no opening quote is found immediately after key.
+fn _find_str_after(t: text, key: text) -> text:
+    val kpos = _find_in(t, key, 0)
+    if kpos < 0:
+        return ""
+    # key already includes the opening quote; collect until closing quote
+    var i = kpos + key.len()
+    val tlen = t.len()
+    var out = ""
+    var running = true
+    while running and i < tlen:
+        val ch = t.char_at(i)
+        if ch == "\"":
+            running = false
+        else:
+            if ch == "\\":
+                # minimal unescape: skip the backslash, take next char
+                i = i + 1
+                if i < tlen:
+                    out = out + t.char_at(i)
+            else:
+                out = out + ch
+        i = i + 1
+    out
+
+# Real parser: extracts scalar fields from the JSON-ish v0 manifest text.
+# Uses key-search helpers (char_at/len only) so it is robust to ASCII-clean
+# v0 content. Returns Err(Malformed) for missing/garbage input,
+# Err(UnsupportedVersion) when schema_version != 0, Ok otherwise.
 fn parse_manifest(sdn_text: text) -> Result<TensorPackManifest, ManifestError>:
-    Err(ManifestError.Malformed)
+    # Empty / whitespace input
+    if sdn_text.len() == 0:
+        return Err(ManifestError.Malformed)
+    # Error ordering: missing required keys → Malformed takes precedence over
+    # UnsupportedVersion. schema_version and model_id are checked first so
+    # that a totally garbage input returns Malformed, not UnsupportedVersion.
+    # Note: negative schema_version → Malformed because _find_int_after returns
+    # -1 when no digit is found (no sign handling), triggering the sv < 0 guard.
+    #
+    # schema_version key must be present
+    val sv_key_pos = _find_in(sdn_text, "\"schema_version\":", 0)
+    if sv_key_pos < 0:
+        return Err(ManifestError.Malformed)
+    # model_id key must be present
+    val mid_key_pos = _find_in(sdn_text, "\"model_id\":\"", 0)
+    if mid_key_pos < 0:
+        return Err(ManifestError.Malformed)
+    # Parse schema_version integer
+    val sv = _find_int_after(sdn_text, "\"schema_version\":")
+    if sv < 0:
+        return Err(ManifestError.Malformed)
+    if sv != 0:
+        return Err(ManifestError.UnsupportedVersion)
+    # Structural integrity: after confirming version, require the essential
+    # array markers and enclosing braces. This rejects truncated or
+    # garbage-tail manifests that would otherwise slip through key-scan only.
+    val trimmed = sdn_text.trim()
+    if trimmed.len() == 0:
+        return Err(ManifestError.Malformed)
+    if trimmed.char_at(0) != "{":
+        return Err(ManifestError.Malformed)
+    if trimmed.char_at(trimmed.len() - 1) != "}":
+        return Err(ManifestError.Malformed)
+    if _find_in(sdn_text, "\"chunks\":[", 0) < 0:
+        return Err(ManifestError.Malformed)
+    if _find_in(sdn_text, "\"tensors\":[", 0) < 0:
+        return Err(ManifestError.Malformed)
+    if _find_in(sdn_text, "\"preferred_chunk_bytes\":", 0) < 0:
+        return Err(ManifestError.Malformed)
+    # Parse remaining scalar fields
+    val mid = _find_str_after(sdn_text, "\"model_id\":\"")
+    val rev = _find_str_after(sdn_text, "\"revision\":\"")
+    val pcb = _find_int_after(sdn_text, "\"preferred_chunk_bytes\":")
+    val preferred: i64
+    if pcb < 0:
+        preferred = 0
+    else:
+        preferred = pcb
+    # Count arrays by unique-per-type keys
+    val tc = _count_occurrences(sdn_text, "\"offset_in_chunk\":")
+    val cc = _count_occurrences(sdn_text, "\"digest_hex\":")
+    Ok(TensorPackManifest(
+        schema_version: 0,
+        model_id: mid,
+        revision: rev,
+        preferred_chunk_bytes: preferred,
+        tensor_count: tc,
+        chunk_count: cc
+    ))
 
 # Stub materializer: given a parsed manifest, build the full TensorPack
 # descriptor (resolves tensor → chunk mappings, checks invariants).
