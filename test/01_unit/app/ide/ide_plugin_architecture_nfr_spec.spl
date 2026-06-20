@@ -1,0 +1,62 @@
+"""
+IDE plugin architecture NFR spec.
+
+Measures the built-in Office plugin manifest and bridge paths used by the
+current IDE plugin architecture milestone.
+
+**Requirements:** doc/02_requirements/nfr/ide_plugin_architecture.md
+**Plan:** doc/03_plan/sys_test/ide_office_plugin_suite.md
+**Architecture:** doc/04_architecture/ide_plugin_architecture.md
+"""
+
+use std.spec.{describe, it, expect}
+
+use app.ide.plugin_manifest.{ide_plugin_manifest_probe}
+use app.office.mod.{office_action_dispatch}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+fn elapsed_micros(start: i64) -> i64:
+    rt_time_now_unix_micros() - start
+
+describe "IDE plugin architecture NFR probes":
+    it "loads the built-in manifest probe within the warm NFR budget":
+        val warmup = ide_plugin_manifest_probe()
+        expect(warmup.entry_count).to_equal(13)
+
+        val start = rt_time_now_unix_micros()
+        val probe = ide_plugin_manifest_probe()
+        val elapsed = elapsed_micros(start)
+
+        expect(probe.roundtrip_count).to_equal(13)
+        expect(elapsed).to_be_less_than(25000)
+
+    it "activates the built-in launcher command within the warm NFR budget":
+        val warmup = office_action_dispatch("open_word", "")
+        expect(warmup.reason).to_equal("opened")
+
+        val start = rt_time_now_unix_micros()
+        val result = office_action_dispatch("open_word", "")
+        val elapsed = elapsed_micros(start)
+
+        expect(result.reason).to_equal("opened")
+        expect(elapsed).to_be_less_than(50000)
+
+    it "keeps hot built-in command dispatch under the p95 budget":
+        val warmup = office_action_dispatch("open_word", "")
+        expect(warmup.reason).to_equal("opened")
+
+        val start = rt_time_now_unix_micros()
+        val a = office_action_dispatch("open_word", "")
+        val b = office_action_dispatch("open_word", "")
+        val c = office_action_dispatch("open_word", "")
+        val d = office_action_dispatch("open_word", "")
+        val e = office_action_dispatch("open_word", "")
+        val elapsed = elapsed_micros(start)
+
+        expect(a.reason).to_equal("opened")
+        expect(b.reason).to_equal("opened")
+        expect(c.reason).to_equal("opened")
+        expect(d.reason).to_equal("opened")
+        expect(e.reason).to_equal("opened")
+        expect(elapsed / 5).to_be_less_than(2000)
