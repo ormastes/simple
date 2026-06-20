@@ -10,8 +10,8 @@
 - `office_llm_catalog_app_names()` -> stable app ordering for LLM prompts,
   manuals, and tests.
 - Writer and Impress rows advertise Markdown-source actions:
-  `render-writer-markdown-html`, `writer-markdown-summary`, and
-  `render-ppt-markdown-html`.
+  `render-writer-markdown-html`, `writer-markdown-summary`,
+  `writer-markdown-outline`, and `render-ppt-markdown-html`.
 
 ## Constraints
 

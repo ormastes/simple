@@ -88,7 +88,7 @@ Headless Office actions are exposed through
 `office_action_dispatch(action, source)` in `app.office.mod`. This is the stable
 non-GUI bridge for cataloged render/export actions:
 `render-markdown-preview-html`, `render-writer-markdown-html`,
-`writer-markdown-summary`,
+`writer-markdown-summary`, `writer-markdown-outline`,
 `render-ppt-markdown-html`, `render-ui-html`,
 `render-ui-html-with-selection`, `export-ui-sdd`, and
 `render-sdd-html-with-selection` / `export-sdd-canonical`. The bridge delegates to the canonical
@@ -342,8 +342,9 @@ modes:
 - Draw: `format=sdd name="SDD: Simple Diagram Document" html=true route=true select=true inspect=true child_meta=true path_meta=true handle_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true`
 - Calc: `display_recalc=true`
 - LLM catalog: Markdown has `render-markdown-preview-html` and `md-edit`; Writer has
-  `render-writer-markdown-html` and `writer-markdown-summary` plus Markdown
-  paper features for task lists, tables/table alignment, images, inline links,
+  `render-writer-markdown-html`, `writer-markdown-summary`, and
+  `writer-markdown-outline` plus Markdown paper features for document outline,
+  task lists, tables/table alignment, images, inline links,
   fenced code, blockquotes, thematic breaks, and URL sanitizing; Impress has
   `render-ppt-markdown-html` plus PPT HTML, slide-count metadata, safe CSS,
   positioned elements, element metadata, class sanitizing, and text escaping; Draw is SDD-backed with

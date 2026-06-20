@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 117 | 117 | 0 | 0 |
+| 118 | 118 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -606,6 +606,23 @@ expect(result.output).to_contain("render=html")
 
 </details>
 
+#### lists Writer Markdown headings as a document outline
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("writer-markdown-outline", "# Title\\n\\n## Section\\n```\\n# hidden\\n```\\n### Detail")
+expect(result.ok).to_be(true)
+expect(result.reason).to_equal("listed")
+expect(result.output).to_equal("0|1|Title\n2|2|Section\n6|3|Detail")
+```
+
+</details>
+
 #### dispatches PPT Markdown HTML rendering as a headless office action
 
 <details>
@@ -948,8 +965,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(85)
-expect(probe.recognized_count).to_equal(85)
+expect(probe.advertised_count).to_equal(86)
+expect(probe.recognized_count).to_equal(86)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2222,8 +2239,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 117 |
-| Active scenarios | 117 |
+| Total scenarios | 118 |
+| Active scenarios | 118 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
