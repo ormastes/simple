@@ -530,7 +530,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1231 lines folded for reproduction.
+Runnable source: 1233 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -850,6 +850,7 @@ val ui_layer_action = office_action_dispatch("ui-layer-edit", "button|controls|9
 val blank_ui_layer_action = office_action_dispatch("ui-layer-edit", "   |controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_layer_action = office_action_dispatch("ui-layer-edit", "button bad|controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_field_ui_layer_action = office_action_dispatch("ui-layer-edit", "button|controls|   \ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val short_ui_layer_action = office_action_dispatch("ui-layer-edit", "button|controls\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_component_action = office_action_dispatch("ui-component-edit", "button|action|primary_action\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_component_action = office_action_dispatch("ui-component-edit", "button|action|primary action\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val short_ui_component_action = office_action_dispatch("ui-component-edit", "button|action\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -1169,6 +1170,7 @@ expect(ui_layer_action.output).to_contain("data-z-index=\"9\"")
 expect(blank_ui_layer_action.reason).to_equal("invalid-args")
 expect(invalid_ui_layer_action.reason).to_equal("invalid-args")
 expect(blank_field_ui_layer_action.reason).to_equal("invalid-args")
+expect(short_ui_layer_action.reason).to_equal("invalid-args")
 expect(ui_component_action.output).to_contain("data-component=\"primary_action\"")
 expect(invalid_ui_component_action.reason).to_equal("invalid-args")
 expect(short_ui_component_action.reason).to_equal("invalid-args")
