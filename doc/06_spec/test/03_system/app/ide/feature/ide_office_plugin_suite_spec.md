@@ -523,7 +523,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1199 lines folded for reproduction.
+Runnable source: 1201 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -775,6 +775,7 @@ val ui_sdd_action = office_action_dispatch("export-ui-sdd", "design: Feature\nno
 val comma_ui_sdd_action = office_action_dispatch("export-ui-sdd", "design: Feature\nnode button|Play,Pause|button|16|16|80|32|primary|controls|action")
 val comma_ui_sdd_graph = sdn_graph_parse(comma_ui_sdd_action.output)
 val sdd_action = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+val unsafe_sdd_css_action = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\ncss_file: javascript:alert(1)\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val sdd_summary_action = office_action_dispatch("sdd-document-summary", "graph: Feature\ncanvas: width: 640 height: 480 grid: 16 snap: true zoom: 100 background: white\ncss accent:\n    fill: #eeeeee\nA: Alpha @accent x: 0 y: 0 width: 80 height: 20\nB: Beta x: 120 y: 0 width: 80 height: 20\nA -> B: Link")
 val sdd_outline_action = office_action_dispatch("sdd-outline-read", "graph: Feature\nA: Alpha role: actor shape: diamond\nB: Beta parent: A\nA -> B: Link kind: async")
 val sdd_style_rules_action = office_action_dispatch("sdd-style-rules-read", "graph: Feature\ncss base:\n    stroke: #111111\ncss accent extends base target edge:\n    fill: #eeeeee")
@@ -1061,6 +1062,7 @@ expect(sdd_action.output).to_contain("data-format-name=\"SDD: Simple Diagram Doc
 expect(sdd_action.output).to_contain("data-file-extension=\".sdd.sdn\"")
 expect(sdd_action.output).to_contain("data-node-count=\"1\"")
 expect(sdd_action.output).to_contain("data-edge-count=\"0\"")
+expect(unsafe_sdd_css_action.output).to_contain("data-css-file=\"#\"")
 expect(sdd_summary_action.output).to_equal("name=Feature\nnodes=2\nedges=1\ncss_rules=1\nstyle_rows=1\ncanvas=true")
 expect(selected_sdd_action.output).to_contain("data-selected-node-id=\"A\"")
 expect(selected_sdd_action.output).to_contain("data-selected=\"true\"")
