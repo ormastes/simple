@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -334,6 +334,28 @@ val rejected = office_ui_design_update_label_checked(design, "submit", "Wrong", 
 expect(rejected.accepted).to_be(false)
 expect(rejected.reason).to_equal("stale-node")
 expect(rejected.design.nodes[0].label).to_equal("Sign in")
+```
+
+</details>
+
+#### guards kind updates with safe kind rejection
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = office_ui_design_parse("design: Kind\nnode action|Action|button|10|10|80|32|primary|1|action")
+val accepted = office_ui_design_update_kind_checked(design, "action", "button", "input")
+expect(accepted.accepted).to_be(true)
+expect(accepted.design.nodes[0].kind).to_equal("input")
+expect(office_ui_design_render_html(accepted.design)).to_contain("office-ui-input")
+val invalid = office_ui_design_update_kind_checked(design, "action", "button", "!!!")
+expect(invalid.accepted).to_be(false)
+expect(invalid.reason).to_equal("invalid-kind")
+expect(invalid.design.nodes[0].kind).to_equal("button")
 ```
 
 </details>
@@ -679,8 +701,8 @@ expect(cycle.reason).to_equal("cycle-parent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
