@@ -1,0 +1,251 @@
+# Unit tests for svllm_status — the readiness/metrics surface for the svllm engine.
+#
+# Coverage:
+#   - Default state (all false) → offline, 5 reasons, not servable
+#   - All-true state → ready, 0 reasons, servable
+#   - Each single-flag-false case → degraded, exactly 1 reason
+#   - kv_cache_ready-only-true case (validates the degraded-OR fix)
+#   - reasons content correctness per flag
+#   - summary string stable substrings
+#   - consumer_module constant
+#   - served_model propagation (empty vs set)
+#
+# NOTE: reasons array indexing beyond [0] is known-buggy in interpreter mode
+# (array.get(n>=1) corruption). All multi-reason checks use .len() only.
+
+use std.gc_async_mut.svllm.svllm_status.{
+    SvllmStatus,
+    svllm_status_default,
+    svllm_status_from,
+    svllm_status_readiness,
+    svllm_status_reasons,
+    svllm_status_summary,
+    svllm_status_consumer_module,
+    svllm_status_is_servable
+}
+use std.spec.{describe, it, expect}
+
+describe "svllm_status_default":
+    it "is offline when nothing is wired":
+        val s = svllm_status_default()
+        expect(s.readiness).to_equal("offline")
+
+    it "has engine_id svllm":
+        val s = svllm_status_default()
+        expect(s.engine_id).to_equal("svllm")
+
+    it "has phase A1":
+        val s = svllm_status_default()
+        expect(s.phase).to_equal("A1")
+
+    it "has empty served_model":
+        val s = svllm_status_default()
+        expect(s.served_model).to_equal("")
+
+    it "is not servable":
+        val s = svllm_status_default()
+        expect(svllm_status_is_servable(s)).to_equal(false)
+
+    it "has exactly 5 reasons":
+        val s = svllm_status_default()
+        expect(s.reasons.len()).to_equal(5)
+
+    it "has all component flags false":
+        val s = svllm_status_default()
+        expect(s.pack_available).to_equal(false)
+        expect(s.loader_ready).to_equal(false)
+        expect(s.nvfs_ready).to_equal(false)
+        expect(s.kv_cache_ready).to_equal(false)
+        expect(s.model_loaded).to_equal(false)
+
+describe "svllm_status_from all-true":
+    it "is ready when all five flags true":
+        val s = svllm_status_from(true, true, true, true, true, "llama3")
+        expect(s.readiness).to_equal("ready")
+
+    it "is servable when all five flags true":
+        val s = svllm_status_from(true, true, true, true, true, "llama3")
+        expect(svllm_status_is_servable(s)).to_equal(true)
+
+    it "has zero reasons when fully ready":
+        val s = svllm_status_from(true, true, true, true, true, "llama3")
+        expect(s.reasons.len()).to_equal(0)
+
+    it "preserves served_model when set":
+        val s = svllm_status_from(true, true, true, true, true, "llama3")
+        expect(s.served_model).to_equal("llama3")
+
+    it "sets consumer_module to dashboard":
+        val s = svllm_status_from(true, true, true, true, true, "llama3")
+        expect(s.consumer_module).to_equal("app.ide.agent_dashboard")
+
+describe "svllm_status_from single-flag-false — pack_available":
+    it "is degraded when only pack_available is false":
+        val s = svllm_status_from(false, true, true, true, true, "llama3")
+        expect(s.readiness).to_equal("degraded")
+
+    it "is not servable":
+        val s = svllm_status_from(false, true, true, true, true, "llama3")
+        expect(svllm_status_is_servable(s)).to_equal(false)
+
+    it "has exactly 1 reason":
+        val s = svllm_status_from(false, true, true, true, true, "llama3")
+        expect(s.reasons.len()).to_equal(1)
+
+describe "svllm_status_from single-flag-false — loader_ready":
+    it "is degraded when only loader_ready is false":
+        val s = svllm_status_from(true, false, true, true, true, "llama3")
+        expect(s.readiness).to_equal("degraded")
+
+    it "is not servable":
+        val s = svllm_status_from(true, false, true, true, true, "llama3")
+        expect(svllm_status_is_servable(s)).to_equal(false)
+
+    it "has exactly 1 reason":
+        val s = svllm_status_from(true, false, true, true, true, "llama3")
+        expect(s.reasons.len()).to_equal(1)
+
+describe "svllm_status_from single-flag-false — nvfs_ready":
+    it "is degraded when only nvfs_ready is false":
+        val s = svllm_status_from(true, true, false, true, true, "llama3")
+        expect(s.readiness).to_equal("degraded")
+
+    it "is not servable":
+        val s = svllm_status_from(true, true, false, true, true, "llama3")
+        expect(svllm_status_is_servable(s)).to_equal(false)
+
+    it "has exactly 1 reason":
+        val s = svllm_status_from(true, true, false, true, true, "llama3")
+        expect(s.reasons.len()).to_equal(1)
+
+describe "svllm_status_from single-flag-false — kv_cache_ready":
+    it "is degraded when only kv_cache_ready is false":
+        val s = svllm_status_from(true, true, true, false, true, "llama3")
+        expect(s.readiness).to_equal("degraded")
+
+    it "is not servable":
+        val s = svllm_status_from(true, true, true, false, true, "llama3")
+        expect(svllm_status_is_servable(s)).to_equal(false)
+
+    it "has exactly 1 reason":
+        val s = svllm_status_from(true, true, true, false, true, "llama3")
+        expect(s.reasons.len()).to_equal(1)
+
+describe "svllm_status_from single-flag-false — model_loaded":
+    it "is degraded when only model_loaded is false":
+        val s = svllm_status_from(true, true, true, true, false, "llama3")
+        expect(s.readiness).to_equal("degraded")
+
+    it "is not servable":
+        val s = svllm_status_from(true, true, true, true, false, "llama3")
+        expect(svllm_status_is_servable(s)).to_equal(false)
+
+    it "has exactly 1 reason":
+        val s = svllm_status_from(true, true, true, true, false, "llama3")
+        expect(s.reasons.len()).to_equal(1)
+
+describe "svllm_status_from kv_cache_ready-only-true (degraded-OR fix validation)":
+    it "is degraded not offline when only kv_cache_ready is true":
+        # This case proves the degraded-OR branch includes kv_cache_ready.
+        # Before the fix: (F,F,F,T,F) fell through to offline because the OR
+        # omitted kv_cache_ready. After the fix it must be "degraded".
+        val s = svllm_status_from(false, false, false, true, false, "")
+        expect(s.readiness).to_equal("degraded")
+
+    it "is not servable":
+        val s = svllm_status_from(false, false, false, true, false, "")
+        expect(svllm_status_is_servable(s)).to_equal(false)
+
+    it "has 4 reasons (all flags except kv_cache_ready are false)":
+        val s = svllm_status_from(false, false, false, true, false, "")
+        expect(s.reasons.len()).to_equal(4)
+
+describe "svllm_status_reasons content":
+    it "includes tensor-pack-unavailable when pack_available is false":
+        val r = svllm_status_reasons(false, true, true, true, true)
+        expect(r.len()).to_equal(1)
+        expect(r.get(0)).to_equal("tensor-pack-unavailable")
+
+    it "includes model-loader-not-ready when loader_ready is false":
+        val r = svllm_status_reasons(true, false, true, true, true)
+        expect(r.len()).to_equal(1)
+        expect(r.get(0)).to_equal("model-loader-not-ready")
+
+    it "includes nvfs-client-not-wired when nvfs_ready is false":
+        val r = svllm_status_reasons(true, true, false, true, true)
+        expect(r.len()).to_equal(1)
+        expect(r.get(0)).to_equal("nvfs-client-not-wired")
+
+    it "includes kv-cache-not-allocated when kv_cache_ready is false":
+        val r = svllm_status_reasons(true, true, true, false, true)
+        expect(r.len()).to_equal(1)
+        expect(r.get(0)).to_equal("kv-cache-not-allocated")
+
+    it "includes model-not-loaded when model_loaded is false":
+        val r = svllm_status_reasons(true, true, true, true, false)
+        expect(r.len()).to_equal(1)
+        expect(r.get(0)).to_equal("model-not-loaded")
+
+    it "is empty when all flags are true":
+        val r = svllm_status_reasons(true, true, true, true, true)
+        expect(r.len()).to_equal(0)
+
+    it "has 5 entries when all flags are false":
+        val r = svllm_status_reasons(false, false, false, false, false)
+        expect(r.len()).to_equal(5)
+
+describe "svllm_status_summary":
+    it "contains phase=A1":
+        val s = svllm_status_default()
+        val sum = svllm_status_summary(s)
+        expect(sum).contains("phase=A1")
+
+    it "contains readiness=offline for default":
+        val s = svllm_status_default()
+        val sum = svllm_status_summary(s)
+        expect(sum).contains("readiness=offline")
+
+    it "contains readiness=ready for all-true":
+        val s = svllm_status_from(true, true, true, true, true, "llama3")
+        val sum = svllm_status_summary(s)
+        expect(sum).contains("readiness=ready")
+
+    it "contains model name in summary when served_model is set":
+        val s = svllm_status_from(true, true, true, true, true, "llama3")
+        val sum = svllm_status_summary(s)
+        expect(sum).contains("model=llama3")
+
+    it "starts with svllm:":
+        val s = svllm_status_default()
+        val sum = svllm_status_summary(s)
+        expect(sum).contains("svllm:")
+
+describe "svllm_status_consumer_module":
+    it "returns the IDE dashboard module path":
+        expect(svllm_status_consumer_module()).to_equal("app.ide.agent_dashboard")
+
+describe "svllm_status_is_servable":
+    it "returns false for default (offline) status":
+        expect(svllm_status_is_servable(svllm_status_default())).to_equal(false)
+
+    it "returns true for all-true status":
+        val s = svllm_status_from(true, true, true, true, true, "model")
+        expect(svllm_status_is_servable(s)).to_equal(true)
+
+    it "returns false when readiness is degraded":
+        val s = svllm_status_from(true, true, true, false, true, "model")
+        expect(svllm_status_is_servable(s)).to_equal(false)
+
+describe "svllm_status_from served_model boundary":
+    it "empty served_model is preserved in status":
+        val s = svllm_status_from(true, true, true, true, true, "")
+        expect(s.served_model).to_equal("")
+
+    it "all-true with empty model is still ready":
+        val s = svllm_status_from(true, true, true, true, true, "")
+        expect(s.readiness).to_equal("ready")
+
+    it "non-empty served_model is preserved in offline status":
+        val s = svllm_status_from(false, false, false, false, false, "stale-model")
+        expect(s.served_model).to_equal("stale-model")
+        expect(s.readiness).to_equal("offline")

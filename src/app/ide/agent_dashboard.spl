@@ -3,8 +3,13 @@
 # Uses the existing editor MCP tool registry as the dashboard integration
 # source. The dashboard can inspect these tools and task/status categories
 # without owning editor or MCP command logic.
+#
+# Cross-reference: std.gc_async_mut.svllm.svllm_status — the svllm readiness
+# surface is imported here so the IDE dashboard can show whether the local
+# svllm engine is ready before routing inference work to it.
 
 use app.editor.mcp_tools.{McpToolDef, editor_mcp_tools}
+use std.gc_async_mut.svllm.{SvllmStatus, svllm_status_default, svllm_status_summary}
 
 struct IdeAgentDashboardLane:
     lane_id: text
@@ -49,6 +54,13 @@ fn ide_agent_dashboard_default_lanes() -> [IdeAgentDashboardLane]:
     ]
 
 fn _ide_agent_dashboard_lane_valid(lane: IdeAgentDashboardLane) -> bool:
+    # svllm lanes have distinct provider/source/gate values — handle separately
+    # so a spark/normal lane cannot forge a valid svllm fingerprint.
+    if lane.provider == "svllm":
+        val status_ok = lane.status == "ready" or lane.status == "reviewed" or lane.status == "blocked" or lane.status == "unavailable"
+        val source_ok = lane.source_module == "std.gc_async_mut.svllm"
+        val gate_ok = lane.review_gate_id == "svllm-inference-ready"
+        return status_ok and source_ok and gate_ok
     val provider_ok = lane.provider == "spark" or lane.provider == "normal"
     val status_ok = lane.status == "ready" or lane.status == "reviewed" or lane.status == "blocked" or lane.status == "unavailable"
     val source_ok = lane.source_module == "assistant.control_plane"
@@ -157,3 +169,141 @@ fn ide_agent_dashboard_surface() -> IdeAgentDashboardSurface:
 fn ide_agent_dashboard_summary() -> text:
     val surface = ide_agent_dashboard_surface()
     "agent-dashboard: tools={surface.tool_count} lsp={surface.lsp_tool_count} wiki={surface.wiki_tool_count} modes={surface.modes.len()} team={surface.lanes.len()} blocked={surface.blocked_count} status={surface.handoff_status}"
+
+# Single source of truth for the svllm lane identity fields. Both the public
+# lane builder and the surface-internal lane go through here so the lane_id /
+# provider / source_module / review_gate_id literals can never drift apart
+# (they are load-bearing for `_ide_agent_dashboard_lane_valid`). The caller
+# supplies the already-mapped lane `status` so the two call sites can use their
+# own (public vs surface-internal) offline mapping.
+fn _ide_agent_dashboard_svllm_lane_build(status: SvllmStatus, mapped_status: text) -> IdeAgentDashboardLane:
+    val degraded_reason =
+        if status.readiness == "ready":
+            ""
+        else: if status.reasons.len() > 0:
+            status.reasons.get(0)
+        else:
+            "svllm-{status.readiness}"
+    IdeAgentDashboardLane(
+        lane_id: "svllm-inference",
+        provider: "svllm",
+        role: "inference",
+        status: mapped_status,
+        requires_review: false,
+        source_module: "std.gc_async_mut.svllm",
+        review_gate_id: "svllm-inference-ready",
+        degraded_reason: degraded_reason
+    )
+
+# Build a dashboard lane for the svllm inference engine (public, standalone).
+# Status mapping (public / item-2 semantics):
+#   ready    -> "ready"
+#   degraded -> "blocked"   (svllm is partially up but not serving — blocks IDE inference routing)
+#   offline  -> "unavailable"
+# NOTE: the offline->"unavailable" mapping is blocking when fed into a surface's
+# blocked_count. Surfaces that must keep an offline svllm non-blocking use
+# `ide_agent_dashboard_surface_with_svllm`, which maps offline->"reviewed".
+fn ide_agent_dashboard_svllm_lane(status: SvllmStatus) -> IdeAgentDashboardLane:
+    val mapped_status =
+        if status.readiness == "ready":
+            "ready"
+        else: if status.readiness == "degraded":
+            "blocked"
+        else:
+            "unavailable"
+    _ide_agent_dashboard_svllm_lane_build(status, mapped_status)
+
+# Build a dashboard gate for the svllm inference engine.
+# required: false — svllm being offline must NOT block IDE integration
+# (it is optional infrastructure; the IDE works without it).
+fn ide_agent_dashboard_svllm_gate(status: SvllmStatus) -> IdeAgentDashboardGate:
+    val gate_status = if status.readiness == "ready": "ready" else: "missing"
+    val reason =
+        if status.readiness == "ready":
+            ""
+        else: if status.reasons.len() > 0:
+            status.reasons.get(0)
+        else:
+            "svllm-{status.readiness}"
+    IdeAgentDashboardGate(
+        gate_id: "svllm-inference-ready",
+        status: gate_status,
+        required: false,
+        source_module: "std.gc_async_mut.svllm",
+        reason: reason
+    )
+
+# Build a dashboard surface that includes the svllm inference lane and gate.
+#
+# Blocked-count design note: `ide_agent_dashboard_blocked_count` counts ANY lane
+# with status "blocked" or "unavailable" unconditionally (no `required` concept
+# at the lane level). An offline svllm must NOT degrade the whole IDE surface —
+# it is optional infrastructure. Therefore the lane appended here uses a
+# different status mapping from the public `ide_agent_dashboard_svllm_lane`:
+#
+#   ready    -> "ready"      (fully up, pass through)
+#   degraded -> "blocked"    (partially up, something is wrong — this DOES block)
+#   offline  -> "reviewed"   (nothing loaded yet; optional, so non-blocking)
+#
+# The svllm gate is `required:false` which neutralises it in blocked_count
+# already, but the lane needs the "reviewed" mapping as the lane-blocking lever.
+fn ide_agent_dashboard_surface_with_svllm(tools: [McpToolDef], lanes: [IdeAgentDashboardLane], status: SvllmStatus) -> IdeAgentDashboardSurface:
+    # Surface-internal lane status: offline is non-blocking ("reviewed"), degraded blocks.
+    val surface_lane_status =
+        if status.readiness == "ready":
+            "ready"
+        else: if status.readiness == "degraded":
+            "blocked"
+        else:
+            "reviewed"
+    val svllm_lane = _ide_agent_dashboard_svllm_lane_build(status, surface_lane_status)
+    var combined_lanes: [IdeAgentDashboardLane] = []
+    for l in lanes:
+        combined_lanes.push(l)
+    combined_lanes.push(svllm_lane)
+    val base = ide_agent_dashboard_surface_from_tools(tools, combined_lanes)
+    # Push the svllm gate (required:false) and recompute derived fields.
+    val svllm_gate = ide_agent_dashboard_svllm_gate(status)
+    var final_gates: [IdeAgentDashboardGate] = []
+    for g in base.gates:
+        final_gates.push(g)
+    final_gates.push(svllm_gate)
+    val blocked = ide_agent_dashboard_blocked_count(combined_lanes, final_gates)
+    val handoff = ide_agent_dashboard_status(combined_lanes, final_gates)
+    IdeAgentDashboardSurface(
+        app_id: base.app_id,
+        owner_module: base.owner_module,
+        source_of_truth: base.source_of_truth,
+        tool_count: base.tool_count,
+        lsp_tool_count: base.lsp_tool_count,
+        wiki_tool_count: base.wiki_tool_count,
+        required_tool_count: base.required_tool_count,
+        has_lsp_tools: base.has_lsp_tools,
+        has_wiki_tools: base.has_wiki_tools,
+        modes: base.modes,
+        lanes: combined_lanes,
+        gates: final_gates,
+        blocked_count: blocked,
+        degraded_reasons: _ide_agent_dashboard_reasons(combined_lanes, final_gates),
+        ready_for_integration: blocked == 0,
+        handoff_status: handoff
+    )
+
+# svllm surface for a caller-supplied (live) svllm status.
+fn ide_agent_dashboard_surface_svllm_for(status: SvllmStatus) -> IdeAgentDashboardSurface:
+    ide_agent_dashboard_surface_with_svllm(editor_mcp_tools(), ide_agent_dashboard_default_lanes(), status)
+
+# Default svllm surface: default MCP tools + default lanes + offline svllm.
+fn ide_agent_dashboard_surface_svllm() -> IdeAgentDashboardSurface:
+    ide_agent_dashboard_surface_svllm_for(svllm_status_default())
+
+# Summary line that appends svllm readiness to the svllm-inclusive dashboard
+# summary, for a caller-supplied (live) svllm status. Built on the svllm surface
+# so the lane/blocked counts reflect the svllm lane.
+fn ide_agent_dashboard_summary_svllm_for(status: SvllmStatus) -> text:
+    val surface = ide_agent_dashboard_surface_svllm_for(status)
+    "agent-dashboard: tools={surface.tool_count} lsp={surface.lsp_tool_count} wiki={surface.wiki_tool_count} modes={surface.modes.len()} team={surface.lanes.len()} blocked={surface.blocked_count} status={surface.handoff_status} svllm={status.readiness}"
+
+# Summary line for the default (offline) svllm status.
+fn ide_agent_dashboard_summary_svllm() -> text:
+    ide_agent_dashboard_summary_svllm_for(svllm_status_default())
