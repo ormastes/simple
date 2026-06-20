@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 166 | 166 | 0 | 0 |
+| 167 | 167 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2424,6 +2424,23 @@ expect(missing.reason).to_equal("missing-edge")
 
 </details>
 
+#### rejects escaped pipe SDD edge style tokens
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("edit-sdd-edge-style", "0|warning\\|dashed\ngraph: Style\nA: A\nB: B\nA -> B: link @warning")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("invalid-style-token")
+expect(result.output).to_contain("actual: warning|dashed")
+```
+
+</details>
+
 #### reads resolved SDD edge styles
 
 <details>
@@ -3251,8 +3268,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 166 |
-| Active scenarios | 166 |
+| Total scenarios | 167 |
+| Active scenarios | 167 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
