@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 160 | 160 | 0 | 0 |
+| 161 | 161 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1004,13 +1004,16 @@ expect(invalid.reason).to_equal("row-width-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = office_action_dispatch("query-table", "count-where|status|open\\ntable: Bad\\ncolumns: id,status\\nrow: 1")
+val malformed_quote = office_action_dispatch("render-base-table-html", "table: Bad\\ncolumns: id,status\\nrow: 1,\"open")
 expect(result.ok).to_be(false)
 expect(result.reason).to_equal("row-width-mismatch")
+expect(malformed_quote.ok).to_be(false)
+expect(malformed_quote.reason).to_equal("row-width-mismatch")
 ```
 
 </details>
@@ -1048,18 +1051,40 @@ expect(result.output).to_contain("row: 2,\"done,ready\"")
 
 </details>
 
+#### preserves escaped pipe Base action values
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val edit = office_action_dispatch("db-edit", "insert|2,open\\|closed\\ntable: Feature\\ncolumns: id,status\\nrow: 1,open")
+val query = office_action_dispatch("query-table", "count-where|status|open\\|closed\\ntable: Feature\\ncolumns: id,status\\nrow: 1,open|closed")
+expect(edit.ok).to_be(true)
+expect(edit.output).to_contain("row: 2,open|closed")
+expect(query.ok).to_be(true)
+expect(query.output).to_equal("1")
+```
+
+</details>
+
 #### rejects blank Base table columns
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = office_action_dispatch("db-edit", "insert|2,done,done\\ntable: Bad\\ncolumns: id,,status\\nrow: 1,open,open")
+val malformed_quote = office_action_dispatch("base-table-summary", "table: Bad\\ncolumns: id,\"status\\nrow: 1,open")
 expect(result.ok).to_be(false)
 expect(result.reason).to_equal("blank-column")
+expect(malformed_quote.ok).to_be(false)
+expect(malformed_quote.reason).to_equal("missing-columns")
 ```
 
 </details>
@@ -3105,8 +3130,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 160 |
-| Active scenarios | 160 |
+| Total scenarios | 161 |
+| Active scenarios | 161 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
