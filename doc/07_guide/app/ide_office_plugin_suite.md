@@ -123,8 +123,10 @@ design body. `ui-label-edit` uses `node_id|expected_label|new_label`.
 Blank or malformed `ui-label-edit`, `ui-layout-edit`, `ui-resize-node`,
 `ui-auto-layout-edit`, and `ui-constraints-edit` / `ui-layer-edit` /
 `ui-style-token-edit` node ids are rejected as `invalid-args`.
-`ui-layer-edit` and `ui-style-token-edit` use `node_id|expected|new`; blank
-expected fields and blank or malformed replacement style-token fields are `invalid-args`.
+`ui-layer-edit`, `ui-component-edit`, and `ui-style-token-edit` use
+`node_id|expected|new`; blank expected layer/style fields and blank or malformed
+replacement style-token fields are `invalid-args`. `ui-component-edit` accepts
+a blank replacement to clear component metadata, or a safe token to set it.
 `ui-style-token-read` and `ui-inspect-node` use `node_id`, reject malformed IDs
 as `invalid-args`, and return compact readback text.
 
@@ -322,7 +324,7 @@ modes:
   `ui-label-edit` / `ui-layout-edit` / `ui-resize-node` / `ui-auto-layout-edit` /
   `ui-resolve-auto-layout` / `ui-duplicate-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
-  `ui-distribute-selection` / `ui-layer-edit` /
+  `ui-distribute-selection` / `ui-layer-edit` / `ui-component-edit` /
   `ui-style-token-read` / `ui-style-token-edit` / `ui-inspect-node`; the IDE
   feature check reports `designer: resize_handle_metadata=true` from a pure
   selected-node render.
