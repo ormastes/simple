@@ -276,6 +276,7 @@ table names plus missing, blank, duplicate, or row-width-mismatched columns. `db
 `update-where|match_column|match_value|update_column|new_value`, or
 `delete-where|match_column|match_value`, rejects blank edit columns as
 `invalid-args`, rejects invalid schemas, and returns the updated table text.
+`export-base-game-state` uses `scope_column|scope_value|key_column|value_column`.
 
 Calc and Impress edit actions use `target_id|expected|replacement` followed by
 the compact `A1=value;B1=value` or `element_id=value;...` body. `sheet-edit`

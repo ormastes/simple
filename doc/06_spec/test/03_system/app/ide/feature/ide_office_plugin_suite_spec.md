@@ -431,7 +431,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -459,6 +459,7 @@ expect(guide).to_contain("expected_auto_layout_signature")
 expect(guide).to_contain("Body-only Designer actions use `html_ui_source`")
 expect(guide).to_contain("body-only Draw actions use\n`sdd_source`")
 expect(guide).to_contain("headers `start|count`, `query|replacement`, `line|text`, and `line`")
+expect(guide).to_contain("scope_column|scope_value|key_column|value_column")
 ```
 
 </details>
