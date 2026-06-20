@@ -446,7 +446,7 @@ expect(invalid).to_contain("data-edge-index=\"0\" data-selected=\"false\" aria-s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -455,6 +455,13 @@ expect(sdn_graph_resolved_style(graph, "accent", "node")).to_contain("background
 expect(sdn_graph_resolved_style(graph, "accent", "node")).to_contain("background-color:#eeeeee")
 expect(sdn_graph_resolved_style_value(graph, "accent", "node", "fill")).to_equal("#eeeeee")
 expect(sdn_graph_resolved_style_value(graph, "accent", "node", "stroke")).to_equal("#111111")
+
+val checked = sdn_graph_set_style_rule_checked(graph, " accent ", " node ", " base ", " stroke ", " #222222 ")
+expect(checked.accepted).to_be(true)
+expect(sdn_graph_resolved_style_value(checked.graph, "accent", "node", "stroke")).to_equal("#222222")
+val deleted = sdn_graph_delete_style_rule_checked(checked.graph, " accent ", " stroke ")
+expect(deleted.accepted).to_be(true)
+expect(sdn_graph_resolved_style_value(deleted.graph, "accent", "node", "stroke")).to_equal("#111111")
 ```
 
 </details>
