@@ -23,7 +23,7 @@
   `edit-sdd-node-style`, `sdd-node-style-read`, `edit-sdd-edge-label`,
   `sdd-edge-label-read`, `sdd-edge-label-point-read`, `edit-sdd-edge-style`,
   `sdd-edge-style-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`,
-  `inspect-sdd-node`, and `inspect-sdd-edge`.
+  `sdd-edge-endpoints-read`, `inspect-sdd-node`, and `inspect-sdd-edge`.
 
 ## Constraints
 
