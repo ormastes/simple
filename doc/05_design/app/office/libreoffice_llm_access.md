@@ -25,7 +25,7 @@
   `sdd-node-resolved-style-read`, `sdd-node-resolved-style-value-read`, `sdd-node-parent-read`, `sdd-node-child-bounds-read`, `sdd-node-child-count-read`, `sdd-node-shape-read`, `sdd-node-layer-read`,
   `sdd-node-order-read`, `sdd-node-role-read`,
   `edit-sdd-edge-label`, `sdd-edge-label-read`, `sdd-edge-label-point-read`, `edit-sdd-edge-style`,
-  `sdd-edge-style-read`, `sdd-edge-resolved-style-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`,
+  `sdd-edge-style-read`, `sdd-edge-resolved-style-read`, `sdd-edge-resolved-style-value-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`,
   `sdd-edge-route-read`, `sdd-edge-path-read`,
   `sdd-edge-segments-read`, `sdd-edge-endpoints-read`, `sdd-style-extends-read`,
   `sdd-style-target-read`, `sdd-style-value-read`, `sdd-style-resolved-read`,

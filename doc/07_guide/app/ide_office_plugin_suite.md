@@ -189,6 +189,7 @@ Blank or malformed SDD order node ids are rejected as `invalid-args`.
 `sdd-node-resolved-style-read` uses `node_id` and returns the selected node's inherited/cascaded declaration string.
 `sdd-node-resolved-style-value-read` uses `node_id|key` and returns the selected node's inherited/cascaded style value.
 `sdd-edge-resolved-style-read` uses `edge_index` and returns the selected edge's inherited/cascaded declaration string.
+`sdd-edge-resolved-style-value-read` uses `edge_index|key` and returns the selected edge's inherited/cascaded style value.
 Blank SDD style-rule css or key arguments are rejected as `invalid-args`.
 `sdd-node-label-read` uses `node_id` and returns the selected node label text.
 `edit-sdd-node-geometry` uses `node_id|x|y|width|height`; `x` and `y` are signed integers, and size fields are non-negative integers.
@@ -386,7 +387,7 @@ modes:
   slide-count metadata, outline readback, safe CSS, positioned elements,
   element metadata, class sanitizing, and text escaping; Draw is SDD-backed with
   `sdd-document-summary`, `render-sdd-html-with-selection`, `export-sdd-canonical`, `reroute-sdd-connector`, `edit-sdd-style-rule`,
-  `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `sdd-style-extends-read`, `sdd-style-target-read`, `sdd-style-value-read`, `sdd-style-resolved-read`, `sdd-style-resolved-value-read`, `sdd-node-resolved-style-read`, `sdd-node-resolved-style-value-read`, `sdd-edge-resolved-style-read`, `add-sdd-node`, `add-sdd-edge`,
+  `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `sdd-style-extends-read`, `sdd-style-target-read`, `sdd-style-value-read`, `sdd-style-resolved-read`, `sdd-style-resolved-value-read`, `sdd-node-resolved-style-read`, `sdd-node-resolved-style-value-read`, `sdd-edge-resolved-style-read`, `sdd-edge-resolved-style-value-read`, `add-sdd-node`, `add-sdd-edge`,
   `duplicate-sdd-edge`, `edit-sdd-edge-label`, `sdd-edge-label-read`, `edit-sdd-edge-label-point`, `sdd-edge-label-point-read`, `edit-sdd-edge-style`, `sdd-edge-style-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`, `sdd-edge-route-read`, `sdd-edge-path-read`, `sdd-edge-segments-read`, `sdd-edge-endpoints-read`, `edit-sdd-edge-endpoints`,
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`, `sdd-node-geometry-read`,
   `edit-sdd-node-label`, `sdd-node-label-read`, `edit-sdd-node-parent`, `sdd-node-parent-read`, `sdd-node-child-bounds-read`, `sdd-node-child-count-read`, `edit-sdd-node-shape`, `sdd-node-shape-read`,
