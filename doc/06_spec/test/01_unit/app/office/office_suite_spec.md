@@ -817,13 +817,14 @@ expect(legacy_sdd.output).to_contain("graph: Feature")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val summary = office_action_dispatch("sdd-document-summary", "graph: Feature\\ncanvas: width: 640 height: 480 grid: 16 snap: true zoom: 100 background: white\\ncss accent:\\n    fill: #eeeeee\\nA: Alpha @accent x: 0 y: 0 width: 80 height: 20\\nB: Beta x: 120 y: 0 width: 80 height: 20\\nA -> B: Link")
 val outline = office_action_dispatch("sdd-outline-read", "graph: Feature\\nA: Alpha role: actor shape: diamond\\nB: Beta parent: A\\nA -> B: Link kind: async")
+val style_rules = office_action_dispatch("sdd-style-rules-read", "graph: Feature\\ncss base:\\n    stroke: #111111\\ncss accent extends base target edge:\\n    fill: #eeeeee")
 val weave = office_action_dispatch("sdd-weave-summary", "graph: Weave\\nweave @:\\n    node where role=actor:\\n        add: accent\\n        shape: diamond\\n        x: 10\\n        y: 20\\n        layer: front\\n    edge where kind=async:\\n        add: dashed\\nA: Alpha role: actor\\nB: Beta\\nA -> B: link kind: async")
 val selected = office_action_dispatch("render-sdd-html-with-selection", "select|A|\\ngraph: Feature\\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val selected_edge = office_action_dispatch("render-sdd-html-with-selection", "select||0\\ngraph: Feature\\nA: Alpha x: 0 y: 0 width: 80 height: 20\\nB: Beta x: 120 y: 0 width: 80 height: 20\\nA -> B: Link route: orthogonal waypoints: 80x10 start: right end: left")
@@ -844,6 +845,9 @@ expect(outline.ok).to_be(true)
 expect(outline.output).to_contain("node 0:A|Alpha|actor|diamond|")
 expect(outline.output).to_contain("node 1:B|Beta|||A")
 expect(outline.output).to_contain("edge 0:A->B|Link|async")
+expect(style_rules.output).to_contain("css_rules=2")
+expect(style_rules.output).to_contain("css accent extends=base target=edge")
+expect(style_rules.output).to_contain("style accent.fill=#eeeeee")
 expect(weave.ok).to_be(true)
 expect(weave.output).to_contain("weaves=2")
 expect(weave.output).to_contain("0:target=node field=role value=actor add=accent shape=diamond x=10 y=20")
@@ -1133,8 +1137,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(124)
-expect(probe.recognized_count).to_equal(124)
+expect(probe.advertised_count).to_equal(125)
+expect(probe.recognized_count).to_equal(125)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
