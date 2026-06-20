@@ -326,8 +326,8 @@ Plugin manifest and LLM catalog entries must keep non-empty libraries/modules,
 evidence keys, and action/function names; duplicate app, action, or function
 symbols are invalid. The Office plugin registry is derived from the LLM catalog
 and registers Markdown, Writer, Calc, Impress, Draw, Designer, Base, Math,
-Mail, Planner, and Counter as separate plugin entries over the shared Markdown,
-HTML/CSS, SDN, and in-memory Mail/Planner substrates. Every LLM catalog action must be recognized by
+Mail, Planner, Counter, and Launcher as separate plugin entries over the shared Markdown,
+HTML/CSS, SDN, in-memory Mail/Planner, and launcher substrates. Every LLM catalog action must be recognized by
 `office_action_dispatch`; blank input may fail with `invalid-args`, but never
 `unknown-action`. IDE manifest entries must advertise exactly
 `ide_capability_<capability>` and `ide_feature_check_<capability>` symbols for
@@ -424,7 +424,7 @@ modes:
   selected-node render.
   `office_llm_action_input_schema(action)` must return a non-empty compact
   source grammar for every advertised action so agents can call Draw, Designer,
-  Base, Math, Mail, Planner, Markdown, Writer, Calc, Impress, and Counter without scraping this
+  Base, Math, Mail, Planner, Markdown, Writer, Calc, Impress, Counter, and Launcher without scraping this
   guide.
 
 ## Verification

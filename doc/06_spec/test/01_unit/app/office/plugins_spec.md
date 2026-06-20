@@ -49,7 +49,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(office_plugin_names().len()).to_equal(11)
+expect(office_plugin_names().len()).to_equal(12)
 ```
 
 </details>
@@ -59,7 +59,7 @@ expect(office_plugin_names().len()).to_equal(11)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -75,6 +75,7 @@ expect(names).to_contain("office-math")
 expect(names).to_contain("office-mail")
 expect(names).to_contain("office-planner")
 expect(names).to_contain("office-counter")
+expect(names).to_contain("office-launcher")
 ```
 
 </details>
@@ -91,9 +92,9 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # plugin_count is the number of entries parsed back out of the manifest;
-# equalling the 11 input entries proves the manifest round-trips.
+# equalling the 12 input entries proves the manifest round-trips.
 val probe = office_plugin_manifest_probe()
-expect(probe.plugin_count).to_equal(11)
+expect(probe.plugin_count).to_equal(12)
 ```
 
 </details>
@@ -118,7 +119,7 @@ expect(err).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 62 lines folded for reproduction.
+Runnable source: 65 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -184,6 +185,9 @@ expect(manifest).to_contain("ui-style-tokens-read")
 expect(manifest).to_contain("ui-css-edit")
 expect(manifest).to_contain("mail-summary")
 expect(manifest).to_contain("planner-summary")
+expect(manifest).to_contain("office-launcher")
+expect(manifest).to_contain("open_word")
+expect(manifest).to_contain("open_counter")
 ```
 
 </details>
