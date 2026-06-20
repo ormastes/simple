@@ -29,7 +29,7 @@ html_render_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 25 | 25 | 0 | 0 |
+| 28 | 28 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -231,6 +231,21 @@ expect(html).to_contain("<link rel=\"stylesheet\" href=\"#\">")
 
 </details>
 
+#### sanitizes local file Writer Markdown stylesheet URLs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("---\ncss_file: file:///etc/passwd\n---\n\nBody")
+expect(html).to_contain("<link rel=\"stylesheet\" href=\"#\">")
+```
+
+</details>
+
 #### renders Writer Markdown tables and images as document HTML
 
 <details>
@@ -311,6 +326,21 @@ expect(html).to_contain("<img src=\"#\" alt=\"Bad\">")
 
 </details>
 
+#### sanitizes local file Writer Markdown image URLs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("![Bad](file:///etc/passwd)")
+expect(html).to_contain("<img src=\"#\" alt=\"Bad\">")
+```
+
+</details>
+
 #### renders Writer Markdown inline links in paper HTML
 
 <details>
@@ -341,6 +371,21 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val html = render_writer_markdown_html("No [Legacy](vbscript:msgbox(1))")
 expect(html).to_contain("<p data-source-line=\"1\">No <a href=\"#\">Legacy</a></p>")
+```
+
+</details>
+
+#### sanitizes local file Writer Markdown inline links
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("No [Local](file:///etc/passwd)")
+expect(html).to_contain("<p data-source-line=\"1\">No <a href=\"#\">Local</a></p>")
 ```
 
 </details>
@@ -485,8 +530,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 28 |
+| Active scenarios | 28 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
