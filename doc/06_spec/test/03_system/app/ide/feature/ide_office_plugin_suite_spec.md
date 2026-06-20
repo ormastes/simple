@@ -111,7 +111,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
-  plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
+  plugin-manifest: plugins: entries=6 roundtrip=6 names=6 kinds=4 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
   llm-catalog: apps=11 features=206 actions=128
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
@@ -2047,7 +2047,7 @@ expect(summary).to_contain("ppt=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2065,6 +2065,7 @@ expect(probe.manifest_text).to_contain("builtin:std.editor.services.sdn_graph")
 expect(probe.manifest_text).to_contain("ide_capability_draw")
 expect(probe.manifest_text).to_contain("ide_feature_check_draw")
 expect(summary).to_contain("roundtrip=6")
+expect(summary).to_contain("kinds=4")
 expect(summary).to_contain("libre=6")
 expect(summary).to_contain("libre_roundtrip=6")
 ```

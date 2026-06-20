@@ -28,7 +28,7 @@ ide_plugin_manifest_harden_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -94,6 +94,23 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val probe = ide_plugin_manifest_probe()
 expect(probe.entry_count).to_equal(ide_capability_count())
+```
+
+</details>
+
+#### manifest records first-seen contribution kinds
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val probe = ide_plugin_manifest_probe()
+expect(probe.contribution_kind_count).to_equal(4)
+expect(probe.contribution_kinds.join(",")).to_equal("office-app,document-renderer,dashboard,database")
+expect(ide_plugin_contribution_kinds().len()).to_equal(probe.contribution_kind_count)
 ```
 
 </details>
@@ -205,8 +222,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
