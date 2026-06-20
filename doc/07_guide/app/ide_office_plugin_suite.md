@@ -183,11 +183,12 @@ Draw style inspector panels.
 rules that apply CSS, shape, and geometry changes.
 
 Layout actions use an explicit first token followed by `id1,id2,...` and the
-UI or SDD document body. Align accepts
-`left|center|right|top|middle|bottom`; distribute accepts
-`horizontal|vertical`. `ui-align-selection`, `ui-distribute-selection`,
-`align-sdd-selection`, and `distribute-sdd-selection` compute the current
-geometry signature and return rendered HTML for the updated document.
+UI or SDD document body. Align uses
+`left|center|right|top|middle|bottom|id1,id2,...`; distribute uses
+`horizontal|vertical|id1,id2,...`. `ui-align-selection`,
+`ui-distribute-selection`, `align-sdd-selection`, and
+`distribute-sdd-selection` compute the current geometry signature and return
+rendered HTML for the updated document.
 `ui-selection-geometry` and `sdd-selection-geometry` return the same current
 signature without mutating the document.
 Blank or malformed layout modes/axes, blank selection lists, or malformed
