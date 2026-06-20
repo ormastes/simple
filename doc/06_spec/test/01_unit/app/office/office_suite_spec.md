@@ -864,8 +864,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(56)
-expect(probe.recognized_count).to_equal(56)
+expect(probe.advertised_count).to_equal(79)
+expect(probe.recognized_count).to_equal(79)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
