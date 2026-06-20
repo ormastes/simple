@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 156 | 156 | 0 | 0 |
+| 157 | 157 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1204,6 +1204,28 @@ val probe = office_catalog_dispatch_probe()
 expect(probe.advertised_count).to_equal(137)
 expect(probe.recognized_count).to_equal(137)
 expect(probe.missing_actions.len()).to_equal(0)
+```
+
+</details>
+
+#### publishes source formats in the LLM catalog
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var formats = ""
+for row in office_llm_feature_catalog():
+    formats = formats + row.component + ":" + row.source_format + "\n"
+expect(formats).to_contain("word:markdown")
+expect(formats).to_contain("slides:slides")
+expect(formats).to_contain("draw:sdd")
+expect(formats).to_contain("ui:html-ui")
+expect(formats).to_contain("db:table")
+expect(formats).to_contain("launcher:launcher")
 ```
 
 </details>
@@ -3025,8 +3047,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 156 |
-| Active scenarios | 156 |
+| Total scenarios | 157 |
+| Active scenarios | 157 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

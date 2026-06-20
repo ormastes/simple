@@ -60,8 +60,9 @@ existing pure metadata/action surface, not a new framework:
 6. Cross-cutting concerns use DI/AOP-style wrappers at dispatch/reporting
    boundaries instead of being copied into every app.
 7. `office_catalog_dispatch_probe()` must exercise catalog actions through
-   `OfficePluginContext`, so catalog component, source-format, and evidence
-   drift is caught by the dispatcher gate. The probe treats `unknown-action`,
+   `OfficePluginContext` using each row's explicit `source_format`, so catalog
+   component, source-format, and evidence drift is caught by the dispatcher
+   gate. The probe treats `unknown-action`,
    `context-mismatch`, and `source-format-mismatch` as missing catalog actions.
 
 ## Layer List
@@ -92,7 +93,7 @@ existing pure metadata/action surface, not a new framework:
 | Common node | Current path | Consumers |
 | --- | --- | --- |
 | Plugin descriptor | `src/app/office/plugins.spl` | IDE manifest, launcher, feature reports |
-| LLM catalog | `src/app/office/llm_catalog.spl` | IDE feature report, agent tooling, specs |
+| LLM catalog | `src/app/office/llm_catalog.spl` | IDE feature report, source-format metadata, agent tooling, specs |
 | Action dispatcher | `src/app/office/mod.spl` | System specs, headless automation |
 | SDD/SDN graph | `src/lib/editor/services/sdn_graph.spl` | Draw, Designer export, docs diagrams |
 | Markdown render contract | `src/app/office/md_wysiwyg.spl`, `src/app/office/word/html_render.spl` | Markdown preview, Writer, PPT source workflows |

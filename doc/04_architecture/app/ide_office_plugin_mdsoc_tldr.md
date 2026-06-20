@@ -7,6 +7,7 @@ Core decision: the plugin boundary is the existing pure metadata/action surface:
 `src/app/office/plugins.spl`, `src/app/office/llm_catalog.spl`,
 `src/app/ide/plugin_manifest.spl`, `src/app/office/mod.spl`, and
 `src/app/office/launcher.spl`.
+`src/app/office/llm_catalog.spl` owns each app's source format.
 
 Layering:
 
