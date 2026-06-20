@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 124 | 124 | 0 | 0 |
+| 125 | 125 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -683,6 +683,26 @@ expect(invalid.reason).to_equal("invalid-args")
 
 </details>
 
+#### deletes Writer Markdown source lines
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("writer-markdown-delete", "1\n# Title\nRemove me\nBody")
+val invalid = office_action_dispatch("writer-markdown-delete", "9\n# Title")
+expect(result.ok).to_be(true)
+expect(result.reason).to_equal("updated")
+expect(result.output).to_equal("# Title\nBody")
+expect(invalid.ok).to_be(false)
+expect(invalid.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### lists Writer Markdown headings as a document outline
 
 <details>
@@ -1083,8 +1103,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(93)
-expect(probe.recognized_count).to_equal(93)
+expect(probe.advertised_count).to_equal(94)
+expect(probe.recognized_count).to_equal(94)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2357,8 +2377,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 124 |
-| Active scenarios | 124 |
+| Total scenarios | 125 |
+| Active scenarios | 125 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
