@@ -112,6 +112,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
+  designer: resize_handle_metadata=true
   llm-catalog: apps=9 features=133 actions=61
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
@@ -170,7 +171,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -207,6 +208,7 @@ expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
 expect(tui_report).to_contain("libre=6")
 expect(tui_report).to_contain("libre_roundtrip=6")
+expect(tui_report).to_contain("designer: resize_handle_metadata=true")
 expect(registry_checks).to_contain("metadata=true")
 expect(registry_checks).to_contain("ppt_html=true")
 expect(registry_checks).to_contain("path_meta=true")
@@ -222,12 +224,12 @@ expect(registry_checks).to_contain("contracts=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val lines = ide_feature_check_report("tui")
-expect(lines.len()).to_equal(24)
+expect(lines.len()).to_equal(25)
 expect(lines[0]).to_equal("Simple IDE feature check")
 expect(lines[1]).to_equal("mode: tui")
 expect(lines[2]).to_equal("capabilities: 6")
@@ -242,8 +244,9 @@ expect(lines[13]).to_start_with("  edit-command:")
 expect(lines[15]).to_start_with("agent-dashboard:")
 expect(lines[17]).to_start_with("db-admin:")
 expect(lines[21]).to_start_with("  plugin-manifest:")
-expect(lines[22]).to_start_with("  llm-catalog:")
-expect(lines[23]).to_start_with("  llm-apps:")
+expect(lines[22]).to_start_with("  designer:")
+expect(lines[23]).to_start_with("  llm-catalog:")
+expect(lines[24]).to_start_with("  llm-apps:")
 ```
 
 </details>

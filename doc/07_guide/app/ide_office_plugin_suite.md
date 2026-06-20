@@ -323,7 +323,9 @@ modes:
   `ui-resolve-auto-layout` / `ui-duplicate-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` /
-  `ui-style-token-read` / `ui-style-token-edit` / `ui-inspect-node`.
+  `ui-style-token-read` / `ui-style-token-edit` / `ui-inspect-node`; the IDE
+  feature check reports `designer: resize_handle_metadata=true` from a pure
+  selected-node render.
   `office_llm_action_input_schema(action)` must return a non-empty compact
   source grammar for every advertised action so agents can call Draw, Designer,
   Base, Math, Markdown, Writer, Calc, Impress, and Counter without scraping this
