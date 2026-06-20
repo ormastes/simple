@@ -410,7 +410,7 @@ expect(auto_layout_child.reason).to_equal("auto-layout-child")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -436,6 +436,10 @@ expect(rejected.design.nodes[0].layer).to_equal("1")
 val missing = office_ui_design_update_layer_checked(design, "missing", "1", "2")
 expect(missing.accepted).to_be(false)
 expect(missing.reason).to_equal("missing-node")
+val invalid = office_ui_design_update_layer_checked(design, "back", "1", "front")
+expect(invalid.accepted).to_be(false)
+expect(invalid.reason).to_equal("invalid-layer")
+expect(invalid.design.nodes[0].layer).to_equal("1")
 ```
 
 </details>
