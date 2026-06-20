@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -223,6 +223,25 @@ val graph = sdn_graph_update_canvas(sdn_graph_parse("graph: escaped\nA: A"), "10
 val html = sdn_graph_render_html(graph)
 expect(html).to_contain("data-canvas-background=\"&quot;&lt;bg&gt;&amp;\"")
 expect(html).to_contain("style=\"width:100px;height:80px;")
+```
+
+</details>
+
+#### escapes node and edge labels in rendered SDD HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: escaped\nA: <Start> x: 10 y: 20 width: 80 height: 20\nB: <End> x: 220 y: 20 width: 80 height: 20\nA -> B: <flow> route: simple start: right end: left")
+val html = sdn_graph_render_html(graph)
+expect(html).to_contain("data-label=\"&lt;Start&gt;\"")
+expect(html).to_contain(">&lt;Start&gt;</button>")
+expect(html).to_contain("data-label=\"&lt;flow&gt;\"")
+expect(html).to_contain(">&lt;flow&gt;</div>")
 ```
 
 </details>
@@ -636,8 +655,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
