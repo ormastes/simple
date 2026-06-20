@@ -510,7 +510,7 @@ expect(invalid_node).to_contain("data-selected-node-id=\"\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -524,6 +524,7 @@ val checked = sdn_graph_set_style_rule_checked(graph, " accent ", " node ", " ba
 expect(checked.accepted).to_be(true)
 expect(sdn_graph_resolved_style_value(checked.graph, "accent", "node", "stroke")).to_equal("#222222")
 expect(sdn_graph_inspect_style_rule(checked.graph, " accent ", " stroke ").value).to_equal("#222222")
+expect(sdn_graph_inspect_style_rule(checked.graph, "bad css", "stroke").reason).to_equal("invalid-style-token")
 val deleted = sdn_graph_delete_style_rule_checked(checked.graph, " accent ", " stroke ")
 expect(deleted.accepted).to_be(true)
 expect(sdn_graph_resolved_style_value(deleted.graph, "accent", "node", "stroke")).to_equal("#111111")
