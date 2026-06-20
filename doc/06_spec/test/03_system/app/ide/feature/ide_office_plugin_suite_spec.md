@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=7 roundtrip=7 names=7 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=205 actions=127
+  llm-catalog: apps=11 features=206 actions=128
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=205")
+expect(tui_report).to_contain("features=206")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -439,7 +439,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1143 lines folded for reproduction.
+Runnable source: 1148 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -448,10 +448,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=205 actions=127")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=206 actions=128")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(127)
-expect(dispatch_probe.recognized_count).to_equal(127)
+expect(dispatch_probe.advertised_count).to_equal(128)
+expect(dispatch_probe.recognized_count).to_equal(128)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -469,6 +469,7 @@ expect(catalog[1].features.join(",")).to_contain("document-insert")
 expect(catalog[1].features.join(",")).to_contain("document-delete")
 expect(catalog[1].features.join(",")).to_contain("document-outline")
 expect(catalog[1].features.join(",")).to_contain("task-lists")
+expect(catalog[1].features.join(",")).to_contain("table-readback")
 expect(catalog[1].features.join(",")).to_contain("table-alignment")
 expect(catalog[1].features.join(",")).to_contain("url-sanitize")
 expect(catalog[1].actions.join(",")).to_contain("render-writer-markdown-html")
@@ -477,6 +478,7 @@ expect(catalog[1].actions.join(",")).to_contain("writer-markdown-stats")
 expect(catalog[1].actions.join(",")).to_contain("writer-markdown-search")
 expect(catalog[1].actions.join(",")).to_contain("writer-markdown-range")
 expect(catalog[1].actions.join(",")).to_contain("writer-markdown-blocks")
+expect(catalog[1].actions.join(",")).to_contain("writer-markdown-tables")
 expect(catalog[1].actions.join(",")).to_contain("writer-markdown-replace")
 expect(catalog[1].actions.join(",")).to_contain("writer-markdown-insert")
 expect(catalog[1].actions.join(",")).to_contain("writer-markdown-delete")
@@ -641,6 +643,7 @@ val writer_stats_action = office_action_dispatch("writer-markdown-stats", "# Wri
 val writer_search_action = office_action_dispatch("writer-markdown-search", "Body\n# Writer\n\nBody words")
 val writer_range_action = office_action_dispatch("writer-markdown-range", "1|2\n# Writer\nFirst\nSecond")
 val writer_blocks_action = office_action_dispatch("writer-markdown-blocks", "# Writer\n\nBody\n- Item")
+val writer_tables_action = office_action_dispatch("writer-markdown-tables", "# Writer\n| A | B |\n|---|---|\n| 1 | 2 |")
 val writer_replace_action = office_action_dispatch("writer-markdown-replace", "Body|Final\n# Writer\n\nBody words")
 val writer_insert_action = office_action_dispatch("writer-markdown-insert", "1|## Added\n# Writer\nBody")
 val writer_delete_action = office_action_dispatch("writer-markdown-delete", "1\n# Writer\nDrop\nBody")
@@ -902,6 +905,8 @@ expect(writer_search_action.output).to_equal("2|0|Body words")
 expect(writer_range_action.output).to_equal("1|First\n2|Second")
 expect(writer_blocks_action.output).to_contain("0|0|0|heading|# Writer")
 expect(writer_blocks_action.output).to_contain("2|3|3|list|- Item")
+expect(writer_tables_action.output).to_contain("0|1|1|| A | B |")
+expect(writer_tables_action.output).to_contain("2|3|3|| 1 | 2 |")
 expect(writer_replace_action.output).to_equal("# Writer\n\nFinal words")
 expect(writer_insert_action.output).to_equal("# Writer\n## Added\nBody")
 expect(writer_delete_action.output).to_equal("# Writer\nBody")
