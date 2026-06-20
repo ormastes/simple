@@ -412,11 +412,11 @@ expect(html).to_contain("<li>Second &lt;safe&gt;</li>")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val html = render_writer_markdown_html("- [x] Done **safe**\n- [ ] Open <x>")
+val html = render_writer_markdown_html("- [x] Done **safe**\n- [ ] Open <x>\n* [X] Star done\n* [ ] Star open")
 expect(html).to_contain("<ul class=\"md-writer-task-list\" data-source-line=\"1\">")
 expect(html).to_contain("data-task=\"true\" data-checked=\"true\"")
 expect(html).to_contain("<input type=\"checkbox\" disabled checked>")
@@ -424,6 +424,8 @@ expect(html).to_contain("Done <strong>safe</strong>")
 expect(html).to_contain("data-task=\"true\" data-checked=\"false\"")
 expect(html).to_contain("<input type=\"checkbox\" disabled>")
 expect(html).to_contain("Open &lt;x&gt;")
+expect(html).to_contain("Star done")
+expect(html).to_contain("Star open")
 ```
 
 </details>

@@ -161,11 +161,11 @@ expect(html).to_contain("style=\"font-family:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val html = wysiwyg_preview_document_html("- [x] Done <safe>\n- [ ] Open")
+val html = wysiwyg_preview_document_html("- [x] Done <safe>\n- [ ] Open\n* [X] Star done\n* [ ] Star open")
 expect(html).to_contain("class=\"markdown-task\"")
 expect(html).to_contain("data-task=\"true\" data-checked=\"true\"")
 expect(html).to_contain("<input type=\"checkbox\" disabled checked>")
@@ -173,6 +173,8 @@ expect(html).to_contain("Done &lt;safe&gt;")
 expect(html).to_contain("data-task=\"true\" data-checked=\"false\"")
 expect(html).to_contain("<input type=\"checkbox\" disabled>")
 expect(html).to_contain("Open</p>")
+expect(html).to_contain("Star done</p>")
+expect(html).to_contain("Star open</p>")
 ```
 
 </details>
