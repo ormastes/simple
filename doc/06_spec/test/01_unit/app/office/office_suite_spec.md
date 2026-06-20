@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 134 | 134 | 0 | 0 |
+| 135 | 135 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1123,8 +1123,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(103)
-expect(probe.recognized_count).to_equal(103)
+expect(probe.advertised_count).to_equal(104)
+expect(probe.recognized_count).to_equal(104)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2235,6 +2235,26 @@ expect(missing.reason).to_equal("missing-edge")
 
 </details>
 
+#### reads SDD edge segments
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("sdd-edge-segments-read", "0\ngraph: Segments\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 80 y: 0 width: 20 height: 20\nA -> B: link route: orthogonal waypoints: 40x10 start: right end: left")
+val invalid = office_action_dispatch("sdd-edge-segments-read", "bad\ngraph: Segments\nA: A\nB: B\nA -> B: link")
+val missing = office_action_dispatch("sdd-edge-segments-read", "2\ngraph: Segments\nA: A\nB: B\nA -> B: link")
+expect(result.ok).to_be(true)
+expect(result.output).to_equal("20,10-40,10;40,10-80,10|30,10;60,10|h;h")
+expect(invalid.reason).to_equal("invalid-args")
+expect(missing.reason).to_equal("missing-edge")
+```
+
+</details>
+
 #### rejects blank SDD node geometry action target ids
 
 <details>
@@ -2560,8 +2580,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 134 |
-| Active scenarios | 134 |
+| Total scenarios | 135 |
+| Active scenarios | 135 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
