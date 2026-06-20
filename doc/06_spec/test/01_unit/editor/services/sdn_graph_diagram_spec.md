@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 25 | 25 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -261,6 +261,26 @@ expect(canon).to_contain("nodes |id, label, css, role, shape, x, y, width, heigh
 expect(canon).to_contain("A, Start, start, , circle, 8, 12, 48, 48, base, ")
 expect(canon).to_contain("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|")
 expect(canon).to_contain("A, B, done, , normal, simple, 56x36, right, left")
+```
+
+</details>
+
+#### round-trips canonical table fields with commas and quotes
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: flow\nA: Alpha \"One\", Inc x: 8 y: 12 width: 48 height: 48\nB: End x: 120 y: 12 width: 80 height: 48\nA -> B: flow,fast route: simple waypoints: 56x36,80x36 start: right end: left")
+val canon = sdn_graph_to_canonical_sdn(graph)
+val parsed = sdn_graph_parse(canon)
+expect(canon).to_contain("\"Alpha \"\"One\"\", Inc\"")
+expect(parsed.nodes[0].label).to_equal("Alpha \"One\", Inc")
+expect(parsed.edges[0].label).to_equal("flow,fast")
+expect(parsed.edges[0].waypoints).to_equal("56x36,80x36")
 ```
 
 </details>
@@ -655,8 +675,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 25 |
+| Active scenarios | 25 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
