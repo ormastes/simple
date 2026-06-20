@@ -175,7 +175,7 @@ expect(missing.join(",")).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -185,6 +185,7 @@ expect(office_llm_action_input_schema("sdd-document-summary")).to_equal("sdd_sou
 expect(office_llm_action_input_schema("render-sdd-html-with-selection")).to_contain("select|node_id|edge_index")
 expect(office_llm_action_input_schema("sdd-style-extends-read")).to_equal("css|key\\nsdd_source")
 expect(office_llm_action_input_schema("sdd-style-target-read")).to_equal("css|key\\nsdd_source")
+expect(office_llm_action_input_schema("sdd-style-value-read")).to_equal("css|key\\nsdd_source")
 expect(office_llm_action_input_schema("sdd-node-label-read")).to_equal("node_id\\nsdd_source")
 expect(office_llm_action_input_schema("sdd-node-style-read")).to_equal("node_id\\nsdd_source")
 expect(office_llm_action_input_schema("sdd-node-parent-read")).to_equal("node_id\\nsdd_source")

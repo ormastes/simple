@@ -28,7 +28,7 @@
   `sdd-edge-style-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`,
   `sdd-edge-route-read`, `sdd-edge-path-read`,
   `sdd-edge-segments-read`, `sdd-edge-endpoints-read`, `sdd-style-extends-read`,
-  `sdd-style-target-read`, `inspect-sdd-node`,
+  `sdd-style-target-read`, `sdd-style-value-read`, `inspect-sdd-node`,
   and `inspect-sdd-edge`.
 
 ## Constraints
