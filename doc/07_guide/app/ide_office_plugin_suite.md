@@ -182,6 +182,7 @@ Blank or malformed SDD order node ids are rejected as `invalid-args`.
 `delete-sdd-style-rule` uses `css|key`, rejects malformed css/key tokens as `invalid-args`, and returns canonical SDD text with that reusable rule removed.
 `inspect-sdd-style-rule` uses `css|key`, rejects malformed css/key tokens as `invalid-args`, and returns compact style-rule readback text.
 Blank SDD style-rule css or key arguments are rejected as `invalid-args`.
+`sdd-node-label-read` uses `node_id` and returns the selected node label text.
 `edit-sdd-node-geometry` uses `node_id|x|y|width|height`; `x` and `y` are signed integers, and size fields are non-negative integers.
 `sdd-node-geometry-read` uses `node_id` and returns `x,y,width,height`.
 Blank or malformed SDD geometry node ids are rejected as `invalid-args`.
@@ -377,7 +378,7 @@ modes:
   `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `add-sdd-node`, `add-sdd-edge`,
   `duplicate-sdd-edge`, `edit-sdd-edge-label`, `sdd-edge-label-read`, `edit-sdd-edge-label-point`, `sdd-edge-label-point-read`, `edit-sdd-edge-style`, `sdd-edge-style-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`, `sdd-edge-route-read`, `sdd-edge-path-read`, `sdd-edge-segments-read`, `sdd-edge-endpoints-read`, `edit-sdd-edge-endpoints`,
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`, `sdd-node-geometry-read`,
-  `edit-sdd-node-label`, `edit-sdd-node-parent`, `sdd-node-parent-read`, `edit-sdd-node-shape`, `sdd-node-shape-read`,
+  `edit-sdd-node-label`, `sdd-node-label-read`, `edit-sdd-node-parent`, `sdd-node-parent-read`, `edit-sdd-node-shape`, `sdd-node-shape-read`,
   `edit-sdd-node-style`, `sdd-node-style-read`, `edit-sdd-node-layer`, `sdd-node-layer-read`, `order-sdd-node`, `edit-sdd-node-role`, `sdd-node-role-read`,
   `duplicate-sdd-node`, `edit-sdd-canvas`, `sdd-canvas-read`, `sdd-selection-geometry`, `sdd-list-layers`, `align-sdd-selection`,
   `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;
