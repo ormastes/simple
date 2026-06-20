@@ -530,7 +530,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1263 lines folded for reproduction.
+Runnable source: 1269 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -897,7 +897,9 @@ val blank_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-st
 val invalid_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent,bad|fill\ncss |name, extends, target|\n    accent, none, node\nstyles |css, key, value|\n    accent, fill, #eeeeee")
 val blank_sdd_style_rule_delete_action = office_action_dispatch("delete-sdd-style-rule", "accent|   \n" + sdd_style_rule_action.output)
 val invalid_sdd_style_rule_delete_action = office_action_dispatch("delete-sdd-style-rule", "accent,bad|fill\n" + sdd_style_rule_action.output)
+val short_sdd_style_rule_delete_action = office_action_dispatch("delete-sdd-style-rule", "accent\n" + sdd_style_rule_action.output)
 val blank_sdd_style_rule_edit_action = office_action_dispatch("edit-sdd-style-rule", "accent|node|none|   |#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
+val short_sdd_style_rule_edit_action = office_action_dispatch("edit-sdd-style-rule", "accent|node|none\ngraph: Style Rule\nA: Alpha @accent")
 val invalid_sdd_style_rule_action = office_action_dispatch("edit-sdd-style-rule", "accent|canvas|none|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
 val invalid_sdd_style_token_action = office_action_dispatch("edit-sdd-style-rule", "accent,bad|node|none|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
 val self_parent_sdd_style_rule_action = office_action_dispatch("edit-sdd-style-rule", "accent|node|accent|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
@@ -969,6 +971,7 @@ val invalid_sdd_canvas_long_number_action = office_action_dispatch("edit-sdd-can
 val invalid_sdd_canvas_snap_action = office_action_dispatch("edit-sdd-canvas", "640|480|16|yes|125|#ffffff\ngraph: Canvas\nA: A")
 val invalid_sdd_canvas_background_action = office_action_dispatch("edit-sdd-canvas", "640|480|16|true|125|url(javascript:bad)\ngraph: Canvas\nA: A")
 val blank_sdd_canvas_action = office_action_dispatch("edit-sdd-canvas", "640|480|16|true|125|   \ngraph: Canvas\nA: A")
+val short_sdd_canvas_action = office_action_dispatch("edit-sdd-canvas", "640|480|16\ngraph: Canvas\nA: A")
 val sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60x10;60x40|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val invalid_sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|curve|60x10|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val invalid_sdd_reroute_waypoint_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60xbad|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
@@ -1262,7 +1265,9 @@ expect(blank_sdd_style_rule_inspect_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_style_rule_inspect_action.reason).to_equal("invalid-args")
 expect(blank_sdd_style_rule_delete_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_style_rule_delete_action.reason).to_equal("invalid-args")
+expect(short_sdd_style_rule_delete_action.reason).to_equal("invalid-args")
 expect(blank_sdd_style_rule_edit_action.reason).to_equal("invalid-args")
+expect(short_sdd_style_rule_edit_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_style_rule_action.reason).to_equal("invalid-target")
 expect(invalid_sdd_style_token_action.reason).to_equal("invalid-style-token")
 expect(self_parent_sdd_style_rule_action.reason).to_equal("style-parent-cycle")
@@ -1352,6 +1357,7 @@ expect(invalid_sdd_canvas_long_number_action.reason).to_equal("invalid-canvas-nu
 expect(invalid_sdd_canvas_snap_action.reason).to_equal("invalid-canvas-snap")
 expect(invalid_sdd_canvas_background_action.reason).to_equal("invalid-canvas-background")
 expect(blank_sdd_canvas_action.reason).to_equal("invalid-args")
+expect(short_sdd_canvas_action.reason).to_equal("invalid-args")
 expect(sdd_reroute_action.output).to_contain("data-route=\"orthogonal\"")
 expect(invalid_sdd_reroute_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_reroute_waypoint_action.reason).to_equal("invalid-args")
