@@ -431,7 +431,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -464,6 +464,7 @@ expect(guide).to_contain("cell_ref|expected_display|new_value")
 expect(guide).to_contain("element_id|expected_text|new_text")
 expect(guide).to_contain("count-where|column|value or select-where|column|value or project-column|column")
 expect(guide).to_contain("insert|v1,v2 or update-where|match_col|match_value|update_col|new_value or delete-where|match_col|match_value")
+expect(guide).to_contain("value|counter_increment|counter_decrement|counter_reset")
 ```
 
 </details>

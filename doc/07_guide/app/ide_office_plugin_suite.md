@@ -304,6 +304,7 @@ Counter actions use `value|counter_increment`, `value|counter_decrement`, or
 `value|counter_reset` and return `value=...`, `status=...`, and
 `changed=...`. Blank action names are `invalid-args`; unsupported named actions
 fail closed and preserve the original value.
+The compact LLM counter schema is `value|counter_increment|counter_decrement|counter_reset`.
 
 Designer/UI editing uses `app.office.ui_editor` as a pure HTML design document
 substrate. It parses positioned frame/component records, renders a stable
