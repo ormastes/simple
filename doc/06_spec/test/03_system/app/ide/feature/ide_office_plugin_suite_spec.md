@@ -530,7 +530,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1233 lines folded for reproduction.
+Runnable source: 1235 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -837,6 +837,7 @@ val ui_parent_action = office_action_dispatch("ui-parent-edit", "button||frame\n
 val stale_ui_parent_action = office_action_dispatch("ui-parent-edit", "button|old|frame\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container\nnode button|Run|button|16|16|80|32|primary||action")
 val cycle_ui_parent_action = office_action_dispatch("ui-parent-edit", "frame||button\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container\nnode button|Run|button|16|16|80|32|primary|frame|action")
 val invalid_ui_parent_action = office_action_dispatch("ui-parent-edit", "button bad||frame\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
+val short_ui_parent_action = office_action_dispatch("ui-parent-edit", "button|\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
 val ui_name_action = office_action_dispatch("ui-name-edit", "Feature|Launch Flow\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_name_action = office_action_dispatch("ui-name-edit", "Feature|   \ndesign: Feature")
 val ui_kind_action = office_action_dispatch("ui-kind-edit", "button|button|input\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -1157,6 +1158,7 @@ expect(ui_parent_action.output).to_contain("data-parent=\"frame\"")
 expect(stale_ui_parent_action.reason).to_equal("stale-node")
 expect(cycle_ui_parent_action.reason).to_equal("cycle-parent")
 expect(invalid_ui_parent_action.reason).to_equal("invalid-args")
+expect(short_ui_parent_action.reason).to_equal("invalid-args")
 expect(ui_name_action.output).to_contain("data-design=\"Launch Flow\"")
 expect(invalid_ui_name_action.reason).to_equal("invalid-args")
 expect(ui_kind_action.output).to_contain("office-ui-input")
