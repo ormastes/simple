@@ -717,11 +717,12 @@ expect(legacy_sdd.output).to_contain("graph: Feature")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+val summary = office_action_dispatch("sdd-document-summary", "graph: Feature\\ncanvas: width: 640 height: 480 grid: 16 snap: true zoom: 100 background: white\\ncss accent:\\n    fill: #eeeeee\\nA: Alpha @accent x: 0 y: 0 width: 80 height: 20\\nB: Beta x: 120 y: 0 width: 80 height: 20\\nA -> B: Link")
 val selected = office_action_dispatch("render-sdd-html-with-selection", "select|A|\\ngraph: Feature\\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val selected_edge = office_action_dispatch("render-sdd-html-with-selection", "select||0\\ngraph: Feature\\nA: Alpha x: 0 y: 0 width: 80 height: 20\\nB: Beta x: 120 y: 0 width: 80 height: 20\\nA -> B: Link route: orthogonal waypoints: 80x10 start: right end: left")
 val canonical = office_action_dispatch("export-sdd-canonical", "graph: Feature\\nA: Alpha x: 0 y: 0 width: 80 height: 20")
@@ -734,6 +735,9 @@ expect(result.output).to_contain("data-node-index=\"0\"")
 expect(result.output).to_contain("data-label=\"Alpha\"")
 expect(result.output).to_contain("data-selected-node-id=\"\"")
 expect(result.output).to_contain("data-selected-edge-index=\"-1\"")
+expect(summary.ok).to_be(true)
+expect(summary.reason).to_equal("summarized")
+expect(summary.output).to_equal("name=Feature\nnodes=2\nedges=1\ncss_rules=1\nstyle_rows=1\ncanvas=true")
 expect(selected.ok).to_be(true)
 expect(selected.output).to_contain("data-selected-node-id=\"A\"")
 expect(selected.output).to_contain("data-selected=\"true\"")
@@ -1019,8 +1023,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(89)
-expect(probe.recognized_count).to_equal(89)
+expect(probe.advertised_count).to_equal(90)
+expect(probe.recognized_count).to_equal(90)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 

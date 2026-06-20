@@ -91,7 +91,8 @@ non-GUI bridge for cataloged render/export actions:
 `writer-markdown-summary`, `writer-markdown-stats`, `writer-markdown-outline`,
 `render-ppt-markdown-html`, `ppt-markdown-outline`, `render-ui-html`,
 `render-ui-html-with-selection`, `export-ui-sdd`, and
-`render-sdd-html-with-selection` / `export-sdd-canonical`. The bridge delegates to the canonical
+`sdd-document-summary`, `render-sdd-html-with-selection` /
+`export-sdd-canonical`. The bridge delegates to the canonical
 Markdown, Writer, Impress, Designer, and SDD renderers rather than
 duplicating rendering logic. Legacy aliases `ui-render`, `ui-export-sdd`, and
 `render-sdd` normalize to those canonical action names.
@@ -156,6 +157,8 @@ as `invalid-args`, and return compact readback text.
 with node id, label, kind, layer, z-index, parent, and component metadata.
 `sdd-list-layers` does the same for Draw nodes with id, label, role, shape,
 layer, z-index, and parent metadata.
+`sdd-document-summary` returns the Draw document name, node count, edge count,
+CSS rule count, style row count, and whether canvas metadata is present.
 
 Layout actions use `mode_or_axis|id1,id2,...`, followed by the UI or SDD
 document body. `ui-align-selection`, `ui-distribute-selection`,
@@ -351,7 +354,7 @@ modes:
   `render-ppt-markdown-html` and `ppt-markdown-outline` plus PPT HTML,
   slide-count metadata, outline readback, safe CSS, positioned elements,
   element metadata, class sanitizing, and text escaping; Draw is SDD-backed with
-  `render-sdd-html-with-selection`, `export-sdd-canonical`, `reroute-sdd-connector`, `edit-sdd-style-rule`,
+  `sdd-document-summary`, `render-sdd-html-with-selection`, `export-sdd-canonical`, `reroute-sdd-connector`, `edit-sdd-style-rule`,
   `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `add-sdd-node`, `add-sdd-edge`,
   `duplicate-sdd-edge`, `edit-sdd-edge-label`, `edit-sdd-edge-label-point`, `edit-sdd-edge-style`, `edit-sdd-edge-kind`, `edit-sdd-edge-endpoints`,
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`,
