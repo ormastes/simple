@@ -100,6 +100,8 @@ first-line `select|node_id` header followed by UI design source.
 returns selected-node HTML.
 `ui-selection-geometry` uses `id1,id2,...` followed by UI design source and
 returns a compact `id:x,y,width,height` signature for guarded layout actions.
+`sdd-selection-geometry` uses the same selection-list header followed by SDD
+source and returns the current Draw node geometry signature.
 `render-sdd-html-with-selection` accepts either raw SDD source or a first-line
 `select|node_id|edge_index` header followed by SDD source; leave `edge_index`
 blank to select only a node.
@@ -150,8 +152,8 @@ Layout actions use `mode_or_axis|id1,id2,...`, followed by the UI or SDD
 document body. `ui-align-selection`, `ui-distribute-selection`,
 `align-sdd-selection`, and `distribute-sdd-selection` compute the current
 geometry signature and return rendered HTML for the updated document.
-`ui-selection-geometry` returns the same current Designer signature without
-mutating the document.
+`ui-selection-geometry` and `sdd-selection-geometry` return the same current
+signature without mutating the document.
 Blank or malformed layout modes/axes, blank selection lists, or malformed
 selection IDs are rejected as `invalid-args`.
 
@@ -326,7 +328,7 @@ modes:
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`,
   `edit-sdd-node-label`, `edit-sdd-node-parent`, `edit-sdd-node-shape`,
   `edit-sdd-node-style`, `edit-sdd-node-layer`, `order-sdd-node`, `edit-sdd-node-role`,
-  `duplicate-sdd-node`, `edit-sdd-canvas`, `align-sdd-selection`,
+  `duplicate-sdd-node`, `edit-sdd-canvas`, `sdd-selection-geometry`, `align-sdd-selection`,
   `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;
   Calc has `formula-counta`,
   `formula-text-functions`, `formula-vlookup`, and
