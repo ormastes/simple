@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 158 | 158 | 0 | 0 |
+| 159 | 159 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2022,6 +2022,21 @@ expect(new_result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects malformed UI CSS edit replacement tokens
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("ui-css-edit", "button|primary|accent,bad\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+expect(result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects malformed UI edit target ids
 
 <details>
@@ -3070,8 +3085,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 158 |
-| Active scenarios | 158 |
+| Total scenarios | 159 |
+| Active scenarios | 159 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
