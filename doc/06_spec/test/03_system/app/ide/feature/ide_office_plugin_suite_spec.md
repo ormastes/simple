@@ -530,7 +530,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1235 lines folded for reproduction.
+Runnable source: 1237 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -831,6 +831,7 @@ val ui_constraints_action = office_action_dispatch("ui-constraints-edit", "butto
 val blank_ui_constraints_action = office_action_dispatch("ui-constraints-edit", "   |left|top|stretch|top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_constraints_action = office_action_dispatch("ui-constraints-edit", "button bad|left|top|stretch|top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_field_ui_constraints_action = office_action_dispatch("ui-constraints-edit", "button|left|top|   |top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val short_ui_constraints_action = office_action_dispatch("ui-constraints-edit", "button|left|top|stretch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_h_ui_constraints_action = office_action_dispatch("ui-constraints-edit", "button|left|top|wide|top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_v_ui_constraints_action = office_action_dispatch("ui-constraints-edit", "button|left|top|stretch|middle\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_parent_action = office_action_dispatch("ui-parent-edit", "button||frame\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container\nnode button|Run|button|16|16|80|32|primary||action")
@@ -1152,6 +1153,7 @@ expect(ui_constraints_action.output).to_contain("data-constraint-h=\"stretch\"")
 expect(blank_ui_constraints_action.reason).to_equal("invalid-args")
 expect(invalid_ui_constraints_action.reason).to_equal("invalid-args")
 expect(blank_field_ui_constraints_action.reason).to_equal("invalid-args")
+expect(short_ui_constraints_action.reason).to_equal("invalid-args")
 expect(invalid_h_ui_constraints_action.reason).to_equal("invalid-args")
 expect(invalid_v_ui_constraints_action.reason).to_equal("invalid-args")
 expect(ui_parent_action.output).to_contain("data-parent=\"frame\"")
