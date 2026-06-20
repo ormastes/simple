@@ -761,10 +761,14 @@ expect(stacked.nodes[2].width).to_equal("100")
 
 #### guards auto-layout parent and constraint edits
 
+- deep source = deep source + "\nnode n" + depth to text
+   - Expected: deep_cycle.reason equals `cycle-parent`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -807,6 +811,16 @@ expect(invalid.reason).to_equal("invalid-layout")
 val cycle = office_ui_design_set_parent_checked(parented.design, "frame", "", "child")
 expect(cycle.accepted).to_be(false)
 expect(cycle.reason).to_equal("cycle-parent")
+var deep_source = "design: Deep\nnode target|Target|frame|0|0|10|10|panel|1|container"
+var depth = 0
+while depth < 65:
+    val next_parent = if depth == 64 then "target" else: "n" + (depth + 1).to_text()
+    deep_source = deep_source + "\nnode n" + depth.to_text() + "|Node|frame|0|0|10|10|panel|1|container|" + next_parent
+    depth = depth + 1
+val deep = office_ui_design_parse(deep_source)
+val deep_cycle = office_ui_design_set_parent_checked(deep, "target", "", "n0")
+expect(deep_cycle.accepted).to_be(false)
+expect(deep_cycle.reason).to_equal("cycle-parent")
 ```
 
 </details>
