@@ -321,11 +321,12 @@ expect(run_office(["md-edit", "9999999999", "first", "changed", "first\\nsecond"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(run_office(["sheet-edit", "A1", "old", "new", "A1=old;B1=2"])).to_equal(0)
+expect(run_office(["sheet-edit", "A1", "old;semi", "new", "A1=old\\;semi;B1=2"])).to_equal(0)
 ```
 
 </details>
@@ -447,11 +448,12 @@ expect(run_office(["sheet-edit", "A1", "old", "new", "A1=old", "extra"])).to_equ
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(run_office(["slide-edit", "title", "old", "new", "title=old;body=second"])).to_equal(0)
+expect(run_office(["slide-edit", "title", "old;semi", "new", "title=old\\;semi;body=second"])).to_equal(0)
 ```
 
 </details>
