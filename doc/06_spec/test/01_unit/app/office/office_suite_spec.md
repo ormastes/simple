@@ -3176,13 +3176,16 @@ expect(result.reason).to_equal("invalid-args")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val result = office_action_dispatch("add-sdd-node", "   |Choice|accent|decision|diamond|   |64|48|32|front|\ngraph: Node Add\nA: Alpha")
+val result = office_action_dispatch("add-sdd-node", "   |Choice|accent|decision|diamond|32|64|48|32|front|\ngraph: Node Add\nA: Alpha")
+val malformed = office_action_dispatch("add-sdd-node", "   |Choice|accent|decision|diamond|   |64|48|32|front|\ngraph: Node Add\nA: Alpha")
 expect(result.ok).to_be(false)
 expect(result.reason).to_equal("invalid-id")
+expect(malformed.ok).to_be(false)
+expect(malformed.reason).to_equal("invalid-args")
 ```
 
 </details>
