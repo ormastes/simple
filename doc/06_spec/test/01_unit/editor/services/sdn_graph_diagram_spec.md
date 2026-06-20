@@ -763,7 +763,7 @@ expect(invalid_add.graph.nodes.len()).to_equal(2)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -786,6 +786,7 @@ val checked_parent = sdn_graph_update_node_parent_checked(ungrouped, " Child ", 
 expect(checked_parent.accepted).to_be(true)
 expect(checked_parent.graph.nodes[1].parent).to_equal("Container")
 expect(sdn_graph_update_node_parent_checked(graph, "Child bad", "Container").reason).to_equal("invalid-id")
+expect(sdn_graph_update_node_parent_checked(graph, "Child", "bad parent").reason).to_equal("invalid-parent-token")
 expect(sdn_graph_delete_node_checked(graph, "Child bad").reason).to_equal("invalid-id")
 expect(sdn_graph_delete_node_checked(graph, "Missing").reason).to_equal("missing-node")
 
