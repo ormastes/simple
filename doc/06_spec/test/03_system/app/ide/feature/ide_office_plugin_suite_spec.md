@@ -548,7 +548,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1337 lines folded for reproduction.
+Runnable source: 1339 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1137,12 +1137,14 @@ expect(sheet_duplicate_source_action.reason).to_equal("duplicate-source-ref")
 expect(sheet_blank_target_action.reason).to_equal("invalid-args")
 expect(short_sheet_edit_action.reason).to_equal("invalid-args")
 expect(sheet_stale_edit_action.reason).to_equal("stale-cell")
+expect(sheet_stale_edit_action.output).to_equal("@@ cell A1 @@\nexpected: missing\nactual: old\nrejected: new")
 expect(slide_edit_action.output).to_equal("title=New")
 expect(slide_edit_action.reason).to_equal("updated")
 expect(slide_duplicate_source_action.reason).to_equal("duplicate-source-id")
 expect(slide_blank_target_action.reason).to_equal("invalid-args")
 expect(short_slide_edit_action.reason).to_equal("invalid-args")
 expect(slide_stale_edit_action.reason).to_equal("stale-slide-element")
+expect(slide_stale_edit_action.output).to_equal("@@ slide element title @@\nexpected: Missing\nactual: Old\nrejected: New")
 expect(ui_action.output).to_contain("data-format=\"html-ui\"")
 expect(ui_action.output).to_contain("data-format-name=\"HTML UI Design Document\"")
 expect(ui_action.output).to_contain("data-node-count=\"1\"")
