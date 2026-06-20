@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 29 | 29 | 0 | 0 |
+| 30 | 30 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -283,6 +283,24 @@ val legacy = sdn_graph_render_html(sdn_graph_parse("graph: escaped\ncss_file: \"
 val local = sdn_graph_render_html(sdn_graph_parse("graph: escaped\ncss_file: \"file:///etc/passwd\"\nA: A"))
 expect(legacy).to_contain("data-css-file=\"#\"")
 expect(local).to_contain("data-css-file=\"#\"")
+```
+
+</details>
+
+#### canonicalizes quoted SDD css_file values
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: escaped\ncss_file: \"styles/diagram\"\"dark.css\"\nA: A")
+val canon = sdn_graph_to_canonical_sdn(graph)
+val parsed = sdn_graph_parse(canon)
+expect(canon).to_contain("css_file: \"styles/diagram\"\"dark.css\"")
+expect(parsed.css_file).to_equal("styles/diagram\"dark.css")
 ```
 
 </details>
@@ -849,8 +867,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 29 |
-| Active scenarios | 29 |
+| Total scenarios | 30 |
+| Active scenarios | 30 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
