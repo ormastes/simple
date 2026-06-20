@@ -22,6 +22,33 @@ Writer Markdown is the Simple Office Writer surface. Markdown is the source
 format and HTML is the render target; the older `WordApp` rich-text module is a
 compatibility UI path, not the product document model.
 
+## IDE Plugin Kernel
+IDE Plugin Kernel is the proposed Simple-native plugin architecture for the IDE
+and Office suite. It combines VS Code-style manifests, contribution points,
+activation events, and extension-host placement with Eclipse-style extension
+registry, service registry, and invalidation, while keeping Simple MDSOC
+visibility rules. The architecture is documented in
+`doc/04_architecture/ide_plugin_architecture.md`.
+
+## Plugin Contribution Point
+A Plugin Contribution Point is a declarative place where a plugin adds behavior
+without importing host or sibling internals. Initial contribution points include
+commands, menus, views, custom editors, document kinds, renderers, importers,
+exporters, diagnostics, diagram shapes, designer tools, sheet functions, slide
+layouts, services, and aspect hooks.
+
+## Plugin DI Service Token
+A Plugin DI Service Token is the named contract a plugin provides or consumes
+through the IDE Plugin Kernel service container. Tokens are scoped to global,
+workspace, document, surface, or request lifetimes and may require capability
+grants for privileged host services.
+
+## Plugin Aspect Hook
+A Plugin Aspect Hook is a constrained AOP extension point owned by the host, not
+arbitrary method interception. Hooks wrap known lifecycle points such as command
+dispatch, document save, rendering, diagnostics, plugin activation, plugin
+deactivation, and resource invalidation.
+
 ## SDD Diagram Draw
 SDD Diagram Draw is the product-facing Simple IDE Draw capability. It stores
 diagrams as SDD (Simple Diagram Document) `.sdd.sdn` files, renders through the
