@@ -29,7 +29,7 @@ html_render_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 25 | 25 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -296,6 +296,21 @@ expect(html).to_contain("<img src=\"#\" alt=\"Bad\">")
 
 </details>
 
+#### sanitizes legacy script Writer Markdown image URLs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("![Bad](vbscript:msgbox(1))")
+expect(html).to_contain("<img src=\"#\" alt=\"Bad\">")
+```
+
+</details>
+
 #### renders Writer Markdown inline links in paper HTML
 
 <details>
@@ -311,6 +326,21 @@ expect(html).to_contain("<p data-source-line=\"3\">See <a href=\"guide.md?a=1&am
 expect(html).to_contain("<p data-source-line=\"5\">Formula <a href=\"calc(sum(1,2))\">Calc</a></p>")
 expect(html).to_contain("<p data-source-line=\"7\">No <a href=\"#\">Script</a></p>")
 expect(html).to_contain("<p data-source-line=\"9\">No <a href=\"#\">Host</a></p>")
+```
+
+</details>
+
+#### sanitizes legacy script Writer Markdown inline links
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("No [Legacy](vbscript:msgbox(1))")
+expect(html).to_contain("<p data-source-line=\"1\">No <a href=\"#\">Legacy</a></p>")
 ```
 
 </details>
@@ -455,8 +485,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 25 |
+| Active scenarios | 25 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
