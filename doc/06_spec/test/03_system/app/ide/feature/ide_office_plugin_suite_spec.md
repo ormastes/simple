@@ -511,12 +511,17 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
    - Expected: counter_bad_action.reason equals `unsupported`
    - Expected: counter_blank_action.reason equals `invalid-args`
    - Expected: counter_overflow_action.reason equals `invalid-args`
+   - Expected: catalog[11].owner_module equals `app.office.launcher`
+   - Expected: launcher_sheets_action.output equals `launcher-open: sheets`
+   - Expected: launcher_sheets_action.reason equals `opened`
+   - Expected: launcher_math_action.output equals `launcher-open: math`
+   - Expected: launcher_math_action.reason equals `opened`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1190 lines folded for reproduction.
+Runnable source: 1199 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1710,6 +1715,15 @@ expect(counter_bad_action.reason).to_equal("unsupported")
 expect(counter_bad_action.output).to_contain("changed=false")
 expect(counter_blank_action.reason).to_equal("invalid-args")
 expect(counter_overflow_action.reason).to_equal("invalid-args")
+expect(catalog[11].owner_module).to_equal("app.office.launcher")
+expect(catalog[11].actions.join(",")).to_contain("open_sheets")
+expect(catalog[11].actions.join(",")).to_contain("open_math")
+val launcher_sheets_action = office_action_dispatch("open_sheets", "")
+val launcher_math_action = office_action_dispatch("open_math", "")
+expect(launcher_sheets_action.output).to_equal("launcher-open: sheets")
+expect(launcher_sheets_action.reason).to_equal("opened")
+expect(launcher_math_action.output).to_equal("launcher-open: math")
+expect(launcher_math_action.reason).to_equal("opened")
 ```
 
 </details>
