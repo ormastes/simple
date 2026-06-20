@@ -182,3 +182,22 @@ Invalidation:
 6. Route VS Code adapter and IDE feature report through the same registry.
 7. Add dynamic plugin invalidation only after built-in plugins are stable.
 
+## Requirement Trace
+
+| Requirement | Architecture evidence |
+| --- | --- |
+| REQ-IPA-001 | Reference model, layer list, contribution points, activation events |
+| REQ-IPA-002 | Tree encapsulation and public surface matrix |
+| REQ-IPA-003 | Service container |
+| REQ-IPA-004 | Contribution points |
+| REQ-IPA-005 | Aspect hooks and ordering/failure semantics |
+| REQ-IPA-006 | Office capsules, tree encapsulation, startup and hot paths |
+| REQ-IPA-007 | Layer list, tree encapsulation, public surface matrix |
+| REQ-IPA-008 | Office action bridge coverage in `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
+| NFR-IPA-001 | Startup manifest cache path |
+| NFR-IPA-002 | Lazy activation path |
+| NFR-IPA-003 | Hot command dispatch path |
+| NFR-IPA-004 | Cache and invalidation model |
+| NFR-IPA-005 | Capability model and public surface matrix |
+| NFR-IPA-006 | IDE Office feature-check contract in `doc/07_guide/app/ide_office_plugin_suite.md` |
+| NFR-IPA-007 | Migration sequence step 7 defers dynamic invalidation |
