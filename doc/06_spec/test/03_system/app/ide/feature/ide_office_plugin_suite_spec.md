@@ -92,7 +92,7 @@ Display policy: `embed_tui`
 ```text
 Simple IDE feature check
 mode: tui
-capabilities: 6
+capabilities: 7
 markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
   check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true task_list=true strike=true link=true list=true ordered_list=true quote=true code=true css_doc=true escaped=true metadata=true
   edit-command: md-edit=true stale-reject=true reason=stale-line
@@ -101,6 +101,8 @@ slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
 draw: SDD Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
   check: draw: sdn_graph format=sdd name="SDD: Simple Diagram Document" extension=.sdd.sdn nodes=3 edges=2 html=true route=true select=true inspect=true child_meta=true path_meta=true handle_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
+designer: UI Designer [office-app] -> app.office.ui_editor (figma, html, sdd, ui)
+  check: designer: app.office.ui_editor html=true sdd=true selection=true resize_handle_metadata=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true display_recalc=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
@@ -111,8 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
-  plugin-manifest: plugins: entries=6 roundtrip=6 names=6 kinds=4 libre=6 libre_roundtrip=6
-  designer: resize_handle_metadata=true
+  plugin-manifest: plugins: entries=7 roundtrip=7 names=7 kinds=4 libre=6 libre_roundtrip=6
   llm-catalog: apps=11 features=206 actions=128
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
@@ -184,6 +185,8 @@ expect(tui_report).to_contain("mode: tui")
 expect(gui_report).to_contain("mode: gui")
 expect(tui_report).to_contain("Presentation Slides")
 expect(tui_report).to_contain("draw: SDD Diagram Draw")
+expect(tui_report).to_contain("designer: UI Designer")
+expect(tui_report).to_contain("designer: app.office.ui_editor html=true sdd=true selection=true resize_handle_metadata=true")
 expect(tui_report).to_contain("name=\"SDD: Simple Diagram Document\"")
 expect(tui_report).to_contain("extension=.sdd.sdn")
 expect(tui_report).to_contain("draw: sdn_graph")
@@ -208,7 +211,7 @@ expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
 expect(tui_report).to_contain("libre=6")
 expect(tui_report).to_contain("libre_roundtrip=6")
-expect(tui_report).to_contain("designer: resize_handle_metadata=true")
+expect(tui_report).to_contain("resize_handle_metadata=true")
 expect(registry_checks).to_contain("metadata=true")
 expect(registry_checks).to_contain("ppt_html=true")
 expect(registry_checks).to_contain("path_meta=true")
@@ -229,24 +232,25 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val lines = ide_feature_check_report("tui")
-expect(lines.len()).to_equal(25)
+expect(lines.len()).to_equal(26)
 expect(lines[0]).to_equal("Simple IDE feature check")
 expect(lines[1]).to_equal("mode: tui")
-expect(lines[2]).to_equal("capabilities: 6")
+expect(lines[2]).to_equal("capabilities: 7")
 expect(lines[3]).to_start_with("markdown:")
 expect(lines[5]).to_start_with("  edit-command:")
 expect(lines[6]).to_start_with("slides:")
 expect(lines[8]).to_start_with("  edit-command:")
 expect(lines[9]).to_start_with("draw:")
 expect(lines[10]).to_start_with("  check:")
-expect(lines[11]).to_start_with("sheets:")
-expect(lines[13]).to_start_with("  edit-command:")
-expect(lines[15]).to_start_with("agent-dashboard:")
-expect(lines[17]).to_start_with("db-admin:")
-expect(lines[21]).to_start_with("  plugin-manifest:")
-expect(lines[22]).to_start_with("  designer:")
-expect(lines[23]).to_start_with("  llm-catalog:")
-expect(lines[24]).to_start_with("  llm-apps:")
+expect(lines[11]).to_start_with("designer:")
+expect(lines[12]).to_start_with("  check:")
+expect(lines[13]).to_start_with("sheets:")
+expect(lines[15]).to_start_with("  edit-command:")
+expect(lines[17]).to_start_with("agent-dashboard:")
+expect(lines[19]).to_start_with("db-admin:")
+expect(lines[23]).to_start_with("  plugin-manifest:")
+expect(lines[24]).to_start_with("  llm-catalog:")
+expect(lines[25]).to_start_with("  llm-apps:")
 ```
 
 </details>
