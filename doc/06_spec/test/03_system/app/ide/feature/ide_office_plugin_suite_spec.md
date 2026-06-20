@@ -431,12 +431,14 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val glossary = file_read("doc/glossary.md")
 val guide = file_read("doc/07_guide/app/ide_office_plugin_suite.md")
+expect(glossary).to_contain("SDD Diagram Draw is the product-facing Simple IDE Draw capability")
+expect(glossary).to_contain("Preferred\nfiles use `.sdd.sdn`")
 expect(glossary).to_contain("selected connector handle edit actions")
 expect(glossary).to_contain("stable handle indexes")
 expect(glossary).to_contain("endpoint/opposite-node ids")
