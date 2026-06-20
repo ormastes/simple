@@ -318,7 +318,7 @@ modes:
   `sqrt-shorthand`, `slash-fraction`, `malformed-fallback`, `checked-rendering`,
   `render-mathml`, `render-math-structure`, and `render-mathml-checked`;
   Counter has `counter-action`; Designer has `selected-resize-handles`,
-  `render-ui-html`, `render-ui-html-with-selection`, `export-ui-sdd`, and
+  `resize-handle-metadata`, `render-ui-html`, `render-ui-html-with-selection`, `export-ui-sdd`, and
   `ui-label-edit` / `ui-layout-edit` / `ui-auto-layout-edit` /
   `ui-resolve-auto-layout` / `ui-duplicate-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
