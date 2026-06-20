@@ -118,7 +118,7 @@ expect(err).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 52 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -149,6 +149,7 @@ expect(manifest).to_contain("sdd-style-target-read")
 expect(manifest).to_contain("sdd-style-value-read")
 expect(manifest).to_contain("sdd-style-resolved-read")
 expect(manifest).to_contain("sdd-style-resolved-value-read")
+expect(manifest).to_contain("sdd-node-resolved-style-read")
 expect(manifest).to_contain("sdd-node-label-read")
 expect(manifest).to_contain("sdd-node-style-read")
 expect(manifest).to_contain("sdd-node-geometry-read")
