@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=158 actions=79
+  llm-catalog: apps=11 features=159 actions=80
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=158")
+expect(tui_report).to_contain("features=159")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -436,7 +436,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 897 lines folded for reproduction.
+Runnable source: 903 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -445,10 +445,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=158 actions=79")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=159 actions=80")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(79)
-expect(dispatch_probe.recognized_count).to_equal(79)
+expect(dispatch_probe.advertised_count).to_equal(80)
+expect(dispatch_probe.recognized_count).to_equal(80)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -457,10 +457,12 @@ expect(catalog[0].features.join(",")).to_contain("guarded-edit")
 expect(catalog[0].actions.join(",")).to_contain("render-markdown-preview-html")
 expect(catalog[0].actions.join(",")).to_contain("md-edit")
 expect(catalog[1].features.join(",")).to_contain("markdown-source")
+expect(catalog[1].features.join(",")).to_contain("source-summary")
 expect(catalog[1].features.join(",")).to_contain("task-lists")
 expect(catalog[1].features.join(",")).to_contain("table-alignment")
 expect(catalog[1].features.join(",")).to_contain("url-sanitize")
 expect(catalog[1].actions.join(",")).to_contain("render-writer-markdown-html")
+expect(catalog[1].actions.join(",")).to_contain("writer-markdown-summary")
 expect(catalog[2].owner_module).to_equal("app.office.sheets")
 expect(catalog[2].features.join(",")).to_contain("formulas")
 expect(catalog[2].features.join(",")).to_contain("formula-counta")
@@ -546,6 +548,7 @@ val md_edit_action = office_action_dispatch("md-edit", "1|old|new\n# Markdown\no
 val md_code_edit_action = office_action_dispatch("md-edit", "1|print(1)|print(2)\n```simple\nprint(1)\n```")
 val md_stale_edit_action = office_action_dispatch("md-edit", "1|missing|new\n# Markdown\nold")
 val writer_action = office_action_dispatch("render-writer-markdown-html", "# Writer")
+val writer_summary_action = office_action_dispatch("writer-markdown-summary", "# Writer\n\nBody")
 val ppt_action = office_action_dispatch("render-ppt-markdown-html", "# Deck\n\n## Slide")
 val sheet_edit_action = office_action_dispatch("sheet-edit", "A1|old|new\nA1=old")
 val sheet_stale_edit_action = office_action_dispatch("sheet-edit", "A1|missing|new\nA1=old")
@@ -755,6 +758,9 @@ expect(md_stale_edit_action.reason).to_equal("stale-line")
 expect(writer_action.output).to_contain("class=\"md-paper\"")
 expect(writer_action.output).to_contain("data-format=\"markdown-paper\"")
 expect(writer_action.output).to_contain("data-format-name=\"Writer Markdown\"")
+expect(writer_summary_action.output).to_contain("source=markdown")
+expect(writer_summary_action.output).to_contain("format=Writer Markdown")
+expect(writer_summary_action.output).to_contain("lines=3")
 expect(ppt_action.output).to_contain("class=\"md-ppt-deck\"")
 expect(ppt_action.output).to_contain("data-format=\"markdown-ppt\"")
 expect(ppt_action.output).to_contain("data-format-name=\"Impress Markdown\"")

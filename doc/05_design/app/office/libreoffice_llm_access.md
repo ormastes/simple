@@ -5,12 +5,13 @@
 `app.office.llm_catalog` provides:
 
 - `office_llm_feature_catalog()` -> structured rows for Markdown, Writer, Calc,
-  Impress, Draw, Base, Math, and Counter.
+  Impress, Draw, Designer, Base, Math, Mail, Planner, and Counter.
 - `office_llm_catalog_summary()` -> compact line for IDE feature checks.
 - `office_llm_catalog_app_names()` -> stable app ordering for LLM prompts,
   manuals, and tests.
-- Writer and Impress rows advertise Markdown-source render actions:
-  `render-writer-markdown-html` and `render-ppt-markdown-html`.
+- Writer and Impress rows advertise Markdown-source actions:
+  `render-writer-markdown-html`, `writer-markdown-summary`, and
+  `render-ppt-markdown-html`.
 
 ## Constraints
 
