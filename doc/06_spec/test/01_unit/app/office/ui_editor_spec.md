@@ -346,7 +346,7 @@ expect(sdd).to_contain("note, \"Save, \"\"now\"\"\", \"copy,primary\", copy, rou
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -359,6 +359,10 @@ val rejected = office_ui_design_update_label_checked(design, "submit", "Wrong", 
 expect(rejected.accepted).to_be(false)
 expect(rejected.reason).to_equal("stale-node")
 expect(rejected.design.nodes[0].label).to_equal("Sign in")
+val blank = office_ui_design_update_label_checked(design, "submit", "Sign in", " ")
+expect(blank.accepted).to_be(false)
+expect(blank.reason).to_equal("invalid-label")
+expect(blank.design.nodes[0].label).to_equal("Sign in")
 ```
 
 </details>
