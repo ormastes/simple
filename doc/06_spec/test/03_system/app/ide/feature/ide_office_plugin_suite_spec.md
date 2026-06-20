@@ -538,22 +538,29 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
    - Expected: counter_overflow_action.reason equals `invalid-args`
    - Expected: catalog[11].owner_module equals `app.office.launcher`
    - Expected: launcher_word_action.output equals `launcher-open: word`
+   - Expected: launcher_word_action.reason equals `opened`
    - Expected: launcher_sheets_action.output equals `launcher-open: sheets`
-   - Expected: launcher_slides_action.output equals `launcher-open: slides`
-   - Expected: launcher_draw_action.output equals `launcher-open: draw`
-   - Expected: launcher_db_action.output equals `launcher-open: db`
    - Expected: launcher_sheets_action.reason equals `opened`
+   - Expected: launcher_slides_action.output equals `launcher-open: slides`
+   - Expected: launcher_slides_action.reason equals `opened`
+   - Expected: launcher_draw_action.output equals `launcher-open: draw`
+   - Expected: launcher_draw_action.reason equals `opened`
+   - Expected: launcher_db_action.output equals `launcher-open: db`
+   - Expected: launcher_db_action.reason equals `opened`
    - Expected: launcher_math_action.output equals `launcher-open: math`
-   - Expected: launcher_mail_action.output equals `launcher-open: mail`
-   - Expected: launcher_planner_action.output equals `launcher-open: planner`
-   - Expected: launcher_counter_action.output equals `launcher-open: counter`
    - Expected: launcher_math_action.reason equals `opened`
+   - Expected: launcher_mail_action.output equals `launcher-open: mail`
+   - Expected: launcher_mail_action.reason equals `opened`
+   - Expected: launcher_planner_action.output equals `launcher-open: planner`
+   - Expected: launcher_planner_action.reason equals `opened`
+   - Expected: launcher_counter_action.output equals `launcher-open: counter`
+   - Expected: launcher_counter_action.reason equals `opened`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1347 lines folded for reproduction.
+Runnable source: 1354 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1894,16 +1901,23 @@ val launcher_mail_action = office_action_dispatch("open_mail", "")
 val launcher_planner_action = office_action_dispatch("open_planner", "")
 val launcher_counter_action = office_action_dispatch("open_counter", "")
 expect(launcher_word_action.output).to_equal("launcher-open: word")
+expect(launcher_word_action.reason).to_equal("opened")
 expect(launcher_sheets_action.output).to_equal("launcher-open: sheets")
-expect(launcher_slides_action.output).to_equal("launcher-open: slides")
-expect(launcher_draw_action.output).to_equal("launcher-open: draw")
-expect(launcher_db_action.output).to_equal("launcher-open: db")
 expect(launcher_sheets_action.reason).to_equal("opened")
+expect(launcher_slides_action.output).to_equal("launcher-open: slides")
+expect(launcher_slides_action.reason).to_equal("opened")
+expect(launcher_draw_action.output).to_equal("launcher-open: draw")
+expect(launcher_draw_action.reason).to_equal("opened")
+expect(launcher_db_action.output).to_equal("launcher-open: db")
+expect(launcher_db_action.reason).to_equal("opened")
 expect(launcher_math_action.output).to_equal("launcher-open: math")
-expect(launcher_mail_action.output).to_equal("launcher-open: mail")
-expect(launcher_planner_action.output).to_equal("launcher-open: planner")
-expect(launcher_counter_action.output).to_equal("launcher-open: counter")
 expect(launcher_math_action.reason).to_equal("opened")
+expect(launcher_mail_action.output).to_equal("launcher-open: mail")
+expect(launcher_mail_action.reason).to_equal("opened")
+expect(launcher_planner_action.output).to_equal("launcher-open: planner")
+expect(launcher_planner_action.reason).to_equal("opened")
+expect(launcher_counter_action.output).to_equal("launcher-open: counter")
+expect(launcher_counter_action.reason).to_equal("opened")
 ```
 
 </details>
