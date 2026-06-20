@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=9 features=133 actions=61
+  llm-catalog: apps=9 features=133 actions=62
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -434,7 +434,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 777 lines folded for reproduction.
+Runnable source: 783 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -443,10 +443,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=133 actions=61")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=133 actions=62")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(61)
-expect(dispatch_probe.recognized_count).to_equal(61)
+expect(dispatch_probe.advertised_count).to_equal(62)
+expect(dispatch_probe.recognized_count).to_equal(62)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -566,7 +566,9 @@ val stale_ui_label_action = office_action_dispatch("ui-label-edit", "button|Old|
 val blank_ui_label_action = office_action_dispatch("ui-label-edit", "   |Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_label_action = office_action_dispatch("ui-label-edit", "button bad|Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_layout_action = office_action_dispatch("ui-layout-edit", "button|16|16|80|32|24|32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val ui_resize_action = office_action_dispatch("ui-resize-node", "button|16|16|80|32|16|16|120|48\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_layout_action = office_action_dispatch("ui-layout-edit", "   |16|16|80|32|24|32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val invalid_ui_resize_action = office_action_dispatch("ui-resize-node", "button|16|16|80|32|16|16|wide|48\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_layout_action = office_action_dispatch("ui-layout-edit", "button bad|16|16|80|32|24|32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_geometry_ui_layout_action = office_action_dispatch("ui-layout-edit", "button|16|16|80|32|   |32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_auto_layout_action = office_action_dispatch("ui-auto-layout-edit", "frame|off|0|0,0,0,0|vertical|8|4,4,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container\nnode button|Run|button|16|16|80|32|primary|frame|action")
@@ -767,7 +769,10 @@ expect(stale_ui_label_action.reason).to_equal("stale-node")
 expect(blank_ui_label_action.reason).to_equal("invalid-args")
 expect(invalid_ui_label_action.reason).to_equal("invalid-args")
 expect(ui_layout_action.output).to_contain("left: 24px")
+expect(ui_resize_action.action).to_equal("ui-resize-node")
+expect(ui_resize_action.output).to_contain("width: 120px")
 expect(blank_ui_layout_action.reason).to_equal("invalid-args")
+expect(invalid_ui_resize_action.reason).to_equal("invalid-args")
 expect(invalid_ui_layout_action.reason).to_equal("invalid-args")
 expect(blank_geometry_ui_layout_action.reason).to_equal("invalid-args")
 expect(ui_auto_layout_action.output).to_contain("data-layout-mode=\"vertical\"")
@@ -1043,6 +1048,7 @@ expect(catalog[5].features.join(",")).to_contain("style-token-edit")
 expect(catalog[5].actions.join(",")).to_contain("export-ui-sdd")
 expect(catalog[5].actions.join(",")).to_contain("render-ui-html-with-selection")
 expect(catalog[5].actions.join(",")).to_contain("ui-layout-edit")
+expect(catalog[5].actions.join(",")).to_contain("ui-resize-node")
 expect(catalog[5].actions.join(",")).to_contain("ui-duplicate-node")
 expect(catalog[5].actions.join(",")).to_contain("ui-auto-layout-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-resolve-auto-layout")

@@ -117,12 +117,12 @@ Blank duplicate source/new IDs or offsets are rejected as `invalid-args`.
 
 Designer edit actions use compact first-line edit headers followed by the UI
 design body. `ui-label-edit` uses `node_id|expected_label|new_label`.
-`ui-layout-edit` uses `node_id|expected_x|expected_y|expected_width|expected_height|new_x|new_y|new_width|new_height`; x/y fields are signed integers and width/height fields are non-negative integers.
+`ui-layout-edit` and `ui-resize-node` use `node_id|expected_x|expected_y|expected_width|expected_height|new_x|new_y|new_width|new_height`; x/y fields are signed integers and width/height fields are non-negative integers.
 `ui-auto-layout-edit` uses `node_id|expected_mode|expected_gap|expected_padding|new_mode|new_gap|new_padding`; all compact header fields are required, and malformed replacement mode, gap, or padding fields are `invalid-args`.
 `ui-constraints-edit` uses `node_id|expected_h|expected_v|new_h|new_v`; all compact header fields are required, and malformed replacement constraint fields are `invalid-args`.
-Blank or malformed `ui-label-edit`, `ui-layout-edit`, `ui-auto-layout-edit`, and
-`ui-constraints-edit` / `ui-layer-edit` / `ui-style-token-edit` node ids are
-rejected as `invalid-args`.
+Blank or malformed `ui-label-edit`, `ui-layout-edit`, `ui-resize-node`,
+`ui-auto-layout-edit`, and `ui-constraints-edit` / `ui-layer-edit` /
+`ui-style-token-edit` node ids are rejected as `invalid-args`.
 `ui-layer-edit` and `ui-style-token-edit` use `node_id|expected|new`; blank
 expected fields and blank or malformed replacement style-token fields are `invalid-args`.
 `ui-style-token-read` and `ui-inspect-node` use `node_id`, reject malformed IDs
@@ -319,7 +319,7 @@ modes:
   `render-mathml`, `render-math-structure`, and `render-mathml-checked`;
   Counter has `counter-action`; Designer has `selected-resize-handles`,
   `resize-handle-metadata`, `render-ui-html`, `render-ui-html-with-selection`, `export-ui-sdd`, and
-  `ui-label-edit` / `ui-layout-edit` / `ui-auto-layout-edit` /
+  `ui-label-edit` / `ui-layout-edit` / `ui-resize-node` / `ui-auto-layout-edit` /
   `ui-resolve-auto-layout` / `ui-duplicate-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` /
