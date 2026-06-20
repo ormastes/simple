@@ -28,7 +28,7 @@ external_compare_report_spec -> web_server_nginx_compare
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -284,6 +284,94 @@ expect(external_comparison_row_claims_speedup(row)).to_be(false)
 
 </details>
 
+#### should parse native profile summary evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val missing = external_profile_evidence_from_text("count\tfunction\n1\tmain\n")
+expect(missing.status).to_equal("not-provided")
+expect(missing.dropped).to_equal(0)
+expect(missing.capacity).to_equal(0)
+
+val clean = external_profile_evidence_from_text("# profile_summary emitted=3 dropped=0 capacity=8192\n")
+expect(clean.status).to_equal("clean")
+expect(clean.emitted).to_equal(3)
+expect(clean.dropped).to_equal(0)
+expect(clean.capacity).to_equal(8192)
+
+val dropped = external_profile_evidence_from_text("# profile_summary emitted=2 dropped=1 capacity=2\n")
+expect(dropped.status).to_equal("drops-present")
+expect(dropped.emitted).to_equal(2)
+expect(dropped.dropped).to_equal(1)
+expect(dropped.capacity).to_equal(2)
+```
+
+</details>
+
+#### should invalidate speedup claims when profile evidence dropped events
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val row = external_measured_static_nginx_row(
+    "static_1kb",
+    1024,
+    1200.0,
+    1000.0,
+    1.5,
+    2.0,
+    9.8,
+    0,
+    "live-simple-nginx-wrk"
+)
+val evidence = external_profile_evidence_from_text("# profile_summary emitted=2 dropped=1 capacity=2\n")
+val guarded = external_profile_guarded_row(row, evidence)
+expect(external_profile_evidence_invalidates_speedup(evidence, row)).to_be(true)
+expect(guarded.status).to_equal("measured_profile_dropped")
+expect(guarded.reason).to_equal("profile-drops-invalid-speedup:dropped=1:capacity=2")
+expect(external_comparison_row_claims_speedup(guarded)).to_be(false)
+```
+
+</details>
+
+#### should keep non-speedup measured rows when profile evidence dropped events
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val row = external_measured_static_nginx_row(
+    "static_1mb",
+    1048576,
+    800.0,
+    1000.0,
+    2.5,
+    2.0,
+    9.8,
+    0,
+    "live-simple-nginx-wrk"
+)
+val evidence = external_profile_evidence_from_text("# profile_summary emitted=2 dropped=1 capacity=2\n")
+val guarded = external_profile_guarded_row(row, evidence)
+expect(guarded.status).to_equal("measured")
+expect(guarded.reason).to_equal("live-simple-nginx-wrk")
+expect(external_comparison_row_claims_speedup(guarded)).to_be(false)
+```
+
+</details>
+
 #### should format markdown rows for report and metrics docs
 
 - external static nginx row
@@ -335,8 +423,8 @@ expect(report).to_contain("not pinned on this host")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
