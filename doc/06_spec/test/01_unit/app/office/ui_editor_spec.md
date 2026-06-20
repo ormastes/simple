@@ -576,7 +576,7 @@ expect(invalid.design.nodes[0].layer).to_equal("1")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -595,9 +595,18 @@ expect(rejected.accepted).to_be(false)
 expect(rejected.reason).to_equal("stale-node")
 expect(rejected.design.nodes[0].css).to_equal("primary")
 
+val unsafe_token = office_ui_design_update_style_token_checked(design, "button", "primary", "danger bad\"onclick=1")
+expect(unsafe_token.accepted).to_be(false)
+expect(unsafe_token.reason).to_equal("invalid-css")
+expect(unsafe_token.design.nodes[0].css).to_equal("primary")
+
 val legacy = office_ui_design_update_css_checked(design, "button", "primary", "accent")
 expect(legacy.accepted).to_be(true)
 expect(legacy.design.nodes[0].css).to_equal("accent")
+val unsafe_legacy = office_ui_design_update_css_checked(design, "button", "primary", "accent bad component")
+expect(unsafe_legacy.accepted).to_be(false)
+expect(unsafe_legacy.reason).to_equal("invalid-css")
+expect(unsafe_legacy.design.nodes[0].css).to_equal("primary")
 
 val missing = office_ui_design_update_style_token_checked(design, "missing", "primary", "danger")
 expect(missing.accepted).to_be(false)
