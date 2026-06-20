@@ -232,13 +232,13 @@ zoom, and background metadata without mutating the document.
 `add-sdd-edge` uses `from_id|to_id|label|css|kind|route|waypoints|start_anchor|end_anchor` and applies the same route, anchor, waypoint, and `invalid-args` validation as connector reroute.
 `duplicate-sdd-edge` uses `edge_index`.
 `edit-sdd-node-label` uses `node_id|new_label` and rejects missing node IDs.
-`edit-sdd-edge-label` uses `edge_index|new_label` and rejects missing edge indexes.
+`edit-sdd-edge-label` uses `edge_index|value` and rejects missing edge indexes.
 `sdd-edge-label-read` uses `edge_index` and returns the connector label text.
 `edit-sdd-edge-label-point` uses `edge_index|label_x|label_y`; label coordinates are signed integers, both blank coordinates clear the override, and one blank or malformed coordinate is `invalid-args`.
 `sdd-edge-label-point-read` uses `edge_index` and returns `label_x,label_y`.
-`edit-sdd-edge-style` uses `edge_index|css_labels`; labels are space-separated safe tokens.
+`edit-sdd-edge-style` uses `edge_index|value`; values are space-separated safe CSS tokens.
 `sdd-edge-style-read` uses `edge_index` and returns the connector CSS/style token string.
-`edit-sdd-edge-kind` uses `edge_index|kind`; kind is empty or one safe token.
+`edit-sdd-edge-kind` uses `edge_index|value`; values are empty or one safe token.
 `sdd-edge-kind-read` uses `edge_index` and returns the connector kind token.
 `sdd-edge-route-read` uses `edge_index` and returns `route|waypoints|start_anchor|end_anchor`.
 `sdd-edge-path-read` uses `edge_index` and returns `path|path_bounds|segment_count`.
