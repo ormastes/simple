@@ -530,7 +530,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1247 lines folded for reproduction.
+Runnable source: 1253 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -807,10 +807,12 @@ val ui_delete_action = office_action_dispatch("ui-delete-node", "frame\ndesign: 
 val invalid_ui_delete_action = office_action_dispatch("ui-delete-node", "button bad\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_order_action = office_action_dispatch("ui-order-node", "a|front\ndesign: Feature\nnode a|A|button|0|0|20|20|primary|1|action\nnode b|B|button|40|0|20|20|secondary|2|action")
 val invalid_ui_order_action = office_action_dispatch("ui-order-node", "a|middle\ndesign: Feature\nnode a|A|button|0|0|20|20|primary|1|action")
+val short_ui_order_action = office_action_dispatch("ui-order-node", "a\ndesign: Feature\nnode a|A|button|0|0|20|20|primary|1|action")
 val ui_label_action = office_action_dispatch("ui-label-edit", "button|Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val stale_ui_label_action = office_action_dispatch("ui-label-edit", "button|Old|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_label_action = office_action_dispatch("ui-label-edit", "   |Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_label_action = office_action_dispatch("ui-label-edit", "button bad|Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val short_ui_label_action = office_action_dispatch("ui-label-edit", "button|Run\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_layout_action = office_action_dispatch("ui-layout-edit", "button|16|16|80|32|24|32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_resize_action = office_action_dispatch("ui-resize-node", "button|16|16|80|32|16|16|120|48\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_layout_action = office_action_dispatch("ui-layout-edit", "   |16|16|80|32|24|32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -846,6 +848,7 @@ val invalid_ui_parent_action = office_action_dispatch("ui-parent-edit", "button 
 val short_ui_parent_action = office_action_dispatch("ui-parent-edit", "button|\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
 val ui_name_action = office_action_dispatch("ui-name-edit", "Feature|Launch Flow\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_name_action = office_action_dispatch("ui-name-edit", "Feature|   \ndesign: Feature")
+val short_ui_name_action = office_action_dispatch("ui-name-edit", "Feature\ndesign: Feature")
 val ui_kind_action = office_action_dispatch("ui-kind-edit", "button|button|input\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_kind_action = office_action_dispatch("ui-kind-edit", "button|button|text input\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val short_ui_kind_action = office_action_dispatch("ui-kind-edit", "button|button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -1130,10 +1133,12 @@ expect(ui_delete_action.output).to_contain("data-node-count=\"0\"")
 expect(invalid_ui_delete_action.reason).to_equal("invalid-args")
 expect(ui_order_action.output).to_contain("data-id=\"a\" data-node-index=\"1\"")
 expect(invalid_ui_order_action.reason).to_equal("invalid-args")
+expect(short_ui_order_action.reason).to_equal("invalid-args")
 expect(ui_label_action.output).to_contain(">Launch</div>")
 expect(stale_ui_label_action.reason).to_equal("stale-node")
 expect(blank_ui_label_action.reason).to_equal("invalid-args")
 expect(invalid_ui_label_action.reason).to_equal("invalid-args")
+expect(short_ui_label_action.reason).to_equal("invalid-args")
 expect(ui_layout_action.output).to_contain("left: 24px")
 expect(ui_resize_action.action).to_equal("ui-resize-node")
 expect(ui_resize_action.output).to_contain("width: 120px")
@@ -1173,6 +1178,7 @@ expect(invalid_ui_parent_action.reason).to_equal("invalid-args")
 expect(short_ui_parent_action.reason).to_equal("invalid-args")
 expect(ui_name_action.output).to_contain("data-design=\"Launch Flow\"")
 expect(invalid_ui_name_action.reason).to_equal("invalid-args")
+expect(short_ui_name_action.reason).to_equal("invalid-args")
 expect(ui_kind_action.output).to_contain("office-ui-input")
 expect(invalid_ui_kind_action.reason).to_equal("invalid-args")
 expect(short_ui_kind_action.reason).to_equal("invalid-args")
