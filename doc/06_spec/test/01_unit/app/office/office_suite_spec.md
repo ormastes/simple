@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 167 | 167 | 0 | 0 |
+| 168 | 168 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2542,6 +2542,23 @@ expect(missing.reason).to_equal("missing-edge")
 
 </details>
 
+#### rejects escaped pipe SDD edge kind tokens
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("edit-sdd-edge-kind", "0|async\\|reply\ngraph: Kind\nA: A\nB: B\nA -> B: link kind: async")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("invalid-kind-token")
+expect(result.output).to_contain("actual: async|reply")
+```
+
+</details>
+
 #### reads SDD edge endpoints
 
 <details>
@@ -3268,8 +3285,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 167 |
-| Active scenarios | 167 |
+| Total scenarios | 168 |
+| Active scenarios | 168 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
