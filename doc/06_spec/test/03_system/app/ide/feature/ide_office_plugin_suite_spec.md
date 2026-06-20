@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=166 actions=87
+  llm-catalog: apps=11 features=167 actions=88
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=166")
+expect(tui_report).to_contain("features=167")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -436,7 +436,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 943 lines folded for reproduction.
+Runnable source: 948 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -445,10 +445,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=166 actions=87")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=167 actions=88")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(87)
-expect(dispatch_probe.recognized_count).to_equal(87)
+expect(dispatch_probe.advertised_count).to_equal(88)
+expect(dispatch_probe.recognized_count).to_equal(88)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -1254,6 +1254,7 @@ expect(office_ui_design_to_sdd(distributed_ui.design)).to_contain("button, Run, 
 expect(office_ui_design_to_sdd(distributed_ui.design)).to_contain("label, Label, secondary, copy, rounded")
 expect(office_ui_design_to_sdd(duplicated_ui.design)).to_contain("button_copy, Run, accent, action, rounded, 144, 32, 96, 40, 3")
 expect(catalog[6].owner_module).to_equal("app.office.base_db")
+expect(catalog[6].features.join(",")).to_contain("table-summary")
 expect(catalog[6].features.join(",")).to_contain("schema-validation")
 expect(catalog[6].features.join(",")).to_contain("html-render")
 expect(catalog[6].features.join(",")).to_contain("html-cell-coordinates")
@@ -1264,12 +1265,14 @@ expect(catalog[6].features.join(",")).to_contain("update-where")
 expect(catalog[6].features.join(",")).to_contain("delete-where")
 expect(catalog[6].features.join(",")).to_contain("game-state-export")
 expect(catalog[6].actions.join(",")).to_contain("query-table")
+expect(catalog[6].actions.join(",")).to_contain("base-table-summary")
 expect(catalog[6].actions.join(",")).to_contain("export-base-game-state")
 expect(catalog[6].actions.join(",")).to_contain("render-base-table-html")
 expect(catalog[6].actions.join(",")).to_contain("db-edit")
 val base_query_count_action = office_action_dispatch("query-table", "count-where|status|open\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
 val base_query_select_action = office_action_dispatch("query-table", "select-where|status|open\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
 val base_query_project_action = office_action_dispatch("query-table", "project-column|status\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
+val base_summary_action = office_action_dispatch("base-table-summary", "table: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
 val base_missing_query_column_action = office_action_dispatch("query-table", "count-where|missing|open\ntable: Feature\ncolumns: id,status\nrow: 1,open")
 val base_game_action = office_action_dispatch("export-base-game-state", "scope|level1|key|value\ntable: Game\ncolumns: scope,key,value\nrow: level1,hp,100\nrow: level1,spawn,gate\nrow: level2,hp,200")
 val base_game_missing_column_action = office_action_dispatch("export-base-game-state", "scope|level1|missing|value\ntable: Game\ncolumns: scope,key,value\nrow: level1,hp,100")
@@ -1288,6 +1291,8 @@ val base_empty_cell_action = office_action_dispatch("db-edit", "insert|3,\ntable
 expect(base_query_count_action.output).to_equal("1")
 expect(base_query_select_action.output).to_contain("row: 1,open")
 expect(base_query_project_action.output).to_contain("open")
+expect(base_summary_action.output).to_equal("table=Feature\ncolumns=id,status\nrows=2")
+expect(base_summary_action.reason).to_equal("summarized")
 expect(base_missing_query_column_action.reason).to_equal("missing-column")
 expect(base_game_action.output).to_contain("hp=100")
 expect(base_game_action.output).to_contain("spawn=gate")

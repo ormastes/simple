@@ -206,6 +206,7 @@ Base table actions use a compact text table body:
 `table: Name`, `columns: id,status`, then `row: 1,open` lines. `query-table`
 uses `count-where|column|value`, `select-where|column|value`, or
 `project-column|column`; blank query columns are `invalid-args`, and table bodies reject blank table names plus missing, blank, duplicate, or row-width-mismatched columns.
+`base-table-summary` returns validated table name, column list, and row count.
 `render-base-table-html` renders that same table body as escaped HTML with
 `data-format="base-table"`, `data-column-count`, `data-row-count`,
 `data-row-index`, and escaped `data-row-index`/`data-column` cell coordinates, and rejects blank
@@ -361,9 +362,9 @@ modes:
   `formula-text-functions`, `formula-vlookup`, and
   `formula-display-recalc`, plus `format-cell-value` and
   `evaluate-sheet-formula`; Base has `schema-validation`, `html-render`,
-  `html-cell-coordinates`, `html-escape`, invalid schema rejection, `query-table`,
+  `html-cell-coordinates`, `html-escape`, `table-summary`, invalid schema rejection, `query-table`,
   `count-where`, `select-where`, `project-column`, `update-where`,
-  `delete-where`, `render-base-table-html`, and `db-edit`; Math has `fraction`,
+  `delete-where`, `base-table-summary`, `render-base-table-html`, and `db-edit`; Math has `fraction`,
   `subscript`, `fenced-group`, `precedence-parser`, `xml-escape`,
   `sqrt-shorthand`, `slash-fraction`, `malformed-fallback`, `checked-rendering`,
   `render-mathml`, `render-math-structure`, and `render-mathml-checked`;

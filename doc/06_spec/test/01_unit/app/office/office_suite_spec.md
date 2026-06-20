@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 119 | 119 | 0 | 0 |
+| 120 | 120 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -777,6 +777,26 @@ expect(result.output).to_contain("<td data-row-index=\"0\" data-column=\"status\
 
 </details>
 
+#### summarizes Base table schema and row count
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("base-table-summary", "table: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
+val invalid = office_action_dispatch("base-table-summary", "table: Feature\ncolumns: id,status\nrow: 1")
+expect(result.ok).to_be(true)
+expect(result.reason).to_equal("summarized")
+expect(result.output).to_equal("table=Feature\ncolumns=id,status\nrows=2")
+expect(invalid.ok).to_be(false)
+expect(invalid.reason).to_equal("row-width-mismatch")
+```
+
+</details>
+
 #### rejects malformed Base table queries
 
 <details>
@@ -982,8 +1002,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(87)
-expect(probe.recognized_count).to_equal(87)
+expect(probe.advertised_count).to_equal(88)
+expect(probe.recognized_count).to_equal(88)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2256,8 +2276,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 119 |
-| Active scenarios | 119 |
+| Total scenarios | 120 |
+| Active scenarios | 120 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
