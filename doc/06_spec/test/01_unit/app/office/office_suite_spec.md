@@ -593,7 +593,7 @@ expect(result.output).to_contain("Title")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -601,12 +601,15 @@ val context = office_plugin_context("render-writer-markdown-html", "writer", "ma
 val result = office_action_dispatch_with_context(context, "# Title")
 val invalid = office_action_dispatch_with_context(office_plugin_context("   ", "writer", "markdown", "word/html_render_spec"), "# Title")
 val mismatched = office_action_dispatch_with_context(office_plugin_context("render-writer-markdown-html", "slides", "markdown", "word/html_render_spec"), "# Title")
+val wrong_format = office_action_dispatch_with_context(office_plugin_context("render-writer-markdown-html", "writer", "sdd", "word/html_render_spec"), "# Title")
 expect(result.ok).to_be(true)
 expect(result.output).to_contain("data-format-name=\"Writer Markdown\"")
 expect(invalid.ok).to_be(false)
 expect(invalid.reason).to_equal("invalid-context")
 expect(mismatched.ok).to_be(false)
 expect(mismatched.reason).to_equal("context-mismatch")
+expect(wrong_format.ok).to_be(false)
+expect(wrong_format.reason).to_equal("source-format-mismatch")
 ```
 
 </details>

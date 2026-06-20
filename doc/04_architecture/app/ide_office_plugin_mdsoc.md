@@ -123,7 +123,9 @@ Use explicit records when app actions need shared services:
 - `OfficePluginContext`: app id, action id, source format, evidence key. The
   first code surface is `office_action_dispatch_with_context(context, source)`
   in `src/app/office/mod.spl`; legacy callers still use
-  `office_action_dispatch(action, source)`.
+  `office_action_dispatch(action, source)`. Non-empty source formats are
+  checked against the action family and reject as `source-format-mismatch` when
+  a caller claims the wrong substrate.
 - `OfficeRenderServices`: Markdown renderer, SDD renderer, HTML escape policy.
 - `OfficeAuditServices`: optional log/metric/stale-reject counters.
 

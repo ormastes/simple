@@ -19,7 +19,8 @@ Layering:
 - Shared services: `src/lib/editor/services/sdn_graph.spl` and Markdown helpers
 
 DI rule: `office_action_dispatch_with_context(context, source)` accepts an
-explicit `OfficePluginContext`. No service locator or container yet.
+explicit `OfficePluginContext` and rejects wrong action/source-format pairings.
+No service locator or container yet.
 
 AOP rule: stale rejection, allowlists, schemas, telemetry, and evidence strings
 wrap dispatch/reporting. App modules should not duplicate those checks.
