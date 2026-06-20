@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 150 | 150 | 0 | 0 |
+| 151 | 151 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1123,8 +1123,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(119)
-expect(probe.recognized_count).to_equal(119)
+expect(probe.advertised_count).to_equal(120)
+expect(probe.recognized_count).to_equal(120)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2134,6 +2134,27 @@ expect(missing.reason).to_equal("missing-edge")
 
 </details>
 
+#### reads resolved SDD edge styles
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("sdd-edge-resolved-style-read", "0\ngraph: Style\ncss base:\n    stroke: #111111\ncss critical:\n    extends: base\n    fill: #eeeeee\nA: A\nB: B\nA -> B: link @critical")
+val invalid = office_action_dispatch("sdd-edge-resolved-style-read", "bad\ngraph: Style\nA: A\nB: B\nA -> B: link @critical")
+val missing = office_action_dispatch("sdd-edge-resolved-style-read", "2\ngraph: Style\nA: A\nB: B\nA -> B: link @critical")
+expect(result.ok).to_be(true)
+expect(result.output).to_contain("stroke:#111111")
+expect(result.output).to_contain("fill:#eeeeee")
+expect(invalid.reason).to_equal("invalid-args")
+expect(missing.reason).to_equal("missing-edge")
+```
+
+</details>
+
 #### reads SDD edge labels
 
 <details>
@@ -2878,8 +2899,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 150 |
-| Active scenarios | 150 |
+| Total scenarios | 151 |
+| Active scenarios | 151 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

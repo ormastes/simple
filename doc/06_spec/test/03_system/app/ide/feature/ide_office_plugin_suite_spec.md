@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=7 roundtrip=7 names=7 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=198 actions=119
+  llm-catalog: apps=11 features=199 actions=120
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=198")
+expect(tui_report).to_contain("features=199")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -439,7 +439,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1099 lines folded for reproduction.
+Runnable source: 1105 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -448,10 +448,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=198 actions=119")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=199 actions=120")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(119)
-expect(dispatch_probe.recognized_count).to_equal(119)
+expect(dispatch_probe.advertised_count).to_equal(120)
+expect(dispatch_probe.recognized_count).to_equal(120)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -577,6 +577,8 @@ expect(catalog[4].features.join(",")).to_contain("edge-path-readback")
 expect(catalog[4].actions.join(",")).to_contain("sdd-edge-path-read")
 expect(catalog[4].features.join(",")).to_contain("edge-segments-readback")
 expect(catalog[4].actions.join(",")).to_contain("sdd-edge-segments-read")
+expect(catalog[4].features.join(",")).to_contain("edge-resolved-style-readback")
+expect(catalog[4].actions.join(",")).to_contain("sdd-edge-resolved-style-read")
 expect(catalog[4].features.join(",")).to_contain("edge-endpoints-readback")
 expect(catalog[4].actions.join(",")).to_contain("sdd-edge-endpoints-read")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-edge-endpoints")
@@ -836,6 +838,7 @@ val signed_sdd_edge_label_point_action = office_action_dispatch("edit-sdd-edge-l
 val blank_sdd_edge_label_point_action = office_action_dispatch("edit-sdd-edge-label-point", "0|   |12\ngraph: Edge Label Point\nA: A\nB: B\nA -> B: link")
 val sdd_edge_style_action = office_action_dispatch("edit-sdd-edge-style", "0|warning dashed\ngraph: Edge Style\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val sdd_edge_style_read_action = office_action_dispatch("sdd-edge-style-read", "0\ngraph: Edge Style\nA: A\nB: B\nA -> B: link @warning dashed")
+val sdd_edge_resolved_style_read_action = office_action_dispatch("sdd-edge-resolved-style-read", "0\ncss |name, extends, target|\n    base, none, edge\n    critical, base, edge\nstyles |css, key, value|\n    base, stroke, #111111\n    critical, fill, #eeeeee\nnodes |id, label|\n    A, Alpha\n    B, Beta\nedges |from, to, label, css|\n    A, B, link, critical")
 val invalid_sdd_edge_style_action = office_action_dispatch("edit-sdd-edge-style", "0|warning,bad\ngraph: Edge Style\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val sdd_edge_kind_action = office_action_dispatch("edit-sdd-edge-kind", "0|async\ngraph: Edge Kind\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link kind: request route: simple start: right end: left")
 val sdd_edge_kind_read_action = office_action_dispatch("sdd-edge-kind-read", "0\ngraph: Edge Kind\nA: A\nB: B\nA -> B: link kind: async")
@@ -1161,6 +1164,9 @@ expect(invalid_sdd_edge_label_point_action.reason).to_equal("invalid-args")
 expect(sdd_edge_style_action.output).to_contain("sdn-css-warning sdn-css-dashed")
 expect(sdd_edge_style_read_action.output).to_equal("warning dashed")
 expect(sdd_edge_style_read_action.reason).to_equal("selected")
+expect(sdd_edge_resolved_style_read_action.output).to_contain("stroke:#111111")
+expect(sdd_edge_resolved_style_read_action.output).to_contain("fill:#eeeeee")
+expect(sdd_edge_resolved_style_read_action.reason).to_equal("selected")
 expect(invalid_sdd_edge_style_action.reason).to_equal("invalid-style-token")
 expect(sdd_edge_kind_action.output).to_contain("data-kind=\"async\"")
 expect(sdd_edge_kind_read_action.output).to_equal("async")
