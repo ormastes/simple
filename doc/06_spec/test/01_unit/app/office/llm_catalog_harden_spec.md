@@ -175,7 +175,7 @@ expect(missing.join(",")).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 47 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -221,6 +221,7 @@ expect(office_llm_action_input_schema("md-edit")).to_contain("line_no|expected_s
 expect(office_llm_action_input_schema("writer-markdown-stats")).to_equal("markdown_source")
 expect(office_llm_action_input_schema("writer-markdown-search")).to_equal("query\\nmarkdown_source")
 expect(office_llm_action_input_schema("writer-markdown-range")).to_equal("start|count\\nmarkdown_source")
+expect(office_llm_action_input_schema("writer-markdown-blocks")).to_equal("markdown_source")
 expect(office_llm_action_input_schema("writer-markdown-replace")).to_equal("query|replacement\\nmarkdown_source")
 expect(office_llm_action_input_schema("writer-markdown-insert")).to_equal("line|text\\nmarkdown_source")
 expect(office_llm_action_input_schema("writer-markdown-delete")).to_equal("line\\nmarkdown_source")

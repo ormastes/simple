@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 153 | 153 | 0 | 0 |
+| 154 | 154 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -663,6 +663,23 @@ expect(invalid.reason).to_equal("invalid-args")
 
 </details>
 
+#### lists Writer Markdown blocks with source line anchors
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("writer-markdown-blocks", "# Title\n\nBody\n- Item")
+expect(result.ok).to_be(true)
+expect(result.reason).to_equal("listed")
+expect(result.output).to_equal("0|0|0|heading|# Title\n1|2|2|paragraph|Body\n2|3|3|list|- Item")
+```
+
+</details>
+
 #### replaces Writer Markdown source text
 
 <details>
@@ -1139,8 +1156,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(126)
-expect(probe.recognized_count).to_equal(126)
+expect(probe.advertised_count).to_equal(127)
+expect(probe.recognized_count).to_equal(127)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2955,8 +2972,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 153 |
-| Active scenarios | 153 |
+| Total scenarios | 154 |
+| Active scenarios | 154 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -89,8 +89,8 @@ Headless Office actions are exposed through
 non-GUI bridge for cataloged render/export actions:
 `render-markdown-preview-html`, `render-writer-markdown-html`,
 `writer-markdown-summary`, `writer-markdown-stats`, `writer-markdown-search`,
-`writer-markdown-range`, `writer-markdown-replace`, `writer-markdown-insert`,
-`writer-markdown-delete`, `writer-markdown-outline`,
+`writer-markdown-range`, `writer-markdown-blocks`, `writer-markdown-replace`,
+`writer-markdown-insert`, `writer-markdown-delete`, `writer-markdown-outline`,
 `render-ppt-markdown-html`, `ppt-markdown-outline`, `render-ui-html`,
 `render-ui-html-with-selection`, `export-ui-sdd`, and
 `sdd-document-summary`, `render-sdd-html-with-selection` /
@@ -385,8 +385,8 @@ modes:
 - LLM catalog: Markdown has `render-markdown-preview-html` and `md-edit`; Writer has
   `render-writer-markdown-html`, `writer-markdown-summary`,
   `writer-markdown-stats`, `writer-markdown-search`,
-  `writer-markdown-range`, `writer-markdown-replace`, `writer-markdown-insert`,
-  `writer-markdown-delete`, and
+  `writer-markdown-range`, `writer-markdown-blocks`, `writer-markdown-replace`,
+  `writer-markdown-insert`, `writer-markdown-delete`, and
   `writer-markdown-outline` plus Markdown paper
   features for document statistics, source search, range read, source replace, source insert, source delete, document outline,
   task lists, tables/table alignment, images, inline links,
