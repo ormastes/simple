@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=9 features=137 actions=66
+  llm-catalog: apps=9 features=138 actions=67
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -434,7 +434,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 807 lines folded for reproduction.
+Runnable source: 813 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -443,10 +443,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=137 actions=66")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=138 actions=67")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(66)
-expect(dispatch_probe.recognized_count).to_equal(66)
+expect(dispatch_probe.advertised_count).to_equal(67)
+expect(dispatch_probe.recognized_count).to_equal(67)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -561,6 +561,8 @@ val ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|bu
 val blank_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "   |button_copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_offset_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button_copy|   |10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val ui_delete_action = office_action_dispatch("ui-delete-node", "frame\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|controls|container\nnode button|Run|button|16|16|80|32|primary|controls|action|frame")
+val invalid_ui_delete_action = office_action_dispatch("ui-delete-node", "button bad\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_label_action = office_action_dispatch("ui-label-edit", "button|Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val stale_ui_label_action = office_action_dispatch("ui-label-edit", "button|Old|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_label_action = office_action_dispatch("ui-label-edit", "   |Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -772,6 +774,8 @@ expect(ui_duplicate_action.output).to_contain("data-id=\"button_copy\"")
 expect(blank_ui_duplicate_action.reason).to_equal("invalid-args")
 expect(invalid_ui_duplicate_action.reason).to_equal("invalid-args")
 expect(blank_offset_ui_duplicate_action.reason).to_equal("invalid-args")
+expect(ui_delete_action.output).to_contain("data-node-count=\"0\"")
+expect(invalid_ui_delete_action.reason).to_equal("invalid-args")
 expect(ui_label_action.output).to_contain(">Launch</div>")
 expect(stale_ui_label_action.reason).to_equal("stale-node")
 expect(blank_ui_label_action.reason).to_equal("invalid-args")
@@ -1061,6 +1065,7 @@ expect(catalog[5].features.join(",")).to_contain("constraints")
 expect(catalog[5].features.join(",")).to_contain("parent-edit")
 expect(catalog[5].features.join(",")).to_contain("layout-edit")
 expect(catalog[5].features.join(",")).to_contain("node-duplicate")
+expect(catalog[5].features.join(",")).to_contain("node-delete")
 expect(catalog[5].features.join(",")).to_contain("align-layout")
 expect(catalog[5].features.join(",")).to_contain("distribute-layout")
 expect(catalog[5].features.join(",")).to_contain("layer-edit")
@@ -1073,6 +1078,7 @@ expect(catalog[5].actions.join(",")).to_contain("ui-canvas-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-layout-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-resize-node")
 expect(catalog[5].actions.join(",")).to_contain("ui-duplicate-node")
+expect(catalog[5].actions.join(",")).to_contain("ui-delete-node")
 expect(catalog[5].actions.join(",")).to_contain("ui-auto-layout-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-resolve-auto-layout")
 expect(catalog[5].actions.join(",")).to_contain("ui-constraints-edit")
