@@ -117,7 +117,10 @@ existing pure metadata/action surface, not a new framework:
 
 Use explicit records when app actions need shared services:
 
-- `OfficePluginContext`: app id, action id, source format, evidence key.
+- `OfficePluginContext`: app id, action id, source format, evidence key. The
+  first code surface is `office_action_dispatch_with_context(context, source)`
+  in `src/app/office/mod.spl`; legacy callers still use
+  `office_action_dispatch(action, source)`.
 - `OfficeRenderServices`: Markdown renderer, SDD renderer, HTML escape policy.
 - `OfficeAuditServices`: optional log/metric/stale-reject counters.
 
@@ -142,8 +145,8 @@ duplicate them.
 ## Migration Sequence
 
 1. Keep current pure manifest/catalog/action surfaces as the plugin boundary.
-2. Add `OfficePluginContext` only when the next action needs shared injected
-   services.
+2. Extend `OfficePluginContext` only when the next action needs another shared
+   service.
 3. Move duplicated validation into dispatcher wrappers before adding new app
    actions.
 4. Keep Draw/Designer on `src/lib/editor/services/sdn_graph.spl`; do not fork a

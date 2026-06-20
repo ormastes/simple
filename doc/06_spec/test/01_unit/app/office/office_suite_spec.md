@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 155 | 155 | 0 | 0 |
+| 156 | 156 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -584,6 +584,26 @@ expect(result.output).to_contain("class=\"md-paper\"")
 expect(result.output).to_contain("data-format=\"markdown-paper\"")
 expect(result.output).to_contain("data-format-name=\"Writer Markdown\"")
 expect(result.output).to_contain("Title")
+```
+
+</details>
+
+#### dispatches through an explicit plugin context
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val context = office_plugin_context("render-writer-markdown-html", "writer", "markdown", "word/html_render_spec")
+val result = office_action_dispatch_with_context(context, "# Title")
+val invalid = office_action_dispatch_with_context(office_plugin_context("   ", "writer", "markdown", "word/html_render_spec"), "# Title")
+expect(result.ok).to_be(true)
+expect(result.output).to_contain("data-format-name=\"Writer Markdown\"")
+expect(invalid.ok).to_be(false)
+expect(invalid.reason).to_equal("invalid-context")
 ```
 
 </details>
@@ -2999,8 +3019,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 155 |
-| Active scenarios | 155 |
+| Total scenarios | 156 |
+| Active scenarios | 156 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

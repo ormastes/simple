@@ -56,7 +56,8 @@ older rich-text `WordApp` remains only as a compatibility UI module.
 - Plugin descriptor: pure Office contribution metadata owned by
   `src/app/office/plugins.spl`.
 - DI context: explicit service/context records passed into Office actions when
-  shared services are needed; no service locator.
+  shared services are needed; `office_action_dispatch_with_context` accepts the
+  current `OfficePluginContext`, with no service locator.
 - AOP wrapper: cross-cutting validation, stale rejection, telemetry, or evidence
   code around dispatch/reporting rather than inside every app.
 
