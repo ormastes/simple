@@ -112,7 +112,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val malformed = OfficeLlmFeature(app_name: "Markdown", component: "markdown", owner_module: "app.office.md_wysiwyg", features: ["html-render"], actions: ["render-md"], evidence_key: "")
+val malformed = OfficeLlmFeature(app_name: "Markdown", component: "markdown", source_format: "markdown", owner_module: "app.office.md_wysiwyg", features: ["html-render"], actions: ["render-md"], evidence_key: "")
 expect(office_llm_catalog_validate([malformed])).to_equal("catalog error: app 'Markdown' has empty evidence key")
 ```
 
@@ -127,7 +127,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val malformed = OfficeLlmFeature(app_name: "Markdown", component: "markdown", owner_module: "app.office.md_wysiwyg", features: [], actions: ["render-md"], evidence_key: "md_wysiwyg_spec")
+val malformed = OfficeLlmFeature(app_name: "Markdown", component: "markdown", source_format: "markdown", owner_module: "app.office.md_wysiwyg", features: [], actions: ["render-md"], evidence_key: "md_wysiwyg_spec")
 expect(office_llm_catalog_validate([malformed])).to_equal("catalog error: app 'Markdown' has no features")
 ```
 
