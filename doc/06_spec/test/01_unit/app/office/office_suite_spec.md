@@ -1216,15 +1216,18 @@ expect(result.reason).to_equal("invalid-args")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val currency = office_action_dispatch("format-cell-value", "1234.5|currency:$:2")
+val escaped = office_action_dispatch("format-cell-value", "1234.5|currency:\\|:0")
 val percent = office_action_dispatch("format-cell-value", "0.375|percent:1")
 val invalid = office_action_dispatch("format-cell-value", "12x|number:2")
 expect(currency.output).to_equal("$1,234.50")
 expect(currency.reason).to_equal("formatted")
+expect(escaped.output).to_equal("|1,235")
+expect(escaped.reason).to_equal("formatted")
 expect(percent.output).to_equal("37.5%")
 expect(invalid.ok).to_be(false)
 expect(invalid.reason).to_equal("invalid-args")
