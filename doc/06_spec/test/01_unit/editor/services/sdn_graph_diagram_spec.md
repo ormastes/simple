@@ -594,7 +594,7 @@ expect(html).to_contain("data-canvas-grid=\"24\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -628,6 +628,13 @@ val added = sdn_graph_add_node_checked(graph, "C", "Choice", "accent", "decision
 expect(added.accepted).to_be(true)
 expect(added.graph.nodes[2].x).to_equal("80")
 expect(added.graph.nodes[2].y).to_equal("80")
+expect(sdn_graph_add_node_checked(graph, "bad id", "Bad", "", "", "", "80", "80", "64", "48", "", "").reason).to_equal("invalid-id")
+
+val copied = sdn_graph_duplicate_node_checked(graph, " A ", " A_copy ", " 12 ", " 8 ")
+expect(copied.accepted).to_be(true)
+expect(copied.graph.nodes[1].id).to_equal("A_copy")
+expect(copied.graph.nodes[1].x).to_equal("22")
+expect(sdn_graph_duplicate_node_checked(graph, "A", "bad id", "1", "1").reason).to_equal("invalid-id")
 
 val invalid_add = sdn_graph_add_node_checked(graph, "D", "Bad", "accent", "decision", "diamond", "left", "80", "-1", "48", "front", "")
 expect(invalid_add.accepted).to_be(false)

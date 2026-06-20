@@ -469,19 +469,25 @@ fn sdn_graph_duplicate_edge_checked(graph: SdnGraph, edge_index: i64) -> SdnGrap
     SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-duplicate-edge @@\n+ " + edge_index.to_text(), graph: updated)
 
 fn sdn_graph_add_node_checked(graph: SdnGraph, id: text, label: text, css: text, role: text, shape: text, x: text, y: text, width: text, height: text, layer: text, parent: text) -> SdnGraphEditResult:
-    if id == "":
+    val clean_id = id.trim()
+    val clean_css = css.trim()
+    val clean_role = role.trim()
+    val clean_shape = shape.trim()
+    val clean_layer = layer.trim()
+    val clean_parent = parent.trim()
+    if clean_id == "" or not _sg_safe_style_token(clean_id):
         return SdnGraphEditResult(accepted: false, reason: "invalid-id", diff: "@@ sdd-add-node @@\nexpected: non-empty id\nactual: " + id, graph: graph)
-    if _sg_node_id_exists(graph, id):
-        return SdnGraphEditResult(accepted: false, reason: "duplicate-id", diff: "@@ sdd-add-node @@\nexpected: unused id\nactual: " + id, graph: graph)
-    if parent != "" and not _sg_node_id_exists(graph, parent):
+    if _sg_node_id_exists(graph, clean_id):
+        return SdnGraphEditResult(accepted: false, reason: "duplicate-id", diff: "@@ sdd-add-node @@\nexpected: unused id\nactual: " + clean_id, graph: graph)
+    if clean_parent != "" and (not _sg_safe_style_token(clean_parent) or not _sg_node_id_exists(graph, clean_parent)):
         return SdnGraphEditResult(accepted: false, reason: "missing-parent", diff: "@@ sdd-add-node @@\nexpected: existing parent or empty\nactual: " + parent, graph: graph)
-    if not _sg_safe_style_token_list(css):
+    if not _sg_safe_style_token_list(clean_css):
         return SdnGraphEditResult(accepted: false, reason: "invalid-style-token", diff: "@@ sdd-add-node @@\nexpected: space-separated style tokens\nactual: " + css, graph: graph)
-    if role != "" and not _sg_safe_style_token(role):
+    if clean_role != "" and not _sg_safe_style_token(clean_role):
         return SdnGraphEditResult(accepted: false, reason: "invalid-role-token", diff: "@@ sdd-add-node @@\nexpected: role token\nactual: " + role, graph: graph)
-    if shape != "" and not _sg_safe_style_token(shape):
+    if clean_shape != "" and not _sg_safe_style_token(clean_shape):
         return SdnGraphEditResult(accepted: false, reason: "invalid-shape-token", diff: "@@ sdd-add-node @@\nexpected: shape token\nactual: " + shape, graph: graph)
-    if layer != "" and not _sg_safe_style_token(layer):
+    if clean_layer != "" and not _sg_safe_style_token(clean_layer):
         return SdnGraphEditResult(accepted: false, reason: "invalid-layer-token", diff: "@@ sdd-add-node @@\nexpected: layer token\nactual: " + layer, graph: graph)
     val clean_x = x.trim()
     val clean_y = y.trim()
@@ -492,9 +498,9 @@ fn sdn_graph_add_node_checked(graph: SdnGraph, id: text, label: text, css: text,
     var out_nodes: [SdnGraphNode] = []
     for node in graph.nodes:
         out_nodes.push(_sg_clone_node(node))
-    out_nodes.push(SdnGraphNode(id: id, label: label, css: css, role: role, shape: shape, x: clean_x, y: clean_y, width: clean_width, height: clean_height, layer: layer, parent: parent))
+    out_nodes.push(SdnGraphNode(id: clean_id, label: label, css: clean_css, role: clean_role, shape: clean_shape, x: clean_x, y: clean_y, width: clean_width, height: clean_height, layer: clean_layer, parent: clean_parent))
     val updated = SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: out_nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
-    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-add-node @@\nadded: " + id, graph: updated)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-add-node @@\nadded: " + clean_id, graph: updated)
 
 fn sdn_graph_set_style_rule_checked(graph: SdnGraph, css: text, target: text, parent_css: text, key: text, value: text) -> SdnGraphEditResult:
     if css == "" or key == "":
@@ -885,35 +891,39 @@ fn sdn_graph_reorder_node_checked(graph: SdnGraph, node_id: text, position: text
     SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-node-order @@\n" + node_id + " -> " + position, graph: updated)
 
 fn sdn_graph_duplicate_node_checked(graph: SdnGraph, source_id: text, new_id: text, dx: text, dy: text) -> SdnGraphEditResult:
-    if source_id == "" or new_id == "":
+    val clean_source_id = source_id.trim()
+    val clean_new_id = new_id.trim()
+    val clean_dx = dx.trim()
+    val clean_dy = dy.trim()
+    if clean_source_id == "" or clean_new_id == "" or not _sg_safe_style_token(clean_source_id) or not _sg_safe_style_token(clean_new_id):
         return SdnGraphEditResult(accepted: false, reason: "invalid-id", diff: "@@ sdd-duplicate-node @@\nexpected: non-empty source and new id\nactual: " + source_id + " -> " + new_id, graph: graph)
-    if _sg_node_id_exists(graph, new_id):
-        return SdnGraphEditResult(accepted: false, reason: "duplicate-id", diff: "@@ sdd-duplicate-node @@\nexpected: unused id\nactual: " + new_id, graph: graph)
-    if _sg_node_id_count(graph, source_id) > 1:
-        return SdnGraphEditResult(accepted: false, reason: "ambiguous-source", diff: "@@ sdd-duplicate-node @@\nexpected: one source node\nactual: " + source_id, graph: graph)
-    val x_offset = _sg_parse_i64_result(dx)
-    val y_offset = _sg_parse_i64_result(dy)
+    if _sg_node_id_exists(graph, clean_new_id):
+        return SdnGraphEditResult(accepted: false, reason: "duplicate-id", diff: "@@ sdd-duplicate-node @@\nexpected: unused id\nactual: " + clean_new_id, graph: graph)
+    if _sg_node_id_count(graph, clean_source_id) > 1:
+        return SdnGraphEditResult(accepted: false, reason: "ambiguous-source", diff: "@@ sdd-duplicate-node @@\nexpected: one source node\nactual: " + clean_source_id, graph: graph)
+    val x_offset = _sg_parse_i64_result(clean_dx)
+    val y_offset = _sg_parse_i64_result(clean_dy)
     if not x_offset.ok or not y_offset.ok:
         return SdnGraphEditResult(accepted: false, reason: "invalid-offset", diff: "@@ sdd-duplicate-node @@\nexpected: integer dx/dy\nactual: " + dx + "," + dy, graph: graph)
     var out_nodes: [SdnGraphNode] = []
     var found = false
     for node in graph.nodes:
         out_nodes.push(_sg_clone_node(node))
-        if node.id == source_id:
+        if node.id == clean_source_id:
             val x = _sg_parse_i64_result(node.x)
             val y = _sg_parse_i64_result(node.y)
             if not x.ok or not y.ok:
                 return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-duplicate-node @@\nexpected: integer source x/y\nactual: " + node.x + "," + node.y, graph: graph)
             var copy = _sg_clone_node(node)
-            copy.id = new_id
+            copy.id = clean_new_id
             copy.x = (x.value + x_offset.value).to_text()
             copy.y = (y.value + y_offset.value).to_text()
             out_nodes.push(copy)
             found = true
     if not found:
-        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-duplicate-node @@\nexpected: " + source_id + "\nactual: missing", graph: graph)
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-duplicate-node @@\nexpected: " + clean_source_id + "\nactual: missing", graph: graph)
     val out = _sg_graph_with_nodes(graph, out_nodes)
-    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-duplicate-node @@\n+ " + new_id, graph: out)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-duplicate-node @@\n+ " + clean_new_id, graph: out)
 
 fn sdn_graph_update_canvas(graph: SdnGraph, new_width: text, new_height: text, new_grid: text, new_snap: text, new_zoom: text, new_background: text) -> SdnGraph:
     SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: new_width, canvas_height: new_height, canvas_grid: new_grid, canvas_snap: new_snap, canvas_zoom: new_zoom, canvas_background: new_background, nodes: graph.nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
