@@ -530,7 +530,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1219 lines folded for reproduction.
+Runnable source: 1221 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -966,6 +966,7 @@ val sdd_edge_label_read_action = office_action_dispatch("sdd-edge-label-read", "
 val sdd_edge_label_point_action = office_action_dispatch("edit-sdd-edge-label-point", "0|66|12\ngraph: Edge Label Point\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val sdd_edge_label_point_read_action = office_action_dispatch("sdd-edge-label-point-read", "0\ngraph: Edge Label Point\nA: A\nB: B\nA -> B: link label_x: 66 label_y: 12")
 val signed_sdd_edge_label_point_action = office_action_dispatch("edit-sdd-edge-label-point", "0|-6|12\ngraph: Edge Label Point\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
+val clear_sdd_edge_label_point_action = office_action_dispatch("edit-sdd-edge-label-point", "0||\ngraph: Edge Label Point\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link label_x: 66 label_y: 12")
 val blank_sdd_edge_label_point_action = office_action_dispatch("edit-sdd-edge-label-point", "0|   |12\ngraph: Edge Label Point\nA: A\nB: B\nA -> B: link")
 val sdd_edge_style_action = office_action_dispatch("edit-sdd-edge-style", "0|warning dashed\ngraph: Edge Style\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val sdd_edge_style_read_action = office_action_dispatch("sdd-edge-style-read", "0\ngraph: Edge Style\nA: A\nB: B\nA -> B: link @warning dashed")
@@ -1333,6 +1334,7 @@ expect(sdd_edge_label_point_action.output).to_contain("data-label-x=\"66\" data-
 expect(sdd_edge_label_point_read_action.output).to_equal("66,12")
 expect(sdd_edge_label_point_read_action.reason).to_equal("selected")
 expect(signed_sdd_edge_label_point_action.output).to_contain("data-label-x=\"-6\" data-label-y=\"12\"")
+expect(clear_sdd_edge_label_point_action.reason).to_equal("updated")
 expect(blank_sdd_edge_label_point_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_edge_label_point_action.reason).to_equal("invalid-args")
 expect(sdd_edge_style_action.output).to_contain("sdn-css-warning sdn-css-dashed")

@@ -229,7 +229,7 @@ zoom, and background metadata without mutating the document.
 `edit-sdd-node-label` uses `node_id|new_label` and rejects missing node IDs.
 `edit-sdd-edge-label` uses `edge_index|new_label` and rejects missing edge indexes.
 `sdd-edge-label-read` uses `edge_index` and returns the connector label text.
-`edit-sdd-edge-label-point` uses `edge_index|label_x|label_y`; label coordinates are required signed integers, and blank or malformed coordinates are `invalid-args`.
+`edit-sdd-edge-label-point` uses `edge_index|label_x|label_y`; label coordinates are signed integers, both blank coordinates clear the override, and one blank or malformed coordinate is `invalid-args`.
 `sdd-edge-label-point-read` uses `edge_index` and returns `label_x,label_y`.
 `edit-sdd-edge-style` uses `edge_index|css_labels`; labels are space-separated safe tokens.
 `sdd-edge-style-read` uses `edge_index` and returns the connector CSS/style token string.
