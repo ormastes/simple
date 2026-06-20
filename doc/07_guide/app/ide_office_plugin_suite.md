@@ -132,6 +132,8 @@ design body. `ui-label-edit` uses `node_id|expected_label|new_label`.
 `ui-name-edit` uses `expected_name|new_name`; the new name is required.
 `ui-canvas-edit` uses `expected_width|expected_height|new_width|new_height`;
 all fields are required non-negative integers.
+`ui-canvas-read` returns the current Designer name, width, and height without
+mutating the document.
 `ui-layout-edit` and `ui-resize-node` use `node_id|expected_x|expected_y|expected_width|expected_height|new_x|new_y|new_width|new_height`; x/y fields are signed integers and width/height fields are non-negative integers.
 `ui-auto-layout-edit` uses `node_id|expected_mode|expected_gap|expected_padding|new_mode|new_gap|new_padding`; all compact header fields are required, and malformed replacement mode, gap, or padding fields are `invalid-args`.
 `ui-constraints-edit` uses `node_id|expected_h|expected_v|new_h|new_v`; all compact header fields are required, and malformed replacement constraint fields are `invalid-args`.
@@ -345,7 +347,7 @@ modes:
   `render-mathml`, `render-math-structure`, and `render-mathml-checked`;
   Counter has `counter-action`; Designer has `selected-resize-handles`,
   `resize-handle-metadata`, `render-ui-html`, `render-ui-html-with-selection`, `export-ui-sdd`, and
-  `ui-label-edit` / `ui-name-edit` / `ui-kind-edit` / `ui-canvas-edit` / `ui-layout-edit` / `ui-resize-node` / `ui-auto-layout-edit` /
+  `ui-label-edit` / `ui-name-edit` / `ui-kind-edit` / `ui-canvas-edit` / `ui-canvas-read` / `ui-layout-edit` / `ui-resize-node` / `ui-auto-layout-edit` /
   `ui-resolve-auto-layout` / `ui-select-node` / `ui-selection-geometry` / `ui-add-node` / `ui-duplicate-node` / `ui-delete-node` / `ui-order-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` / `ui-component-edit` /

@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=9 features=145 actions=75
+  llm-catalog: apps=9 features=146 actions=76
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -434,7 +434,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 875 lines folded for reproduction.
+Runnable source: 879 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -443,10 +443,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=145 actions=75")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=146 actions=76")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(75)
-expect(dispatch_probe.recognized_count).to_equal(75)
+expect(dispatch_probe.advertised_count).to_equal(76)
+expect(dispatch_probe.recognized_count).to_equal(76)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -615,6 +615,7 @@ val invalid_ui_name_action = office_action_dispatch("ui-name-edit", "Feature|   
 val ui_kind_action = office_action_dispatch("ui-kind-edit", "button|button|input\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_kind_action = office_action_dispatch("ui-kind-edit", "button|button|text input\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_canvas_action = office_action_dispatch("ui-canvas-edit", "960|540|1280|720\ndesign: Feature\nsize: 960x540\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val ui_canvas_read_action = office_action_dispatch("ui-canvas-read", "design: Feature\nsize: 960x540\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_canvas_action = office_action_dispatch("ui-canvas-edit", "960|540|wide|720\ndesign: Feature\nsize: 960x540")
 val ui_layer_action = office_action_dispatch("ui-layer-edit", "button|controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_layer_action = office_action_dispatch("ui-layer-edit", "   |controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -844,6 +845,7 @@ expect(invalid_ui_name_action.reason).to_equal("invalid-args")
 expect(ui_kind_action.output).to_contain("office-ui-input")
 expect(invalid_ui_kind_action.reason).to_equal("invalid-args")
 expect(ui_canvas_action.output).to_contain("data-canvas-width=\"1280\"")
+expect(ui_canvas_read_action.output).to_equal("name=Feature width=960 height=540")
 expect(invalid_ui_canvas_action.reason).to_equal("invalid-args")
 expect(ui_layer_action.output).to_contain("data-z-index=\"9\"")
 expect(blank_ui_layer_action.reason).to_equal("invalid-args")
@@ -1097,6 +1099,7 @@ expect(catalog[5].features.join(",")).to_contain("resize-handle-metadata")
 expect(catalog[5].features.join(",")).to_contain("inspector")
 expect(catalog[5].features.join(",")).to_contain("name-edit")
 expect(catalog[5].features.join(",")).to_contain("canvas-edit")
+expect(catalog[5].features.join(",")).to_contain("canvas-readback")
 expect(catalog[5].features.join(",")).to_contain("kind-edit")
 expect(catalog[5].features.join(",")).to_contain("component-edit")
 expect(catalog[5].features.join(",")).to_contain("layers-readback")
@@ -1119,6 +1122,7 @@ expect(catalog[5].actions.join(",")).to_contain("render-ui-html-with-selection")
 expect(catalog[5].actions.join(",")).to_contain("ui-name-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-kind-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-canvas-edit")
+expect(catalog[5].actions.join(",")).to_contain("ui-canvas-read")
 expect(catalog[5].actions.join(",")).to_contain("ui-layout-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-resize-node")
 expect(catalog[5].actions.join(",")).to_contain("ui-select-node")
