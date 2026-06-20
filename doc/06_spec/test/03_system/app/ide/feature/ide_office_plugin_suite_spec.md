@@ -530,7 +530,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1225 lines folded for reproduction.
+Runnable source: 1227 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -852,6 +852,7 @@ val invalid_ui_layer_action = office_action_dispatch("ui-layer-edit", "button ba
 val blank_field_ui_layer_action = office_action_dispatch("ui-layer-edit", "button|controls|   \ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_component_action = office_action_dispatch("ui-component-edit", "button|action|primary_action\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val invalid_ui_component_action = office_action_dispatch("ui-component-edit", "button|action|primary action\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val short_ui_component_action = office_action_dispatch("ui-component-edit", "button|action\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_style_read_action = office_action_dispatch("ui-style-token-read", "button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_style_tokens_action = office_action_dispatch("ui-style-tokens-read", "design: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container\nnode button|Run|button|16|16|80|32|primary|9|action|frame")
 val invalid_ui_style_read_action = office_action_dispatch("ui-style-token-read", "button bad\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -1168,6 +1169,7 @@ expect(invalid_ui_layer_action.reason).to_equal("invalid-args")
 expect(blank_field_ui_layer_action.reason).to_equal("invalid-args")
 expect(ui_component_action.output).to_contain("data-component=\"primary_action\"")
 expect(invalid_ui_component_action.reason).to_equal("invalid-args")
+expect(short_ui_component_action.reason).to_equal("invalid-args")
 expect(ui_style_read_action.output).to_equal("primary")
 expect(ui_style_tokens_action.output).to_contain("nodes=2")
 expect(ui_style_tokens_action.output).to_contain("frame=surface")
