@@ -516,7 +516,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1172 lines folded for reproduction.
+Runnable source: 1174 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1031,6 +1031,7 @@ expect(missing_ui_selection_geometry_action.reason).to_equal("missing-node")
 expect(ui_sdd_action.output).to_contain("theme: office-ui")
 expect(ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape")
 expect(ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent, layout_mode, layout_gap, layout_padding, constraint_h, constraint_v|")
+expect(ui_sdd_action.output).to_contain("button, Run, primary, action, rounded, 16, 16, 80, 32, controls, , off, 0, \"0,0,0,0\", left, top")
 expect(sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(sdd_action.output).to_contain("data-format=\"sdd\"")
 expect(sdd_action.output).to_contain("data-format-name=\"SDD: Simple Diagram Document\"")
@@ -1063,6 +1064,7 @@ expect(legacy_ui_sdd_action.action).to_equal("export-ui-sdd")
 expect(legacy_ui_sdd_action.output).to_contain("theme: office-ui")
 expect(legacy_ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape")
 expect(legacy_ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent, layout_mode, layout_gap, layout_padding, constraint_h, constraint_v|")
+expect(legacy_ui_sdd_action.output).to_contain("button, Run, primary, action, rounded, 16, 16, 80, 32, controls, , off, 0, \"0,0,0,0\", left, top")
 expect(legacy_sdd_action.action).to_equal("render-sdd-html")
 expect(legacy_sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(legacy_sdd_action.output).to_contain("data-format=\"sdd\"")
