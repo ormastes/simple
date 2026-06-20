@@ -139,6 +139,8 @@ mutating the document.
 `ui-auto-layout-edit` uses `node_id|expected_mode|expected_gap|expected_padding|new_mode|new_gap|new_padding`; all compact header fields are required, and malformed replacement mode, gap, or padding fields are `invalid-args`.
 `ui-auto-layout-signature` takes the UI design body and returns the canonical
 signature used as the guard header for `ui-resolve-auto-layout`.
+`ui-resolved-layout-read` takes the UI design body and returns rendered Designer
+HTML after applying auto-layout, without requiring or mutating a stale guard.
 `ui-constraints-edit` uses `node_id|expected_h|expected_v|new_h|new_v`; all compact header fields are required, and malformed replacement constraint fields are `invalid-args`.
 Blank or malformed `ui-label-edit`, `ui-layout-edit`, `ui-resize-node`,
 `ui-auto-layout-edit`, and `ui-constraints-edit` / `ui-layer-edit` /
@@ -359,7 +361,7 @@ modes:
   Mail has `mail-summary`; Planner has `planner-summary`; Counter has `counter-action`; Designer has `selected-resize-handles`,
   `resize-handle-metadata`, `render-ui-html`, `render-ui-html-with-selection`, `export-ui-sdd`, and
   `ui-label-edit` / `ui-name-edit` / `ui-kind-edit` / `ui-canvas-edit` / `ui-canvas-read` / `ui-layout-edit` / `ui-resize-node` / `ui-auto-layout-edit` /
-  `ui-auto-layout-signature` / `ui-resolve-auto-layout` / `ui-select-node` / `ui-selection-geometry` / `ui-add-node` / `ui-duplicate-node` / `ui-delete-node` / `ui-order-node` /
+  `ui-auto-layout-signature` / `ui-resolve-auto-layout` / `ui-resolved-layout-read` / `ui-select-node` / `ui-selection-geometry` / `ui-add-node` / `ui-duplicate-node` / `ui-delete-node` / `ui-order-node` /
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` / `ui-component-edit` /
   `ui-style-token-read` / `ui-style-token-edit` / `ui-css-edit` / `ui-inspect-node` / `ui-list-layers`; the IDE

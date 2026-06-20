@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 114 | 114 | 0 | 0 |
+| 115 | 115 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -874,6 +874,25 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### dispatches Designer resolved auto-layout readback
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("ui-resolved-layout-read", "design: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container||vertical|8|4,4,4,4\nnode button|Run|button|16|16|80|32|primary|2|action|frame")
+expect(result.ok).to_be(true)
+expect(result.reason).to_equal("listed")
+expect(result.output).to_contain("data-node=\"button\"")
+expect(result.output).to_contain("left: 4px")
+expect(result.output).to_contain("top: 4px")
+```
+
+</details>
+
 #### recognizes every LLM catalog office action
 
 <details>
@@ -884,8 +903,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(81)
-expect(probe.recognized_count).to_equal(81)
+expect(probe.advertised_count).to_equal(82)
+expect(probe.recognized_count).to_equal(82)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2158,8 +2177,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 114 |
-| Active scenarios | 114 |
+| Total scenarios | 115 |
+| Active scenarios | 115 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
