@@ -516,7 +516,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1171 lines folded for reproduction.
+Runnable source: 1172 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1062,6 +1062,7 @@ expect(legacy_ui_action.output).to_contain("data-format-name=\"HTML UI Design Do
 expect(legacy_ui_sdd_action.action).to_equal("export-ui-sdd")
 expect(legacy_ui_sdd_action.output).to_contain("theme: office-ui")
 expect(legacy_ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape")
+expect(legacy_ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent, layout_mode, layout_gap, layout_padding, constraint_h, constraint_v|")
 expect(legacy_sdd_action.action).to_equal("render-sdd-html")
 expect(legacy_sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(legacy_sdd_action.output).to_contain("data-format=\"sdd\"")
