@@ -138,8 +138,8 @@ rejects malformed source or new node IDs as `invalid-args`.
 Blank duplicate source/new IDs or offsets are rejected as `invalid-args`.
 `ui-delete-node` uses `node_id`, returns rendered UI HTML, removes descendant
 nodes with the target, and rejects malformed IDs as `invalid-args`.
-`ui-order-node` uses `node_id|front` or `node_id|back` to change Designer
-document/render order.
+`ui-order-node` uses `node_id|front_or_back`, where `front_or_back` is `front`
+or `back`, to change Designer document/render order.
 
 Designer edit actions use compact first-line edit headers followed by the UI
 design body. `ui-label-edit` uses `node_id|expected_label|new_label`.
@@ -196,7 +196,7 @@ Blank or malformed SDD node edit ids are rejected as `invalid-args`.
 Parent edits reject malformed replacement parent IDs, missing parent IDs, and parent cycles.
 `add-sdd-node` uses `id|label|css|role|shape|x|y|width|height|layer|parent`
 and rejects duplicate IDs, blank IDs, missing parent IDs, malformed geometry, and unsafe style, role, shape, or layer tokens.
-`order-sdd-node` uses `node_id|front` or `node_id|back` to change document/render order.
+`order-sdd-node` uses `node_id|front_or_back`, where `front_or_back` is `front` or `back`, to change document/render order.
 Blank or malformed SDD order node ids are rejected as `invalid-args`.
 `edit-sdd-style-rule` uses `css|target|extends|key|value` and returns canonical SDD text; `css`, `target`, and `key` are required, and `extends` must be `none`, empty, or an existing non-self CSS rule.
 `delete-sdd-style-rule` uses `css|key`, rejects malformed css/key tokens as `invalid-args`, and returns canonical SDD text with that reusable rule removed.

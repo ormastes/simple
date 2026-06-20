@@ -431,7 +431,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -451,6 +451,7 @@ expect(guide).to_contain("handle_meta=true")
 expect(guide).to_contain("Align accepts\n`left|center|right|top|middle|bottom`; distribute accepts\n`horizontal|vertical`")
 expect(guide).to_contain("from_id|to_id|label|css|kind|route|waypoints|start_anchor|end_anchor")
 expect(guide).to_contain("css|node_or_edge|key")
+expect(guide).to_contain("node_id|front_or_back")
 ```
 
 </details>
