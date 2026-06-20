@@ -981,17 +981,18 @@ fn sdn_graph_geometry_signature(graph: SdnGraph, node_ids: [text]) -> text:
 fn sdn_graph_align_checked(graph: SdnGraph, node_ids: [text], expected_signature: text, mode: text) -> SdnGraphEditResult:
     if not _sg_node_id_list_valid(node_ids):
         return SdnGraphEditResult(accepted: false, reason: "invalid-selection-id", diff: "@@ sdd-align " + mode + " @@\nexpected: node id tokens\nactual: " + node_ids.join(","), graph: graph)
-    val actual_signature = sdn_graph_geometry_signature(graph, node_ids)
+    val clean_node_ids = _sg_clean_node_id_list(node_ids)
+    val actual_signature = sdn_graph_geometry_signature(graph, clean_node_ids)
     if actual_signature != expected_signature:
         return SdnGraphEditResult(accepted: false, reason: "stale-selection", diff: "@@ sdd-align " + mode + " @@\nexpected: " + expected_signature + "\nactual: " + actual_signature, graph: graph)
     if node_ids.len() < 2:
         return SdnGraphEditResult(accepted: false, reason: "invalid-selection", diff: "@@ sdd-align " + mode + " @@\nexpected: at least 2 nodes\nactual: " + node_ids.len().to_text(), graph: graph)
-    val selected_count = _sg_selected_count(graph, node_ids)
+    val selected_count = _sg_selected_count(graph, clean_node_ids)
     if selected_count != node_ids.len():
         return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-align " + mode + " @@\nexpected: " + node_ids.join(",") + "\nactual: " + actual_signature, graph: graph)
     if not _sg_align_mode_supported(mode):
         return SdnGraphEditResult(accepted: false, reason: "unsupported-align-mode", diff: "@@ sdd-align " + mode + " @@\nexpected: left|center|right|top|middle|bottom\nactual: " + mode, graph: graph)
-    val bounds = _sg_selected_bounds(graph, node_ids)
+    val bounds = _sg_selected_bounds(graph, clean_node_ids)
     if not bounds.ok:
         return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-align " + mode + " @@\nexpected: integer geometry\nactual: " + actual_signature, graph: graph)
     var out_nodes: [SdnGraphNode] = []
@@ -1001,32 +1002,33 @@ fn sdn_graph_align_checked(graph: SdnGraph, node_ids: [text], expected_signature
     var i = 0
     while i < out.nodes.len():
         val node = out.nodes[i]
-        if _sg_id_in_list(node.id, node_ids):
+        if _sg_id_in_list(node.id, clean_node_ids):
             val aligned = _sg_align_node(node, mode, bounds)
             if not aligned.ok:
                 return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-align " + mode + " @@\nexpected: integer geometry\nactual: " + actual_signature, graph: graph)
             out.nodes[i] = aligned.node
         i = i + 1
-    val new_signature = sdn_graph_geometry_signature(out, node_ids)
+    val new_signature = sdn_graph_geometry_signature(out, clean_node_ids)
     SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-align " + mode + " @@\n- " + expected_signature + "\n+ " + new_signature, graph: out)
 
 fn sdn_graph_distribute_checked(graph: SdnGraph, node_ids: [text], expected_signature: text, axis: text) -> SdnGraphEditResult:
     if not _sg_node_id_list_valid(node_ids):
         return SdnGraphEditResult(accepted: false, reason: "invalid-selection-id", diff: "@@ sdd-distribute " + axis + " @@\nexpected: node id tokens\nactual: " + node_ids.join(","), graph: graph)
-    val actual_signature = sdn_graph_geometry_signature(graph, node_ids)
+    val clean_node_ids = _sg_clean_node_id_list(node_ids)
+    val actual_signature = sdn_graph_geometry_signature(graph, clean_node_ids)
     if actual_signature != expected_signature:
         return SdnGraphEditResult(accepted: false, reason: "stale-selection", diff: "@@ sdd-distribute " + axis + " @@\nexpected: " + expected_signature + "\nactual: " + actual_signature, graph: graph)
     if node_ids.len() < 3:
         return SdnGraphEditResult(accepted: false, reason: "invalid-selection", diff: "@@ sdd-distribute " + axis + " @@\nexpected: at least 3 nodes\nactual: " + node_ids.len().to_text(), graph: graph)
-    val selected_count = _sg_selected_count(graph, node_ids)
+    val selected_count = _sg_selected_count(graph, clean_node_ids)
     if selected_count != node_ids.len():
         return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-distribute " + axis + " @@\nexpected: " + node_ids.join(",") + "\nactual: " + actual_signature, graph: graph)
     if axis != "horizontal" and axis != "vertical":
         return SdnGraphEditResult(accepted: false, reason: "unsupported-distribute-axis", diff: "@@ sdd-distribute " + axis + " @@\nexpected: horizontal|vertical\nactual: " + axis, graph: graph)
-    val bounds = _sg_selected_bounds(graph, node_ids)
+    val bounds = _sg_selected_bounds(graph, clean_node_ids)
     if not bounds.ok:
         return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-distribute " + axis + " @@\nexpected: integer geometry\nactual: " + actual_signature, graph: graph)
-    val total_span = _sg_selected_axis_size(graph, node_ids, axis)
+    val total_span = _sg_selected_axis_size(graph, clean_node_ids, axis)
     if not total_span.ok:
         return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-distribute " + axis + " @@\nexpected: integer geometry\nactual: " + actual_signature, graph: graph)
     val available = if axis == "horizontal" then bounds.max_x - bounds.min_x else bounds.max_y - bounds.min_y
@@ -1038,11 +1040,11 @@ fn sdn_graph_distribute_checked(graph: SdnGraph, node_ids: [text], expected_sign
     var i = 0
     while i < out.nodes.len():
         val node = out.nodes[i]
-        if _sg_id_in_list(node.id, node_ids):
+        if _sg_id_in_list(node.id, clean_node_ids):
             val size = if axis == "horizontal" then _sg_parse_i64_result(node.width) else _sg_parse_i64_result(node.height)
             if not size.ok:
                 return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-distribute " + axis + " @@\nexpected: integer geometry\nactual: " + actual_signature, graph: graph)
-            val cursor = _sg_distribution_cursor_for_node(graph, node_ids, axis, node.id, bounds, gap)
+            val cursor = _sg_distribution_cursor_for_node(graph, clean_node_ids, axis, node.id, bounds, gap)
             if not cursor.ok:
                 return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-distribute " + axis + " @@\nexpected: integer geometry\nactual: " + actual_signature, graph: graph)
             var updated = _sg_clone_node(node)
@@ -1052,7 +1054,7 @@ fn sdn_graph_distribute_checked(graph: SdnGraph, node_ids: [text], expected_sign
                 updated.y = cursor.value.to_text()
             out.nodes[i] = updated
         i = i + 1
-    val new_signature = sdn_graph_geometry_signature(out, node_ids)
+    val new_signature = sdn_graph_geometry_signature(out, clean_node_ids)
     SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-distribute " + axis + " @@\n- " + expected_signature + "\n+ " + new_signature, graph: out)
 
 fn sdn_graph_inspect_node(graph: SdnGraph, node_id: text) -> SdnGraphNodeInspector:
@@ -1556,6 +1558,12 @@ fn _sg_node_id_list_valid(ids: [text]) -> bool:
         if clean == "" or not _sg_safe_style_token(clean):
             return false
     true
+
+fn _sg_clean_node_id_list(ids: [text]) -> [text]:
+    var out: [text] = []
+    for item in ids:
+        out.push(item.trim())
+    out
 
 fn _sg_node_id_exists(graph: SdnGraph, id: text) -> bool:
     for node in graph.nodes:

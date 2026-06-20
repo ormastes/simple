@@ -803,7 +803,7 @@ expect(ordered.graph.nodes[0].id).to_equal("Child")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -825,6 +825,11 @@ expect(middle.accepted).to_be(true)
 expect(middle.graph.nodes[0].y).to_equal("50")
 expect(middle.graph.nodes[1].y).to_equal("50")
 expect(middle.graph.nodes[2].y).to_equal("50")
+
+val padded = sdn_graph_align_checked(graph, [" A ", " B "], sdn_graph_geometry_signature(graph, ["A", "B"]), "left")
+expect(padded.accepted).to_be(true)
+expect(padded.graph.nodes[0].x).to_equal("10")
+expect(padded.graph.nodes[1].x).to_equal("10")
 
 val stale = sdn_graph_align_checked(graph, ids, "A:0,0,1,1", "left")
 expect(stale.accepted).to_be(false)
