@@ -531,7 +531,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1309 lines folded for reproduction.
+Runnable source: 1315 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -749,10 +749,13 @@ val writer_summary_action = office_action_dispatch("writer-markdown-summary", "#
 val writer_stats_action = office_action_dispatch("writer-markdown-stats", "# Writer\n\nBody words")
 val writer_search_action = office_action_dispatch("writer-markdown-search", "Body\n# Writer\n\nBody words")
 val writer_range_action = office_action_dispatch("writer-markdown-range", "1|2\n# Writer\nFirst\nSecond")
+val writer_short_range_action = office_action_dispatch("writer-markdown-range", "1\n# Writer\nFirst\nSecond")
 val writer_blocks_action = office_action_dispatch("writer-markdown-blocks", "# Writer\n\nBody\n- Item")
 val writer_tables_action = office_action_dispatch("writer-markdown-tables", "# Writer\n| A | B |\n|---|---|\n| 1 | 2 |")
 val writer_replace_action = office_action_dispatch("writer-markdown-replace", "Body|Final\n# Writer\n\nBody words")
+val writer_short_replace_action = office_action_dispatch("writer-markdown-replace", "Body\n# Writer\n\nBody words")
 val writer_insert_action = office_action_dispatch("writer-markdown-insert", "1|## Added\n# Writer\nBody")
+val writer_short_insert_action = office_action_dispatch("writer-markdown-insert", "1\n# Writer\nBody")
 val writer_delete_action = office_action_dispatch("writer-markdown-delete", "1\n# Writer\nDrop\nBody")
 val writer_outline_action = office_action_dispatch("writer-markdown-outline", "# Writer\n\n## Section")
 val ppt_action = office_action_dispatch("render-ppt-markdown-html", "# Deck\n\n## Slide")
@@ -1061,12 +1064,15 @@ expect(writer_summary_action.output).to_contain("lines=3")
 expect(writer_stats_action.output).to_equal("lines=3\nblocks=2\nheadings=1\nwords=3")
 expect(writer_search_action.output).to_equal("2|0|Body words")
 expect(writer_range_action.output).to_equal("1|First\n2|Second")
+expect(writer_short_range_action.reason).to_equal("invalid-args")
 expect(writer_blocks_action.output).to_contain("0|0|0|heading|# Writer")
 expect(writer_blocks_action.output).to_contain("2|3|3|list|- Item")
 expect(writer_tables_action.output).to_contain("0|1|1|| A | B |")
 expect(writer_tables_action.output).to_contain("2|3|3|| 1 | 2 |")
 expect(writer_replace_action.output).to_equal("# Writer\n\nFinal words")
+expect(writer_short_replace_action.reason).to_equal("invalid-args")
 expect(writer_insert_action.output).to_equal("# Writer\n## Added\nBody")
+expect(writer_short_insert_action.reason).to_equal("invalid-args")
 expect(writer_delete_action.output).to_equal("# Writer\nBody")
 expect(writer_outline_action.output).to_equal("0|1|Writer\n2|2|Section")
 expect(writer_outline_action.reason).to_equal("listed")
