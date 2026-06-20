@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -192,7 +192,7 @@ expect(html).to_contain("data-end-anchor=\"left\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -204,7 +204,8 @@ expect(html).to_contain("data-canvas-grid=\"16\"")
 expect(html).to_contain("data-canvas-snap=\"true\"")
 expect(html).to_contain("data-canvas-zoom=\"125\"")
 expect(html).to_contain("data-canvas-background=\"#ffffff\"")
-expect(html).to_contain("style=\"width:1200px;height:800px;\"")
+expect(html).to_contain("style=\"width:1200px;height:800px;background-color:#ffffff")
+expect(html).to_contain("background-size:16px 16px;")
 ```
 
 </details>
@@ -221,7 +222,7 @@ Reproduction: this block contains the complete executable scenario source.
 val graph = sdn_graph_update_canvas(sdn_graph_parse("graph: escaped\nA: A"), "100", "80", "10", "true", "100", "\"<bg>&")
 val html = sdn_graph_render_html(graph)
 expect(html).to_contain("data-canvas-background=\"&quot;&lt;bg&gt;&amp;\"")
-expect(html).to_contain("style=\"width:100px;height:80px;\"")
+expect(html).to_contain("style=\"width:100px;height:80px;")
 ```
 
 </details>
@@ -359,6 +360,22 @@ expect(selected).to_contain("data-edge-index=\"0\" data-selected=\"true\" aria-s
 expect(selected).to_contain("class=\"sdn-graph-edge sdd-connector sdn-css-primary sdd-selected\"")
 expect(invalid).to_contain("data-selected-edge-index=\"99\"")
 expect(invalid).to_contain("data-edge-index=\"0\" data-selected=\"false\" aria-selected=\"false\"")
+```
+
+</details>
+
+#### resolves inherited CSS style values
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: style\ncss base:\n    fill: #ffffff\n    stroke: #111111\ncss accent:\n    extends: base\n    fill: #eeeeee\nA: Alpha @accent")
+expect(sdn_graph_resolved_style_value(graph, "accent", "node", "fill")).to_equal("#eeeeee")
+expect(sdn_graph_resolved_style_value(graph, "accent", "node", "stroke")).to_equal("#111111")
 ```
 
 </details>
@@ -617,8 +634,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
