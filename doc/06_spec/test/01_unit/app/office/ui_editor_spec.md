@@ -377,18 +377,19 @@ expect(sdd).to_contain("submit, \"Sign in\", primary, action, rounded, 72, 200, 
 
 </details>
 
-#### quotes SDD table cells containing commas and quotes
+#### quotes SDD table cells containing separators and quotes
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val design = office_ui_design_parse("design: Text\nnode note|Save, \"now\"|text|0|0|120|24|copy,primary|1|copy")
+val design = office_ui_design_parse("design: Text\nnode note|Save, \"now\"|text|0|0|120|24|copy,primary|1|copy\nnode escaped|A\\|B\\\\C|text|0|30|120|24|copy|2|copy")
 val sdd = office_ui_design_to_sdd(design)
 expect(sdd).to_contain("note, \"Save, \"\"now\"\"\", \"copy,primary\", copy, rounded")
+expect(sdd).to_contain("escaped, \"A|B\\C\", copy, copy, rounded")
 ```
 
 </details>
