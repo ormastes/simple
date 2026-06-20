@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 115 | 115 | 0 | 0 |
+| 116 | 116 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -877,6 +877,27 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### formats Calc numeric display values
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val currency = office_action_dispatch("format-cell-value", "1234.5|currency:$:2")
+val percent = office_action_dispatch("format-cell-value", "0.375|percent:1")
+val invalid = office_action_dispatch("format-cell-value", "12x|number:2")
+expect(currency.output).to_equal("$1,234.50")
+expect(currency.reason).to_equal("formatted")
+expect(percent.output).to_equal("37.5%")
+expect(invalid.ok).to_be(false)
+expect(invalid.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### dispatches Designer resolved auto-layout readback
 
 <details>
@@ -906,8 +927,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(83)
-expect(probe.recognized_count).to_equal(83)
+expect(probe.advertised_count).to_equal(84)
+expect(probe.recognized_count).to_equal(84)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2180,8 +2201,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 115 |
-| Active scenarios | 115 |
+| Total scenarios | 116 |
+| Active scenarios | 116 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

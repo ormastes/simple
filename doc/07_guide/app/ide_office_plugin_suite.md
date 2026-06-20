@@ -220,6 +220,8 @@ rejects blank target refs and malformed, invalid, or duplicate source cell refs.
 `slide-edit` rejects blank target ids and malformed, missing, or duplicate source element ids.
 `sheet-edit` and `slide-edit` return the updated target assignment and reject stale
 values with deterministic diffs.
+`format-cell-value` uses `numeric_value|format` and returns the same Calc
+display text used by the sheet formatter without mutating a sheet.
 
 Math actions accept one expression body. `render-mathml` returns MathML,
 `render-mathml-checked` returns MathML with malformed-input rejection reasons,
@@ -352,7 +354,7 @@ modes:
   `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;
   Calc has `formula-counta`,
   `formula-text-functions`, `formula-vlookup`, and
-  `formula-display-recalc`; Base has `schema-validation`, `html-render`,
+  `formula-display-recalc`, plus `format-cell-value`; Base has `schema-validation`, `html-render`,
   `html-cell-coordinates`, `html-escape`, invalid schema rejection, `query-table`,
   `count-where`, `select-where`, `project-column`, `update-where`,
   `delete-where`, `render-base-table-html`, and `db-edit`; Math has `fraction`,
