@@ -642,7 +642,7 @@ expect(html).to_contain("data-canvas-grid=\"24\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -671,6 +671,15 @@ expect(styled.nodes[1].shape).to_equal("cylinder")
 expect(styled.nodes[1].css).to_equal("storage highlight")
 expect(styled.nodes[1].x).to_equal("220")
 expect(sdn_graph_render_html(styled)).to_contain("sdn-css-storage sdn-css-highlight")
+
+val checked_shape = sdn_graph_update_node_shape_checked(graph, 0, " diamond ")
+expect(checked_shape.accepted).to_be(true)
+expect(checked_shape.graph.nodes[0].shape).to_equal("diamond")
+val checked_style = sdn_graph_update_node_style_checked(checked_shape.graph, 0, " primary selected ")
+expect(checked_style.accepted).to_be(true)
+expect(checked_style.graph.nodes[0].css).to_equal("primary selected")
+expect(sdn_graph_update_node_shape_checked(graph, 0, "bad shape").reason).to_equal("invalid-shape-token")
+expect(sdn_graph_update_node_style_checked(graph, 0, "primary bad\"onclick=1").reason).to_equal("invalid-style-token")
 
 val added = sdn_graph_add_node_checked(graph, "C", "Choice", "accent", "decision", "diamond", " 80 ", " 80 ", "64", "48", "front", "")
 expect(added.accepted).to_be(true)
