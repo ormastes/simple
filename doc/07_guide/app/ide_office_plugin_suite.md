@@ -202,6 +202,7 @@ Blank or malformed SDD edge endpoint IDs are rejected as `invalid-args`.
 Node, edge, canvas, layout, and connector edit actions return rendered SDD HTML
 for the updated document. Style-rule edit/delete actions return canonical SDD
 text for round-trip persistence.
+`sdd-node-style-read` uses `node_id` and returns the node CSS/style token string.
 `inspect-sdd-node` uses `node_id`; `inspect-sdd-edge` uses `edge_index`;
 `inspect-sdd-style-rule` uses `css|key`. Malformed node IDs and style-rule tokens are `invalid-args`. Inspectors return compact readback
 text for geometry, style, group child metadata, route, rendered path metadata,
@@ -364,7 +365,7 @@ modes:
   `duplicate-sdd-edge`, `edit-sdd-edge-label`, `edit-sdd-edge-label-point`, `edit-sdd-edge-style`, `edit-sdd-edge-kind`, `edit-sdd-edge-endpoints`,
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`,
   `edit-sdd-node-label`, `edit-sdd-node-parent`, `edit-sdd-node-shape`,
-  `edit-sdd-node-style`, `edit-sdd-node-layer`, `order-sdd-node`, `edit-sdd-node-role`,
+  `edit-sdd-node-style`, `sdd-node-style-read`, `edit-sdd-node-layer`, `order-sdd-node`, `edit-sdd-node-role`,
   `duplicate-sdd-node`, `edit-sdd-canvas`, `sdd-canvas-read`, `sdd-selection-geometry`, `sdd-list-layers`, `align-sdd-selection`,
   `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;
   Calc has `formula-evaluate-read`, `formula-counta`,

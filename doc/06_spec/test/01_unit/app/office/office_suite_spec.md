@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 126 | 126 | 0 | 0 |
+| 127 | 127 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1123,8 +1123,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(95)
-expect(probe.recognized_count).to_equal(95)
+expect(probe.advertised_count).to_equal(96)
+expect(probe.recognized_count).to_equal(96)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2072,6 +2072,28 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### reads SDD node style tokens
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("sdd-node-style-read", "A\ngraph: Style\nA: A @accent warning x: 0 y: 0 width: 20 height: 20")
+val invalid = office_action_dispatch("sdd-node-style-read", "A bad\ngraph: Style\nA: A @accent")
+val missing = office_action_dispatch("sdd-node-style-read", "Nope\ngraph: Style\nA: A @accent")
+expect(result.ok).to_be(true)
+expect(result.output).to_equal("accent warning")
+expect(invalid.ok).to_be(false)
+expect(invalid.reason).to_equal("invalid-args")
+expect(missing.ok).to_be(false)
+expect(missing.reason).to_equal("missing-node")
+```
+
+</details>
+
 #### rejects blank SDD node geometry action target ids
 
 <details>
@@ -2397,8 +2419,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 126 |
-| Active scenarios | 126 |
+| Total scenarios | 127 |
+| Active scenarios | 127 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

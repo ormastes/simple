@@ -113,7 +113,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=11 features=174 actions=95
+  llm-catalog: apps=11 features=175 actions=96
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
@@ -202,7 +202,7 @@ expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=11")
-expect(tui_report).to_contain("features=174")
+expect(tui_report).to_contain("features=175")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
@@ -439,7 +439,7 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 976 lines folded for reproduction.
+Runnable source: 981 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -448,10 +448,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(11)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=174 actions=95")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=175 actions=96")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(95)
-expect(dispatch_probe.recognized_count).to_equal(95)
+expect(dispatch_probe.advertised_count).to_equal(96)
+expect(dispatch_probe.recognized_count).to_equal(96)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -522,6 +522,7 @@ expect(catalog[4].features.join(",")).to_contain("edge-reconnect-edit")
 expect(catalog[4].features.join(",")).to_contain("edge-delete")
 expect(catalog[4].features.join(",")).to_contain("node-shape-edit")
 expect(catalog[4].features.join(",")).to_contain("node-style-edit")
+expect(catalog[4].features.join(",")).to_contain("node-style-readback")
 expect(catalog[4].features.join(",")).to_contain("node-layer-edit")
 expect(catalog[4].features.join(",")).to_contain("node-order-edit")
 expect(catalog[4].features.join(",")).to_contain("node-role-edit")
@@ -558,6 +559,7 @@ expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-geometry")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-parent")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-shape")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-style")
+expect(catalog[4].actions.join(",")).to_contain("sdd-node-style-read")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-layer")
 expect(catalog[4].actions.join(",")).to_contain("order-sdd-node")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-role")
@@ -722,6 +724,7 @@ val invalid_ui_align_mode_action = office_action_dispatch("ui-align-selection", 
 val invalid_sdd_distribute_axis_action = office_action_dispatch("distribute-sdd-selection", "radial|A,B,C\ngraph: Dist\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 40 y: 0 width: 20 height: 20\nC: C x: 100 y: 0 width: 20 height: 20")
 val sdd_shape_action = office_action_dispatch("edit-sdd-node-shape", "A|diamond\ngraph: Shape\nA: A x: 0 y: 0 width: 20 height: 20")
 val sdd_style_action = office_action_dispatch("edit-sdd-node-style", "A|accent\ngraph: Style\nA: A x: 0 y: 0 width: 20 height: 20")
+val sdd_style_read_action = office_action_dispatch("sdd-node-style-read", "A\ngraph: Style\nA: A @accent warning x: 0 y: 0 width: 20 height: 20")
 val blank_sdd_style_action = office_action_dispatch("edit-sdd-node-style", "   |accent\ngraph: Style\nA: A x: 0 y: 0 width: 20 height: 20")
 val invalid_sdd_shape_action = office_action_dispatch("edit-sdd-node-shape", "A|bad shape\ngraph: Shape\nA: A x: 0 y: 0 width: 20 height: 20")
 val invalid_sdd_style_action = office_action_dispatch("edit-sdd-node-style", "A|accent,bad\ngraph: Style\nA: A x: 0 y: 0 width: 20 height: 20")
@@ -992,6 +995,8 @@ expect(invalid_ui_align_mode_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_distribute_axis_action.reason).to_equal("invalid-args")
 expect(sdd_shape_action.output).to_contain("data-shape=\"diamond\"")
 expect(sdd_style_action.output).to_contain("sdn-css-accent")
+expect(sdd_style_read_action.output).to_equal("accent warning")
+expect(sdd_style_read_action.reason).to_equal("found")
 expect(blank_sdd_style_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_shape_action.reason).to_equal("invalid-shape-token")
 expect(invalid_sdd_style_action.reason).to_equal("invalid-style-token")
