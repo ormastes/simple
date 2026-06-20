@@ -276,9 +276,9 @@ for every capability so plugin metadata cannot silently drift from the report.
 Plugin manifest and LLM catalog entries must keep non-empty libraries/modules,
 evidence keys, and action/function names; duplicate app, action, or function
 symbols are invalid. The Office plugin registry is derived from the LLM catalog
-and registers Markdown, Writer, Calc, Impress, Draw, Designer, Base, Math, and
-Counter as separate plugin entries over the shared Markdown, HTML/CSS, and SDN
-substrates. Every LLM catalog action must be recognized by
+and registers Markdown, Writer, Calc, Impress, Draw, Designer, Base, Math,
+Planner, and Counter as separate plugin entries over the shared Markdown,
+HTML/CSS, SDN, and in-memory Planner substrates. Every LLM catalog action must be recognized by
 `office_action_dispatch`; blank input may fail with `invalid-args`, but never
 `unknown-action`. IDE manifest entries must advertise exactly
 `ide_capability_<capability>` and `ide_feature_check_<capability>` symbols for
@@ -317,6 +317,10 @@ browser or CAS dependency. `math_to_mathml_checked` adds bounded checked
 rendering for core precedence (`^`, `*`, `/`, `+`, `-`), parentheses,
 `sqrt(...)`, and malformed-input fallback reasons.
 
+Planner uses the existing `app.office.planner.planner_app` in-memory project
+state. `planner-summary` is read-only and returns the default project, active
+view, task count, and board column count.
+
 IDE feature checks should expose these hardening markers in both TUI and GUI
 modes:
 
@@ -347,7 +351,7 @@ modes:
   `subscript`, `fenced-group`, `precedence-parser`, `xml-escape`,
   `sqrt-shorthand`, `slash-fraction`, `malformed-fallback`, `checked-rendering`,
   `render-mathml`, `render-math-structure`, and `render-mathml-checked`;
-  Counter has `counter-action`; Designer has `selected-resize-handles`,
+  Planner has `planner-summary`; Counter has `counter-action`; Designer has `selected-resize-handles`,
   `resize-handle-metadata`, `render-ui-html`, `render-ui-html-with-selection`, `export-ui-sdd`, and
   `ui-label-edit` / `ui-name-edit` / `ui-kind-edit` / `ui-canvas-edit` / `ui-canvas-read` / `ui-layout-edit` / `ui-resize-node` / `ui-auto-layout-edit` /
   `ui-auto-layout-signature` / `ui-resolve-auto-layout` / `ui-select-node` / `ui-selection-geometry` / `ui-add-node` / `ui-duplicate-node` / `ui-delete-node` / `ui-order-node` /
@@ -358,7 +362,7 @@ modes:
   selected-node render.
   `office_llm_action_input_schema(action)` must return a non-empty compact
   source grammar for every advertised action so agents can call Draw, Designer,
-  Base, Math, Markdown, Writer, Calc, Impress, and Counter without scraping this
+  Base, Math, Planner, Markdown, Writer, Calc, Impress, and Counter without scraping this
   guide.
 
 ## Verification
