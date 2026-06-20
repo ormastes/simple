@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 25 | 25 | 0 | 0 |
+| 26 | 26 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -421,6 +421,25 @@ expect(sdn_graph_resolved_style_value(graph, "accent", "node", "stroke")).to_equ
 
 </details>
 
+#### rejects unsafe SDD CSS function values
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: style\ncss bad:\n    fill: expression(alert(1))\n    stroke: var(--safe-stroke)\nA: Alpha @bad")
+val html = sdn_graph_render_html(graph)
+expect(sdn_graph_resolved_style_value(graph, "bad", "node", "fill")).to_equal("")
+expect(sdn_graph_resolved_style_value(graph, "bad", "node", "stroke")).to_equal("var(--safe-stroke)")
+expect(html.contains("expression(alert(1))")).to_be(false)
+expect(html).to_contain("border-color:var(--safe-stroke)")
+```
+
+</details>
+
 #### inspects selected nodes and connectors as pure snapshots
 
 <details>
@@ -675,8 +694,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
