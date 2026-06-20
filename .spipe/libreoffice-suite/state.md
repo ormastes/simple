@@ -306,6 +306,15 @@ possible so they are runner-verifiable.
   attributes and pure `sdn_graph_update_canvas` edits canvas state without
   mutating nodes or connectors. Catalog metadata now exposes
   `canvas-metadata` and `edit-sdd-canvas`.
+- 2026-06-19 dev: Rendered SDD Draw canvas backgrounds. Safe
+  `canvas_background` values now paint the deterministic HTML root
+  `background-color` while preserving the `data-canvas-background` metadata.
+- 2026-06-19 dev: Rendered SDD Draw canvas grid spacing. Safe `canvas_grid`
+  values now produce deterministic root CSS dot grids via `background-size`.
+- 2026-06-19 dev: Rendered SDD Draw node shapes. Existing `shape` metadata now
+  maps common Draw shapes to deterministic HTML CSS for person/actor,
+  frame/container, rounded, pill, circle, terminator, diamond, and
+  cylinder/database previews.
 - 2026-06-19 dev: Promoted SDD Draw to the IDE feature-check surface. Added a
   pure `app.ide.draw_sanity` probe and registered Draw as a first-class IDE
   capability, so `simple ide --feature-check --tui|--gui` now reports six
@@ -331,3 +340,138 @@ possible so they are runner-verifiable.
   headless action bridge as `render-markdown-preview-html`, completing the
   Markdown-source HTML render triad alongside Writer paper HTML and PPT deck
   HTML.
+- 2026-06-19 dev: Advanced SDD Draw copy/paste basics. Added checked
+  `sdn_graph_duplicate_node_checked` for duplicating one node with a unique id
+  and integer offset while preserving style, shape, layer, and parent metadata.
+  Draw catalog metadata now exposes `node-duplicate` and `duplicate-sdd-node`.
+- 2026-06-19 dev: Advanced Figma-like Designer copy/paste basics. Added checked
+  `office_ui_design_duplicate_node_checked` for duplicating one UI node with a
+  unique id and integer offset while preserving style, component, layer, parent,
+  auto-layout, and constraint metadata for nodes outside auto-layout parents.
+  Designer catalog metadata now exposes `node-duplicate` and
+  `ui-duplicate-node`.
+- 2026-06-19 dev: Wired duplicate actions into the headless Office action
+  bridge. `ui-duplicate-node` and `duplicate-sdd-node` accept a first-line
+  `source_id|new_id|dx|dy` edit header followed by the UI/SDD document body and
+  return rendered HTML for the updated document.
+- 2026-06-19 dev: Wired UI/SDD align and distribute actions into the headless
+  Office action bridge. `ui-align-selection`, `ui-distribute-selection`,
+  `align-sdd-selection`, and `distribute-sdd-selection` accept
+  `mode_or_axis|id1,id2,...` followed by the UI/SDD document body and return
+  rendered HTML for the updated document.
+- 2026-06-19 dev: Wired remaining SDD edit actions into the headless Office
+  action bridge: `reroute-sdd-connector`, `edit-sdd-node-parent`,
+  `edit-sdd-node-shape`, `edit-sdd-node-style`, and `edit-sdd-canvas`.
+  Each accepts a compact first-line edit header followed by the SDD body and
+  returns rendered HTML for the updated document.
+- 2026-06-19 dev: Wired the remaining cataloged Designer/UI edit actions into
+  the headless Office action bridge: `ui-label-edit`, `ui-layout-edit`,
+  `ui-auto-layout-edit`, `ui-constraints-edit`, `ui-layer-edit`,
+  `ui-style-token-read`, `ui-style-token-edit`, and `ui-inspect-node`. The
+  bridge now exposes the existing guarded Figma-like UI editor helpers through
+  compact first-line headers plus rendered HTML or readback text.
+- 2026-06-19 dev: Wired Base table actions into the headless Office action
+  bridge. `query-table` now supports `count-where`, `select-where`, and
+  `project-column` over compact `table:`/`columns:`/`row:` text tables, while
+  `db-edit` exposes the existing checked `insert`, `update-where`, and
+  `delete-where` helpers and returns updated table text.
+- 2026-06-19 dev: Wired Math render actions into the headless Office action
+  bridge. `render-mathml`, `render-mathml-checked`, and
+  `render-math-structure` now execute the existing Math editor renderer and
+  expose MathML, checked rejection reasons, and compact structure readbacks.
+- 2026-06-19 dev: Wired Counter actions into the headless Office action bridge.
+  `counter-action` accepts `value|counter_increment`,
+  `value|counter_decrement`, or `value|counter_reset`, returns compact value /
+  status / changed readback, and keeps unsupported actions fail-closed.
+- 2026-06-19 dev: Wired SDD inspector actions into the headless Office action
+  bridge. `inspect-sdd-node` and `inspect-sdd-edge` now return compact
+  draw.io-like readback text for node geometry/style/group fields and edge
+  route/path fields, including missing-node/edge rejection reasons.
+- 2026-06-19 dev: Wired Markdown guarded line editing into the headless Office
+  action bridge. `md-edit` accepts `line_no|expected_source|new_source`
+  followed by the Markdown body, returns updated Markdown source, and rejects
+  stale or missing lines with the existing deterministic WYSIWYG diff.
+- 2026-06-19 dev: Wired Calc and Impress checked edits into the headless Office
+  action bridge. `sheet-edit` and `slide-edit` accept
+  `target_id|expected|replacement` followed by compact source bodies, return
+  updated assignments, and reject stale values with existing deterministic
+  diffs.
+- 2026-06-19 dev: Aligned the launcher-visible product surface with the
+  LibreOffice suite name. The launcher now presents Writer, Calc, and Impress
+  labels plus a LibreOffice window/status title while preserving existing
+  `open_word`/`open_sheets`/`open_slides` compatibility actions.
+- 2026-06-19 dev: Pointed the CLI Writer route at the Markdown-backed Writer
+  surface. `word` and the new `writer` alias now load the existing WYSIWYG
+  Markdown model (`source=markdown`, `render=html`), while the older rich-text
+  `WordApp` remains available as a compatibility UI module.
+- 2026-06-19 dev: Added Draw/SDD label editing. `sdn_graph_update_node_label_at`
+  edits the visible node label without changing shape/style/geometry, and
+  `edit-sdd-node-label` exposes it through the headless Office action bridge
+  for draw.io-like node rename workflows.
+- 2026-06-19 dev: Added Draw/SDD connector label editing.
+  `sdn_graph_update_edge_label_at` edits the visible connector label without
+  changing route/waypoint/anchor geometry, and `edit-sdd-edge-label` exposes it
+  through the headless Office action bridge.
+- 2026-06-19 dev: Added Draw/SDD connector style editing.
+  `sdn_graph_update_edge_style_at` edits connector CSS labels without changing
+  label/route geometry, and `edit-sdd-edge-style` exposes it through the
+  headless Office action bridge and IDE Draw sanity probe.
+- 2026-06-19 dev: Added Draw/SDD connector reconnect editing.
+  `sdn_graph_update_edge_endpoints_at` changes connector source/target node ids,
+  and `edit-sdd-edge-endpoints` exposes it with missing-node validation through
+  the headless Office action bridge and IDE Draw sanity probe.
+- 2026-06-19 dev: Added Draw/SDD connector delete editing.
+  `sdn_graph_delete_edge_at` removes one connector by canonical edge index, and
+  `delete-sdd-edge` exposes it through the headless Office action bridge and IDE
+  Draw sanity probe.
+- 2026-06-19 dev: Added Draw/SDD node delete editing.
+  `sdn_graph_delete_node_at` removes one node, prunes attached connectors, and
+  clears child parent references; `delete-sdd-node` exposes it through the
+  headless Office action bridge and IDE Draw sanity probe.
+- 2026-06-19 dev: Added Draw/SDD node geometry editing.
+  `edit-sdd-node-geometry` exposes `node_id|x|y|width|height` through the
+  headless Office action bridge while preserving node label/style/shape/layer,
+  and the IDE Draw sanity probe now reports `geometry=true`.
+- 2026-06-19 dev: Added Draw/SDD node layer editing.
+  `sdn_graph_update_node_layer_at` edits stacking layer metadata without
+  changing label/style/shape/geometry, and `edit-sdd-node-layer` exposes
+  `node_id|layer` through the headless Office action bridge.
+- 2026-06-19 dev: Added Draw/SDD node role editing.
+  `sdn_graph_update_node_role_at` edits semantic role metadata without changing
+  label/style/shape/geometry/layer, and `edit-sdd-node-role` exposes
+  `node_id|role` through the headless Office action bridge.
+- 2026-06-19 dev: Added Draw/SDD connector kind editing.
+  `sdn_graph_update_edge_kind_at` edits connector kind metadata without
+  changing label/style/route/anchors, and `edit-sdd-edge-kind` exposes
+  `edge_index|kind` through the headless Office action bridge.
+- 2026-06-19 dev: Added Draw/SDD connector creation.
+  `sdn_graph_add_edge` appends a connector with endpoint, label, style, kind,
+  route, waypoint, and anchor metadata, and `add-sdd-edge` exposes it through
+  the headless Office action bridge with existing-node validation.
+- 2026-06-19 dev: Added Draw/SDD node creation.
+  `sdn_graph_add_node_checked` appends a node with label, style, role, shape,
+  geometry, layer, and parent metadata while rejecting empty or duplicate ids;
+  `add-sdd-node` exposes it through the headless Office action bridge and IDE
+  Draw sanity probe.
+- 2026-06-19 dev: Added Draw/SDD reusable style-rule editing and rendering.
+  `sdn_graph_set_style_rule_checked` adds or updates canonical css/style table
+  rules, rejects invalid targets and unsafe CSS values, and the HTML renderer
+  resolves known node/edge paint keys into safe inline styles. `edit-sdd-style-rule`
+  exposes the bridge through the headless Office action surface.
+- 2026-06-19 dev: Added Draw/SDD reusable style-rule inspection.
+  `sdn_graph_inspect_style_rule` returns compact target/parent/key/value
+  readback for one style rule, and `inspect-sdd-style-rule` exposes it through
+  the headless Office action surface for LLM/editor workflows.
+- 2026-06-19 dev: Added Draw/SDD reusable style-rule deletion.
+  `sdn_graph_delete_style_rule_checked` removes all matching property rows for
+  one `css|key` pair while preserving the class definition for round-trip node
+  references. `delete-sdd-style-rule` exposes the same canonical-SDD persistence
+  bridge through the headless Office action surface.
+- 2026-06-19 dev: Added Draw/SDD connector duplication.
+  `sdn_graph_duplicate_edge_checked` appends an exact connector copy by index,
+  `duplicate-sdd-edge` exposes it through the headless Office action bridge,
+  and IDE feature checks now report `edge_duplicate=true`.
+- 2026-06-19 dev: Added Draw/SDD node order editing.
+  `sdn_graph_reorder_node_checked` moves a node to front/back document order
+  without changing layer metadata, `order-sdd-node` exposes it through Office,
+  and IDE feature checks now report `order=true`.

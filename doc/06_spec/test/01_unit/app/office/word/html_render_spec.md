@@ -29,7 +29,7 @@ html_render_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -137,15 +137,18 @@ expect(html).to_contain("class=\"paragraph\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = render_writer_markdown_html("---\npage_view: true\nheader: Draft\n---\n\n# Title\n\nBody")
 expect(html).to_start_with("<article class=\"md-paper-layout\"")
+expect(html).to_contain("data-format=\"markdown-paper\"")
+expect(html).to_contain("data-format-name=\"Writer Markdown\"")
+expect(html).to_contain("data-line-count=\"3\"")
 expect(html).to_contain("<header class=\"md-page-header\">Draft</header>")
-expect(html).to_contain("<h1>Title</h1>")
-expect(html).to_contain("<p>Body</p>")
+expect(html).to_contain("<h1 data-source-line=\"1\">Title</h1>")
+expect(html).to_contain("<p data-source-line=\"3\">Body</p>")
 ```
 
 </details>
@@ -161,6 +164,194 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val html = render_writer_markdown_html("# <script>alert(1)</script>")
 expect(html).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
+```
+
+</details>
+
+#### sanitizes unsafe Writer Markdown stylesheet URLs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("---\ncss_file: javascript:alert(1)\n---\n\nBody")
+expect(html).to_contain("<link rel=\"stylesheet\" href=\"#\">")
+expect(html).to_contain("<p data-source-line=\"1\">Body</p>")
+```
+
+</details>
+
+#### renders Writer Markdown tables and images as document HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("| Name | Status |\n| --- | --- |\n| Alpha | Ready |\n\n![Diagram](diagram.png)")
+expect(html).to_contain("<table class=\"md-writer-table\" data-source-line=\"1\">")
+expect(html).to_contain("<th>Name</th>")
+expect(html).to_contain("<td>Ready</td>")
+expect(html).to_contain("<figure class=\"md-writer-image\" data-source-line=\"5\">")
+expect(html).to_contain("<img src=\"diagram.png\" alt=\"Diagram\">")
+```
+
+</details>
+
+#### sanitizes unsafe Writer Markdown image URLs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("![Bad <x>](javascript:alert(1))")
+expect(html).to_contain("<img src=\"#\" alt=\"Bad &lt;x&gt;\">")
+expect(html).to_contain("<figcaption>Bad &lt;x&gt;</figcaption>")
+```
+
+</details>
+
+#### renders Writer Markdown inline links in paper HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("# [Docs](docs.md)\n\nSee [Guide <x>](guide.md?a=1&b=2)\n\nFormula [Calc](calc(sum(1,2)))\n\nNo [Script](javascript:alert(1))")
+expect(html).to_contain("<h1 data-source-line=\"1\"><a href=\"docs.md\">Docs</a></h1>")
+expect(html).to_contain("<p data-source-line=\"3\">See <a href=\"guide.md?a=1&amp;b=2\">Guide &lt;x&gt;</a></p>")
+expect(html).to_contain("<p data-source-line=\"5\">Formula <a href=\"calc(sum(1,2))\">Calc</a></p>")
+expect(html).to_contain("<p data-source-line=\"7\">No <a href=\"#\">Script</a></p>")
+```
+
+</details>
+
+#### renders Writer Markdown bullet lists as document HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("- First **item**\n* Second <safe>")
+expect(html).to_contain("<ul class=\"md-writer-list\" data-source-line=\"1\">")
+expect(html).to_contain("<li>First <strong>item</strong></li>")
+expect(html).to_contain("<li>Second &lt;safe&gt;</li>")
+```
+
+</details>
+
+#### renders Writer Markdown task lists as document HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("- [x] Done **safe**\n- [ ] Open <x>")
+expect(html).to_contain("<ul class=\"md-writer-task-list\" data-source-line=\"1\">")
+expect(html).to_contain("data-task=\"true\" data-checked=\"true\"")
+expect(html).to_contain("<input type=\"checkbox\" disabled checked>")
+expect(html).to_contain("Done <strong>safe</strong>")
+expect(html).to_contain("data-task=\"true\" data-checked=\"false\"")
+expect(html).to_contain("<input type=\"checkbox\" disabled>")
+expect(html).to_contain("Open &lt;x&gt;")
+```
+
+</details>
+
+#### renders Writer Markdown ordered lists as document HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("1. First **item**\n10. Second <safe>")
+expect(html).to_contain("<ol class=\"md-writer-list md-writer-ordered-list\" data-source-line=\"1\">")
+expect(html).to_contain("<li>First <strong>item</strong></li>")
+expect(html).to_contain("<li>Second &lt;safe&gt;</li>")
+```
+
+</details>
+
+#### renders Writer Markdown blockquotes as document HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("> First **quote**\n> Second <safe>")
+expect(html).to_contain("<blockquote class=\"md-writer-quote\" data-source-line=\"1\">")
+expect(html).to_contain("<p>First <strong>quote</strong></p>")
+expect(html).to_contain("<p>Second &lt;safe&gt;</p>")
+```
+
+</details>
+
+#### renders Writer Markdown thematic breaks as document rules
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("Before\n---\nAfter")
+expect(html).to_contain("<p data-source-line=\"1\">Before</p><hr class=\"md-writer-rule\" data-source-line=\"2\"><p data-source-line=\"3\">After</p>")
+```
+
+</details>
+
+#### renders Writer Markdown fenced code as escaped code HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("```python\nprint(\"<x>\")\n```")
+expect(html).to_contain("<pre class=\"md-writer-code\" data-source-line=\"1\" data-language=\"python\"><code>print(&quot;&lt;x&gt;&quot;)</code></pre>")
+```
+
+</details>
+
+#### preserves Markdown table alignment markers in Writer HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("| Name | Score | Note |\n| :--- | ---: | :-: |\n| Alpha | 42 | ok |")
+expect(html).to_contain("<th data-row-index=\"0\" data-column-index=\"0\" data-align=\"left\" style=\"text-align:left\">Name</th>")
+expect(html).to_contain("<th data-row-index=\"0\" data-column-index=\"1\" data-align=\"right\" style=\"text-align:right\">Score</th>")
+expect(html).to_contain("<td data-row-index=\"1\" data-column-index=\"2\" data-align=\"center\" style=\"text-align:center\">ok</td>")
 ```
 
 </details>
@@ -186,8 +377,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -73,15 +73,15 @@ Simple IDE feature check
 mode: tui
 capabilities: 6
 markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
-  check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true css_doc=true escaped=true
+  check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true task_list=true strike=true link=true list=true ordered_list=true quote=true code=true css_doc=true escaped=true metadata=true
   edit-command: md-edit=true stale-reject=true reason=stale-line
 slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
-  check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true
+  check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true element_meta=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
-draw: Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
-  check: draw: sdn_graph nodes=2 edges=1 html=true route=true select=true inspect=true edit=true canvas=true
+draw: SDD Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
+  check: draw: sdn_graph format=sdd name="SDD: Simple Diagram Document" extension=.sdd.sdn nodes=3 edges=2 html=true route=true select=true inspect=true child_meta=true path_meta=true handle_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
-  check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
+  check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true display_recalc=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
   gui: gui-backend: theme=dark size=1200x800 md=true ppt=true sheet=true config=true
 agent-dashboard: Agent Dashboard [dashboard] -> app.editor.mcp_tools (agent, dashboard, mcp)
@@ -89,9 +89,9 @@ agent-dashboard: Agent Dashboard [dashboard] -> app.editor.mcp_tools (agent, das
 db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, simple-db, portal-db)
   check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
-  launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
-  plugin-manifest: plugins: entries=6 roundtrip=6 names=6
-  llm-catalog: apps=9 features=73 actions=32
+  launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
+  plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
+  llm-catalog: apps=9 features=132 actions=61
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -131,12 +131,20 @@ expect(out).to_contain("capabilities: 6")
 step("Confirm every Office plugin capability is visible")
 expect(out).to_contain("markdown: Markdown Preview")
 expect(out).to_contain("slides: Presentation Slides")
-expect(out).to_contain("draw: Diagram Draw")
+expect(out).to_contain("draw: SDD Diagram Draw")
+expect(out).to_contain("node_create=true")
+expect(out).to_contain("style_rule=true")
+expect(out).to_contain("style_delete=true")
+expect(out).to_contain("style_inspect=true")
+expect(out).to_contain("order=true")
+expect(out).to_contain("edge_duplicate=true")
+expect(out).to_contain("node_delete=true")
 expect(out).to_contain("canvas=true")
 expect(out).to_contain("sheets: Spreadsheet")
 expect(out).to_contain("agent-dashboard: Agent Dashboard")
 expect(out).to_contain("db-admin: Database Admin")
 expect(out).to_contain("plugin-manifest: plugins: entries=6")
+expect(out).to_contain("llm-catalog: apps=9 features=132 actions=61")
 
 step("Capture the TUI report so the manual shows the CLI surface")
 expect(_write_tui_capture(out)).to_equal(0)
