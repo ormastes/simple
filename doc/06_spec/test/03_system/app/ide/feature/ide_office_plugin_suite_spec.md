@@ -394,7 +394,7 @@ expect(guide).to_contain("handle_meta=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -405,6 +405,7 @@ expect(guide).to_contain("`data-cursor`")
 expect(guide).to_contain("`data-handle-label`")
 expect(guide).to_contain("`data-anchor-x`/`data-anchor-y`")
 expect(guide).to_contain("`data-opposite-anchor-x`/`data-opposite-anchor-y`")
+expect(guide).to_contain("`data-delta-x`/`data-delta-y`")
 expect(guide).to_contain("stable `data-handle-index`")
 expect(guide).to_contain("`data-node-index`")
 expect(guide).to_contain("Designer has `selected-resize-handles`")
@@ -1084,7 +1085,7 @@ expect(office_ui_design_render_html(distributed_ui.design)).to_contain("data-con
 expect(office_ui_design_render_html_with_selection(distributed_ui.design, "button")).to_contain("data-selected=\"true\"")
 expect(selected_ui_action.ok).to_be(true)
 expect(selected_ui_action.output).to_contain("data-selected-node-id=\"button\"")
-expect(selected_ui_action.output).to_contain("data-resize-handle=\"se\" data-edit-action=\"resize-node\" data-handle-index=\"3\" data-handle-label=\"Resize southeast\" data-anchor-x=\"right\" data-anchor-y=\"bottom\" data-opposite-anchor-x=\"left\" data-opposite-anchor-y=\"top\" data-cursor=\"nwse-resize\" data-node=\"button\" data-node-index=\"0\"")
+expect(selected_ui_action.output).to_contain("data-resize-handle=\"se\" data-edit-action=\"resize-node\" data-handle-index=\"3\" data-handle-label=\"Resize southeast\" data-anchor-x=\"right\" data-anchor-y=\"bottom\" data-opposite-anchor-x=\"left\" data-opposite-anchor-y=\"top\" data-delta-x=\"1\" data-delta-y=\"1\" data-cursor=\"nwse-resize\" data-node=\"button\" data-node-index=\"0\"")
 val inspected_ui = office_ui_design_inspect_node(distributed_ui.design, "button")
 expect(inspected_ui.found).to_be(true)
 expect(inspected_ui.reason).to_equal("selected")

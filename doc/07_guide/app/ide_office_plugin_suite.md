@@ -214,7 +214,8 @@ Selection and inspection are read-only derived views: selected renders add
 visible `data-resize-handle` corner handles tagged with stable
 `data-edit-action="resize-node"`, `data-handle-index`, `data-handle-label`,
 `data-anchor-x`/`data-anchor-y`, `data-opposite-anchor-x`/`data-opposite-anchor-y`,
-`data-cursor`, `data-node`, and `data-node-index`, and `ui-inspect-node` returns a node
+`data-delta-x`/`data-delta-y`, `data-cursor`, `data-node`, and
+`data-node-index`, and `ui-inspect-node` returns a node
 snapshot without mutating the design document. Style-token reads and guarded
 style-token edits expose the node `css` token as a deterministic visual class;
 they do not accept arbitrary CSS blocks. Rendered Designer classes are emitted
