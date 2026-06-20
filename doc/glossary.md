@@ -17,6 +17,12 @@ path for HTML UI design documents. Frame nodes with horizontal or vertical
 layout metadata place child nodes using integer gap/padding and child
 constraints, then expose resolved absolute geometry in HTML and SDD output.
 
+## HTML UI Design Document
+HTML UI Design Document is the named Office Designer format produced by
+`app.office.ui_editor`. It is a pure HTML canvas for Figma-like positioned
+frames/components and exports to SDD-compatible node tables instead of creating
+a separate design-file substrate.
+
 ## Writer Markdown
 Writer Markdown is the Simple Office Writer surface. Markdown is the source
 format and HTML is the render target; the older `WordApp` rich-text module is a
