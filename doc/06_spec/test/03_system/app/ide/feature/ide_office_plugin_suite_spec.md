@@ -531,7 +531,7 @@ expect(writer_bad_evidence.reason).to_equal("context-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1315 lines folded for reproduction.
+Runnable source: 1317 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -990,6 +990,7 @@ val short_sdd_canvas_action = office_action_dispatch("edit-sdd-canvas", "640|480
 val sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60x10;60x40|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val invalid_sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|curve|60x10|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val invalid_sdd_reroute_waypoint_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60xbad|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
+val malformed_sdd_reroute_waypoint_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val invalid_sdd_reroute_anchor_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60x10|side|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val short_sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60x10\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val sdd_add_edge_action = office_action_dispatch("add-sdd-edge", "B|A|return|secondary|reply|simple||left|right\ngraph: Edge Add\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20")
@@ -1397,6 +1398,7 @@ expect(short_sdd_canvas_action.reason).to_equal("invalid-args")
 expect(sdd_reroute_action.output).to_contain("data-route=\"orthogonal\"")
 expect(invalid_sdd_reroute_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_reroute_waypoint_action.reason).to_equal("invalid-args")
+expect(malformed_sdd_reroute_waypoint_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_reroute_anchor_action.reason).to_equal("invalid-args")
 expect(short_sdd_reroute_action.reason).to_equal("invalid-args")
 expect(sdd_add_edge_action.output).to_contain(">return</div>")
