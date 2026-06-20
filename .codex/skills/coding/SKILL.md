@@ -47,9 +47,17 @@ fn add(a: i64, b: i64) -> i64:
     a + b
 ```
 
-### Generics
+### Arrays and Generics
 
-**Use `<>` not `[]`:**
+Array/list shorthand uses brackets:
+
+```simple
+val names: [text] = []
+fn args() -> [text]: ["--help"]
+```
+
+Generic type arguments use `<>`, not `[]`:
+
 ```simple
 Option<T>
 List<Int>
