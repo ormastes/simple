@@ -678,17 +678,20 @@ expect(invalid.reason).to_equal("invalid-args")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = office_action_dispatch("writer-markdown-range", "1|2\n# Title\nFirst\nSecond\nThird")
 val invalid = office_action_dispatch("writer-markdown-range", "9|1\n# Title")
+val extra = office_action_dispatch("writer-markdown-range", "1|2|ignored\n# Title\nFirst\nSecond")
 expect(result.ok).to_be(true)
 expect(result.reason).to_equal("listed")
 expect(result.output).to_equal("1|First\n2|Second")
 expect(invalid.ok).to_be(false)
 expect(invalid.reason).to_equal("invalid-args")
+expect(extra.ok).to_be(false)
+expect(extra.reason).to_equal("invalid-args")
 ```
 
 </details>
