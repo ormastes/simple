@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 28 | 28 | 0 | 0 |
+| 29 | 29 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -261,6 +261,23 @@ Reproduction: this block contains the complete executable scenario source.
 val graph = sdn_graph_parse("graph: escaped\ncss_file: \"//evil.example/diagram.css\"\nA: A")
 val html = sdn_graph_render_html(graph)
 expect(html).to_contain("data-css-file=\"#\"")
+```
+
+</details>
+
+#### sanitizes legacy script and local file SDD css_file URLs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val legacy = sdn_graph_render_html(sdn_graph_parse("graph: escaped\ncss_file: \"vbscript:msgbox(1)\"\nA: A"))
+val local = sdn_graph_render_html(sdn_graph_parse("graph: escaped\ncss_file: \"file:///etc/passwd\"\nA: A"))
+expect(legacy).to_contain("data-css-file=\"#\"")
+expect(local).to_contain("data-css-file=\"#\"")
 ```
 
 </details>
@@ -799,8 +816,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 28 |
-| Active scenarios | 28 |
+| Total scenarios | 29 |
+| Active scenarios | 29 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
