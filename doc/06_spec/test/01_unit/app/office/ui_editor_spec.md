@@ -132,7 +132,7 @@ expect(design.nodes[1].component).to_equal("action")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -161,6 +161,8 @@ expect(unsafe.nodes[0].component).to_equal("")
 expect(unsafe.nodes[0].parent).to_equal("")
 val bad_gap = office_ui_design_parse("design: Gap\nnode frame|Frame|frame|0|0|100|40|panel|1|container||horizontal|-1|0,0,0,0|left|top")
 expect(bad_gap.nodes[0].layout_gap).to_equal("0")
+val bad_padding = office_ui_design_parse("design: Padding\nnode frame|Frame|frame|0|0|100|40|panel|1|container||horizontal|0|0,-1,0,0|left|top")
+expect(bad_padding.nodes[0].layout_padding).to_equal("0,0,0,0")
 ```
 
 </details>
@@ -728,7 +730,7 @@ expect(stacked.nodes[2].width).to_equal("100")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -761,6 +763,10 @@ val negative_spacing = office_ui_design_update_auto_layout_checked(parented.desi
 expect(negative_spacing.accepted).to_be(false)
 expect(negative_spacing.reason).to_equal("invalid-layout")
 expect(negative_spacing.design.nodes[0].layout_padding).to_equal("0,0,0,0")
+val negative_gap = office_ui_design_update_auto_layout_checked(parented.design, "frame", "off", "0", "0,0,0,0", "horizontal", "-1", "8,8,8,8")
+expect(negative_gap.accepted).to_be(false)
+expect(negative_gap.reason).to_equal("invalid-layout")
+expect(negative_gap.design.nodes[0].layout_gap).to_equal("0")
 val invalid = office_ui_design_update_constraint_checked(layout.design, "child", "left", "top", "diagonal", "top")
 expect(invalid.accepted).to_be(false)
 expect(invalid.reason).to_equal("invalid-layout")
