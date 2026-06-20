@@ -189,6 +189,7 @@ Blank or malformed SDD geometry node ids are rejected as `invalid-args`.
 `sdd-node-parent-read` uses `node_id` and returns the selected node parent id.
 `sdd-node-shape-read` uses `node_id` and returns the selected node shape token.
 `sdd-node-layer-read` uses `node_id` and returns the selected node layer token.
+`sdd-node-order-read` uses `node_id` and returns the selected node order index.
 `sdd-node-role-read` uses `node_id` and returns the selected node role token.
 `delete-sdd-node` uses `node_id`, rejects blank or malformed IDs, and removes attached connectors.
 `edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`; every field is required, numeric fields must be non-negative integers, snap is `true` or `false`, and background must be a safe CSS value.
@@ -379,7 +380,7 @@ modes:
   `duplicate-sdd-edge`, `edit-sdd-edge-label`, `sdd-edge-label-read`, `edit-sdd-edge-label-point`, `sdd-edge-label-point-read`, `edit-sdd-edge-style`, `sdd-edge-style-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`, `sdd-edge-route-read`, `sdd-edge-path-read`, `sdd-edge-segments-read`, `sdd-edge-endpoints-read`, `edit-sdd-edge-endpoints`,
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`, `sdd-node-geometry-read`,
   `edit-sdd-node-label`, `sdd-node-label-read`, `edit-sdd-node-parent`, `sdd-node-parent-read`, `edit-sdd-node-shape`, `sdd-node-shape-read`,
-  `edit-sdd-node-style`, `sdd-node-style-read`, `edit-sdd-node-layer`, `sdd-node-layer-read`, `order-sdd-node`, `edit-sdd-node-role`, `sdd-node-role-read`,
+  `edit-sdd-node-style`, `sdd-node-style-read`, `edit-sdd-node-layer`, `sdd-node-layer-read`, `order-sdd-node`, `sdd-node-order-read`, `edit-sdd-node-role`, `sdd-node-role-read`,
   `duplicate-sdd-node`, `edit-sdd-canvas`, `sdd-canvas-read`, `sdd-selection-geometry`, `sdd-list-layers`, `align-sdd-selection`,
   `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;
   Calc has `formula-evaluate-read`, `formula-counta`,
