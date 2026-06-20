@@ -92,10 +92,12 @@ Display policy: `embed_tui`
 ```text
 Simple IDE feature check
 mode: tui
-capabilities: 7
+capabilities: 8
 markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
   check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true task_list=true strike=true link=true list=true ordered_list=true quote=true code=true css_doc=true escaped=true metadata=true
   edit-command: md-edit=true stale-reject=true reason=stale-line
+writer: Markdown Writer [office-app] -> app.office.word.html_render (writer, md, markdown, html)
+  check: writer: app.office.word.html_render markdown=true html=true paper=true escaped=true
 slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true element_meta=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
@@ -113,7 +115,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
-  plugin-manifest: plugins: entries=7 roundtrip=7 names=7 kinds=4 libre=6 libre_roundtrip=6
+  plugin-manifest: plugins: entries=8 roundtrip=8 names=8 kinds=4 libre=6 libre_roundtrip=6
   llm-catalog: apps=11 features=206 actions=128
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
@@ -172,7 +174,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -184,6 +186,8 @@ for cap in ide_capabilities():
 expect(tui_report).to_contain("mode: tui")
 expect(gui_report).to_contain("mode: gui")
 expect(tui_report).to_contain("Presentation Slides")
+expect(tui_report).to_contain("writer: Markdown Writer")
+expect(tui_report).to_contain("writer: app.office.word.html_render markdown=true html=true paper=true escaped=true")
 expect(tui_report).to_contain("draw: SDD Diagram Draw")
 expect(tui_report).to_contain("designer: UI Designer")
 expect(tui_report).to_contain("designer: app.office.ui_editor html=true sdd=true selection=true resize_handle_metadata=true")
@@ -213,6 +217,7 @@ expect(tui_report).to_contain("libre=6")
 expect(tui_report).to_contain("libre_roundtrip=6")
 expect(tui_report).to_contain("resize_handle_metadata=true")
 expect(registry_checks).to_contain("metadata=true")
+expect(registry_checks).to_contain("writer:")
 expect(registry_checks).to_contain("ppt_html=true")
 expect(registry_checks).to_contain("path_meta=true")
 expect(registry_checks).to_contain("handle_meta=true")
@@ -227,30 +232,32 @@ expect(registry_checks).to_contain("contracts=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val lines = ide_feature_check_report("tui")
-expect(lines.len()).to_equal(26)
+expect(lines.len()).to_equal(28)
 expect(lines[0]).to_equal("Simple IDE feature check")
 expect(lines[1]).to_equal("mode: tui")
-expect(lines[2]).to_equal("capabilities: 7")
+expect(lines[2]).to_equal("capabilities: 8")
 expect(lines[3]).to_start_with("markdown:")
 expect(lines[5]).to_start_with("  edit-command:")
-expect(lines[6]).to_start_with("slides:")
-expect(lines[8]).to_start_with("  edit-command:")
-expect(lines[9]).to_start_with("draw:")
-expect(lines[10]).to_start_with("  check:")
-expect(lines[11]).to_start_with("designer:")
+expect(lines[6]).to_start_with("writer:")
+expect(lines[7]).to_start_with("  check:")
+expect(lines[8]).to_start_with("slides:")
+expect(lines[10]).to_start_with("  edit-command:")
+expect(lines[11]).to_start_with("draw:")
 expect(lines[12]).to_start_with("  check:")
-expect(lines[13]).to_start_with("sheets:")
-expect(lines[15]).to_start_with("  edit-command:")
-expect(lines[17]).to_start_with("agent-dashboard:")
-expect(lines[19]).to_start_with("db-admin:")
-expect(lines[23]).to_start_with("  plugin-manifest:")
-expect(lines[24]).to_start_with("  llm-catalog:")
-expect(lines[25]).to_start_with("  llm-apps:")
+expect(lines[13]).to_start_with("designer:")
+expect(lines[14]).to_start_with("  check:")
+expect(lines[15]).to_start_with("sheets:")
+expect(lines[17]).to_start_with("  edit-command:")
+expect(lines[19]).to_start_with("agent-dashboard:")
+expect(lines[21]).to_start_with("db-admin:")
+expect(lines[25]).to_start_with("  plugin-manifest:")
+expect(lines[26]).to_start_with("  llm-catalog:")
+expect(lines[27]).to_start_with("  llm-apps:")
 ```
 
 </details>
@@ -260,7 +267,7 @@ expect(lines[25]).to_start_with("  llm-apps:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -268,6 +275,7 @@ val lines = ide_feature_check_report("tui")
 val capture = lines.join("\n")
 expect(_max_line_width(lines)).to_be_less_than(121)
 expect(capture).to_contain("markdown: Markdown Preview")
+expect(capture).to_contain("writer: Markdown Writer")
 expect(capture).to_contain("slides: Presentation Slides")
 expect(capture).to_contain("draw: SDD Diagram Draw")
 expect(capture).to_contain("sheets: Spreadsheet")
@@ -2051,24 +2059,28 @@ expect(summary).to_contain("ppt=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = ide_plugin_manifest_probe()
 val summary = ide_plugin_manifest_summary()
-expect(probe.entry_count).to_equal(6)
-expect(probe.roundtrip_count).to_equal(6)
+expect(probe.entry_count).to_equal(8)
+expect(probe.roundtrip_count).to_equal(8)
 expect(probe.libreoffice_entry_count).to_equal(6)
 expect(probe.libreoffice_roundtrip_count).to_equal(6)
 expect(probe.names.join(",")).to_contain("ide.slides")
+expect(probe.names.join(",")).to_contain("ide.writer")
 expect(probe.names.join(",")).to_contain("ide.draw")
+expect(probe.names.join(",")).to_contain("ide.designer")
 expect(probe.names.join(",")).to_contain("ide.sheets")
 expect(probe.manifest_text).to_contain("builtin:app.office.slides")
+expect(probe.manifest_text).to_contain("builtin:app.office.word.html_render")
 expect(probe.manifest_text).to_contain("builtin:std.editor.services.sdn_graph")
+expect(probe.manifest_text).to_contain("builtin:app.office.ui_editor")
 expect(probe.manifest_text).to_contain("ide_capability_draw")
 expect(probe.manifest_text).to_contain("ide_feature_check_draw")
-expect(summary).to_contain("roundtrip=6")
+expect(summary).to_contain("roundtrip=8")
 expect(summary).to_contain("kinds=4")
 expect(summary).to_contain("libre=6")
 expect(summary).to_contain("libre_roundtrip=6")
