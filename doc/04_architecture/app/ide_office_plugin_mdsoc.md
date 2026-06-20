@@ -61,7 +61,8 @@ existing pure metadata/action surface, not a new framework:
    boundaries instead of being copied into every app.
 7. `office_catalog_dispatch_probe()` must exercise catalog actions through
    `OfficePluginContext`, so catalog component, source-format, and evidence
-   drift is caught by the dispatcher gate.
+   drift is caught by the dispatcher gate. The probe treats `unknown-action`,
+   `context-mismatch`, and `source-format-mismatch` as missing catalog actions.
 
 ## Layer List
 

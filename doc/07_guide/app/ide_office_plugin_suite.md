@@ -438,7 +438,9 @@ modes:
   guide.
 - `office_catalog_dispatch_probe()` dispatches each advertised catalog action
   with `OfficePluginContext`, so wrong component, source-format, or evidence
-  metadata is rejected instead of counted as valid.
+  metadata is rejected instead of counted as valid. `unknown-action`,
+  `context-mismatch`, and `source-format-mismatch` all count as missing catalog
+  actions.
 
 ## Verification
 
