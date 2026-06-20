@@ -18,6 +18,8 @@ sheets, dashboard, DB admin, and LibreOffice-like app catalog checks through
 - Game data bridge: `src/app/office/game_bridge.spl`
 - SDD diagram substrate: `src/lib/editor/services/sdn_graph.spl`
 - LLM-readable catalog: `src/app/office/llm_catalog.spl`
+- Plugin/MDSOC architecture:
+  `doc/04_architecture/app/ide_office_plugin_mdsoc.md`
 - IDE system spec:
   `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl`
 
@@ -51,6 +53,12 @@ older rich-text `WordApp` remains only as a compatibility UI module.
 - Designer: HTML UI design editor; aliases `designer`, `ui`, `html-ui`, `figma`.
 - SDD: Simple Diagram Document, the Office Draw file model stored as SDN text.
 - SDN: Simple Data Notation, the table-oriented substrate used by SDD and Simple docs.
+- Plugin descriptor: pure Office contribution metadata owned by
+  `src/app/office/plugins.spl`.
+- DI context: explicit service/context records passed into Office actions when
+  shared services are needed; no service locator.
+- AOP wrapper: cross-cutting validation, stale rejection, telemetry, or evidence
+  code around dispatch/reporting rather than inside every app.
 
 Markdown GUI rendering must use `wysiwyg_preview_document_html`, not a bare
 preview pane. The document helper owns the stable `.wysiwyg-preview` CSS wrapper
