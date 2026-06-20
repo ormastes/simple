@@ -1,0 +1,169 @@
+# svllm NvfsClient transport (Round 6) — system-level end-to-end spec
+#
+# Proves the complete transport pipeline: build a TensorPack from TensorInfos,
+# serialize it to a manifest, build an in-memory image via MemNvfsClient,
+# then load it back via the streaming loader. Exercises all error paths.
+#
+# Fixture strategy: 2–3 small tensors (align=1, bytes 8/12) packed greedily
+# into chunks. Manifest is serialized to SDN text. Chunk bytes are pre-filled
+# with a known pattern. MemNvfsClient holds manifest + chunks in memory.
+# Loading via mem_nvfs_image + load_model_from_pack_via validates the
+# transport loop (fetch manifest, parse, fetch chunks, stream-stage).
+
+use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack, TensorInfo, plan_chunks}
+use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
+use std.gc_async_mut.svllm.model_executor.model_loader.manifest.{serialize_manifest}
+use std.gc_async_mut.svllm.model_executor.model_loader.transport.{mem_nvfs_image, load_model_from_pack_via, MemNvfsClient}
+use std.gc_async_mut.svllm.model_executor.model_loader.loader.{LoadResult, LoaderError}
+
+# Helper: fill a byte buffer with a repeating pattern (byte byte_val repeated).
+fn fill_pattern(len: i64, byte_val: u8) -> [u8]:
+    var buf: [u8] = []
+    var i = 0
+    while i < len:
+        buf.push(byte_val)
+        i = i + 1
+    buf
+
+# Helper: verify a condition; fail the test if false.
+fn verify(cond: bool) -> bool:
+    expect(cond).to_equal(true)
+
+describe "svllm NvfsClient transport — end-to-end streaming":
+    it "happy path: pack, serialize, image, load with granule=4":
+        # Build 2 tensors: t1 (8 bytes, F32), t2 (12 bytes, F32).
+        var ts: [TensorInfo] = []
+        ts.push(TensorInfo(name: "t1", shape: [2], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 8))
+        ts.push(TensorInfo(name: "t2", shape: [3], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 12))
+
+        # Plan chunks with align=1, large preferred size -> single chunk.
+        val pack = plan_chunks(ts, 1, 100000)
+        verify(pack.chunks.len() >= 1)
+
+        # Compute total bytes in all chunks.
+        var total: i64 = 0
+        var ci = 0
+        while ci < pack.chunks.len():
+            total = total + pack.chunks[ci].byte_len
+            ci = ci + 1
+
+        # Serialize manifest to SDN text.
+        val manifest_text = serialize_manifest(pack)
+        verify(manifest_text.len() > 10)
+
+        # Build chunk byte buffers: one per chunk, filled with pattern 0xAB.
+        var chunk_paths: [text] = []
+        var chunk_bytes: [[u8]] = []
+        var i = 0
+        while i < pack.chunks.len():
+            chunk_paths.push(pack.chunks[i].relative_path)
+            chunk_bytes.push(fill_pattern(pack.chunks[i].byte_len, 0xAB as u8))
+            i = i + 1
+
+        # Build in-memory NvfsClient image.
+        val client = mem_nvfs_image("/models/test1", manifest_text, chunk_paths, chunk_bytes)
+
+        # Load with granule=4.
+        val result_r = load_model_from_pack_via(client, "/models/test1", 4)
+        verify(result_r.is_ok())
+
+        val lr = result_r.unwrap()
+        verify(lr.staged_tensor_count == pack.tensors.len())
+        verify(lr.bytes_streamed == total)
+        verify(lr.op_count >= pack.chunks.len())
+        verify(lr.pack.tensors.len() == pack.tensors.len())
+
+    it "happy path: granule=0 (one op per chunk)":
+        var ts: [TensorInfo] = []
+        ts.push(TensorInfo(name: "w", shape: [4], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 16))
+
+        val pack = plan_chunks(ts, 1, 100000)
+        val manifest_text = serialize_manifest(pack)
+
+        var chunk_paths: [text] = []
+        var chunk_bytes: [[u8]] = []
+        var i = 0
+        while i < pack.chunks.len():
+            chunk_paths.push(pack.chunks[i].relative_path)
+            chunk_bytes.push(fill_pattern(pack.chunks[i].byte_len, 0xCD as u8))
+            i = i + 1
+
+        val client = mem_nvfs_image("/models/test2", manifest_text, chunk_paths, chunk_bytes)
+        val result_r = load_model_from_pack_via(client, "/models/test2", 0)
+        verify(result_r.is_ok())
+
+        val lr = result_r.unwrap()
+        # granule=0 -> one op per chunk (simplest case).
+        verify(lr.op_count == pack.chunks.len())
+
+    it "error: wrong pack root returns PackRootNotFound":
+        var ts: [TensorInfo] = []
+        ts.push(TensorInfo(name: "x", shape: [2], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 8))
+
+        val pack = plan_chunks(ts, 1, 100000)
+        val manifest_text = serialize_manifest(pack)
+
+        var chunk_paths: [text] = []
+        var chunk_bytes: [[u8]] = []
+        var i = 0
+        while i < pack.chunks.len():
+            chunk_paths.push(pack.chunks[i].relative_path)
+            chunk_bytes.push(fill_pattern(pack.chunks[i].byte_len, 0xEE as u8))
+            i = i + 1
+
+        # Image stored at /models/m1, but load from /wrong/root.
+        val client = mem_nvfs_image("/models/m1", manifest_text, chunk_paths, chunk_bytes)
+        val result_r = load_model_from_pack_via(client, "/wrong/root", 4)
+        verify(result_r.is_err())
+
+        match result_r:
+            Ok(_) => verify(false)
+            Err(e) =>
+                match e:
+                    LoaderError.PackRootNotFound => verify(true)
+                    _ => verify(false)
+
+    it "error: missing chunks returns ChunkOpenFailed":
+        var ts: [TensorInfo] = []
+        ts.push(TensorInfo(name: "y", shape: [3], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 12))
+
+        val pack = plan_chunks(ts, 1, 100000)
+        val manifest_text = serialize_manifest(pack)
+
+        # Build manifest but NO chunk objects (empty chunk_paths / chunk_bytes).
+        val client = mem_nvfs_image("/models/m2", manifest_text, [], [])
+        val result_r = load_model_from_pack_via(client, "/models/m2", 4)
+        verify(result_r.is_err())
+
+        match result_r:
+            Ok(_) => verify(false)
+            Err(e) =>
+                match e:
+                    LoaderError.ChunkOpenFailed => verify(true)
+                    _ => verify(false)
+
+    it "error: malformed manifest returns ManifestInvalid":
+        var ts: [TensorInfo] = []
+        ts.push(TensorInfo(name: "z", shape: [2], dtype: Dtype.F32, chunk_id: 0, offset_in_chunk: 0, byte_len: 8))
+
+        val pack = plan_chunks(ts, 1, 100000)
+
+        var chunk_paths: [text] = []
+        var chunk_bytes: [[u8]] = []
+        var i = 0
+        while i < pack.chunks.len():
+            chunk_paths.push(pack.chunks[i].relative_path)
+            chunk_bytes.push(fill_pattern(pack.chunks[i].byte_len, 0xFF as u8))
+            i = i + 1
+
+        # Pass garbage as manifest instead of valid SDN.
+        val client = mem_nvfs_image("/models/m3", "garbage text not valid sdn", chunk_paths, chunk_bytes)
+        val result_r = load_model_from_pack_via(client, "/models/m3", 4)
+        verify(result_r.is_err())
+
+        match result_r:
+            Ok(_) => verify(false)
+            Err(e) =>
+                match e:
+                    LoaderError.ManifestInvalid => verify(true)
+                    _ => verify(false)

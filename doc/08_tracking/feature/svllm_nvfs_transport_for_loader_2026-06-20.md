@@ -1,7 +1,8 @@
 # svllm NvfsClient transport for load_model_from_pack
 
 **Filed:** 2026-06-20
-**Status:** open
+**Updated:** 2026-06-20 (in-memory transport landed)
+**Status:** partial — in-memory adapter done; read-capable std.fs/native adapter pending
 **Priority:** P2
 
 ## Summary
@@ -39,5 +40,13 @@ stays portable (see `model_loader/__init__.spl` header).
 
 ## Status
 
-Open. Streaming logic complete (`streamer.spl`, `loader.spl`); transport awaits
-a concrete `NvfsClient` adapter.
+Partial. Streaming logic complete (`streamer.spl`, `loader.spl`). The **in-memory
+transport** is now implemented (`transport.spl`): `MemNvfsClient` +
+`load_model_from_pack_via` fetch the manifest text + chunk bytes off an in-memory
+image and drive the streaming loader end to end (Option 1, in-memory variant).
+
+Remaining: a **read-capable std.fs / native adapter**. The std.fs bring-up
+adapter's `read_range` returns `Unsupported`, and the real `NvfsClient` contract
+reads ranges into registered `BufHandle` buffers — a *different* entry shape than
+`MemNvfsClient`'s `read_text`/`read_bytes`, so it needs its own transport entry
+(not a drop-in). That adapter + entry is the open work.
