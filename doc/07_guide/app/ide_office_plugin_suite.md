@@ -89,7 +89,7 @@ Headless Office actions are exposed through
 non-GUI bridge for cataloged render/export actions:
 `render-markdown-preview-html`, `render-writer-markdown-html`,
 `writer-markdown-summary`, `writer-markdown-stats`, `writer-markdown-search`,
-`writer-markdown-replace`, `writer-markdown-outline`,
+`writer-markdown-replace`, `writer-markdown-insert`, `writer-markdown-outline`,
 `render-ppt-markdown-html`, `ppt-markdown-outline`, `render-ui-html`,
 `render-ui-html-with-selection`, `export-ui-sdd`, and
 `sdd-document-summary`, `render-sdd-html-with-selection` /
@@ -349,9 +349,9 @@ modes:
 - LLM catalog: Markdown has `render-markdown-preview-html` and `md-edit`; Writer has
   `render-writer-markdown-html`, `writer-markdown-summary`,
   `writer-markdown-stats`, `writer-markdown-search`,
-  `writer-markdown-replace`, and
+  `writer-markdown-replace`, `writer-markdown-insert`, and
   `writer-markdown-outline` plus Markdown paper
-  features for document statistics, source search, source replace, document outline,
+  features for document statistics, source search, source replace, source insert, document outline,
   task lists, tables/table alignment, images, inline links,
   fenced code, blockquotes, thematic breaks, and URL sanitizing; Impress has
   `render-ppt-markdown-html` and `ppt-markdown-outline` plus PPT HTML,
