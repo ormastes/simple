@@ -113,8 +113,8 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
   designer: resize_handle_metadata=true
-  llm-catalog: apps=10 features=153 actions=78
-  llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Planner,Counter
+  llm-catalog: apps=11 features=158 actions=79
+  llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
 
 </details>
@@ -201,9 +201,9 @@ expect(tui_report).to_contain("edit-command: sheet-edit=true stale-reject=true")
 expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
-expect(tui_report).to_contain("llm-catalog: apps=10")
-expect(tui_report).to_contain("features=153")
-expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Planner,Counter")
+expect(tui_report).to_contain("llm-catalog: apps=11")
+expect(tui_report).to_contain("features=158")
+expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(tui_report).to_contain("office_actions=9")
 expect(tui_report).to_contain("office_cards=9")
 expect(tui_report).to_contain("libre=6")
@@ -425,7 +425,8 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
    - Expected: row_count(deleted_base.table) equals `0`
    - Expected: math_bad_action.reason equals `syntax-error`
    - Expected: math_to_mathml_checked("a +").reason equals `syntax-error`
-   - Expected: catalog[8].owner_module equals `app.office.planner.planner_app`
+   - Expected: catalog[8].owner_module equals `app.office.mail.mail_app`
+   - Expected: catalog[9].owner_module equals `app.office.planner.planner_app`
    - Expected: counter_inc_action.reason equals `incremented`
    - Expected: counter_bad_action.reason equals `unsupported`
    - Expected: counter_blank_action.reason equals `invalid-args`
@@ -435,19 +436,19 @@ expect(guide).to_contain("Designer has `selected-resize-handles`")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 890 lines folded for reproduction.
+Runnable source: 897 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
-expect(catalog.len()).to_equal(10)
-expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Planner,Counter")
+expect(catalog.len()).to_equal(11)
+expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=10 features=153 actions=78")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=11 features=158 actions=79")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(78)
-expect(dispatch_probe.recognized_count).to_equal(78)
+expect(dispatch_probe.advertised_count).to_equal(79)
+expect(dispatch_probe.recognized_count).to_equal(79)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -1307,14 +1308,21 @@ expect(math_to_mathml_checked("a +").reason).to_equal("syntax-error")
 expect(math_fraction("x + 1", "y")).to_contain("<mrow><mi>x</mi><mo>+</mo><mn>1</mn></mrow>")
 expect(math_subscript("x", "i")).to_contain("<msub><mi>x</mi><mi>i</mi></msub>")
 expect(math_fenced("(", "x + y", ")")).to_contain("<mo>(</mo><mi>x</mi><mo>+</mo><mi>y</mi><mo>)</mo>")
-expect(catalog[8].owner_module).to_equal("app.office.planner.planner_app")
-expect(catalog[8].features.join(",")).to_contain("task-count-summary")
-expect(catalog[8].actions.join(",")).to_contain("planner-summary")
+expect(catalog[8].owner_module).to_equal("app.office.mail.mail_app")
+expect(catalog[8].features.join(",")).to_contain("unread-count")
+expect(catalog[8].actions.join(",")).to_contain("mail-summary")
+val mail_summary_action = office_action_dispatch("mail-summary", "")
+expect(mail_summary_action.output).to_contain("folder=Inbox")
+expect(mail_summary_action.output).to_contain("emails=5")
+expect(mail_summary_action.output).to_contain("unread=2")
+expect(catalog[9].owner_module).to_equal("app.office.planner.planner_app")
+expect(catalog[9].features.join(",")).to_contain("task-count-summary")
+expect(catalog[9].actions.join(",")).to_contain("planner-summary")
 val planner_summary_action = office_action_dispatch("planner-summary", "")
 expect(planner_summary_action.output).to_contain("project=My Project")
 expect(planner_summary_action.output).to_contain("view=kanban")
 expect(planner_summary_action.output).to_contain("tasks=0")
-expect(catalog[9].actions.join(",")).to_contain("counter-action")
+expect(catalog[10].actions.join(",")).to_contain("counter-action")
 val counter_inc_action = office_action_dispatch("counter-action", "41|counter_increment")
 val counter_dec_action = office_action_dispatch("counter-action", "41|counter_decrement")
 val counter_reset_action = office_action_dispatch("counter-action", "5|counter_reset")
