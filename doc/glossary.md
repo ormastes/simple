@@ -655,13 +655,16 @@ canonical diagram substrate for Office Draw work, not a relationship-only graph
 format. It keeps compact graph syntax and adds diagram-editor
 metadata: root node/edge counts, node shape, x/y position, width/height, layer,
 document/render order, parent/container membership for draw.io-like groups,
-canvas/page metadata, connector route, waypoints, start/end anchors, label
-points, rendered endpoint/waypoint/label handles, node duplication with offset
-geometry, guarded multi-node layout, and safe stylesheet resource metadata.
-coordinates, selected connector handle edit actions, stable handle indexes,
-endpoint/opposite-node ids, connector segment counts/endpoints/midpoints/orientations, connector label points, draw canvas/page metadata,
-rendered SVG connector paths, reusable CSS labels, connector duplication, style-rule delete/inspection, and resolved style-table paint
-rules, direct node create/label/shape/style/layer/role/parent/geometry/canvas/delete and connector
+canvas/page metadata, connector route, waypoints, start/end anchors, optional
+label-point overrides, rendered endpoint/waypoint/label handles, node
+duplication with offset geometry, guarded multi-node layout, and safe
+stylesheet resource metadata. The selected connector handle edit actions expose
+stable handle indexes, endpoint/opposite-node ids, connector segment
+counts/endpoints/midpoints/orientations, connector label points that can be
+cleared back to rendered path midpoints, draw canvas/page metadata, rendered
+SVG connector paths, reusable CSS labels, connector duplication, style-rule
+delete/inspection, and resolved style-table paint rules, direct node
+create/label/shape/style/layer/role/parent/geometry/canvas/delete and connector
 create/label/style/kind/reconnect/delete edit operations, transient
 selection rendering, pure node/connector inspector snapshots, guarded multi-node
 align/distribute operations, and weave-based batch style or layout edits.
