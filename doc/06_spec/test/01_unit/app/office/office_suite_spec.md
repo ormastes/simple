@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 125 | 125 | 0 | 0 |
+| 126 | 126 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -643,6 +643,26 @@ expect(invalid.reason).to_equal("invalid-args")
 
 </details>
 
+#### reads Writer Markdown source ranges with line numbers
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("writer-markdown-range", "1|2\n# Title\nFirst\nSecond\nThird")
+val invalid = office_action_dispatch("writer-markdown-range", "9|1\n# Title")
+expect(result.ok).to_be(true)
+expect(result.reason).to_equal("listed")
+expect(result.output).to_equal("1|First\n2|Second")
+expect(invalid.ok).to_be(false)
+expect(invalid.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### replaces Writer Markdown source text
 
 <details>
@@ -1103,8 +1123,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_catalog_dispatch_probe()
-expect(probe.advertised_count).to_equal(94)
-expect(probe.recognized_count).to_equal(94)
+expect(probe.advertised_count).to_equal(95)
+expect(probe.recognized_count).to_equal(95)
 expect(probe.missing_actions.len()).to_equal(0)
 ```
 
@@ -2377,8 +2397,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 125 |
-| Active scenarios | 125 |
+| Total scenarios | 126 |
+| Active scenarios | 126 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

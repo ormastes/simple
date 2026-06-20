@@ -12,7 +12,7 @@
 - Writer and Impress rows advertise Markdown-source actions:
   `render-writer-markdown-html`, `writer-markdown-summary`,
   `writer-markdown-stats`, `writer-markdown-search`,
-  `writer-markdown-replace`, `writer-markdown-insert`,
+  `writer-markdown-range`, `writer-markdown-replace`, `writer-markdown-insert`,
   `writer-markdown-delete`, `writer-markdown-outline`,
   `render-ppt-markdown-html`, and
   `ppt-markdown-outline`.

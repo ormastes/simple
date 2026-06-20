@@ -118,7 +118,7 @@ expect(err).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -133,6 +133,7 @@ expect(manifest).to_contain("render-writer-markdown-html")
 expect(manifest).to_contain("writer-markdown-summary")
 expect(manifest).to_contain("writer-markdown-stats")
 expect(manifest).to_contain("writer-markdown-search")
+expect(manifest).to_contain("writer-markdown-range")
 expect(manifest).to_contain("writer-markdown-replace")
 expect(manifest).to_contain("writer-markdown-insert")
 expect(manifest).to_contain("writer-markdown-delete")
