@@ -112,7 +112,7 @@ expect(invalid.design.name).to_equal("Login")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -123,6 +123,11 @@ expect(design.height).to_equal("480")
 expect(design.nodes.len()).to_equal(2)
 expect(design.nodes[0].kind).to_equal("frame")
 expect(design.nodes[1].component).to_equal("action")
+val escaped = office_ui_design_parse("design: Demo\nnode submit|Sign\\|in|button|72|200|120|36|primary|controls|action")
+expect(escaped.nodes[0].label).to_equal("Sign|in")
+expect(escaped.nodes[0].kind).to_equal("button")
+expect(escaped.nodes[0].x).to_equal("72")
+expect(escaped.nodes[0].y).to_equal("200")
 ```
 
 </details>

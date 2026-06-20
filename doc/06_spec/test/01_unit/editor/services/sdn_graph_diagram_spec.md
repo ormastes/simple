@@ -459,7 +459,7 @@ expect(graph.nodes[1].css).to_equal("target")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -470,8 +470,10 @@ expect(selected).to_contain("data-selected-edge-index=\"0\"")
 expect(selected).to_contain("class=\"sdd-connector-path sdn-css-primary sdd-selected\"")
 expect(selected).to_contain("data-edge-index=\"0\" data-selected=\"true\" aria-selected=\"true\"")
 expect(selected).to_contain("class=\"sdn-graph-edge sdd-connector sdn-css-primary sdd-selected\"")
-expect(invalid).to_contain("data-selected-edge-index=\"99\"")
+expect(invalid).to_contain("data-selected-edge-index=\"-1\"")
 expect(invalid).to_contain("data-edge-index=\"0\" data-selected=\"false\" aria-selected=\"false\"")
+val invalid_node = sdn_graph_render_html_with_selection(graph, "Missing", -1)
+expect(invalid_node).to_contain("data-selected-node-id=\"\"")
 ```
 
 </details>
