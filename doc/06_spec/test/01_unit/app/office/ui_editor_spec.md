@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,6 +82,27 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(office_ui_editor_format_name()).to_equal("HTML UI Design Document")
+```
+
+</details>
+
+#### guards design name updates with non-empty names
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = office_ui_design_parse("design: Login\nsize: 800x480")
+val renamed = office_ui_design_update_name_checked(design, "Login", "Sign In")
+expect(renamed.accepted).to_be(true)
+expect(renamed.design.name).to_equal("Sign In")
+val invalid = office_ui_design_update_name_checked(design, "Login", " ")
+expect(invalid.accepted).to_be(false)
+expect(invalid.reason).to_equal("invalid-name")
+expect(invalid.design.name).to_equal("Login")
 ```
 
 </details>
@@ -727,8 +748,8 @@ expect(cycle.reason).to_equal("cycle-parent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
