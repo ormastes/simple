@@ -182,6 +182,7 @@ Blank or malformed SDD order node ids are rejected as `invalid-args`.
 `delete-sdd-style-rule` uses `css|key`, rejects malformed css/key tokens as `invalid-args`, and returns canonical SDD text with that reusable rule removed.
 `inspect-sdd-style-rule` uses `css|key`, rejects malformed css/key tokens as `invalid-args`, and returns compact style-rule readback text.
 `sdd-style-extends-read` uses `css|key` and returns the selected style rule's `extends` token.
+`sdd-style-target-read` uses `css|key` and returns the selected style rule's target token.
 Blank SDD style-rule css or key arguments are rejected as `invalid-args`.
 `sdd-node-label-read` uses `node_id` and returns the selected node label text.
 `edit-sdd-node-geometry` uses `node_id|x|y|width|height`; `x` and `y` are signed integers, and size fields are non-negative integers.
@@ -377,7 +378,7 @@ modes:
   slide-count metadata, outline readback, safe CSS, positioned elements,
   element metadata, class sanitizing, and text escaping; Draw is SDD-backed with
   `sdd-document-summary`, `render-sdd-html-with-selection`, `export-sdd-canonical`, `reroute-sdd-connector`, `edit-sdd-style-rule`,
-  `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `sdd-style-extends-read`, `add-sdd-node`, `add-sdd-edge`,
+  `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `sdd-style-extends-read`, `sdd-style-target-read`, `add-sdd-node`, `add-sdd-edge`,
   `duplicate-sdd-edge`, `edit-sdd-edge-label`, `sdd-edge-label-read`, `edit-sdd-edge-label-point`, `sdd-edge-label-point-read`, `edit-sdd-edge-style`, `sdd-edge-style-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`, `sdd-edge-route-read`, `sdd-edge-path-read`, `sdd-edge-segments-read`, `sdd-edge-endpoints-read`, `edit-sdd-edge-endpoints`,
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`, `sdd-node-geometry-read`,
   `edit-sdd-node-label`, `sdd-node-label-read`, `edit-sdd-node-parent`, `sdd-node-parent-read`, `edit-sdd-node-shape`, `sdd-node-shape-read`,

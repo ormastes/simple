@@ -27,7 +27,8 @@
   `edit-sdd-edge-label`, `sdd-edge-label-read`, `sdd-edge-label-point-read`, `edit-sdd-edge-style`,
   `sdd-edge-style-read`, `edit-sdd-edge-kind`, `sdd-edge-kind-read`,
   `sdd-edge-route-read`, `sdd-edge-path-read`,
-  `sdd-edge-segments-read`, `sdd-edge-endpoints-read`, `sdd-style-extends-read`, `inspect-sdd-node`,
+  `sdd-edge-segments-read`, `sdd-edge-endpoints-read`, `sdd-style-extends-read`,
+  `sdd-style-target-read`, `inspect-sdd-node`,
   and `inspect-sdd-edge`.
 
 ## Constraints
