@@ -1,0 +1,333 @@
+# svllm_streaming_loader_system_spec
+#
+# End-to-end system test of Round 5 streaming loader.
+# Verifies:
+#   1. plan_chunks builds a TensorPack from small TensorInfos
+#   2. stream_pack gathers tensor bytes from chunk buffers
+#   3. plan_stream produces an aligned read schedule
+#   4. load_model_from_pack_streamed orchestrates the full flow
+#   5. Error paths (invalid manifest, missing chunks, unavailable nvfs)
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack, TensorInfo, plan_chunks}
+use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
+use std.gc_async_mut.svllm.model_executor.model_loader.manifest.{serialize_manifest}
+use std.gc_async_mut.svllm.model_executor.model_loader.streamer.{plan_stream, stream_pack, StreamError, StreamResult}
+use std.gc_async_mut.svllm.model_executor.model_loader.loader.{load_model_from_pack_streamed, load_model_from_pack, LoadResult, LoaderError}
+
+# Helper: verify a boolean condition
+fn verify(cond: bool):
+    expect cond == true
+
+# Helper: check if LoaderError is ChunkOpenFailed
+fn is_chunk_open_failed(e: LoaderError) -> bool:
+    match e:
+        LoaderError.ChunkOpenFailed: true
+        _: false
+
+# Helper: check if LoaderError is ManifestInvalid
+fn is_manifest_invalid(e: LoaderError) -> bool:
+    match e:
+        LoaderError.ManifestInvalid: true
+        _: false
+
+# Helper: check if LoaderError is NvfsUnavailable
+fn is_nvfs_unavailable(e: LoaderError) -> bool:
+    match e:
+        LoaderError.NvfsUnavailable: true
+        _: false
+
+# Helper: sum the byte_lens of all chunks in a pack
+fn sum_chunk_bytes(pack: TensorPack) -> i64:
+    var total: i64 = 0
+    var i = 0
+    while i < pack.chunks.len():
+        total = total + pack.chunks[i].byte_len
+        i = i + 1
+    total
+
+# Helper: sum the byte_lens of all tensors in a pack
+fn sum_tensor_bytes(pack: TensorPack) -> i64:
+    var total: i64 = 0
+    var i = 0
+    while i < pack.tensors.len():
+        total = total + pack.tensors[i].byte_len
+        i = i + 1
+    total
+
+# Helper: build a chunk buffer filled with a known pattern
+fn make_pattern_buffer(byte_len: i64) -> [u8]:
+    var buf: [u8] = []
+    var i: i64 = 0
+    while i < byte_len:
+        buf.push((i % 256) as u8)
+        i = i + 1
+    buf
+
+describe "svllm streaming loader — tensor packing":
+
+    it "plan_chunks creates a TensorPack from TensorInfos":
+        val t0 = TensorInfo(
+            name: "w0",
+            shape: [2, 4],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 0,
+            byte_len: 8
+        )
+        val t1 = TensorInfo(
+            name: "b0",
+            shape: [4],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 8,
+            byte_len: 12
+        )
+        val tensors: [TensorInfo] = [t0, t1]
+        val pack = plan_chunks(tensors, 1, 2097152)
+
+        verify pack.tensors.len() == 2
+        verify pack.chunks.len() >= 1
+        verify pack.preferred_chunk_bytes == 2097152
+
+    it "plan_chunks assigns chunk_id and aligned offsets":
+        val t0 = TensorInfo(
+            name: "w0",
+            shape: [2, 4],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 0,
+            byte_len: 8
+        )
+        val t1 = TensorInfo(
+            name: "b0",
+            shape: [4],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 8,
+            byte_len: 16
+        )
+        val tensors: [TensorInfo] = [t0, t1]
+        val pack = plan_chunks(tensors, 1, 2097152)
+
+        verify pack.tensors[0].chunk_id >= 0
+        verify pack.tensors[1].chunk_id >= 0
+        verify pack.tensors[0].offset_in_chunk >= 0
+        verify pack.tensors[1].offset_in_chunk >= pack.tensors[0].offset_in_chunk
+
+describe "svllm streaming loader — streaming pack":
+
+    it "stream_pack gathers tensor bytes from chunk buffers":
+        val t0 = TensorInfo(
+            name: "w0",
+            shape: [2, 4],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 0,
+            byte_len: 8
+        )
+        val t1 = TensorInfo(
+            name: "b0",
+            shape: [4],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 8,
+            byte_len: 12
+        )
+        val tensors: [TensorInfo] = [t0, t1]
+        val pack = plan_chunks(tensors, 1, 2097152)
+
+        val chunk_byte_len = sum_chunk_bytes(pack)
+        val buf = make_pattern_buffer(chunk_byte_len)
+        val chunk_data: [[u8]] = [buf]
+
+        val ok = match stream_pack(pack, chunk_data):
+            Ok(r): r.stages.len() == pack.tensors.len() and r.bytes_streamed == chunk_byte_len
+            Err(e): false
+        verify ok
+
+    it "stream_pack validates chunk_data length":
+        val t0 = TensorInfo(
+            name: "w0",
+            shape: [2],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 0,
+            byte_len: 8
+        )
+        val tensors: [TensorInfo] = [t0]
+        val pack = plan_chunks(tensors, 1, 2097152)
+
+        val chunk_data: [[u8]] = []
+
+        val has_error = match stream_pack(pack, chunk_data):
+            Ok(r): false
+            Err(e): true
+        verify has_error
+
+    it "stream_pack validates chunk buffer sizes":
+        val t0 = TensorInfo(
+            name: "w0",
+            shape: [2],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 0,
+            byte_len: 8
+        )
+        val tensors: [TensorInfo] = [t0]
+        val pack = plan_chunks(tensors, 1, 2097152)
+
+        val short_buf: [u8] = [1, 2, 3]
+        val chunk_data: [[u8]] = [short_buf]
+
+        val has_error = match stream_pack(pack, chunk_data):
+            Ok(r): false
+            Err(e): true
+        verify has_error
+
+    it "stream_pack extracts tensor bytes with correct pattern":
+        val t0 = TensorInfo(
+            name: "w0",
+            shape: [2, 4],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 0,
+            byte_len: 8
+        )
+        val tensors: [TensorInfo] = [t0]
+        val pack = plan_chunks(tensors, 1, 2097152)
+
+        val buf = make_pattern_buffer(pack.chunks[0].byte_len)
+        val chunk_data: [[u8]] = [buf]
+
+        val ok = match stream_pack(pack, chunk_data):
+            Ok(r): r.stages.len() == 1 and r.stages[0].bytes.len() == pack.tensors[0].byte_len and r.stages[0].bytes[0] == (0 as u8) and r.stages[0].bytes[1] == (1 as u8)
+            Err(e): false
+        verify ok
+
+describe "svllm streaming loader — read planning":
+
+    it "plan_stream builds read schedule with granule=0":
+        val t0 = TensorInfo(
+            name: "w0",
+            shape: [2, 4],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 0,
+            byte_len: 8
+        )
+        val t1 = TensorInfo(
+            name: "b0",
+            shape: [4],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 8,
+            byte_len: 12
+        )
+        val tensors: [TensorInfo] = [t0, t1]
+        val pack = plan_chunks(tensors, 1, 2097152)
+
+        val plan = plan_stream(pack, 0)
+        verify plan.op_count == pack.chunks.len()
+        verify plan.total_bytes == sum_chunk_bytes(pack)
+
+    it "plan_stream splits large chunks by granule":
+        val t0 = TensorInfo(
+            name: "w0",
+            shape: [2, 4],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 0,
+            byte_len: 100
+        )
+        val tensors: [TensorInfo] = [t0]
+        val pack = plan_chunks(tensors, 1, 2097152)
+
+        val granule: i64 = 4
+        val plan = plan_stream(pack, granule)
+        verify plan.granule == granule
+        verify plan.op_count >= pack.chunks.len()
+        verify plan.total_bytes == sum_chunk_bytes(pack)
+
+describe "svllm streaming loader — manifest serialization":
+
+    it "serialize_manifest produces text":
+        val t0 = TensorInfo(
+            name: "w0",
+            shape: [2, 4],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 0,
+            byte_len: 8
+        )
+        val tensors: [TensorInfo] = [t0]
+        val pack = plan_chunks(tensors, 1, 2097152)
+
+        val txt = serialize_manifest(pack)
+        verify txt.len() > 0
+        verify txt.contains("schema_version") == true
+
+describe "svllm streaming loader — full integration":
+
+    it "load_model_from_pack_streamed returns LoadResult on success":
+        val t0 = TensorInfo(
+            name: "w0",
+            shape: [2, 4],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 0,
+            byte_len: 8
+        )
+        val t1 = TensorInfo(
+            name: "b0",
+            shape: [4],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 8,
+            byte_len: 12
+        )
+        val tensors: [TensorInfo] = [t0, t1]
+        val pack = plan_chunks(tensors, 1, 2097152)
+
+        val manifest_text = serialize_manifest(pack)
+        val chunk_byte_len = sum_chunk_bytes(pack)
+        val buf = make_pattern_buffer(chunk_byte_len)
+        val chunk_data: [[u8]] = [buf]
+
+        val granule: i64 = 4
+        val plan = plan_stream(pack, granule)
+
+        val ok = match load_model_from_pack_streamed("/tmp/p", manifest_text, granule, chunk_data):
+            Ok(lr): lr.staged_tensor_count == pack.tensors.len() and lr.bytes_streamed == chunk_byte_len and lr.op_count == plan.op_count and lr.pack.tensors.len() == pack.tensors.len()
+            Err(e): false
+        verify ok
+
+    it "load_model_from_pack_streamed fails on invalid manifest":
+        val has_manifest_error = match load_model_from_pack_streamed("/tmp/p", "invalid sdn", 4, []):
+            Ok(lr): false
+            Err(e): is_manifest_invalid(e)
+        verify has_manifest_error
+
+    it "load_model_from_pack_streamed fails on empty chunk_data":
+        val t0 = TensorInfo(
+            name: "w0",
+            shape: [2, 4],
+            dtype: Dtype.F32,
+            chunk_id: 0,
+            offset_in_chunk: 0,
+            byte_len: 8
+        )
+        val tensors: [TensorInfo] = [t0]
+        val pack = plan_chunks(tensors, 1, 2097152)
+        val manifest_text = serialize_manifest(pack)
+
+        val has_chunk_error = match load_model_from_pack_streamed("/tmp/p", manifest_text, 4, []):
+            Ok(lr): false
+            Err(e): is_chunk_open_failed(e)
+        verify has_chunk_error
+
+    it "load_model_from_pack returns NvfsUnavailable":
+        val has_nvfs_error = match load_model_from_pack("/tmp/p"):
+            Ok(lr): false
+            Err(e): is_nvfs_unavailable(e)
+        verify has_nvfs_error

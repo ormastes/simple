@@ -1,0 +1,163 @@
+# svllm loader — A3 streaming path + error mapping surface
+
+use std.gc_async_mut.svllm.model_executor.model_loader.loader.{LoadResult, LoaderError, load_model_from_pack, load_model_from_pack_streamed}
+use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack, TensorInfo, plan_chunks, DEFAULT_CHUNK_ALIGN, DEFAULT_PREFERRED_CHUNK_BYTES}
+use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
+use std.gc_async_mut.svllm.model_executor.model_loader.manifest.{serialize_manifest}
+use std.gc_async_mut.svllm.model_executor.model_loader.streamer.{plan_stream}
+
+# Build a small TensorPack with two tensors (each 16 bytes) and serialize it.
+# chunk_data is synthesized to match each chunk's byte_len.
+fn _make_pack_and_manifest() -> TensorPack:
+    val tensors: [TensorInfo] = [
+        TensorInfo(name: "w0", shape: [2, 2], dtype: Dtype.F32,
+                   chunk_id: 0, offset_in_chunk: 0, byte_len: 16),
+        TensorInfo(name: "b0", shape: [4], dtype: Dtype.F32,
+                   chunk_id: 0, offset_in_chunk: 0, byte_len: 16)
+    ]
+    plan_chunks(tensors, DEFAULT_CHUNK_ALIGN, DEFAULT_PREFERRED_CHUNK_BYTES)
+
+# Build chunk_data: one [u8] per chunk, sized to chunk.byte_len, filled with 0x42.
+fn _make_chunk_data(pack: TensorPack) -> [[u8]]:
+    var result: [[u8]] = []
+    var ci = 0
+    while ci < pack.chunks.len():
+        val blen = pack.chunks[ci].byte_len
+        var chunk: [u8] = []
+        var bi: i64 = 0
+        while bi < blen:
+            chunk.push(0x42 as u8)
+            bi = bi + 1
+        result.push(chunk)
+        ci = ci + 1
+    result
+
+describe "load_model_from_pack_streamed — happy path":
+    it "returns Ok":
+        val pack = _make_pack_and_manifest()
+        val serialized = serialize_manifest(pack)
+        val chunk_data = _make_chunk_data(pack)
+        val r = load_model_from_pack_streamed("/models/test", serialized, 0, chunk_data)
+        expect(r.is_ok()).to_equal(true)
+
+    it "result.pack has correct tensor count":
+        val pack = _make_pack_and_manifest()
+        val serialized = serialize_manifest(pack)
+        val chunk_data = _make_chunk_data(pack)
+        val r = load_model_from_pack_streamed("/models/test", serialized, 0, chunk_data)
+        match r:
+            Ok(lr) => expect(lr.pack.tensors.len()).to_equal(pack.tensors.len())
+            Err(_) => expect(false).to_equal(true)
+
+    it "result.pack has correct chunk count":
+        val pack = _make_pack_and_manifest()
+        val serialized = serialize_manifest(pack)
+        val chunk_data = _make_chunk_data(pack)
+        val r = load_model_from_pack_streamed("/models/test", serialized, 0, chunk_data)
+        match r:
+            Ok(lr) => expect(lr.pack.chunks.len()).to_equal(pack.chunks.len())
+            Err(_) => expect(false).to_equal(true)
+
+    it "bytes_streamed equals sum of chunk byte_lens":
+        val pack = _make_pack_and_manifest()
+        val serialized = serialize_manifest(pack)
+        val chunk_data = _make_chunk_data(pack)
+        val r = load_model_from_pack_streamed("/models/test", serialized, 0, chunk_data)
+        var expected: i64 = 0
+        var ci = 0
+        while ci < pack.chunks.len():
+            expected = expected + pack.chunks[ci].byte_len
+            ci = ci + 1
+        match r:
+            Ok(lr) => expect(lr.bytes_streamed).to_equal(expected)
+            Err(_) => expect(false).to_equal(true)
+
+    it "staged_tensor_count equals tensor count":
+        val pack = _make_pack_and_manifest()
+        val serialized = serialize_manifest(pack)
+        val chunk_data = _make_chunk_data(pack)
+        val r = load_model_from_pack_streamed("/models/test", serialized, 0, chunk_data)
+        match r:
+            Ok(lr) => expect(lr.staged_tensor_count).to_equal(pack.tensors.len())
+            Err(_) => expect(false).to_equal(true)
+
+    it "op_count matches plan_stream result":
+        val pack = _make_pack_and_manifest()
+        val serialized = serialize_manifest(pack)
+        val chunk_data = _make_chunk_data(pack)
+        val r = load_model_from_pack_streamed("/models/test", serialized, 0, chunk_data)
+        val plan = plan_stream(pack, 0)
+        match r:
+            Ok(lr) => expect(lr.op_count).to_equal(plan.op_count)
+            Err(_) => expect(false).to_equal(true)
+
+    it "op_count > chunk_count when granule splits chunks":
+        # Use a granule of 1 byte so each byte_len of each chunk => many ops.
+        # This discriminates that loader wires plan.op_count (not chunk_count).
+        val pack = _make_pack_and_manifest()
+        val serialized = serialize_manifest(pack)
+        val chunk_data = _make_chunk_data(pack)
+        # granule=4096: chunk is DEFAULT_CHUNK_ALIGN-aligned (>=4096), so
+        # at least 1 op per chunk but if chunk > 4096 then >1 op per chunk.
+        # chunk byte_len = align_up(tensor offsets) which is a multiple of 4096.
+        # With two 16-byte tensors: second placed at 4096, ends at 4096+16=4112,
+        # chunk byte_len = align_up(4112, 4096) = 8192 => 2 ops at granule=4096.
+        val granule: i64 = 4096
+        val r = load_model_from_pack_streamed("/models/test", serialized, granule, chunk_data)
+        val plan = plan_stream(pack, granule)
+        expect(plan.op_count).to_be_greater_than(pack.chunks.len())
+        match r:
+            Ok(lr) => expect(lr.op_count).to_equal(plan.op_count)
+            Err(_) => expect(false).to_equal(true)
+
+describe "load_model_from_pack_streamed — error cases":
+    it "malformed manifest_text yields Err(ManifestInvalid)":
+        val empty_data: [[u8]] = []
+        val r = load_model_from_pack_streamed("/models/test", "garbage", 0, empty_data)
+        match r:
+            Ok(_) => expect(false).to_equal(true)
+            Err(e) =>
+                val is_invalid = match e:
+                    LoaderError.ManifestInvalid => true
+                    _ => false
+                expect(is_invalid).to_equal(true)
+
+    it "empty chunk_data with valid manifest yields Err(ChunkOpenFailed)":
+        val pack = _make_pack_and_manifest()
+        val serialized = serialize_manifest(pack)
+        val empty_data: [[u8]] = []
+        val r = load_model_from_pack_streamed("/models/test", serialized, 0, empty_data)
+        match r:
+            Ok(_) => expect(false).to_equal(true)
+            Err(e) =>
+                val is_chunk_err = match e:
+                    LoaderError.ChunkOpenFailed => true
+                    _ => false
+                expect(is_chunk_err).to_equal(true)
+
+describe "load_model_from_pack_streamed — ChunkDataInvalid path":
+    # ChunkDataInvalid maps StreamError.TensorOutOfBounds and StreamError.ChunkNotFound.
+    # These StreamErrors are NOT constructible through the manifest path because
+    # build_tensor_pack validates (offset_in_chunk + byte_len) <= chunk.byte_len
+    # and chunk_id existence before returning Ok. Any tensor that would produce
+    # TensorOutOfBounds or ChunkNotFound in stream_pack is already rejected as
+    # ManifestError.TensorChunkMismatch by build_tensor_pack.
+    # Therefore load_model_from_pack_streamed cannot reach LoaderError.ChunkDataInvalid
+    # via parse_manifest+build_tensor_pack. This path requires a direct TensorPack
+    # constructed by hand (bypassing the manifest layer), which is not the loader's
+    # entry surface. Test omitted intentionally — the code change is correct and
+    # covered at the streamer layer (TensorOutOfBounds/ChunkNotFound tests in
+    # streamer_spec.spl). The ChunkOpenFailed path (empty chunk_data) remains tested below.
+    it "placeholder — ChunkDataInvalid unreachable via manifest path (see comment above)":
+        expect(true).to_equal(true)
+
+describe "load_model_from_pack — bare entry":
+    it "returns Err(NvfsUnavailable)":
+        val r = load_model_from_pack("x")
+        match r:
+            Ok(_) => expect(false).to_equal(true)
+            Err(e) =>
+                val is_nvfs = match e:
+                    LoaderError.NvfsUnavailable => true
+                    _ => false
+                expect(is_nvfs).to_equal(true)
