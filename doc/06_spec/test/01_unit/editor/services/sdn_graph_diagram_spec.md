@@ -560,7 +560,7 @@ expect(bad_token_html.contains("background-color:#ff0000")).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -575,6 +575,9 @@ expect(node.role).to_equal("source")
 expect(node.shape).to_equal("rounded")
 expect(node.x).to_equal("10")
 expect(node.parent).to_equal("Group")
+val padded_node = sdn_graph_inspect_node(graph, " A ")
+expect(padded_node.found).to_be(true)
+expect(padded_node.id).to_equal("A")
 expect(edge.found).to_be(true)
 expect(edge.reason).to_equal("selected")
 expect(edge.edge_index).to_equal(0)
