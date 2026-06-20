@@ -71,7 +71,7 @@ Display policy: `embed_tui`
 ```text
 Simple IDE feature check
 mode: tui
-capabilities: 12
+capabilities: 13
 markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
   check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true task_list=true strike=true link=true list=true ordered_list=true quote=true code=true css_doc=true escaped=true metadata=true
   edit-command: md-edit=true stale-reject=true reason=stale-line
@@ -92,6 +92,8 @@ planner: Planner [office-app] -> app.office.planner.planner_app (planner, tasks,
   check: planner: app.office.planner.planner_app tasks=1 view=calendar calendar=2026-1 modified=true
 counter: Counter [office-app] -> app.office.counter (counter, state, action)
   check: counter: app.office.counter increment=true decrement=true fail_closed=true
+launcher: Office Launcher [office-app] -> app.office.launcher (launcher, home, recent-files)
+  check: launcher: app.office.launcher actions=9 cards=9 fail_closed=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true display_recalc=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
@@ -102,7 +104,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
-  plugin-manifest: plugins: entries=12 roundtrip=12 names=12 kinds=4 libre=6 libre_roundtrip=6
+  plugin-manifest: plugins: entries=13 roundtrip=13 names=13 kinds=4 libre=6 libre_roundtrip=6
   llm-catalog: apps=11 features=206 actions=128
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Mail,Planner,Counter
 ```
@@ -127,7 +129,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -138,7 +140,7 @@ expect(code).to_equal(0)
 step("Review the feature-check header and TUI mode")
 expect(out).to_start_with("Simple IDE feature check")
 expect(out).to_contain("mode: tui")
-expect(out).to_contain("capabilities: 12")
+expect(out).to_contain("capabilities: 13")
 
 step("Confirm every Office plugin capability is visible")
 expect(out).to_contain("markdown: Markdown Preview")
@@ -156,6 +158,8 @@ expect(out).to_contain("planner: Planner")
 expect(out).to_contain("planner: app.office.planner.planner_app tasks=1 view=calendar")
 expect(out).to_contain("counter: Counter")
 expect(out).to_contain("counter: app.office.counter increment=true decrement=true fail_closed=true")
+expect(out).to_contain("launcher: Office Launcher")
+expect(out).to_contain("launcher: app.office.launcher actions=9 cards=9 fail_closed=true")
 expect(out).to_contain("node_create=true")
 expect(out).to_contain("style_rule=true")
 expect(out).to_contain("style_delete=true")
@@ -167,7 +171,7 @@ expect(out).to_contain("canvas=true")
 expect(out).to_contain("sheets: Spreadsheet")
 expect(out).to_contain("agent-dashboard: Agent Dashboard")
 expect(out).to_contain("db-admin: Database Admin")
-expect(out).to_contain("plugin-manifest: plugins: entries=12")
+expect(out).to_contain("plugin-manifest: plugins: entries=13")
 expect(out).to_contain("llm-catalog: apps=11 features=206 actions=128")
 
 step("Capture the TUI report so the manual shows the CLI surface")
