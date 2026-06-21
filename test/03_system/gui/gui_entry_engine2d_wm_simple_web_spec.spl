@@ -79,15 +79,11 @@ use std.io_runtime.{getpid, time_now_unix_micros}
 
 use os.qemu_runner.{OsTarget, build_os, get_wm_simple_web_check_target}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use app.io.mod.{cwd, file_delete, thread_sleep, process_run_timeout}
 
 use test.system.qemu.os.common.qemu_os_harness.{
     can_run_target, file_exists, spawn_guest_with_qmp, stop_guest,
     wait_for_serial_marker, read_serial_log, read_qemu_stderr_log}
-
-extern fn rt_get_cwd() -> text
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_thread_sleep(ms: i64)
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
 fn _build_once(target: OsTarget) -> bool:
     if file_exists(target.output):
@@ -163,7 +159,7 @@ fn _capture_and_assert_web_ppm(qmp_socket: text, output_path: text) -> bool:
         "sha=hashlib.sha256(ppm).hexdigest() if ppm else '';" +
         "print('capture_method=pmemsave pmem_addr=0xfd000000 pmem_size=3145728 pmem_raw_bytes=%d ppm_dims=%dx%d nonblack=%d ppm_bytes=%d ppm_sha256=%s checks=[probe=%s,header=%s,bodyA=%s,bodyB=%s,top=%s,taskbar=%s]' % (len(mem),w,h,non,len(ppm),sha,probe,head,bodya,bodyb,top,task));" +
         "sys.exit(0 if ok and w==1024 and h==768 and non>100000 and probe and head and bodya and bodyb and top and task else 4)"
-    val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, output_path], 20000)
+    val result = process_run_timeout("python3", ["-c", script, qmp_socket, output_path], 20000)
     if result[0] != "":
         print "[gui_entry_engine2d_wm_simple_web_spec] qmp ppm {result[0]}"
     if result[1] != "":
@@ -175,7 +171,7 @@ fn _capture_and_assert_web_ppm_retry(qmp_socket: text, output_path: text, max_at
     while attempt < max_attempts:
         if _capture_and_assert_web_ppm(qmp_socket, output_path):
             return true
-        rt_thread_sleep(50)
+        thread_sleep(50)
         attempt = attempt + 1
     false
 
@@ -202,7 +198,7 @@ fn _qmp_drag_and_assert_framebuffer_delta(qmp_socket: text, before_path: text, a
         "sha1=hashlib.sha256(mem1).hexdigest() if mem1 else '';" +
         "print('qmp_drag_input before_raw_bytes=%d after_raw_bytes=%d framebuffer_changed_bytes=%d before_sha256=%s after_sha256=%s before_ppm=%s after_ppm=%s' % (len(mem0),len(mem1),diff,sha0,sha1,before,after));" +
         "sys.exit(0 if len(mem0)==3145728 and len(mem1)==3145728 and diff>2048 and sha0!=sha1 else 5)"
-    val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, before_path, after_path], 25000)
+    val result = process_run_timeout("python3", ["-c", script, qmp_socket, before_path, after_path], 25000)
     if result[0] != "":
         print "[gui_entry_engine2d_wm_simple_web_spec] qmp drag {result[0]}"
     if result[1] != "":
@@ -232,16 +228,16 @@ describe "WM Simple Web Engine2D BGA QEMU check":
         val artifact_dir = _run_dir(run_id)
         val qmp_socket = _qmp_socket(run_id)
         val serial_log = _serial_log(run_id)
-        val cwd = rt_get_cwd()
+        val cwd = cwd()
         val capture_ppm = _capture_ppm(cwd, run_id)
         val before_drag_ppm = _capture_before_ppm(cwd, run_id)
         val after_drag_ppm = _capture_after_ppm(cwd, run_id)
 
         dir_create_all(artifact_dir)
-        val _deleted_qmp_socket = rt_file_delete(qmp_socket)
-        val _deleted_capture_ppm = rt_file_delete(capture_ppm)
-        val _deleted_before_drag_ppm = rt_file_delete(before_drag_ppm)
-        val _deleted_after_drag_ppm = rt_file_delete(after_drag_ppm)
+        val _deleted_qmp_socket = file_delete(qmp_socket)
+        val _deleted_capture_ppm = file_delete(capture_ppm)
+        val _deleted_before_drag_ppm = file_delete(before_drag_ppm)
+        val _deleted_after_drag_ppm = file_delete(after_drag_ppm)
 
         match spawn_guest_with_qmp(capture_target, qmp_socket, serial_log):
             Ok(handle):
