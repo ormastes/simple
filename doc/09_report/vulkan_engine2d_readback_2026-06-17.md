@@ -28,7 +28,7 @@
 
 ## 2026-06-21 Strict Engine2D No-Fallback Evidence
 
-- command: `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_processing_spec.spl`
+- command: `SIMPLE_LIB=src bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_processing_spec.spl`
 - result: pass, 23 scenarios
 - strict contract: `Engine2D.create_with_backend_strict(4, 4, "vulkan")` either returns an Engine2D with `backend_name() == "vulkan"` or typed Vulkan diagnostics with `requested_name`, `selected_name`, and `backend_name` all set to `vulkan`.
 - fallback contract: unavailable/failed Vulkan returns `BackendStatus.Unavailable` or `BackendStatus.Failed`; `BackendStatus.Fallback` is rejected.
