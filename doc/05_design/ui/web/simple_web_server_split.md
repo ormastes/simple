@@ -23,7 +23,7 @@ Current web server code is scattered across three layers with overlapping respon
 
 1. **`src/lib/nogc_async_mut/http_server/`** — 25-module async server (router, middleware, CORS, CSRF, compression, rate-limit, security headers, static files, metrics, WebGPU assets, etc.). Full-featured but async-only and heavyweight for simple use cases.
 2. **`src/app/ui.web/`** — `WebServer` (sync) and `AsyncWebServer` classes. Tightly coupled to `UISession`, SDN tree parsing, and UI rendering. Not reusable outside the UI stack.
-3. **`src/app/io/http_sffi.spl`** — SFFI wrappers around `rt_http_server_*` externs (hyper-based). Provides `HttpServer` with route registration and static-file mount, but requires the Rust runtime extern layer.
+3. **`src/app/io/http_sffi.spl`** — SFFI-backed HTTP server facade (hyper-based). Provides `HttpServer` with route registration and static-file mount, but requires the Rust runtime extern layer.
 
 **Problem:** There is no minimal, sync, pure-Simple HTTP server that can be embedded into CLI tools, MCP servers, dashboards, or test harnesses without pulling in the async runtime or UI dependencies.
 
