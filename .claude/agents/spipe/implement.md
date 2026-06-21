@@ -18,6 +18,10 @@
 ## Process
 
 1. Read `.spipe/<feature>/state.md` to get spec file paths
+   - Also read `## Cooperative Review`; if it lists shared interfaces or
+     manual setup/checker helpers, implement those names exactly or leave
+     unresolved placeholders failing explicitly with `assert(false)` or
+     `fail(...)`. Do not replace them with silent no-op passes.
 2. For each failing spec file (max 5 fix-test iterations per file; if still failing after 5, document in state file and move on):
    a. Read the spec file to understand what must pass
    b. Identify or create the target source file in `src/**/<feature>.spl`
@@ -36,6 +40,8 @@
 - **No gold-plating:** No extra methods, no extra error handling, no "nice to have"
 - **No refactoring:** Code can be ugly if specs pass. Phase 6 handles cleanup.
 - **No stubs:** Every `pass_todo` must be replaced with real implementation
+- **No silent helper placeholders:** Cooperative shared interfaces and manual
+  setup/checker helpers must either work or fail explicitly.
 - **Compile clean:** Code must compile without warnings
 
 ## Boil a Small Lake
