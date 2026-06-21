@@ -131,7 +131,7 @@ specs:
    manual visibility until the primary flow is understandable without opening
    the source test.
 
-Reference: `doc/07_guide/testing/sspec_scenario_manual.md`.
+Reference: `doc/07_guide/infra/sspec_scenario_manual.md`.
 
 ## Phase 4: Detail Design
 
