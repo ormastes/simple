@@ -39,6 +39,12 @@ extern fn rt_time_ms() -> u64
 fn web_server_time_ms() -> u64:
     rt_time_ms()
 
+fn web_server_text_to_bytes(s: text) -> [u8]:
+    rt_text_to_bytes(s)
+
+fn web_server_bytes_to_text(data: [u8]) -> text:
+    rt_bytes_to_text(data)
+
 var _wm_login_rate_window_start_ms: u64 = 0u64
 var _wm_login_rate_attempt_count: i64 = 0
 
@@ -46,7 +52,7 @@ fn send_ws_tcp_frame(stream: TcpStream, message: text) -> bool:
     """Send a text message as one unmasked RFC6455 frame over a raw TcpStream
     (server->client frames are never masked). Avoids ConnStream (whose
     write_all_bytes path can't downcast its Any-typed stream in the interpreter)."""
-    val payload = rt_text_to_bytes(message)
+    val payload = web_server_text_to_bytes(message)
     val len = payload.len()
     var frame: [u8] = [0x81]
     if len < 126:
@@ -143,7 +149,7 @@ fn ws_read_text_frame(stream: TcpStream) -> text?:
         while i < payload_len:
             payload[i] = payload[i] ^ maskkey[i % 4]
             i = i + 1
-    return rt_bytes_to_text(payload)
+    return web_server_bytes_to_text(payload)
 
 fn parse_request_line(request_line: text) -> (text, text):
     var method = ""
@@ -252,7 +258,7 @@ class WebServer:
         """Write an HTTP response in <=8KB chunks via write_all. A single large
         write after read_head's read() does not deliver in the interpreter;
         chunked writes (each within the delivering size) do."""
-        val bytes = rt_text_to_bytes(response)
+        val bytes = web_server_text_to_bytes(response)
         val total = bytes.len()
         var off = 0
         while off < total:
@@ -278,7 +284,7 @@ class WebServer:
             off = end
 
     fn send_small_http(stream: TcpStream, response: text):
-        match stream.write_all(rt_text_to_bytes(response)):
+        match stream.write_all(web_server_text_to_bytes(response)):
             Err(e):
                 print "HTTP write error: {e}"
             Ok(()):
@@ -307,7 +313,7 @@ class WebServer:
                     if chunk.len() == 0:
                         head_done = true
                     else:
-                        raw = "{raw}{rt_bytes_to_text(chunk)}"
+                        raw = "{raw}{web_server_bytes_to_text(chunk)}"
                         if not ui_web_request_head_allowed(raw.len()):
                             return Err("request_head_too_large")
                         if raw.contains("\r\n\r\n"):
@@ -855,7 +861,7 @@ fn _wm_read_head(stream: TcpStream) -> Result<(text, text, text, text), text>:
             Ok(chunk):
                 if chunk.len() == 0:
                     break
-                raw = "{raw}{rt_bytes_to_text(chunk)}"
+                raw = "{raw}{web_server_bytes_to_text(chunk)}"
                 if not ui_web_request_head_allowed(raw.len()):
                     return Err("request_head_too_large")
                 if raw.contains("\r\n\r\n"):
