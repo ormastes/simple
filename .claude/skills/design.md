@@ -32,6 +32,10 @@
 | Detail design | `doc/05_design/<domain>/<topic>/<feature>.md` |
 | Agent tasks | `doc/03_plan/<domain>/<topic>/<feature>.md` |
 
+Broad-lane agent-task docs must list lower-model sidecar lanes or `N/A`, merge
+owner, final normal/highest-capability reviewer, and the shared
+interface/manual helper names accepted before implementation.
+
 ## Critical Rules
 
 - Never design without approved architecture (`/arch`)

@@ -150,6 +150,9 @@ Reference: `doc/07_guide/infra/sspec_scenario_manual.md`.
 - Data structures, algorithms, module interactions, error handling
 - Output: `doc/05_design/<feature>.md`
 - Agent tasks: `doc/03_plan/agent_tasks/<feature>.md`
+- Agent-task docs for broad lanes must list lower-model sidecar lanes or `N/A`,
+  merge owner, final normal/highest-capability reviewer, and the shared
+  interface/manual helper names accepted before implementation.
 
 ## Phase 5: Quality Check
 
