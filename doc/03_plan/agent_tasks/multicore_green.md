@@ -111,7 +111,7 @@ Primary paths:
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
 - `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`
 - `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
-- `doc/06_spec/test/05_perf/stress/multicore_green_cross_language_gate_spec.md`
+- `doc/06_spec/05_perf/stress/multicore_green_cross_language_gate_spec.md`
 
 Deliverables:
 
