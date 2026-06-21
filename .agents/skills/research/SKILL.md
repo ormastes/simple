@@ -10,6 +10,9 @@ description: Run local + domain research for a feature. Search src/ and doc/ for
 ## Phase 1: Local Research
 
 Search `src/` and `doc/` for related code, types, call chains, prior research, ADRs.
+For broad lanes, record lower-model sidecars to use or merge, such as Codex
+Spark, Claude Haiku, or Claude Sonnet, or mark `N/A`; require a
+normal/highest-capability review before accepting final research/options.
 
 Output: `doc/01_research/local/<feature>.md`
 

@@ -20,6 +20,9 @@ description: "Codex research skill (Step 2 in cooperative pipeline). Forked para
 Search `src/` and `doc/` for related code, types, call chains, prior research, ADRs.
 
 - Use forked parallel threads: one for `src/compiler/`, one for `src/lib/`, one for `doc/`
+- For broad lanes, record lower-model sidecars to use or merge, such as Codex
+  Spark, Claude Haiku, or Claude Sonnet, or mark `N/A`; require a
+  normal/highest-capability review before accepting final research/options
 - Merge findings into a single local research document
 
 Output: `doc/01_research/local/<feature>.md`
@@ -61,9 +64,10 @@ After selection:
 Codex excels at forked parallel research. When investigating a feature:
 
 1. **Fork** — identify 3-5 independent research threads
-2. **Execute** — run each thread in parallel (local code search, web search, doc scan)
+2. **Execute** — run each thread in parallel (local code search, web search, doc scan), using lower-model sidecars for broad lanes when available
 3. **Merge** — combine findings, resolve contradictions, synthesize
-4. **Rank** — order options by feasibility and alignment with existing codebase
+4. **Review** — have the normal/highest-capability model check contradictions and coverage
+5. **Rank** — order options by feasibility and alignment with existing codebase
 
 ## Multi-LLM Collaboration
 
