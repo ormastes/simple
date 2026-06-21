@@ -53,7 +53,7 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
 - Shared interface names and manual-facing setup/checker helper names match the
   accepted architecture/design/spec/manual references.
 - Placeholder helpers for shared interfaces or manual setup/checker flow fail
-  explicitly with `assert(false)` or equivalent until implemented; silent
+  explicitly with `assert(false)` or `fail(...)` until implemented; silent
   placeholder passes are a FAIL.
 - For broad SPipe lanes, the recorded cooperative review plan is complete or
   explicitly `N/A`: lower-model sidecars such as Codex Spark, Claude Haiku, or

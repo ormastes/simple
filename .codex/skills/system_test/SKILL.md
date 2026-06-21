@@ -102,7 +102,7 @@ describe "<Feature Name>":
 - For broad lanes with shared interfaces, the primary/best model must define
   shared interface names and manual setup/checker helper names before sidecar
   implementation starts. Placeholder helpers must fail explicitly with
-  `assert(false)` or equivalent until implemented; silent no-op helpers are not
+  `assert(false)` or `fail(...)` until implemented; silent no-op helpers are not
   valid SSpec coverage.
 - Use `step("...")` as the current manual-step helper. `Given_*`, `When_*`, and
   `Then_*` helpers are legacy and should not be introduced in new specs.
