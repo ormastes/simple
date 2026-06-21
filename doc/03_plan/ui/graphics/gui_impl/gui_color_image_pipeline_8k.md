@@ -64,7 +64,10 @@ conversion stages.
   orientation/extra channels, Modular pixel decode subset, then VarDCT subset.
 - Keep every web/browser/image milestone tied to exact RGBA bitmap evidence.
 
-## 2026-05-31 Evidence Status
+## 2026-06-21 Evidence Status
+
+Current report:
+`doc/09_report/gui_color_image_pipeline_8k_evidence_2026-06-21.md`.
 
 - Done: 8K BGRA8 packed-surface planning keeps the default hot path at
   132,710,400 bytes and does not initialize Lab/XYZ transforms, TIFF decode, or
