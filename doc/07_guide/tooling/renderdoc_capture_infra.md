@@ -59,6 +59,85 @@ The helper validates `.rdc` files by checking the `RDOC` magic header. If a host
 cannot provide Chrome Vulkan or a non-CPU Vulkan device, record the concrete
 reason in `doc/09_report/` instead of duplicating ad hoc capture commands.
 
+## macOS GUI/Web/2D Vulkan Checklist
+
+This lane is Mac-first. Do not generalize the result to Windows or Linux yet;
+add those platforms only after they have their own host runbook, evidence keys,
+and failure vocabulary.
+
+Install or refresh the macOS Vulkan portability stack with Homebrew:
+
+```sh
+brew install vulkan-tools vulkan-loader vulkan-headers molten-vk spirv-tools glslang
+brew upgrade vulkan-tools vulkan-loader vulkan-headers molten-vk
+vulkaninfo --summary
+```
+
+The host is Vulkan-ready only when `vulkaninfo --summary` reports the Apple GPU
+through MoltenVK, for example `driverName = MoltenVK`. This proves the Vulkan
+loader/ICD path, not that Chrome, Electron, Simple, or RenderDoc used Vulkan.
+
+Run the Mac availability probe before any capture claim:
+
+```sh
+BUILD_DIR=build/renderdoc/macos-portability-current \
+REPORT_PATH=build/renderdoc/macos-portability-current/report.md \
+sh scripts/check/check-renderdoc-macos-portability-probe.shs
+```
+
+On a prepared capture host, opt into real launch/capture attempts:
+
+```sh
+RDOC_MACOS_RUN_CAPTURES=1 \
+BUILD_DIR=build/renderdoc/macos-portability-capture-current \
+REPORT_PATH=build/renderdoc/macos-portability-capture-current/report.md \
+sh scripts/check/check-renderdoc-macos-portability-probe.shs
+```
+
+The capture-mode probe must attempt all three Mac lanes:
+
+- Simple 2D/Engine2D Vulkan:
+  `scripts/tool/renderdoc-evidence.shs capture-simple`, then
+  `scripts/check/check-renderdoc-simple-gate.shs`.
+- Chrome HTML/CSS Vulkan:
+  `scripts/tool/renderdoc-evidence.shs capture-html`, then
+  `scripts/check/check-renderdoc-html-external-host-gate.shs`.
+- Electron HTML/CSS Vulkan:
+  `scripts/tool/renderdoc-evidence.shs capture-electron-html`, then
+  `scripts/check/check-renderdoc-electron-html-gate.shs`.
+
+For GUI/web/2D comparison work, collect both the browser-hosted surface and the
+Simple renderer surface from the same fixture:
+
+```sh
+RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe \
+  scripts/tool/renderdoc-evidence.shs capture-electron-html
+
+SIMPLE_VULKAN_READBACK_WORK_DIR=build/renderdoc/simple-vulkan-readback \
+SIMPLE_LIB=src \
+  sh scripts/check/check-vulkan-engine2d-readback.shs
+
+sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
+sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
+```
+
+Completion requires typed evidence, not screenshots alone:
+
+- RenderDoc `.rdc` files exist and start with `RDOC`.
+- The Simple lane reports `rdoc_backend=simple`,
+  `rdoc_scene=vulkan-engine2d`, and the Simple Vulkan gate passes.
+- The Electron/Chrome lane reports requested Vulkan/ANGLE metadata and its log
+  does not contain Chromium's `angle=vulkan` unavailable failure. A rendered
+  bitmap with that log is a browser fallback, not a Vulkan-backed browser proof.
+- The production GUI/web parity evidence still reports matching checksums,
+  `mismatch_count=0`, and `blur_or_tolerance=false`.
+
+If Chrome or Electron on macOS renders pixels but logs that
+`angle=vulkan` is not in the allowed implementations, record
+`vulkan-angle-unavailable` in the report and keep the Vulkan browser gate
+failed. Current macOS Chromium builds may expose Metal/OpenGL/SwiftShader
+without exposing ANGLE Vulkan even when MoltenVK is installed.
+
 ## Evidence Artifacts
 
 Each capture command writes an `evidence.env` file under its output directory.

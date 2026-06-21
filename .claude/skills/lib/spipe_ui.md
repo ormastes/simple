@@ -157,6 +157,43 @@ SIMPLE_BIN="$PWD/src/compiler_rust/target/gui/debug/simple" SIMPLE_LIB="$PWD/src
   bash scripts/check/check-cpu-simd-engine2d-evidence.shs
 ```
 
+## Mac RenderDoc + Vulkan GUI/Web/2D Gate
+
+This is currently a macOS-only workflow. Do not promote Windows or Linux from
+these commands until those platforms have separate runbooks and evidence keys.
+
+First prove the host Vulkan stack:
+
+```bash
+brew install vulkan-tools vulkan-loader vulkan-headers molten-vk spirv-tools glslang
+vulkaninfo --summary  # must show the Apple GPU through MoltenVK
+```
+
+Then collect the three RenderDoc/Vulkan lanes and the production parity lane:
+
+```bash
+RDOC_MACOS_RUN_CAPTURES=1 \
+BUILD_DIR=build/renderdoc/macos-portability-capture-current \
+REPORT_PATH=build/renderdoc/macos-portability-capture-current/report.md \
+  sh scripts/check/check-renderdoc-macos-portability-probe.shs
+
+RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe \
+  scripts/tool/renderdoc-evidence.shs capture-electron-html
+
+SIMPLE_VULKAN_READBACK_WORK_DIR=build/renderdoc/simple-vulkan-readback \
+SIMPLE_LIB=src \
+  sh scripts/check/check-vulkan-engine2d-readback.shs
+
+sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
+sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
+```
+
+Vulkan browser proof requires more than `--use-angle=vulkan`. If Chrome or
+Electron writes a bitmap but logs `angle=vulkan` as unavailable, record
+`vulkan-angle-unavailable` and keep the Chromium lane failed. The Simple 2D lane
+must prove Vulkan via the Simple Vulkan/Engine2D readback or RenderDoc gate; a
+spec that skips hardware assertions when `probe_vulkan()` fails is not enough.
+
 ## Mobile (Tauri Android / iOS) sanity
 
 The mobile GUI lane runs the **real** `render_html_tree` + `generate_css`

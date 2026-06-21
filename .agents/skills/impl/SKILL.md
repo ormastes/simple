@@ -52,6 +52,10 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   verification-contract changes refreshed matching `doc/07_guide`,
   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
   and `.claude/agents/spipe/` process docs
+- For Mac GUI/web/2D RenderDoc+Vulkan work, preserve the macOS-only scope until
+  Windows and Linux runbooks exist. Refresh the guide, SPipe skill, verify
+  mirrors, Simple Vulkan/Engine2D evidence, Chrome gate, Electron gate, and
+  production GUI/web parity evidence together.
 - Run $verify before VCS sync
 - If `src/compiler/**`, `src/lib/**`, `src/app/mcp/**`, `src/app/simple_lsp_mcp/**`, or MCP packaging files changed, finish with:
   - `<runtime> check src/compiler`

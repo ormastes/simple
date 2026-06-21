@@ -127,11 +127,24 @@ For RenderDoc evidence, use the shared helper interface instead of spelling
   in-application `rt_renderdoc_*` Vulkan Engine2D path.
 - `scripts/tool/renderdoc-evidence.shs capture-html` for original RenderDoc
   Chrome HTML/CSS capture.
+- `scripts/tool/renderdoc-evidence.shs capture-electron-html` for bundled
+  Electron Chromium HTML/CSS capture.
 - `test/helpers/renderdoc_capture_helper.shs` for test-facing shell helpers.
 
 Record `.rdc` path, `RDOC` magic validation, capture log path, and any
 host-unavailable reason as artifact captures. Screenshot-only evidence is not
 Vulkan IO-level RenderDoc evidence.
+
+For Mac GUI/web/2D Vulkan comparison, keep the scope explicitly macOS until
+Windows and Linux runbooks are added. The Mac setup starts with Homebrew Vulkan
+tooling (`vulkan-tools`, `vulkan-loader`, `vulkan-headers`, `molten-vk`,
+`spirv-tools`, `glslang`) and `vulkaninfo --summary` showing the Apple GPU
+through MoltenVK. That only proves host readiness. Completion evidence still
+needs Simple Vulkan/Engine2D readback or RenderDoc proof, original
+Chrome+RenderDoc proof, Electron+RenderDoc proof, and production GUI/web parity
+proof. If Chrome or Electron renders pixels but its log says `angle=vulkan` was
+not in the allowed implementations, classify the browser lane as
+`vulkan-angle-unavailable`; do not treat the bitmap as Vulkan-backed proof.
 
 Prefer the strongest available oracle for the surface:
 

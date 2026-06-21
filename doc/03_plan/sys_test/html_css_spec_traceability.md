@@ -81,6 +81,25 @@ then verifies:
 
 Use this section when restarting the goal from this plan doc.
 
+Mac-first Vulkan/RenderDoc scope:
+
+- This restart lane currently targets macOS only. Windows and Linux GUI/web/2D
+  RenderDoc/Vulkan runbooks are later additions and must not be inferred from
+  this Mac evidence.
+- First prove the host Vulkan portability stack with
+  `brew install vulkan-tools vulkan-loader vulkan-headers molten-vk spirv-tools glslang`
+  followed by `vulkaninfo --summary`. A usable Mac host reports the Apple GPU
+  through MoltenVK.
+- A successful `vulkaninfo` result is only host readiness. It does not prove
+  Chrome, Electron, Simple Engine2D, or RenderDoc used Vulkan.
+- Browser-backed GUI proof requires Chrome/Electron launch logs that do not
+  contain Chromium's `angle=vulkan` unavailable failure. If the browser writes
+  pixels but logs that Vulkan ANGLE is not in the allowed implementations, keep
+  the browser Vulkan lane failed with reason `vulkan-angle-unavailable`.
+- Simple GUI/2D proof requires the Simple Vulkan/Engine2D readback or RenderDoc
+  gate to pass; permissive specs that skip hardware assertions when
+  `probe_vulkan()` is unavailable are not enough completion evidence.
+
 Goal status command:
 
 ```sh
@@ -155,6 +174,33 @@ manifest and the actual fixture HTML emitted by
 that all 105 WHATWG HTML elements and all 62 implemented Simple Web CSS
 properties are covered by rendered fixture HTML, not only by text-only SSpec
 assignment.
+
+Mac capture commands for GUI/web/2D Vulkan comparison:
+
+```sh
+BUILD_DIR=build/renderdoc/macos-portability-current \
+REPORT_PATH=build/renderdoc/macos-portability-current/report.md \
+sh scripts/check/check-renderdoc-macos-portability-probe.shs
+
+RDOC_MACOS_RUN_CAPTURES=1 \
+BUILD_DIR=build/renderdoc/macos-portability-capture-current \
+REPORT_PATH=build/renderdoc/macos-portability-capture-current/report.md \
+sh scripts/check/check-renderdoc-macos-portability-probe.shs
+
+RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe \
+scripts/tool/renderdoc-evidence.shs capture-electron-html
+
+SIMPLE_VULKAN_READBACK_WORK_DIR=build/renderdoc/simple-vulkan-readback \
+SIMPLE_LIB=src \
+sh scripts/check/check-vulkan-engine2d-readback.shs
+```
+
+The Mac capture-mode probe should publish
+`rdoc_macos_capture_simple_status`, `rdoc_macos_capture_html_status`,
+`rdoc_macos_html_gate_status`, `rdoc_macos_capture_electron_status`, and
+`rdoc_macos_electron_gate_status`. The top-level status remains incomplete
+until the Simple Vulkan lane, original Chrome lane, Electron Chromium lane, and
+production GUI/web renderer parity lane all provide passing evidence.
 
 Already completed:
 

@@ -61,6 +61,12 @@ not create, rewrite, or weaken SPipe after verification.
   event routing plus semantic screenshot/pixel checks for rendered windows and
   taskbar/dock icon or label regions. Explicit skips may pass only when reported
   as skipped, not as live proof.
+- Mac GUI/web/2D RenderDoc+Vulkan evidence is macOS-only until separate Windows
+  and Linux runbooks exist. Require MoltenVK host readiness, Simple
+  Vulkan/Engine2D readback or RenderDoc proof, original Chrome RenderDoc proof,
+  Electron RenderDoc proof, and production GUI/web parity evidence. If Chrome or
+  Electron logs show `angle=vulkan` unavailable, report
+  `vulkan-angle-unavailable` and fail the Vulkan proof even when pixels render.
 - For `simple run` script-startup changes, require evidence from
   `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` and confirm CLI
   argument scripts still avoid unnecessary compile/JIT startup unless

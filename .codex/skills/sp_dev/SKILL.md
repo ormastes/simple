@@ -46,8 +46,18 @@ For RenderDoc evidence specifically, use
 `scripts/tool/renderdoc-evidence.shs capture-simple` for the Simple
 in-application `rt_renderdoc_*` path and
 `scripts/tool/renderdoc-evidence.shs capture-html` for original
-RenderDoc+Chrome HTML/CSS capture. Tests should route through
+RenderDoc+Chrome HTML/CSS capture, plus
+`scripts/tool/renderdoc-evidence.shs capture-electron-html` for bundled
+Electron Chromium HTML/CSS capture. Tests should route through
 `test/helpers/renderdoc_capture_helper.shs` or the compatibility wrappers.
+For Mac GUI/web/2D RenderDoc+Vulkan work, keep the lane Mac-only until separate
+Windows/Linux runbooks exist: install/refresh `vulkan-tools`,
+`vulkan-loader`, `vulkan-headers`, `molten-vk`, `spirv-tools`, and `glslang`;
+prove MoltenVK with `vulkaninfo --summary`; then require Simple
+Vulkan/Engine2D evidence, original Chrome evidence, Electron Chromium evidence,
+and production GUI/web parity evidence. A Chrome/Electron bitmap with a log
+containing Chromium's `angle=vulkan` unavailable failure is a fallback render,
+not Vulkan proof; record `vulkan-angle-unavailable` and leave the gate failed.
 
 For runtime concurrency work, keep the public API map current in
 `doc/07_guide/lib/misc/stdlib.md`, `doc/07_guide/compiler/check_perf.md`, and

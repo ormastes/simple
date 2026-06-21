@@ -50,17 +50,23 @@
    - shared interface/manual helper names match design, spec, manual, and
      tooling references
    - placeholder helpers fail explicitly with `assert(false)` or `fail(...)`
-11. Compile verification report:
+11. For Mac GUI/web/2D RenderDoc+Vulkan evidence, keep scope macOS-only until
+    Windows and Linux runbooks exist. Verify MoltenVK host readiness, Simple
+    Vulkan/Engine2D readback or RenderDoc proof, original Chrome RenderDoc proof,
+    Electron RenderDoc proof, and production GUI/web parity evidence. If Chrome
+    or Electron logs show `angle=vulkan` unavailable, report
+    `vulkan-angle-unavailable` and fail the Vulkan proof even when pixels render.
+12. Compile verification report:
    - Test results (pass/fail counts)
    - Coverage percentage (target: 80%+)
    - Doc coverage for new code
    - Scenario manual quality result for generated docs
    - Workflow/tool/evidence/verification contract doc freshness result
    - Any remaining issues
-12. If critical issues found (max 3 fix-recheck cycles; escalate after 3):
+13. If critical issues found (max 3 fix-recheck cycles; escalate after 3):
    a. Fix ONLY test/doc issues (not feature code)
    b. Re-run affected checks with `set -o pipefail; ... 2>&1 | tail -40` output cap
-13. Update state file with verification report
+14. Update state file with verification report
 
 ## Rules
 
