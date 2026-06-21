@@ -30,6 +30,15 @@ skill at `.claude/skills/spipe_doc_wiki_refactor.md` so stale docs, command
 references, wiki-style process knowledge, and feature/layer expert links are
 cleaned before completion.
 
+Before final verification or ship handoff, update every process artifact that
+the lane changed: generated/manual SPipe docs under `doc/06_spec`, matching
+`doc/07_guide` pages, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
+and `.claude/agents/spipe/` instructions. Treat stale workflow/tooling docs as
+verify failures, not release cleanup. For scenario-oriented SSpec, generate the
+mirrored manual doc, read it as an operator manual, and fix step names,
+captures, `@inline`/`@prev` visibility, and helper names until the primary flow
+is understandable without opening the source spec.
+
 For recent unfinished-plan cleanup lanes, use
 `doc/07_guide/infra/recent_plan_cleanup.md`. Keep the cleanup matrix under
 `doc/03_plan/agent_tasks/`, keep SPipe state under `.spipe/<cleanup-name>/`,
