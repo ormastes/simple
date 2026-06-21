@@ -179,8 +179,8 @@ Your ONLY output is spec files and the coverage matrix in the state file.
 - `test/path/module_spec.spl` — N specs covering AC-3
 
 ### Generated Manuals
-- `doc/06_spec/test/path/feature_spec.md` — complete, 0 stubs
-- `doc/06_spec/test/path/module_spec.md` — complete, 0 stubs
+- `doc/06_spec/path/feature_spec.md` — complete, 0 stubs
+- `doc/06_spec/path/module_spec.md` — complete, 0 stubs
 
 ### Manual Shape
 | Scenario | Visibility | Capture | Inline/Prev |
