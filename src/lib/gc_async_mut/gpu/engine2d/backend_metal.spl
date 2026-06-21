@@ -25,6 +25,12 @@ extern fn rt_free(ptr: i64) -> i64
 extern fn rt_ptr_write_i32(ptr: i64, offset: i64, value: i64) -> i64
 extern fn rt_ptr_read_i64(ptr: i64, offset: i64) -> i64
 
+fn metal_host_alloc(size: i64) -> i64:
+    rt_alloc(size)
+
+fn metal_host_free(ptr: i64) -> i64:
+    rt_free(ptr)
+
 enum MetalErrorKind:
     NotAvailable
     DeviceLost
@@ -345,12 +351,12 @@ impl MetalBackend:
         val total_i32 = self.w * self.h
         val total_pixels = _metal_i64(total_i32)
         val byte_size = total_pixels * 4
-        val host = rt_alloc(byte_size + 8)
+        val host = metal_host_alloc(byte_size + 8)
         if host == 0:
             return []
         val ok = metal_buffer_download_ptr(host, self.d_framebuffer, byte_size)
         if ok == 0:
-            rt_free(host)
+            metal_host_free(host)
             return []
         var pixels: [u32] = [0u32; total_i32]
         var i: i64 = 0
@@ -361,11 +367,11 @@ impl MetalBackend:
             if i < total_pixels:
                 pixels[i as i32] = ((pair >> 32) & 0xFFFFFFFF) as u32
                 i = i + 1
-        rt_free(host)
+        metal_host_free(host)
         pixels
 
     me _dispatch_metal_clear(color: u32) -> bool:
-        val params = rt_alloc(12)
+        val params = metal_host_alloc(12)
         if params == 0:
             return false
         rt_ptr_write_i32(params, 0, color as i64)
@@ -374,13 +380,13 @@ impl MetalBackend:
         val pipeline = self.session.pipe_clear
         val threads = _metal_i64(self.w) * _metal_i64(self.h)
         val ok = self._dispatch_metal_1d(pipeline, threads, 256, params, 12)
-        rt_free(params)
+        metal_host_free(params)
         ok
 
     me _dispatch_metal_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32) -> bool:
         if w <= 0 or h <= 0:
             return true
-        val params = rt_alloc(28)
+        val params = metal_host_alloc(28)
         if params == 0:
             return false
         rt_ptr_write_i32(params, 0, x as i64)
@@ -392,13 +398,13 @@ impl MetalBackend:
         rt_ptr_write_i32(params, 24, self.h as i64)
         val pipeline = self.session.pipe_rect_filled
         val ok = self._dispatch_metal_2d(pipeline, w, h, params, 28)
-        rt_free(params)
+        metal_host_free(params)
         ok
 
     me _dispatch_metal_rect_outline(x: i32, y: i32, w: i32, h: i32, color: u32) -> bool:
         if w <= 0 or h <= 0:
             return true
-        val params = rt_alloc(28)
+        val params = metal_host_alloc(28)
         if params == 0:
             return false
         rt_ptr_write_i32(params, 0, x as i64)
@@ -410,11 +416,11 @@ impl MetalBackend:
         rt_ptr_write_i32(params, 24, self.h as i64)
         val pipeline = self.session.pipe_rect_outline
         val ok = self._dispatch_metal_2d(pipeline, w, h, params, 28)
-        rt_free(params)
+        metal_host_free(params)
         ok
 
     me _dispatch_metal_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32) -> bool:
-        val params = rt_alloc(32)
+        val params = metal_host_alloc(32)
         if params == 0:
             return false
         rt_ptr_write_i32(params, 0, x1 as i64)
@@ -438,13 +444,13 @@ impl MetalBackend:
             steps = 1
         val pipeline = self.session.pipe_line
         val ok = self._dispatch_metal_1d(pipeline, (steps + 1) as i64, 256, params, 32)
-        rt_free(params)
+        metal_host_free(params)
         ok
 
     me _dispatch_metal_circle(cx: i32, cy: i32, r: i32, color: u32, filled: bool) -> bool:
         if r <= 0:
             return true
-        val params = rt_alloc(28)
+        val params = metal_host_alloc(28)
         if params == 0:
             return false
         rt_ptr_write_i32(params, 0, cx as i64)
@@ -471,13 +477,13 @@ impl MetalBackend:
             # r+1 threads is a safe upper bound (extras self-cull on px < py).
             val pipe_o = self.session.pipe_circle
             ok = self._dispatch_metal_1d(pipe_o, (r + 1) as i64, 256, params, 28)
-        rt_free(params)
+        metal_host_free(params)
         ok
 
     me _dispatch_metal_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32) -> bool:
         if w <= 0 or h <= 0:
             return true
-        val params = rt_alloc(32)
+        val params = metal_host_alloc(32)
         if params == 0:
             return false
         rt_ptr_write_i32(params, 0, x as i64)
@@ -496,14 +502,14 @@ impl MetalBackend:
             threads = h
         val pipeline = self.session.pipe_rounded_rect
         val ok = self._dispatch_metal_1d(pipeline, threads as i64, 256, params, 32)
-        rt_free(params)
+        metal_host_free(params)
         ok
 
     me _dispatch_metal_rounded_rect_outline(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, thickness: i32) -> bool:
         if w <= 0 or h <= 0:
             return true
         # RoundedRectOutlineParams: x,y,w,h,radius,color,thickness,fb_w,fb_h (9 i32 = 36 bytes)
-        val params = rt_alloc(36)
+        val params = metal_host_alloc(36)
         if params == 0:
             return false
         rt_ptr_write_i32(params, 0, x as i64)
@@ -519,7 +525,7 @@ impl MetalBackend:
         # inclusion test (edges + corner arcs). Bit-exact with the CPU mirror.
         val pipeline = self.session.pipe_rounded_rect_outline
         val ok = self._dispatch_metal_2d(pipeline, w, h, params, 36)
-        rt_free(params)
+        metal_host_free(params)
         ok
 
     me _dispatch_metal_triangle(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32) -> bool:
@@ -540,7 +546,7 @@ impl MetalBackend:
         val bh = max_y - min_y + 1
         if bw <= 0 or bh <= 0:
             return true
-        val params = rt_alloc(44)
+        val params = metal_host_alloc(44)
         if params == 0:
             return false
         rt_ptr_write_i32(params, 0, x1 as i64)
@@ -556,13 +562,13 @@ impl MetalBackend:
         rt_ptr_write_i32(params, 40, min_y as i64)
         val pipeline = self.session.pipe_triangle
         val ok = self._dispatch_metal_2d(pipeline, bw, bh, params, 44)
-        rt_free(params)
+        metal_host_free(params)
         ok
 
     me _dispatch_metal_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32) -> bool:
         if w <= 0 or h <= 0:
             return true
-        val params = rt_alloc(32)
+        val params = metal_host_alloc(32)
         if params == 0:
             return false
         rt_ptr_write_i32(params, 0, x as i64)
@@ -575,7 +581,7 @@ impl MetalBackend:
         rt_ptr_write_i32(params, 28, self.h as i64)
         val pipeline = self.session.pipe_gradient
         val ok = self._dispatch_metal_2d(pipeline, w, h, params, 32)
-        rt_free(params)
+        metal_host_free(params)
         ok
 
     me _dispatch_metal_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> bool:
