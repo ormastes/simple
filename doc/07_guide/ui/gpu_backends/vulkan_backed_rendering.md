@@ -96,10 +96,14 @@ scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 ```
 
+Do not report Windows or Linux status from this top-level workflow; those
+runbooks are intentionally deferred until they have their own host evidence.
+
 On macOS, `vulkaninfo --summary` reporting `driverName = MoltenVK` proves only
 the host Vulkan loader path. It does not prove that Electron or Chrome accepted
-ANGLE Vulkan, and it does not install RenderDoc. The macOS setup evidence must
-also record the selected Simple driver through
+ANGLE Vulkan, that Simple selected the fresh macOS-capable Rust driver, or that
+RenderDoc can capture frames. The macOS setup evidence must also record the
+selected Simple driver through
 `gui_web_2d_vulkan_simple_bin_selection_reason`, plus
 `gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status` and
 `gui_web_2d_vulkan_renderdoc_macos_upstream_support_status`; this separates a
@@ -112,9 +116,10 @@ gate failed. If `renderdoccmd` is missing, the setup evidence records
 RenderDoc paths; use a project-approved `RenderDoc.app`/fork or set `RDOC_HOME`
 to a tree containing `renderdoccmd` before claiming `.rdc` evidence.
 
-Windows and Linux are intentionally deferred from this top-level workflow. When
-those platform runbooks are added, reuse these same evidence keys instead of
-adding platform-specific status names.
+Completion requires RenderDoc `.rdc` files whose first bytes are `RDOC` for the
+Simple Engine2D lane and for any browser lane being claimed as Vulkan-backed.
+Browser bitmap output without ANGLE Vulkan logs and RDOC capture proof remains
+fallback comparison evidence.
 
 ### Electron / Chromium parity (`scripts/check/check-electron-vulkan-web-parity.shs`)
 Renders a page through real Chromium (Electron + `xvfb`, via

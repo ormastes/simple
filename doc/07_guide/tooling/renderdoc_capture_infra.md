@@ -81,8 +81,9 @@ keeps these states separate:
 - optional RenderDoc `.rdc` capture availability and gate status.
 
 Current top-level scope is macOS-only. Use this section to prove and debug the
-macOS path now. Add Windows and Linux parity capture runbooks later using the
-same evidence keys rather than inventing platform-specific status names.
+macOS path now. Do not infer Windows or Linux status from this workflow. Add
+Windows and Linux parity capture runbooks later using the same evidence keys
+rather than inventing platform-specific status names.
 
 Run a readiness-only probe first:
 
@@ -128,7 +129,7 @@ For platform package commands without changing the host, print the runbook:
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --print-install
 ```
 
-### macOS Checklist
+### macOS-Only Checklist
 
 Install or refresh the macOS Vulkan portability stack with Homebrew:
 
@@ -139,8 +140,10 @@ vulkaninfo --summary
 ```
 
 The host is Vulkan-ready only when `vulkaninfo --summary` reports the Apple GPU
-through MoltenVK, for example `driverName = MoltenVK`. This proves the Vulkan
-loader/ICD path, not that Chrome, Electron, Simple, or RenderDoc used Vulkan.
+through MoltenVK, for example `driverName = MoltenVK`. This proves only the
+Vulkan loader/ICD path. It does not prove that Chrome or Electron accepted
+ANGLE Vulkan, that Simple selected a Vulkan-capable driver, or that RenderDoc
+can capture frames.
 
 RenderDoc is a separate prerequisite on macOS. Homebrew may provide the Vulkan
 and MoltenVK stack without a RenderDoc package. Record that package state
@@ -204,7 +207,9 @@ they must not be used as completion evidence unless their logs prove Vulkan and
 their `.rdc` files pass the same RDOC gates.
 
 For GUI/web/2D comparison work, collect both the browser-hosted surface and the
-Simple renderer surface from the same fixture:
+Simple renderer surface from the same fixture. The browser bitmap lanes are
+comparison evidence only until their logs prove Vulkan and their `.rdc` files
+pass the RDOC gates:
 
 ```sh
 SIMPLE_BIN=src/compiler_rust/target/release/simple \

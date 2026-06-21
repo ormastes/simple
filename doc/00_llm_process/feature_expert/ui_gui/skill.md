@@ -52,7 +52,10 @@ and the same evidence keys, after the macOS workflow is stable.
 
 On macOS, Vulkan readiness means `vulkaninfo --summary` reports MoltenVK, not
 that Chrome/Electron accepted ANGLE Vulkan and not that RenderDoc is installed.
-Homebrew covers the Vulkan/MoltenVK stack, but the macOS runbook must record
+The setup wrapper must also record the selected Simple executable and why,
+including `gui_web_2d_vulkan_simple_bin_selection_reason`; a fresh macOS-capable
+driver should report `macos-vulkan-loader-paths-present`. Homebrew covers the
+Vulkan/MoltenVK stack, but the macOS runbook must record
 `gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status` because this host
 has no `renderdoc` formula or cask. Upstream official RenderDoc support lists
 Windows/Linux/Android rather than macOS; use only a project-approved

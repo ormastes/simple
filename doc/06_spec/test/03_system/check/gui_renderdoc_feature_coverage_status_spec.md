@@ -90,6 +90,8 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
   Vulkan/MoltenVK readiness status.
 - The audit reports which Simple executable the GUI/web/2D Vulkan setup probe
   selected, including whether it found a fresh macOS-capable driver.
+- The top-level GUI/web/2D Vulkan RenderDoc workflow is macOS-only until
+  Windows and Linux add independent runbooks with the same evidence keys.
 - Simple `.rdc` evidence must carry Vulkan runtime backend, RenderDoc API, and
   rendered-pixel proof through the aggregate audit.
 - Electron Chromium/Vulkan `.rdc` evidence is fail-closed and required before
