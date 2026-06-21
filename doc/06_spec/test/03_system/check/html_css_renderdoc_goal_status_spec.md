@@ -125,7 +125,7 @@ sh scripts/check/check-html-css-renderdoc-goal-status.shs || true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 154 lines folded for reproduction.
+Runnable source: 155 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -192,6 +192,7 @@ expect(evidence).to_contain("electron_renderdoc_gate_required_magic=RDOC")
 expect(evidence).to_contain("electron_renderdoc_gate_required_api=vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_required_angle=vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_required_features=Vulkan")
+expect(evidence).to_contain("electron_renderdoc_gate_required_electron_suffix=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron|tools/electron-shell/node_modules/.bin/electron")
 expect(evidence).to_contain("electron_renderdoc_gate_required_argb_status=pass")
 expect(evidence).to_contain("electron_renderdoc_gate_required_argb_format=argb-u32")
 expect(evidence).to_contain("electron_renderdoc_gate_required_argb_producer=electron-chromium-capture")
@@ -297,7 +298,7 @@ expect(report).to_contain("- blocked completion gates:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 67 lines folded for reproduction.
+Runnable source: 68 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -351,6 +352,7 @@ expect(evidence).to_contain("electron_renderdoc_gate_argb_nonblank_pixel_count=1
 expect(evidence).to_contain("electron_renderdoc_gate_requested_api=vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_requested_angle=vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_requested_features=Vulkan")
+expect(evidence).to_contain("electron_renderdoc_gate_required_electron_suffix=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron|tools/electron-shell/node_modules/.bin/electron")
 expect(evidence).to_contain("electron_renderdoc_gate_required_argb_status=pass")
 expect(evidence).to_contain("electron_renderdoc_gate_required_argb_format=argb-u32")
 expect(evidence).to_contain("electron_renderdoc_gate_required_argb_producer=electron-chromium-capture")

@@ -90,6 +90,8 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
   rendered-pixel proof through the aggregate audit.
 - Electron Chromium/Vulkan `.rdc` evidence is fail-closed and required before
   the aggregate GUI audit can report `pass`.
+- Electron Chromium/Vulkan `.rdc` evidence must name the repo Electron shell
+  binary, not just any nonempty Electron path.
 - Strict mode fails closed unless the aggregate audit status is `pass`.
 
 ## Scenarios
@@ -156,7 +158,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 391 lines folded for reproduction.
+Runnable source: 392 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -358,6 +360,7 @@ expect(evidence).to_contain("electron_renderdoc_gate_required_api=vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_required_angle=vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_required_features=Vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+expect(evidence).to_contain("electron_renderdoc_gate_required_electron_suffix=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron|tools/electron-shell/node_modules/.bin/electron")
 expect(evidence).to_contain("electron_renderdoc_gate_required_capture_script_suffix=tools/electron-live-bitmap/capture_html_argb.js")
 expect(evidence).to_contain("electron_renderdoc_gate_required_launch_flag_enable_features=--enable-features=Vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_required_launch_flag_use_angle=--use-angle=vulkan")
@@ -668,7 +671,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-sourc
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 71 lines folded for reproduction.
+Runnable source: 72 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -726,6 +729,7 @@ expect(evidence).to_contain("electron_renderdoc_gate_requested_api=vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_requested_angle=vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_requested_features=Vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_required_features=Vulkan")
+expect(evidence).to_contain("electron_renderdoc_gate_required_electron_suffix=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron|tools/electron-shell/node_modules/.bin/electron")
 expect(evidence).to_contain("electron_renderdoc_gate_argb_status=pass")
 expect(evidence).to_contain("electron_renderdoc_gate_argb_reason=pass")
 expect(evidence).to_contain("electron_renderdoc_gate_argb_format=argb-u32")
