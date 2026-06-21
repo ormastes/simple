@@ -49,5 +49,7 @@ simple spipe-docgen test/03_system/app/ide/feature/ide_office_plugin_suite_spec.
 find doc/06_spec -name '*_spec.spl' | wc -l
 ```
 
-The docgen result must read like an operator manual and report `0 stubs`. The
-final command must print `0`.
+The generated manual at
+`doc/06_spec/03_system/app/ide/feature/ide_office_plugin_suite_spec.md` must
+read like an operator manual and report `0 stubs`. The final command must
+print `0`.
