@@ -165,13 +165,15 @@ Browser Vulkan proof must be read from
 `gui_web_2d_vulkan_browser_backing_status`,
 `gui_web_2d_vulkan_browser_backing_reason`, and
 `gui_web_2d_vulkan_browser_backing_mode`; fallback bitmap comparison is not
-Vulkan-backed browser proof.
+Vulkan-backed browser proof, and the aggregate GUI audit must remain incomplete
+until browser backing is `pass`.
 Read current macOS blocker lanes from
 `gui_web_2d_vulkan_renderdoc_blocker_status`,
 `gui_web_2d_vulkan_renderdoc_blocker_reason`,
 `gui_web_2d_vulkan_renderdoc_blocker_gate_count`, and
 `gui_web_2d_vulkan_renderdoc_blocker_gates` before claiming that RenderDoc,
-Simple, Electron, or Chrome Vulkan-backed capture is ready.
+Simple, Electron, or Chrome Vulkan-backed capture is ready; blocker status
+`blocked` is a completion blocker, not a warning.
 GUI widget fixture evidence must also prove per-widget feature witnesses via
 `gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features`,
 not only widget/class presence.

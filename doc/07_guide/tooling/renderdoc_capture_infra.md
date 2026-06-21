@@ -140,7 +140,8 @@ The browser Vulkan-backed proof is a separate rollup:
 `gui_web_2d_vulkan_browser_backing_mode`. A passing comparison artifact with
 `gui_web_2d_vulkan_browser_backing_mode=fallback-bitmap-comparison` is useful
 comparison evidence, but it is not Electron/Chrome Vulkan-backed RenderDoc
-proof.
+proof, and the aggregate audit cannot report complete while browser backing is
+not `pass`.
 The current blockers are machine-readable in
 `gui_web_2d_vulkan_renderdoc_blocker_status`,
 `gui_web_2d_vulkan_renderdoc_blocker_reason`,
@@ -150,7 +151,8 @@ Vulkan readiness, RenderDoc command availability, Simple RenderDoc gate status,
 Electron ANGLE Vulkan acceptance, Electron RenderDoc gate status, Chrome ANGLE
 Vulkan acceptance, and Chrome RenderDoc gate status. A blocker status of
 `blocked` means the GUI/web/2D comparison can still be useful, but at least one
-required Vulkan-backed `.rdc` proof lane is missing.
+required Vulkan-backed `.rdc` proof lane is missing, and completion remains
+`incomplete`.
 
 On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
 `src/compiler_rust/target/debug/simple` when that binary advertises the macOS
@@ -290,6 +292,9 @@ Completion requires typed evidence, not screenshots alone:
 - The aggregate audit reports `gui_web_2d_vulkan_comparison_artifact_status=pass`
   or records an explicit `gui_web_2d_vulkan_comparison_artifact_reason` for the
   missing or mismatched comparison artifact.
+- The aggregate audit reports `gui_web_2d_vulkan_browser_backing_status=pass`
+  and `gui_web_2d_vulkan_renderdoc_blocker_status=pass`; otherwise these fields
+  are completion blockers, not warnings.
 - The production GUI/web parity evidence still reports matching checksums,
   `mismatch_count=0`, and `blur_or_tolerance=false`.
 
