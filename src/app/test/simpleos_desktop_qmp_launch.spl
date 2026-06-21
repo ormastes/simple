@@ -1,15 +1,11 @@
-#[runtime_intrinsics]
 use os.qemu_runner.{OsTarget, get_desktop_browser_target, get_wm_simple_web_check_target, _x64_nvme_disk_args, build_os, build_qemu_command, ensure_desktop_disk_image}
 use std.nogc_sync_mut.sffi.io.{dir_create_all}
 use app.io.env_ops.{env_get as qmp_env_get}
-use app.io.mod.{process_run_timeout, process_spawn_async, process_wait, process_is_running, process_kill}
-
-extern fn rt_getpid() -> i64
-extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_thread_sleep(ms: i64)
+use app.io.mod.{
+    file_delete, file_exists, file_read_text, getpid, process_run_timeout,
+    process_spawn_async, process_wait, process_is_running, process_kill,
+    thread_sleep_ms, time_now_unix_micros
+}
 
 class QemuGuestHandle:
     pid: i64
@@ -137,7 +133,7 @@ fn can_run_target(target: OsTarget) -> bool:
     if not _qemu_available(target.qemu_system):
         print "SKIP: {target.qemu_system} not found on PATH"
         return false
-    if not rt_file_exists(target.output):
+    if not file_exists(target.output):
         print "SKIP: Kernel not built: {target.output}"
         return false
     true
@@ -145,10 +141,10 @@ fn can_run_target(target: OsTarget) -> bool:
 fn _wait_for_qmp_socket(socket_path: text, timeout_ms: i64) -> bool:
     var waited = 0
     while waited <= timeout_ms:
-        if rt_file_exists(socket_path):
-            rt_thread_sleep(200)
+        if file_exists(socket_path):
+            thread_sleep_ms(200)
             return true
-        rt_thread_sleep(100)
+        thread_sleep_ms(100)
         waited = waited + 100
     false
 
@@ -173,15 +169,15 @@ fn _tail_lines(data: text, max_lines: i64) -> text:
     data
 
 fn read_qemu_stderr_log_path(path: text) -> text:
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return ""
-    rt_file_read_text(path) ?? ""
+    file_read_text(path)
 
 fn read_qemu_stderr_log(handle: QemuGuestHandle) -> text:
     read_qemu_stderr_log_path(handle.stderr_log)
 
 fn read_serial_log(handle: QemuGuestHandle) -> text:
-    if not rt_file_exists(handle.serial_log):
+    if not file_exists(handle.serial_log):
         return ""
     val (stdout, _stderr, exit_code) = process_run_timeout(
         "/bin/sh",
@@ -189,17 +185,17 @@ fn read_serial_log(handle: QemuGuestHandle) -> text:
         5000)
     if exit_code == 0 and stdout != "":
         return stdout
-    rt_file_read_text(handle.serial_log) ?? ""
+    file_read_text(handle.serial_log)
 
 fn spawn_guest_with_qmp(target: OsTarget, qmp_socket: text, serial_log: text) -> Result<QemuGuestHandle, text>:
     val stderr_log = serial_log + ".stderr"
     _cleanup_stale_guest_identity(qmp_socket, serial_log, stderr_log)
-    if rt_file_exists(qmp_socket):
-        rt_file_delete(qmp_socket)
-    if rt_file_exists(serial_log):
-        rt_file_delete(serial_log)
-    if rt_file_exists(stderr_log):
-        rt_file_delete(stderr_log)
+    if file_exists(qmp_socket):
+        file_delete(qmp_socket)
+    if file_exists(serial_log):
+        file_delete(serial_log)
+    if file_exists(stderr_log):
+        file_delete(stderr_log)
 
     val target_with_qmp = _target_with_qmp(target, qmp_socket)
     val cmd_parts = build_qemu_command(target_with_qmp)
@@ -228,12 +224,12 @@ fn stop_guest(handle: QemuGuestHandle) -> bool:
         stopped = process_kill(handle.pid)
         process_wait(handle.pid, 2000)
     _cleanup_stale_guest_identity(handle.qmp_socket, handle.serial_log, handle.stderr_log)
-    if rt_file_exists(handle.qmp_socket):
-        rt_file_delete(handle.qmp_socket)
-    if rt_file_exists(handle.serial_log):
-        rt_file_delete(handle.serial_log)
-    if rt_file_exists(handle.stderr_log):
-        rt_file_delete(handle.stderr_log)
+    if file_exists(handle.qmp_socket):
+        file_delete(handle.qmp_socket)
+    if file_exists(handle.serial_log):
+        file_delete(handle.serial_log)
+    if file_exists(handle.stderr_log):
+        file_delete(handle.stderr_log)
     stopped
 
 fn wait_for_serial_marker(handle: QemuGuestHandle, marker: text, timeout_ms: i64) -> bool:
@@ -242,7 +238,7 @@ fn wait_for_serial_marker(handle: QemuGuestHandle, marker: text, timeout_ms: i64
         val serial_output = read_serial_log(handle)
         if serial_output.contains(marker):
             return true
-        rt_thread_sleep(100)
+        thread_sleep_ms(100)
         waited = waited + 100
     read_serial_log(handle).contains(marker)
 
@@ -301,25 +297,25 @@ fn _print_launch_failure_context(handle_pid: i64, qmp_socket: text, serial_log: 
 fn main() -> i64:
     val target_name = qmp_env_get("SIMPLEOS_DESKTOP_QMP_TARGET") ?? "desktop"
     val build_target = if target_name == "wm-simple-web": get_wm_simple_web_check_target() else: get_desktop_browser_target()
-    val token = "{rt_getpid()}_{rt_time_now_unix_micros()}"
+    val token = "{getpid()}_{time_now_unix_micros()}"
     val qmp_socket = qmp_env_get("SIMPLEOS_DESKTOP_QMP_SOCKET") ?? "/tmp/simpleos_desktop_qmp_{token}.sock"
     val serial_log = qmp_env_get("SIMPLEOS_DESKTOP_QMP_SERIAL_LOG") ?? "build/os/simpleos_desktop_qmp_{token}.log"
     dir_create_all("build/os")
 
-    if target_name == "wm-simple-web" and not rt_file_exists(build_target.entry):
+    if target_name == "wm-simple-web" and not file_exists(build_target.entry):
         print "simpleos_desktop_qmp_status=unavailable"
         print "simpleos_desktop_qmp_reason=wm-simple-web-source-missing"
         print "simpleos_desktop_qmp_target={target_name}"
         print "simpleos_desktop_qmp_entry={build_target.entry}"
         return 1
-    if target_name == "wm-simple-web" and (not rt_file_exists(build_target.output) or _source_newer_than_output(build_target.entry, build_target.output)):
+    if target_name == "wm-simple-web" and (not file_exists(build_target.output) or _source_newer_than_output(build_target.entry, build_target.output)):
         if not build_os(build_target):
             print "simpleos_desktop_qmp_status=unavailable"
             print "simpleos_desktop_qmp_reason=wm-simple-web-build-failed"
             print "simpleos_desktop_qmp_target={target_name}"
             print "simpleos_desktop_qmp_entry={build_target.entry}"
             return 1
-    if not rt_file_exists(build_target.output) and not build_os(build_target):
+    if not file_exists(build_target.output) and not build_os(build_target):
         print "simpleos_desktop_qmp_status=unavailable"
         print "simpleos_desktop_qmp_reason=desktop-build-failed"
         print "simpleos_desktop_qmp_target={target_name}"
