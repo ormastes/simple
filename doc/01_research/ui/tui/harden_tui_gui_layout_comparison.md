@@ -82,7 +82,7 @@ Research for hardening TUI and GUI layout comparison, fixing reachable compariso
 
 ## TUI Scenario Manual Update: 2026-06-01
 
-- Regenerated `doc/06_spec/system/gui/tui_screen_spec.md` from `test/03_system/gui/tui_screen_spec.spl` with `src/compiler_rust/target/debug/simple spipe-docgen ... --output doc/06_spec`.
+- Regenerated `doc/06_spec/03_system/gui/tui_screen_spec.md` from `test/03_system/gui/tui_screen_spec.spl` with `src/compiler_rust/target/debug/simple spipe-docgen ... --output doc/06_spec`.
 - The regenerated manual includes the two parser diagnostic assertions for `minimal.ui.sdn` and `demo.ui.sdn`.
 - Added a manual-purpose section describing the screen-buffer contract, parser diagnostic behavior, and operator-visible TUI layout outcomes.
 - Post-manual verification:
@@ -97,7 +97,7 @@ Research for hardening TUI and GUI layout comparison, fixing reachable compariso
   changed executable specs or source.
 - Confirmed manual mirrors exist for changed specs:
   - `doc/06_spec/integration/rendering/backend_screenshot_compare_spec.md`
-  - `doc/06_spec/system/gui/tui_screen_spec.md`
+  - `doc/06_spec/03_system/gui/tui_screen_spec.md`
 - Focused audit commands:
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/02_integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter`: 1 file, 6 tests, 0 failures.
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/03_system/gui/tui_screen_spec.spl --mode=interpreter`: 1 file, 11 tests, 0 failures.
