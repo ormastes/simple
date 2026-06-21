@@ -43,7 +43,7 @@ use std.nogc_sync_mut.http_server.{
 
 # Extras — from stdlib for feature layers
 use std.nogc_sync_mut.net.tcp.{TcpListener, TcpStream}
-use std.nogc_sync_mut.io.tls_sffi.{...}   # TLS termination
+use std.nogc_sync_mut.io.tls.{...}        # TLS termination
 use std.common.json.{...}                  # JSON API responses
 use std.common.text.{...}                  # String utilities
 ```
@@ -137,9 +137,9 @@ fn make_static_handler(root: text) -> fn(HttpRequest) -> HttpResponse:
     return \req:
         val rel_path = req.path.strip_prefix("/static")
         val file_path = "{root}/{rel_path}"
-        if not rt_file_exists(file_path):
+        if not file_exists(file_path):
             return HttpResponse.not_found()
-        val content = rt_file_read_text(file_path)
+        val content = file_read_text(file_path)
         val content_type = guess_content_type(file_path)
         return HttpResponse.ok(content).with_content_type(content_type)
 
@@ -156,10 +156,10 @@ fn guess_content_type(path: text) -> text:
 ### 6. tls.spl — TLS Termination
 
 ```simple
-use std.nogc_sync_mut.io.tls_sffi.{rt_tls_server_config_new, rt_tls_server_accept, ...}
+use std.nogc_sync_mut.io.tls.{tls_server_config_new, tls_server_accept, ...}
 
 fn start_tls_server(config: ServerConfig, router: Router):
-    val tls_config = rt_tls_server_config_new(config.tls_cert, config.tls_key)
+    val tls_config = tls_server_config_new(config.tls_cert, config.tls_key)
     # Wrap accept loop: TLS handshake → ConnStream → parse_request → router.dispatch
     ...
 ```
