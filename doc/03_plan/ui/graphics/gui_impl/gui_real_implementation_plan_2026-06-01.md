@@ -46,8 +46,8 @@ collection, dynlib/SMF loading, clocks, and final presentation.
 
 ## Explicitly Removed From The Release Path
 
-- `rt_gui_*`, `rt_winit_*`, `rt_sdl_*`, `rt_cocoa_*`, and related native GUI
-  runtime calls inside WM, GUI library, and web renderer modules.
+- Facade-bypassing native GUI runtime calls inside WM, GUI library, and web
+  renderer modules.
 - `HostCompositor` as acceptance evidence for the macOS path.
 - `SimpleWebRenderer`, HTML layout, browser surfaces, and `WebRenderRequest` as
   the GUI app content path.
@@ -105,8 +105,8 @@ the evidence.
   Prefer pure Simple SMF envelope, symbol, and probe code. If direct native
   symbol invocation cannot be expressed in Simple, use a minimal C bridge at the
   adapter boundary and keep the GUI library pure Simple.
-- Existing WM and hosted examples still contain direct `rt_gui_*` and
-  `rt_winit_*` extern calls. They must not be imported by the release lane.
+- Existing WM and hosted examples still contain direct native GUI extern calls.
+  They must not be imported by the release lane.
 - Existing Simple Web renderer files are renderer/browser feature code, not the
   requested pure Simple GUI library.
 - Existing QEMU capture and WM tests prove presentation or screenshots, not
@@ -314,8 +314,8 @@ as proof of the pure GUI SMF/dynlib release path.
   `SIMPLE_LIB=src bin/simple run src/app/gui_perf/linux_smf_dynlib_e2e_gate.spl`
   must emit `GUI_LINUX_SMF_DYNLIB_E2E_GATE status=pass` on Linux after a
   `GUI_DYNLIB_PERF` row proving the SMF/SFFI hot-call path.
-- Pure GUI release-lane dependency guard: no WM, Simple Web, or `rt_gui`/hosted
-  runtime imports.
+- Pure GUI release-lane dependency guard: no WM, Simple Web, native GUI, or
+  hosted runtime imports.
 - macOS arm64 dynlib/SMF hot response probe: p99 < 1000 us after warmup.
 - `GUI_DYNLIB_PERF` must report `loader=smf_dynlib`,
   `dynload=smf_dynlib`, `host_dynload=sffi`,
