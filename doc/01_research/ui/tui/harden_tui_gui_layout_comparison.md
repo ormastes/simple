@@ -236,7 +236,7 @@ Research for hardening TUI and GUI layout comparison, fixing reachable compariso
 
 ## HTML Compatibility Matcher Mirror Update: 2026-06-01
 
-- `doc/06_spec/system/wm_compare/html_compat_spec.md` already mirrored the current 16 executable scenarios, including invalid dimensions, truncated exact buffers, and truncated perceptual buffers.
+- `doc/06_spec/03_system/gui/wm_compare/html_compat_spec.md` already mirrored the current 16 executable scenarios, including invalid dimensions, truncated exact buffers, and truncated perceptual buffers.
 - The ignored SPipe matcher mirror `test/sys/wm_compare/.spipe_matchers_html_compat_spec.spl` was stale and only covered the earlier exact-match/change cases. It now imports `compare_perceptual` and mirrors the invalid-dimension, truncated exact, and truncated perceptual comparison cases.
 - Focused verification:
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/03_system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 16 tests, 0 failures; runner duration 8162ms.
@@ -250,7 +250,7 @@ Research for hardening TUI and GUI layout comparison, fixing reachable compariso
 
 - `src/app/wm_compare/html_compat_part3.spl` `compare_pair` previously accepted exact pixel matches based on the requested viewport dimensions and pixel buffer lengths, without checking each successful capture's own `width` and `height` metadata. A capture with mismatched viewport metadata could therefore be accepted as exact if the raw pixel array matched.
 - `compare_pair` now treats Chrome or Simple capture viewport metadata mismatches as failed captures before exact comparison. The returned pair result records `exact: false`, `accepted: false`, zero match/perceptual percentages, and a `viewport metadata mismatch` diagnostic.
-- `test/03_system/wm_compare/html_compat_spec.spl` now covers mismatched Chrome capture metadata, and `doc/06_spec/system/wm_compare/html_compat_spec.md` mirrors the scenario with 17 active scenarios.
+- `test/03_system/wm_compare/html_compat_spec.spl` now covers mismatched Chrome capture metadata, and `doc/06_spec/03_system/gui/wm_compare/html_compat_spec.md` mirrors the scenario with 17 active scenarios.
 - Focused verification:
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/03_system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 17 tests, 0 failures; runner duration 8406ms.
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/02_integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter --clean`: 1 file, 9 tests, 0 failures; runner duration 2184ms.
