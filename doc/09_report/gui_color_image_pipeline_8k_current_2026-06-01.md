@@ -13,6 +13,9 @@
 - pure_simple_jpegxl_stage: metadata parsing, sparse 8K placeholder allocation, structured default-sRGB color metadata, non-default structured color fail-closed routing, and exact raster tiling are covered; full JPEG XL pixel decode remains a follow-up
 - non_identity_icc_fail_closed: focused image decode spec requires RGB ICC profiles with Lab PCS to return icc-rgb-lab-transform-pending rather than identity pixels
 - jpegxl_nondefault_color_fail_closed: focused image decode spec requires direct, full-container, and split-partial non-default JPEG XL structured color headers to fail closed rather than silently accepting default sRGB
+- wm_compare_spipe_8k_planning: `test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl`
+  verifies the 132,710,400-byte packed 8K plan, rejects `RGB565` from the 8K
+  hot path, and requires zero default wide-color/codec initialization.
 
 ## Evidence
 
@@ -34,6 +37,14 @@
 - gui_color_image_pipeline_8k_lab_white_point=D65
 
 ## Focused Specs
+
+    spec_path=test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl
+    Simple Test Runner v1.0.0-beta
+    Files: 1
+    Passed: 10
+    Failed: 0
+    spec_doc=doc/06_spec/test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.md
+    spec_exit_code=0
 
     spec_path=examples/11_advanced/browser/test/gpu/surface_color_plan_spec.spl
     Simple Test Runner v1.0.0-beta

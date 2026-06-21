@@ -28,7 +28,7 @@ production_gui_web_renderer_parity_hardening_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,7 +43,10 @@ Verifies selected Feature C and NFR C renderer parity and GPU/browser evidence t
 |-------|-------|
 | Category | Other |
 | Status | Active |
-| Requirements | doc/02_requirements/nfr/simple_web_browser_production_hardening.md |
+| Requirements | doc/02_requirements/ui/graphics/gui_color_image_pipeline_8k.md |
+| Plan | doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md |
+| Design | doc/05_design/ui/misc/production_gui_web_renderer_parity_hardening.md |
+| Research | doc/01_research/ui/graphics/gui/gui_color_image_pipeline_8k.md |
 | Source | `test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -55,11 +58,62 @@ taxonomy contracts.
 
 **Requirements:** doc/02_requirements/feature/simple_web_browser_production_hardening.md
 **Requirements:** doc/02_requirements/nfr/simple_web_browser_production_hardening.md
+**Requirements:** doc/02_requirements/ui/graphics/gui_color_image_pipeline_8k.md
+**Research:** doc/01_research/ui/graphics/gui/gui_color_image_pipeline_8k.md
+**Plan:** doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md
+**Design:** doc/05_design/ui/misc/production_gui_web_renderer_parity_hardening.md
 **Traceability:** REQ-WEB-HARD-013, REQ-WEB-HARD-014, NFR-WEB-HARD-009, NFR-WEB-HARD-012
+
+## Syntax
+
+Call the parity harness helpers from
+`app.wm_compare.production_gui_web_renderer_parity` and assert concrete
+framebuffer sizes, backend names, pixel counts, exact mismatch counters, and
+timing-budget status.
+
+## Examples
+
+The 8K packed-surface planning scenarios assert `7680 * 4320 * 4 =
+132710400`, accept `ARGB32`/`RGBA32`/`BGRA32`, reject `RGB565`, and confirm no
+default wide-color or codec initialization is required.
 
 ## Scenarios
 
 ### production GUI web renderer parity hardening
+
+#### 8K packed surface planning
+
+#### reports the exact packed 8K framebuffer size without wide-color eager init
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(gui_8k_packed_framebuffer_bytes()).to_equal(132710400)
+expect(gui_8k_default_lazy_init_count()).to_equal(0)
+```
+
+</details>
+
+#### accepts only 32-bit packed formats for the 8K hot path
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(gui_8k_format_eligible_for_packed_hot_path("ARGB32")).to_equal(true)
+expect(gui_8k_format_eligible_for_packed_hot_path("RGBA32")).to_equal(true)
+expect(gui_8k_format_eligible_for_packed_hot_path("BGRA32")).to_equal(true)
+expect(gui_8k_format_eligible_for_packed_hot_path("RGB565")).to_equal(false)
+```
+
+</details>
 
 #### generated common.ui widget HTML
 
@@ -265,8 +319,8 @@ expect(report.exact_backend_parity).to_equal(true)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -274,7 +328,10 @@ expect(report.exact_backend_parity).to_equal(true)
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/nfr/simple_web_browser_production_hardening.md](doc/02_requirements/nfr/simple_web_browser_production_hardening.md)
+- **Requirements:** [doc/02_requirements/ui/graphics/gui_color_image_pipeline_8k.md](doc/02_requirements/ui/graphics/gui_color_image_pipeline_8k.md)
+- **Plan:** [doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md](doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md)
+- **Design:** [doc/05_design/ui/misc/production_gui_web_renderer_parity_hardening.md](doc/05_design/ui/misc/production_gui_web_renderer_parity_hardening.md)
+- **Research:** [doc/01_research/ui/graphics/gui/gui_color_image_pipeline_8k.md](doc/01_research/ui/graphics/gui/gui_color_image_pipeline_8k.md)
 
 
 </details>
