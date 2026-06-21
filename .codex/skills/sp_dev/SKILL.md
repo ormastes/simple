@@ -221,6 +221,10 @@ fixture-scoped browser text antialiasing normalization, but must still require
 matching checksums, `mismatch_count=0`, and `blur_or_tolerance=false`. Treat
 Linux Metal readback as host-unavailable (`metal-requires-macos`) and require
 native raw Metal readback evidence on macOS.
+For GUI/web queue proof, runtime queue/drain receipts are necessary but not
+sufficient. Production proof requires same-frame backend `device_readback`, a
+positive backend handle, and matching checksum; runtime-only, synthetic-handle,
+upload-only, or CPU-mirror evidence fails.
 
 Before marking a feature tracking row `status=done`, fill `requirement`,
 `research`, `plan`, `architecture`, `design`, `system_spec`, `spec_doc`,
