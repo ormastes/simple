@@ -11,15 +11,21 @@
 #             (parent has NO reference to the private repo at all)
 set -eu
 
+CORE_MODE=
+case "${1:-}" in
+  --vendor|--nested) CORE_MODE="$1"; shift ;;
+esac
 MODE="${1:-}"
 PRIVATE_URL="${2:-}"
 CORE_URL="${3:-https://github.com/ormastes/simple.git}"
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 usage() {
-  echo "usage: place_spipe.sh <embed|generate> <private-spipe-repo-url> [core-url]"
+  echo "usage: place_spipe.sh [--vendor|--nested] <embed|generate> <private-spipe-repo-url> [core-url]"
   echo "  embed     .spipe added as a submodule of this project"
   echo "  generate  .spipe cloned into ./.spipe and gitignored (no outside link)"
+  echo "  --vendor  core/ committed snapshot, pull-only for all clones (default)"
+  echo "  --nested  core/ live clone, gitignored, pull with 'git -C core pull'"
   exit 1
 }
 [ -n "$MODE" ] && [ -n "$PRIVATE_URL" ] || usage
@@ -38,7 +44,7 @@ case "$MODE" in
   *) usage ;;
 esac
 
-# wire the read-only core submodule INSIDE .spipe (submodule-of-submodule)
-( cd .spipe && sh "$HERE/add_spipe_core.sh" "$CORE_URL" )
+# wire the pull-only core INSIDE .spipe (forward the core mode flag)
+( cd .spipe && sh "$HERE/add_spipe_core.sh" $CORE_MODE "$CORE_URL" )
 
 echo "done: .spipe ($MODE) with read-only core at .spipe/core"

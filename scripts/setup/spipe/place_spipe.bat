@@ -2,6 +2,9 @@
 REM place_spipe.bat  (script 2, Windows) — see place_spipe.sh for details.
 setlocal
 set "HERE=%~dp0"
+set "CORE_MODE="
+if /i "%~1"=="--vendor" ( set "CORE_MODE=--vendor" & shift )
+if /i "%~1"=="--nested" ( set "CORE_MODE=--nested" & shift )
 set "MODE=%~1"
 set "PRIVATE_URL=%~2"
 set "CORE_URL=%~3"
@@ -21,9 +24,9 @@ if /i "%MODE%"=="embed" (
   goto usage
 )
 
-REM wire read-only core + doc/wiki skeleton inside .spipe (submodule-of-submodule)
+REM wire pull-only core + doc/wiki skeleton inside .spipe (forward core mode)
 pushd .spipe
-call "%HERE%add_spipe_core.bat" "%CORE_URL%" || ( popd & exit /b 1 )
+call "%HERE%add_spipe_core.bat" %CORE_MODE% "%CORE_URL%" || ( popd & exit /b 1 )
 popd
 
 echo done: .spipe (%MODE%) with read-only core at .spipe/core

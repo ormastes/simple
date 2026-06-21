@@ -28,7 +28,7 @@ repo at most references `.spipe` itself, never `core/` or upstream.
 ```sh
 # embed:    .spipe is a submodule of your project
 # generate: .spipe is a plain clone, gitignored in your project (no outside link)
-scripts/setup/spipe/place_spipe.sh <embed|generate> <private-spipe-repo-url> [core-url]
+scripts/setup/spipe/place_spipe.sh [--vendor|--nested] <embed|generate> <private-spipe-repo-url> [core-url]
 ```
 
 ## gitignore is set at creation
@@ -37,15 +37,21 @@ scripts/setup/spipe/place_spipe.sh <embed|generate> <private-spipe-repo-url> [co
   — the private overlay never enters your repo's history.
 - No secrets are created or referenced; keep secret material under `.spipe/` only.
 
-## `core/` is pull-only
+## `core/` is pull-only — two modes
 
-`add_spipe_core` shallow-clones the public project into `core/`, **strips its
-`.git`**, and commits the snapshot. Because the committed tree has no upstream
-remote, **pushing to the public repo is impossible by construction** for everyone
-who clones `.spipe` — not just the machine that set it up. Pull updates by
-re-running the script (re-clones latest, recommits; clean no-op when unchanged).
+`add_spipe_core [--vendor|--nested]` (forwarded by `place_spipe`):
 
-> A nested *live* clone (`git clone … core` + `set-url --push DISABLED`) only
-> blocks pushes on the one machine that set it (config is per-clone, not
-> committed). The stripped-vendor snapshot is what makes pull-only hold for all
-> clones, so it is the default here.
+| Mode | `core/` is | gitignored? | pull-only holds for | update |
+|------|-----------|-------------|---------------------|--------|
+| `--vendor` (default) | committed snapshot (`.git` stripped) | no — it travels in clones | **every clone** (no upstream link in the tree) | re-run the script |
+| `--nested` | live clone (`origin` push disabled) | yes — `/core/` | only the machine that set it (config is per-clone) | `git -C core pull` |
+
+Pick by whether `core/` should ride along when someone clones *your* `.spipe`:
+
+- **`--vendor`** — copy travels, push-block is structural and guaranteed for
+  all clones. Use when consumers should get `core/` automatically.
+- **`--nested`** — lighter history, easy `git -C core pull`, but each consumer
+  must reclone `core/` themselves and the push-block is local-only.
+
+Neither grants write access to the public repo; the push-disable only stops
+*accidental* pushes on a configured machine.

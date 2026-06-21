@@ -1,26 +1,47 @@
 #!/bin/sh
 # add_spipe_core.sh  (script 1)
-# Vendor the public CORE project into ./core as a real, COMMITTED copy.
-# Run from INSIDE the .spipe private repo. core/ becomes plain files in THIS
-# repo — a normal `git clone` of the private repo gets everything, no submodule.
+# Place the public CORE project at ./core inside the .spipe private repo,
+# pull-only. Run from INSIDE the .spipe private repo. Two modes:
 #
-# Pull-only by construction: core/ is a stripped clone (its .git is removed), so
-# there is no link back to the public repo and nothing can be pushed upstream.
-# To PULL changes later, just re-run this script: it re-clones the latest
-# snapshot and recommits. Needs nothing beyond core git (no git-subtree).
+#   --vendor  (default) shallow-clone, strip .git, COMMIT the snapshot. core/ is
+#             real files that travel inside .spipe clones; the committed tree has
+#             no upstream remote, so pushing to the public repo is impossible by
+#             construction for EVERY clone. Update: re-run this script.
+#   --nested  live clone kept OUT of the repo (gitignored /core/). Pulls with
+#             `git -C core pull`; push disabled locally. That push-block is
+#             per-machine config and does NOT travel — each consumer reclones.
+#
+# Needs only core git (no git-subtree).
 set -eu
+
+MODE=vendor
+case "${1:-}" in
+  --vendor) MODE=vendor; shift ;;
+  --nested) MODE=nested; shift ;;
+  --*) echo "error: unknown flag $1 (use --vendor or --nested)"; exit 1 ;;
+esac
 
 CORE_URL="${1:-https://github.com/ormastes/simple.git}"
 CORE_REF="${2:-main}"
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: run inside the .spipe git repo"; exit 1; }
 
-# (re)vendor: replace core/ with the latest upstream snapshot, then strip its .git
-rm -rf core
-git clone --depth 1 --branch "$CORE_REF" "$CORE_URL" core
-rm -rf core/.git
-git add -A core
-git commit -q -m "vendor: core @ $CORE_REF ($CORE_URL)" || echo "core already up to date"
+if [ "$MODE" = vendor ]; then
+  # (re)vendor: replace core/ with the latest upstream snapshot, then strip its .git
+  rm -rf core
+  git clone --depth 1 --branch "$CORE_REF" "$CORE_URL" core
+  rm -rf core/.git
+  git add -A core
+  git commit -q -m "vendor: core @ $CORE_REF ($CORE_URL)" || echo "core already up to date"
+else
+  # nested live clone: kept out of the repo, pull-only on this machine
+  [ -e core ] && { echo "error: ./core already exists"; exit 1; }
+  git clone --branch "$CORE_REF" "$CORE_URL" core
+  git -C core remote set-url --push origin DISABLED
+  grep -qxF '/core/' .gitignore 2>/dev/null || printf '/core/\n' >> .gitignore
+  git add .gitignore
+  git commit -q -m "chore(spipe): gitignore nested core/ live clone" || true
+fi
 
 # overlay doc/wiki skeleton (read order: 00 -> 10 -> 20). Created if missing.
 mkdir -p 00_llm_process 10_llm_wiki 20_raw_doc
@@ -30,6 +51,10 @@ mkdir -p 00_llm_process 10_llm_wiki 20_raw_doc
 git add 00_llm_process 10_llm_wiki 20_raw_doc
 git commit -q -m "chore(spipe): overlay doc/wiki skeleton (00_llm_process 10_llm_wiki 20_raw_doc)" || true
 
-echo "core vendored at .spipe/core ($CORE_URL@$CORE_REF) — committed copy, pull-only"
-echo "pull updates later: re-run this script (re-clones latest snapshot, recommits)"
+echo "core ready at .spipe/core ($MODE, $CORE_URL@$CORE_REF) — pull-only"
+if [ "$MODE" = vendor ]; then
+  echo "pull updates: re-run this script (re-clones latest snapshot, recommits)"
+else
+  echo "pull updates: git -C core pull"
+fi
 echo "doc/wiki dirs ready: 00_llm_process/ 10_llm_wiki/ 20_raw_doc/"
