@@ -101,7 +101,7 @@ stdlib code: no Node.js wrapper and no direct `rt_*` extern declarations. The
 matching plan and generated/manual page are:
 
 - `doc/03_plan/sys_test/mcp_cmdline_handshake.md`
-- `doc/06_spec/test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.md`
+- `doc/06_spec/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.md`
 
 When updating MCP specs, also regenerate and review their scenario manuals:
 
