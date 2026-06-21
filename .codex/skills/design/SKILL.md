@@ -139,7 +139,8 @@ Reference: `doc/07_guide/infra/sspec_scenario_manual.md`.
   such as Codex Spark, Claude Haiku, or Claude Sonnet for parallel exploration,
   plus merge owner and final normal/highest-capability reviewer. Before those
   sidecars start, the primary/best model defines the shared interface names,
-  manual setup/checker helper names, and placeholder fail-fast helpers
+  manual `step("...")` flow helper names, setup/checker helper names, and
+  placeholder fail-fast helpers
   (`assert(false)` or `fail(...)`) that sidecars must target.
 
 ## Phase 5: Quality Check

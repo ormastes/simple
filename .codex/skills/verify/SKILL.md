@@ -168,6 +168,9 @@ Scan for stub patterns — any match is a **FAIL**:
 - `doc/04_architecture/` updated for new modules
 - `doc/05_design/` updated for new features
 - `doc/06_spec/` generated/manual docs follow the mirrored `test/` layout
+- Every final verification audits whether the lane changed `doc/07_guide`,
+  generated/manual SPipe docs, or process skills, and fails stale or missing
+  updates instead of deferring them to release cleanup.
 - Scenario manual guidance is followed for scenario-oriented specs; if not,
   return to design/implementation to improve the SPipe source and regenerate.
 - Workflow, tool-contract, evidence-wrapper, or verification-contract changes

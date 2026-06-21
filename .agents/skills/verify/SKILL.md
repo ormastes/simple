@@ -114,6 +114,9 @@ not create, rewrite, or weaken SPipe after verification.
 - `doc/04_architecture/` updated for new modules
 - `doc/05_design/` updated for new features
 - `doc/06_spec/` manual output reviewed for scenario quality when applicable
+- Every final verification audits whether the lane changed `doc/07_guide`,
+  generated/manual SPipe docs, or process skills, and fails stale or missing
+  updates instead of deferring them to release cleanup.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`; executable specs
   under `doc/06_spec` are a hard layout failure
 - Workflow, tool-contract, evidence-wrapper, or verification-contract changes
