@@ -357,7 +357,7 @@ The repo already has enough capture, comparison, backend, and system-test scaffo
   - unavailable/failed-lane validation that accepts explicit unavailable reasons without hiding behind fallback success.
   - matrix validation requiring Metal, Vulkan, CUDA, and CPU SIMD evidence lanes.
 - Added `test/03_system/wm_compare/backend_measurement_report_spec.spl` with 5 scenarios covering initialized lane evidence, scalar-baseline rejection, unavailable Metal evidence, fallback rejection for Vulkan, and required matrix statuses.
-- Added `doc/06_spec/system/wm_compare/backend_measurement_report_spec.md` as the manual scenario doc.
+- Added `doc/06_spec/03_system/gui/wm_compare/backend_measurement_report_spec.md` as the manual scenario doc.
 - Focused verification:
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/app/wm_compare/backend_measurement_report.spl test/03_system/wm_compare/backend_measurement_report_spec.spl`: passed.
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/03_system/wm_compare/backend_measurement_report_spec.spl --mode=interpreter --clean`: 1 file, 5 tests, 0 failures; runner duration 1346ms.
