@@ -30,6 +30,12 @@ extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
 extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64) -> i64
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 
+fn opencl_host_alloc(size: i64) -> i64:
+    rt_alloc(size)
+
+fn opencl_host_free(ptr: i64, size: i64):
+    rt_free(ptr, size)
+
 fn opencl_host_read_i32(addr: i64, offset: i64) -> i32:
     rt_ptr_read_i32(addr, offset)
 
@@ -320,9 +326,9 @@ class OpenClBackend:
             self.owns_session = false
             self.initialized = false
             return false
-        self.clear_args_ptr = rt_alloc(OPENCL_2D_CLEAR_ARG_BYTES)
-        self.readback_ptr = rt_alloc(self.framebuffer_bytes)
-        self.host_staging_ptr = rt_alloc(self.framebuffer_bytes)
+        self.clear_args_ptr = opencl_host_alloc(OPENCL_2D_CLEAR_ARG_BYTES)
+        self.readback_ptr = opencl_host_alloc(self.framebuffer_bytes)
+        self.host_staging_ptr = opencl_host_alloc(self.framebuffer_bytes)
         if self.clear_args_ptr == 0 or self.readback_ptr == 0 or self.host_staging_ptr == 0:
             self.last_probe = _opencl_probe_failure("OpenCL host staging allocation failed", "opencl_surface")
             self._cleanup_opencl_surface()
@@ -347,13 +353,13 @@ class OpenClBackend:
             self.session.free(self.d_framebuffer)
             self.d_framebuffer = 0
         if self.readback_ptr != 0:
-            rt_free(self.readback_ptr, self.framebuffer_bytes)
+            opencl_host_free(self.readback_ptr, self.framebuffer_bytes)
             self.readback_ptr = 0
         if self.clear_args_ptr != 0:
-            rt_free(self.clear_args_ptr, OPENCL_2D_CLEAR_ARG_BYTES)
+            opencl_host_free(self.clear_args_ptr, OPENCL_2D_CLEAR_ARG_BYTES)
             self.clear_args_ptr = 0
         if self.host_staging_ptr != 0:
-            rt_free(self.host_staging_ptr, self.framebuffer_bytes)
+            opencl_host_free(self.host_staging_ptr, self.framebuffer_bytes)
             self.host_staging_ptr = 0
         self.framebuffer_bytes = 0
         self.device_current = false
@@ -389,7 +395,7 @@ class OpenClBackend:
         if not self._ensure_device_current():
             return false
         val image_bytes = _i64(pixel_count) * 4
-        val host_pixels = rt_alloc(image_bytes)
+        val host_pixels = opencl_host_alloc(image_bytes)
         val d_pixels = self.session.alloc(image_bytes)
         if host_pixels != 0 and d_pixels != 0:
             _write_u32_pixels_to_host(host_pixels, pixels, pixel_count)
@@ -401,15 +407,15 @@ class OpenClBackend:
                     rc = self.session.launch_blit_image_u32(self.d_framebuffer, d_pixels, _i64(x), _i64(y), _i64(w), _i64(h), _i64(self.width()), _i64(self.height()))
                 if rc == 0:
                     self.session.synchronize()
-                    rt_free(host_pixels, image_bytes)
+                    opencl_host_free(host_pixels, image_bytes)
                     self.session.free(d_pixels)
                     self.device_current = true
                     return true
-            rt_free(host_pixels, image_bytes)
+            opencl_host_free(host_pixels, image_bytes)
             self.session.free(d_pixels)
         else:
             if host_pixels != 0:
-                rt_free(host_pixels, image_bytes)
+                opencl_host_free(host_pixels, image_bytes)
             if d_pixels != 0:
                 self.session.free(d_pixels)
         false
