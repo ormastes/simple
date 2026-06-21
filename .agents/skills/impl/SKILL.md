@@ -45,6 +45,16 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
 - If design introduced shared interface or manual setup/checker helper
   placeholders, implement them or keep them failing explicitly with
   `assert(false)` or `fail(...)`. Silent no-op helpers are not valid coverage.
+- For broad lanes, preserve the cooperative review plan from design: lower-model
+  sidecars such as Codex Spark, Claude Haiku, or Claude Sonnet must be merged or
+  explicitly `N/A`, then a normal/highest-capability reviewer must accept broad
+  findings, generated-manual quality, coverage claims, exclusions, and done
+  marks before implementation handoff.
+- When implementation changes workflow/tooling, evidence wrappers, generated
+  specs, or verification contracts, update the matching `doc/07_guide`,
+  `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, and
+  `.claude/agents/spipe/` instructions before `$verify`; stale process docs are
+  implementation work, not release cleanup.
 - Executable specs must stay under `test/`; generated/manual docs under
   `doc/06_spec` must be `.md` only. Require
   `find doc/06_spec -name '*_spec.spl' | wc -l` to print `0` before sync.
