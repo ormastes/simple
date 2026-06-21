@@ -136,7 +136,9 @@
   requests.
 - Production renderer parity wrapper now passes locally with top-level status
   `pass`: Electron matrix, Electron CSS/layout manifest, Tauri/Chrome surface
-  manifest, and backend CPU SIMD/Metal parity pass. The layout/surface manifests
+  manifest, CPU SIMD parity, and the Metal-path parity contract. This local
+  Linux report is not native Metal device-readback proof; native Metal remains
+  covered by the external host evidence runbook. The layout/surface manifests
   cover 18 cases with 16 exact passes, 2 tracked text-raster divergence rows,
   and 0 failures; blur/tolerance remains unused.
 
