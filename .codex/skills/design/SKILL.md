@@ -55,6 +55,9 @@ Output: `doc/04_architecture/<feature>.md`
 - SPipe BDD tests with **built-in matchers only**
 - Every REQ-NNN must have at least one test
 - Include edge cases and error paths
+- Define shared interface names and manual-facing setup/checker helper names
+  before implementation. Temporary placeholder helpers must fail explicitly
+  (`assert(false)` or equivalent), not pass silently.
 - For scenario-oriented specs, design the generated `doc/06_spec/...` output as
   a hand-written-quality manual: primary user/operator/system flows visible,
   setup scenarios expanded silently through `@prev`, reusable setup hidden via
