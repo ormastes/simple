@@ -2,8 +2,22 @@
 # GPU Full Render Offload MDSOC+ Plan
 
 Date: 2026-06-09
-Status: proposed
+Status: active SPipe lane
 Scope: Pure Simple GUI, Pure Simple Web renderer, Simple 2D, and later TUI
+
+SPipe state:
+
+- `.spipe/gpu-full-render-offload/state.md`
+
+Current completion state (2026-06-22):
+
+- This document is the controlling rollout plan for GPU full render offload.
+- The lane is not complete until the artifact map below is filled with current
+  docs/specs/evidence and the remaining blockers have explicit owner tasks.
+- Verification must be crash-safe: do not run broad or repeated `bin/simple`
+  checks while the 2026-06-22 runaway `bin/simple src/app/repl/main.spl`
+  process tree is present. Use targeted file/layout guards and existing
+  evidence first, then run one focused scenario per acceptance criterion.
 
 ## Goal
 
@@ -73,6 +87,94 @@ External systems are references, not replacement architectures:
 - Existing GPU design proposals:
   `doc/05_design/unified_wrapper_unwrap_proposal.md`,
   `doc/05_design/ml/simplified_gpu_types.md`
+
+## Artifact Map
+
+| Artifact | Current path | State |
+| --- | --- | --- |
+| SPipe state | `.spipe/gpu-full-render-offload/state.md` | Active acceptance criteria |
+| Architecture anchor | `doc/04_architecture/ui/simple_gui_stack.md` | Existing stack anchor; needs GPU full-render delta |
+| Drawing architecture | `doc/04_architecture/ui/drawing_stack.md`, `doc/04_architecture/ui/engine_2d.md` | Existing anchors; need DisplayGraphIR ownership alignment |
+| Renderer parity architecture | `doc/04_architecture/ui/production_gui_web_renderer_parity_hardening.md` | Existing parity anchor |
+| Detail design anchor | `doc/05_design/ui/renderer_unification_2026-06-15.md`, `doc/05_design/ui/graphics/engine_2d.md` | Existing design anchors; need full-render offload checklist |
+| GUI/Web specs | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`, `test/03_system/gui/shared_wm_renderer_unification_evidence_spec.spl`, `test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl` | Existing related specs |
+| GPU/evidence specs | `test/03_system/check/production_gui_web_renderer_parity_evidence_spec.spl`, `test/03_system/check/production_gui_web_host_gpu_aggregate_status_contract_spec.spl`, `test/03_system/check/electron_vulkan_web_parity_spec.spl`, `test/05_perf/graphics_2d/backend_probe_spec.spl` | Existing related specs; strict backend coverage must be reviewed before done |
+| Generated manuals | `doc/06_spec/test/03_system/gui/`, `doc/06_spec/test/03_system/check/`, `doc/06_spec/test/05_perf/graphics_2d/` | Existing mirrors; layout guard must remain zero for `*_spec.spl` under `doc/06_spec` |
+| Evidence reports | `doc/09_report/vulkan_engine2d_readback_2026-06-16.md`, `doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-21.md`, `doc/09_report/electron_vulkan_web_parity.md` | Existing reports; must not be interpreted as full offload completion without command-family parity |
+| Process guide | `doc/07_guide/infra/testing/benchmarking.md`, GPU/GUI/Web guide notes as updated by the touched wrapper | Needs review when wrappers change |
+
+## Crash-Safe Verification Rules
+
+- Run each acceptance criterion check at most once per session.
+- Do not start broad `bin/simple test`, full-tree status, or repeated process
+  probes while the runaway REPL process tree remains.
+- Never treat fallback screenshots, CPU mirror readback, or Chromium
+  `angle=vulkan` unavailable logs as Vulkan-backed browser proof.
+- Strict backend requests must fail closed when the requested backend is
+  unavailable; silent CPU fallback is a failing result.
+- Generated spec layout guard must report zero executable specs under
+  `doc/06_spec` before handoff.
+- Dirty worktree sync must commit only the GPU full-render lane files after a
+  scoped review; do not absorb unrelated crashed-session output.
+
+## Current Evidence Gaps
+
+- A dedicated architecture delta for `DisplayGraphIR` ownership under
+  `doc/04_architecture/ui/` is still needed.
+- A detail design checklist tying `DrawIrComposition -> DisplayGraphIR ->
+  backend` to GUI, Web, and Simple 2D is still needed.
+- Existing specs cover related renderer parity and backend probe behavior, but
+  the lane still needs an explicit review that maps each full-render acceptance
+  criterion to a spec/manual/evidence report.
+- Vulkan evidence exists for Engine2D readback and Electron/Web parity paths,
+  but full command-family parity remains incomplete until strict CPU-oracle
+  readback proves each promoted command family.
+- Process-isolated GPU worker crash/fallback evidence remains required before
+  claiming production process isolation.
+
+## Plan Completion Contract
+
+This SPipe plan is complete when the planning lane proves the following items.
+It does not mean every backend implementation is complete.
+
+| ID | Requirement | Authoritative evidence |
+| --- | --- | --- |
+| PLAN-1 | The lane has a SPipe state file with testable acceptance criteria. | `.spipe/gpu-full-render-offload/state.md` contains `## Acceptance Criteria` and `## Phase` is `dev-done`. |
+| PLAN-2 | The plan is no longer a passive proposal. | This file has `Status: active SPipe lane` and a current completion state. |
+| PLAN-3 | CPU semantic ownership is explicit. | `What Stays Host/CPU-Owned`, `MDSOC+ Layer Map`, and `Crash-Safe Verification Rules` keep UI tree, layout, events, hit maps, and text shaping outside GPU ownership. |
+| PLAN-4 | GPU ownership is explicit. | `What Moves To GPU`, phase deliverables, and backend evidence gates restrict GPU work to render graph expansion, raster, compositing, present, readback, and backend-local resource caches. |
+| PLAN-5 | Existing evidence is linked without overclaiming. | `Artifact Map` links current specs and reports, and `Current Evidence Gaps` lists missing full command-family parity and process-isolation proof. |
+| PLAN-6 | Crash-safe handoff rules are recorded. | `Crash-Safe Verification Rules` forbids repeated broad checks, silent fallback evidence, and unscoped dirty-worktree sync. |
+| PLAN-7 | Future implementation work is decomposed. | `Implementation Task Queue` below has concrete tasks, owners, prerequisites, and done evidence. |
+
+## Implementation Task Queue
+
+| Task | Owner lane | Prerequisites | Done evidence |
+| --- | --- | --- | --- |
+| T1: DisplayGraphIR architecture delta | A: MDSOC+ contracts | Current Draw IR and window scene anchors | `doc/04_architecture/ui/display_graph_ir.md` or equivalent section in `simple_gui_stack.md`, plus TLDR if a new long doc is created |
+| T2: Detail design checklist | A: MDSOC+ contracts | T1 | `doc/05_design/ui/gpu_full_render_offload.md` maps GUI, Web, and Simple 2D through `DrawIrComposition -> DisplayGraphIR -> backend` |
+| T3: Boundary SSpec/manual mapping | A/F: contracts and evidence | T1 and T2 | SSpec under `test/03_system/gui/` or `test/03_system/check/` plus generated Markdown under `doc/06_spec/...` |
+| T4: Vulkan strict rect baseline | B/C: Vulkan runtime and draw kernels | Existing backend probe and Engine2D readback reports | CPU-oracle checksum equals Vulkan checksum for clear/fill/clipped rect fixtures; requested `vulkan` fails closed when unavailable |
+| T5: GUI/Web/2D adoption proof | D: surface adoption | T3 and T4 | One GUI fixture, one Web fixture, and one Simple 2D fixture emit equivalent Draw IR and DisplayGraphIR records before backend execution |
+| T6: Process-isolated GPU worker proof | B/F: process and evidence | T4 | Worker crash or device-loss scenario returns explicit fallback reason and does not report success |
+| T7: Command-family promotion gates | C/F: kernels and evidence | T4 | Each promoted command family has CPU oracle, GPU readback checksum, Draw IR diff, timing fields, and fallback count |
+| T8: Metal mirror proof | E: Metal mirror | T4 and macOS host | Native macOS Metal strict smoke uses GPU readback, not CPU mirror or present-only proof |
+| T9: Documentation freshness | F: evidence/docs | Any wrapper or evidence change | Matching `doc/07_guide`, `doc/09_report`, generated manuals, and this plan cite the canonical wrapper and latest evidence |
+
+## Done-Marking Rules
+
+- Mark a task done only when its `Done evidence` path exists and has been read
+  against the requirement it claims to prove.
+- Do not promote a command family from planned to done because a neighboring
+  command family passes.
+- Do not treat CPU mirror, fallback bitmap, or present-only output as GPU
+  readback proof.
+- Do not mark `T5` done from a single surface; GUI, Web, and Simple 2D must each
+  have boundary evidence.
+- Do not mark `T6` done from an in-process debug run; process-isolated evidence
+  must be distinguishable from debug mode.
+- If the runaway REPL process tree is still present, record targeted evidence
+  from existing files and defer broad runtime execution.
 
 ## MDSOC+ Layer Map
 
