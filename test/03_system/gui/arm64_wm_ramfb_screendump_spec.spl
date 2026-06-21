@@ -13,24 +13,17 @@ use os.qemu_runner.{_native_build_failure_log_path, _tail_lines, build_os, scena
 use test.system.qemu.os.common.qemu_os_harness.{
     can_run_target, file_exists, read_qemu_stderr_log, read_serial_log,
     spawn_guest_with_qmp, stop_guest, wait_for_serial_marker}
-
-extern fn rt_get_cwd() -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text?
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-extern fn rt_getpid() -> i64
-extern fn rt_time_now_unix_micros() -> i64
+use app.io.mod.{cwd, file_delete, file_exists as io_file_exists, file_read_text, file_write}
+use app.io.mod.{getpid, process_run_timeout, time_now_unix_micros}
 
 fn _arm64_wm_screendump_blocker_path() -> text:
     "build/os/arm64_wm_ramfb_screendump.blocker.txt"
 
 fn _arm64_wm_screendump_run_id() -> text:
-    "{rt_getpid()}-{rt_time_now_unix_micros()}"
+    "{getpid()}-{time_now_unix_micros()}"
 
 fn _write_arm64_wm_screendump_blocker(reason: text, detail: text) -> bool:
-    rt_file_write_text(
+    file_write(
         _arm64_wm_screendump_blocker_path(),
         "arm64_wm_ramfb_screendump_status=blocked\nreason={reason}\n{detail}"
     )
@@ -38,9 +31,9 @@ fn _write_arm64_wm_screendump_blocker(reason: text, detail: text) -> bool:
 fn _arm64_wm_build_failure_detail() -> text:
     val target = scenario_target(scenario_arm64_wm_ramfb())
     val path = _native_build_failure_log_path(target.arch)
-    if not rt_file_exists(path):
+    if not io_file_exists(path):
         return "native_build_failure_log=\"{path}\"\nnative_build_failure_tail=\"missing\"\n"
-    val log = rt_file_read_text(path) ?? ""
+    val log = file_read_text(path) ?? ""
     "native_build_failure_log=\"{path}\"\nnative_build_failure_tail=\"\"\"\n" + _tail_lines(log, 30) + "\"\"\"\n"
 
 fn _arm64_wm_guest_failure_detail(serial: text, stderr: text) -> text:
@@ -48,7 +41,7 @@ fn _arm64_wm_guest_failure_detail(serial: text, stderr: text) -> text:
 
 fn _cleanup_arm64_wm_guest(handle, qmp_socket: text, serial_log: text):
     stop_guest(handle)
-    rt_process_run_timeout(
+    process_run_timeout(
         "/bin/sh",
         [
             "-c",
@@ -59,8 +52,8 @@ fn _cleanup_arm64_wm_guest(handle, qmp_socket: text, serial_log: text):
         ],
         5000
     )
-    if rt_file_exists(qmp_socket):
-        rt_file_delete(qmp_socket)
+    if io_file_exists(qmp_socket):
+        file_delete(qmp_socket)
 
 fn _ppm_header_valid(path: text) -> bool:
     val script =
@@ -68,7 +61,7 @@ fn _ppm_header_valid(path: text) -> bool:
         "p=sys.argv[1];" +
         "data=open(p,'rb').read(128).split();" +
         "sys.exit(2) if len(data)<4 or data[0]!=b'P6' else sys.exit(0 if int(data[1])>0 and int(data[2])>0 else 3)"
-    val result = rt_process_run_timeout("python3", ["-c", script, path], 5000)
+    val result = process_run_timeout("python3", ["-c", script, path], 5000)
     result[2] == 0
 
 fn _ppm_has_dock_icon_artwork(path: text) -> bool:
@@ -103,14 +96,14 @@ fn _ppm_has_dock_icon_artwork(path: text) -> bool:
         "            if max(r,g,b)-min(r,g,b)>70: accent+=1\n" +
         "    if dark>=100 and (bright+accent)>=15: hits+=1\n" +
         "sys.exit(0 if hits>=6 else 5)\n"
-    val result = rt_process_run_timeout("python3", ["-c", script, path], 5000)
+    val result = process_run_timeout("python3", ["-c", script, path], 5000)
     result[2] == 0
 
 fn _build_arm64_wm_once() -> bool:
     val target = scenario_target(scenario_arm64_wm_ramfb())
     if not file_exists(target.output):
         return build_os(target)
-    val newer = rt_process_run_timeout("sh", ["-c", "test \"$1\" -nt \"$2\"", "sh", target.entry, target.output], 2000)
+    val newer = process_run_timeout("sh", ["-c", "test \"$1\" -nt \"$2\"", "sh", target.entry, target.output], 2000)
     if newer[2] == 0:
         return build_os(target)
     true
@@ -125,8 +118,8 @@ fn _print_arm64_guest_diagnostics(prefix: text, serial: text, stderr: text):
 describe "SimpleOS ARM64 WM ramfb screendump":
 
     it "captures a real QMP screendump after the WM render marker":
-        if rt_file_exists(_arm64_wm_screendump_blocker_path()):
-            expect(rt_file_delete(_arm64_wm_screendump_blocker_path())).to_equal(true)
+        if io_file_exists(_arm64_wm_screendump_blocker_path()):
+            expect(file_delete(_arm64_wm_screendump_blocker_path())).to_equal(true)
         val scenario = scenario_arm64_wm_ramfb()
         val target = scenario_target(scenario)
         val built = _build_arm64_wm_once()
@@ -139,11 +132,11 @@ describe "SimpleOS ARM64 WM ramfb screendump":
                 expect(_write_arm64_wm_screendump_blocker("qemu-or-kernel-artifact-unavailable", "")).to_equal(true)
                 expect(file_exists(target.output)).to_equal(true)
             else:
-                val cwd = rt_get_cwd()
+                val repo_cwd = cwd()
                 val run_id = _arm64_wm_screendump_run_id()
                 val qmp_socket = "/tmp/arm64_wm_ramfb_screendump_qmp_{run_id}.sock"
                 val serial_log = "build/os/arm64_wm_ramfb_screendump.{run_id}.serial.log"
-                val capture_ppm = "{cwd}/build/os/arm64_wm_ramfb_screendump.{run_id}.ppm"
+                val capture_ppm = "{repo_cwd}/build/os/arm64_wm_ramfb_screendump.{run_id}.ppm"
                 match spawn_guest_with_qmp(target, qmp_socket, serial_log):
                     Ok(handle):
                         val saw_render = wait_for_serial_marker(handle, "[WM] Glass desktop rendered!", 45000)
@@ -172,8 +165,8 @@ describe "SimpleOS ARM64 WM ramfb screendump":
                                 if not capture_ok:
                                     _write_arm64_wm_screendump_blocker("ppm-capture-assertion-failed", "ppm_path=\"{capture_ppm}\"\nexists={file_exists(capture_ppm)}\nheader_ok={header_ok}\nartwork_ok={artwork_ok}\n")
                                 else:
-                                    if rt_file_exists(_arm64_wm_screendump_blocker_path()):
-                                        expect(rt_file_delete(_arm64_wm_screendump_blocker_path())).to_equal(true)
+                                    if io_file_exists(_arm64_wm_screendump_blocker_path()):
+                                        expect(file_delete(_arm64_wm_screendump_blocker_path())).to_equal(true)
                                 expect(capture_ok).to_equal(true)
                     Err(err):
                         print "[arm64_wm_ramfb_screendump_spec] failed to spawn guest: {err}"
