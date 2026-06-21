@@ -11,7 +11,7 @@ In multi-LLM cooperative mode, Gemini owns **Step 3 (UI/UX design)** — its pri
 Step 1: Claude /research  →  Step 2: Codex $research  →  Step 3: Gemini /design (UI)
 →  Step 4: Codex $design (arch)  →  Step 5: Claude /design (quality)
 ```
-See: `doc/guide/llm_cooperative_dev_phase.md`
+See: `doc/07_guide/app/llm/llm_cooperative_dev_phase.md`
 
 ## Skills Reference
 

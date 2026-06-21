@@ -41,7 +41,7 @@ Before starting any step, **check if prerequisite artifacts exist**:
 | UI design | `doc/05_design/<feature>_tui.md` | Create TUI/GUI mockups yourself |
 | Architecture | `doc/04_architecture/<feature>.md` | Design architecture yourself |
 | System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` | Create SPipe tests yourself |
-| Generated spec docs | `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md` | Generate from executable tests |
+| Generated spec docs | `doc/06_spec/test/03_system/app/<app_name>/feature/<feature>_spec.md` | Generate from executable tests |
 | Detail design | `doc/05_design/<feature>.md` | Create detail design yourself |
 | Implementation | `src/**/<feature>.spl` | Implement the feature |
 
@@ -193,7 +193,7 @@ If missing, do all:
 
 ### System Test Design
 - SPipe BDD tests: `test/03_system/app/<app_name>/feature/<feature>_spec.spl`
-- Generated/manual SPipe docs: `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md`
+- Generated/manual SPipe docs: `doc/06_spec/test/03_system/app/<app_name>/feature/<feature>_spec.md`
 - Never place executable `.spl` specs under `doc/06_spec`; that tree is for
   generated/manual `.md` manuals and evidence assets only.
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
@@ -319,7 +319,7 @@ MCP server available via npm: `@simple-lang/mcp-server`
 | 2 | UI design | `doc/05_design/<feature>_tui.md`, `_gui.md` |
 | 2 | Detail design | `doc/05_design/<feature>.md` |
 | 2 | System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` |
-| 2 | Generated spec docs | `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md` |
+| 2 | Generated spec docs | `doc/06_spec/test/03_system/app/<app_name>/feature/<feature>_spec.md` |
 | 2 | Test plan | `doc/03_plan/sys_test/<feature>.md` |
 | 2 | Agent tasks | `doc/03_plan/agent_tasks/<feature>.md` |
 | 3 | Source code | `src/**/<feature>.spl` |
