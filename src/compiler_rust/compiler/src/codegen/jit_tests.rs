@@ -200,3 +200,73 @@ fn test_jit_static_provider_resolves_generic_rt_len() {
         "rt_time_now_unix_micros must be registered so timing helpers do not NULL-jump in JIT"
     );
 }
+
+// Regression: an f64 function-call result was corrupted at the call boundary.
+// The uniform i64 return ABI carries an f64 return as raw bits, but the return
+// terminator value-converted it (fcvt_to_sint: `return 21.5` -> integer 21), and
+// MirInst::Call results were left unstamped so f64 consumers treated the i64 bits
+// as an integer. Result: an f64 call result bound to a local, fed into a binop,
+// or passed as an argument came out as ~0.0 / garbage. Fixed in
+// codegen/instr/body.rs (Return bitcast + build_vreg_types f64 stamping).
+#[test]
+fn test_jit_f64_call_result_value() {
+    let source = r#"
+fn half() -> f64:
+    return 21.5
+fn add(a: f64, b: f64) -> f64:
+    return a + b
+fn consume(v: f64) -> i64:
+    if v > 5.0:
+        return 1
+    return 0
+fn main() -> i64:
+    var score = 0
+    val x = half()
+    if x > 5.0:
+        score = score + 1
+    if half() + half() > 42.0:
+        score = score + 1
+    if add(1.5, 2.25) > 3.0:
+        score = score + 1
+    if consume(half()) > 0:
+        score = score + 1
+    return score
+"#;
+    let jit = jit_compile(source).unwrap();
+    let result = unsafe { jit.call_i64_void("main").unwrap() };
+    assert_eq!(
+        result, 4,
+        "all 4 f64 call-result cases (bound local, binop of two calls, binop on \
+         params, call result as fn arg) must be correct; got score {}",
+        result
+    );
+}
+
+// Regression: an f64 call result passed to print() showed 0.0 because the result
+// carried mangled bits and was boxed as an integer. With the fix print(half())
+// formats the real value.
+#[test]
+fn test_jit_f64_call_result_print() {
+    use simple_runtime::value::{rt_capture_stdout_start, rt_capture_stdout_stop};
+
+    let mut jit = JitCompiler::new_static().unwrap();
+    let mut parser = simple_parser::Parser::new(
+        "fn half() -> f64:\n    return 21.5\nfn main() -> i64:\n    print(half())\n    return 0\n",
+    );
+    let ast = parser.parse().expect("parse failed");
+    let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+    let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
+    jit.compile_module(&mir_module).unwrap();
+
+    rt_capture_stdout_start();
+    let result = unsafe { jit.call_i64_void("main").unwrap() };
+    let captured = rt_capture_stdout_stop();
+
+    assert_eq!(result, 0);
+    assert_eq!(
+        captured.trim(),
+        "21.5",
+        "print() of an f64 call result must format the value, got: '{}'",
+        captured
+    );
+}
