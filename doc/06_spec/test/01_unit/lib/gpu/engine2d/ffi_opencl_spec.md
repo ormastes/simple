@@ -1,6 +1,6 @@
-# Ffi Opencl Specification
+# Engine2D OpenCL FFI Specification
 
-> <details>
+> Verifies that the static OpenCL FFI wrapper advertises its dispatch mode and fails closed for invalid OpenCL handles instead of pretending to execute GPU work without a valid device context.
 
 <!-- sdn-diagram:id=ffi_opencl_spec.arch -->
 <details class="sdn-source">
@@ -32,7 +32,48 @@ ffi_opencl_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Ffi Opencl Specification
+# Engine2D OpenCL FFI Specification
+
+Verifies that the static OpenCL FFI wrapper advertises its dispatch mode and fails closed for invalid OpenCL handles instead of pretending to execute GPU work without a valid device context.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Reference | `src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl` |
+| Requirements | N/A |
+| Plan | doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md |
+| Design | doc/05_design/ui/renderer_unification_2026-06-15.md |
+| Research | doc/01_research/ui/render_path/gui_web_2d_render_optimization_2026-06-16.md |
+| Source | `test/01_unit/lib/gpu/engine2d/ffi_opencl_spec.spl` |
+| Updated | 2026-06-21 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies that the static OpenCL FFI wrapper advertises its dispatch mode and
+fails closed for invalid OpenCL handles instead of pretending to execute GPU
+work without a valid device context.
+
+**Source:** `src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl`
+**Requirements:** N/A
+**Research:** doc/01_research/ui/render_path/gui_web_2d_render_optimization_2026-06-16.md
+**Plan:** doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md
+**Design:** doc/05_design/ui/renderer_unification_2026-06-15.md
+
+## Syntax
+
+Use `OpenClFfi.create_static()` for strict static-dispatch checks. Invalid
+contexts, queues, programs, kernels, buffers, and kernel arguments must return
+false or zero handles.
+
+## Examples
+
+The scenarios cover mode reporting, kernel launch rejection, invalid resource
+creation, invalid enqueue/finish calls, release calls, buffer operations, and
+kernel argument binding.
 
 ## Scenarios
 
@@ -41,7 +82,7 @@ ffi_opencl_spec -> std
 #### exposes a static generic ICD wrapper
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -56,7 +97,7 @@ expect(ffi.mode() == GpuFfiMode.Static).to_equal(true)
 #### fails closed instead of dispatching a name-only OpenCL kernel
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -71,7 +112,7 @@ expect(ffi.launch_kernel("simple_2d_fill_u32", 1, 1, 1, 1, 1, 1)).to_equal(false
 #### fails closed when creating a queue from an invalid OpenCL context
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -86,7 +127,7 @@ expect(ffi.create_queue(0)).to_equal(0)
 #### fails closed when creating and building a program from an invalid context
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -103,7 +144,7 @@ expect(ffi.build_program(program)).to_equal(false)
 #### fails closed when creating a kernel from an invalid program
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -118,7 +159,7 @@ expect(ffi.create_kernel(0, "simple_2d_fill_u32")).to_equal(0)
 #### fails closed when enqueueing and finishing invalid OpenCL handles
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -134,7 +175,7 @@ expect(ffi.finish(0)).to_equal(false)
 #### fails closed when releasing invalid OpenCL handles
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -152,7 +193,7 @@ expect(ffi.release_context(0)).to_equal(false)
 #### fails closed for invalid OpenCL buffers and kernel args
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -170,21 +211,6 @@ expect(ffi.set_kernel_arg_buffer(0, 0, 0)).to_equal(false)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/gpu/engine2d/ffi_opencl_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- OpenClFfi
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -194,6 +220,13 @@ Tests covering:
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md](doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md)
+- **Design:** [doc/05_design/ui/renderer_unification_2026-06-15.md](doc/05_design/ui/renderer_unification_2026-06-15.md)
+- **Research:** [doc/01_research/ui/render_path/gui_web_2d_render_optimization_2026-06-16.md](doc/01_research/ui/render_path/gui_web_2d_render_optimization_2026-06-16.md)
 
 
 </details>
