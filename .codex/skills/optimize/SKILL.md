@@ -31,6 +31,12 @@ explicitly asks for runtime/compiler C/Rust changes.
   formats for speed unless requirements explicitly allow it.
 - If C/Go parity is not reachable in Simple because of a runtime/compiler
   blocker, record a concrete bug under `doc/08_tracking/bug/`.
+- For GUI/web/2D 8K performance claims, keep a retained evidence row in
+  `doc/09_report` or `doc/10_metrics` with viewport, backend, binary/source
+  revision, readback mode, p50/p95 timing, RSS or memory budget, fallback state,
+  and checksum/readback proof. If the host cannot produce that row, record an
+  explicit blocker such as `8k-host-unavailable`; do not treat small viewport,
+  software fallback, or cached replay evidence as an 8K pass.
 
 ## Required Loop
 
