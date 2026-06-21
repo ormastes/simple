@@ -67,6 +67,18 @@ the interpreter `run` path.
 Call `extern fn rt_env_get(key: text) -> text` directly and compare against `""`.
 In use at `examples/06_io/ui/showcase_8k_scroll_gui.spl` (`env_i32` helper).
 
+2026-06-21 update: replacing the 8K showcase helper with imported facade calls
+was still unsafe. `use app.io.env_ops.{env_get as showcase_env_get}` made the
+default run report a JIT unresolved-symbol fallback for `showcase_env_get`.
+Using an unaliased facade import avoided that fallback, but
+`SHOWCASE_8K_W=64 SHOWCASE_8K_H=64 SHOWCASE_8K_OFF_FRAMES=1
+SHOWCASE_8K_ON_FRAMES=1 ... run examples/06_io/ui/showcase_8k_scroll_gui.spl`
+still rendered the default `1280x800` surface and timed out. The same happened
+with `std.nogc_sync_mut.io.env_ops.env_get`. Keeping a single local
+`showcase_env_get()` wrapper around raw `rt_env_get` preserved the env values,
+reported `64x64`, and completed without a JIT fallback line. This keeps the
+runtime boundary localized but leaves the facade/import behavior open.
+
 ## Notes
 
 - The existing showcase apps that read `env_get(...) ?? ""` and only test for
