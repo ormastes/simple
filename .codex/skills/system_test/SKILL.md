@@ -53,8 +53,8 @@ implementation proceed. Temporary helper placeholders must fail explicitly with
 | `to_be_less_than(val)` | Numeric less than |
 
 **Do not use in new specs:**
-- `to_be_true()` — compatibility helper; use `to_equal(true)` instead
-- `to_be_false()` — compatibility helper; use `to_equal(false)` instead
+- `to_be_true()` / `to_be_false()` — compatibility helpers; assert concrete
+  values, or use `to_be(true/false)` only when the boolean itself is the behavior
 - `to_raise()` — not available; test error returns via `Result<T, E>`
 - Feature-specific matcher replacements — use helper functions inside SSpec
   scenarios instead
@@ -279,7 +279,8 @@ bin/simple test path/to/spec.spl --native  # Compiled mode (full execution)
 - Canonical matchers only in new specs; add helper functions inside scenarios
   instead of custom matcher replacements
 - Every REQ-NNN must have test coverage — zero is a FAIL
-- Use `to_equal(true)` not compatibility helpers such as `to_be_true()`
+- Do not use `to_be_true()` / `to_be_false()`; assert concrete values, or use
+  `to_be(true/false)` only when the boolean itself is the behavior.
 - All test code in `.spl` — no Python, no Bash
 - Generics use `<>` not `[]`
 - NO inheritance in test helpers — use composition

@@ -59,7 +59,9 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
 - Canonical matchers in new specs: `to_equal`, `to_be`, `to_be_nil`,
   `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`,
   `to_be_less_than`
-- Use `to_equal(true)` not compatibility helpers such as `to_be_true()`
+- Do not replace compatibility helpers with boolean-wrapper assertions. Assert
+  concrete values, or use `to_be(true/false)` only when the boolean itself is
+  the behavior under test.
 - For short grammar features, require runtime-specific evidence:
   - Interpreter specs for pipe-forward, composition, placeholder lambdas, method references, optional access, and compact DSL forms.
   - Native specs for only the compact forms intended to work in native mode.

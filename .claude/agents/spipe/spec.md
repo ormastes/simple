@@ -57,7 +57,7 @@ expect(actual).to_be_less_than(n)
 ```
 
 Do NOT use: `to_be_true`, `to_be_false`, `to_raise`, `to_match`, or any custom matchers.
-Use `to_equal(true)` and `to_equal(false)` instead.
+Assert concrete values, or use `to_be(true/false)` only when the boolean itself is the behavior.
 
 ## Spec File Structure
 
