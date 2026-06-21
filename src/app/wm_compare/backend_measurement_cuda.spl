@@ -8,12 +8,12 @@ use std.gpu.engine2d.backend_probe.{BackendProbeResult}
 use std.gpu.engine2d.generated_kernel_dispatch.{GENERATED_2D_FILL}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gc_async_mut.cuda.{cuda_available, cuda_memcpy_dtoh, CUDA_SUCCESS}
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
 
 extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64, size: i64)
 extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64) -> i64
-extern fn rt_time_now_micros() -> i64
 
 pub struct CudaDeviceMeasurementOptions:
     fixture_id: text
@@ -28,7 +28,7 @@ pub struct CudaDeviceMeasurementOptions:
     package_size_bytes: i64
 
 fn _elapsed_us(start_us: i64) -> i64:
-    val elapsed = rt_time_now_micros() - start_us
+    val elapsed = time_now_micros() - start_us
     if elapsed <= 0:
         return 1
     elapsed
@@ -129,7 +129,7 @@ pub fn cuda_device_buffer_measurement_sample(opts: CudaDeviceMeasurementOptions)
         return _cuda_unavailable_sample(opts, "invalid CUDA measurement dimensions")
     if not cuda_available():
         return _cuda_unavailable_sample(opts, "CUDA runtime unavailable")
-    val init_start = rt_time_now_micros()
+    val init_start = time_now_micros()
     val session = CudaSession.create()
     val session_rc = session.init()
     val init_us = _elapsed_us(init_start)
@@ -137,7 +137,7 @@ pub fn cuda_device_buffer_measurement_sample(opts: CudaDeviceMeasurementOptions)
         session.shutdown()
         return _cuda_unavailable_sample(opts, "CUDA init/device/context unavailable")
 
-    val load_start = rt_time_now_micros()
+    val load_start = time_now_micros()
     val module = session.load_module(cuda_2d_ptx_source())
     val load_us = _elapsed_us(load_start)
     if module == 0:
@@ -147,7 +147,7 @@ pub fn cuda_device_buffer_measurement_sample(opts: CudaDeviceMeasurementOptions)
 
     val count = opts.width * opts.height
     val byte_count = count * 4
-    val alloc_start = rt_time_now_micros()
+    val alloc_start = time_now_micros()
     val device_buffer = session.alloc(byte_count)
     val readback_ptr = rt_alloc(byte_count)
     val val_ptr = rt_alloc(32)
@@ -174,7 +174,7 @@ pub fn cuda_device_buffer_measurement_sample(opts: CudaDeviceMeasurementOptions)
     rt_ptr_write_i64(args_ptr, 16, val_ptr + 16)
     rt_ptr_write_i64(args_ptr, 24, val_ptr + 24)
 
-    val submit_start = rt_time_now_micros()
+    val submit_start = time_now_micros()
     val launch_rc = session.launch_generated_2d(GENERATED_2D_FILL, opts.width, opts.height, args_ptr)
     val submit_us = _elapsed_us(submit_start)
     if launch_rc != CUDA_SUCCESS:
@@ -185,7 +185,7 @@ pub fn cuda_device_buffer_measurement_sample(opts: CudaDeviceMeasurementOptions)
         session.shutdown()
         return _cuda_unavailable_sample(opts, "CUDA generated fill launch failed")
 
-    val sync_start = rt_time_now_micros()
+    val sync_start = time_now_micros()
     val sync_rc = session.sync()
     val sync_us = _elapsed_us(sync_start)
     if sync_rc != CUDA_SUCCESS:
@@ -196,7 +196,7 @@ pub fn cuda_device_buffer_measurement_sample(opts: CudaDeviceMeasurementOptions)
         session.shutdown()
         return _cuda_unavailable_sample(opts, "CUDA sync failed")
 
-    val read_start = rt_time_now_micros()
+    val read_start = time_now_micros()
     val read_rc = cuda_memcpy_dtoh(readback_ptr, device_buffer, byte_count)
     val read_us = _elapsed_us(read_start)
     if read_rc != CUDA_SUCCESS:
