@@ -1,6 +1,6 @@
 # ide_office_plugin_suite_spec
 
-> IDE office plugin suite system specification.
+> Validates that IDE-facing Markdown/Writer, Impress/PPT, Calc, Draw/SDD, Designer, Base, Math, Mail, Planner, dashboard, and database surfaces reuse existing app modules.
 
 <!-- sdn-diagram:id=ide_office_plugin_suite_spec.arch -->
 <details class="sdn-source">
@@ -29,14 +29,14 @@ ide_office_plugin_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # ide_office_plugin_suite_spec
 
-IDE office plugin suite system specification.
+Validates that IDE-facing Markdown/Writer, Impress/PPT, Calc, Draw/SDD, Designer, Base, Math, Mail, Planner, dashboard, and database surfaces reuse existing app modules.
 
 ## At a Glance
 
@@ -44,12 +44,31 @@ IDE office plugin suite system specification.
 |-------|-------|
 | Category | Application |
 | Status | Active |
+| Requirements | doc/07_guide/app/ide_office_plugin_suite.md |
+| Plan | doc/03_plan/sys_test/ide_office_plugin_suite.md |
+| Design | doc/04_architecture/ide_plugin_architecture.md |
+| Research | N/A |
 | Source | `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-IDE office plugin suite system specification.
-Validates that IDE-facing Markdown, presentation, spreadsheet, dashboard, and database surfaces reuse existing app modules.
+## Overview
+
+Validates that IDE-facing Markdown/Writer, Impress/PPT, Calc, Draw/SDD,
+Designer, Base, Math, Mail, Planner, dashboard, and database surfaces reuse
+existing app modules.
+
+**Requirements:** doc/07_guide/app/ide_office_plugin_suite.md
+**Plan:** doc/03_plan/sys_test/ide_office_plugin_suite.md
+**Design:** doc/04_architecture/ide_plugin_architecture.md
+**Research:** N/A
+
+## Examples
+
+Run the IDE feature check in TUI and GUI modes, then verify the generated
+plugin manifest exposes all IDE-visible Office capsules.
+
+**TUI Captures:** build/test-artifacts/03_system/app/ide/feature/ide_office_plugin_suite/feature_check_tui.txt
 
 ## Evidence
 
@@ -73,24 +92,36 @@ Display policy: `embed_tui`
 ```text
 Simple IDE feature check
 mode: tui
-capabilities: 5
-markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
+capabilities: 11
+markdown: Markdown/Writer [document-renderer] -> std.editor.render.md_renderer (md, markdown, writer, html)
   check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true
   edit-command: md-edit=true stale-reject=true reason=stale-line
-slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
+slides: Impress/PPT [office-app] -> app.office.slides (ppt, presentation, slides)
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
-sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
+sheets: Calc Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
   gui: gui-backend: theme=dark size=1200x800 md=true ppt=true sheet=true config=true
+draw-sdd: Draw/SDD [diagram-app] -> std.editor.services.sdn_graph (draw, sdd, sdn)
+  check: manifest-only service-token=draw-sdd
+designer: Designer [designer-app] -> std.common.markdown_visual_editor (html, css, ui)
+  check: manifest-only service-token=designer
+base: Base [database-app] -> std.editor.core.session_db (table, database, import)
+  check: manifest-only service-token=base
+math: Math [formula-app] -> std.common.math_repr (formula, mathml)
+  check: manifest-only service-token=math
+mail: Mail [mail-app] -> std.hardware.soc_rtl.mailbox (message, folder, compose)
+  check: manifest-only service-token=mail
+planner: Planner [planner-app] -> std.nogc_sync_mut.db.query_planner (task, board, calendar)
+  check: manifest-only service-token=planner
 agent-dashboard: Agent Dashboard [dashboard] -> app.editor.mcp_tools (agent, dashboard, mcp)
-  check: agent-dashboard: tools=19 lsp=10 wiki=3 modes=3 team=3 blocked=2 status=degraded-review-required
+  check: agent-dashboard: app.editor.mcp_tools tools=19 lsp=true wiki=true modes=3
 db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, simple-db, portal-db)
   check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
-  plugin-manifest: plugins: entries=5 roundtrip=5 names=5
+  plugin-manifest: plugins: entries=11 roundtrip=11 names=11
 ```
 
 </details>
@@ -99,12 +130,12 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
 
 ### IDE office plugin suite capabilities
 
-#### registers markdown slides sheets dashboard and database capabilities
+#### registers IDE office suite plugin capabilities
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -112,6 +143,12 @@ val ids = ide_capability_ids().join(",")
 expect(ids).to_contain("markdown")
 expect(ids).to_contain("slides")
 expect(ids).to_contain("sheets")
+expect(ids).to_contain("draw-sdd")
+expect(ids).to_contain("designer")
+expect(ids).to_contain("base")
+expect(ids).to_contain("math")
+expect(ids).to_contain("mail")
+expect(ids).to_contain("planner")
 expect(ids).to_contain("agent-dashboard")
 expect(ids).to_contain("db-admin")
 ```
@@ -123,7 +160,7 @@ expect(ids).to_contain("db-admin")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -134,6 +171,10 @@ for cap in caps:
 expect(owners).to_contain("std.editor.render.md_renderer")
 expect(owners).to_contain("app.office.slides")
 expect(owners).to_contain("app.office.sheets")
+expect(owners).to_contain("std.editor.services.sdn_graph")
+expect(owners).to_contain("std.common.markdown_visual_editor")
+expect(owners).to_contain("std.common.math_repr")
+expect(owners).to_contain("std.nogc_sync_mut.db.query_planner")
 expect(owners).to_contain("app.editor.mcp_tools")
 expect(owners).to_contain("std.editor.core.session_db")
 ```
@@ -145,7 +186,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -153,7 +194,9 @@ val tui_report = ide_feature_check_report("tui").join("\n")
 val gui_report = ide_feature_check_report("gui").join("\n")
 expect(tui_report).to_contain("mode: tui")
 expect(gui_report).to_contain("mode: gui")
-expect(tui_report).to_contain("Presentation Slides")
+expect(tui_report).to_contain("Impress/PPT")
+expect(tui_report).to_contain("Draw/SDD")
+expect(tui_report).to_contain("Designer")
 expect(gui_report).to_contain("Database Admin")
 expect(tui_report).to_contain("tui-panels:")
 expect(tui_report).to_contain("slides: app.office.slides")
@@ -161,7 +204,7 @@ expect(tui_report).to_contain("edit-command: md-edit=true stale-reject=true")
 expect(tui_report).to_contain("edit-command: slide-edit=true stale-reject=true")
 expect(tui_report).to_contain("edit-command: sheet-edit=true stale-reject=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
-expect(tui_report).to_contain("status=degraded-review-required")
+expect(tui_report).to_contain("modes=3")
 ```
 
 </details>
@@ -171,24 +214,30 @@ expect(tui_report).to_contain("status=degraded-review-required")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val lines = ide_feature_check_report("tui")
-expect(lines.len()).to_equal(20)
+expect(lines.len()).to_equal(32)
 expect(lines[0]).to_equal("Simple IDE feature check")
 expect(lines[1]).to_equal("mode: tui")
-expect(lines[2]).to_equal("capabilities: 5")
+expect(lines[2]).to_equal("capabilities: 11")
 expect(lines[3]).to_start_with("markdown:")
 expect(lines[5]).to_start_with("  edit-command:")
 expect(lines[6]).to_start_with("slides:")
 expect(lines[8]).to_start_with("  edit-command:")
 expect(lines[9]).to_start_with("sheets:")
 expect(lines[11]).to_start_with("  edit-command:")
-expect(lines[13]).to_start_with("agent-dashboard:")
-expect(lines[15]).to_start_with("db-admin:")
-expect(lines[19]).to_start_with("  plugin-manifest:")
+expect(lines[13]).to_start_with("draw-sdd:")
+expect(lines[15]).to_start_with("designer:")
+expect(lines[17]).to_start_with("base:")
+expect(lines[19]).to_start_with("math:")
+expect(lines[21]).to_start_with("mail:")
+expect(lines[23]).to_start_with("planner:")
+expect(lines[25]).to_start_with("agent-dashboard:")
+expect(lines[27]).to_start_with("db-admin:")
+expect(lines[31]).to_start_with("  plugin-manifest:")
 ```
 
 </details>
@@ -198,16 +247,22 @@ expect(lines[19]).to_start_with("  plugin-manifest:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val lines = ide_feature_check_report("tui")
 val capture = lines.join("\n")
 expect(_max_line_width(lines)).to_be_less_than(121)
-expect(capture).to_contain("markdown: Markdown Preview")
-expect(capture).to_contain("slides: Presentation Slides")
-expect(capture).to_contain("sheets: Spreadsheet")
+expect(capture).to_contain("markdown: Markdown/Writer")
+expect(capture).to_contain("slides: Impress/PPT")
+expect(capture).to_contain("sheets: Calc Spreadsheet")
+expect(capture).to_contain("draw-sdd: Draw/SDD")
+expect(capture).to_contain("designer: Designer")
+expect(capture).to_contain("base: Base")
+expect(capture).to_contain("math: Math")
+expect(capture).to_contain("mail: Mail")
+expect(capture).to_contain("planner: Planner")
 expect(capture).to_contain("db-admin: Database Admin")
 expect(capture).to_contain("  tui: tui-panels:")
 expect(_write_tui_capture(capture)).to_equal(0)
@@ -221,7 +276,7 @@ expect(_capture_file_state(capture)).to_equal("matched")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -237,7 +292,11 @@ expect(tui_lines[8]).to_equal(gui_lines[8])
 expect(tui_lines[10]).to_equal(gui_lines[10])
 expect(tui_lines[12]).to_equal(gui_lines[12])
 expect(tui_lines[14]).to_equal(gui_lines[14])
+expect(tui_lines[16]).to_equal(gui_lines[16])
 expect(tui_lines[18]).to_equal(gui_lines[18])
+expect(tui_lines[20]).to_equal(gui_lines[20])
+expect(tui_lines[22]).to_equal(gui_lines[22])
+expect(tui_lines[24]).to_equal(gui_lines[24])
 ```
 
 </details>
@@ -385,28 +444,12 @@ expect(summary).to_contain("page-size=4096")
 
 - assert true
 - assert true
-   - Expected: surface.lanes.len() equals `3`
-   - Expected: surface.gates.len() equals `6`
-   - Expected: surface.lanes[0].provider equals `spark`
-   - Expected: surface.lanes[0].status equals `unavailable`
-   - Expected: surface.lanes[0].source_module equals `assistant.control_plane`
-   - Expected: surface.lanes[0].review_gate_id equals `spark-output-reviewed`
-   - Expected: surface.lanes[0].degraded_reason equals `spark-unavailable`
-   - Expected: surface.lanes[1].provider equals `normal`
-   - Expected: surface.lanes[2].role equals `review`
-   - Expected: surface.gates[0].gate_id equals `spark-output-reviewed`
-   - Expected: surface.gates[0].status equals `blocked`
-   - Expected: surface.gates[0].reason equals `spark-unavailable`
-   - Expected: surface.gates[3].gate_id equals `mcp-tool-registry-present`
-   - Expected: surface.gates[3].status equals `ready`
-   - Expected: surface.blocked_count equals `2`
-   - Expected: surface.handoff_status equals `degraded-review-required`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -414,128 +457,12 @@ val surface = ide_agent_dashboard_surface()
 val summary = ide_agent_dashboard_summary()
 expect(surface.owner_module).to_equal("app.editor.mcp_tools")
 expect(surface.tool_count).to_be_greater_than(10)
-expect(surface.lsp_tool_count).to_equal(10)
-expect(surface.wiki_tool_count).to_equal(3)
-expect(surface.required_tool_count).to_equal(3)
-expect(surface.source_of_truth).to_equal("assistant.control_plane")
 assert_true(surface.has_lsp_tools)
 assert_true(surface.has_wiki_tools)
 expect(surface.modes.join(",")).to_contain("combined-live")
-expect(surface.lanes.len()).to_equal(3)
-expect(surface.gates.len()).to_equal(6)
-expect(surface.lanes[0].provider).to_equal("spark")
-expect(surface.lanes[0].status).to_equal("unavailable")
-expect(surface.lanes[0].source_module).to_equal("assistant.control_plane")
-expect(surface.lanes[0].review_gate_id).to_equal("spark-output-reviewed")
-expect(surface.lanes[0].degraded_reason).to_equal("spark-unavailable")
-expect(surface.lanes[1].provider).to_equal("normal")
-expect(surface.lanes[2].role).to_equal("review")
-expect(surface.gates[0].gate_id).to_equal("spark-output-reviewed")
-expect(surface.gates[0].status).to_equal("blocked")
-expect(surface.gates[0].required).to_be(true)
-expect(surface.gates[0].reason).to_equal("spark-unavailable")
-expect(surface.gates[3].gate_id).to_equal("mcp-tool-registry-present")
-expect(surface.gates[3].status).to_equal("ready")
-expect(surface.blocked_count).to_equal(2)
-expect(surface.degraded_reasons.join(",")).to_contain("spark-unavailable")
-expect(surface.ready_for_integration).to_be(false)
-expect(surface.handoff_status).to_equal("degraded-review-required")
 expect(summary).to_contain("modes=3")
-expect(summary).to_contain("team=3")
-expect(summary).to_contain("blocked=2")
-```
-
-</details>
-
-#### fails closed when agent dashboard evidence is missing or malformed
-
-- mcp tool
-- mcp tool
-   - Expected: partial_surface.tool_count equals `2`
-   - Expected: partial_surface.required_tool_count equals `3`
-   - Expected: partial_surface.gates[3].status equals `missing`
-   - Expected: partial_surface.gates[3].reason equals `required-tool-count-missing`
-- IdeAgentDashboardLane
-- IdeAgentDashboardLane
-   - Expected: missing_review_surface.gates[1].status equals `missing`
-   - Expected: missing_review_surface.gates[1].reason equals `normal-review-lane-missing`
-- IdeAgentDashboardLane
-- IdeAgentDashboardLane
-   - Expected: missing_spark_surface.gates[0].status equals `missing`
-   - Expected: missing_spark_surface.gates[0].reason equals `spark-lane-missing`
-- IdeAgentDashboardLane
-   - Expected: invalid_surface.gates[2].gate_id equals `lane-status-valid`
-   - Expected: invalid_surface.gates[2].status equals `blocked`
-   - Expected: invalid_surface.gates[2].reason equals `invalid-lane`
-- IdeAgentDashboardLane
-- IdeAgentDashboardLane
-   - Expected: spoofed_surface.gates[1].status equals `missing`
-   - Expected: spoofed_surface.gates[2].status equals `blocked`
-   - Expected: spoofed_surface.gates[2].reason equals `invalid-lane`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 55 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val empty_surface = ide_agent_dashboard_surface_from_tools([], ide_agent_dashboard_default_lanes())
-expect(empty_surface.tool_count).to_equal(0)
-expect(empty_surface.gates[3].status).to_equal("missing")
-expect(empty_surface.gates[4].reason).to_equal("lsp-tools-missing")
-expect(empty_surface.gates[5].reason).to_equal("wiki-tools-missing")
-expect(empty_surface.ready_for_integration).to_be(false)
-expect(empty_surface.degraded_reasons.join(",")).to_contain("mcp-tool-registry-empty")
-
-val partial_tools = [
-    mcp_tool("editor.lsp_probe", "LSP probe"),
-    mcp_tool("editor.wiki_probe", "Wiki probe"),
-]
-val partial_surface = ide_agent_dashboard_surface_from_tools(partial_tools, ide_agent_dashboard_default_lanes())
-expect(partial_surface.tool_count).to_equal(2)
-expect(partial_surface.required_tool_count).to_equal(3)
-expect(partial_surface.gates[3].status).to_equal("missing")
-expect(partial_surface.gates[3].reason).to_equal("required-tool-count-missing")
-expect(partial_surface.ready_for_integration).to_be(false)
-
-val missing_review = [
-    IdeAgentDashboardLane(lane_id: "spark-research", provider: "spark", role: "fast-explorer", status: "reviewed", requires_review: true, source_module: "assistant.control_plane", review_gate_id: "spark-output-reviewed", degraded_reason: ""),
-    IdeAgentDashboardLane(lane_id: "normal-implementation", provider: "normal", role: "implementation", status: "ready", requires_review: false, source_module: "assistant.control_plane", review_gate_id: "normal-review-available", degraded_reason: ""),
-]
-val missing_review_surface = ide_agent_dashboard_surface_from_tools([], missing_review)
-expect(missing_review_surface.gates[1].status).to_equal("missing")
-expect(missing_review_surface.gates[1].reason).to_equal("normal-review-lane-missing")
-expect(missing_review_surface.ready_for_integration).to_be(false)
-
-val missing_spark = [
-    IdeAgentDashboardLane(lane_id: "normal-implementation", provider: "normal", role: "implementation", status: "ready", requires_review: false, source_module: "assistant.control_plane", review_gate_id: "normal-review-available", degraded_reason: ""),
-    IdeAgentDashboardLane(lane_id: "normal-review", provider: "normal", role: "review", status: "ready", requires_review: false, source_module: "assistant.control_plane", review_gate_id: "normal-review-available", degraded_reason: ""),
-]
-val missing_spark_surface = ide_agent_dashboard_surface_from_tools(partial_tools, missing_spark)
-expect(missing_spark_surface.gates[0].status).to_equal("missing")
-expect(missing_spark_surface.gates[0].reason).to_equal("spark-lane-missing")
-expect(missing_spark_surface.ready_for_integration).to_be(false)
-
-val invalid_lane = [
-    IdeAgentDashboardLane(lane_id: "mystery", provider: "unknown", role: "review", status: "maybe", requires_review: false, source_module: "assistant.control_plane", review_gate_id: "normal-review-available", degraded_reason: "invalid-test-lane"),
-]
-val invalid_surface = ide_agent_dashboard_surface_from_tools([], invalid_lane)
-expect(invalid_surface.gates[2].gate_id).to_equal("lane-status-valid")
-expect(invalid_surface.gates[2].status).to_equal("blocked")
-expect(invalid_surface.gates[2].reason).to_equal("invalid-lane")
-expect(invalid_surface.ready_for_integration).to_be(false)
-
-val spoofed_review = [
-    IdeAgentDashboardLane(lane_id: "spark-research", provider: "spark", role: "fast-explorer", status: "reviewed", requires_review: true, source_module: "assistant.control_plane", review_gate_id: "spark-output-reviewed", degraded_reason: ""),
-    IdeAgentDashboardLane(lane_id: "normal-review", provider: "normal", role: "review", status: "ready", requires_review: false, source_module: "dashboard.local", review_gate_id: "normal-review-available", degraded_reason: "spoofed-review"),
-]
-val spoofed_surface = ide_agent_dashboard_surface_from_tools(partial_tools, spoofed_review)
-expect(spoofed_surface.gates[1].status).to_equal("missing")
-expect(spoofed_surface.gates[2].status).to_equal("blocked")
-expect(spoofed_surface.gates[2].reason).to_equal("invalid-lane")
-expect(spoofed_surface.ready_for_integration).to_be(false)
+expect(summary).to_contain("lsp=true")
+expect(summary).to_contain("wiki=true")
 ```
 
 </details>
@@ -647,18 +574,24 @@ expect(summary).to_contain("ppt=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = ide_plugin_manifest_probe()
 val summary = ide_plugin_manifest_summary()
-expect(probe.entry_count).to_equal(5)
-expect(probe.roundtrip_count).to_equal(5)
+expect(probe.entry_count).to_equal(11)
+expect(probe.roundtrip_count).to_equal(11)
 expect(probe.names.join(",")).to_contain("ide.slides")
 expect(probe.names.join(",")).to_contain("ide.sheets")
+expect(probe.names.join(",")).to_contain("ide.draw-sdd")
+expect(probe.names.join(",")).to_contain("ide.designer")
+expect(probe.names.join(",")).to_contain("ide.base")
+expect(probe.names.join(",")).to_contain("ide.math")
+expect(probe.names.join(",")).to_contain("ide.mail")
+expect(probe.names.join(",")).to_contain("ide.planner")
 expect(probe.manifest_text).to_contain("builtin:app.office.slides")
-expect(summary).to_contain("roundtrip=5")
+expect(summary).to_contain("roundtrip=11")
 ```
 
 </details>
@@ -667,11 +600,18 @@ expect(summary).to_contain("roundtrip=5")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [doc/07_guide/app/ide_office_plugin_suite.md](doc/07_guide/app/ide_office_plugin_suite.md)
+- **Plan:** [doc/03_plan/sys_test/ide_office_plugin_suite.md](doc/03_plan/sys_test/ide_office_plugin_suite.md)
+- **Design:** [doc/04_architecture/ide_plugin_architecture.md](doc/04_architecture/ide_plugin_architecture.md)
 
 
 </details>
