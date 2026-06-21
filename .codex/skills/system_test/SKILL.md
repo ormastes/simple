@@ -154,7 +154,7 @@ describe "<Feature Name>":
   - Raster evidence (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.ppm`) is tracked by Git LFS.
 - After adding or moving UI-facing app feature specs, run
   `test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl` so the
-  critical UI lane keeps executable specs, mirrored `doc/06_spec/system/app`
+  critical UI lane keeps executable specs, mirrored `doc/06_spec/03_system/app`
   manuals, and visible evidence markers.
 - SGTTI must remain zero-overhead outside explicit test/debug builds. Specs that
   add SGTTI-backed TUI/GUI evidence must also prove the normal production
