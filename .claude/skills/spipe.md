@@ -135,8 +135,8 @@ Record `.rdc` path, `RDOC` magic validation, capture log path, and any
 host-unavailable reason as artifact captures. Screenshot-only evidence is not
 Vulkan IO-level RenderDoc evidence.
 
-For Mac GUI/web/2D Vulkan comparison, keep the scope explicitly macOS until
-Windows and Linux evidence is added. Use
+For Mac GUI/web/2D Vulkan comparison, keep the top-level scope explicitly
+macOS until Windows and Linux runbooks are added. Use
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check` for readiness,
 `--run` for direct Electron/Chrome/Simple launch probes, and
 `--renderdoc-simple` for the supported macOS Simple RenderDoc debug path on a
@@ -149,11 +149,9 @@ needs Simple Vulkan/Engine2D readback or RenderDoc proof, original
 Chrome+RenderDoc proof, Electron+RenderDoc proof, and production GUI/web parity
 proof. If Chrome or Electron renders pixels but its log says `angle=vulkan` was
 not in the allowed implementations, classify the browser lane as
-`vulkan-angle-unavailable`; do not treat the bitmap as Vulkan-backed proof. For
-Windows, begin with `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check`;
-for Linux, use the POSIX wrapper after installing a real GPU Vulkan ICD,
-Vulkan tools, shader tools, Chrome/Chromium, Electron dependencies, and
-RenderDoc.
+`vulkan-angle-unavailable`; do not treat the bitmap as Vulkan-backed proof.
+Defer Windows and Linux claims until platform-specific runbooks validate the
+same evidence keys and RDOC gate contract.
 
 Prefer the strongest available oracle for the surface:
 

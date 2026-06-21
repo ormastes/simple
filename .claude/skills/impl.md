@@ -110,9 +110,9 @@ verification-contract changes must refresh matching `doc/07_guide`,
 and `.claude/agents/spipe/` process docs.
 For GUI/web/2D RenderDoc+Vulkan work, use
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc` as
-the POSIX readiness/direct-run/capture wrapper and
-`scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check` as the Windows readiness
-entrypoint. Refresh the guide, SPipe skill, verify mirrors, Simple
+the macOS top-level readiness/direct-run/capture wrapper. Keep Windows and
+Linux out of the top-level completion claim until their platform runbooks are
+added. Refresh the guide, SPipe skill, verify mirrors, Simple
 Vulkan/Engine2D evidence, Chrome gate, Electron gate, and production GUI/web
 parity evidence together.
 

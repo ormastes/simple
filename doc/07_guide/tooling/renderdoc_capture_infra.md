@@ -197,7 +197,7 @@ The supported macOS RenderDoc debug path is Simple-first:
 On macOS, Chrome and Electron RenderDoc lanes are exploratory only. They may
 render pixels through Metal/OpenGL/SwiftShader while rejecting ANGLE Vulkan, so
 they must not be used as completion evidence unless their logs prove Vulkan and
-their `.rdc` files pass the same gates as Linux/Windows.
+their `.rdc` files pass the same RDOC gates.
 
 For GUI/web/2D comparison work, collect both the browser-hosted surface and the
 Simple renderer surface from the same fixture:
@@ -461,12 +461,13 @@ The setup helper resolves either an unpacked RenderDoc tree with
 `bin/renderdoccmd` or a macOS `RenderDoc.app` bundle, and prints both
 `LD_LIBRARY_PATH` and `DYLD_LIBRARY_PATH` exports for prepared capture hosts.
 
-The shared CLI remains the preferred interface:
+The shared CLI remains the preferred interface. On macOS, run the Simple lane
+first and treat Chrome/Electron capture attempts as exploratory until their
+Vulkan logs and RDOC gates both pass:
 
 ```sh
 scripts/setup/setup-renderdoc-env.shs --check
 scripts/tool/renderdoc-evidence.shs capture-simple
-scripts/tool/renderdoc-evidence.shs capture-html
 sh scripts/check/check-renderdoc-macos-portability-probe.shs
 ```
 
@@ -479,4 +480,5 @@ RenderDoc cannot capture the macOS path.
 
 By default the macOS probe records availability only. Set
 `RDOC_MACOS_RUN_CAPTURES=1` on a prepared macOS host to run the Simple
-RenderDoc capture and exploratory Chrome capture through the shared CLI.
+RenderDoc capture and exploratory browser capture attempts through the shared
+CLI.

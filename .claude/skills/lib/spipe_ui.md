@@ -159,9 +159,9 @@ SIMPLE_BIN="$PWD/src/compiler_rust/target/gui/debug/simple" SIMPLE_LIB="$PWD/src
 
 ## Mac RenderDoc + Vulkan GUI/Web/2D Gate
 
-Use the setup wrapper as the canonical entrypoint. macOS is the current local
-actual-run workflow; Windows and Linux have prepared setup entrypoints but must
-not be promoted until they produce matching evidence keys and gates.
+Use the setup wrapper as the canonical entrypoint. macOS is the current
+top-level actual-run workflow. Windows and Linux are deferred until separate
+platform runbooks produce matching evidence keys and gates.
 
 First prove the host Vulkan stack:
 
@@ -191,11 +191,9 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 On a prepared RenderDoc host, `scripts/setup/setup-gui-web-2d-vulkan-env.shs
 --renderdoc-simple` is the supported macOS Simple debug path. The all-lane
 `--renderdoc` mode is for cross-surface evidence collection and should treat
-macOS Chrome/Electron captures as exploratory unless Chromium logs prove Vulkan.
-For Windows readiness, use
-`scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check`. For Linux readiness,
-install a real GPU Vulkan ICD, Vulkan tools, shader tools, Chrome/Chromium,
-Electron dependencies, and RenderDoc, then run the POSIX wrapper.
+macOS Chrome/Electron captures as exploratory unless Chromium logs prove Vulkan
+and the RDOC gates pass. Do not report Windows or Linux status from this Mac
+runbook.
 
 Vulkan browser proof requires more than `--use-angle=vulkan`. If Chrome or
 Electron writes a bitmap but logs `angle=vulkan` as unavailable, record

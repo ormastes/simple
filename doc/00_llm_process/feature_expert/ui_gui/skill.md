@@ -25,13 +25,14 @@ Maintain feature-specific process knowledge for UI and GUI. Use this skill when 
 ## GUI/Web/2D Vulkan RenderDoc Verification
 
 Current canonical setup is macOS-only at the top level. Before claiming
-GUI/web/2D Vulkan parity, run the macOS host probe and compare all three lanes
-from the same fixture:
+GUI/web/2D Vulkan parity, run the macOS host probe and compare the direct
+Electron, Chrome, and pure-Simple lanes from the same fixture:
 
 ```sh
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 SIMPLE_BIN=src/compiler_rust/target/release/simple \
-  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple
 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 ```
 
@@ -40,7 +41,10 @@ Required lanes:
 - Electron Chromium with requested `--enable-features=Vulkan --use-angle=vulkan`.
 - Original Chrome with the same Vulkan/ANGLE request.
 - Pure-Simple GUI/web/2D through Engine2D Vulkan readback.
-- RenderDoc `.rdc` evidence with `RDOC` magic for each capture lane.
+- RenderDoc `.rdc` evidence with `RDOC` magic for each capture lane before a
+  completion claim; on macOS, the supported debug capture is Simple-first and
+  browser RenderDoc captures remain exploratory unless Chromium logs and gates
+  both prove Vulkan.
 
 Do not report Windows or Linux GUI/web/2D RenderDoc status from this top-level
 Mac runbook yet. Those lanes should be added later with their own setup notes

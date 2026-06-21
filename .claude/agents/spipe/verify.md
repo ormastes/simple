@@ -58,11 +58,11 @@
     `sh scripts/audit/direct-env-runtime-guard.shs --staged`; app leaf and
     `src/lib/gc_async_mut` env reads outside owner modules must use env facades,
     not local `rt_env_get`.
-13. For Mac GUI/web/2D RenderDoc+Vulkan evidence, keep proof scope macOS-only
-    until Windows and Linux runbooks exist. Start from
+13. For Mac GUI/web/2D RenderDoc+Vulkan evidence, keep top-level proof scope
+    macOS-only until Windows and Linux runbooks exist. Start from
     `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc`
-    on POSIX hosts or `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check`
-    only as readiness preparation. Verify MoltenVK host readiness, Simple
+    on a Mac host. Treat Windows and Linux helpers only as future readiness
+    preparation until their runbooks land. Verify MoltenVK host readiness, Simple
     Vulkan/Engine2D readback or RenderDoc proof, original Chrome RenderDoc proof,
     Electron RenderDoc proof, and production GUI/web parity evidence. If Chrome
     or Electron logs show `angle=vulkan` unavailable, report
