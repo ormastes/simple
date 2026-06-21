@@ -2212,7 +2212,7 @@ fn compile_known_enum_constructor_call<M: Module>(
     let disc_val = builder.ins().iconst(types::I32, disc);
     let payload_val = match args {
         [] => builder.ins().iconst(types::I64, 3),
-        [single] => get_vreg_or_default(ctx, builder, single),
+        [single] => runtime_payload_value(ctx, builder, *single),
         many => {
             let capacity = builder.ins().iconst(types::I64, many.len() as i64);
             let array = call_runtime_1(ctx, builder, "rt_array_new", capacity);
@@ -2979,7 +2979,27 @@ pub fn compile_call<M: Module>(
             emit_profiler_call(ctx, builder, func_name)?;
         }
         let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
-        let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
+        let arg_vals: Vec<_> = args
+            .iter()
+            .map(|a| {
+                let v = get_vreg_or_default(ctx, builder, a);
+                // A cross-block f64 argument is carried through an i64-typed
+                // Cranelift Variable, so it arrives here as an I64 value. Passing
+                // it to `adapt_args_to_signature_with_signedness` against an f64
+                // param would `fcvt_from_sint` (value-convert) the raw bits as an
+                // integer — garbage (e.g. `consume(f())` saw 0). `vreg_types`
+                // records the true F64 type; reinterpret the bits back to f64 so
+                // adaptation sees F64==F64. Gated on `vreg_types` → no effect on
+                // genuine integer args.
+                if ctx.vreg_types.get(a).copied() == Some(TypeId::F64)
+                    && builder.func.dfg.value_type(v) == types::I64
+                {
+                    builder.ins().bitcast(types::F64, MemFlags::new(), v)
+                } else {
+                    v
+                }
+            })
+            .collect();
         let arg_signed: Vec<Option<bool>> = args.iter().map(|arg| super::core::vreg_is_signed(ctx, *arg)).collect();
         let arg_vals = adapt_args_to_signature_with_signedness(builder, callee_ref, arg_vals, Some(&arg_signed));
         let call = adapted_call(builder, callee_ref, &arg_vals);

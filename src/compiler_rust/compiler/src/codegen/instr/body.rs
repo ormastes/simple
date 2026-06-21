@@ -69,7 +69,33 @@ fn binop_result_type(op: BinOp, lhs_ty: Option<TypeId>) -> Option<TypeId> {
 /// is topological for most functions. Cross-block phi-like propagation may
 /// miss some `Copy` destinations — consumers treat missing entries as
 /// "unknown" (default signed in FR-0002b).
-pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
+///
+/// `fn_return_types` maps callee name → its *true Simple return TypeId* (NOT the
+/// Cranelift ABI type, which lowers an f64 return to an i64 bit-carrier in the
+/// integer return register). It lets the `MirInst::Call` arm stamp
+/// f64-returning call results — which carry no type otherwise — so downstream
+/// f64 consumers (the binop/store/arg-adapt reinterprets) fire. Gated to f64,
+/// so integer returns stay unstamped exactly as before (no FR-0002b change).
+pub(super) fn build_vreg_types(
+    func: &MirFunction,
+    fn_return_types: &std::collections::BTreeMap<String, TypeId>,
+) -> HashMap<VReg, TypeId> {
+    build_vreg_types_inner(func, &|name| {
+        if fn_return_types.get(name).copied() == Some(TypeId::F64) {
+            Some(TypeId::F64)
+        } else {
+            None
+        }
+    })
+}
+
+/// Core of [`build_vreg_types`], parameterized over a callee-return-type lookup
+/// so it can be unit-tested without a real Cranelift `Module`. `callee_f64`
+/// returns `Some(TypeId::F64)` for f64-returning callees, `None` otherwise.
+fn build_vreg_types_inner(
+    func: &MirFunction,
+    callee_f64: &dyn Fn(&str) -> Option<TypeId>,
+) -> HashMap<VReg, TypeId> {
     let mut types_map: HashMap<VReg, TypeId> = HashMap::new();
 
     for block in &func.blocks {
@@ -242,7 +268,17 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                         | "rt_typed_words_u64_data_at"
                         | "rt_typed_words_u64_data_at_checked"
                         | "rt_typed_words_u64_raw_data_at" => Some(TypeId::U64),
-                        _ => None,
+                        // A user-defined function returning f64 carries no entry
+                        // here otherwise (`MirInst::Call` has no return_type field).
+                        // Leaving it unstamped breaks every downstream f64
+                        // consumer: the result (and its inliner-produced Copy/
+                        // BinOp chain) is treated as i64, so an f64 call result
+                        // passed as an arg, used in a binop, or bound to a local
+                        // is mishandled. Look up the callee's declared return ABI
+                        // type and stamp ONLY when it is f64 (gated so i64/u64/…
+                        // returns stay unstamped exactly as before, preserving
+                        // FR-0002b signedness dispatch).
+                        _ => callee_f64(target.name()),
                     };
                     if let Some(ty) = ty {
                         types_map.insert(*d, ty);
@@ -272,6 +308,65 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                 // absent — consumers treat missing as "unknown".
                 _ => {}
             }
+        }
+    }
+
+    // F64-only forward-propagation completion.
+    //
+    // The single pass above visits instructions in block-storage order, which is
+    // not guaranteed topological: a `Copy`/`BinOp` whose source is an f64 VReg
+    // defined in a later-stored block sees the source as still-unstamped and
+    // therefore does not propagate f64. The inliner produces exactly this shape
+    // (e.g. `Copy{dest, src=<f64 call result in another block>}`), leaving the
+    // copy dest — and the binop/comparison that consume it — unstamped, so the
+    // f64-reinterpret consumer gates silently no-op.
+    //
+    // Re-run propagation to a fixpoint, but STRICTLY for f64 sources and ONLY
+    // filling absent entries (never overwriting). This completes f64 chains
+    // regardless of block order while leaving every integer/other entry exactly
+    // as the main pass produced it — so FR-0002b signedness dispatch (which keys
+    // off unstamped == "unknown/signed") is byte-for-byte unchanged.
+    loop {
+        let mut changed = false;
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    MirInst::Copy { dest, src } => {
+                        if !types_map.contains_key(dest)
+                            && types_map.get(src).copied() == Some(TypeId::F64)
+                        {
+                            types_map.insert(*dest, TypeId::F64);
+                            changed = true;
+                        }
+                    }
+                    MirInst::BinOp { dest, op, left, .. } => {
+                        // Only arithmetic/bitwise ops keep the operand type;
+                        // comparisons/logical already produce BOOL in the main
+                        // pass. Reuse `binop_result_type` so the classification
+                        // stays identical.
+                        if !types_map.contains_key(dest)
+                            && types_map.get(left).copied() == Some(TypeId::F64)
+                            && binop_result_type(*op, Some(TypeId::F64)) == Some(TypeId::F64)
+                        {
+                            types_map.insert(*dest, TypeId::F64);
+                            changed = true;
+                        }
+                    }
+                    MirInst::UnaryOp { dest, op, operand } => {
+                        if !matches!(op, UnaryOp::Not)
+                            && !types_map.contains_key(dest)
+                            && types_map.get(operand).copied() == Some(TypeId::F64)
+                        {
+                            types_map.insert(*dest, TypeId::F64);
+                            changed = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !changed {
+            break;
         }
     }
 
@@ -377,6 +472,7 @@ pub fn compile_function_body<M: Module>(
     cranelift_func: &mut cranelift_codegen::ir::Function,
     func: &MirFunction,
     func_ids: &mut std::collections::BTreeMap<String, cranelift_module::FuncId>,
+    fn_return_types: &std::collections::BTreeMap<String, TypeId>,
     runtime_funcs: &HashMap<&'static str, cranelift_module::FuncId>,
     global_ids: &std::collections::BTreeMap<String, cranelift_module::DataId>,
     import_map: &std::sync::Arc<std::collections::HashMap<String, String>>,
@@ -427,7 +523,7 @@ pub fn compile_function_body<M: Module>(
     let mut vreg_from_local: HashMap<VReg, usize> = HashMap::new();
     // FR-DRIVER-0002a: per-VReg TypeId, populated once up front from MIR.
     // Consumers (FR-0002b widening + shift emission) read via InstrContext.vreg_types.
-    let mut vreg_types: HashMap<VReg, TypeId> = build_vreg_types(func);
+    let mut vreg_types: HashMap<VReg, TypeId> = build_vreg_types(func, fn_return_types);
 
     // Declare Cranelift Variables for all VRegs to handle SSA across blocks.
     // This lets Cranelift automatically insert phi nodes (block params) where needed.
@@ -972,8 +1068,28 @@ pub fn compile_function_body<M: Module>(
                                 // Int to float conversion for return value
                                 builder.ins().fcvt_from_sint(ret_ty, rv)
                             } else if val_type.is_float() && ret_ty.is_int() {
-                                // Float to int conversion for return value
-                                builder.ins().fcvt_to_sint(ret_ty, rv)
+                                if matches!(func.return_type, TypeId::F32 | TypeId::F64) {
+                                    // The uniform i64 return ABI carries an f64
+                                    // return value as its raw bit pattern — every
+                                    // consumer (BoxFloat, binop reinterpret, call-arg
+                                    // adapt) bitcasts i64->f64 to recover it.
+                                    // Reinterpret the bits; do NOT value-convert.
+                                    // `fcvt_to_sint` turned `return 21.5` into the
+                                    // integer 21, which callers then read as a tiny
+                                    // denormal ~= 0.0 (f64 fn result passed as an arg
+                                    // / printed showed 0). f32 widens to f64 first so
+                                    // the bits fill the 64-bit slot.
+                                    let as_f64 = if val_type == types::F32 {
+                                        builder.ins().fpromote(types::F64, rv)
+                                    } else {
+                                        rv
+                                    };
+                                    builder.ins().bitcast(ret_ty, cranelift_codegen::ir::MemFlags::new(), as_f64)
+                                } else {
+                                    // Genuine float->int return (the function logically
+                                    // returns an integer): value-convert as before.
+                                    builder.ins().fcvt_to_sint(ret_ty, rv)
+                                }
                             } else if val_type.is_float() && ret_ty.is_float() {
                                 // Float width conversion
                                 if val_type.bits() < ret_ty.bits() {
@@ -1151,7 +1267,7 @@ mod tests {
         entry.instructions.push(MirInst::ConstBool { dest: r7, value: true });
         entry.terminator = Terminator::Return(Some(r3));
 
-        let map = build_vreg_types(&func);
+        let map = build_vreg_types_inner(&func, &|_| None);
 
         assert_eq!(map.get(&r0).copied(), Some(TypeId::I64), "ConstInt -> I64");
         assert_eq!(map.get(&r1).copied(), Some(TypeId::I32), "Cast to I32");
@@ -1186,7 +1302,7 @@ mod tests {
         });
         entry.terminator = Terminator::Return(Some(hoisted_word));
 
-        let map = build_vreg_types(&func);
+        let map = build_vreg_types_inner(&func, &|_| None);
 
         assert_eq!(map.get(&word).copied(), Some(TypeId::U64));
         assert_eq!(map.get(&hoisted_word).copied(), Some(TypeId::U64));
@@ -1220,7 +1336,7 @@ mod tests {
         });
         entry.terminator = Terminator::Return(None);
 
-        let map = build_vreg_types(&func);
+        let map = build_vreg_types_inner(&func, &|_| None);
 
         // Signed integer types
         for ty in [TypeId::I8, TypeId::I16, TypeId::I32, TypeId::I64] {

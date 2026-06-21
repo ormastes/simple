@@ -198,6 +198,12 @@ pub struct CodegenBackend<M: Module> {
     pub module: M,
     pub ctx: Context,
     pub func_ids: BTreeMap<String, cranelift_module::FuncId>,
+    /// Callee name → true Simple return `TypeId` (NOT the ABI signature type).
+    /// f64 returns are passed as i64 bits through the integer return register, so
+    /// the Cranelift signature reports I64; this map preserves the real f64 type
+    /// so `build_vreg_types` can stamp `MirInst::Call` results correctly. Keyed
+    /// identically to `func_ids` (raw + mangled name).
+    pub fn_return_types: BTreeMap<String, crate::hir::TypeId>,
     pub runtime_funcs: HashMap<&'static str, cranelift_module::FuncId>,
     pub global_ids: BTreeMap<String, cranelift_module::DataId>,
     pub body_stub: Option<cranelift_module::FuncId>,
@@ -738,6 +744,7 @@ impl<M: Module> CodegenBackend<M> {
             module,
             ctx,
             func_ids: BTreeMap::new(),
+            fn_return_types: BTreeMap::new(),
             runtime_funcs: HashMap::new(),
             global_ids: BTreeMap::new(),
             body_stub: None,
@@ -996,8 +1003,13 @@ impl<M: Module> CodegenBackend<M> {
 
             // Always register under the raw name so local calls resolve
             func_ids.insert(func.name.clone(), func_id);
+            // Record the true Simple return type (keyed identically) so
+            // build_vreg_types can recover f64 returns hidden behind the i64
+            // return ABI.
+            self.fn_return_types.insert(func.name.clone(), func.return_type);
             // Also register under the mangled name if different
             if symbol_name != func.name {
+                self.fn_return_types.insert(symbol_name.clone(), func.return_type);
                 func_ids.insert(symbol_name, func_id);
             }
         }
@@ -1248,6 +1260,7 @@ impl<M: Module> CodegenBackend<M> {
                 &mut self.ctx.func,
                 func,
                 &mut self.func_ids,
+                &self.fn_return_types,
                 &self.runtime_funcs,
                 &self.global_ids,
                 &self.import_map,
