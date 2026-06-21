@@ -191,11 +191,11 @@ backend readback fixtures. Synthetic handles remain isolated probe evidence.
 
 - Spark task: preserve WebGPU real device readback and keep upload/fallback
   provenance separate.
-- Evidence keys for current real readback:
-  `webgpu_spark_task_status=pass`,
+- Current real readback status: unavailable/not-device-readback on this host.
+  Promotion requires `webgpu_spark_task_status=pass`,
   `webgpu_normal_llm_verification_status=pass`,
-  `webgpu_real_readback_source=device_readback`,
-  positive `webgpu_real_readback_backend_handle`, and matching checksum.
+  `webgpu_real_readback_source=device_readback`, positive
+  `webgpu_real_readback_backend_handle`, and matching checksum.
 - Fail closed: `surface_upload`, adapter probe success, and CPU mirror pixels are
   not production `device_readback` proof.
 - Safe non-HW guidance: browserless or adapterless agents may preserve guard

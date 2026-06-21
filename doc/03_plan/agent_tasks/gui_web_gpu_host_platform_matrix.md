@@ -248,10 +248,10 @@ unavailable/provenance-only to production proof.
   `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl`,
   production wrapper/report.
 - Command: run the production wrapper after WebGPU readback evidence is added.
-- Current real-readback evidence keys:
-  `webgpu_spark_task_status=pass`,
-  `webgpu_normal_llm_verification_status=pass`,
-  `presentation_provenance_device_readback_status=not_device_readback`.
+- Current real-readback status: unavailable/not-device-readback on this host.
+  Promotion requires `webgpu_spark_task_status=pass`,
+  `webgpu_normal_llm_verification_status=pass`, `webgpu_real` source
+  `device_readback`, a positive backend handle, and matching checksums.
 - Fail-closed condition: `surface_upload` is upload provenance only and must not
   satisfy `device_readback`.
 - Safe non-HW guidance: browserless or adapterless agents may preserve the guard
