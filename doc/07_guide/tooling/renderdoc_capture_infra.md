@@ -323,7 +323,11 @@ property covered/total counts, missing tag/property lists, fixture scene count,
 and manifest scenes missing fixture HTML. A restart audit should therefore show
 the 105/105 HTML tag coverage and 62/62 implemented CSS property coverage in
 the same evidence env as the Simple, original Chrome, Electron, and production
-parity gates. It also re-emits the full W3C CSS inventory count from the SSpec
+parity gates. GUI widget witness provenance is inspectable as widget/class
+pairs through `gui_widget_rendering_fixture_coverage_spec_widget_classes`,
+`gui_widget_rendering_fixture_coverage_render_fixture_widget_classes`, and
+`gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_classes`.
+It also re-emits the full W3C CSS inventory count from the SSpec
 traceability gate as
 `html_css_rendering_manifest_traceability_total_css_property_count` and the
 remaining non-rendered inventory count as
