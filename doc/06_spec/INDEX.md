@@ -17,7 +17,7 @@
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [Simple Web Browser Production Hardening Live Endpoint Specification](test/03_system/gui/simple_web_browser_production_hardening_spec.md) | Minimal | N/A | 6 | 20% | 10 lines |
-| [Production GUI/Web Renderer Parity Hardening Specification](test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.md) | Minimal | N/A | 8 | 20% | 10 lines |
+| [Production GUI/Web Renderer Parity Hardening Specification](03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.md) | Minimal | N/A | 8 | 20% | 10 lines |
 | [GUI Widget RenderDoc Goal Status Gate](test/03_system/check/gui_widget_renderdoc_goal_status_spec.md) | Minimal | N/A | 2 | 20% | 32 lines |
 
 ## Application (2 features)
