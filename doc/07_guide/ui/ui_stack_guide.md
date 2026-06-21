@@ -305,6 +305,9 @@ Pure Simple GUI/default Simple2D rendering must enter through the shared
 Engine2D backend lane planner. GUI code should request a typed drawing or
 processing lane and let the planner select the best available backend instead
 of bypassing into direct GPU calls or app-specific renderer paths.
+Image URI commands are command-level evidence until the asset resolver feeds
+real decoded pixels into Engine2D. Current 8K evidence covers TIFF raster paths
+and JPEG XL metadata/sparse planning, but not full JPEG XL pixel decode.
 
 Engine2D exposes two backend-order helpers. `backend_full_preference_order()`
 is the documented preference order: explicit platform-native surfaces
