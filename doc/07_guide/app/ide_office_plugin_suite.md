@@ -40,7 +40,7 @@ TUI and GUI modes. A capability added to an Office capsule must update:
 - `src/app/ide/feature_report.spl`
 - `src/app/ide/plugin_manifest.spl`
 - `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl`
-- `doc/06_spec/test/03_system/app/ide/feature/ide_office_plugin_suite_spec.md`
+- `doc/06_spec/03_system/app/ide/feature/ide_office_plugin_suite_spec.md`
 
 ## Verification
 
