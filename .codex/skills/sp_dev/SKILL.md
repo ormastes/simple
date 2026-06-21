@@ -61,10 +61,16 @@ with `vulkaninfo --summary`; then require Simple Vulkan/Engine2D evidence,
 original Chrome evidence, Electron Chromium evidence, and production GUI/web
 parity evidence. A Chrome/Electron bitmap with a log containing Chromium's
 `angle=vulkan` unavailable failure is a fallback render, not Vulkan proof;
-record `vulkan-angle-unavailable` and leave the gate failed. Windows setup
-starts with `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check`; Linux setup
-uses the same POSIX wrapper after installing a real GPU Vulkan ICD, Vulkan
-tools, shader tools, Chrome/Chromium, Electron dependencies, and RenderDoc.
+record `vulkan-angle-unavailable` and leave the gate failed. The aggregate
+audit must expose `gui_web_2d_vulkan_comparison_fixture_status`,
+`gui_web_2d_vulkan_comparison_artifact_status`,
+`gui_web_2d_vulkan_comparison_artifact_reason`,
+`gui_web_2d_vulkan_electron_argb_viewport_match_status`,
+`gui_web_2d_vulkan_chrome_screenshot_file_status`, and
+`gui_web_2d_vulkan_simple_evidence_file_status` before treating Electron,
+Chrome, and Simple artifacts as comparable. Defer Windows and Linux claims
+until platform-specific runbooks validate the same evidence keys and RDOC gate
+contract.
 
 For runtime concurrency work, keep the public API map current in
 `doc/07_guide/lib/misc/stdlib.md`, `doc/07_guide/compiler/check_perf.md`, and

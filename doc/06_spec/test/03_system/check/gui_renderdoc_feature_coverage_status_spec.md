@@ -162,6 +162,9 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: traceability_html_count equals `105`
    - Expected: traceability_implemented_css_count equals `62`
    - Expected: traceability_unsupported_css_missing_count equals `0`
+   - Expected: comparison_fixture_status equals `pass`
+   - Expected: comparison_artifact_reason equals `pass`
+   - Expected: comparison_artifact_status equals `incomplete`
    - Expected: renderdoc_blocked_gate equals ``
    - Expected: renderdoc_blocked_gate_count equals `0`
    - Expected: renderdoc_blocked_gates equals ``
@@ -178,7 +181,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 476 lines folded for reproduction.
+Runnable source: 491 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -316,6 +319,9 @@ expect(evidence).to_contain("gui_web_2d_vulkan_simple_bin_selection_reason=")
 expect(evidence).to_contain("gui_web_2d_vulkan_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 expect(evidence).to_contain("gui_web_2d_vulkan_width=")
 expect(evidence).to_contain("gui_web_2d_vulkan_height=")
+expect(evidence).to_contain("gui_web_2d_vulkan_comparison_fixture_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_comparison_artifact_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_comparison_artifact_reason=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_requested_api=vulkan")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_requested_angle=vulkan")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_requested_features=Vulkan")
@@ -330,8 +336,11 @@ expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_mode=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_path=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_width=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_height=")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_viewport_match_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_screenshot=")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_screenshot_file_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_evidence_env=")
+expect(evidence).to_contain("gui_web_2d_vulkan_simple_evidence_file_status=")
 expect(evidence).to_contain("simple_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple")
 expect(evidence).to_contain("simple_renderdoc_evidence_env=")
 expect(evidence).to_contain("simple_renderdoc_capture_status=")
@@ -504,6 +513,9 @@ val traceability_implemented_css_indexed_count = _value_of(evidence, "html_css_t
 val traceability_unsupported_css_count = _value_of(evidence, "html_css_traceability_unsupported_css_property_count")
 val traceability_unsupported_css_properties = _value_of(evidence, "html_css_traceability_unsupported_css_properties")
 val traceability_unsupported_css_missing_count = _value_of(evidence, "html_css_traceability_unsupported_css_property_missing_count")
+val comparison_fixture_status = _value_of(evidence, "gui_web_2d_vulkan_comparison_fixture_status")
+val comparison_artifact_status = _value_of(evidence, "gui_web_2d_vulkan_comparison_artifact_status")
+val comparison_artifact_reason = _value_of(evidence, "gui_web_2d_vulkan_comparison_artifact_reason")
 val production_gate_status = _value_of(evidence, "production_gui_web_renderer_parity_gate_status")
 val production_gate_reason = _value_of(evidence, "production_gui_web_renderer_parity_gate_reason")
 val renderdoc_status = _value_of(evidence, "renderdoc_goal_status")
@@ -601,6 +613,12 @@ expect(traceability_implemented_css_indexed_count.to_i64()).to_be_greater_than(5
 expect(traceability_unsupported_css_count.to_i64()).to_be_greater_than(300)
 expect(traceability_unsupported_css_properties.len()).to_be_greater_than(1000)
 expect(traceability_unsupported_css_missing_count).to_equal("0")
+expect(comparison_fixture_status).to_equal("pass")
+if comparison_artifact_status == "pass":
+    expect(comparison_artifact_reason).to_equal("pass")
+else:
+    expect(comparison_artifact_status).to_equal("incomplete")
+    expect(comparison_artifact_reason.len()).to_be_greater_than(0)
 expect(production_gate_status.len()).to_be_greater_than(0)
 expect(production_gate_reason.len()).to_be_greater_than(0)
 expect(renderdoc_status.len()).to_be_greater_than(0)

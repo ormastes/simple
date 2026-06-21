@@ -118,7 +118,15 @@ comparison fixture and viewport through `gui_web_2d_vulkan_html_path`,
 `gui_web_2d_vulkan_width`, and `gui_web_2d_vulkan_height`, plus the runtime
 artifacts `gui_web_2d_vulkan_electron_argb_path`,
 `gui_web_2d_vulkan_chrome_screenshot`, and
-`gui_web_2d_vulkan_simple_evidence_env`.
+`gui_web_2d_vulkan_simple_evidence_env`. The machine-checkable comparison
+contract is `gui_web_2d_vulkan_comparison_fixture_status`,
+`gui_web_2d_vulkan_comparison_artifact_status`,
+`gui_web_2d_vulkan_comparison_artifact_reason`,
+`gui_web_2d_vulkan_electron_argb_viewport_match_status`,
+`gui_web_2d_vulkan_chrome_screenshot_file_status`, and
+`gui_web_2d_vulkan_simple_evidence_file_status`; use those fields to decide
+whether the Electron baseline, Chrome screenshot, and Simple evidence env are
+present and comparable before making a GUI/web/2D Vulkan comparison claim.
 
 On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
 `src/compiler_rust/target/debug/simple` when that binary advertises the macOS
@@ -255,6 +263,9 @@ Completion requires typed evidence, not screenshots alone:
 - Any exploratory Electron/Chrome lane reports requested Vulkan/ANGLE metadata and its log
   does not contain Chromium's `angle=vulkan` unavailable failure. A rendered
   bitmap with that log is a browser fallback, not a Vulkan-backed browser proof.
+- The aggregate audit reports `gui_web_2d_vulkan_comparison_artifact_status=pass`
+  or records an explicit `gui_web_2d_vulkan_comparison_artifact_reason` for the
+  missing or mismatched comparison artifact.
 - The production GUI/web parity evidence still reports matching checksums,
   `mismatch_count=0`, and `blur_or_tolerance=false`.
 
