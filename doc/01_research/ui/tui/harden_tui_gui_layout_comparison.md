@@ -340,7 +340,7 @@ The repo already has enough capture, comparison, backend, and system-test scaffo
   - deterministic TUI cell-grid SDN output.
 - Wired the shared report into `src/app/wm_compare/site_corpus_layout_report.spl` through `build_site_corpus_structural_layout_report(...)`, and attached that report to the first mismatch block in the famous-site corpus layout report.
 - Added `test/03_system/wm_compare/structural_layout_report_spec.spl` with 5 scenarios covering matching structure, geometry mismatch, invalid viewport failure, TUI cell geometry, and focused famous-site layout-report attachment.
-- Restored `doc/06_spec/system/wm_compare/structural_layout_report_spec.md` manually after automatic docgen missed the fifth scenario and, before the later docgen fix, reported unrelated `unknown extern function: shell` from the docgen path.
+- Restored `doc/06_spec/03_system/gui/wm_compare/structural_layout_report_spec.md` manually after automatic docgen missed the fifth scenario and, before the later docgen fix, reported unrelated `unknown extern function: shell` from the docgen path.
 - Focused verification:
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/app/wm_compare/site_corpus_layout_report.spl test/03_system/wm_compare/structural_layout_report_spec.spl test/03_system/wm_compare/famous_site_corpus_spec.spl`: passed.
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/03_system/wm_compare/structural_layout_report_spec.spl --mode=interpreter --clean`: 1 file, 5 tests, 0 failures; runner duration 4357ms.
@@ -417,7 +417,7 @@ The repo already has enough capture, comparison, backend, and system-test scaffo
 - Extended `src/app/wm_compare/structural_layout_report.spl` with `StructuralLayoutBox`, `structural_layout_box(...)`, `structural_layout_boxes_sdn(...)`, and `structural_box_layout_compare(...)`.
 - The adapter records stable GUI/browser node labels, geometry, and text values, then compares box lists before pixel acceptance so layout shifts are diagnosed separately from pixel diffing.
 - Extended `test/03_system/wm_compare/structural_layout_report_spec.spl` from 5 to 7 scenarios with GUI box SDN output and GUI geometry mismatch coverage.
-- Regenerated `doc/06_spec/system/wm_compare/structural_layout_report_spec.md` and restored the manual-purpose section with TUI cells, GUI boxes, backend evidence, pixel links, and corpus attachment.
+- Regenerated `doc/06_spec/03_system/gui/wm_compare/structural_layout_report_spec.md` and restored the manual-purpose section with TUI cells, GUI boxes, backend evidence, pixel links, and corpus attachment.
 - Focused verification:
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/app/wm_compare/structural_layout_report.spl test/03_system/wm_compare/structural_layout_report_spec.spl`: passed.
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/03_system/wm_compare/structural_layout_report_spec.spl --mode=interpreter --clean`: 1 file, 7 tests, 0 failures; runner duration 1381ms.
