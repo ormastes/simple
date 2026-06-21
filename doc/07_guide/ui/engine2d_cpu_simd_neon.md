@@ -11,8 +11,8 @@ The production backing is **C** (the Rust seed is bootstrap-only): native builds
 run the C kernels; the interpreter is the seed and uses a thin Rust shim.
 
 - **Production kernels (C, native):**
-  `src/runtime/runtime_simd_dispatch.c` — `rt_engine2d_simd_fill_row_u32`,
-  `rt_engine2d_simd_copy_row_u32`, `rt_engine2d_simd_blend_row_u32`.
+  `src/runtime/runtime_simd_dispatch.c` — `engine2d_simd_fill_row_u32_api`,
+  `engine2d_simd_copy_row_u32_api`, `engine2d_simd_blend_row_u32_api`.
   - fill → NEON `vdupq`/`vst1q` (AVX2 `_mm256_set1_epi64x` on x86); copy →
     `vld1q`/`vst1q`; blend → NEON `mul.4s`/`mla.4s` per-channel multiply-
     accumulate with a **scalar exact `/255` floor** (bit-identical to the Simple
@@ -21,7 +21,7 @@ run the C kernels; the interpreter is the seed and uses a thin Rust shim.
     NEON vector. Compiled into the core-c runtime archive
     (`pipeline/native_project/tools.rs` runtime input list).
 - **Interpreter shim (Rust *seed*):** `compiler/src/interpreter_extern/simd.rs`
-  implements the same three `rt_engine2d_simd_*_row_u32` externs (fill/copy reuse
+  implements the same three `engine2d_simd_*_row_u32_api` facades (fill/copy reuse
   the `engine2d_simd_ops.rs` NEON helpers so the hit counter advances; blend is a
   bit-exact scalar loop), registered in `interpreter_extern/mod.rs` and
   allow-listed in `common/src/runtime_symbols.rs`. The interpreter passes an
@@ -41,7 +41,7 @@ scalar-pretending-to-be-NEON false-greens:
    the built driver.
 2. **Bit-identical output** — the native kernel result is compared, byte-for-
    byte, against an independent scalar reference computed in Simple.
-3. **Execution counter** — `rt_simd_engine2d_neon_hits()` only advances on the
+3. **Execution counter** — `simd_engine2d_neon_hits()` only advances on the
    NEON chunk path. The CPU-SIMD evidence gate now *fails* on aarch64 if the
    counter did not advance (`native_simd_executed`), closing the old false-green
    where the path reported `has_neon` without running NEON.
@@ -83,8 +83,8 @@ provides.
   `(sa,s,d)` blend combos). This is the only gate that exercises the **C** path
   directly; the others run in the interpreter (Rust seed shim).
 - `scripts/check/check-cpu-simd-engine2d-evidence.shs` — interpreter evidence
-  (NEON executed + bit-exact). Its skip-guard greps `rt_engine2d_simd_fill_row_u32`
-  (the symbol the evidence actually calls) so a binary without the new externs
+  (NEON executed + bit-exact). Its skip-guard checks the
+  `engine2d_simd_fill_row_u32_api` facade so a binary without the new externs
   skips cleanly rather than crashing.
 
 ## Deployment
@@ -101,8 +101,9 @@ verification.
   core-c runtime archive (`tools.rs`) and `.spl` calls the C-backed externs, but
   this was only verified in interpreter mode + by the standalone C gate; a native
   engine2d build that actually links and runs the C kernels has not been run here
-  (that build path is separately problematic). Confirm the native lane links
-  `rt_engine2d_simd_*_row_u32` from the C archive before claiming production parity.
+  (that build path is separately problematic). Confirm the native lane links the
+  `engine2d_simd_*_row_u32_api` facades from the C archive before claiming
+  production parity.
 - **Dead legacy handlers.** The old `rt_simd_fill_row_u32` / `rt_simd_copy_row_u32`
   interpreter handlers (engine2d_simd_ops Rust backing) are no longer referenced
   by `.spl`; delete-unused cleanup is deferred to avoid an extra seed rebuild.
