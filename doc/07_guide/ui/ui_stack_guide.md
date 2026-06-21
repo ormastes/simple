@@ -338,8 +338,8 @@ scripts/gui/macos-gui-run.shs examples/06_io/ui/web_text_gui.spl
 ```
 
 **Verify the framebuffer, not the screenshot.** Dump `read_pixels()` to a P3 PPM
-via `rt_file_write_text` and inspect it — that is the ground truth, independent of
-window-server/compositor/permission state; region screen-capture is flaky. See
+through the stdlib/app file facade and inspect it — that is the ground truth,
+independent of window-server/compositor/permission state; region screen-capture is flaky. See
 `doc/04_architecture/ui/simple_gui_stack.md` → "GUI Sanity Apps".
 
 Notes:

@@ -637,9 +637,9 @@ scripts/gui/macos-gui-run.shs examples/06_io/ui/web_text_gui.spl
 
 Verification approach (avoid screen-capture flakiness): the **framebuffer is the
 ground truth**. Run an app headless and dump `read_pixels()` to a P3 PPM via
-`rt_file_write_text`, then inspect/convert it — this proves the lane renders
-independent of window-server/compositor state. The live `.app` launch is the
-secondary, human-in-the-loop check. (See
+the stdlib/app file facade or the lane's evidence wrapper, then inspect/convert
+it — this proves the lane renders independent of window-server/compositor
+state. The live `.app` launch is the secondary, human-in-the-loop check. (See
 `scripts/check/check-macos-gui-live-window-evidence.shs` for the capture gate.)
 
 Caveats:
