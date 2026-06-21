@@ -1,19 +1,14 @@
-#[runtime_intrinsics]
 # OpenCL device-buffer measurement capture for wm_compare backend evidence.
 
 use app.wm_compare.backend_measurement_capture.{InitializedGpuRuntimeMeasurement, initialized_gpu_runner_comparison_sample_from_probe}
 use app.wm_compare.backend_measurement_report.{BackendComparisonSample}
+use app.wm_compare.backend_measurement_runtime_ops.{measurement_alloc, measurement_free, measurement_ptr_read_i32, measurement_ptr_write_i64}
 use std.gpu.engine2d.backend_opencl.{opencl_2d_generated_source}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gpu.engine2d.generated_kernel_dispatch.{GENERATED_2D_FILL}
 use std.gpu.engine2d.opencl_session.{OpenClSession}
 use std.gpu.engine2d.sffi_opencl.{OpenClFfi}
 use std.nogc_sync_mut.io.time_ops.{time_now_micros}
-
-extern fn rt_alloc(size: i64) -> i64
-extern fn rt_free(ptr: i64, size: i64)
-extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
-extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64) -> i64
 
 pub struct OpenClDeviceMeasurementOptions:
     fixture_id: text
@@ -40,7 +35,7 @@ fn _checksum_u32_host(ptr: i64, count: i64) -> i64:
     var checksum: i64 = 0
     var i: i64 = 0
     while i < count:
-        val pixel = rt_ptr_read_i32(ptr, i * 4) as i64
+        val pixel = measurement_ptr_read_i32(ptr, i * 4) as i64
         checksum = checksum + (pixel & 0xFFFFFFFF)
         i = i + 1
     checksum
@@ -49,7 +44,7 @@ fn _nonzero_u32_host(ptr: i64, count: i64) -> i64:
     var nonzero: i64 = 0
     var i: i64 = 0
     while i < count:
-        if rt_ptr_read_i32(ptr, i * 4) != 0:
+        if measurement_ptr_read_i32(ptr, i * 4) != 0:
             nonzero = nonzero + 1
         i = i + 1
     nonzero
@@ -150,31 +145,31 @@ pub fn opencl_device_buffer_measurement_sample(opts: OpenClDeviceMeasurementOpti
     val byte_count = count * 4
     val alloc_start = time_now_micros()
     val device_buffer = session.alloc(byte_count)
-    val readback_ptr = rt_alloc(byte_count)
-    val args_ptr = rt_alloc(32)
+    val readback_ptr = measurement_alloc(byte_count)
+    val args_ptr = measurement_alloc(32)
     val alloc_us = _elapsed_us(alloc_start)
     if device_buffer == 0 or readback_ptr == 0 or args_ptr == 0:
         if device_buffer != 0:
             session.free(device_buffer)
         if readback_ptr != 0:
-            rt_free(readback_ptr, byte_count)
+            measurement_free(readback_ptr, byte_count)
         if args_ptr != 0:
-            rt_free(args_ptr, 32)
+            measurement_free(args_ptr, 32)
         session.shutdown()
         return _opencl_unavailable_sample(opts, "OpenCL measurement allocation failed")
 
-    rt_ptr_write_i64(args_ptr, 0, device_buffer)
-    rt_ptr_write_i64(args_ptr, 8, opts.width)
-    rt_ptr_write_i64(args_ptr, 16, opts.height)
-    rt_ptr_write_i64(args_ptr, 24, opts.color)
+    measurement_ptr_write_i64(args_ptr, 0, device_buffer)
+    measurement_ptr_write_i64(args_ptr, 8, opts.width)
+    measurement_ptr_write_i64(args_ptr, 16, opts.height)
+    measurement_ptr_write_i64(args_ptr, 24, opts.color)
 
     val submit_start = time_now_micros()
     val launch_ev = session.launch_generated_2d_evidence(GENERATED_2D_FILL, opts.width, opts.height, args_ptr)
     val submit_us = _elapsed_us(submit_start)
     if not launch_ev.success:
         session.free(device_buffer)
-        rt_free(readback_ptr, byte_count)
-        rt_free(args_ptr, 32)
+        measurement_free(readback_ptr, byte_count)
+        measurement_free(args_ptr, 32)
         session.shutdown()
         return _opencl_unavailable_sample(opts, launch_ev.reason)
 
@@ -183,8 +178,8 @@ pub fn opencl_device_buffer_measurement_sample(opts: OpenClDeviceMeasurementOpti
     val sync_us = _elapsed_us(sync_start)
     if not sync_ev.success:
         session.free(device_buffer)
-        rt_free(readback_ptr, byte_count)
-        rt_free(args_ptr, 32)
+        measurement_free(readback_ptr, byte_count)
+        measurement_free(args_ptr, 32)
         session.shutdown()
         return _opencl_unavailable_sample(opts, sync_ev.reason)
 
@@ -193,16 +188,16 @@ pub fn opencl_device_buffer_measurement_sample(opts: OpenClDeviceMeasurementOpti
     val read_us = _elapsed_us(read_start)
     if not read_ev.success:
         session.free(device_buffer)
-        rt_free(readback_ptr, byte_count)
-        rt_free(args_ptr, 32)
+        measurement_free(readback_ptr, byte_count)
+        measurement_free(args_ptr, 32)
         session.shutdown()
         return _opencl_unavailable_sample(opts, read_ev.reason)
 
     val checksum_value = _checksum_u32_host(readback_ptr, count)
     val nonzero = _nonzero_u32_host(readback_ptr, count)
     session.free(device_buffer)
-    rt_free(readback_ptr, byte_count)
-    rt_free(args_ptr, 32)
+    measurement_free(readback_ptr, byte_count)
+    measurement_free(args_ptr, 32)
     session.shutdown()
 
     val proof = if nonzero > 0: "nonzero_pixels:" + nonzero.to_string() else: ""
