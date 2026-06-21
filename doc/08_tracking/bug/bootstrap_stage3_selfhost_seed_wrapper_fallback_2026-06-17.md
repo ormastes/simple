@@ -2,8 +2,18 @@
 
 - **Id:** bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17
 - **Status:** Open
-- **Severity:** P2 (self-host verification is skipped on every full bootstrap;
-  Stage 4 silently falls back to the Rust seed, so the produced
+- **Severity:** P2 — **NEEDS REVISIT (2026-06-21):** the parenthetical below
+  claims "the seed-built artifacts are valid," but that assumption is now
+  contradicted. A fresh `--pure-simple` Stage 4 binary **SIGSEGVs on every
+  invocation** (even `print(1)`, both interpret and JIT) via infinite recursion
+  in `io.cli_ops.get_args` — see
+  `doc/08_tracking/bug/bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21.md`.
+  If the seed-built fallback artifact is not runnable, this is a
+  runtime-correctness regression and likely warrants a P1 bump (or splitting the
+  not-runnable-binary symptom into the new bug and keeping this one scoped to the
+  self-host-verification gap). Re-triage before closing.
+  <br>(original P2 rationale: self-host verification is skipped on every full
+  bootstrap; Stage 4 silently falls back to the Rust seed, so the produced
   `build/bootstrap/full/<triple>/simple` is never the self-hosted compiler. The
   reproducible-build guarantee — stage2 SHA256 == stage3 SHA256 — cannot be
   checked. Not a runtime-correctness bug; the seed-built artifacts are valid.)
@@ -90,8 +100,14 @@ confirming the failure is independent of any Rust-seed source change.
 
 ## IMPACT / WORKAROUND
 
-- The bootstrap still produces working binaries (Stage 4 uses the seed, which is
-  a correct compiler). Runtime correctness is unaffected.
+- ~~The bootstrap still produces working binaries (Stage 4 uses the seed, which is
+  a correct compiler). Runtime correctness is unaffected.~~
+  **CONTRADICTED 2026-06-21:** a fresh `--pure-simple` Stage 4 binary is NOT
+  runnable — it SIGSEGVs on every invocation via `io.cli_ops.get_args` infinite
+  recursion (see
+  `doc/08_tracking/bug/bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21.md`).
+  Treat "Stage 4 fallback produces a working binary" as unverified; re-triage
+  severity (see header).
 - The lost guarantee is **self-host verification** (stage2 == stage3 SHA256) and
   shipping a genuinely self-hosted `build/bootstrap/full/<triple>/simple`.
 - No source-side workaround; it is a pipeline/entry-capability gap.
