@@ -40,6 +40,9 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   claiming completion: `bin/simple spipe-docgen <spec> --output doc/06_spec`,
   read the output like a manual, then revise steps/captures/visibility until
   primary flows are manual-quality and noisy details are folded or skipped.
+- If design introduced shared interface or manual setup/checker helper
+  placeholders, implement them or keep them failing explicitly with
+  `assert(false)` or equivalent. Silent no-op helpers are not valid coverage.
 - Executable specs must stay under `test/`; generated/manual docs under
   `doc/06_spec` must be `.md` only. Require
   `find doc/06_spec -name '*_spec.spl' | wc -l` to print `0` before sync.
