@@ -243,6 +243,9 @@ checks across lower-model parallel agents when available (for example Codex
 Spark, Claude Haiku, or Claude Sonnet). A normal/highest-capability LLM must
 review and accept the merged result before requirements, done marks, broad
 exclusions, or release-blocking verification are trusted.
+Before lower-model sidecars fan out, the first normal/highest-capability pass
+must define shared interface names and manual-facing setup/checker helper names;
+temporary helpers must fail explicitly with `assert(false)` or equivalent.
 Final verification must prove the recorded cooperative review plan is complete
 or explicitly `N/A`, including generated-manual quality and done-mark review.
 

@@ -47,6 +47,11 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
   visible first, `@inline`/`@prev` setup expands without redundant metadata,
   executable SPipe is folded by default, and advanced/edge/matrix/stress
   scenarios are folded or skipped according to policy.
+- Shared interface names and manual-facing setup/checker helper names match the
+  accepted architecture/design/spec/manual references.
+- Placeholder helpers for shared interfaces or manual setup/checker flow fail
+  explicitly with `assert(false)` or equivalent until implemented; silent
+  placeholder passes are a FAIL.
 - UI-facing specs include visible-state evidence when practical: TUI text/ANSI
   captures under `build/test-artifacts/<spec-relative-path>/`, GUI screenshots
   or goldens under `doc/06_spec/image/<spec-relative-path>/`, and embedded
