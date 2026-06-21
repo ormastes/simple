@@ -1,7 +1,7 @@
 # Plan: Simple Web Server — Compiled EXE Path & Interpreter Performance
 
 **Date:** 2026-05-27
-**Status:** Phase 1 partial (rt_text_to_i64 fix kept, lib workarounds reverted), Phase 2–3 pending
+**Status:** Phase 1 partial (text-to-i64 parsing fix kept, lib workarounds reverted), Phase 2–3 pending
 
 ## Baseline (Interpreter Mode, Single-Threaded)
 
@@ -18,7 +18,7 @@ Simple interpreter: 0.55% of nginx RPS. Expected — interpreter overhead + sing
 ## Phase 1: Fix Interpreter Blockers (PARTIAL)
 
 ### Kept: Pure-Simple text parsing (legitimate fix)
-1. **`rt_text_to_i64` extern** — replaced with pure-Simple char_at+arithmetic parsing in:
+1. **Former text-to-i64 extern** — replaced with pure-Simple char_at+arithmetic parsing in:
    - `src/lib/nogc_sync_mut/http_server/parser.spl`
    - `src/lib/nogc_sync_mut/http_server/types.spl`
    - `examples/06_io/simple_web_server/config.spl`
