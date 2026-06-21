@@ -1,7 +1,7 @@
 <!-- codex-architecture -->
 # Simple UI, GUI, Web, and 2D Stack Architecture
 
-Status: draft-v3 (2026-06-15)
+Status: draft-v4 (2026-06-21)
 Owners: `src/app/ui.web`, `src/app/ui.electron`, `src/lib/common/ui`,
 `src/lib/gc_async_mut/gpu/browser_engine`,
 `src/lib/gc_async_mut/gpu/engine2d`, `src/lib/nogc_async_mut/gpu/engine2d`,
