@@ -164,7 +164,8 @@ Host input
   production work.
 - Pure Simple GUI/default Simple2D rendering enters through the shared Engine2D
   backend lane planner. GUI code should not bypass the lane planner with direct
-  GPU calls.
+  GPU calls. Engine2D env overrides and the Vulkan GLSL opt-in gate use the
+  stdlib I/O facade rather than local `rt_env_get` declarations.
 - Engine2D backend preference: `backend_full_preference_order()` puts explicit
   native surfaces (`baremetal`, `virtio_gpu`) before Metal/CUDA/ROCm,
   Qualcomm, Vulkan, DirectX, and portable fallback lanes; the automatic probe

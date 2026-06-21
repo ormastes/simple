@@ -658,7 +658,9 @@ This iteration moved the stack toward the target above (see design doc
   `SIMPLE_2D_BACKEND` (e.g. `cpu_simd`, `software`, `cuda`, `vulkan`) when the
   named lane initializes, else auto-probes. The `RenderBackend` trait was already
   shared by every SIMD-CPU/GPU lane; selection is now config/environment-driven
-  without per-call-site changes.
+  without per-call-site changes. Engine2D env selection and the opt-in Vulkan
+  GLSL gate read configuration through the stdlib I/O facade instead of local
+  `rt_env_get` declarations.
 - **Three renderers, shared cheap base.** common renderer
   (`lib/common/render_scene` cascade + `lib/common/ui/draw_ir`) → web renderer
   (`browser_engine`) and slim text renderer (`editor/render/md_renderer.spl`).
