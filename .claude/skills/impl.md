@@ -104,6 +104,10 @@ Run `/verify` (Claude) for production readiness verification.
 
 All pass -> `/git-jj-sync` -> `doc/09_report/<feature>_complete_<date>.md`
 Add/update guide docs in `doc/07_guide/` if needed.
+Before verify/sync, workflow, tool-contract, evidence-wrapper, or
+verification-contract changes must refresh matching `doc/07_guide`,
+`doc/06_spec`, `.codex/skills/`, `.agents/skills/`,
+`.claude/skills/spipe.md`, and `.claude/agents/spipe/` process docs.
 
 ## Per-Agent Checks
 

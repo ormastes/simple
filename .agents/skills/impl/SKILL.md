@@ -48,6 +48,10 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` before claiming
   completion.
 - Files > 800 lines must be split
+- Before $verify, confirm workflow, tool-contract, evidence-wrapper, or
+  verification-contract changes refreshed matching `doc/07_guide`,
+  `doc/06_spec`, `.codex/skills/`, `.agents/skills/`,
+  `.claude/skills/spipe.md`, and `.claude/agents/spipe/` process docs
 - Run $verify before VCS sync
 - If `src/compiler/**`, `src/lib/**`, `src/app/mcp/**`, `src/app/simple_lsp_mcp/**`, or MCP packaging files changed, finish with:
   - `<runtime> check src/compiler`
