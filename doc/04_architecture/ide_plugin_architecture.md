@@ -25,7 +25,7 @@ Simple does not adopt JavaScript extension execution, Java classloaders, OSGi bu
 | Common contracts | `src/lib/common/ide/` | Manifest, contribution, service, aspect, capability structs and traits |
 | Plugin kernel | `src/app/ide/plugin_kernel/` | Registry, activation, service container, aspect chain, host router |
 | IDE host | `src/app/ide/` | Workspace lifecycle, command dispatch, feature report, IDE UI integration |
-| Office capsules | `src/app/office/` | Writer, Slides, Sheets, Dashboard, DB Admin, Designer plugin capsules |
+| Office capsules | `src/app/office/` | Markdown/Writer, Calc, Impress/PPT, Draw/SDD, Designer, Base, Math, Mail, Planner, dashboard, DB admin plugin capsules |
 | UI protocol | `src/lib/common/ui/`, `src/app/ui.web/` | Capability-gated UI access and render surfaces |
 | Document formats | `src/lib/common/markdown/`, SDN graph docs and parsers | Markdown, HTML render, SDN diagram/document payloads |
 | External extension adapters | `src/app/vscode_extension/` | VS Code bridge consuming the same common contracts where possible |
@@ -34,11 +34,15 @@ Simple does not adopt JavaScript extension execution, Java classloaders, OSGi bu
 
 `src/lib/common/ide/` is the only shared contract layer. Sibling plugins must not import each other's private code. Office plugins connect through contributions and service tokens:
 
-- Writer provides markdown document, HTML render, block/table editing services.
-- Slides provides deck, page, layout, and presentation services.
-- Sheets provides grid, formula, chart, and import/export services.
-- Diagram provides SDN graph, shape, connector, layout, and export services.
+- Markdown/Writer provides Markdown document, generated HTML render, block/table editing services.
+- Impress/PPT provides Markdown deck, slide page, layout, and presentation services.
+- Calc provides grid, formula, chart, and import/export services.
+- Draw/SDD provides SDN graph, shape, connector, layout, and export services.
 - Designer provides HTML/UI surface, CSS, component tree, constraint/layout, and asset services.
+- Base provides table/database readback, import, and admin services.
+- Math provides formula and MathML render services.
+- Mail provides message, folder, and compose services.
+- Planner provides task, board, calendar, timeline, and list services.
 
 Each capsule owns its internal model and exposes only declared services.
 
@@ -177,7 +181,9 @@ Invalidation:
 1. Add common manifest/contribution/service/aspect/capability structs.
 2. Add plugin kernel registry and manifest cache for built-in Office plugins.
 3. Migrate Office feature catalog entries into declarative contribution points.
-4. Add DI service tokens for Writer markdown, Slides deck, Sheets grid, Diagram SDN graph, and Designer HTML surface.
+4. Add DI service tokens for Markdown/Writer markdown, Impress/PPT deck,
+   Calc grid, Draw/SDD graph, Designer HTML surface, Base table, Math formula,
+   Mail message, and Planner task services.
 5. Add command/document/render aspect hooks with deterministic ordering.
 6. Route VS Code adapter and IDE feature report through the same registry.
 7. Add dynamic plugin invalidation only after built-in plugins are stable.
