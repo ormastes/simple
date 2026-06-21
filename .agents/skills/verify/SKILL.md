@@ -85,7 +85,8 @@ not create, rewrite, or weaken SPipe after verification.
   under `doc/06_spec` are a hard layout failure
 - Workflow, tool-contract, evidence-wrapper, or verification-contract changes
   updated the matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
-  `.claude/skills/`, and SPipe process docs before final verification
+  `.agents/skills/`, `.claude/skills/spipe.md`, and `.claude/agents/spipe/`
+  process docs before final verification
 - Cross-references intact
 
 ## Report Format

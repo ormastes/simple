@@ -132,7 +132,8 @@ Scan for stub patterns — any match is a **FAIL**:
   return to design/implementation to improve the SPipe source and regenerate.
 - Workflow, tool-contract, evidence-wrapper, or verification-contract changes
   updated the matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
-  `.claude/skills/`, and SPipe process docs before final verification.
+  `.agents/skills/`, `.claude/skills/spipe.md`, and `.claude/agents/spipe/`
+  process docs before final verification.
 - Cross-references between docs intact
 - CHANGELOG updated for user-facing changes
 

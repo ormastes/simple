@@ -81,8 +81,9 @@
 - **TLDR docs:** Every new architecture/design doc must have a `_tldr.md` companion
   (≤30 lines with diagram)
 - **Process docs fresh:** Workflow, tool, evidence, or verification contract
-  changes must update matching `doc/07_guide`, `doc/06_spec`, `.codex`,
-  `.claude`, and SPipe process docs before PASS
+  changes must update matching `doc/07_guide`, `doc/06_spec`,
+  `.codex/skills/`, `.agents/skills/`, `.claude/skills/spipe.md`, and
+  `.claude/agents/spipe/` process docs before PASS
 
 ## Boil a Small Lake
 
