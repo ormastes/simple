@@ -19,6 +19,129 @@ value_of() {
     sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
 }
 
+write_argb_gate_env() {
+    argb_path="$1"
+    expected_width="$2"
+    expected_height="$3"
+    out_path="$4"
+
+    if [ ! -s "$argb_path" ]; then
+        {
+            echo "rdoc_electron_html_gate_argb_status=missing"
+            echo "rdoc_electron_html_gate_argb_reason=missing-electron-argb-file"
+            echo "rdoc_electron_html_gate_argb_path=$argb_path"
+            echo "rdoc_electron_html_gate_argb_width="
+            echo "rdoc_electron_html_gate_argb_height="
+            echo "rdoc_electron_html_gate_argb_format="
+            echo "rdoc_electron_html_gate_argb_producer="
+            echo "rdoc_electron_html_gate_argb_native_width="
+            echo "rdoc_electron_html_gate_argb_native_height="
+            echo "rdoc_electron_html_gate_argb_pixel_count=0"
+            echo "rdoc_electron_html_gate_argb_nonblank_pixel_count=0"
+            echo "rdoc_electron_html_gate_argb_expected_width=$expected_width"
+            echo "rdoc_electron_html_gate_argb_expected_height=$expected_height"
+        } >"$out_path"
+        return 0
+    fi
+
+    if ! command -v node >/dev/null 2>&1; then
+        {
+            echo "rdoc_electron_html_gate_argb_status=unavailable"
+            echo "rdoc_electron_html_gate_argb_reason=missing-node-json-reader"
+            echo "rdoc_electron_html_gate_argb_path=$argb_path"
+            echo "rdoc_electron_html_gate_argb_width="
+            echo "rdoc_electron_html_gate_argb_height="
+            echo "rdoc_electron_html_gate_argb_format="
+            echo "rdoc_electron_html_gate_argb_producer="
+            echo "rdoc_electron_html_gate_argb_native_width="
+            echo "rdoc_electron_html_gate_argb_native_height="
+            echo "rdoc_electron_html_gate_argb_pixel_count=0"
+            echo "rdoc_electron_html_gate_argb_nonblank_pixel_count=0"
+            echo "rdoc_electron_html_gate_argb_expected_width=$expected_width"
+            echo "rdoc_electron_html_gate_argb_expected_height=$expected_height"
+        } >"$out_path"
+        return 0
+    fi
+
+    node - "$argb_path" "$expected_width" "$expected_height" <<'NODE' >"$out_path"
+const fs = require("fs");
+const argbPath = process.argv[2] || "";
+const expectedWidth = Number(process.argv[3] || 0);
+const expectedHeight = Number(process.argv[4] || 0);
+
+function emit(key, value) {
+  console.log(`rdoc_electron_html_gate_argb_${key}=${value === undefined || value === null ? "" : value}`);
+}
+
+emit("path", argbPath);
+try {
+  const payload = JSON.parse(fs.readFileSync(argbPath, "utf8"));
+  const pixels = Array.isArray(payload.pixels) ? payload.pixels : [];
+  const width = Number(payload.width || 0);
+  const height = Number(payload.height || 0);
+  const format = String(payload.format || "");
+  const producer = String(payload.producer || "");
+  const nativeWidth = Number(payload.nativeWidth || 0);
+  const nativeHeight = Number(payload.nativeHeight || 0);
+  let nonblank = 0;
+  for (const value of pixels) {
+    const pixel = Number(value) >>> 0;
+    const alpha = (pixel >>> 24) & 255;
+    if (alpha !== 0 && pixel !== 0xffffffff) nonblank++;
+  }
+  let status = "pass";
+  let reason = "pass";
+  if (width <= 0 || height <= 0) {
+    status = "invalid";
+    reason = "missing-electron-argb-dimensions";
+  } else if (expectedWidth > 0 && width !== expectedWidth) {
+    status = "invalid";
+    reason = "unexpected-electron-argb-width";
+  } else if (expectedHeight > 0 && height !== expectedHeight) {
+    status = "invalid";
+    reason = "unexpected-electron-argb-height";
+  } else if (format !== "argb-u32") {
+    status = "invalid";
+    reason = "unexpected-electron-argb-format";
+  } else if (producer !== "electron-chromium-capture") {
+    status = "invalid";
+    reason = "unexpected-electron-argb-producer";
+  } else if (pixels.length !== width * height) {
+    status = "invalid";
+    reason = "unexpected-electron-argb-pixel-count";
+  } else if (nonblank <= 0) {
+    status = "invalid";
+    reason = "blank-electron-argb-capture";
+  }
+  emit("status", status);
+  emit("reason", reason);
+  emit("width", width);
+  emit("height", height);
+  emit("format", format);
+  emit("producer", producer);
+  emit("native_width", nativeWidth);
+  emit("native_height", nativeHeight);
+  emit("pixel_count", pixels.length);
+  emit("nonblank_pixel_count", nonblank);
+  emit("expected_width", expectedWidth || "");
+  emit("expected_height", expectedHeight || "");
+} catch (error) {
+  emit("status", "invalid");
+  emit("reason", "invalid-electron-argb-json");
+  emit("width", "");
+  emit("height", "");
+  emit("format", "");
+  emit("producer", "");
+  emit("native_width", "");
+  emit("native_height", "");
+  emit("pixel_count", 0);
+  emit("nonblank_pixel_count", 0);
+  emit("expected_width", expectedWidth || "");
+  emit("expected_height", expectedHeight || "");
+}
+NODE
+}
+
 write_evidence() {
     status="$1"
     reason="$2"
@@ -36,6 +159,19 @@ write_evidence() {
         echo "rdoc_electron_html_gate_html_path=${html_path:-}"
         echo "rdoc_electron_html_gate_electron=${electron_bin:-}"
         echo "rdoc_electron_html_gate_capture_script=${capture_script:-}"
+        echo "rdoc_electron_html_gate_argb_path=${argb_path:-}"
+        echo "rdoc_electron_html_gate_argb_status=${argb_status:-}"
+        echo "rdoc_electron_html_gate_argb_reason=${argb_reason:-}"
+        echo "rdoc_electron_html_gate_argb_width=${argb_width:-}"
+        echo "rdoc_electron_html_gate_argb_height=${argb_height:-}"
+        echo "rdoc_electron_html_gate_argb_format=${argb_format:-}"
+        echo "rdoc_electron_html_gate_argb_producer=${argb_producer:-}"
+        echo "rdoc_electron_html_gate_argb_native_width=${argb_native_width:-}"
+        echo "rdoc_electron_html_gate_argb_native_height=${argb_native_height:-}"
+        echo "rdoc_electron_html_gate_argb_pixel_count=${argb_pixel_count:-}"
+        echo "rdoc_electron_html_gate_argb_nonblank_pixel_count=${argb_nonblank_pixel_count:-}"
+        echo "rdoc_electron_html_gate_argb_expected_width=${argb_expected_width:-}"
+        echo "rdoc_electron_html_gate_argb_expected_height=${argb_expected_height:-}"
         echo "rdoc_electron_html_gate_requested_api=${requested_api:-}"
         echo "rdoc_electron_html_gate_requested_angle=${requested_angle:-}"
         echo "rdoc_electron_html_gate_requested_features=${requested_features:-}"
@@ -49,6 +185,10 @@ write_evidence() {
         echo "rdoc_electron_html_gate_required_features=Vulkan"
         echo "rdoc_electron_html_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html"
         echo "rdoc_electron_html_gate_required_capture_script_suffix=tools/electron-live-bitmap/capture_html_argb.js"
+        echo "rdoc_electron_html_gate_required_argb_status=pass"
+        echo "rdoc_electron_html_gate_required_argb_format=argb-u32"
+        echo "rdoc_electron_html_gate_required_argb_producer=electron-chromium-capture"
+        echo "rdoc_electron_html_gate_required_argb_nonblank_pixel_count_min=1"
         echo "rdoc_electron_html_gate_required_launch_flag_enable_features=--enable-features=Vulkan"
         echo "rdoc_electron_html_gate_required_launch_flag_use_angle=--use-angle=vulkan"
     } >"$OUT_ENV"
@@ -65,6 +205,11 @@ write_evidence() {
         echo "- capture file: ${capture_file:-}"
         echo "- capture magic: ${capture_magic:-}"
         echo "- capture file magic: ${capture_file_magic:-}"
+        echo "- argb status: ${argb_status:-}"
+        echo "- argb reason: ${argb_reason:-}"
+        echo "- argb path: ${argb_path:-}"
+        echo "- argb pixels: ${argb_pixel_count:-}"
+        echo "- argb nonblank pixels: ${argb_nonblank_pixel_count:-}"
         echo "- requested API: ${requested_api:-}"
         echo "- requested ANGLE: ${requested_angle:-}"
         echo
@@ -89,6 +234,19 @@ if [ ! -s "$SOURCE_ENV" ]; then
     requested_angle=""
     requested_features=""
     launch_flags=""
+    argb_path=""
+    argb_status=""
+    argb_reason=""
+    argb_width=""
+    argb_height=""
+    argb_format=""
+    argb_producer=""
+    argb_native_width=""
+    argb_native_height=""
+    argb_pixel_count=""
+    argb_nonblank_pixel_count=""
+    argb_expected_width=""
+    argb_expected_height=""
     write_evidence "unavailable" "missing-source-evidence"
     exit 1
 fi
@@ -106,10 +264,28 @@ fi
 html_path="$(value_of rdoc_html_path "$SOURCE_ENV")"
 electron_bin="$(value_of rdoc_electron "$SOURCE_ENV")"
 capture_script="$(value_of rdoc_electron_capture_script "$SOURCE_ENV")"
+argb_path="$(value_of rdoc_electron_argb "$SOURCE_ENV")"
+electron_width="$(value_of rdoc_electron_width "$SOURCE_ENV")"
+electron_height="$(value_of rdoc_electron_height "$SOURCE_ENV")"
 requested_api="$(value_of rdoc_chromium_requested_api "$SOURCE_ENV")"
 requested_angle="$(value_of rdoc_chromium_requested_angle "$SOURCE_ENV")"
 requested_features="$(value_of rdoc_chromium_requested_features "$SOURCE_ENV")"
 launch_flags="$(value_of rdoc_chromium_launch_flags "$SOURCE_ENV")"
+
+argb_env="$BUILD_DIR/argb-gate.env"
+write_argb_gate_env "$argb_path" "$electron_width" "$electron_height" "$argb_env"
+argb_status="$(value_of rdoc_electron_html_gate_argb_status "$argb_env")"
+argb_reason="$(value_of rdoc_electron_html_gate_argb_reason "$argb_env")"
+argb_width="$(value_of rdoc_electron_html_gate_argb_width "$argb_env")"
+argb_height="$(value_of rdoc_electron_html_gate_argb_height "$argb_env")"
+argb_format="$(value_of rdoc_electron_html_gate_argb_format "$argb_env")"
+argb_producer="$(value_of rdoc_electron_html_gate_argb_producer "$argb_env")"
+argb_native_width="$(value_of rdoc_electron_html_gate_argb_native_width "$argb_env")"
+argb_native_height="$(value_of rdoc_electron_html_gate_argb_native_height "$argb_env")"
+argb_pixel_count="$(value_of rdoc_electron_html_gate_argb_pixel_count "$argb_env")"
+argb_nonblank_pixel_count="$(value_of rdoc_electron_html_gate_argb_nonblank_pixel_count "$argb_env")"
+argb_expected_width="$(value_of rdoc_electron_html_gate_argb_expected_width "$argb_env")"
+argb_expected_height="$(value_of rdoc_electron_html_gate_argb_expected_height "$argb_env")"
 
 case "$html_path" in
     *test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html)
@@ -166,7 +342,9 @@ if [ "$backend" = "electron" ] \
     && [ "$requested_angle" = "vulkan" ] \
     && [ "$requested_features_vulkan" = "1" ] \
     && [ "$html_path_matches" = "1" ] \
+    && [ "$electron_bin" != "" ] \
     && [ "$capture_script_matches" = "1" ] \
+    && [ "$argb_status" = "pass" ] \
     && [ "$launch_flags_enable_features" = "1" ] \
     && [ "$launch_flags_use_angle" = "1" ]; then
     write_evidence "pass" "pass"
@@ -195,12 +373,16 @@ elif [ "$requested_features_vulkan" != "1" ]; then
     write_evidence "fail" "missing-vulkan-requested-feature"
 elif [ "$html_path_matches" != "1" ]; then
     write_evidence "fail" "unexpected-html-fixture"
+elif [ "$electron_bin" = "" ]; then
+    write_evidence "fail" "missing-electron-binary"
 elif [ "$capture_script_matches" != "1" ]; then
     write_evidence "fail" "unexpected-capture-script"
 elif [ "$launch_flags_enable_features" != "1" ]; then
     write_evidence "fail" "missing-vulkan-feature-flag"
 elif [ "$launch_flags_use_angle" != "1" ]; then
     write_evidence "fail" "missing-vulkan-angle-flag"
+elif [ "$argb_status" != "pass" ]; then
+    write_evidence "fail" "${argb_reason:-missing-electron-argb-render-proof}"
 else
     write_evidence "fail" "electron-renderdoc-gate-failed"
 fi

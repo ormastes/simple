@@ -211,6 +211,121 @@ rdoc_emit_electron_html_metadata() {
     echo "rdoc_chromium_launch_flags=$(rdoc_electron_vulkan_flags)"
 }
 
+rdoc_emit_electron_argb_metadata() {
+    argb_path="${1:-}"
+    expected_width="${2:-}"
+    expected_height="${3:-}"
+
+    if [ ! -s "$argb_path" ]; then
+        echo "rdoc_electron_argb_status=missing"
+        echo "rdoc_electron_argb_reason=missing-electron-argb-file"
+        echo "rdoc_electron_argb_width="
+        echo "rdoc_electron_argb_height="
+        echo "rdoc_electron_argb_format="
+        echo "rdoc_electron_argb_producer="
+        echo "rdoc_electron_argb_native_width="
+        echo "rdoc_electron_argb_native_height="
+        echo "rdoc_electron_argb_pixel_count=0"
+        echo "rdoc_electron_argb_nonblank_pixel_count=0"
+        echo "rdoc_electron_argb_expected_width=$expected_width"
+        echo "rdoc_electron_argb_expected_height=$expected_height"
+        return 0
+    fi
+
+    if ! command -v node >/dev/null 2>&1; then
+        echo "rdoc_electron_argb_status=unavailable"
+        echo "rdoc_electron_argb_reason=missing-node-json-reader"
+        echo "rdoc_electron_argb_width="
+        echo "rdoc_electron_argb_height="
+        echo "rdoc_electron_argb_format="
+        echo "rdoc_electron_argb_producer="
+        echo "rdoc_electron_argb_native_width="
+        echo "rdoc_electron_argb_native_height="
+        echo "rdoc_electron_argb_pixel_count=0"
+        echo "rdoc_electron_argb_nonblank_pixel_count=0"
+        echo "rdoc_electron_argb_expected_width=$expected_width"
+        echo "rdoc_electron_argb_expected_height=$expected_height"
+        return 0
+    fi
+
+    node - "$argb_path" "$expected_width" "$expected_height" <<'NODE'
+const fs = require("fs");
+const argbPath = process.argv[2] || "";
+const expectedWidth = Number(process.argv[3] || 0);
+const expectedHeight = Number(process.argv[4] || 0);
+
+function emit(key, value) {
+  console.log(`rdoc_electron_argb_${key}=${value === undefined || value === null ? "" : value}`);
+}
+
+try {
+  const payload = JSON.parse(fs.readFileSync(argbPath, "utf8"));
+  const pixels = Array.isArray(payload.pixels) ? payload.pixels : [];
+  const width = Number(payload.width || 0);
+  const height = Number(payload.height || 0);
+  const format = String(payload.format || "");
+  const producer = String(payload.producer || "");
+  const nativeWidth = Number(payload.nativeWidth || 0);
+  const nativeHeight = Number(payload.nativeHeight || 0);
+  let nonblank = 0;
+  for (const value of pixels) {
+    const pixel = Number(value) >>> 0;
+    const alpha = (pixel >>> 24) & 255;
+    if (alpha !== 0 && pixel !== 0xffffffff) nonblank++;
+  }
+  let status = "pass";
+  let reason = "pass";
+  if (width <= 0 || height <= 0) {
+    status = "invalid";
+    reason = "missing-electron-argb-dimensions";
+  } else if (expectedWidth > 0 && width !== expectedWidth) {
+    status = "invalid";
+    reason = "unexpected-electron-argb-width";
+  } else if (expectedHeight > 0 && height !== expectedHeight) {
+    status = "invalid";
+    reason = "unexpected-electron-argb-height";
+  } else if (format !== "argb-u32") {
+    status = "invalid";
+    reason = "unexpected-electron-argb-format";
+  } else if (producer !== "electron-chromium-capture") {
+    status = "invalid";
+    reason = "unexpected-electron-argb-producer";
+  } else if (pixels.length !== width * height) {
+    status = "invalid";
+    reason = "unexpected-electron-argb-pixel-count";
+  } else if (nonblank <= 0) {
+    status = "invalid";
+    reason = "blank-electron-argb-capture";
+  }
+  emit("status", status);
+  emit("reason", reason);
+  emit("width", width);
+  emit("height", height);
+  emit("format", format);
+  emit("producer", producer);
+  emit("native_width", nativeWidth);
+  emit("native_height", nativeHeight);
+  emit("pixel_count", pixels.length);
+  emit("nonblank_pixel_count", nonblank);
+  emit("expected_width", expectedWidth || "");
+  emit("expected_height", expectedHeight || "");
+} catch (error) {
+  emit("status", "invalid");
+  emit("reason", "invalid-electron-argb-json");
+  emit("width", "");
+  emit("height", "");
+  emit("format", "");
+  emit("producer", "");
+  emit("native_width", "");
+  emit("native_height", "");
+  emit("pixel_count", 0);
+  emit("nonblank_pixel_count", 0);
+  emit("expected_width", expectedWidth || "");
+  emit("expected_height", expectedHeight || "");
+}
+NODE
+}
+
 rdoc_write_electron_html_unavailable() {
     root="$1"
     electron_bin="${2:-}"
@@ -520,6 +635,7 @@ rdoc_capture_electron_html() {
         --enable-features=Vulkan --use-angle=vulkan \
         "$capture_script" >"$out_dir/renderdoc-electron-html.log" 2>&1 || true
     sed -n '1,160p' "$out_dir/renderdoc-electron-html.log"
+    rdoc_emit_electron_argb_metadata "$out_dir/electron_argb.json" "$width" "$height" >>"$env_path"
     rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
     tmp_env="$out_dir/evidence.status.env"
     set +e

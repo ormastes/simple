@@ -27,7 +27,7 @@ renderdoc_electron_html_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -79,6 +79,10 @@ sh scripts/check/check-renderdoc-electron-html-gate.shs || true
   pass status, `RDOC` magic, an existing `.rdc` file, the canonical HTML/CSS
   RenderDoc fixture, the live-bitmap capture script, and Vulkan requested
   API/ANGLE/features launch fields.
+- Passing gate evidence also requires the Electron live-bitmap ARGB JSON proof
+  to have the expected dimensions, `argb-u32` format, the
+  `electron-chromium-capture` producer, complete pixel data, and nonblank
+  rendered pixels.
 
 ## Scenarios
 
@@ -89,7 +93,7 @@ sh scripts/check/check-renderdoc-electron-html-gate.shs || true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -110,6 +114,10 @@ expect(evidence).to_contain("rdoc_electron_html_gate_required_angle=vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_required_features=Vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 expect(evidence).to_contain("rdoc_electron_html_gate_required_capture_script_suffix=tools/electron-live-bitmap/capture_html_argb.js")
+expect(evidence).to_contain("rdoc_electron_html_gate_required_argb_status=pass")
+expect(evidence).to_contain("rdoc_electron_html_gate_required_argb_format=argb-u32")
+expect(evidence).to_contain("rdoc_electron_html_gate_required_argb_producer=electron-chromium-capture")
+expect(evidence).to_contain("rdoc_electron_html_gate_required_argb_nonblank_pixel_count_min=1")
 expect(evidence).to_contain("rdoc_electron_html_gate_required_launch_flag_enable_features=--enable-features=Vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_required_launch_flag_use_angle=--use-angle=vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_capture_file_magic=")
@@ -150,11 +158,11 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-renderdoc-electron-html-gate-pass && mkdir -p build/test-renderdoc-electron-html-gate-pass/source && printf 'RDOCsynthetic electron capture\\n' > build/test-renderdoc-electron-html-gate-pass/source/electron.rdc && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-electron-html-gate-pass/source/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan\\n' > build/test-renderdoc-electron-html-gate-pass/source/evidence.env && RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-renderdoc-electron-html-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-electron-html-gate-pass/out REPORT_PATH=build/test-renderdoc-electron-html-gate-pass/report.md sh scripts/check/check-renderdoc-electron-html-gate.shs"
+val command = "rm -rf build/test-renderdoc-electron-html-gate-pass && mkdir -p build/test-renderdoc-electron-html-gate-pass/source && printf 'RDOCsynthetic electron capture\\n' > build/test-renderdoc-electron-html-gate-pass/source/electron.rdc && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-renderdoc-electron-html-gate-pass/source/electron_argb.json && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-electron-html-gate-pass/source/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-renderdoc-electron-html-gate-pass/source/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan\\n' > build/test-renderdoc-electron-html-gate-pass/source/evidence.env && RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-renderdoc-electron-html-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-electron-html-gate-pass/out REPORT_PATH=build/test-renderdoc-electron-html-gate-pass/report.md sh scripts/check/check-renderdoc-electron-html-gate.shs"
 val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -172,6 +180,35 @@ expect(evidence).to_contain("rdoc_electron_html_gate_requested_angle=vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_requested_features=Vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_required_features=Vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan")
+expect(evidence).to_contain("rdoc_electron_html_gate_argb_status=pass")
+expect(evidence).to_contain("rdoc_electron_html_gate_argb_reason=pass")
+expect(evidence).to_contain("rdoc_electron_html_gate_argb_format=argb-u32")
+expect(evidence).to_contain("rdoc_electron_html_gate_argb_producer=electron-chromium-capture")
+expect(evidence).to_contain("rdoc_electron_html_gate_argb_pixel_count=4")
+expect(evidence).to_contain("rdoc_electron_html_gate_argb_nonblank_pixel_count=1")
+```
+
+</details>
+
+#### rejects Electron captures missing live-bitmap ARGB rendered pixels
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-renderdoc-electron-html-gate-missing-argb && mkdir -p build/test-renderdoc-electron-html-gate-missing-argb/source && printf 'RDOCsynthetic electron capture\\n' > build/test-renderdoc-electron-html-gate-missing-argb/source/electron.rdc && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-electron-html-gate-missing-argb/source/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-renderdoc-electron-html-gate-missing-argb/source/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan\\n' > build/test-renderdoc-electron-html-gate-missing-argb/source/evidence.env && RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-renderdoc-electron-html-gate-missing-argb/source/evidence.env BUILD_DIR=build/test-renderdoc-electron-html-gate-missing-argb/out REPORT_PATH=build/test-renderdoc-electron-html-gate-missing-argb/report.md sh scripts/check/check-renderdoc-electron-html-gate.shs || true"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = rt_file_read_text("build/test-renderdoc-electron-html-gate-missing-argb/out/evidence.env") ?? ""
+expect(evidence).to_contain("rdoc_electron_html_gate_status=fail")
+expect(evidence).to_contain("rdoc_electron_html_gate_reason=missing-electron-argb-file")
+expect(evidence).to_contain("rdoc_electron_html_gate_argb_status=missing")
+expect(evidence).to_contain("rdoc_electron_html_gate_argb_pixel_count=0")
+expect(evidence).to_contain("rdoc_electron_html_gate_required_argb_status=pass")
 ```
 
 </details>
@@ -244,8 +281,8 @@ expect(evidence).to_contain("rdoc_electron_html_gate_required_features=Vulkan")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
