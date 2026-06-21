@@ -180,6 +180,22 @@ changes must miss stale interpreter, SMF, and JIT cache entries instead of
 reusing old code. Keep the spec close to the cache owner and mirror it into
 `doc/06_spec` as a readable scenario manual.
 
+### Native HTTPServer benchmark evidence
+
+For native HTTPServer/static-file performance work, use
+`scripts/check/check-native-pure-simple-goal-status.shs` as the aggregate gate.
+The focused peer wrappers are `check-web-server-nginx-live-compare.shs`,
+`check-web-server-static-external-live-compare.shs --require-simple-ge-all`,
+`check-web-server-go-erlang-static-compare.shs --require-simple-ge`,
+`check-httpserver-live-static.shs`, and
+`check-httpserver-static-profile-counters.shs --broad --require-retained`.
+Keep `doc/07_guide/infra/testing/benchmarking.md`,
+`doc/10_metrics/perf/web_server_nginx_compare.md`, and
+`doc/09_report/perf/web_server_nginx_compare_2026-06-17.md` aligned when rows
+or wrappers change. Current retained nginx rows are 1KB Simple `15503.65` RPS
+vs nginx `15115.00`, and 1MB Simple `1884.42` RPS vs nginx `1376.25`; the
+retained Vulkan offscreen 8K row is `3527` FPS.
+
 Avoid boolean-wrapper assertions such as `expect(a == b).to_equal(true)` or
 `expect(a != b).to_equal(false)`. Prefer direct value matchers such as
 `to_equal`, `to_be_greater_than`, `to_contain`, or `to_be_nil`; use

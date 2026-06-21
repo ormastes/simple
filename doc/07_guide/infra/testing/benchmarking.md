@@ -215,6 +215,41 @@ Useful knobs include `LINUX_QEMU_DISK=virtio|nvme`,
 `LINUX_QEMU_ACCEL=kvm:tcg`, `LINUX_QEMU_SSH_PORT`, `LINUX_QEMU_TIMEOUT`,
 `NET_PARITY_ITERS`, and `NET_PARITY_PAYLOAD`.
 
+### Native HTTPServer Static Parity
+
+Use the retained native HTTPServer wrapper when a lane claims Simple static-file
+serving is equal to or faster than peer servers:
+
+```bash
+sh scripts/check/check-native-pure-simple-goal-status.shs
+```
+
+The aggregate status reads retained rows from
+`doc/10_metrics/perf/web_server_nginx_compare.md` and the companion report
+`doc/09_report/perf/web_server_nginx_compare_2026-06-17.md`. Current retained
+static rows are:
+
+| Payload | Simple RPS | Peer | Peer RPS | Status |
+|---------|------------|------|----------|--------|
+| 1KB | 15503.65 | nginx | 15115.00 | Simple >= peer |
+| 1MB | 1884.42 | nginx | 1376.25 | Simple >= peer |
+
+For fresh host-local evidence, use the focused wrappers:
+
+```bash
+WRK_DURATION=1s sh scripts/check/check-web-server-nginx-live-compare.shs
+WRK_DURATION=1s sh scripts/check/check-web-server-static-external-live-compare.shs --require-simple-ge-all
+sh scripts/check/check-web-server-go-erlang-static-compare.shs --require-simple-ge
+sh scripts/check/check-httpserver-live-static.shs
+sh scripts/check/check-httpserver-static-profile-counters.shs --broad --require-retained
+```
+
+The same aggregate status also records the DB B+ gate and Vulkan offscreen 8K
+rendering gate. The latest retained offscreen 8K Vulkan row is `3527` FPS; live
+onscreen 8K remains host-blocked unless the host provides a suitable display.
+Do not replace retained rows with shorter or noisier runs unless the strict
+wrappers still pass.
+
 ---
 
 ## Integration with SPipe

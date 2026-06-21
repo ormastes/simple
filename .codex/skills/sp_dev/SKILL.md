@@ -108,6 +108,20 @@ access, and process execution). Release-mode production wrappers must not call
 `doc/07_guide/lib/networking/pure_simple_servers.md` current when this contract
 changes.
 
+For native HTTPServer/static-file performance lanes, keep the canonical evidence
+set current before handoff: `scripts/check/check-native-pure-simple-goal-status.shs`,
+`scripts/check/check-web-server-nginx-live-compare.shs`,
+`scripts/check/check-web-server-static-external-live-compare.shs --require-simple-ge-all`,
+`scripts/check/check-web-server-go-erlang-static-compare.shs --require-simple-ge`,
+`scripts/check/check-httpserver-live-static.shs`, and
+`scripts/check/check-httpserver-static-profile-counters.shs --broad --require-retained`.
+Update `doc/07_guide/infra/testing/benchmarking.md`,
+`doc/10_metrics/perf/web_server_nginx_compare.md`,
+`doc/09_report/perf/web_server_nginx_compare_2026-06-17.md`, and the active
+tracking docs when retained rows or wrappers change. Do not keep a
+micro-optimization that fails retained rows; revert it or record the measured
+blocker/rejected result under `doc/08_tracking/`.
+
 When a task introduces a new runtime/pure wrapper, update the shared guide at
 `doc/07_guide/os/crypto_dual_backend.md` and prefer an explicit
 `DualBackendConfig` dependency-injection entrypoint plus a default-config
