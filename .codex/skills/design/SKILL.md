@@ -158,6 +158,9 @@ Reference: `doc/07_guide/infra/sspec_scenario_manual.md`.
 - Check generated manual quality for scenario-oriented specs before accepting
   the design. A doc that exposes raw test mechanics as the primary flow is not
   design-complete.
+- Confirm matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
+  `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
+  instructions were updated when the workflow or tool contract changed.
 - Verify architecture alignment with MDSOC rules
 - Ask user if architecture/design needs changes
 
