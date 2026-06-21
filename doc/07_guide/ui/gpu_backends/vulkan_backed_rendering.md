@@ -47,7 +47,7 @@ line (thickness 1) and gradient.
 The GLSL sources in `backend_vulkan_glsl.spl` can differ from the hand-assembled
 SPIR-V blobs. To recover a kernel's real algorithm:
 
-1. Dump the blob to a `.spv` file from Simple via `rt_file_write_bytes`.
+1. Dump the blob to a `.spv` file from Simple via the file write-bytes facade.
 2. `build/tools/renderdoc/...`? no — use the system `spirv-dis blob.spv`.
 3. Read the integer ops (`OpSDiv`/`OpIMul`/`OpIAdd`) and replicate them exactly
    in `SoftwareBackend`. Simple's integer `/` truncates toward zero, matching
