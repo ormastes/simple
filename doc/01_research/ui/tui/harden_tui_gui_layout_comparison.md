@@ -274,7 +274,7 @@ Research for hardening TUI and GUI layout comparison, fixing reachable compariso
 
 - `src/app/wm_compare/site_corpus_compat.spl` `compare_site_sample` had the same viewport metadata acceptance gap as the HTML compatibility pair path: matching raw pixels could be accepted even when the capture's own `width` and `height` metadata disagreed with the requested corpus viewport.
 - `compare_site_sample` now treats Chrome or Simple capture viewport metadata mismatches as failed captures before exact comparison. The returned pair records `exact: false`, `accepted: false`, zero match/perceptual percentages, and a `viewport metadata mismatch` diagnostic.
-- Added `test/03_system/wm_compare/site_corpus_pair_spec.spl` to cover the corpus pair metadata contract, and added a manual-purpose section to `doc/06_spec/system/wm_compare/site_corpus_pair_spec.md`.
+- Added `test/03_system/wm_compare/site_corpus_pair_spec.spl` to cover the corpus pair metadata contract, and added a manual-purpose section to `doc/06_spec/03_system/gui/wm_compare/site_corpus_pair_spec.md`.
 - Focused verification:
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/03_system/wm_compare/site_corpus_pair_spec.spl --mode=interpreter --clean`: 1 file, 1 test, 0 failures; runner duration 3769ms.
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/03_system/wm_compare/html_compat_spec.spl --mode=interpreter --clean`: 1 file, 17 tests, 0 failures; runner duration 8448ms.
@@ -285,9 +285,9 @@ Research for hardening TUI and GUI layout comparison, fixing reachable compariso
 - Final manual-doc restoration and focused verification:
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check test/03_system/wm_compare/site_corpus_pair_spec.spl`: passed.
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/03_system/wm_compare/site_corpus_pair_spec.spl --mode=interpreter --clean`: 1 file, 1 test, 0 failures; runner duration 3856ms.
-  - Restored `doc/06_spec/system/wm_compare/site_corpus_pair_spec.md` manual-purpose text after doc generation rewrote the file.
+  - Restored `doc/06_spec/03_system/gui/wm_compare/site_corpus_pair_spec.md` manual-purpose text after doc generation rewrote the file.
   - `find doc/06_spec -name '*_spec.spl' | wc -l`: `0`.
-  - Placeholder scan over `src/app/wm_compare/site_corpus_compat.spl`, `test/03_system/wm_compare/site_corpus_pair_spec.spl`, and `doc/06_spec/system/wm_compare/site_corpus_pair_spec.md` found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
+  - Placeholder scan over `src/app/wm_compare/site_corpus_compat.spl`, `test/03_system/wm_compare/site_corpus_pair_spec.spl`, and `doc/06_spec/03_system/gui/wm_compare/site_corpus_pair_spec.md` found no live `pass_todo`, false-pass assertions, `TODO`, or `FIXME` markers.
 
 ## Research Conclusion
 
