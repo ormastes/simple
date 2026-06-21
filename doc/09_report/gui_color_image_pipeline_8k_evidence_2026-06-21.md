@@ -14,6 +14,14 @@
 - non_identity_icc_fail_closed: focused image decode spec requires RGB ICC profiles with Lab PCS to return icc-rgb-lab-transform-pending rather than identity pixels
 - jpegxl_nondefault_color_fail_closed: focused image decode spec requires direct, full-container, and split-partial non-default JPEG XL structured color headers to fail closed rather than silently accepting default sRGB
 
+## Remaining Scope
+
+- Full JPEG XL pixel decode is not proven by this report. The current evidence
+  covers metadata parsing, sparse 8K allocation, color fail-closed routing, and
+  raster tiling only.
+- Image URI rendering remains command-level evidence until real
+  PNG/JPEG/WebP/TIFF/JPEG XL pixels feed Engine2D through the asset resolver.
+
 ## Evidence
 
 - gui_color_image_pipeline_8k_status=pass
