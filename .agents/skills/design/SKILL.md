@@ -14,6 +14,18 @@ description: Create architecture, UI design, system tests, and detail design for
 | Requirements | `doc/02_requirements/feature/<feature>.md` | Run $research first |
 | NFR | `doc/02_requirements/nfr/<feature>.md` | Run $research first |
 
+## Phase 0: Cooperative Review Setup
+
+- For broad plans, split independent architecture, UI, test, and risk checks
+  across lower-model parallel agents when available (for example Codex Spark,
+  Claude Haiku, or Claude Sonnet).
+- A normal/highest-capability LLM must review and accept the merged result
+  before final requirements, done marks, exclusions, or broad architecture
+  claims are treated as complete.
+- The first/highest-capability pass defines shared interface names,
+  manual-facing setup/checker helper names, and temporary helper placeholders.
+  Placeholder helpers must fail explicitly (`assert(false)` or equivalent).
+
 ## Phase 1: UI Design (if applicable)
 
 - TUI: `doc/05_design/<feature>_tui.md`
@@ -62,6 +74,8 @@ description: Create architecture, UI design, system tests, and detail design for
 - Generate/read mirrored `doc/06_spec/...` for scenario-oriented specs and
   update steps/captures/visibility until the manual is usable without opening
   the source test.
+- Confirm matching `doc/07_guide`, `doc/06_spec`, and skill instructions were
+  updated when the workflow or tool contract changed.
 - Ask user if architecture/design needs changes
 
 ## Rules
