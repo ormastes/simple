@@ -51,6 +51,12 @@ def rel_text_path(value: str) -> str:
         return rel(path)
     return value
 
+def to_int(value: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
 def file_magic_of(value: str) -> str:
     if not value:
         return ""
@@ -204,12 +210,22 @@ if Path("scripts/check/check-html-css-sspec-traceability.shs").exists():
     traceability_css_count = value_of("html_css_sspec_traceability_css_property_count", traceability_env)
     traceability_required_css_min_count = value_of("html_css_sspec_traceability_required_css_property_min_count", traceability_env)
     traceability_implemented_css_count = value_of("html_css_sspec_traceability_implemented_css_property_count", traceability_env)
+    traceability_implemented_css_indexed_count = value_of("html_css_sspec_traceability_implemented_css_property_indexed_count", traceability_env)
+    traceability_unsupported_css_count = value_of("html_css_sspec_traceability_unsupported_css_property_count", traceability_env)
+    traceability_unsupported_css_missing_count = value_of("html_css_sspec_traceability_unsupported_css_property_missing_count", traceability_env)
+    traceability_implemented_css_subset_spec = value_of("html_css_sspec_traceability_implemented_css_subset_spec", traceability_env)
+    traceability_unsupported_css_inventory_spec = value_of("html_css_sspec_traceability_unsupported_css_inventory_spec", traceability_env)
 else:
     traceability_html_count = ""
     traceability_required_html_count = ""
     traceability_css_count = ""
     traceability_required_css_min_count = ""
     traceability_implemented_css_count = ""
+    traceability_implemented_css_indexed_count = ""
+    traceability_unsupported_css_count = ""
+    traceability_unsupported_css_missing_count = ""
+    traceability_implemented_css_subset_spec = ""
+    traceability_unsupported_css_inventory_spec = ""
 if not traceability_status:
     traceability_status = "fail"
 if not traceability_reason:
@@ -623,6 +639,12 @@ rendering_manifest_html_tag_missing = value_of("html_css_rendering_manifest_trac
 rendering_manifest_css_property_count = value_of("html_css_rendering_manifest_traceability_css_property_count", rendering_manifest_output)
 rendering_manifest_css_property_covered_count = value_of("html_css_rendering_manifest_traceability_css_property_covered_count", rendering_manifest_output)
 rendering_manifest_css_property_missing = value_of("html_css_rendering_manifest_traceability_css_property_missing", rendering_manifest_output)
+rendering_manifest_css_property_scope = "implemented-simple-web-css"
+rendering_manifest_total_css_property_count = traceability_css_count
+rendering_manifest_unrendered_spec_css_property_count = max(
+    0,
+    to_int(traceability_css_count) - to_int(rendering_manifest_css_property_covered_count),
+)
 rendering_manifest_case_count = value_of("html_css_rendering_manifest_traceability_manifest_case_count", rendering_manifest_output)
 rendering_manifest_required_case_count = value_of("html_css_rendering_manifest_traceability_required_manifest_case_count", rendering_manifest_output)
 rendering_manifest_fixture_scene_count = value_of("html_css_rendering_manifest_traceability_fixture_scene_count", rendering_manifest_output)
@@ -782,6 +804,11 @@ emit("html_css_traceability_required_html_tag_count", traceability_required_html
 emit("html_css_traceability_css_property_count", traceability_css_count)
 emit("html_css_traceability_required_css_property_min_count", traceability_required_css_min_count)
 emit("html_css_traceability_implemented_css_property_count", traceability_implemented_css_count)
+emit("html_css_traceability_implemented_css_property_indexed_count", traceability_implemented_css_indexed_count)
+emit("html_css_traceability_unsupported_css_property_count", traceability_unsupported_css_count)
+emit("html_css_traceability_unsupported_css_property_missing_count", traceability_unsupported_css_missing_count)
+emit("html_css_traceability_implemented_css_subset_spec", traceability_implemented_css_subset_spec)
+emit("html_css_traceability_unsupported_css_inventory_spec", traceability_unsupported_css_inventory_spec)
 emit("gui_widget_rendering_fixture_coverage_command", "sh scripts/check/check-gui-widget-rendering-fixture-coverage.shs")
 emit("gui_widget_rendering_fixture_coverage_exit_code", widget_fixture_code)
 emit("gui_widget_rendering_fixture_coverage_status", widget_fixture_status)
@@ -816,6 +843,9 @@ emit("html_css_rendering_manifest_traceability_html_tag_missing", rendering_mani
 emit("html_css_rendering_manifest_traceability_css_property_count", rendering_manifest_css_property_count)
 emit("html_css_rendering_manifest_traceability_css_property_covered_count", rendering_manifest_css_property_covered_count)
 emit("html_css_rendering_manifest_traceability_css_property_missing", rendering_manifest_css_property_missing)
+emit("html_css_rendering_manifest_traceability_css_property_scope", rendering_manifest_css_property_scope)
+emit("html_css_rendering_manifest_traceability_total_css_property_count", rendering_manifest_total_css_property_count)
+emit("html_css_rendering_manifest_traceability_unrendered_spec_css_property_count", rendering_manifest_unrendered_spec_css_property_count)
 emit("html_css_rendering_manifest_traceability_manifest_case_count", rendering_manifest_case_count)
 emit("html_css_rendering_manifest_traceability_required_manifest_case_count", rendering_manifest_required_case_count)
 emit("html_css_rendering_manifest_traceability_fixture_scene_count", rendering_manifest_fixture_scene_count)
@@ -1121,6 +1151,8 @@ if electron_status != "pass" or electron_gate_status != "pass":
         blocked_gates.append(electron_blocker)
 if production_core_status != "pass":
     blocked_gates.append("production GUI/web parity evidence with live Tauri and Chrome captures")
+if rendering_manifest_unrendered_spec_css_property_count > 0:
+    blocked_gates.append("full CSS specification rendering coverage beyond implemented Simple Web subset")
 blocked_gate = blocked_gates[0] if blocked_gates else ""
 emit("blocked_completion_gate", blocked_gate)
 emit("blocked_completion_gate_count", len(blocked_gates))
@@ -1143,7 +1175,8 @@ reason="$(sed -n 's/^gui_renderdoc_feature_coverage_reason=//p' "$OUT_ENV" | tai
     echo "- Electron layout manifest cases: $(sed -n 's/^electron_layout_manifest_case_count=//p' "$OUT_ENV" | tail -n 1)"
     echo "- HTML/CSS rendering manifest traceability: $(sed -n 's/^html_css_rendering_manifest_traceability_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^html_css_rendering_manifest_traceability_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo "- HTML/CSS rendered tags: $(sed -n 's/^html_css_rendering_manifest_traceability_html_tag_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^html_css_rendering_manifest_traceability_html_tag_count=//p' "$OUT_ENV" | tail -n 1)"
-    echo "- HTML/CSS rendered properties: $(sed -n 's/^html_css_rendering_manifest_traceability_css_property_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^html_css_rendering_manifest_traceability_css_property_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- HTML/CSS rendered implemented properties: $(sed -n 's/^html_css_rendering_manifest_traceability_css_property_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^html_css_rendering_manifest_traceability_css_property_count=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^html_css_rendering_manifest_traceability_css_property_scope=//p' "$OUT_ENV" | tail -n 1))"
+    echo "- HTML/CSS full CSS spec render gap: $(sed -n 's/^html_css_rendering_manifest_traceability_unrendered_spec_css_property_count=//p' "$OUT_ENV" | tail -n 1) of $(sed -n 's/^html_css_rendering_manifest_traceability_total_css_property_count=//p' "$OUT_ENV" | tail -n 1)"
     echo "- RenderDoc goal: $(sed -n 's/^renderdoc_goal_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^renderdoc_goal_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo "- Simple RenderDoc: $(sed -n 's/^simple_renderdoc_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^simple_renderdoc_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo "- External Chrome/Vulkan RenderDoc: $(sed -n 's/^external_renderdoc_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^external_renderdoc_reason=//p' "$OUT_ENV" | tail -n 1))"

@@ -323,7 +323,13 @@ property covered/total counts, missing tag/property lists, fixture scene count,
 and manifest scenes missing fixture HTML. A restart audit should therefore show
 the 105/105 HTML tag coverage and 62/62 implemented CSS property coverage in
 the same evidence env as the Simple, original Chrome, Electron, and production
-parity gates.
+parity gates. It also re-emits the full W3C CSS inventory count from the SSpec
+traceability gate as
+`html_css_rendering_manifest_traceability_total_css_property_count` and the
+remaining non-rendered inventory count as
+`html_css_rendering_manifest_traceability_unrendered_spec_css_property_count`.
+Those unsupported properties are assigned to the inventory SSpec, not claimed as
+rendered behavior, until they move into the implemented Simple Web CSS subset.
 
 The nested HTML/CSS RenderDoc goal status gate reports every unsatisfied
 RenderDoc goal lane through `renderdoc_goal_blocked_gates` and
