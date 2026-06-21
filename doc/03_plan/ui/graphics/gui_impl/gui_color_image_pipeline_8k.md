@@ -80,7 +80,10 @@ Current report:
 - Done: commandbar/taskbar/card web-layout rendering now records exact Simple
   and Node/Bun ARGB files, mismatch count 0, no blur/tolerance, and static pixel
   cache perf wins.
-- Remaining: JPEG XL is only metadata-sized placeholder raster support today;
-  full pure Simple pixel decode still needs separate Modular and VarDCT tasks.
+- Remaining: JPEG XL evidence is metadata parsing, sparse 8K allocation,
+  structured color fail-closed routing, and tiling only. `NFR-GCI8K-008`
+  requires separate exact-pixel SPipe evidence before full JPEG XL pixel decode
+  or image URI decoded-pixel rendering can be claimed; Modular and VarDCT pixel
+  decode remain separate tasks.
 - Remaining: live QEMU WM capture and QEMU-side GTK/Simple perf remain blocked
   until a real `QEMU_QMP_SOCKET` and guest setup are available.
