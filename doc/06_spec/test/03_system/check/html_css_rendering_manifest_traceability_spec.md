@@ -76,7 +76,8 @@ sh scripts/check/check-html-css-rendering-manifest-traceability.shs
 
 - The gate writes stable `html_css_rendering_manifest_traceability_*` evidence
   keys.
-- All 105 current HTML elements have rendered fixture or manifest coverage.
+- All 105 current HTML elements have concrete rendered fixture element
+  coverage; manifest prose alone is not sufficient.
 - All 62 implemented Simple Web CSS properties appear in actual rendered
   fixture CSS.
 - Every scene in the 50-case manifest has a fixture HTML assignment.
@@ -97,6 +98,9 @@ sh scripts/check/check-html-css-rendering-manifest-traceability.shs
 - Read the emitted evidence contract
    - Expected: tag_count equals `105`
    - Expected: tag_covered equals `105`
+   - Expected: tag_fixture_covered equals `105`
+   - Expected: tag_manifest_only_count equals `0`
+   - Expected: tag_manifest_only equals ``
    - Expected: tag_missing equals ``
    - Expected: css_count equals `62`
    - Expected: css_covered equals `62`
@@ -110,7 +114,7 @@ sh scripts/check/check-html-css-rendering-manifest-traceability.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -128,6 +132,9 @@ expect(evidence).to_contain("html_css_rendering_manifest_traceability_fixture=sc
 
 val tag_count = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_count")
 val tag_covered = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_covered_count")
+val tag_fixture_covered = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_fixture_covered_count")
+val tag_manifest_only_count = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_manifest_only_count")
+val tag_manifest_only = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_manifest_only")
 val tag_missing = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_missing")
 val css_count = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_count")
 val css_covered = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_covered_count")
@@ -138,6 +145,9 @@ val missing_fixture = _value_of(evidence, "html_css_rendering_manifest_traceabil
 
 expect(tag_count).to_equal("105")
 expect(tag_covered).to_equal("105")
+expect(tag_fixture_covered).to_equal("105")
+expect(tag_manifest_only_count).to_equal("0")
+expect(tag_manifest_only).to_equal("")
 expect(tag_missing).to_equal("")
 expect(css_count).to_equal("62")
 expect(css_covered).to_equal("62")
