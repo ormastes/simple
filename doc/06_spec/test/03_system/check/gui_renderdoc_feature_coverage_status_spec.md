@@ -88,16 +88,6 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
   Chrome/Vulkan `.rdc` gates without treating missing host captures as pass.
 - The audit reports macOS RenderDoc package/support status separately from the
   Vulkan/MoltenVK readiness status.
-- The audit reports which Simple executable the GUI/web/2D Vulkan setup probe
-  selected, including whether it found a fresh macOS-capable driver.
-- The top-level GUI/web/2D Vulkan RenderDoc workflow is macOS-only until
-  Windows and Linux add independent runbooks with the same evidence keys.
-- The setup `--run` lane can emit Electron, Chrome, and Simple ARGB evidence
-  plus pairwise pixel diff status for the shared GUI/web/2D Vulkan fixture.
-- The audit reports the current GUI/web/2D Vulkan RenderDoc blocker lanes as
-  machine-readable status, reason, count, and gate-list keys.
-- The aggregate audit treats comparison artifacts, pairwise pixel comparison,
-  browser Vulkan backing, and RenderDoc blocker status as completion gates.
 - Simple `.rdc` evidence must carry Vulkan runtime backend, RenderDoc API, and
   rendered-pixel proof through the aggregate audit.
 - Electron Chromium/Vulkan `.rdc` evidence is fail-closed and required before
@@ -154,9 +144,9 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: rendering_manifest_tag_covered equals `105`
    - Expected: rendering_manifest_tag_covered_names.split(",").len() equals `105`
    - Expected: rendering_manifest_tag_missing equals ``
-   - Expected: rendering_manifest_css_count equals `62`
-   - Expected: rendering_manifest_css_covered equals `62`
-   - Expected: rendering_manifest_css_covered_names.split(",").len() equals `62`
+   - Expected: rendering_manifest_css_count equals `63`
+   - Expected: rendering_manifest_css_covered equals `63`
+   - Expected: rendering_manifest_css_covered_names.split(",").len() equals `63`
    - Expected: rendering_manifest_css_missing equals ``
    - Expected: rendering_manifest_css_scope equals `implemented-simple-web-css`
    - Expected: rendering_manifest_total_css_count equals `traceability_css_count`
@@ -166,7 +156,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: rendering_manifest_missing_fixture equals ``
    - Expected: traceability_status equals `pass`
    - Expected: traceability_html_count equals `105`
-   - Expected: traceability_implemented_css_count equals `62`
+   - Expected: traceability_implemented_css_count equals `63`
    - Expected: traceability_unsupported_css_missing_count equals `0`
    - Expected: comparison_fixture_status equals `pass`
    - Expected: comparison_artifact_reason equals `pass`
@@ -213,7 +203,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 606 lines folded for reproduction.
+Runnable source: 607 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -236,8 +226,8 @@ expect(evidence).to_contain("html_css_rendering_manifest_traceability_fixture=sc
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_count=105")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_covered_count=105")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_covered=")
-expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_count=62")
-expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_covered_count=62")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_count=63")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_covered_count=63")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_covered=")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_scope=implemented-simple-web-css")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_total_css_property_count=")
@@ -251,7 +241,7 @@ expect(evidence).to_contain("html_css_traceability_exit_code=0")
 expect(evidence).to_contain("html_css_traceability_evidence_env=build/test-gui-renderdoc-feature-coverage-status/sspec-traceability/evidence.env")
 expect(evidence).to_contain("html_css_traceability_required_html_tag_count=105")
 expect(evidence).to_contain("html_css_traceability_required_css_property_min_count=390")
-expect(evidence).to_contain("html_css_traceability_implemented_css_property_count=62")
+expect(evidence).to_contain("html_css_traceability_implemented_css_property_count=63")
 expect(evidence).to_contain("html_css_traceability_implemented_css_property_indexed_count=")
 expect(evidence).to_contain("html_css_traceability_unsupported_css_property_count=")
 expect(evidence).to_contain("html_css_traceability_unsupported_css_properties=")
@@ -689,11 +679,12 @@ expect(rendering_manifest_tag_covered_names).to_contain("article")
 expect(rendering_manifest_tag_covered_names).to_contain("video")
 expect(rendering_manifest_tag_covered_names.split(",").len()).to_equal(105)
 expect(rendering_manifest_tag_missing).to_equal("")
-expect(rendering_manifest_css_count).to_equal("62")
-expect(rendering_manifest_css_covered).to_equal("62")
+expect(rendering_manifest_css_count).to_equal("63")
+expect(rendering_manifest_css_covered).to_equal("63")
 expect(rendering_manifest_css_covered_names).to_contain("display")
 expect(rendering_manifest_css_covered_names).to_contain("justify-content")
-expect(rendering_manifest_css_covered_names.split(",").len()).to_equal(62)
+expect(rendering_manifest_css_covered_names).to_contain("border-style")
+expect(rendering_manifest_css_covered_names.split(",").len()).to_equal(63)
 expect(rendering_manifest_css_missing).to_equal("")
 expect(rendering_manifest_css_scope).to_equal("implemented-simple-web-css")
 expect(rendering_manifest_total_css_count).to_equal(traceability_css_count)
@@ -708,7 +699,7 @@ expect(rendering_manifest_missing_fixture).to_equal("")
 expect(traceability_status).to_equal("pass")
 expect(traceability_html_count).to_equal("105")
 expect(traceability_css_count.to_i64()).to_be_greater_than(389)
-expect(traceability_implemented_css_count).to_equal("62")
+expect(traceability_implemented_css_count).to_equal("63")
 expect(traceability_implemented_css_indexed_count.to_i64()).to_be_greater_than(50)
 expect(traceability_unsupported_css_count.to_i64()).to_be_greater_than(300)
 expect(traceability_unsupported_css_properties.len()).to_be_greater_than(1000)
@@ -809,7 +800,7 @@ expect(report).to_contain("- widget render fixture witnesses: 43/43")
 expect(report).to_contain("- Electron layout manifest cases: 50")
 expect(report).to_contain("- HTML/CSS rendering manifest traceability: pass (pass)")
 expect(report).to_contain("- HTML/CSS rendered tags: 105/105")
-expect(report).to_contain("- HTML/CSS rendered implemented properties: 62/62 (implemented-simple-web-css)")
+expect(report).to_contain("- HTML/CSS rendered implemented properties: 63/63 (implemented-simple-web-css)")
 expect(report).to_contain("- HTML/CSS full CSS spec render gap:")
 expect(report).to_contain("- Electron Chromium RenderDoc:")
 expect(report).to_contain("- Electron Chromium/Vulkan RenderDoc:")

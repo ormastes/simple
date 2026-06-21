@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 57 | 57 | 0 | 0 |
+| 60 | 60 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -184,6 +184,44 @@ val pixels = simple_web_render_html_to_pixels(html, 96, 64)
 expect(pixels.len()).to_equal(96 * 64)
 expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
 expect(_count_color(pixels, 0xFF141418u32)).to_equal(0)
+```
+
+</details>
+
+#### keeps styled widget panels on authored CSS instead of legacy widget chrome
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}section.widget-panel{display:block;width:20px;height:10px;border:2px solid #0f172a;background-color:#bfdbfe}</style></head><body><section class='widget-panel'></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 40, 24)
+expect(simple_web_layout_uses_legacy_widget_chrome(html)).to_equal(false)
+expect(pixels.len()).to_equal(40 * 24)
+expect(pixels[0]).to_equal(0xFF0F172Au32)
+expect(_count_color(pixels, 0xFF0066CCu32)).to_equal(0)
+```
+
+</details>
+
+#### honors border-style none while preserving solid border paint
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.solid{display:block;width:12px;height:8px;border-width:2px;border-style:solid;border-color:#ef4444;background-color:#22c55e}.none{display:block;width:12px;height:8px;border-width:2px;border-style:none;border-color:#1d4ed8;background-color:#f59e0b;margin-top:4px}</style></head><body><div class='solid'></div><div class='none'></div></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 40, 32)
+expect(pixels.len()).to_equal(40 * 32)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(0)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_be_greater_than(0)
 ```
 
 </details>
@@ -949,6 +987,27 @@ expect(_pixels_equal(simple_pixels, browser_pixels)).to_equal(true)
 
 </details>
 
+#### web render backend pure_simple uses the Engine2D auto backend path
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><div style='width: 64px; height: 24px; background-color: #2563eb'></div><span style='color:#ffffff'>Auto</span></body></html>"
+val simple = SimpleWebRenderer.create(96, 64)
+val web = WebRenderBackend.create("pure_simple", 96, 64)
+val simple_pixels = simple.render_html_to_pixels(html)
+val web_pixels = web.render_html_to_pixels(html)
+expect(simple.backend_name).to_equal(simple_web_resolved_engine2d_backend_name(96, 64, "auto"))
+expect(web.name()).to_equal("pure_simple")
+expect(_pixels_equal(simple_pixels, web_pixels)).to_equal(true)
+```
+
+</details>
+
 #### fallback facade parses rgb() background-color with the shared CSS parser
 
 <details>
@@ -1255,8 +1314,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 57 |
-| Active scenarios | 57 |
+| Total scenarios | 60 |
+| Active scenarios | 60 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
