@@ -32,12 +32,15 @@ description: Create architecture, UI design, system tests, and detail design for
 ## Phase 3: System Test Design
 
 - SPipe BDD tests: `test/03_system/app/<app_name>/feature/<feature>_spec.spl`
-- Generated/manual SPipe docs: `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md`
+- Generated/manual SPipe docs: `doc/06_spec/03_system/app/<app_name>/feature/<feature>_spec.md`
 - Never create executable `.spl` specs under `doc/06_spec`; verify
   `find doc/06_spec -name '*_spec.spl' | wc -l` is `0`.
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
 - Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 - Every REQ-NNN must have at least one test
+- Define shared interface names and manual-facing setup/checker helper names
+  before implementation. Temporary placeholder helpers must fail explicitly
+  (`assert(false)` or equivalent), not pass silently.
 - Scenario-oriented specs must generate docs that read like hand-written
   manuals: primary flows visible, setup expanded through `@prev`/`@inline`,
   executable SPipe folded, and advanced/edge/matrix/stress details folded or
@@ -59,6 +62,8 @@ description: Create architecture, UI design, system tests, and detail design for
   manual `step("...")` flow helper names, setup/checker helper names, and
   placeholder fail-fast helpers (`assert(false)` or `fail(...)`) that sidecars
   must target.
+- The final normal/highest-capability reviewer must accept the merged sidecar
+  design before implementation handoff.
 
 ## Phase 5: Quality Check
 
