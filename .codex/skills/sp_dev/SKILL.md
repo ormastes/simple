@@ -72,7 +72,11 @@ audit must expose `gui_web_2d_vulkan_comparison_fixture_status`,
 `gui_web_2d_vulkan_chrome_screenshot_png_status`,
 `gui_web_2d_vulkan_simple_evidence_file_status`, and
 `gui_web_2d_vulkan_simple_backend_status` before treating Electron,
-Chrome, and Simple artifacts as comparable. GUI widget fixture evidence must
+Chrome, and Simple artifacts as comparable. Browser Vulkan proof must be read
+from `gui_web_2d_vulkan_browser_backing_status`,
+`gui_web_2d_vulkan_browser_backing_reason`, and
+`gui_web_2d_vulkan_browser_backing_mode`; fallback bitmap comparison is not
+Vulkan-backed browser proof. GUI widget fixture evidence must
 also prove per-widget feature witnesses via
 `gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features`, not
 only widget/class presence. Defer Windows and Linux claims

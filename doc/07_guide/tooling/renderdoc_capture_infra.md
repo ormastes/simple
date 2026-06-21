@@ -134,6 +134,13 @@ contract is `gui_web_2d_vulkan_comparison_fixture_status`,
 the Electron baseline exists and is nonblank, the Chrome screenshot is a
 viewport-matching PNG, and the Simple evidence env proves the Vulkan backend
 before making a GUI/web/2D Vulkan comparison claim.
+The browser Vulkan-backed proof is a separate rollup:
+`gui_web_2d_vulkan_browser_backing_status`,
+`gui_web_2d_vulkan_browser_backing_reason`, and
+`gui_web_2d_vulkan_browser_backing_mode`. A passing comparison artifact with
+`gui_web_2d_vulkan_browser_backing_mode=fallback-bitmap-comparison` is useful
+comparison evidence, but it is not Electron/Chrome Vulkan-backed RenderDoc
+proof.
 
 On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
 `src/compiler_rust/target/debug/simple` when that binary advertises the macOS

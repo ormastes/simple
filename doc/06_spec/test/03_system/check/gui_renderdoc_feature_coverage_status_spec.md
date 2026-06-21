@@ -175,6 +175,10 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: chrome_screenshot_png_height equals `720`
    - Expected: simple_backend_status equals `pass`
    - Expected: comparison_artifact_status equals `incomplete`
+   - Expected: browser_backing_reason equals `pass`
+   - Expected: browser_backing_mode equals `vulkan-backed-renderdoc`
+   - Expected: browser_backing_status equals `fail`
+   - Expected: browser_backing_mode equals `fallback-bitmap-comparison`
    - Expected: renderdoc_blocked_gate equals ``
    - Expected: renderdoc_blocked_gate_count equals `0`
    - Expected: renderdoc_blocked_gates equals ``
@@ -191,7 +195,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 523 lines folded for reproduction.
+Runnable source: 537 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -335,6 +339,9 @@ expect(evidence).to_contain("gui_web_2d_vulkan_height=")
 expect(evidence).to_contain("gui_web_2d_vulkan_comparison_fixture_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_comparison_artifact_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_comparison_artifact_reason=")
+expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_reason=")
+expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_mode=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_requested_api=vulkan")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_requested_angle=vulkan")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_requested_features=Vulkan")
@@ -539,6 +546,9 @@ val traceability_unsupported_css_missing_count = _value_of(evidence, "html_css_t
 val comparison_fixture_status = _value_of(evidence, "gui_web_2d_vulkan_comparison_fixture_status")
 val comparison_artifact_status = _value_of(evidence, "gui_web_2d_vulkan_comparison_artifact_status")
 val comparison_artifact_reason = _value_of(evidence, "gui_web_2d_vulkan_comparison_artifact_reason")
+val browser_backing_status = _value_of(evidence, "gui_web_2d_vulkan_browser_backing_status")
+val browser_backing_reason = _value_of(evidence, "gui_web_2d_vulkan_browser_backing_reason")
+val browser_backing_mode = _value_of(evidence, "gui_web_2d_vulkan_browser_backing_mode")
 val electron_argb_file_status = _value_of(evidence, "gui_web_2d_vulkan_electron_argb_file_status")
 val electron_argb_nonblank_status = _value_of(evidence, "gui_web_2d_vulkan_electron_argb_nonblank_status")
 val chrome_screenshot_png_status = _value_of(evidence, "gui_web_2d_vulkan_chrome_screenshot_png_status")
@@ -661,6 +671,13 @@ if comparison_artifact_status == "pass":
 else:
     expect(comparison_artifact_status).to_equal("incomplete")
     expect(comparison_artifact_reason.len()).to_be_greater_than(0)
+if browser_backing_status == "pass":
+    expect(browser_backing_reason).to_equal("pass")
+    expect(browser_backing_mode).to_equal("vulkan-backed-renderdoc")
+else:
+    expect(browser_backing_status).to_equal("fail")
+    expect(browser_backing_reason.len()).to_be_greater_than(0)
+    expect(browser_backing_mode).to_equal("fallback-bitmap-comparison")
 expect(production_gate_status.len()).to_be_greater_than(0)
 expect(production_gate_reason.len()).to_be_greater_than(0)
 expect(renderdoc_status.len()).to_be_greater_than(0)
@@ -713,6 +730,7 @@ expect(report).to_contain("- Electron Chromium/Vulkan RenderDoc:")
 expect(report).to_contain("- Electron Chromium/Vulkan gate:")
 expect(report).to_contain("- macOS Vulkan:")
 expect(report).to_contain("- macOS RenderDoc:")
+expect(report).to_contain("- GUI/web/2D browser Vulkan backing:")
 expect(report).to_contain("- Production GUI/web parity gate:")
 expect(report).to_contain("- Production surface host:")
 expect(report).to_contain("- Production Tauri surface capture:")
