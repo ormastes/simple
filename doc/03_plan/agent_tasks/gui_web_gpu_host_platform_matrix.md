@@ -57,8 +57,8 @@ Acceptance:
   BrowserBackend backend handle, typed frame payload receipt, timing budgets,
   typed readback metadata, same-frame `device_readback`, Vulkan readback, CUDA
   readback, and OpenCL generated 2D readback all pass. The full host-GPU
-  platform matrix remains incomplete until Metal, ROCm/HIP, and native DirectX
-  device-readback evidence pass.
+  platform matrix remains incomplete until Metal, ROCm/HIP, native DirectX, and
+  real WebGPU device-readback evidence pass.
   Synthetic handles remain limited to isolated runtime queue roundtrip tests.
 
 ### Linux OpenCL Matrix Notes
