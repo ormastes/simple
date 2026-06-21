@@ -19,7 +19,8 @@ Run this as a support skill during SPipe Phase 6 (Refactor) and Phase 8
   - `.spipe/00_llm_process/` — LLM pipeline/process definitions; reference the wiki
   - `.spipe/10_llm_wiki/` — curated LLM wiki, distilled from raw docs
   - `.spipe/20_raw_doc/` — raw source documents the wiki is built from
-  - `.spipe/core/` — read-only submodule of the public project (never edit here)
+  - `.spipe/core/` — vendored read-only copy of the public project (stripped
+    clone, pull-only; never edit or push from here)
 
 ## Actions
 
@@ -41,7 +42,8 @@ Run this as a support skill during SPipe Phase 6 (Refactor) and Phase 8
 9. Maintain the overlay doc/wiki tree when a change touches it: distill new
    `.spipe/20_raw_doc/` material into `.spipe/10_llm_wiki/`, and keep
    `.spipe/00_llm_process/` references to the wiki current. Edit raw docs and
-   wiki, never `.spipe/core/` (read-only submodule).
+   wiki, never `.spipe/core/` (vendored read-only snapshot; refresh it by
+   re-running `add_spipe_core`, not by hand-editing).
 
 ## Guardrails
 
