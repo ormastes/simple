@@ -192,7 +192,7 @@ Scan for stub patterns — any match is a **FAIL**:
 [PASS] test/lib/feature_spec.spl:15 — REQ-001 has 3 test cases
 [FAIL] src/lib/feature.spl:87 — pass_todo found (STUB001)
 [FAIL] test/lib/feature_spec.spl:30 — expect(true).to_equal(true) is not a real assertion
-[FAIL] doc/06_spec/system/app/feature/feature_spec.md — generated manual lacks readable scenario steps
+[FAIL] doc/06_spec/03_system/app/feature/feature_spec.md — generated manual lacks readable scenario steps
 [WARN] doc/04_architecture/feature.md — not updated for new module
 
 STATUS: FAIL (3 failures, 1 warning)
