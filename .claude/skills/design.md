@@ -23,9 +23,12 @@
 | Detail design | `doc/05_design/<domain>/<topic>/<feature>.md` |
 | Agent tasks | `doc/03_plan/<domain>/<topic>/<feature>.md` |
 
-Broad-lane agent-task docs must list lower-model sidecar lanes or `N/A`, merge
-owner, final normal/highest-capability reviewer, and the shared
-interface/manual helper names accepted before implementation.
+Broad-lane agent-task docs must list lower-model sidecar lanes or `N/A`, such
+as Codex Spark, Claude Haiku, or Claude Sonnet for parallel exploration, plus
+merge owner and final normal/highest-capability reviewer. Before those sidecars
+start, the primary/best model defines the shared interface names, manual
+setup/checker helper names, and placeholder fail-fast helpers (`assert(false)`
+or equivalent) that sidecars must target.
 
 ## Critical Rules
 
