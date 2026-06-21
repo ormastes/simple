@@ -293,7 +293,7 @@ impl Saveable for Document:
 
 | Mistake | Correct |
 |---------|---------|
-| `List[T]` | `List<T>` (angle brackets for generics) |
+| `List[T]` | `List<T>` for generic parameters; `[T]` is an array type |
 | `fn foo(self)` | `fn foo()` (self is implicit) |
 | `fn foo() -> ()` | `fn foo():` (omit void return type) |
 | Missing `:` before body | `fn foo():` and `if x > 0:` need colons |
@@ -309,7 +309,7 @@ impl Saveable for Document:
 
 3. **Remember implicit self**: In methods, do not write `self` as a parameter.
 
-4. **Use `<>` for generics**: `List<T>` not `List[T]`.
+4. **Separate generics and arrays**: `List<T>` uses `<>`; `[T]` is an array type.
 
 5. **Colons matter**: Function and block definitions need `:` before the body.
 

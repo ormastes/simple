@@ -367,11 +367,13 @@ val int_box = Container.new(42)      # T inferred as i64
 val str_box = Container.new("hello") # T inferred as text
 ```
 
-Use angle brackets `<>` for generics (not `[]`):
+Use angle brackets `<>` for generic type parameters. Use `[]` for array types
+and literals:
 
 ```simple
 List<i64>                            # Correct
 Option<text>                         # Correct
+[i64]                                # Correct array type
 ```
 
 ---
