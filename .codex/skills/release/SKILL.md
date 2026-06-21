@@ -28,6 +28,8 @@ Do NOT proceed with release if verification has any FAIL items.
 SPipe specs and SPipe coverage are verified before release. Do not create,
 rewrite, or weaken SPipe during release; if SPipe is missing, stale, or
 placeholder-based, stop and go back to verify/implementation.
+Generated-manual quality and lower-model sidecar review must already be covered
+by verify PASS; release does not repair or accept them afterward.
 
 ## Steps
 
@@ -116,6 +118,7 @@ override that credential.
 
 - NEVER release without verify PASS
 - NEVER update SPipe in release; release must consume verified SPipe evidence
+- NEVER accept generated-manual quality or sidecar-review gaps during release
 - NEVER push without user approval
 - NEVER skip version locations — all 3 version sources must be updated
 - NEVER release if `find doc/06_spec -name '*_spec.spl' | wc -l` is nonzero
