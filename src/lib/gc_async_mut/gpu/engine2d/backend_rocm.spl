@@ -69,6 +69,12 @@ fn rocm_backend_memset(ptr: i64, value: i32, size: i64):
 fn rocm_backend_get_function(module: i64, name: text) -> i64:
     rt_rocm_get_function(module, name)
 
+fn rocm_backend_synchronize():
+    rt_rocm_synchronize()
+
+fn rocm_backend_launch_kernel(func: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, shared_mem: i64, args: [i64]):
+    rt_rocm_launch_kernel(func, gx, gy, gz, bx, by, bz, shared_mem, args)
+
 # ============================================================================
 # ROCm/HIP Probe
 #
@@ -477,7 +483,7 @@ impl RenderBackend for RocmBackend:
         if self.initialized and self.dirty and self.d_framebuffer != 0:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
             _download_framebuffer(self.d_framebuffer, self.host_buf, fb_size)
-            rt_rocm_synchronize()
+            rocm_backend_synchronize()
             self.dirty = false
 
     fn read_pixels() -> [u32]:
@@ -493,7 +499,7 @@ impl RenderBackend for RocmBackend:
         if self.dirty:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
             _download_framebuffer(self.d_framebuffer, self.host_buf, fb_size)
-            rt_rocm_synchronize()
+            rocm_backend_synchronize()
             source = "device_readback"
         var copy: [u32] = [0u32; self.w * self.h]
         var i = 0
@@ -583,7 +589,7 @@ impl Engine2DExtended for RocmBackend:
 
 fn _launch_kernel_1d(backend: RocmBackend, func: i64, grid_x: i64, block_x: i64, args: [i64]):
     """Launch a 1D HIP kernel via ROCm."""
-    rt_rocm_launch_kernel(
+    rocm_backend_launch_kernel(
         func,
         grid_x, 1, 1,    # grid dims
         block_x, 1, 1,   # block dims
@@ -593,7 +599,7 @@ fn _launch_kernel_1d(backend: RocmBackend, func: i64, grid_x: i64, block_x: i64,
 
 fn _launch_kernel_2d(backend: RocmBackend, func: i64, grid_dim: RocmGridDim, block_dim: RocmBlockDim, args: [i64]):
     """Launch a 2D HIP kernel via ROCm."""
-    rt_rocm_launch_kernel(
+    rocm_backend_launch_kernel(
         func,
         grid_dim.x, grid_dim.y, 1,     # grid dims
         block_dim.x, block_dim.y, 1,   # block dims
@@ -656,7 +662,7 @@ fn _draw_image_with_kernel(backend: RocmBackend, func: i64, x: i32, y: i32, w: i
     if pixel_count > pixels.len() as i64:
         return false
     val byte_size = pixel_count * 4
-    val d_src = rt_rocm_malloc(byte_size)
+    val d_src = rocm_backend_malloc(byte_size)
     if d_src == 0:
         return false
     _upload_pixels_to_device(d_src, pixels, pixel_count)
@@ -664,7 +670,7 @@ fn _draw_image_with_kernel(backend: RocmBackend, func: i64, x: i32, y: i32, w: i
     val block_dim = _block_for_rect()
     val args: [i64] = [backend.d_framebuffer, d_src, _i64(x), _i64(y), _i64(w), _i64(h), _i64(backend.w), _i64(backend.h)]
     _launch_kernel_2d(backend, func, grid_dim, block_dim, args)
-    rt_rocm_free(d_src)
+    rocm_backend_free(d_src)
     true
 
 # ============================================================================
@@ -685,7 +691,7 @@ fn _gpu_draw_text_fallback(backend: RocmBackend, x: i32, y: i32, text_val: text,
     if backend.dirty:
         val fb_size = _i64(backend.w) * _i64(backend.h) * 4
         _download_framebuffer(backend.d_framebuffer, backend.host_buf, fb_size)
-        rt_rocm_synchronize()
+        rocm_backend_synchronize()
 
     # Render glyphs into host buffer using shared glyph module
     render_text_to_buffer(backend.host_buf, backend.w, backend.h, x, y, text_val, color, font_size)
