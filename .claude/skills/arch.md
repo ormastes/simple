@@ -8,9 +8,14 @@
 
 ## Phase 1: Architecture
 
-1. Evaluate architecture patterns (ask user which to use)
-2. Apply MDSOC pattern where appropriate (see `src/compiler/85.mdsoc/`)
-3. Output: `doc/04_architecture/<domain>/<topic>/<feature>.md`
+1. For broad plans, merge lower-model sidecar findings when available (Codex
+   Spark, Claude Haiku, or Claude Sonnet), then run this pass as the
+   normal/highest-capability review before accepting broad architecture claims.
+2. Evaluate architecture patterns (ask user which to use)
+3. Apply MDSOC pattern where appropriate (see `src/compiler/85.mdsoc/`)
+4. Define shared interface names and manual-facing setup/checker helper names.
+   Placeholder helpers must fail explicitly (`assert(false)` or equivalent).
+5. Output: `doc/04_architecture/<domain>/<topic>/<feature>.md`
 
 ## Phase 2: System Test Design
 
@@ -28,8 +33,10 @@
 ## Quality Check
 
 1. Verify SPipe quality (target: A grade) — real assertions, edge cases, full REQ coverage
-2. Ask user: "Should architecture change?"
-3. If yes, loop back
+2. Confirm matching `doc/07_guide`, `doc/06_spec`, and skill/SPipe process docs
+   were updated when the workflow or tool contract changed
+3. Ask user: "Should architecture change?"
+4. If yes, loop back
 
 ## Outputs
 | Artifact | Location |

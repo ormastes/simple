@@ -129,8 +129,15 @@ Proposed | Accepted | Deprecated | Superseded by ADR-XXX
 
 ## Multi-LLM Collaboration
 
+- For broad architecture plans, split independent module, dependency, risk, and
+  testability checks across lower-model parallel agents when available (for
+  example Codex Spark, Claude Haiku, or Claude Sonnet), then have a
+  normal/highest-capability LLM review and accept the merged result.
 - If other LLMs produced architecture docs, review and extend — never overwrite
 - Codex is the preferred architecture evaluator in cooperative mode
+- The first/highest-capability architecture pass defines shared interface names
+  and manual-facing setup/checker helper names. Placeholder helpers must fail
+  explicitly (`assert(false)` or equivalent).
 - Tag Codex-produced artifacts with `<!-- codex-architecture -->` comment
 
 ## Rules
