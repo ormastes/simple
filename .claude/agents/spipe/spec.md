@@ -22,14 +22,18 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
    plus `## Cooperative Review`. If that section is `N/A`, preserve the reason.
 2. **Design the manual shape first:** sketch which scenarios are primary flows
    (visible), which are edge/stress/matrix (folded), which are internal plumbing (skip)
-3. **Write step helpers** with names that read as manual sentences:
-   - Name functions so `user.open_editor()` renders as "User open editor"
-   - Prefix checker functions with `Then_` so `Then_file_is_saved()` renders as "Then file is saved"
-   - Use `@step "Human-readable text"` when the derived label is unclear
+3. **Write manual steps with `step("...")`:**
+   - Use `step("Human-readable text")` inside scenarios for the primary manual
+     flow.
+   - Use helper functions only when they remove real duplication; keep the
+     `step("...")` call in the scenario or inside the helper so the generated
+     manual reads naturally.
+   - Use `@step "Human-readable text"` only when labeling an existing helper or
+     checker call that cannot be replaced cleanly with `step("...")`.
    - For broad cooperative lanes, use the shared interface and manual
      setup/checker helper names from `## Cooperative Review`; unresolved
      placeholders must fail explicitly with `assert(false)` or `fail(...)`.
-4. **Write scenarios** using those helpers — each `it` block is a manual scenario
+4. **Write scenarios** using those steps — each `it` block is a manual scenario
 5. **Add manual metadata:**
    - `# @inline` for reusable setup (not shown as standalone sections)
    - `# @prev("setup name")` to expand inline setup into the current scenario
@@ -60,7 +64,7 @@ Assert concrete values, or use `to_be(true/false)` only when the boolean itself 
 ## Spec File Structure
 
 ```simple
-use std.spec
+use std.spec.*
 
 # --- Step Helpers ---
 
@@ -72,8 +76,8 @@ fn open_project(path: text):
 fn build_with_release_profile() -> text:
     ...
 
-@step "Then build succeeds without warnings"
-fn Then_build_succeeds(output: text):
+@step "Build succeeds without warnings"
+fn build_succeeds(output: text):
     expect(output).to_contain("Build complete")
 
 # --- Primary Scenarios ---
@@ -81,13 +85,16 @@ fn Then_build_succeeds(output: text):
 describe "Build System":
     # @inline
     it "project is configured":
+        step("Open the project")
         open_project("examples/hello")
 
     # @prev("project is configured")
     # @capture(exec)
     it "produces a release binary":
+        step("Build with release profile")
         val output = build_with_release_profile()
-        Then_build_succeeds(output)
+        step("Build succeeds without warnings")
+        build_succeeds(output)
 
 # --- Edge Cases ---
 
@@ -95,7 +102,9 @@ describe "Build System":
 describe "Build System Edge Cases":
     # @manual: folded
     it "handles missing source gracefully":
+        step("Open a missing project")
         open_project("nonexistent")
+        step("Build with release profile")
         val output = build_with_release_profile()
         expect(output).to_contain("error")
 
@@ -136,7 +145,8 @@ If the answer is no to any of these, rewrite the helpers and metadata.
 - Spec files exist at `test/` paths for every module in the architecture
 - Every AC-N has at least one `it` block
 - All specs use only built-in matchers
-- **Step helpers read as manual sentences** (no raw function calls in scenarios)
+- **Manual steps read as operator actions** via `step("...")`; helper functions
+  are only supporting plumbing
 - **Cooperative helper names match state:** broad lanes use the shared
   interface/manual helper names from `## Cooperative Review`, or that section is
   explicitly `N/A`
