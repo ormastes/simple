@@ -37,7 +37,7 @@ prefix build was deferred because the agent sandbox had no network.
       for the processing kernels (GLSL → SPIR-V parity).
       (2026-06-12: all 8 blobs real SPIR-V 1.3, spirv-as + spirv-val; pushed
       7875a3e7d5f.)
-- [x] Root-cause the `rt_vulkan_init` interpreter crash that blocks the full
+- [x] Root-cause the Vulkan initialization facade interpreter crash that blocks the full
       lavapipe end-to-end readback test. (Non-reproducible — returns true with
       lavapipe; init+clear succeed; resolved by prior interpreter fix.)
 
