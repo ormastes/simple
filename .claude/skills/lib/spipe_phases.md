@@ -106,11 +106,15 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 **Actions:**
 1. Read architecture and ACs from state file
 2. **Design manual shape:** decide which scenarios are primary (show), edge (folded), plumbing (skip)
-3. **Write step helpers** named as manual sentences (`open_editor`, `Then_file_is_saved`)
-4. **Write scenarios** using helpers with `@inline`/`@prev` chains and `@capture` evidence
-5. Create SPipe test file(s) following `.claude/templates/spipe_template.spl`
-6. Add `# @cover src/path/to/impl.spl` coverage markers
-7. Tests should be runnable but FAILING (red phase of TDD)
+3. For broad lanes, the primary/highest-capability pass defines shared
+   interface names, manual-facing setup/checker helper names, and fail-fast
+   placeholder helpers (`assert(false)` or `fail(...)`) before lower-model
+   sidecars such as Codex Spark, Claude Haiku, or Claude Sonnet fan out
+4. **Write step helpers** named as manual sentences (`open_editor`, `Then_file_is_saved`)
+5. **Write scenarios** using helpers with `@inline`/`@prev` chains and `@capture` evidence
+6. Create SPipe test file(s) following `.claude/templates/spipe_template.spl`
+7. Add `# @cover src/path/to/impl.spl` coverage markers
+8. Tests should be runnable but FAILING (red phase of TDD)
 
 **Exit Criteria:**
 - At least one `.spl` spec file created in `test/`
@@ -123,6 +127,9 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - Tests reference implementation files that will be created in Phase 5
 - Coverage markers present
 - State file includes Manual Shape table alongside AC Coverage Matrix
+- Broad-lane state records cooperative sidecars or `N/A`, merge owner, final
+  normal/highest-capability reviewer, shared interfaces, manual helper names,
+  and any fail-fast placeholders
 
 ---
 
@@ -215,8 +222,12 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 6. **Read generated docs** as scenario manuals — if they read like test plumbing,
    note which step helpers or visibility annotations need improvement and
    require the generator to report `0 stubs`
-7. Mark ACs as checked in the state file
-8. If any test fails, document the failure and note whether it needs Phase 5 re-run
+7. Verify the cooperative review plan is complete or explicitly `N/A`: lower-model
+   sidecars were merged/reviewed when used, and the normal/highest-capability
+   reviewer accepted broad findings, generated-manual quality, coverage claims,
+   exclusions, and done marks
+8. Mark ACs as checked in the state file
+9. If any test fails, document the failure and note whether it needs Phase 5 re-run
 
 **Exit Criteria:**
 - All spec tests pass (or documented reason for interpreter-mode limitation)
@@ -227,6 +238,8 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
   `0 stubs`
 - **Diagram presence:** each phase doc (research, arch, refactor) has ≥1 SDN diagram
 - **Prose concision:** each phase doc ≤30 lines of prose (tables/diagrams excluded)
+- Cooperative sidecar review is complete or explicitly `N/A`; incomplete
+  lower-model merge/review or unreviewed done marks block PASS
 - If any AC cannot be verified, it is documented with a clear reason
 
 ---
@@ -257,6 +270,9 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - Commit message references the feature
 - State file phase checklist is fully checked
 - Doc/wiki refactor pass is recorded in the state file
+- Workflow/tooling changes refreshed matching `doc/07_guide`, `doc/06_spec`,
+  `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, and
+  `.claude/agents/spipe/` instructions, or the state file records `N/A`
 - Numbered artifact guard passes for staged added/renamed paths
 - Final summary written under `### 8-ship`
 - No uncommitted changes remain
