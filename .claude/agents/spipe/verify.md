@@ -50,23 +50,28 @@
    - shared interface/manual helper names match design, spec, manual, and
      tooling references
    - placeholder helpers fail explicitly with `assert(false)` or `fail(...)`
-11. For Mac GUI/web/2D RenderDoc+Vulkan evidence, keep scope macOS-only until
+11. Verify the `## Cooperative Review` plan from the state file was completed:
+    lower-model sidecar lanes are either reviewed/merged or explicitly `N/A`,
+    and the normal/highest-capability review accepted broad findings,
+    coverage claims, generated-manual quality, and done marks.
+12. For Mac GUI/web/2D RenderDoc+Vulkan evidence, keep scope macOS-only until
     Windows and Linux runbooks exist. Verify MoltenVK host readiness, Simple
     Vulkan/Engine2D readback or RenderDoc proof, original Chrome RenderDoc proof,
     Electron RenderDoc proof, and production GUI/web parity evidence. If Chrome
     or Electron logs show `angle=vulkan` unavailable, report
     `vulkan-angle-unavailable` and fail the Vulkan proof even when pixels render.
-12. Compile verification report:
+13. Compile verification report:
    - Test results (pass/fail counts)
    - Coverage percentage (target: 80%+)
    - Doc coverage for new code
    - Scenario manual quality result for generated docs
+   - Cooperative review completion result
    - Workflow/tool/evidence/verification contract doc freshness result
    - Any remaining issues
-13. If critical issues found (max 3 fix-recheck cycles; escalate after 3):
+14. If critical issues found (max 3 fix-recheck cycles; escalate after 3):
    a. Fix ONLY test/doc issues (not feature code)
    b. Re-run affected checks with `set -o pipefail; ... 2>&1 | tail -40` output cap
-14. Update state file with verification report
+15. Update state file with verification report
 
 ## Rules
 
@@ -90,6 +95,9 @@
   changes must update matching `doc/07_guide`, `doc/06_spec`,
   `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, and
   `.claude/agents/spipe/` process docs before PASS
+- **Cooperative review complete:** Broad lanes must finish the recorded
+  lower-model sidecars or mark them `N/A`, then pass normal/highest-capability
+  review before PASS
 
 ## Boil a Small Lake
 
@@ -104,6 +112,7 @@ If a fix requires significant code changes, flag it for Phase 5 re-entry.
 - [ ] Coverage at 80%+ for new code
 - [ ] Doc coverage exists for public APIs
 - [ ] Scenario-oriented generated docs pass manual quality review
+- [ ] Cooperative review plan complete or explicitly `N/A`
 - [ ] Workflow/tool/evidence/verification contract docs reviewed and updated
 - [ ] No `pass_todo` stubs remain
 - [ ] Numbered artifact guard passes
