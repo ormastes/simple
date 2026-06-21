@@ -27,16 +27,12 @@ use std.nogc_sync_mut.sffi.io.{
     file_write_text,
     dir_create_all}
 use app.common.string_builder.{StringBuilder}
+use app.io.mod.{process_run_timeout}
 
 use std.io_runtime.{file_read, file_read_bytes, file_exists, env_get}
 
-# rt_process_run_timeout is the raw runtime extern. We invoke it directly because
-# `capture_electron`'s `val (out, err, exit_code) = shell(...)` struct
-# destructure trips an interpreter bug ("variable `exit_code` not found"),
-# and the parent path uses `std.io.shell` which behaves slightly different
-# under bootstrap. Going through the runtime extern keeps the harness
-# portable across stages.
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+# Use the app process facade rather than declaring raw runtime process externs
+# in this leaf harness.
 # NOTE: We do NOT use std.common.image.ppm_decode here. Its
 # `decode_ppm_to_argb` calls `data.len().to_i32()`, which crashes under
 # the bootstrap interpreter ("method `to_i32` not found on type i64").
@@ -472,7 +468,7 @@ fn capture_chrome(html: text, width: i32, height: i32) -> CaptureResult:
             " ELECTRON_CAPTURE_OUTPUT=" + argb_json_path +
             " ELECTRON_DISABLE_SANDBOX=1 timeout 60s npm --prefix tools/electron-shell exec -- electron --no-sandbox --disable-gpu tools/electron-live-bitmap/capture_html_argb.js" +
             " && node tools/pixel_compare/argb_json_to_ppm.js " + argb_json_path + " " + ppm_path
-        val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 60000)
+        val (stdout, stderr, exit_code) = process_run_timeout("/bin/sh", ["-c", cmd], 60000)
 
         if exit_code == -1:
             return capture_error("electron", width, height, "Electron live-bitmap capture timed out after 60000 ms")
@@ -556,7 +552,7 @@ fn _simple_capture_output_path(fixture_id: text) -> text:
 fn _simple_capture_candidate_runnable(candidate: text) -> bool:
     if candidate == "":
         return false
-    val (_stdout, _stderr, exit_code) = rt_process_run_timeout(candidate, ["--version"], 2000)
+    val (_stdout, _stderr, exit_code) = process_run_timeout(candidate, ["--version"], 2000)
     exit_code == 0
 
 fn _simple_capture_select_candidate(candidate: text) -> text:
@@ -613,7 +609,7 @@ fn capture_simple(fixture_id: text, html: text, width: i32, height: i32, timeout
         "--width=" + width.to_string(),
         "--height=" + height.to_string()
     ]
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(simple_bin, args, timeout_ms)
+    val (stdout, stderr, exit_code) = process_run_timeout(simple_bin, args, timeout_ms)
     if exit_code == -1:
         return capture_error(
             "simple_browser_engine", width, height,
