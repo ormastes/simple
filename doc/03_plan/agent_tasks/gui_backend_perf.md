@@ -14,6 +14,17 @@ Updated: 2026-06-14
 - `3d8cd2a636a` (`perf(gui): avoid duplicate backend canonicalization`) prevented redundant canonicalization on duplicate backend names.
 - `102a3853d49` (`perf(gui): share font backend priority ranking`) moved font offload priority lookup onto the shared canonical Engine2D backend priority helper.
 
+## Cooperative Review Routing
+
+Use `.spipe/gui-hardening-full/state.md` as the source of truth for broad-lane
+sidecars and manual helper names. Codex Spark owns bounded evidence-key and
+manual-readability checks, Claude Haiku owns bounded 8K retained-row/blocker
+checks, and Claude Sonnet owns broader web/Electron/Node/Bun and WM/QEMU/GTK
+matrix review. A normal/highest-capability model must merge and accept findings,
+generated-manual quality, coverage claims, exclusions, and done marks before
+closing this lane. Shared helper placeholders must fail explicitly with
+`assert(false)` or `fail(...)`; silent helper passes are not evidence.
+
 ## Completed (already pushed)
 
 - `2dc841a399` -- font offload backend selection: added
