@@ -93,8 +93,8 @@ bin/simple test && bin/simple build lint
 ### Phase 15: Verify + VCS Sync
 - Before verify, confirm workflow, tool-contract, evidence-wrapper, or
   verification-contract changes refreshed matching `doc/07_guide`,
-  `doc/06_spec`, `.codex/skills/`, `.agents/skills/`,
-  `.claude/skills/spipe.md`, and `.claude/agents/spipe/` process docs.
+  `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
+  and `.claude/agents/spipe/` process docs.
 - Run `verify` skill — must show STATUS: PASS
 - If `src/compiler/**`, `src/lib/**`, `src/app/mcp/**`, `src/app/simple_lsp_mcp/**`, or MCP packaging files changed, run:
   - `<runtime> check src/compiler`

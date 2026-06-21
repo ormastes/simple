@@ -82,7 +82,7 @@
   (≤30 lines with diagram)
 - **Process docs fresh:** Workflow, tool, evidence, or verification contract
   changes must update matching `doc/07_guide`, `doc/06_spec`,
-  `.codex/skills/`, `.agents/skills/`, `.claude/skills/spipe.md`, and
+  `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, and
   `.claude/agents/spipe/` process docs before PASS
 
 ## Boil a Small Lake
