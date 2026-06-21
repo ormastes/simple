@@ -15,6 +15,11 @@ Run this as a support skill during SPipe Phase 6 (Refactor) and Phase 8
 - Existing docs under `doc/`
 - Process/knowledge files under `.claude/skills/`, `.claude/agents/`,
   `.codex/skills/`, and `doc/00_llm_process/`
+- The private overlay doc/wiki tree (read order `00 -> 10 -> 20`):
+  - `.spipe/00_llm_process/` — LLM pipeline/process definitions; reference the wiki
+  - `.spipe/10_llm_wiki/` — curated LLM wiki, distilled from raw docs
+  - `.spipe/20_raw_doc/` — raw source documents the wiki is built from
+  - `.spipe/core/` — read-only submodule of the public project (never edit here)
 
 ## Actions
 
@@ -33,10 +38,15 @@ Run this as a support skill during SPipe Phase 6 (Refactor) and Phase 8
 8. For SPipe/spec-adjacent work, run
    `find doc/06_spec -name '*_spec.spl' | wc -l` and keep the result at `0`;
    executable specs belong under `test/`, not `doc/06_spec`.
+9. Maintain the overlay doc/wiki tree when a change touches it: distill new
+   `.spipe/20_raw_doc/` material into `.spipe/10_llm_wiki/`, and keep
+   `.spipe/00_llm_process/` references to the wiki current. Edit raw docs and
+   wiki, never `.spipe/core/` (read-only submodule).
 
 ## Guardrails
 
 - Do not change implementation behavior.
+- Keep `.spipe/10_llm_wiki/` public-safe: no secrets, tokens, or private URLs.
 - Do not create broad documentation rewrites unrelated to the feature.
 - Do not overwrite another agent's research; append with a dated note if needed.
 - Keep process knowledge reusable and concise.
