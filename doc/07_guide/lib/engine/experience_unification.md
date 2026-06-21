@@ -75,7 +75,7 @@ per-dimension).
 
 ## Specs and known limits
 
-Spec manuals: `doc/06_spec/test/01_unit/lib/engine/{surface_layer,camera_order,
+Spec manuals: `doc/06_spec/01_unit/lib/engine/{surface_layer,camera_order,
 audio_bus,fixed_timestep/fixed_timestep}_spec.md` (interpreter-mode green:
 7/4/30/11).
 
