@@ -168,6 +168,12 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: traceability_unsupported_css_missing_count equals `0`
    - Expected: comparison_fixture_status equals `pass`
    - Expected: comparison_artifact_reason equals `pass`
+   - Expected: electron_argb_file_status equals `pass`
+   - Expected: electron_argb_nonblank_status equals `pass`
+   - Expected: chrome_screenshot_png_status equals `pass`
+   - Expected: chrome_screenshot_png_width equals `1280`
+   - Expected: chrome_screenshot_png_height equals `720`
+   - Expected: simple_backend_status equals `pass`
    - Expected: comparison_artifact_status equals `incomplete`
    - Expected: renderdoc_blocked_gate equals ``
    - Expected: renderdoc_blocked_gate_count equals `0`
@@ -185,7 +191,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 505 lines folded for reproduction.
+Runnable source: 523 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -341,13 +347,19 @@ expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_evidence_env=")
 expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_source=")
 expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_mode=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_path=")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_file_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_width=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_height=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_viewport_match_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_nonblank_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_screenshot=")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_screenshot_file_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_screenshot_png_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_screenshot_png_width=")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_screenshot_png_height=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_evidence_env=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_evidence_file_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_simple_backend_status=")
 expect(evidence).to_contain("simple_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple")
 expect(evidence).to_contain("simple_renderdoc_evidence_env=")
 expect(evidence).to_contain("simple_renderdoc_capture_status=")
@@ -527,6 +539,12 @@ val traceability_unsupported_css_missing_count = _value_of(evidence, "html_css_t
 val comparison_fixture_status = _value_of(evidence, "gui_web_2d_vulkan_comparison_fixture_status")
 val comparison_artifact_status = _value_of(evidence, "gui_web_2d_vulkan_comparison_artifact_status")
 val comparison_artifact_reason = _value_of(evidence, "gui_web_2d_vulkan_comparison_artifact_reason")
+val electron_argb_file_status = _value_of(evidence, "gui_web_2d_vulkan_electron_argb_file_status")
+val electron_argb_nonblank_status = _value_of(evidence, "gui_web_2d_vulkan_electron_argb_nonblank_status")
+val chrome_screenshot_png_status = _value_of(evidence, "gui_web_2d_vulkan_chrome_screenshot_png_status")
+val chrome_screenshot_png_width = _value_of(evidence, "gui_web_2d_vulkan_chrome_screenshot_png_width")
+val chrome_screenshot_png_height = _value_of(evidence, "gui_web_2d_vulkan_chrome_screenshot_png_height")
+val simple_backend_status = _value_of(evidence, "gui_web_2d_vulkan_simple_backend_status")
 val production_gate_status = _value_of(evidence, "production_gui_web_renderer_parity_gate_status")
 val production_gate_reason = _value_of(evidence, "production_gui_web_renderer_parity_gate_reason")
 val renderdoc_status = _value_of(evidence, "renderdoc_goal_status")
@@ -634,6 +652,12 @@ expect(traceability_unsupported_css_missing_count).to_equal("0")
 expect(comparison_fixture_status).to_equal("pass")
 if comparison_artifact_status == "pass":
     expect(comparison_artifact_reason).to_equal("pass")
+    expect(electron_argb_file_status).to_equal("pass")
+    expect(electron_argb_nonblank_status).to_equal("pass")
+    expect(chrome_screenshot_png_status).to_equal("pass")
+    expect(chrome_screenshot_png_width).to_equal("1280")
+    expect(chrome_screenshot_png_height).to_equal("720")
+    expect(simple_backend_status).to_equal("pass")
 else:
     expect(comparison_artifact_status).to_equal("incomplete")
     expect(comparison_artifact_reason.len()).to_be_greater_than(0)

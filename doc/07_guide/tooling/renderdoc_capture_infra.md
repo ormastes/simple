@@ -123,10 +123,17 @@ contract is `gui_web_2d_vulkan_comparison_fixture_status`,
 `gui_web_2d_vulkan_comparison_artifact_status`,
 `gui_web_2d_vulkan_comparison_artifact_reason`,
 `gui_web_2d_vulkan_electron_argb_viewport_match_status`,
-`gui_web_2d_vulkan_chrome_screenshot_file_status`, and
-`gui_web_2d_vulkan_simple_evidence_file_status`; use those fields to decide
-whether the Electron baseline, Chrome screenshot, and Simple evidence env are
-present and comparable before making a GUI/web/2D Vulkan comparison claim.
+`gui_web_2d_vulkan_electron_argb_file_status`,
+`gui_web_2d_vulkan_electron_argb_nonblank_status`,
+`gui_web_2d_vulkan_chrome_screenshot_file_status`,
+`gui_web_2d_vulkan_chrome_screenshot_png_status`,
+`gui_web_2d_vulkan_chrome_screenshot_png_width`,
+`gui_web_2d_vulkan_chrome_screenshot_png_height`,
+`gui_web_2d_vulkan_simple_evidence_file_status`, and
+`gui_web_2d_vulkan_simple_backend_status`; use those fields to decide whether
+the Electron baseline exists and is nonblank, the Chrome screenshot is a
+viewport-matching PNG, and the Simple evidence env proves the Vulkan backend
+before making a GUI/web/2D Vulkan comparison claim.
 
 On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
 `src/compiler_rust/target/debug/simple` when that binary advertises the macOS
