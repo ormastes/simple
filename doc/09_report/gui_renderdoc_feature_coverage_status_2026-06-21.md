@@ -411,3 +411,25 @@
 - blocked_completion_gate=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic
 - blocked_completion_gate_count=4
 - blocked_completion_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic|original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|production GUI/web parity evidence with live Tauri and Chrome captures
+
+## Linux check addendum — 2026-06-21
+
+Command:
+
+```bash
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+```
+
+Result: exit 0.
+
+- gui_web_2d_vulkan_uname_s=Linux
+- gui_web_2d_vulkan_uname_m=x86_64
+- gui_web_2d_vulkan_loader_status=present
+- gui_web_2d_vulkan_device=llvmpipe (LLVM 20.1.2, 256 bits)
+- gui_web_2d_vulkan_driver=llvmpipe
+- gui_web_2d_vulkan_renderdoc_status=unavailable
+- gui_web_2d_vulkan_renderdoc_reason=missing-renderdoccmd-in-search-paths
+
+This is readiness/blocker evidence only. llvmpipe is software Vulkan fallback,
+and missing `renderdoccmd` blocks RenderDoc proof; do not count this Linux check
+as production GUI/web/2D Vulkan or RenderDoc completion.
