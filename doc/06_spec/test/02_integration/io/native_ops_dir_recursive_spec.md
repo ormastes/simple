@@ -1,6 +1,6 @@
-# Native Ops Dir Recursive Specification
+# Native recursive directory operations
 
-> <details>
+> Verifies nested directory setup and cleanup for native directory operations while host shell access goes through the shared IO runtime wrapper.
 
 <!-- sdn-diagram:id=native_ops_dir_recursive_spec.arch -->
 <details class="sdn-source">
@@ -11,6 +11,7 @@
 @direction LR
 
 native_ops_dir_recursive_spec -> app
+native_ops_dir_recursive_spec -> std
 ```
 
 </details>
@@ -32,7 +33,30 @@ native_ops_dir_recursive_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Native Ops Dir Recursive Specification
+# Native recursive directory operations
+
+Verifies nested directory setup and cleanup for native directory operations while host shell access goes through the shared IO runtime wrapper.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | I/O |
+| Status | Active |
+| Source | `test/02_integration/io/native_ops_dir_recursive_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies nested directory setup and cleanup for native directory operations while
+host shell access goes through the shared IO runtime wrapper.
+
+## Acceptance
+
+- A nested temporary directory can be created.
+- The nested path is detected as a directory.
+- The temporary directory tree is removed.
 
 ## Scenarios
 
@@ -67,21 +91,6 @@ check(shell_rm_rf("{tmp}/simple_native_deep"))
 
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | I/O |
-| Status | Active |
-| Source | `test/02_integration/io/native_ops_dir_recursive_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Native Directory Ops
 
 ## Scenario Summary
 

@@ -1,6 +1,6 @@
-# Native Ops Dir Create All Specification
+# Native recursive directory create operations
 
-> <details>
+> Verifies a nested temporary directory tree can be created and removed while the test routes host shell access through the shared IO runtime wrapper.
 
 <!-- sdn-diagram:id=native_ops_dir_create_all_spec.arch -->
 <details class="sdn-source">
@@ -11,6 +11,7 @@
 @direction LR
 
 native_ops_dir_create_all_spec -> app
+native_ops_dir_create_all_spec -> std
 ```
 
 </details>
@@ -32,7 +33,30 @@ native_ops_dir_create_all_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Native Ops Dir Create All Specification
+# Native recursive directory create operations
+
+Verifies a nested temporary directory tree can be created and removed while the test routes host shell access through the shared IO runtime wrapper.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | I/O |
+| Status | Active |
+| Source | `test/02_integration/io/native_ops_dir_create_all_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies a nested temporary directory tree can be created and removed while the
+test routes host shell access through the shared IO runtime wrapper.
+
+## Acceptance
+
+- A nested temporary directory tree can be created.
+- The deepest directory is detected as a directory.
+- The temporary root tree can be removed.
 
 ## Scenarios
 
@@ -67,21 +91,6 @@ check(dir_remove_all("{tmp}/simple_create_all") == 0)
 
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | I/O |
-| Status | Active |
-| Source | `test/02_integration/io/native_ops_dir_create_all_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Native Directory Ops
 
 ## Scenario Summary
 

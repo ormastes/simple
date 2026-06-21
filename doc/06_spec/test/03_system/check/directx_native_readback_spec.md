@@ -127,10 +127,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val command = "rm -rf build/test-directx-native-readback && BUILD_DIR=build/test-directx-native-readback REPORT_PATH=build/test-directx-native-readback/report.md SIMPLE_DIRECTX_NATIVE_TIMEOUT_SECS=180 sh scripts/check/check-directx-native-readback.shs || true"
-val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
-val evidence = rt_file_read_text("build/test-directx-native-readback/evidence.env")
+val evidence = file_read("build/test-directx-native-readback/evidence.env")
 expect(evidence).to_contain("directx_native_readback_status=")
 expect(evidence).to_contain("directx_native_readback_reason=")
 expect(evidence).to_contain("directx_native_readback_source=")

@@ -10,7 +10,7 @@
 @layout dag
 @direction LR
 
-test_daemon_concurrent_spec
+test_daemon_concurrent_spec -> std
 ```
 
 </details>
@@ -63,14 +63,14 @@ to the same directory and verifies correct handling.
 
 #### handles requests from 5 concurrent agents
 
-1. conc setup
-2. agent submit
-3. agent submit
-4. agent submit
-5. agent submit
-6. agent submit
+- conc setup
+- agent submit
+- agent submit
+- agent submit
+- agent submit
+- agent submit
    - Expected: count_req_files() equals `5`
-7. conc cleanup
+- conc cleanup
 
 
 <details>
@@ -94,9 +94,9 @@ conc_cleanup()
 
 #### preserves all request data
 
-1. conc setup
+- conc setup
    - Expected: reqs.len() equals `2`
-2. conc cleanup
+- conc cleanup
 
 
 <details>
@@ -118,10 +118,10 @@ conc_cleanup()
 
 #### handles 20 rapid sequential submissions
 
-1. conc setup
-2. submit n rapid agents
+- conc setup
+- submit n rapid agents
    - Expected: count_req_files() equals `20`
-3. conc cleanup
+- conc cleanup
 
 
 <details>
@@ -143,10 +143,10 @@ conc_cleanup()
 
 #### allows same test from different agents
 
-1. conc setup
+- conc setup
    - Expected: count_req_files() equals `2`
    - Expected: id1 != id2 is true
-2. conc cleanup
+- conc cleanup
 
 
 <details>
@@ -169,14 +169,14 @@ conc_cleanup()
 
 #### daemon responds to first, redirects second
 
-1. conc setup
-2. daemon respond
-3. daemon respond
+- conc setup
+- daemon respond
+- daemon respond
    - Expected: resp1[0] equals `2`
    - Expected: resp2[0] equals `2`
    - Expected: resp1[2] equals `5`
    - Expected: resp2[2] equals `5`
-4. conc cleanup
+- conc cleanup
 
 
 <details>
@@ -207,12 +207,12 @@ conc_cleanup()
 
 #### returns cached response for unchanged test
 
-1. conc setup
-2. daemon respond cached
+- conc setup
+- daemon respond cached
    - Expected: resp[0] equals `6`
    - Expected: resp[2] equals `10`
    - Expected: resp[4] is true
-3. conc cleanup
+- conc cleanup
 
 
 <details>
@@ -236,11 +236,11 @@ conc_cleanup()
 
 #### executes and caches new test
 
-1. conc setup
-2. daemon respond
+- conc setup
+- daemon respond
    - Expected: resp[0] equals `2`
    - Expected: resp[4] is false
-3. conc cleanup
+- conc cleanup
 
 
 <details>
@@ -265,11 +265,11 @@ conc_cleanup()
 
 #### always executes clean run (kind=3)
 
-1. conc setup
-2. daemon respond
+- conc setup
+- daemon respond
    - Expected: resp[0] equals `2`
    - Expected: resp[4] is false
-3. conc cleanup
+- conc cleanup
 
 
 <details>
@@ -294,10 +294,10 @@ conc_cleanup()
 
 #### handles RUN_SINGLE, CLEAN, and STATUS simultaneously
 
-1. conc setup
+- conc setup
    - Expected: count_req_files() equals `3`
    - Expected: reqs.len() equals `3`
-2. conc cleanup
+- conc cleanup
 
 
 <details>
@@ -324,17 +324,17 @@ conc_cleanup()
 
 #### each agent gets its own response
 
-1. conc setup
-2. daemon respond
-3. daemon respond
-4. daemon respond
+- conc setup
+- daemon respond
+- daemon respond
+- daemon respond
    - Expected: r1[0] equals `2`
    - Expected: r1[2] equals `10`
    - Expected: r2[0] equals `3`
    - Expected: r2[3] equals `2`
    - Expected: r3[0] equals `2`
    - Expected: r3[2] equals `7`
-5. conc cleanup
+- conc cleanup
 
 
 <details>
@@ -367,13 +367,13 @@ conc_cleanup()
 
 #### response arrives after request cleanup
 
-1. conc setup
+- conc setup
    - Expected: reqs.len() equals `1`
-2. delete req files in dir
+- delete req files in dir
    - Expected: count_req_files() equals `0`
-3. daemon respond
+- daemon respond
    - Expected: resp[0] equals `2`
-4. conc cleanup
+- conc cleanup
 
 
 <details>
@@ -405,12 +405,12 @@ conc_cleanup()
 
 #### handles 50 agents submitting different tests
 
-1. conc setup
+- conc setup
    - Expected: count_req_files() equals `50`
-2. respond n agents stress
+- respond n agents stress
    - Expected: count_resp_files() equals `50`
-3. verify n agents stress
-4. conc cleanup
+- verify n agents stress
+- conc cleanup
 
 
 <details>
@@ -435,11 +435,11 @@ conc_cleanup()
 
 #### handles 10 agents all requesting same test
 
-1. conc setup
+- conc setup
    - Expected: count_req_files() equals `10`
-2. respond n agents same test
-3. verify n agents same test
-4. conc cleanup
+- respond n agents same test
+- verify n agents same test
+- conc cleanup
 
 
 <details>

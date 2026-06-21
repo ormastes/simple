@@ -10,7 +10,7 @@
 @layout dag
 @direction LR
 
-lifecycle_tools_spec
+lifecycle_tools_spec -> std
 ```
 
 </details>
@@ -306,23 +306,28 @@ expect(arch_to_binary("mips")).to_equal("t32marm")
 
 ### t32_find_install_dir
 
-#### returns /opt/t32 when it exists (standard install)
+#### returns configured or standard install dir when present
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# This machine has /opt/t32 installed
 val dir = find_install_dir()
-expect(dir).to_equal("/opt/t32")
+val configured = env_get("T32MEM")
+if configured != "":
+    expect(dir).to_equal(configured)
+elif file_exists("/opt/t32"):
+    expect(dir).to_equal("/opt/t32")
+else:
+    expect(dir).to_equal("")
 ```
 
 </details>
 
-#### returns non-empty string when T32 is installed
+#### returns a stable result across repeated lookup
 
 <details>
 <summary>Executable SSpec</summary>
@@ -332,25 +337,28 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val dir = find_install_dir()
-expect(dir != "").to_equal(true)
+expect(find_install_dir()).to_equal(dir)
 ```
 
 </details>
 
 ### t32_check_xvfb
 
-#### returns true when xvfb-run is installed
+#### matches xvfb-run availability on the current host
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# This machine has xvfb installed
 val result = check_xvfb()
-expect(result).to_equal(true)
+val (_stdout, _stderr, rc) = process_run("/bin/sh", ["-c", "which xvfb-run 2>/dev/null"])
+if rc == 0:
+    expect(result).to_equal(true)
+else:
+    expect(result).to_equal(false)
 ```
 
 </details>

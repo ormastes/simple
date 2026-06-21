@@ -10,7 +10,7 @@
 @layout dag
 @direction LR
 
-smoke_spec
+smoke_spec -> std
 ```
 
 </details>
@@ -64,7 +64,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val found = rt_file_exists("src")
+val found = file_exists("src")
 expect(found).to_equal(true)
 ```
 
@@ -79,7 +79,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val found = rt_file_exists("test")
+val found = file_exists("test")
 expect(found).to_equal(true)
 ```
 
@@ -94,7 +94,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val found = rt_file_exists("CLAUDE.md")
+val found = file_exists("CLAUDE.md")
 expect(found).to_equal(true)
 ```
 

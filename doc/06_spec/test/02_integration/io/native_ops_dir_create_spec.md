@@ -1,6 +1,6 @@
-# Native Ops Dir Create Specification
+# Native directory create operations
 
-> <details>
+> Verifies the native directory API can create and remove a temporary directory through the Simple directory facade.
 
 <!-- sdn-diagram:id=native_ops_dir_create_spec.arch -->
 <details class="sdn-source">
@@ -11,6 +11,7 @@
 @direction LR
 
 native_ops_dir_create_spec -> app
+native_ops_dir_create_spec -> std
 ```
 
 </details>
@@ -32,7 +33,30 @@ native_ops_dir_create_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Native Ops Dir Create Specification
+# Native directory create operations
+
+Verifies the native directory API can create and remove a temporary directory through the Simple directory facade.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | I/O |
+| Status | Active |
+| Source | `test/02_integration/io/native_ops_dir_create_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies the native directory API can create and remove a temporary directory
+through the Simple directory facade.
+
+## Acceptance
+
+- A temporary directory can be created.
+- The directory is detected as a directory.
+- The directory tree can be removed.
 
 ## Scenarios
 
@@ -43,9 +67,9 @@ native_ops_dir_create_spec -> app
 
 #### creates directories _(slow)_
 
-1. check
-2. check
-3. check
+- check
+- check
+- check
 
 
 <details>
@@ -66,21 +90,6 @@ check(dir_remove_all(test_dir) == 0)
 
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | I/O |
-| Status | Active |
-| Source | `test/02_integration/io/native_ops_dir_create_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Native Directory Ops
 
 ## Scenario Summary
 

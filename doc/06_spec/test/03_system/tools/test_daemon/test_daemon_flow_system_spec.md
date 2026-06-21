@@ -10,7 +10,7 @@
 @layout dag
 @direction LR
 
-test_daemon_flow_system_spec
+test_daemon_flow_system_spec -> std
 ```
 
 </details>
@@ -63,21 +63,21 @@ real filesystem operations.
 
 #### completes full submit-process-respond cycle
 
-1. flow setup
-2. client write lock
+- flow setup
+- client write lock
    - Expected: flow_req_count() equals `1`
    - Expected: reqs.len() equals `1`
    - Expected: reqs[0][0] equals `req_id`
    - Expected: reqs[0][2] equals `test/flow_spec.spl`
-3. daemon process and respond
-4. daemon cleanup requests
+- daemon process and respond
+- daemon cleanup requests
    - Expected: flow_req_count() equals `0`
    - Expected: flow_resp_count() equals `1`
    - Expected: client_check_response(req_id) is true
    - Expected: resp[0] equals `2`
    - Expected: resp[1] equals `test/flow_spec.spl`
    - Expected: resp[2] equals `Tests completed`
-5. flow cleanup
+- flow cleanup
 
 
 <details>
@@ -117,15 +117,15 @@ flow_cleanup()
 
 #### processes 3 requests in one poll cycle
 
-1. flow setup
-2. client write lock
+- flow setup
+- client write lock
    - Expected: reqs.len() equals `3`
-3. flow process all requests
-4. daemon cleanup requests
+- flow process all requests
+- daemon cleanup requests
    - Expected: client_check_response(id1) is true
    - Expected: client_check_response(id2) is true
    - Expected: client_check_response(id3) is true
-5. flow cleanup
+- flow cleanup
 
 
 <details>
@@ -159,15 +159,15 @@ flow_cleanup()
 
 #### processes requests across multiple poll cycles
 
-1. flow setup
-2. client write lock
-3. daemon process and respond
-4. daemon cleanup requests
-5. daemon process and respond
-6. daemon cleanup requests
+- flow setup
+- client write lock
+- daemon process and respond
+- daemon cleanup requests
+- daemon process and respond
+- daemon cleanup requests
    - Expected: r1[0] equals `2`
    - Expected: r2[0] equals `2`
-7. flow cleanup
+- flow cleanup
 
 
 <details>
@@ -203,10 +203,10 @@ flow_cleanup()
 
 #### client gets empty for missing response
 
-1. flow setup
+- flow setup
    - Expected: resp[0] equals `-1`
    - Expected: resp[1] equals ``
-2. flow cleanup
+- flow cleanup
 
 
 <details>
@@ -227,9 +227,9 @@ flow_cleanup()
 
 #### daemon handles empty request directory
 
-1. flow setup
+- flow setup
    - Expected: reqs.len() equals `0`
-2. flow cleanup
+- flow cleanup
 
 
 <details>
@@ -251,12 +251,12 @@ flow_cleanup()
 
 #### requests and responses use separate directories
 
-1. flow setup
+- flow setup
    - Expected: flow_req_count() equals `1`
    - Expected: flow_resp_count() equals `0`
-2. daemon process and respond
+- daemon process and respond
    - Expected: flow_resp_count() equals `1`
-3. flow cleanup
+- flow cleanup
 
 
 <details>
@@ -281,14 +281,14 @@ flow_cleanup()
 
 #### 5 agents submit, daemon batch processes, all get results
 
-1. flow setup
-2. client write lock
+- flow setup
+- client write lock
    - Expected: flow_req_count() equals `5`
    - Expected: reqs.len() equals `5`
-3. flow process reqs with offset
-4. daemon cleanup requests
-5. flow verify all responses
-6. flow cleanup
+- flow process reqs with offset
+- daemon cleanup requests
+- flow verify all responses
+- flow cleanup
 
 
 <details>

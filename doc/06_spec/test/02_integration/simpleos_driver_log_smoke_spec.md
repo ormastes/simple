@@ -54,7 +54,7 @@ AC-6d (one driver integration smoke).
 Status: RED PHASE. Pilot driver `null_block.spl` has not been rerouted
 through the facade yet; backend slot table not present yet.
 
-Pilot driver: `examples/09_embedded/simple_os/src/drivers/null_block.spl` is the
+Pilot driver: `src/lib/nogc_sync_mut/driver/null_block_driver.spl` is the
 single driver in the SimpleOS tree today (per Phase 2 audit). Phase 5
 must wire its registration log line through `log_info(SUBSYS_DRIVER_BLOCK, ...)`.
 
@@ -78,11 +78,11 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("examples/09_embedded/simple_os/src/drivers/null_block.spl") ?? ""
-expect(source.contains("fn null_block_register()")).to_equal(true)
+val source = null_block_driver_source()
+expect(source.contains("fn register_null_block_driver()")).to_equal(true)
 expect(source.contains("log_info(SUBSYS_DRIVER_BLOCK")).to_equal(true)
 expect(source.contains("null_block: registered")).to_equal(true)
-expect(source.contains("null_block_smoke()")).to_equal(true)
+expect(source.contains("null_block_make_ops()")).to_equal(true)
 ```
 
 </details>
@@ -98,7 +98,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # The production contract is source-level for this hosted spec:
 # driver logging must enter std.log, not raw UART output.
-val source = rt_file_read_text("examples/09_embedded/simple_os/src/drivers/null_block.spl") ?? ""
+val source = null_block_driver_source()
 expect(source.contains("log_info(SUBSYS_DRIVER_BLOCK")).to_equal(true)
 expect(source.index_of("uart_writeln(") ?? -1).to_equal(-1)
 expect(source.index_of("log_raw_println(") ?? -1).to_equal(-1)
@@ -115,10 +115,10 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("examples/09_embedded/simple_os/src/drivers/null_block.spl") ?? ""
+val source = null_block_driver_source()
 expect(source.index_of("pass_todo(") ?? -1).to_equal(-1)
 expect(source).to_contain("fn register_null_block_driver_auto()")
-expect(source).to_contain("return register_static_driver(m, ops)")
+expect(source).to_contain("return register_static_driver(m, null_block_make_ops())")
 ```
 
 </details>

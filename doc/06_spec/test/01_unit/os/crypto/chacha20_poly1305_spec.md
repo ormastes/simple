@@ -170,22 +170,22 @@ expect(_decrypt_payload(res)).to_equal(_plaintext())
 
 #### decrypt with wrong tag fails authentication
 
-1. bad tag push
-2. bad tag push
-3. bad tag push
-4. bad tag push
-5. bad tag push
-6. bad tag push
-7. bad tag push
-8. bad tag push
-9. bad tag push
-10. bad tag push
-11. bad tag push
-12. bad tag push
-13. bad tag push
-14. bad tag push
-15. bad tag push
-16. bad tag push
+- bad tag push
+- bad tag push
+- bad tag push
+- bad tag push
+- bad tag push
+- bad tag push
+- bad tag push
+- bad tag push
+- bad tag push
+- bad tag push
+- bad tag push
+- bad tag push
+- bad tag push
+- bad tag push
+- bad tag push
+- bad tag push
    - Expected: _decrypt_ok(res) is false
 
 

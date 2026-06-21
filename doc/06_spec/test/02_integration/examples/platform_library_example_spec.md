@@ -1,6 +1,6 @@
 # Platform Library Example Specification
 
-> 1. print "  Host: {arch name}-{os name}
+> <details>
 
 <!-- sdn-diagram:id=platform_library_example_spec.arch -->
 <details class="sdn-source">
@@ -10,7 +10,7 @@
 @layout dag
 @direction LR
 
-platform_library_example_spec
+platform_library_example_spec -> std
 ```
 
 </details>
@@ -40,7 +40,7 @@ platform_library_example_spec
 
 #### Example 1: Auto-detect host platform
 
-1. print "  Host: {arch name}-{os name}
+- print "  Host: {arch name}-{os name}
    - Expected: arch_name.len() > 0 is true
    - Expected: os_name.len() > 0 is true
    - Expected: host.pointer_bytes > 0 is true
@@ -72,7 +72,7 @@ expect(host.pointer_bytes > 0).to_equal(true)
 
 #### Example 2: Same-platform conversion (zero-cost no-op)
 
-1. print "  Value: {value} → {result}
+- print "  Value: {value} → {result}
    - Expected: result equals `value`
 
 
@@ -151,7 +151,7 @@ expect(restored).to_equal(value)
 
 #### Example 5: Text newline conversion (LF ↔ CRLF)
 
-1. print "  Unix
+- print "  Unix
    - Expected: unix_len equals `17`
    - Expected: win_len equals `19`
    - Expected: back equals `unix_text`
@@ -187,11 +187,11 @@ expect(back).to_equal(unix_text)
 
 #### Example 6: Wire format serialization
 
-1. var writer = wire writer network
-2. writer write u32
-3. writer write text
-4. writer write u32
-5. var reader = wire reader new
+- var writer = wire writer network
+- writer write u32
+- writer write text
+- writer write u32
+- var reader = wire reader new
    - Expected: n1 equals `12345`
    - Expected: msg equals `Protocol`
    - Expected: n2 equals `67890`
@@ -228,8 +228,8 @@ expect(n2).to_equal(67890)
 
 #### Example 7: Platform-aware file I/O
 
-1. text file write local
-2. file delete
+- text file write local
+- text file delete local
    - Expected: read_back equals `content`
 
 
@@ -250,7 +250,7 @@ text_file_write_local(path, content)
 val read_back = text_file_read_local(path)
 
 # Clean up
-file_delete(path)
+text_file_delete_local(path)
 
 # Content preserved
 expect(read_back).to_equal(content)

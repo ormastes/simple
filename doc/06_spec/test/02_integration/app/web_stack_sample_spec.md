@@ -10,7 +10,7 @@
 @layout dag
 @direction LR
 
-web_stack_sample_spec
+web_stack_sample_spec -> std
 ```
 
 </details>
@@ -41,7 +41,7 @@ web_stack_sample_spec
 #### defines the canonical backend selector and matching storage paths
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -63,7 +63,7 @@ expect(web_app).to_contain("SessionStore.sqlite")
 #### declares the required auth crud and search routes
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -86,7 +86,7 @@ expect(routes).to_contain("pattern: \"/items/search\"")
 #### implements backend-neutral record storage and dual-backend sessions
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -111,7 +111,7 @@ expect(session).to_contain("Failed to initialize Simple DB sessions")
 #### renders stable login created-item and search-result markers
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

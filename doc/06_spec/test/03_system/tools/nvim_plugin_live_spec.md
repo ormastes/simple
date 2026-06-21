@@ -41,13 +41,13 @@ nvim_plugin_live_spec -> std
 #### runs isolated headless plugin checks from the worktree
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val result = rt_process_run("bin/simple", ["run", "scripts/smoke/nvim_plugin_smoke.spl"])
+val result = process_run("bin/simple", ["run", "scripts/smoke/nvim_plugin_smoke.spl"])
 expect(result.2).to_equal(0)
 if result.0.contains("SKIP: nvim not found"):
     expect(result.0).to_contain("SKIP: nvim not found")

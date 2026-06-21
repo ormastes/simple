@@ -47,11 +47,11 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = rt_file_read_text("src/app/cli/bootstrap_main.spl") ?? ""
-val bin_catalog = rt_file_read_text("bin/FILE.md") ?? ""
+val src = file_read("src/app/cli/bootstrap_main.spl")
+val bin_catalog = file_read("bin/FILE.md")
 expect(src).to_contain("bootstrap_main cannot emit a seed-wrapper fallback")
 expect(forbidden_bootstrap_marker(src)).to_equal("ok")
-expect(rt_file_exists("bin/simple.bootstrap_seed_wrapper.c")).to_equal(false)
+expect(file_exists("bin/simple.bootstrap_seed_wrapper.c")).to_equal(false)
 expect(bin_catalog.contains("bootstrap_seed_wrapper")).to_equal(false)
 ```
 
@@ -66,7 +66,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = rt_file_read_text("src/compiler/80.driver/driver_bootstrap.spl") ?? ""
+val src = file_read("src/compiler/80.driver/driver_bootstrap.spl")
 expect(src).to_contain("bootstrap seed-wrapper fallback was removed")
 expect(src).to_contain("bootstrap driver stub LLVM was removed")
 expect(src).to_contain("bootstrap direct stub IR was removed")
@@ -84,25 +84,25 @@ Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val rust_dispatch = rt_file_read_text("src/compiler_rust/driver/src/main.rs") ?? ""
-val cli_dispatch = rt_file_read_text("src/app/cli/main_part2.spl") ?? ""
-val native_entry = rt_file_read_text("src/app/cli/native_build_main.spl") ?? ""
-val parser_types = rt_file_read_text("src/compiler/10.frontend/parser_types.spl") ?? ""
-val flat_bridge = rt_file_read_text("src/compiler/10.frontend/flat_ast_bridge_part1.spl") ?? ""
-val type_resolver = rt_file_read_text("src/compiler_rust/compiler/src/hir/lower/type_resolver.rs") ?? ""
-val type_registration = rt_file_read_text("src/compiler_rust/compiler/src/hir/lower/type_registration.rs") ?? ""
-val expr_tests = rt_file_read_text("src/compiler_rust/compiler/src/hir/lower/tests/expression_tests.rs") ?? ""
-val stmt_lowering = rt_file_read_text("src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs") ?? ""
-val import_loader = rt_file_read_text("src/compiler_rust/compiler/src/hir/lower/import_loader.rs") ?? ""
-val parser_utils = rt_file_read_text("src/compiler/10.frontend/parser_types_utils.spl") ?? ""
-val parser_expr = rt_file_read_text("src/compiler/10.frontend/parser_types_expr.spl") ?? ""
-val cache_types = rt_file_read_text("src/compiler/80.driver/cache/cache_types.spl") ?? ""
-val bootstrap_api = rt_file_read_text("src/compiler/80.driver/bootstrap_api.spl") ?? ""
-val driver_api_compile = rt_file_read_text("src/compiler/80.driver/driver_api_compile_single.spl") ?? ""
-val driver_api_interpret = rt_file_read_text("src/compiler/80.driver/driver_api_interpret.spl") ?? ""
-val driver_incremental = rt_file_read_text("src/compiler/80.driver/driver/incremental.spl") ?? ""
-val sdn_shim = rt_file_read_text("src/lib/sdn/__init__.spl") ?? ""
-val module_resolver = rt_file_read_text("src/compiler_rust/compiler/src/module_resolver/mod.rs") ?? ""
+val rust_dispatch = file_read("src/compiler_rust/driver/src/main.rs")
+val cli_dispatch = file_read("src/app/cli/main_part2.spl")
+val native_entry = file_read("src/app/cli/native_build_main.spl")
+val parser_types = file_read("src/compiler/10.frontend/parser_types.spl")
+val flat_bridge = file_read("src/compiler/10.frontend/flat_ast_bridge_part1.spl")
+val type_resolver = file_read("src/compiler_rust/compiler/src/hir/lower/type_resolver.rs")
+val type_registration = file_read("src/compiler_rust/compiler/src/hir/lower/type_registration.rs")
+val expr_tests = file_read("src/compiler_rust/compiler/src/hir/lower/tests/expression_tests.rs")
+val stmt_lowering = file_read("src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs")
+val import_loader = file_read("src/compiler_rust/compiler/src/hir/lower/import_loader.rs")
+val parser_utils = file_read("src/compiler/10.frontend/parser_types_utils.spl")
+val parser_expr = file_read("src/compiler/10.frontend/parser_types_expr.spl")
+val cache_types = file_read("src/compiler/80.driver/cache/cache_types.spl")
+val bootstrap_api = file_read("src/compiler/80.driver/bootstrap_api.spl")
+val driver_api_compile = file_read("src/compiler/80.driver/driver_api_compile_single.spl")
+val driver_api_interpret = file_read("src/compiler/80.driver/driver_api_interpret.spl")
+val driver_incremental = file_read("src/compiler/80.driver/driver/incremental.spl")
+val sdn_shim = file_read("src/lib/sdn/__init__.spl")
+val module_resolver = file_read("src/compiler_rust/compiler/src/module_resolver/mod.rs")
 expect(rust_dispatch).to_contain("src/app/cli/native_build_main.spl")
 expect(native_entry).to_contain("cli_native_build")
 expect(native_entry).to_contain("native_build_entry_args")

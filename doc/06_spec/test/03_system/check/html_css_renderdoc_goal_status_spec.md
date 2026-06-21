@@ -131,11 +131,11 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Run the aggregate RenderDoc goal-status gate in an isolated build directory")
 val command = "rm -rf build/test-html-css-renderdoc-goal-status && BUILD_DIR=build/test-html-css-renderdoc-goal-status REPORT_PATH=build/test-html-css-renderdoc-goal-status/report.md sh scripts/check/check-html-css-renderdoc-goal-status.shs || true"
-val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
 step("Read the current evidence contract emitted by the gate")
-val evidence = rt_file_read_text("build/test-html-css-renderdoc-goal-status/evidence.env") ?? ""
+val evidence = file_read("build/test-html-css-renderdoc-goal-status/evidence.env")
 expect(evidence).to_contain("html_css_renderdoc_goal_status=")
 expect(evidence).to_contain("html_css_traceability_status=pass")
 expect(evidence).to_contain("html_css_traceability_reason=pass")
@@ -284,7 +284,7 @@ else:
         expect(electron_gate_status == "pass").to_equal(false)
 
 step("Verify the operator report was written")
-val report = rt_file_read_text("build/test-html-css-renderdoc-goal-status/report.md") ?? ""
+val report = file_read("build/test-html-css-renderdoc-goal-status/report.md")
 expect(report).to_contain("# HTML/CSS RenderDoc Goal Status")
 expect(report).to_contain("- HTML/CSS traceability: pass (pass)")
 expect(report).to_contain("- HTML/CSS rendering manifest traceability: pass (pass)")
@@ -309,11 +309,11 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Create controlled Simple, external-host, and Electron RenderDoc evidence fixtures")
 val command = "rm -rf build/test-html-css-renderdoc-goal-status-pass && mkdir -p build/test-html-css-renderdoc-goal-status-pass/simple build/test-html-css-renderdoc-goal-status-pass/external/capture/html build/test-html-css-renderdoc-goal-status-pass/electron && printf 'RDOCsynthetic simple capture\\n' > build/test-html-css-renderdoc-goal-status-pass/simple/simple.rdc && printf 'RDOCsynthetic external capture\\n' > build/test-html-css-renderdoc-goal-status-pass/external/capture/html/html.rdc && printf 'RDOCsynthetic electron capture\\n' > build/test-html-css-renderdoc-goal-status-pass/electron/electron.rdc && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-html-css-renderdoc-goal-status-pass/electron/electron_argb.json && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-html-css-renderdoc-goal-status-pass/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > build/test-html-css-renderdoc-goal-status-pass/simple/evidence.env && printf 'rdoc_external_host_capture_status=pass\\nrdoc_external_host_capture_reason=pass\\nrdoc_external_host_capture_env=build/test-html-css-renderdoc-goal-status-pass/external/capture/html/evidence.env\\nrdoc_external_host_capture_status_raw=pass\\nrdoc_external_host_capture_reason_raw=pass\\nrdoc_external_host_capture_file=build/test-html-css-renderdoc-goal-status-pass/external/capture/html/html.rdc\\nrdoc_external_host_capture_magic=RDOC\\nrdoc_external_host_capture_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_gate_status=pass\\nrdoc_external_host_gate_reason=pass\\nrdoc_external_host_gate_scene=html-css-chrome\\nrdoc_external_host_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_gate_requested_api=vulkan\\nrdoc_external_host_gate_requested_angle=vulkan\\nrdoc_external_host_gate_requested_features=Vulkan\\nrdoc_external_host_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan\\nrdoc_external_host_required_backend=original\\nrdoc_external_host_required_scene=html-css-chrome\\nrdoc_external_host_required_status=pass\\nrdoc_external_host_required_magic=RDOC\\nrdoc_external_host_required_api=vulkan\\nrdoc_external_host_required_angle=vulkan\\nrdoc_external_host_required_features=Vulkan\\nrdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_required_launch_flag_enable_features=--enable-features=Vulkan\\nrdoc_external_host_required_launch_flag_use_angle=--use-angle=vulkan\\n' > build/test-html-css-renderdoc-goal-status-pass/external/evidence.env && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-html-css-renderdoc-goal-status-pass/electron/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/.bin/electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-html-css-renderdoc-goal-status-pass/electron/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--enable-features=Vulkan --use-angle=vulkan\\n' > build/test-html-css-renderdoc-goal-status-pass/electron/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/simple/evidence.env RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/external/evidence.env RDOC_ELECTRON_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/electron/evidence.env BUILD_DIR=build/test-html-css-renderdoc-goal-status-pass/out REPORT_PATH=build/test-html-css-renderdoc-goal-status-pass/report.md sh scripts/check/check-html-css-renderdoc-goal-status.shs"
-val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
 step("Assert the aggregate gate accepts only the complete controlled evidence set")
-val evidence = rt_file_read_text("build/test-html-css-renderdoc-goal-status-pass/out/evidence.env") ?? ""
+val evidence = file_read("build/test-html-css-renderdoc-goal-status-pass/out/evidence.env")
 expect(evidence).to_contain("html_css_renderdoc_goal_status=pass")
 expect(evidence).to_contain("html_css_renderdoc_goal_reason=pass")
 expect(evidence).to_contain("html_css_traceability_status=pass")

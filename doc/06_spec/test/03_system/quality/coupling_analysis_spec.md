@@ -11,6 +11,7 @@
 @direction LR
 
 coupling_analysis_spec -> std
+coupling_analysis_spec -> compiler
 ```
 
 </details>
@@ -27,7 +28,7 @@ coupling_analysis_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 31 | 31 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -38,464 +39,89 @@ coupling_analysis_spec -> std
 
 ### Coupling Analysis
 
-### CBO / Fan-in / Fan-out / Instability
+#### computes coupling metrics for a dependency graph
 
-#### computes fan-out as count of distinct module dependencies
+- edges = edges set
+- edges = edges set
+- edges = edges set
+   - Expected: metrics.len() equals `3`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-pass_do_nothing
+var edges: Dict<text, [text]> = {}
+edges = edges.set("app", ["lib", "compiler"])
+edges = edges.set("lib", [])
+edges = edges.set("compiler", ["lib"])
+
+val metrics = compute_all_metrics(graph(edges))
+
+expect(metrics.len()).to_equal(3)
+expect(metrics[0].module_name.len()).to_be_greater_than(0)
 ```
 
 </details>
 
-#### computes fan-in as count of modules depending on this module
+#### detects cohesion split with LCOM4
+
+- method access
+- method access
+- method access
+   - Expected: result.method_count equals `3`
+   - Expected: result.lcom4 equals `2`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-pass_do_nothing
+val methods = [
+    method_access("read", ["path"], []),
+    method_access("write", ["path"], []),
+    method_access("render", ["canvas"], [])
+]
+
+val result = compute_lcom4("QualitySmoke", methods)
+
+expect(result.method_count).to_equal(3)
+expect(result.lcom4).to_equal(2)
 ```
 
 </details>
 
-#### computes instability as fan_out / (fan_in + fan_out)
+#### flags lower layer importing a higher layer
+
+- edges = edges set
+- edges = edges set
+   - Expected: violations.len() equals `1`
+   - Expected: violations[0].from_layer equals `10`
+   - Expected: violations[0].to_layer equals `30`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-pass_do_nothing
-```
-
-</details>
-
-#### handles zero fan-in and fan-out gracefully
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-### SCC Cycle Detection
-
-#### detects circular dependencies using SCC
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### does not report single-node SCCs
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### finds all SCCs in a complex graph
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-### Layer Violations
-
-#### flags backward dependencies between numbered compiler layers
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### allows forward dependencies
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### extracts layer numbers from compiler paths
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-### DSM Matrix
-
-<details>
-<summary>Advanced: builds NxN matrix with dependency counts</summary>
-
-#### builds NxN matrix with dependency counts
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-
-</details>
-
-### Output Formats
-
-#### produces text format report
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### produces JSON format report
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### produces Markdown format report
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-### Coupling Lint Rules
-
-#### W0501 flags high CBO
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### W0502 flags circular dependency
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### W0503 flags layer violation
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### W0504 flags instability inversion
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-### LCOM4 Cohesion
-
-#### computes LCOM4 = 1 for cohesive class
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### computes LCOM4 > 1 for uncohesive class
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-### Public API Quality
-
-#### computes PSS as public methods + public fields
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### computes EUR as externally used / total public
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### computes normalized entropy for usage distribution
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-### Argument Signature Similarity
-
-#### detects exact type-set duplicates
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### detects near-duplicates with edit distance 1
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### computes correct edit distance for different type sets
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-### Relaxed Token Duplication
-
-#### matches token-kind-only sequences ignoring variable names
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-### Extended Lint Rules
-
-#### W0505 flags high LCOM
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### W0506 flags high public surface ratio
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### W0507 flags dead public API
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
-```
-
-</details>
-
-#### W0508 flags high API complexity
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-pass_do_nothing
+var edges: Dict<text, [text]> = {}
+edges = edges.set("compiler/10.frontend/parser", ["compiler/30.types/checker"])
+edges = edges.set("compiler/30.types/checker", [])
+
+val violations = find_layer_violations(graph(edges))
+
+expect(violations.len()).to_equal(1)
+expect(violations[0].from_layer).to_equal(10)
+expect(violations[0].to_layer).to_equal(30)
 ```
 
 </details>
@@ -514,24 +140,13 @@ pass_do_nothing
 
 Tests covering:
 - Coupling Analysis
-- CBO / Fan-in / Fan-out / Instability
-- SCC Cycle Detection
-- Layer Violations
-- DSM Matrix
-- Output Formats
-- Coupling Lint Rules
-- LCOM4 Cohesion
-- Public API Quality
-- Argument Signature Similarity
-- Relaxed Token Duplication
-- Extended Lint Rules
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 31 |
-| Active scenarios | 31 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -41,13 +41,13 @@ simple_lsp_protocol_live_spec -> std
 #### responds to initialize, didOpen, completion, definition, codeAction, and shutdown
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val result = rt_process_run("bin/simple", ["run", "scripts/smoke/simple_lsp_protocol_smoke.spl"])
+val result = process_run("bin/simple", ["run", "scripts/smoke/simple_lsp_protocol_smoke.spl"])
 expect(result.2).to_equal(0)
 expect(result.0).to_contain("STATUS: PASS simple_lsp_protocol_smoke")
 ```

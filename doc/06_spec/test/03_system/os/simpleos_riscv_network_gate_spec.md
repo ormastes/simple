@@ -41,7 +41,7 @@ simpleos_riscv_network_gate_spec -> std
 #### keeps the RV64 boot handoff freestanding and QEMU-memory explicit
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -67,7 +67,7 @@ expect(boot.index_of("riscv_boot_mem_init") ?? -1).to_equal(-1)
 #### keeps hosted boot logging out of the HTTP handoff closure
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -90,7 +90,7 @@ expect(http.index_of("use os.kernel.log.klog_api") ?? -1).to_equal(-1)
 #### keeps the freestanding C runtime linked without hosted OS helpers
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -132,7 +132,7 @@ expect(runtime).to_contain("return 0;")
 #### requires packet TX and RX readiness before reporting network ready
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -165,7 +165,7 @@ expect(ready_set).to_be_greater_than(rx_probe)
 #### keeps the freestanding runtime on real virtio packet IO
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -192,7 +192,7 @@ expect(runtime).to_contain("fallback_html_response")
 #### uses a real virtio-gpu control queue for display readiness
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -228,7 +228,7 @@ expect(script).to_contain("Display service ready")
 #### uses a real virtio-blk queue and NVFS superblock for storage readiness
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -273,7 +273,7 @@ expect(script).to_contain("NVFS root superblock ready")
 #### routes weak C TCP fallbacks through the boot packet provider
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -296,7 +296,7 @@ expect(runtime).to_contain("return rt_boot_tcp_close(fd) == 0 ? 11 : 19;")
 #### keeps netstack init unavailable until packet TX and RX are ready
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -326,7 +326,7 @@ expect(ready_set).to_be_greater_than(rx_probe)
 #### fails closed in the baremetal IoDriver shim until packet TX and RX are ready
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -353,7 +353,7 @@ expect(shim.index_of("baremetal always reports UP") ?? -1).to_equal(-1)
 #### does not let TCP shims fake listener or write success without netstack
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -373,7 +373,7 @@ expect(shim).to_contain("Returns -1 if the fd is invalid or the netstack is unav
 #### lets the sync HTTP server serve inline when thread spawn is unavailable
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -395,7 +395,7 @@ expect(server).to_contain("handler.free()")
 #### reports sync HTTP response write failure on fail-closed TCP streams
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -412,7 +412,7 @@ expect(write_error(stream, HttpStatus.BadRequest, "bad request")).to_equal(false
 #### keeps the boot-local TCP shim delegated to the packet provider
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -431,12 +431,12 @@ expect(boot_shim).to_contain("fn rt_io_tcp_write_text(fd: i64, data: text) -> i6
 
 #### keeps the RV64 smoke script explicit about the deferred boundary
 
-1. expect qemu deferred script contract
+- expect qemu deferred script contract
    - Expected: script.index_of("scripts/os/simpleos-native-build.shs --target riscv64gc-unknown-none") ?? -1 equals `-1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -468,11 +468,11 @@ expect(script.index_of("scripts/os/simpleos-native-build.shs --target riscv64gc-
 
 #### keeps the RV32 smoke script explicit about the deferred boundary
 
-1. expect qemu deferred script contract
+- expect qemu deferred script contract
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -486,7 +486,7 @@ expect_qemu_deferred_script_contract("scripts/qemu/qemu_rv32_http_test.shs")
 #### documents the real LLVM-backed RV32 build prerequisite
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -505,7 +505,7 @@ expect(script.index_of("riscv32gc-unknown-none") ?? -1).to_equal(-1)
 #### maps current RV32 backend failures to actionable prerequisites
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -523,7 +523,7 @@ expect(runner).to_contain("LLVM backend unavailable: rebuild the selected Simple
 #### runs the RV64 HTTP and NVFS storage QEMU gate when explicitly enabled
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -564,11 +564,11 @@ else:
 
 #### does not report os_network success for query/no-crash socket placeholders
 
-1. expect no fake network pass
+- expect no fake network pass
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -585,11 +585,11 @@ expect(source).to_contain("_assert(conn_result >= 0")
 
 #### does not report full-stack network success for no-crash socket placeholders
 
-1. expect no fake network pass
+- expect no fake network pass
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

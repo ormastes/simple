@@ -352,7 +352,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val exists = rt_file_exists("src/lib/nogc_async_mut/mcp/perf_guard.spl")
+val exists = file_exists("src/lib/nogc_async_mut/mcp/perf_guard.spl")
 expect(exists).to_equal(true)
 ```
 
@@ -367,7 +367,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
+val source = file_read("src/lib/nogc_async_mut/mcp/perf_guard.spl")
 expect(source.contains("struct McpPerfGuard")).to_equal(true)
 ```
 
@@ -382,7 +382,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
+val source = file_read("src/lib/nogc_async_mut/mcp/perf_guard.spl")
 expect(source.contains("struct PerfViolation")).to_equal(true)
 ```
 
@@ -397,7 +397,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
+val source = file_read("src/lib/nogc_async_mut/mcp/perf_guard.spl")
 expect(source.contains("record_dir_walk")).to_equal(true)
 ```
 
@@ -412,7 +412,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
+val source = file_read("src/lib/nogc_async_mut/mcp/perf_guard.spl")
 expect(source.contains("record_file_read")).to_equal(true)
 ```
 
@@ -427,7 +427,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
+val source = file_read("src/lib/nogc_async_mut/mcp/perf_guard.spl")
 expect(source.contains("record_subprocess")).to_equal(true)
 ```
 
@@ -442,7 +442,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
+val source = file_read("src/lib/nogc_async_mut/mcp/perf_guard.spl")
 expect(source.contains("PERF_LATENCY")).to_equal(true)
 ```
 
@@ -457,7 +457,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
+val source = file_read("src/lib/nogc_async_mut/mcp/perf_guard.spl")
 expect(source.contains("MCP_PERF_GUARD")).to_equal(true)
 ```
 
@@ -472,7 +472,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
+val source = file_read("src/lib/nogc_async_mut/mcp/perf_guard.spl")
 expect(source.contains("McpPerfSnapshot")).to_equal(true)
 ```
 
@@ -489,7 +489,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val exists = rt_file_exists("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
+val exists = file_exists("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
 expect(exists).to_equal(true)
 ```
 
@@ -504,7 +504,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
+val source = file_read("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
 expect(source.contains("struct WrapperValidationResult")).to_equal(true)
 ```
 
@@ -519,7 +519,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
+val source = file_read("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
 expect(source.contains("simple_mcp_server")).to_equal(true)
 expect(source.contains("simple_lsp_mcp_server")).to_equal(true)
 expect(source.contains("t32_mcp_server")).to_equal(true)
@@ -538,7 +538,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
+val source = file_read("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
 expect(source.contains("has_spl_entry")).to_equal(true)
 ```
 
@@ -553,7 +553,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
+val source = file_read("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
 expect(source.contains("compiler_rust/target")).to_equal(true)
 ```
 
@@ -568,7 +568,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
+val source = file_read("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
 expect(source.contains("SIMPLE_LOG=error")).to_equal(true)
 ```
 
@@ -583,7 +583,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
+val source = file_read("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
 expect(source.contains("2>/dev/null")).to_equal(true)
 ```
 
@@ -600,7 +600,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val exists = rt_file_exists("bin/simple_mcp_server")
+val exists = file_exists("bin/simple_mcp_server")
 expect(exists).to_equal(true)
 ```
 
@@ -615,7 +615,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val exists = rt_file_exists("bin/simple_lsp_mcp_server")
+val exists = file_exists("bin/simple_lsp_mcp_server")
 expect(exists).to_equal(true)
 ```
 
@@ -630,7 +630,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val exists = rt_file_exists("bin/t32_mcp_server")
+val exists = file_exists("bin/t32_mcp_server")
 expect(exists).to_equal(true)
 ```
 
@@ -645,7 +645,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val exists = rt_file_exists("bin/t32_lsp_mcp_server")
+val exists = file_exists("bin/t32_lsp_mcp_server")
 expect(exists).to_equal(true)
 ```
 
@@ -660,7 +660,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val exists = rt_file_exists("bin/obsidian_lsp_mcp_server")
+val exists = file_exists("bin/obsidian_lsp_mcp_server")
 expect(exists).to_equal(true)
 ```
 
@@ -677,7 +677,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val exists = rt_file_exists("src/compiler/35.semantics/lint/mcp_perf_lint.spl")
+val exists = file_exists("src/compiler/35.semantics/lint/mcp_perf_lint.spl")
 expect(exists).to_equal(true)
 ```
 
@@ -692,7 +692,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/compiler/35.semantics/lint/__init__.spl")
+val source = file_read("src/compiler/35.semantics/lint/__init__.spl")
 expect(source.contains("mcp_perf_lint")).to_equal(true)
 ```
 
@@ -707,7 +707,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/compiler/35.semantics/lint/__init__.spl")
+val source = file_read("src/compiler/35.semantics/lint/__init__.spl")
 expect(source.contains("McpPerfLintWarning")).to_equal(true)
 ```
 
@@ -722,7 +722,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/compiler/35.semantics/lint/__init__.spl")
+val source = file_read("src/compiler/35.semantics/lint/__init__.spl")
 expect(source.contains("lint_source_entrypoint")).to_equal(true)
 expect(source.contains("lint_full_tree_scan")).to_equal(true)
 expect(source.contains("lint_per_request_subprocess")).to_equal(true)
@@ -742,8 +742,8 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/app/mcp/main.spl")
-expect(source.contains("TOOLS_CACHE")).to_equal(true)
+val source = file_read("src/app/mcp/main.spl")
+expect(source.contains("_mcp_static_tools_result_cached")).to_equal(true)
 ```
 
 </details>
@@ -757,8 +757,8 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/app/mcp/main.spl")
-expect(source.contains("INIT_CACHE")).to_equal(true)
+val source = file_read("src/app/mcp/main.spl")
+expect(source.contains("_mcp_initialize_result")).to_equal(true)
 ```
 
 </details>
@@ -772,8 +772,8 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/app/mcp/main.spl")
-val table_source = rt_file_read_text("src/app/mcp/tool_table.spl")
+val source = file_read("src/app/mcp/main.spl")
+val table_source = file_read("src/app/mcp/tool_table.spl")
 expect(source.contains("dispatch_tool")).to_equal(true)
 expect(source.contains("use .tool_table")).to_equal(true)
 expect(table_source.contains("get_tool_table")).to_equal(true)
@@ -790,7 +790,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/app/mcp/main_dispatch.spl")
+val source = file_read("src/app/mcp/main_dispatch.spl")
 expect(source.contains("_dispatch_in_process")).to_equal(true)
 ```
 
@@ -805,8 +805,8 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/app/mcp/main_dispatch.spl")
-val table_source = rt_file_read_text("src/app/mcp/tool_table.spl")
+val source = file_read("src/app/mcp/main_dispatch.spl")
+val table_source = file_read("src/app/mcp/tool_table.spl")
 # CLI passthrough is used only for handler_kind="cli"
 expect(source.contains("_dispatch_cli_direct")).to_equal(true)
 expect(source.contains("handle_cli_passthrough_direct")).to_equal(true)

@@ -10,7 +10,7 @@
 @layout dag
 @direction LR
 
-condition_spec
+condition_spec -> std
 ```
 
 </details>
@@ -47,7 +47,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_sync_mut/spec/condition.spl") ?? ""
+val source = file_read("src/lib/nogc_sync_mut/spec/condition.spl")
 
 expect(source).to_contain("struct SkipCondition")
 expect(source).to_contain("platforms: [text]")
@@ -66,7 +66,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/lib/nogc_sync_mut/spec/condition.spl") ?? ""
+val source = file_read("src/lib/nogc_sync_mut/spec/condition.spl")
 
 expect(source).to_contain("fn matches_platforms(platforms: [text]) -> bool")
 expect(source).to_contain("fn matches_runtimes(runtimes: [text]) -> bool")

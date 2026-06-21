@@ -589,7 +589,7 @@ expect(daemon_tools).to_contain("test_daemon_run")
 
 #### all help-listed commands have real implementations
 
-1. placeholder in help push
+- placeholder in help push
    - Expected: placeholder_in_help.len() equals `0`
 
 

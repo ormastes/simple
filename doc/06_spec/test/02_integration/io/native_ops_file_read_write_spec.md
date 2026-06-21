@@ -1,6 +1,6 @@
-# Native Ops File Read Write Specification
+# Native file read/write operations
 
-> <details>
+> Verifies the native file API can write, detect, read, and delete a temporary text file through the Simple file-ops facade.
 
 <!-- sdn-diagram:id=native_ops_file_read_write_spec.arch -->
 <details class="sdn-source">
@@ -11,6 +11,7 @@
 @direction LR
 
 native_ops_file_read_write_spec -> app
+native_ops_file_read_write_spec -> std
 ```
 
 </details>
@@ -32,7 +33,30 @@ native_ops_file_read_write_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Native Ops File Read Write Specification
+# Native file read/write operations
+
+Verifies the native file API can write, detect, read, and delete a temporary text file through the Simple file-ops facade.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | I/O |
+| Status | Active |
+| Source | `test/02_integration/io/native_ops_file_read_write_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies the native file API can write, detect, read, and delete a temporary
+text file through the Simple file-ops facade.
+
+## Acceptance
+
+- A temporary file can be written.
+- The file exists and reads back with the expected content.
+- The file can be deleted and no longer exists.
 
 ## Scenarios
 
@@ -43,11 +67,11 @@ native_ops_file_read_write_spec -> app
 
 #### creates and reads files _(slow)_
 
-1. check
-2. check
+- check
+- check
    - Expected: file_read(test_file).trim() equals `content`
-3. check
-4. check
+- check
+- check
 
 
 <details>
@@ -71,21 +95,6 @@ check(not file_exists(test_file))
 
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | I/O |
-| Status | Active |
-| Source | `test/02_integration/io/native_ops_file_read_write_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Native File Ops
 
 ## Scenario Summary
 

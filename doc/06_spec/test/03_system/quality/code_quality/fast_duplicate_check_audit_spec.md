@@ -1,6 +1,6 @@
 # Fast Duplicate Check Audit Specification
 
-> 1. "fn shared
+> <details>
 
 <!-- sdn-diagram:id=fast_duplicate_check_audit_spec.arch -->
 <details class="sdn-source">
@@ -40,7 +40,7 @@ fast_duplicate_check_audit_spec -> std
 
 #### finds exact line-window duplicates and honors max allowed
 
-1. "fn shared
+- "fn shared
    - Expected: rt_file_write_text(root + "/a.spl", body) is true
    - Expected: rt_file_write_text(root + "/b.spl", body) is true
    - Expected: result.2 equals `1`
@@ -48,7 +48,7 @@ fast_duplicate_check_audit_spec -> std
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

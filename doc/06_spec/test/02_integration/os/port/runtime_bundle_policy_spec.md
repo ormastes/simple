@@ -41,16 +41,16 @@ runtime_bundle_policy_spec -> std
 #### rejects hosted runtime bundles and preserves Simple/C lane names
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = rt_file_read_text("src/app/io/cli_compile_part2.spl") ?? ""
-val rust_cli = rt_file_read_text("src/compiler_rust/driver/src/cli/native_build.rs") ?? ""
-val rust_config = rt_file_read_text("src/compiler_rust/compiler/src/pipeline/native_project/config.rs") ?? ""
-val rust_tools = rt_file_read_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs") ?? ""
+val src = file_read("src/app/io/cli_compile_part2.spl")
+val rust_cli = file_read("src/compiler_rust/driver/src/cli/native_build.rs")
+val rust_config = file_read("src/compiler_rust/compiler/src/pipeline/native_project/config.rs")
+val rust_tools = file_read("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
 expect(src).to_contain("cli_runtime_bundle_is_rust_or_hosted")
 expect(src).to_contain("was removed; use simple-core or core-c-bootstrap")
 expect(src).to_contain("use simple-core or core-c-bootstrap")

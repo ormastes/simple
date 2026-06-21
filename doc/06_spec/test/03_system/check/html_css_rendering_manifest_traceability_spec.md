@@ -122,11 +122,11 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Run the rendering manifest traceability check without network dependence")
 val command = "rm -rf build/test-html-css-rendering-manifest-traceability && BUILD_DIR=build/test-html-css-rendering-manifest-traceability REPORT_PATH=build/test-html-css-rendering-manifest-traceability/report.md HTML_CSS_RENDERING_MANIFEST_FETCH=0 sh scripts/check/check-html-css-rendering-manifest-traceability.shs"
-val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
 step("Read the emitted evidence contract")
-val evidence = rt_file_read_text("build/test-html-css-rendering-manifest-traceability/evidence.env") ?? ""
+val evidence = file_read("build/test-html-css-rendering-manifest-traceability/evidence.env") ?? ""
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_status=pass")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_reason=pass")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest=tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt")
@@ -168,7 +168,7 @@ expect(required_manifest_cases).to_equal("50")
 expect(missing_fixture).to_equal("")
 
 step("Verify the operator report was written")
-val report = rt_file_read_text("build/test-html-css-rendering-manifest-traceability/report.md") ?? ""
+val report = file_read("build/test-html-css-rendering-manifest-traceability/report.md") ?? ""
 expect(report).to_contain("# HTML/CSS Rendering Manifest Traceability")
 expect(report).to_contain("- HTML tags: 105/105")
 expect(report).to_contain("- implemented CSS properties: 63/63")
@@ -195,11 +195,11 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Create a manifest missing one render case and run the gate against it")
 val command = "rm -rf build/test-html-css-rendering-manifest-traceability-truncated && mkdir -p build/test-html-css-rendering-manifest-traceability-truncated/source && head -n 50 tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt > build/test-html-css-rendering-manifest-traceability-truncated/source/truncated_manifest.txt && BUILD_DIR=build/test-html-css-rendering-manifest-traceability-truncated/out REPORT_PATH=build/test-html-css-rendering-manifest-traceability-truncated/report.md HTML_CSS_RENDERING_MANIFEST_FETCH=0 HTML_CSS_RENDERING_MANIFEST_PATH=build/test-html-css-rendering-manifest-traceability-truncated/source/truncated_manifest.txt sh scripts/check/check-html-css-rendering-manifest-traceability.shs || true"
-val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
 step("Assert the gate fails on case count instead of silently accepting partial coverage")
-val evidence = rt_file_read_text("build/test-html-css-rendering-manifest-traceability-truncated/out/evidence.env") ?? ""
+val evidence = file_read("build/test-html-css-rendering-manifest-traceability-truncated/out/evidence.env") ?? ""
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_status=fail")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_reason=unexpected-manifest-case-count")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest=build/test-html-css-rendering-manifest-traceability-truncated/source/truncated_manifest.txt")

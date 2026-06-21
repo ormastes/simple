@@ -174,7 +174,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val (_, _, rc) = rt_process_run("test", ["-x", "bin/simple_mcp_server"])
+val (_, _, rc) = process_run("test", ["-x", "bin/simple_mcp_server"])
 expect(rc).to_equal(0)
 ```
 
@@ -189,7 +189,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val (_, _, rc) = rt_process_run("test", ["-x", "bin/simple_lsp_mcp_server"])
+val (_, _, rc) = process_run("test", ["-x", "bin/simple_lsp_mcp_server"])
 expect(rc).to_equal(0)
 ```
 
@@ -316,7 +316,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val (stdout, stderr, rc) = rt_process_run("bin/simple", ["--version"])
+val (stdout, stderr, rc) = process_run("bin/simple", ["--version"])
 expect(rc).to_equal(0)
 ```
 
@@ -331,7 +331,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val (stdout, _, _) = rt_process_run("bin/simple", ["--version"])
+val (stdout, _, _) = process_run("bin/simple", ["--version"])
 val has_version = stdout.contains("simple") or stdout.contains("Simple") or stdout.contains("0.")
 expect(has_version).to_equal(true)
 ```
@@ -347,7 +347,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val (stdout, stderr, rc) = rt_process_run("bin/simple", ["help"])
+val (stdout, stderr, rc) = process_run("bin/simple", ["help"])
 # help may return 0 or 1 depending on implementation
 val ok = rc == 0 or rc == 1
 expect(ok).to_equal(true)

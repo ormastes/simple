@@ -96,10 +96,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val command = "rm -rf build/test-renderdoc-simple-gate && RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/canonical-probe/simple/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate REPORT_PATH=build/test-renderdoc-simple-gate/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
-val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
-val evidence = rt_file_read_text("build/test-renderdoc-simple-gate/evidence.env") ?? ""
+val evidence = file_read("build/test-renderdoc-simple-gate/evidence.env")
 expect(evidence).to_contain("rdoc_simple_gate_status=")
 expect(evidence).to_contain("rdoc_simple_gate_reason=")
 expect(evidence).to_contain("rdoc_simple_gate_source_env=")
@@ -151,10 +151,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val command = "rm -rf build/test-renderdoc-simple-gate-pass && mkdir -p build/test-renderdoc-simple-gate-pass/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-pass/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-pass/source/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > build/test-renderdoc-simple-gate-pass/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-pass/out REPORT_PATH=build/test-renderdoc-simple-gate-pass/report.md sh scripts/check/check-renderdoc-simple-gate.shs"
-val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
-val evidence = rt_file_read_text("build/test-renderdoc-simple-gate-pass/out/evidence.env") ?? ""
+val evidence = file_read("build/test-renderdoc-simple-gate-pass/out/evidence.env")
 expect(evidence).to_contain("rdoc_simple_gate_status=pass")
 expect(evidence).to_contain("rdoc_simple_gate_reason=pass")
 expect(evidence).to_contain("rdoc_simple_gate_backend=simple")
@@ -182,10 +182,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val command = "rm -rf build/test-renderdoc-simple-gate-bad-file-magic && mkdir -p build/test-renderdoc-simple-gate-bad-file-magic/source && printf 'NOPEsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-bad-file-magic/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-bad-file-magic/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-bad-file-magic/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-bad-file-magic/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-bad-file-magic/out REPORT_PATH=build/test-renderdoc-simple-gate-bad-file-magic/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
-val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
-val evidence = rt_file_read_text("build/test-renderdoc-simple-gate-bad-file-magic/out/evidence.env") ?? ""
+val evidence = file_read("build/test-renderdoc-simple-gate-bad-file-magic/out/evidence.env")
 expect(evidence).to_contain("rdoc_simple_gate_status=fail")
 expect(evidence).to_contain("rdoc_simple_gate_reason=missing-rdoc-file-magic")
 expect(evidence).to_contain("rdoc_simple_gate_capture_magic=RDOC")
@@ -204,10 +204,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val command = "rm -rf build/test-renderdoc-simple-gate-wrong-program && mkdir -p build/test-renderdoc-simple-gate-wrong-program/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-wrong-program/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/other_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-wrong-program/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-wrong-program/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-wrong-program/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-wrong-program/out REPORT_PATH=build/test-renderdoc-simple-gate-wrong-program/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
-val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
-val evidence = rt_file_read_text("build/test-renderdoc-simple-gate-wrong-program/out/evidence.env") ?? ""
+val evidence = file_read("build/test-renderdoc-simple-gate-wrong-program/out/evidence.env")
 expect(evidence).to_contain("rdoc_simple_gate_status=fail")
 expect(evidence).to_contain("rdoc_simple_gate_reason=unexpected-program")
 ```
@@ -224,10 +224,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val command = "rm -rf build/test-renderdoc-simple-gate-runtime-backend && mkdir -p build/test-renderdoc-simple-gate-runtime-backend/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-runtime-backend/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-runtime-backend/source/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=software\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > build/test-renderdoc-simple-gate-runtime-backend/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-runtime-backend/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-runtime-backend/out REPORT_PATH=build/test-renderdoc-simple-gate-runtime-backend/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
-val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
-val evidence = rt_file_read_text("build/test-renderdoc-simple-gate-runtime-backend/out/evidence.env") ?? ""
+val evidence = file_read("build/test-renderdoc-simple-gate-runtime-backend/out/evidence.env")
 expect(evidence).to_contain("rdoc_simple_gate_status=fail")
 expect(evidence).to_contain("rdoc_simple_gate_reason=unexpected-runtime-backend")
 expect(evidence).to_contain("rdoc_simple_gate_runtime_backend=software")

@@ -10,7 +10,7 @@
 @layout dag
 @direction LR
 
-static_method_desugar_spec
+static_method_desugar_spec -> std
 ```
 
 </details>
@@ -47,7 +47,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/compiler/20.hir/hir_types.spl") ?? ""
+val source = file_read("src/compiler/20.hir/hir_types.spl")
 
 expect(source).to_contain("StaticMethod(type_id: SymbolId, method_id: SymbolId)")
 expect(source).to_contain("Look up a static method in a class/struct/enum")
@@ -65,7 +65,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/compiler/50.mir/mir_lowering_expr_part3.spl") ?? ""
+val source = file_read("src/compiler/50.mir/mir_lowering_expr_part3.spl")
 
 expect(source).to_contain("case StaticMethod(type_id, method_id):")
 expect(source).to_contain("method_id")
@@ -82,7 +82,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/compiler/10.frontend/desugar/mod.spl") ?? ""
+val source = file_read("src/compiler/10.frontend/desugar/mod.spl")
 
 expect(source).to_contain("desugar")
 ```

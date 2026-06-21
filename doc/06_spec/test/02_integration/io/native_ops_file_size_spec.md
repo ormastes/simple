@@ -1,6 +1,6 @@
-# Native Ops File Size Specification
+# Native file size operations
 
-> <details>
+> Verifies the native file API can write a temporary file, report its size through the Simple file-ops facade, and delete the file.
 
 <!-- sdn-diagram:id=native_ops_file_size_spec.arch -->
 <details class="sdn-source">
@@ -11,6 +11,7 @@
 @direction LR
 
 native_ops_file_size_spec -> app
+native_ops_file_size_spec -> std
 ```
 
 </details>
@@ -32,7 +33,30 @@ native_ops_file_size_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Native Ops File Size Specification
+# Native file size operations
+
+Verifies the native file API can write a temporary file, report its size through the Simple file-ops facade, and delete the file.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | I/O |
+| Status | Active |
+| Source | `test/02_integration/io/native_ops_file_size_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies the native file API can write a temporary file, report its size through
+the Simple file-ops facade, and delete the file.
+
+## Acceptance
+
+- A temporary file can be written in the host temp directory.
+- `file_size_raw` reports the expected size.
+- The temporary file is removed after the check.
 
 ## Scenarios
 
@@ -43,9 +67,9 @@ native_ops_file_size_spec -> app
 
 #### gets file size _(slow)_
 
-1. check
+- check
    - Expected: file_size_raw(test_file) equals `6`
-2. check
+- check
 
 
 <details>
@@ -66,21 +90,6 @@ check(file_delete(test_file))
 
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | I/O |
-| Status | Active |
-| Source | `test/02_integration/io/native_ops_file_size_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Native File Ops
 
 ## Scenario Summary
 

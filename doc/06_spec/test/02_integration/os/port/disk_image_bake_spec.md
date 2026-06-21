@@ -48,7 +48,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = rt_file_read_text("src/os/port/disk_image_bake.spl") ?? ""
+val src = file_read("src/os/port/disk_image_bake.spl")
 expect(src).to_contain("if io.file_exists(\"build/os/.bake_include_toolchain\"):")
 expect(src).to_contain("toolchain marker set but clang_static missing")
 expect(src).to_contain("return Err(\"bake: toolchain marker set but clang_static missing: \" + clang_static_path)")
@@ -65,7 +65,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = rt_file_read_text("src/os/port/disk_image_bake.spl") ?? ""
+val src = file_read("src/os/port/disk_image_bake.spl")
 expect(src).to_contain("toolchain marker set but rustc_static missing")
 expect(src).to_contain("return Err(\"bake: toolchain marker set but rustc_static missing: \" + rustc_static_path)")
 ```

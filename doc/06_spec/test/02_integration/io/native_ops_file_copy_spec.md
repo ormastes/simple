@@ -1,6 +1,6 @@
-# Native Ops File Copy Specification
+# Native file copy operations
 
-> <details>
+> Verifies the native file API can copy a temporary file and read the copied content through the Simple file-ops facade.
 
 <!-- sdn-diagram:id=native_ops_file_copy_spec.arch -->
 <details class="sdn-source">
@@ -11,6 +11,7 @@
 @direction LR
 
 native_ops_file_copy_spec -> app
+native_ops_file_copy_spec -> std
 ```
 
 </details>
@@ -32,7 +33,30 @@ native_ops_file_copy_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Native Ops File Copy Specification
+# Native file copy operations
+
+Verifies the native file API can copy a temporary file and read the copied content through the Simple file-ops facade.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | I/O |
+| Status | Active |
+| Source | `test/02_integration/io/native_ops_file_copy_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies the native file API can copy a temporary file and read the copied
+content through the Simple file-ops facade.
+
+## Acceptance
+
+- A source file can be written.
+- The source file can be copied to a destination.
+- The copied content matches and both files are removed.
 
 ## Scenarios
 
@@ -43,11 +67,11 @@ native_ops_file_copy_spec -> app
 
 #### copies files _(slow)_
 
-1. check
-2. check
+- check
+- check
    - Expected: file_read(dst).trim() equals `Copy test`
-3. check
-4. check
+- check
+- check
 
 
 <details>
@@ -71,21 +95,6 @@ check(file_delete(dst))
 
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | I/O |
-| Status | Active |
-| Source | `test/02_integration/io/native_ops_file_copy_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Native File Ops
 
 ## Scenario Summary
 

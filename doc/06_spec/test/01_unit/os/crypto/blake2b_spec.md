@@ -84,12 +84,12 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# Python: hashlib.blake2b(b'a'*128).hexdigest()
-#   fc328bf04ed0ec3a0ee77e16ef6d87c34f86b6cae8fb2f7ce9e43a570b0a224
-#   e5d22eca4e82e5261c4b4fd4a94c44de0f0cce82e08dc0f91b6d6d0f55b1d92e3
+# BLAKE2b-512(b'a'*128) — verified byte-exact against an independent
+# Node `crypto` blake2b512 reference (the prior Python-comment vector
+# was a transcription error: 63-hex first line / digits dropped).
 val msg = _repeat_bytes(0x61u8, 128)
 val digest = blake2b(_empty_bytes(), msg, 64)
-expect(_bytes_to_hex(digest)).to_equal("fc328bf04ed0ec3a0ee77e16ef6d87c34f86b6cae8fb2f7ce9e43a570b0a224e5d22eca4e82e5261c4b4fd4a94c44de0f0cce82e08dc0f91b6d6d0f55b1d92e3")
+expect(_bytes_to_hex(digest)).to_equal("fc6c71f688f43ea7d60817478808f3cac753e61571865c95adbc2d9122c943a76b92c2cb1047ef3fe7bf6e436ec1d0a99a9e5b216780bf7fed9d7ca91d3a8f3b")
 ```
 
 </details>
@@ -99,16 +99,15 @@ expect(_bytes_to_hex(digest)).to_equal("fc328bf04ed0ec3a0ee77e16ef6d87c34f86b6ca
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# Python: hashlib.blake2b(b'a'*129).hexdigest()
-#   2319e3789c47e2daa5fe807f61bec2a1a6537fa03f19ff32e87eecbfd64b7e0
-#   e8ccff439ac8c3bf8fb3d9b2a2f4f0ef94cf72e2c45d33ff5fb61aef4e97c4daf
+# BLAKE2b-512(b'a'*129) — verified byte-exact against an independent
+# Node `crypto` blake2b512 reference (prior Python-comment vector wrong).
 val msg = _repeat_bytes(0x61u8, 129)
 val digest = blake2b(_empty_bytes(), msg, 64)
-expect(_bytes_to_hex(digest)).to_equal("2319e3789c47e2daa5fe807f61bec2a1a6537fa03f19ff32e87eecbfd64b7e0e8ccff439ac8c3bf8fb3d9b2a2f4f0ef94cf72e2c45d33ff5fb61aef4e97c4daf")
+expect(_bytes_to_hex(digest)).to_equal("55e6e0eb418149a8af92fd9ddc99254781b2f522a131b4f4d984404b71a00e1167b8124d5dcddd4c6977b299392335d6edd303da6d344d74bbef2d38101b232b")
 ```
 
 </details>

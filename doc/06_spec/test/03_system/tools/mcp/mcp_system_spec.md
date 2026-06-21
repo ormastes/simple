@@ -62,9 +62,9 @@ Tests all public APIs, error paths, and integration points.
 
 #### workflow 1 - happy path _(slow)_
 
-1. verify
-2. verify
-3. verify
+- verify
+- verify
+- verify
 
 
 <details>
@@ -96,8 +96,8 @@ verify(result.len() > 0)
 
 #### workflow 2 - error handling _(slow)_
 
-1. verify
-2. verify
+- verify
+- verify
 
 
 <details>
@@ -129,7 +129,7 @@ verify(error.? == true)
 
 #### workflow 3 - edge cases _(slow)_
 
-1. verify
+- verify
 
 
 <details>
@@ -162,9 +162,9 @@ for c in edge_cases:
 
 #### workflow 4 - stress test _(slow)_
 
-1. items = items append
-2. verify
-3. verify
+- items = items append
+- verify
+- verify
 
 
 <details>
@@ -199,9 +199,9 @@ verify(processed == 100)
 
 #### workflow 5 - concurrent operations _(slow)_
 
-1. operations = operations append
-2. verify
-3. verify
+- operations = operations append
+- verify
+- verify
 
 
 <details>
@@ -242,8 +242,8 @@ verify(completed == 50)
 
 #### branch 1 - if true
 
-1. verify
-2. verify
+- verify
+- verify
 
 
 <details>
@@ -265,8 +265,8 @@ else:
 
 #### branch 2 - if false
 
-1. verify
-2. verify
+- verify
+- verify
 
 
 <details>
@@ -288,9 +288,9 @@ else:
 
 #### branch 3 - nested if true/true
 
-1. verify
-2. verify
-3. verify
+- verify
+- verify
+- verify
 
 
 <details>
@@ -314,9 +314,9 @@ else:
 
 #### branch 4 - nested if true/false
 
-1. verify
-2. verify
-3. verify
+- verify
+- verify
+- verify
 
 
 <details>
@@ -340,9 +340,9 @@ else:
 
 #### branch 5 - nested if false
 
-1. verify
-2. verify
-3. verify
+- verify
+- verify
+- verify
 
 
 <details>
@@ -366,9 +366,9 @@ else:
 
 #### branch 6 - match some
 
-1. Some
-2. verify
-3. verify
+- Some
+- verify
+- verify
 
 
 <details>
@@ -391,9 +391,9 @@ match opt:
 
 #### branch 7 - match nil
 
-1. Some
-2. verify
-3. verify
+- Some
+- verify
+- verify
 
 
 <details>
@@ -416,7 +416,7 @@ match opt:
 
 #### branch 8 - match multiple patterns
 
-1. verify
+- verify
 
 
 <details>
@@ -444,7 +444,7 @@ verify(result == "two")
 
 #### branch 9 - while loop executed
 
-1. verify
+- verify
 
 
 <details>
@@ -469,7 +469,7 @@ verify(count == 5)
 
 #### branch 10 - while loop not executed
 
-1. verify
+- verify
 
 
 <details>
@@ -497,7 +497,7 @@ verify(count == 10)
 
 #### branch 11 - for loop with items
 
-1. verify
+- verify
 
 
 <details>
@@ -525,7 +525,7 @@ verify(sum == 6)
 
 #### branch 12 - for loop empty
 
-1. verify
+- verify
 
 
 <details>
@@ -550,8 +550,8 @@ verify(count == 0)
 
 #### branch 13 - early return
 
-1. verify
-2. verify
+- verify
+- verify
 
 
 <details>
@@ -576,7 +576,7 @@ else:
 
 #### branch 14 - break in loop
 
-1. verify
+- verify
 
 
 <details>
@@ -601,7 +601,7 @@ verify(count == 10)
 
 #### branch 15 - continue in loop
 
-1. verify
+- verify
 
 
 <details>
@@ -625,7 +625,7 @@ verify(even_count == 10)
 
 #### error 1 - null input
 
-1. verify
+- verify
 
 
 <details>
@@ -644,7 +644,7 @@ verify(input == nil)
 
 #### error 2 - empty input
 
-1. verify
+- verify
 
 
 <details>
@@ -663,7 +663,7 @@ verify(input.len() == 0)
 
 #### error 3 - invalid type
 
-1. verify
+- verify
 
 
 <details>
@@ -682,7 +682,7 @@ verify(value > 0)
 
 #### error 4 - out of bounds
 
-1. verify
+- verify
 
 
 <details>
@@ -701,7 +701,7 @@ verify(arr.len() == 3)
 
 #### error 5 - missing key
 
-1. verify
+- verify
 
 
 <details>
@@ -720,7 +720,7 @@ verify(dict.get("b").? == false)
 
 #### error 6 - division by zero handling
 
-1. verify
+- verify
 
 
 <details>
@@ -740,7 +740,7 @@ verify(denominator != 0)
 
 #### error 7 - overflow handling
 
-1. verify
+- verify
 
 
 <details>
@@ -759,7 +759,7 @@ verify(large > 0)
 
 #### error 8 - underflow handling
 
-1. verify
+- verify
 
 
 <details>
@@ -780,7 +780,7 @@ verify(small < 0)
 
 #### integration 1 - module A to B
 
-1. verify
+- verify
 
 
 <details>
@@ -799,7 +799,7 @@ verify(data.len() == 4)
 
 #### integration 2 - module B to C
 
-1. verify
+- verify
 
 
 <details>
@@ -818,7 +818,7 @@ verify(processed.ends_with("_processed"))
 
 #### integration 3 - round trip
 
-1. verify
+- verify
 
 
 <details>
@@ -839,7 +839,7 @@ verify(decoded == original)
 
 #### integration 4 - pipeline
 
-1. verify
+- verify
 
 
 <details>
@@ -862,7 +862,7 @@ verify(step3 == "start_1_2_3")
 
 #### integration 5 - error propagation
 
-1. verify
+- verify
 
 
 <details>
