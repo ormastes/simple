@@ -60,14 +60,13 @@
     must use env/process facades, not local `rt_env_get`, `rt_process_run`,
     `rt_process_run_timeout`, `rt_process_spawn_async`, `rt_process_wait`,
     `rt_process_is_running`, `rt_process_is_alive`, or `rt_process_kill`.
-13. For Mac GUI/web/2D RenderDoc+Vulkan evidence, keep top-level proof scope
-    macOS-only until Windows and Linux runbooks exist. Start from
+13. For GUI/web/2D RenderDoc+Vulkan evidence, start from
     `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc`
-    on a Mac host. Treat Windows and Linux helpers only as future readiness
-    preparation until their runbooks land. Verify MoltenVK host readiness, Simple
-    Vulkan/Engine2D readback or RenderDoc proof, original Chrome RenderDoc proof,
-    Electron RenderDoc proof, and production GUI/web parity evidence. If Chrome
-    or Electron logs show `angle=vulkan` unavailable, report
+    on POSIX hosts or `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check` on
+    Windows. Verify host Vulkan readiness, Simple Vulkan/Engine2D readback or
+    RenderDoc proof, original Chrome RenderDoc proof, Electron RenderDoc proof,
+    and production GUI/web parity evidence. If Chrome or Electron logs show
+    `angle=vulkan` unavailable, report
     `vulkan-angle-unavailable` and fail the Vulkan proof even when pixels render.
 14. Metal/Vulkan/8K claims require matching evidence: native Metal raw readback
     on macOS, `metal-requires-macos` for Linux Metal, the Vulkan gate above for
