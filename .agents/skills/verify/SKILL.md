@@ -133,7 +133,7 @@ not create, rewrite, or weaken SPipe after verification.
 ```
 [PASS] file:line — description
 [FAIL] file:line — reason
-[FAIL] doc/06_spec/system/app/feature/feature_spec.md — generated manual lacks readable scenario steps
+[FAIL] doc/06_spec/03_system/app/feature/feature_spec.md — generated manual lacks readable scenario steps
 [WARN] file:line — concern
 ```
 
