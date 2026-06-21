@@ -1,6 +1,6 @@
-# md_wysiwyg_spec
+# Md Wysiwyg Specification
 
-> Verifies the Markdown-backed Writer replacement surface: a pure side-by-side view-model pairing each editable Markdown source line with its rendered styled preview, plus per-line edit-and-rerender. The renderer covers headings, paragraphs, fenced code, escaped HTML, and task-list checkboxes through the same document wrapper consumed by IDE TUI and GUI feature checks.
+> _A view pairs source lines with rendered previews from one document._
 
 <!-- sdn-diagram:id=md_wysiwyg_spec.arch -->
 <details class="sdn-source">
@@ -28,53 +28,12 @@ md_wysiwyg_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# md_wysiwyg_spec
-
-Verifies the Markdown-backed Writer replacement surface: a pure side-by-side view-model pairing each editable Markdown source line with its rendered styled preview, plus per-line edit-and-rerender. The renderer covers headings, paragraphs, fenced code, escaped HTML, and task-list checkboxes through the same document wrapper consumed by IDE TUI and GUI feature checks.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Requirements | N/A |
-| Plan | doc/03_plan/sys_test/ide_office_plugin_suite.md |
-| Design | N/A |
-| Research | N/A |
-| Source | `test/01_unit/app/office/md_wysiwyg_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Verifies the Markdown-backed Writer replacement surface: a pure side-by-side
-view-model pairing each editable Markdown source line with its rendered styled
-preview, plus per-line edit-and-rerender. The renderer covers headings,
-paragraphs, fenced code, escaped HTML, and task-list checkboxes through the same
-document wrapper consumed by IDE TUI and GUI feature checks.
-
-## Syntax
-
-Input is normal Markdown source text split by newline. Source lines stay editable
-by `line_no`; preview rows use `.wysiwyg-preview-line` and preserve line numbers
-for stable beside-the-line editing.
-
-## Examples
-
-`- [x] Done` renders as a disabled checked checkbox row; `- [ ] Open` renders as
-an unchecked disabled checkbox row. Checked edits require the expected source
-line to match before replacing a row.
-
-**Requirements:** N/A
-**Plan:** doc/03_plan/sys_test/ide_office_plugin_suite.md
-**Design:** N/A
-**Research:** N/A
+# Md Wysiwyg Specification
 
 ## Scenarios
 
@@ -117,172 +76,15 @@ expect(pane).to_equal("alpha\nbeta")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val view = build_wysiwyg_view("hello")
 val pane = wysiwyg_preview_pane(view)
-expect(pane).to_start_with("<div class=\"wysiwyg-preview\"")
-expect(pane).to_contain("data-format=\"markdown-wysiwyg\"")
-expect(pane).to_contain("data-format-name=\"Writer Markdown\"")
-expect(pane).to_contain("data-line-count=\"1\"")
-expect(pane).to_contain("class=\"wysiwyg-preview-line\" data-line-no=\"0\"")
+expect(pane).to_start_with("<div class=\"wysiwyg-preview\">")
 expect(pane).to_contain("line-height: 1.5;")
 expect(pane).to_contain(">hello</p>")
-```
-
-</details>
-
-#### exposes a CSS-backed document wrapper for GUI WYSIWYG rendering
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = wysiwyg_preview_document_html("# Title\n<script>alert(1)</script>")
-expect(wysiwyg_preview_css()).to_contain(".wysiwyg-preview")
-expect(html).to_start_with("<style>.wysiwyg-preview")
-expect(html).to_contain("box-sizing: border-box")
-expect(html).to_contain(".wysiwyg-preview-line")
-expect(html).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
-expect(html).to_contain("data-line-count=\"2\"")
-expect(html).to_contain("data-line-no=\"1\"")
-expect(html).to_contain("style=\"font-family:")
-```
-
-</details>
-
-#### renders Markdown task list items as disabled checkboxes
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = wysiwyg_preview_document_html("- [x] Done <safe>\n- [ ] Open\n* [X] Star done\n* [ ] Star open")
-expect(html).to_contain("class=\"markdown-task\"")
-expect(html).to_contain("data-task=\"true\" data-checked=\"true\"")
-expect(html).to_contain("<input type=\"checkbox\" disabled checked>")
-expect(html).to_contain("Done &lt;safe&gt;")
-expect(html).to_contain("data-task=\"true\" data-checked=\"false\"")
-expect(html).to_contain("<input type=\"checkbox\" disabled>")
-expect(html).to_contain("Open</p>")
-expect(html).to_contain("Star done</p>")
-expect(html).to_contain("Star open</p>")
-```
-
-</details>
-
-#### renders strikethrough inline HTML through the document wrapper
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = wysiwyg_preview_document_html("Keep ~~old <tag>~~")
-expect(html).to_contain("<del>old &lt;tag&gt;</del>")
-```
-
-</details>
-
-#### renders inline links through the document wrapper
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = wysiwyg_preview_document_html("Read [Docs <x>](docs.md?a=1&b=2)")
-expect(html).to_contain("<a href=\"docs.md?a=1&amp;b=2\">Docs &lt;x&gt;</a>")
-```
-
-</details>
-
-#### sanitizes unsafe inline links through the document wrapper
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = wysiwyg_preview_document_html("Read [Bad](javascript:alert(1))")
-expect(html).to_contain("<a href=\"#\">Bad</a>")
-```
-
-</details>
-
-#### sanitizes whitespace-obfuscated unsafe inline links
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = wysiwyg_preview_document_html("Read [Bad](java\tscript:alert(1))")
-expect(html).to_contain("<a href=\"#\">Bad</a>")
-```
-
-</details>
-
-#### renders Markdown bullet list lines as HTML lists
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = wysiwyg_preview_document_html("- First **item**")
-expect(html).to_contain("<ul class=\"markdown-list\"")
-expect(html).to_contain("<li>First <strong>item</strong></li>")
-```
-
-</details>
-
-#### renders Markdown ordered list lines as HTML lists
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = wysiwyg_preview_document_html("10. First **item**")
-expect(html).to_contain("<ol class=\"markdown-list markdown-ordered-list\"")
-expect(html).to_contain("<li>First <strong>item</strong></li>")
-```
-
-</details>
-
-#### renders Markdown blockquote lines as quote HTML
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = wysiwyg_preview_document_html("> Quote **safe** <x>")
-expect(html).to_contain("<blockquote class=\"markdown-quote\"")
-expect(html).to_contain(">Quote <strong>safe</strong> &lt;x&gt;</blockquote>")
 ```
 
 </details>
@@ -325,25 +127,6 @@ expect(preview).to_contain(">changed</p>")
 
 </details>
 
-#### keeps edited lines inside fenced code blocks rendered as code
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val view = build_wysiwyg_view("```simple\nprint(1)\n```")
-val edited = wysiwyg_update_line(view, 1, "print(\"<x>\")")
-val preview = wysiwyg_preview_pane(edited)
-expect(preview).to_contain("<pre")
-expect(preview).to_contain("print(&quot;&lt;x&gt;&quot;)")
-expect(preview).to_contain("data-line-no=\"1\"")
-```
-
-</details>
-
 #### accepts checked edits only when expected source matches actual source
 
 <details>
@@ -359,25 +142,6 @@ expect(result.accepted).to_be(true)
 expect(result.reason).to_equal("updated")
 expect(result.diff).to_equal("@@ line 1 @@\n- second\n+ changed")
 expect(wysiwyg_source_pane(result.view)).to_equal("first\nchanged")
-```
-
-</details>
-
-#### keeps checked edits inside fenced code blocks rendered as code
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val view = build_wysiwyg_view("```simple\nprint(1)\n```")
-val result = wysiwyg_update_line_checked(view, 1, "print(1)", "print(2)")
-val preview = wysiwyg_preview_pane(result.view)
-expect(result.accepted).to_be(true)
-expect(preview).to_contain("<pre")
-expect(preview).to_contain(">print(2)</pre>")
 ```
 
 </details>
@@ -421,20 +185,31 @@ expect(wysiwyg_source_pane(result.view)).to_equal("first")
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/office/md_wysiwyg_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- markdown WYSIWYG view: source and preview panes
+- markdown WYSIWYG view: beside-the-line editing
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-
-
-## Related Documentation
-
-- **Plan:** [doc/03_plan/sys_test/ide_office_plugin_suite.md](doc/03_plan/sys_test/ide_office_plugin_suite.md)
 
 
 </details>

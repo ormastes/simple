@@ -1962,17 +1962,6 @@ mod vulkan_dlopen {
     pub(super) type VkResult = i32;
 
     pub(super) const VK_SUCCESS: VkResult = 0;
-    pub(super) const VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR: u32 = 0x0000_0001;
-
-    pub static VK_LAST_ERROR: Mutex<String> = Mutex::new(String::new());
-
-    pub(super) fn set_last_error(message: impl Into<String>) {
-        *VK_LAST_ERROR.lock().unwrap() = message.into();
-    }
-
-    pub(super) fn clear_last_error() {
-        VK_LAST_ERROR.lock().unwrap().clear();
-    }
 
     #[repr(C)]
     pub(super) struct VkApplicationInfo {
@@ -2408,30 +2397,7 @@ mod vulkan_dlopen {
 
     pub fn load_vulkan() -> Option<VkFns> {
         unsafe {
-            #[cfg(all(unix, target_os = "macos"))]
-            {
-                let names = &[
-                    "libvulkan.1.dylib",
-                    "libvulkan.dylib",
-                    "/opt/homebrew/lib/libvulkan.1.dylib",
-                    "/opt/homebrew/lib/libvulkan.dylib",
-                    "/usr/local/lib/libvulkan.1.dylib",
-                    "/usr/local/lib/libvulkan.dylib",
-                    "/opt/homebrew/lib/libMoltenVK.dylib",
-                    "/usr/local/lib/libMoltenVK.dylib",
-                ];
-                let handle = names.iter().find_map(|name| {
-                    let n = CString::new(*name).ok()?;
-                    let h = libc::dlopen(n.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
-                    if h.is_null() {
-                        None
-                    } else {
-                        Some(h)
-                    }
-                })?;
-                load_vk_syms(handle)
-            }
-            #[cfg(all(unix, not(target_os = "macos")))]
+            #[cfg(unix)]
             {
                 let names = &["libvulkan.so.1", "libvulkan.so"];
                 let handle = names.iter().find_map(|name| {
@@ -2655,26 +2621,12 @@ pub fn rt_vulkan_is_available_fn(_args: &[Value]) -> Result<Value, CompileError>
 pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::*;
     use std::ptr;
-    clear_last_error();
     let fns = match vulkan_dlopen::load_vulkan() {
         Some(f) => f,
-        None => {
-            set_last_error("Vulkan loader library not found");
-            return Ok(Value::Int(0));
-        }
+        None => return Ok(Value::Int(0)),
     };
     unsafe {
         let app_name = std::ffi::CString::new("simple").unwrap();
-        #[cfg(target_os = "macos")]
-        let extension_names = vec![std::ffi::CString::new("VK_KHR_portability_enumeration").unwrap()];
-        #[cfg(not(target_os = "macos"))]
-        let extension_names: Vec<std::ffi::CString> = Vec::new();
-        let extension_ptrs: Vec<*const std::os::raw::c_char> =
-            extension_names.iter().map(|name| name.as_ptr()).collect();
-        #[cfg(target_os = "macos")]
-        let instance_flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-        #[cfg(not(target_os = "macos"))]
-        let instance_flags = 0;
         let app_info = VkApplicationInfo {
             s_type: 0,
             p_next: ptr::null(),
@@ -2687,47 +2639,27 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         let create_info = VkInstanceCreateInfo {
             s_type: 1,
             p_next: ptr::null(),
-            flags: instance_flags,
+            flags: 0,
             p_application_info: &app_info,
             enabled_layer_count: 0,
             pp_enabled_layer_names: ptr::null(),
-            enabled_extension_count: extension_ptrs.len() as u32,
-            pp_enabled_extension_names: if extension_ptrs.is_empty() {
-                ptr::null()
-            } else {
-                extension_ptrs.as_ptr()
-            },
+            enabled_extension_count: 0,
+            pp_enabled_extension_names: ptr::null(),
         };
         let mut instance: VkInstance = ptr::null_mut();
-        let create_instance_result = (fns.create_instance)(&create_info, ptr::null(), &mut instance);
-        if create_instance_result != VK_SUCCESS {
-            set_last_error(format!("vkCreateInstance failed: {}", create_instance_result));
+        if (fns.create_instance)(&create_info, ptr::null(), &mut instance) != VK_SUCCESS {
             return Ok(Value::Int(0));
         }
 
         // Enumerate physical devices
         let mut count: u32 = 0;
-        let enumerate_result = (fns.enumerate_physical_devices)(instance, &mut count, ptr::null_mut());
-        if enumerate_result != VK_SUCCESS {
-            set_last_error(format!("vkEnumeratePhysicalDevices failed: {}", enumerate_result));
-            (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Int(0));
-        }
+        (fns.enumerate_physical_devices)(instance, &mut count, ptr::null_mut());
         if count == 0 {
-            set_last_error("no Vulkan physical devices enumerated");
             (fns.destroy_instance)(instance, ptr::null());
             return Ok(Value::Int(0));
         }
         let mut phys_devs: Vec<VkPhysicalDevice> = vec![ptr::null_mut(); count as usize];
-        let enumerate_fill_result = (fns.enumerate_physical_devices)(instance, &mut count, phys_devs.as_mut_ptr());
-        if enumerate_fill_result != VK_SUCCESS {
-            set_last_error(format!(
-                "vkEnumeratePhysicalDevices fill failed: {}",
-                enumerate_fill_result
-            ));
-            (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Int(0));
-        }
+        (fns.enumerate_physical_devices)(instance, &mut count, phys_devs.as_mut_ptr());
 
         // Pick first device with a compute queue
         let mut chosen_phys: VkPhysicalDevice = ptr::null_mut();
@@ -2747,7 +2679,6 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             }
         }
         if chosen_phys.is_null() {
-            set_last_error("no Vulkan compute queue family found");
             (fns.destroy_instance)(instance, ptr::null());
             return Ok(Value::Int(0));
         }
@@ -2775,9 +2706,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             p_enabled_features: &features,
         };
         let mut device: VkDevice = ptr::null_mut();
-        let create_device_result = (fns.create_device)(chosen_phys, &dev_ci, ptr::null(), &mut device);
-        if create_device_result != VK_SUCCESS {
-            set_last_error(format!("vkCreateDevice failed: {}", create_device_result));
+        if (fns.create_device)(chosen_phys, &dev_ci, ptr::null(), &mut device) != VK_SUCCESS {
             (fns.destroy_instance)(instance, ptr::null());
             return Ok(Value::Int(0));
         }
@@ -2805,9 +2734,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             queue_family_index: chosen_qf,
         };
         let mut cmd_pool: VkCommandPool = 0;
-        let command_pool_result = (fns.create_command_pool)(device, &pool_ci, ptr::null(), &mut cmd_pool);
-        if command_pool_result != VK_SUCCESS {
-            set_last_error(format!("vkCreateCommandPool failed: {}", command_pool_result));
+        if (fns.create_command_pool)(device, &pool_ci, ptr::null(), &mut cmd_pool) != VK_SUCCESS {
             (fns.destroy_device)(device, ptr::null());
             (fns.destroy_instance)(instance, ptr::null());
             return Ok(Value::Int(0));
@@ -3796,11 +3723,7 @@ pub fn rt_vulkan_wait_idle_fn(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_vulkan_get_last_error_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::VK_STATE;
     let guard = VK_STATE.lock().unwrap();
-    let err = guard
-        .as_ref()
-        .map(|s| s.last_error.clone())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| vulkan_dlopen::VK_LAST_ERROR.lock().unwrap().clone());
+    let err = guard.as_ref().map(|s| s.last_error.clone()).unwrap_or_default();
     Ok(Value::Str(err))
 }
 
@@ -3922,40 +3845,88 @@ mod renderdoc_dlopen {
 
     fn api_ptr() -> Option<*const *const c_void> {
         let p = *API.get_or_init(|| unsafe {
-            // librenderdoc is normally already resident (injected by renderdoccmd).
-            // RTLD_NOLOAD returns the existing handle without loading a new copy;
-            // fall back to loading the repo-local library if not present.
-            let names = ["librenderdoc.so\0", "build/tools/renderdoc/lib/librenderdoc.so\0"];
-            let mut handle = std::ptr::null_mut();
-            for n in names {
-                handle = libc::dlopen(n.as_ptr() as *const c_char, libc::RTLD_NOW | libc::RTLD_NOLOAD);
-                if !handle.is_null() {
-                    break;
-                }
-            }
-            if handle.is_null() {
+            #[cfg(unix)]
+            {
+                // librenderdoc is normally already resident (injected by renderdoccmd).
+                // RTLD_NOLOAD returns the existing handle without loading a new copy;
+                // fall back to loading the repo-local library if not present.
+                let names = [
+                    "librenderdoc.so\0",
+                    "build/tools/renderdoc/lib/librenderdoc.so\0",
+                ];
+                let mut handle = std::ptr::null_mut();
                 for n in names {
-                    handle = libc::dlopen(n.as_ptr() as *const c_char, libc::RTLD_NOW);
+                    handle = libc::dlopen(n.as_ptr() as *const c_char, libc::RTLD_NOW | libc::RTLD_NOLOAD);
                     if !handle.is_null() {
                         break;
                     }
                 }
+                if handle.is_null() {
+                    for n in names {
+                        handle = libc::dlopen(n.as_ptr() as *const c_char, libc::RTLD_NOW);
+                        if !handle.is_null() {
+                            break;
+                        }
+                    }
+                }
+                if handle.is_null() {
+                    return 0usize;
+                }
+                let sym = CString::new("RENDERDOC_GetAPI").unwrap();
+                let f = libc::dlsym(handle, sym.as_ptr());
+                if f.is_null() {
+                    return 0usize;
+                }
+                let get_api: GetApiFn = std::mem::transmute(f);
+                let mut api: *mut c_void = std::ptr::null_mut();
+                let ok = get_api(API_VERSION_1_6_0, &mut api);
+                if ok != 1 || api.is_null() {
+                    return 0usize;
+                }
+                api as usize
             }
-            if handle.is_null() {
-                return 0usize;
+            #[cfg(windows)]
+            {
+                use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress, LoadLibraryA};
+                // renderdoc.dll is normally already resident when launched under
+                // renderdoccmd capture (it hooks the Vulkan instance at startup).
+                // Try GetModuleHandleA first (no refcount bump); fall back to
+                // LoadLibraryA for the system-installed copy.
+                let dll_names: &[&[u8]] = &[b"renderdoc.dll\0"];
+                let mut handle = std::ptr::null_mut::<std::ffi::c_void>();
+                for name in dll_names {
+                    let h = GetModuleHandleA(name.as_ptr());
+                    if !h.is_null() {
+                        handle = h as *mut std::ffi::c_void;
+                        break;
+                    }
+                }
+                if handle.is_null() {
+                    for name in dll_names {
+                        let h = LoadLibraryA(name.as_ptr());
+                        if !h.is_null() {
+                            handle = h as *mut std::ffi::c_void;
+                            break;
+                        }
+                    }
+                }
+                if handle.is_null() {
+                    return 0usize;
+                }
+                let sym = b"RENDERDOC_GetAPI\0";
+                let f = GetProcAddress(handle as _, sym.as_ptr());
+                let f = match f {
+                    Some(fp) => fp as *mut c_void,
+                    None => return 0usize,
+                };
+                let get_api: GetApiFn = std::mem::transmute(f);
+                let mut api: *mut c_void = std::ptr::null_mut();
+                let ok = get_api(API_VERSION_1_6_0, &mut api);
+                if ok != 1 || api.is_null() {
+                    return 0usize;
+                }
+                api as usize
             }
-            let sym = CString::new("RENDERDOC_GetAPI").unwrap();
-            let f = libc::dlsym(handle, sym.as_ptr());
-            if f.is_null() {
-                return 0usize;
-            }
-            let get_api: GetApiFn = std::mem::transmute(f);
-            let mut api: *mut c_void = std::ptr::null_mut();
-            let ok = get_api(API_VERSION_1_6_0, &mut api);
-            if ok != 1 || api.is_null() {
-                return 0usize;
-            }
-            api as usize
         });
         if p == 0 {
             None
@@ -3969,7 +3940,8 @@ mod renderdoc_dlopen {
             unsafe {
                 let f = *api.offset(IDX_START_FRAME_CAPTURE);
                 if !f.is_null() {
-                    let func: unsafe extern "C" fn(*const c_void, *const c_void) = std::mem::transmute(f);
+                    let func: unsafe extern "C" fn(*const c_void, *const c_void) =
+                        std::mem::transmute(f);
                     func(std::ptr::null(), std::ptr::null());
                     return true;
                 }
@@ -3983,7 +3955,8 @@ mod renderdoc_dlopen {
             unsafe {
                 let f = *api.offset(IDX_END_FRAME_CAPTURE);
                 if !f.is_null() {
-                    let func: unsafe extern "C" fn(*const c_void, *const c_void) -> u32 = std::mem::transmute(f);
+                    let func: unsafe extern "C" fn(*const c_void, *const c_void) -> u32 =
+                        std::mem::transmute(f);
                     return func(std::ptr::null(), std::ptr::null());
                 }
             }
@@ -4007,11 +3980,7 @@ mod renderdoc_dlopen {
 
 /// `rt_renderdoc_available() -> i64` (1 if the RENDERDOC API resolved)
 pub fn rt_renderdoc_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(if renderdoc_dlopen::num_captures() != u32::MAX {
-        1
-    } else {
-        0
-    }))
+    Ok(Value::Int(if renderdoc_dlopen::num_captures() != u32::MAX { 1 } else { 0 }))
 }
 
 /// `rt_renderdoc_start_capture() -> i64` (1 if a frame capture was started)

@@ -5,10 +5,6 @@
  * Supports pthread (Linux/macOS) and Windows threads.
  */
 
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
-
 #include "runtime_thread.h"
 #include "runtime_memtrack.h"
 #include "runtime_value.h"
@@ -60,9 +56,6 @@ typedef struct {
 } HandleEntry;
 
 static HandleEntry g_handles[MAX_HANDLES];
-
-static void rt_pool_mark_worker_blocked(void);
-static void rt_pool_mark_worker_unblocked(void);
 
 /* Freelist stack for O(1) handle alloc/free */
 static int64_t g_freelist[MAX_HANDLES];

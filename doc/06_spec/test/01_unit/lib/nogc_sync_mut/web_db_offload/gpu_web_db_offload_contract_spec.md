@@ -1,6 +1,6 @@
-# GPU Web/DB Offload Contract
+# Gpu Web Db Offload Contract Specification
 
-> These scenarios define the reliability-first admission contract for coarse web/database GPU work. HTTP control-plane and proxy forwarding remain CPU-owned, while eligible batch work may reserve reusable GPU queue slots with pinned host buffer accounting, reusable execution evidence, and CPU fallback.
+> <details>
 
 <!-- sdn-diagram:id=gpu_web_db_offload_contract_spec.arch -->
 <details class="sdn-source">
@@ -27,61 +27,12 @@ gpu_web_db_offload_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# GPU Web/DB Offload Contract
-
-These scenarios define the reliability-first admission contract for coarse web/database GPU work. HTTP control-plane and proxy forwarding remain CPU-owned, while eligible batch work may reserve reusable GPU queue slots with pinned host buffer accounting, reusable execution evidence, and CPU fallback.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Requirements | doc/02_requirements/feature/gpu_web_db_offload.md |
-| Plan | doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md |
-| Design | doc/05_design/gpu_web_db_offload.md |
-| Research | doc/01_research/local/gpu_web_db_offload.md |
-| Source | `test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-These scenarios define the reliability-first admission contract for coarse
-web/database GPU work. HTTP control-plane and proxy forwarding remain CPU-owned,
-while eligible batch work may reserve reusable GPU queue slots with pinned host
-buffer accounting, reusable execution evidence, and CPU fallback.
-
-## Requirements
-
-**Requirements:** doc/02_requirements/feature/gpu_web_db_offload.md
-
-- CPU fallback remains mandatory for GPU-eligible web and database work.
-- Proxy forwarding and HTTP control-plane work stay CPU-owned.
-- Queue submissions expose reusable evidence for GPU hits and CPU fallbacks.
-
-## Plan
-
-**Plan:** doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md
-
-## Design
-
-**Design:** doc/05_design/gpu_web_db_offload.md
-
-## Research
-
-**Research:** doc/01_research/local/gpu_web_db_offload.md
-
-## Examples
-
-Use `gpu_wdb_decide` for admission, `gpu_wdb_submit_batch` for bounded queue
-accounting, and `gpu_wdb_submission_evidence` when benchmark or caller code
-needs a stable metrics record.
+# Gpu Web Db Offload Contract Specification
 
 ## Scenarios
 
@@ -443,253 +394,30 @@ expect(decision.reason).to_equal("metadata-filter-must-stay-cpu-owned")
 
 </details>
 
-#### should submit eligible web work through reusable pinned GPU queue accounting
+## At a Glance
 
-- Reserve one reusable GPU stream and pinned host batch buffer
-   - Expected: submission.dispatch_target equals `gpu_web_embedding_batch`
-   - Expected: submission.stream_id equals `0`
-   - Expected: submission.pinned_host_bytes equals `budget.min_gpu_batch_bytes * 2`
-   - Expected: submission.state.queue_depth equals `1`
-   - Expected: submission.state.gpu_hit_count equals `1`
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
 
+## Overview
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 19 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Reserve one reusable GPU stream and pinned host batch buffer")
-val budget = gpu_wdb_default_budget()
-val state = gpu_wdb_queue_initial(4)
-val submission = gpu_wdb_submit_batch(
-    state,
-    GpuWdbWorkKind.WebEmbedding,
-    budget.min_gpu_batch_bytes * 2,
-    2,
-    true,
-    true,
-    true,
-    budget
-)
-expect(submission.accepted).to_be(true)
-expect(submission.dispatch_target).to_equal("gpu_web_embedding_batch")
-expect(submission.stream_id).to_equal(0)
-expect(submission.pinned_host_bytes).to_equal(budget.min_gpu_batch_bytes * 2)
-expect(submission.state.queue_depth).to_equal(1)
-expect(submission.state.gpu_hit_count).to_equal(1)
-```
-
-</details>
-
-#### should expose reusable execution evidence for accepted GPU submissions
-
-- Convert queue submission state into benchmark-ready evidence
-- gpu wdb queue initial
-   - Expected: evidence.work_kind equals `GpuWdbWorkKind.DbVectorSearch`
-   - Expected: evidence.work_kind_name equals `db_vector_search`
-   - Expected: evidence.batch_size equals `4`
-   - Expected: evidence.batch_bytes equals `budget.min_gpu_batch_bytes * 4`
-   - Expected: evidence.transfer_bytes equals `budget.min_gpu_batch_bytes * 4`
-   - Expected: evidence.kernel_time_us equals `40`
-   - Expected: evidence.completion_latency_us equals `40`
-   - Expected: evidence.gpu_hits equals `1`
-   - Expected: evidence.cpu_fallbacks equals `0`
-   - Expected: evidence.stream_id equals `0`
-   - Expected: evidence.fallback_reason equals ``
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 31 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Convert queue submission state into benchmark-ready evidence")
-val budget = gpu_wdb_default_budget()
-val submission = gpu_wdb_submit_batch(
-    gpu_wdb_queue_initial(4),
-    GpuWdbWorkKind.DbVectorSearch,
-    budget.min_gpu_batch_bytes * 4,
-    4,
-    true,
-    true,
-    true,
-    budget
-)
-val evidence = gpu_wdb_submission_evidence(
-    submission,
-    4,
-    budget.min_gpu_batch_bytes * 4,
-    100,
-    140
-)
-expect(evidence.work_kind).to_equal(GpuWdbWorkKind.DbVectorSearch)
-expect(evidence.work_kind_name).to_equal("db_vector_search")
-expect(evidence.accepted).to_be(true)
-expect(evidence.batch_size).to_equal(4)
-expect(evidence.batch_bytes).to_equal(budget.min_gpu_batch_bytes * 4)
-expect(evidence.transfer_bytes).to_equal(budget.min_gpu_batch_bytes * 4)
-expect(evidence.kernel_time_us).to_equal(40)
-expect(evidence.completion_latency_us).to_equal(40)
-expect(evidence.gpu_hits).to_equal(1)
-expect(evidence.cpu_fallbacks).to_equal(0)
-expect(evidence.stream_id).to_equal(0)
-expect(evidence.fallback_reason).to_equal("")
-```
-
-</details>
-
-#### should complete reusable GPU queue submissions and release pinned bytes
-
-- Release queue depth and pinned host bytes after GPU completion
-   - Expected: completed.queue_depth equals `0`
-   - Expected: completed.completed_count equals `1`
-   - Expected: completed.pinned_host_bytes equals `0`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 17 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Release queue depth and pinned host bytes after GPU completion")
-val budget = gpu_wdb_default_budget()
-val state = gpu_wdb_queue_initial(2)
-val submission = gpu_wdb_submit_batch(
-    state,
-    GpuWdbWorkKind.DbVectorSearch,
-    budget.min_gpu_batch_bytes * 3,
-    3,
-    true,
-    true,
-    true,
-    budget
-)
-val completed = gpu_wdb_complete_submission(submission.state, submission)
-expect(completed.queue_depth).to_equal(0)
-expect(completed.completed_count).to_equal(1)
-expect(completed.pinned_host_bytes).to_equal(0)
-```
-
-</details>
-
-#### should keep tiny reusable queue submissions on CPU without reserving streams
-
-- Avoid GPU queue reservation for tiny batches
-   - Expected: submission.dispatch_target equals `cpu_fallback`
-   - Expected: submission.stream_id equals `-1`
-   - Expected: submission.pinned_host_bytes equals `0`
-   - Expected: submission.state.queue_depth equals `0`
-   - Expected: submission.state.cpu_fallback_count equals `1`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 19 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Avoid GPU queue reservation for tiny batches")
-val budget = gpu_wdb_default_budget()
-val state = gpu_wdb_queue_initial(2)
-val submission = gpu_wdb_submit_batch(
-    state,
-    GpuWdbWorkKind.WebRank,
-    budget.min_gpu_batch_bytes - 1,
-    1,
-    true,
-    true,
-    true,
-    budget
-)
-expect(submission.accepted).to_be(false)
-expect(submission.dispatch_target).to_equal("cpu_fallback")
-expect(submission.stream_id).to_equal(-1)
-expect(submission.pinned_host_bytes).to_equal(0)
-expect(submission.state.queue_depth).to_equal(0)
-expect(submission.state.cpu_fallback_count).to_equal(1)
-```
-
-</details>
-
-#### should expose fallback evidence without fake transfer or kernel time
-
-- Convert CPU fallback submissions into explicit fallback evidence
-- gpu wdb queue initial
-   - Expected: evidence.batch_size equals `1`
-   - Expected: evidence.batch_bytes equals `budget.min_gpu_batch_bytes - 1`
-   - Expected: evidence.transfer_bytes equals `0`
-   - Expected: evidence.kernel_time_us equals `0`
-   - Expected: evidence.completion_latency_us equals `1`
-   - Expected: evidence.gpu_hits equals `0`
-   - Expected: evidence.cpu_fallbacks equals `1`
-   - Expected: evidence.stream_id equals `-1`
-   - Expected: evidence.fallback_reason equals `batch-too-small`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 29 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Convert CPU fallback submissions into explicit fallback evidence")
-val budget = gpu_wdb_default_budget()
-val submission = gpu_wdb_submit_batch(
-    gpu_wdb_queue_initial(2),
-    GpuWdbWorkKind.WebRank,
-    budget.min_gpu_batch_bytes - 1,
-    1,
-    true,
-    true,
-    true,
-    budget
-)
-val evidence = gpu_wdb_submission_evidence(
-    submission,
-    1,
-    budget.min_gpu_batch_bytes - 1,
-    200,
-    200
-)
-expect(evidence.accepted).to_be(false)
-expect(evidence.batch_size).to_equal(1)
-expect(evidence.batch_bytes).to_equal(budget.min_gpu_batch_bytes - 1)
-expect(evidence.transfer_bytes).to_equal(0)
-expect(evidence.kernel_time_us).to_equal(0)
-expect(evidence.completion_latency_us).to_equal(1)
-expect(evidence.gpu_hits).to_equal(0)
-expect(evidence.cpu_fallbacks).to_equal(1)
-expect(evidence.stream_id).to_equal(-1)
-expect(evidence.fallback_reason).to_equal("batch-too-small")
-```
-
-</details>
+Tests covering:
+- GPU web/db offload contract
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-
-
-## Related Documentation
-
-- **Requirements:** [doc/02_requirements/feature/gpu_web_db_offload.md](doc/02_requirements/feature/gpu_web_db_offload.md)
-- **Plan:** [doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md](doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md)
-- **Design:** [doc/05_design/gpu_web_db_offload.md](doc/05_design/gpu_web_db_offload.md)
-- **Research:** [doc/01_research/local/gpu_web_db_offload.md](doc/01_research/local/gpu_web_db_offload.md)
 
 
 </details>

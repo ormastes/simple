@@ -34,10 +34,6 @@ Generate executable SSpec `.spl` scenarios using the canonical matcher set.
 SPipe runs those scenarios and generates mirrored manual docs.
 Executable specs belong under `test/...`; `doc/06_spec/...` is reserved for
 generated/manual scenario documentation derived from those specs.
-For broad lanes, the first normal/highest-capability pass defines shared
-interface names and manual-facing setup/checker helper names before sidecars or
-implementation proceed. Temporary helper placeholders must fail explicitly with
-`assert(false)` or equivalent until implemented.
 
 ### Canonical Matchers
 
@@ -238,9 +234,6 @@ Create test plan with:
 - Execution order and dependencies
 - Pass/fail criteria
 - Risk areas needing extra coverage
-- Cooperative review plan: lower-model sidecar lanes for broad work (Codex
-  Spark, Claude Haiku, or Claude Sonnet) or `N/A`, plus final
-  normal/highest-capability review before accepting broad coverage claims
 - Manual rendering policy: which scenarios are visible, folded, skipped, or
   detail-only in generated `doc/06_spec/...`
 - Capture plan by evidence kind and scope
@@ -267,9 +260,6 @@ bin/simple test path/to/spec.spl --native  # Compiled mode (full execution)
 
 ## Multi-LLM Collaboration
 
-- For broad system-test plans, split independent requirement, edge-case,
-  environment, and manual-quality checks across lower-model sidecars when
-  available, then have a normal/highest-capability LLM review the merged plan.
 - If other LLMs wrote test specs, review quality and extend — never overwrite
 - Codex is the preferred test designer in cooperative mode
 - Tag Codex-produced tests with `# codex-system-test` comment

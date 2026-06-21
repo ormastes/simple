@@ -1,58 +1,48 @@
 # MinIO Get Skill
 
-Download an object from MinIO via `bin/itf minio get` (pure-Simple SigV4 REST — `adapter_minio.spl`, no `mc`).
+Download an object from MinIO via `mc cp --json`.
 
 ## Prerequisites
 
-- `[minio]` section in `~/.config/itf/auth.sdn` (see `/minio setup`).
-- For `--out PATH`, the destination path is writable.
-
-Signature: `get <bucket> <key> [--out PATH] [--range R]`. Bucket and key are **separate** positional args.
+- Configured alias (see `/minio setup`).
+- Local destination path is writable; if it is a directory, the source filename is preserved.
 
 ## Procedure
 
-### Stream Body to a File
+### Download to Explicit Path
 
 ```bash
-bin/itf minio get firmware-images zynq/v1/fw.bin --out ./fw.bin
-# → minio_download(cfg, "firmware-images", "zynq/v1/fw.bin", "./fw.bin", 3600); prints "wrote N bytes to ./fw.bin"
+bin/itf minio get firmware-images/zynq/v1/fw.bin ./fw.bin
+# delegates to: mc --json cp <alias>/firmware-images/zynq/v1/fw.bin ./fw.bin
 ```
 
-### Print Body to stdout
-
-With no `--out`, the object body is written to stdout (`--json` wraps the raw response instead):
+### Download to Current Directory
 
 ```bash
-bin/itf minio get firmware-images zynq/v1/fw.bin
-# → minio_get_object → prints result.body
-```
-
-### Byte Range
-
-```bash
-bin/itf minio get firmware-images zynq/v1/fw.bin --range bytes=0-1023 --out ./head.bin
-# passes the HTTP Range header through
+bin/itf minio get firmware-images/zynq/v1/fw.bin
+# delegates to: mc --json cp <alias>/firmware-images/zynq/v1/fw.bin .
 ```
 
 ### Recursive (Prefix) Download
 
-The built-in `get` is single-object only. For prefix downloads, run `mc` directly:
+`adapter_minio_mc.spl` exposes a single-object copy. For prefix downloads, run `mc` directly:
 
 ```bash
 mc --json cp --recursive <alias>/firmware-images/zynq/ ./local/zynq/
 ```
 
-(Reference: `mc-cp-2026` `--recursive`. Separate raw-`mc` escape hatch, not the built-in path.)
+(Reference: `mc-cp-2026` `--recursive` flag.)
 
 ## Output
 
-`--out PATH` writes the file and prints a `wrote N bytes` success line. Without `--out`, the raw body goes to stdout; `--json` prints `format_json_output(raw)` (the raw S3 response) instead.
+`mc --json cp` streams progress lines (NDJSON) culminating in a `status: success` line. Stderr carries `mc` diagnostics.
 
 ## Error Handling
 
-- `NoSuchKey`: path is wrong; verify with `/minio ls` first.
-- `AccessDenied`: credentials lack `s3:GetObject`.
-- Local `permission denied`: `--out` directory not writable.
+- HTTP 404 / `NoSuchKey`: path is wrong; verify with `/minio ls` first.
+- HTTP 403 / `AccessDenied`: missing `s3:GetObject` permission.
+- Local `permission denied`: destination directory not writable.
+- Network drop: rerun the command; `mc` does not auto-resume single-object copies.
 
 ## Integration
 

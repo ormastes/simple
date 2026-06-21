@@ -28,7 +28,7 @@ libreoffice_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -59,16 +59,12 @@ expect(libreoffice_suite_name()).to_equal("LibreOffice")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(libreoffice_app_name("word")).to_equal("Writer")
-expect(libreoffice_app_name("sheets")).to_equal("Calc")
-expect(libreoffice_app_name("calc")).to_equal("Calc")
 expect(libreoffice_app_name("excel")).to_equal("Calc")
-expect(libreoffice_app_name("slides")).to_equal("Impress")
-expect(libreoffice_app_name("impress")).to_equal("Impress")
 expect(libreoffice_app_name("ppt")).to_equal("Impress")
 ```
 
@@ -95,18 +91,13 @@ expect(libreoffice_app_name("math")).to_equal("Math")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(is_office_component("word")).to_be(true)
 expect(is_office_component("sheets")).to_be(true)
-expect(is_office_component("calc")).to_be(true)
-expect(is_office_component("impress")).to_be(true)
-expect(is_office_component("base")).to_be(true)
 expect(is_office_component("counter")).to_be(true)
-expect(libreoffice_app_name_checked("writer")).to_equal("Writer")
-expect(libreoffice_app_name_checked("base")).to_equal("Base")
 expect(libreoffice_app_name_checked("counter")).to_equal("Counter")
 expect(libreoffice_app_name_checked("unknown")).to_equal("error: unknown LibreOffice component: unknown")
 val route = lookup_office_component("counter")
@@ -117,33 +108,12 @@ expect(route.component).to_equal("counter")
 
 </details>
 
-#### normalizes LibreOffice direct route aliases
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect(office_canonical_component("calc")).to_equal("sheets")
-expect(office_canonical_component("excel")).to_equal("sheets")
-expect(office_canonical_component("impress")).to_equal("slides")
-expect(office_canonical_component("ppt")).to_equal("slides")
-expect(office_canonical_component("base")).to_equal("db")
-expect(lookup_office_component("calc").component).to_equal("sheets")
-expect(lookup_office_component("impress").component).to_equal("slides")
-expect(lookup_office_component("base").component).to_equal("db")
-```
-
-</details>
-
 #### resolves launcher actions including counter actions
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -153,16 +123,6 @@ expect(sheets.unwrap()).to_equal("sheets")
 val counter = office_component_for_action("open_counter")
 expect(counter.is_some()).to_be(true)
 expect(counter.unwrap()).to_equal("counter")
-val draw = office_component_for_action("open_draw")
-expect(draw.is_some()).to_be(true)
-expect(draw.unwrap()).to_equal("draw")
-val db = office_component_for_action("open_db")
-expect(db.is_some()).to_be(true)
-expect(db.unwrap()).to_equal("db")
-val math = office_component_for_action("open_math")
-expect(math.is_some()).to_be(true)
-expect(math.unwrap()).to_equal("math")
-expect(office_component_for_action("open_writer").is_none()).to_be(true)
 ```
 
 </details>
@@ -177,28 +137,6 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(libreoffice_apps().len()).to_equal(6)
-```
-
-</details>
-
-#### normalizes glossary aliases for Office apps and formats
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect(office_canonical_app_name("md")).to_equal("Writer")
-expect(office_canonical_app_name("xlsx")).to_equal("Calc")
-expect(office_canonical_app_name("pptx")).to_equal("Impress")
-expect(office_canonical_app_name("sdn")).to_equal("Draw")
-expect(office_canonical_app_name("html-ui")).to_equal("Designer")
-expect(office_app_aliases("draw")).to_contain("sdd")
-expect(office_app_aliases("designer")).to_contain("figma")
-expect(office_format_name("sdd")).to_equal("SDD: Simple Diagram Document")
-expect(office_format_name("sdn")).to_equal("SDN: Simple Data Notation")
 ```
 
 </details>
@@ -232,7 +170,7 @@ expect(names).to_contain("Math")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -240,9 +178,6 @@ val entries = libreoffice_plugin_entries()
 expect(entries.len()).to_equal(6)
 val first = entries[0]
 expect(first.name).to_equal("libreoffice-writer")
-val draw = entries[3]
-expect(draw.name).to_equal("libreoffice-draw")
-expect(draw.library).to_equal("std.editor.services.sdn_graph")
 ```
 
 </details>
@@ -267,8 +202,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

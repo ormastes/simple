@@ -1,12 +1,5 @@
 "use strict";
 
-const MACOS_WEBKIT_OVERLAYS = {
-  "form_controls_matrix": {
-    offsets: [1866,1895,1991,2087,2183,2250,2251,2277,2278,2279],
-    colors: [0xff77cec6,0xffe5e7eb,0xff49c3b7,0xff1dbaa9,0xffa5d8d6,0xffe5e7eb,0xff49c3b7,0xff1dbaa9,0xffa5d8d6,0xffe5e7eb],
-  },
-};
-
 const WEBKITGTK_OVERLAYS = {
   "opacity_matrix": {
     offsets: [388,389,390,391,392,393,394,395,396,397,398,399,400,401,402,403,404,405,406,407,484,485,486,487,488,489,490,491,492,493,494,495,496,497,498,499,500,501,502,503,580,581,582,583,584,585,586,587,588,589,590,591,592,593,594,595,596,597,598,599,676,677,678,679,680,681,682,683,684,685,686,687,688,689,690,691,692,693,694,695,772,773,774,775,776,777,778,779,780,781,782,783,784,785,786,787,788,789,790,791,868,869,870,871,872,873,874,875,876,877,878,879,880,881,882,883,884,885,886,887,964,965,966,967,968,969,970,971,972,973,974,975,976,977,978,979,980,981,982,983,1060,1061,1062,1063,1064,1065,1066,1067,1068,1069,1070,1071,1072,1073,1074,1075,1076,1077,1078,1079,1156,1157,1158,1159,1160,1161,1162,1163,1164,1165,1166,1167,1168,1169,1170,1171,1172,1173,1174,1175,1252,1253,1254,1255,1256,1257,1258,1259,1260,1261,1262,1263,1264,1265,1266,1267,1268,1269,1270,1271,1348,1349,1350,1351,1352,1353,1354,1355,1356,1357,1358,1359,1360,1361,1362,1363,1364,1365,1366,1367,1444,1445,1446,1447,1448,1449,1450,1451,1452,1453,1454,1455,1456,1457,1458,1459,1460,1461,1462,1463],
@@ -42,28 +35,4 @@ function applyWebkitGtkExpectedOverlay(expectedPath, pixels) {
   return { pixels: out, profile: 'tauri-webkitgtk-x11:' + caseName, overlayPixelCount: overlay.offsets.length };
 }
 
-function applyOverlay(overlays, expectedPath, pixels, profilePrefix) {
-  const normalized = String(expectedPath || '').replace(/\\/g, '/');
-  let caseName = '';
-  for (const name of Object.keys(overlays)) {
-    if (normalized.includes('/' + name + '/')) {
-      caseName = name;
-      break;
-    }
-  }
-  if (!caseName) return { pixels, profile: 'none', overlayPixelCount: 0 };
-  const overlay = overlays[caseName];
-  if (!overlay) return { pixels, profile: 'none', overlayPixelCount: 0 };
-  const out = pixels.slice();
-  for (let i = 0; i < overlay.offsets.length; i += 1) {
-    const idx = overlay.offsets[i];
-    if (idx >= 0 && idx < out.length) out[idx] = overlay.colors[i] >>> 0;
-  }
-  return { pixels: out, profile: profilePrefix + ':' + caseName, overlayPixelCount: overlay.offsets.length };
-}
-
-function applyMacosWebkitExpectedOverlay(expectedPath, pixels) {
-  return applyOverlay(MACOS_WEBKIT_OVERLAYS, expectedPath, pixels, 'tauri-macos-wkwebview');
-}
-
-module.exports = { applyWebkitGtkExpectedOverlay, applyMacosWebkitExpectedOverlay };
+module.exports = { applyWebkitGtkExpectedOverlay };

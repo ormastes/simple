@@ -26,14 +26,8 @@
    e. If specs fail and iterations < 5, read error output, fix, repeat
    f. If specs still fail after 5 iterations, log the failure in state file and escalate to orchestrator
 3. After all specs pass, verify no `pass_todo` stubs remain in implementation
-   and any temporary shared-interface or manual-facing helper placeholder
-   fails explicitly with `assert(false)` or equivalent until implemented.
 4. Run full compile check: `bin/simple build check`
-5. If the implementation changed a workflow, tool contract, evidence wrapper,
-   or verification contract, refresh matching `doc/07_guide`, `doc/06_spec`,
-   `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, and
-   `.claude/agents/spipe/` instructions before handoff.
-6. Update state file with implementation status
+5. Update state file with implementation status
 
 ## Rules
 
@@ -41,9 +35,7 @@
 - **Minimum viable code:** Do not add features beyond what specs require
 - **No gold-plating:** No extra methods, no extra error handling, no "nice to have"
 - **No refactoring:** Code can be ugly if specs pass. Phase 6 handles cleanup.
-- **No stubs:** Every `pass_todo` must be replaced with real implementation;
-  temporary shared/manual helper placeholders must fail explicitly with
-  `assert(false)` or equivalent
+- **No stubs:** Every `pass_todo` must be replaced with real implementation
 - **Compile clean:** Code must compile without warnings
 
 ## Boil a Small Lake
@@ -56,9 +48,7 @@ Load the spec, load the target file, write code, run test. That is all.
 
 - [ ] All spec files from Phase 4 pass: `bin/simple test <spec_file>` green for each
 - [ ] No `pass_todo` stubs in implementation files
-- [ ] Temporary shared/manual helper placeholders fail explicitly
 - [ ] Code compiles cleanly: `bin/simple build check` passes
-- [ ] Process mirrors refreshed when workflow/tool/evidence/verify contracts changed
 - [ ] State file updated: `phase: implement` marked complete, `impl_files:` listed
 
 ## Output

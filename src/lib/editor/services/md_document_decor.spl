@@ -3,9 +3,6 @@
 # Extracts document-level rendering hints from Markdown frontmatter and CSS
 # fences so GUI preview can render page view, header/footer, and custom CSS.
 
-use std.common.markdown.inline.{markdown_inline_text}
-use std.common.markdown.utilities.{markdown_heading_level, markdown_strip_heading_marker}
-
 struct MdDocumentDecor:
     page_view: bool
     header: text
@@ -16,7 +13,6 @@ struct MdDocumentDecor:
 
 struct MdDocumentSlide:
     index: i64
-    source_line: i64
     title: text
     content: text
     css: text
@@ -103,41 +99,36 @@ fn md_document_split_ppt_pages(content: text) -> [MdDocumentSlide]:
     val lines = _mdd_split_lines(body)
     var slides: [MdDocumentSlide] = []
     var current_title = ""
-    var current_source_line = 0
     var current_lines: [text] = []
     var current_css = ""
     var seen_slide = false
-    var i = 0
-    while i < lines.len():
-        val line = lines[i]
+    for line in lines:
         val trimmed = line.trim()
         if trimmed.starts_with("## "):
             if seen_slide:
-                slides.push(MdDocumentSlide(index: slides.len() + 1, source_line: current_source_line, title: current_title, content: _mdd_trim_outer_blank_lines(current_lines).join("\n"), css: current_css))
+                slides.push(MdDocumentSlide(index: slides.len() + 1, title: current_title, content: _mdd_trim_outer_blank_lines(current_lines).join("\n"), css: current_css))
             current_title = trimmed.slice(3, trimmed.len()).trim()
-            current_source_line = i + 1
             current_lines = []
             current_css = _mdd_heading_css(trimmed)
             seen_slide = true
         elif seen_slide:
             current_lines.push(line)
-        i = i + 1
     if seen_slide:
-        slides.push(MdDocumentSlide(index: slides.len() + 1, source_line: current_source_line, title: current_title, content: _mdd_trim_outer_blank_lines(current_lines).join("\n"), css: current_css))
+        slides.push(MdDocumentSlide(index: slides.len() + 1, title: current_title, content: _mdd_trim_outer_blank_lines(current_lines).join("\n"), css: current_css))
     slides
 
 fn md_document_render_ppt_html(content: text) -> text:
     val decor = md_document_decor_parse(content)
     val slides = md_document_split_ppt_pages(content)
     var html: [text] = []
-    html.push("<section class=\"md-ppt-deck\" data-layout=\"" + _mdd_escape_html(decor.layout) + "\" data-format=\"markdown-ppt\" data-format-name=\"Impress Markdown\" data-slide-count=\"" + slides.len().to_text() + "\">")
+    html.push("<section class=\"md-ppt-deck\" data-layout=\"" + _mdd_escape_html(decor.layout) + "\">")
     if decor.css_file != "":
-        html.push("<link rel=\"stylesheet\" href=\"" + _mdd_escape_html(_mdd_safe_markdown_url(decor.css_file)) + "\">")
+        html.push("<link rel=\"stylesheet\" href=\"" + _mdd_escape_html(decor.css_file) + "\">")
     if decor.inline_css != "":
         html.push("<style class=\"md-inline-css\">" + _mdd_escape_html(decor.inline_css) + "</style>")
     for slide in slides:
         val css_class = if slide.css != "" then " " + _mdd_css_classes(slide.css) else: ""
-        html.push("<article class=\"md-ppt-slide" + css_class + "\" data-slide=\"" + slide.index.to_text() + "\" data-source-line=\"" + slide.source_line.to_text() + "\"><h2>" + _mdd_escape_html(slide.title) + "</h2><div class=\"md-ppt-body\">" + _mdd_render_plain_markdown_lines(slide.content) + "</div></article>")
+        html.push("<article class=\"md-ppt-slide" + css_class + "\" data-slide=\"" + slide.index.to_text() + "\"><h2>" + _mdd_escape_html(slide.title) + "</h2><div class=\"md-ppt-body\">" + _mdd_render_plain_markdown_lines(slide.content) + "</div></article>")
     html.push("</section>")
     html.join("")
 
@@ -164,9 +155,9 @@ fn md_document_render_paper_html(content: text) -> text:
     val decor = md_document_decor_parse(content)
     val body = _mdd_body_without_script_fences(md_document_body_without_decor(content))
     var html: [text] = []
-    html.push("<article class=\"md-paper-layout\" data-layout=\"paper\" data-format=\"markdown-paper\" data-format-name=\"Writer Markdown\" data-line-count=\"" + _mdd_split_lines(body).len().to_text() + "\">")
+    html.push("<article class=\"md-paper-layout\" data-layout=\"paper\">")
     if decor.css_file != "":
-        html.push("<link rel=\"stylesheet\" href=\"" + _mdd_escape_html(_mdd_safe_markdown_url(decor.css_file)) + "\">")
+        html.push("<link rel=\"stylesheet\" href=\"" + _mdd_escape_html(decor.css_file) + "\">")
     if decor.inline_css != "":
         html.push("<style class=\"md-inline-css\">" + _mdd_escape_html(decor.inline_css) + "</style>")
     if decor.header != "":
@@ -185,7 +176,7 @@ fn md_document_render_office_html(content: text) -> text:
     if decor.layout == "ppt" or decor.layout == "slides" or decor.layout == "presentation":
         return md_document_render_ppt_html(content)
     if decor.layout == "sheet" or decor.layout == "excel" or decor.layout == "spreadsheet":
-        return "<section class=\"md-sheet-layout\" data-layout=\"" + _mdd_escape_html(decor.layout) + "\" data-format=\"markdown-sheet-layout\" data-format-name=\"Calc Markdown Sheet Layout\">" + md_document_render_sheet_html(content) + md_document_render_script_embeds_html(content) + "</section>"
+        return "<section class=\"md-sheet-layout\" data-layout=\"" + _mdd_escape_html(decor.layout) + "\">" + md_document_render_sheet_html(content) + md_document_render_script_embeds_html(content) + "</section>"
     md_document_render_paper_html(content)
 
 fn md_document_sheet_cells(content: text) -> [MdSheetCell]:
@@ -218,7 +209,7 @@ fn md_document_sheet_cells(content: text) -> [MdSheetCell]:
 fn md_document_render_sheet_html(content: text) -> text:
     val cells = md_document_sheet_cells(content)
     var html: [text] = []
-    html.push("<table class=\"md-sheet\" data-format=\"markdown-sheet\" data-format-name=\"Calc Markdown Sheet\" data-calculated=\"true\">")
+    html.push("<table class=\"md-sheet\" data-calculated=\"true\">")
     var current_row = 0
     for cell in cells:
         if cell.row != current_row:
@@ -288,7 +279,7 @@ fn md_document_render_script_embeds_html(content: text) -> text:
     val embeds = md_document_script_embeds(content)
     var html: [text] = []
     for embed in embeds:
-        html.push("<pre class=\"md-script-embed\" data-format=\"markdown-script-embed\" data-format-name=\"Markdown Script Embed\" data-language=\"" + _mdd_escape_html(embed.language) + "\"><code>" + _mdd_escape_html(embed.code) + "</code></pre>")
+        html.push("<pre class=\"md-script-embed\" data-language=\"" + _mdd_escape_html(embed.language) + "\"><code>" + _mdd_escape_html(embed.code) + "</code></pre>")
     html.join("")
 
 fn _mdd_body_without_script_fences(content: text) -> text:
@@ -338,19 +329,10 @@ fn _mdd_heading_css(line: text) -> text:
 fn _mdd_split_table_row(line: text) -> [text]:
     var cells: [text] = []
     var current = ""
-    var escaped = false
     var i = 0
     while i < line.len():
         val ch = line.char_at(i)
-        if escaped:
-            if ch == "|" or ch == "\\":
-                current = current + ch
-            else:
-                current = current + "\\" + ch
-            escaped = false
-        elif ch == "\\":
-            escaped = true
-        elif ch == "|":
+        if ch == "|":
             val cell = current.trim()
             if cells.len() > 0 or cell != "":
                 cells.push(cell)
@@ -358,8 +340,6 @@ fn _mdd_split_table_row(line: text) -> [text]:
         else:
             current = current + ch
         i = i + 1
-    if escaped:
-        current = current + "\\"
     val tail = current.trim()
     if tail != "":
         cells.push(tail)
@@ -368,18 +348,7 @@ fn _mdd_split_table_row(line: text) -> [text]:
 fn _mdd_join_table_row(cells: [text]) -> text:
     var out = "|"
     for cell in cells:
-        out = out + " " + _mdd_escape_table_cell(cell.trim()) + " |"
-    out
-
-fn _mdd_escape_table_cell(cell: text) -> text:
-    var out = ""
-    var i = 0
-    while i < cell.len():
-        val ch = cell.char_at(i)
-        if ch == "\\" or ch == "|":
-            out = out + "\\"
-        out = out + ch
-        i = i + 1
+        out = out + " " + cell.trim() + " |"
     out
 
 fn _mdd_is_table_separator(line: text) -> bool:
@@ -468,232 +437,18 @@ fn _mdd_css_classes(css: text) -> text:
     var classes: [text] = []
     for part in parts:
         val token = part.trim()
-        if _mdd_is_safe_css_class_token(token):
+        if token != "":
             classes.push("md-css-" + token)
     classes.join(" ")
-
-fn _mdd_is_safe_css_class_token(token: text) -> bool:
-    if token == "":
-        return false
-    val allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-    var i = 0
-    while i < token.len():
-        if not allowed.contains(token.char_at(i)):
-            return false
-        i = i + 1
-    true
 
 fn _mdd_render_plain_markdown_lines(content: text) -> text:
     val lines = _mdd_split_lines(content)
     var html: [text] = []
-    var i = 0
-    while i < lines.len():
-        val line = lines.get(i)
+    for line in lines:
         val trimmed = line.trim()
         if trimmed != "":
-            if _mdd_is_code_fence(trimmed):
-                val source_line = i + 1
-                val language = trimmed.slice(3, trimmed.len()).trim()
-                var code_lines: [text] = []
-                i = i + 1
-                while i < lines.len() and not lines.get(i).trim().starts_with("```"):
-                    code_lines.push(lines.get(i))
-                    i = i + 1
-                if i < lines.len() and lines.get(i).trim().starts_with("```"):
-                    i = i + 1
-                html.push(_mdd_render_markdown_code_block(language, code_lines, source_line))
-                continue
-            if _mdd_is_horizontal_rule(trimmed):
-                html.push("<hr class=\"md-writer-rule\" data-source-line=\"" + (i + 1).to_text() + "\">")
-                i = i + 1
-                continue
-            if _mdd_is_table_row(trimmed):
-                val source_line = i + 1
-                var table_lines: [text] = []
-                while i < lines.len() and _mdd_is_table_row(lines.get(i).trim()):
-                    table_lines.push(lines.get(i).trim())
-                    i = i + 1
-                html.push(_mdd_render_markdown_table(table_lines, source_line))
-                continue
-            if _mdd_is_task_line(trimmed):
-                val source_line = i + 1
-                var task_lines: [text] = []
-                while i < lines.len() and _mdd_is_task_line(lines.get(i).trim()):
-                    task_lines.push(lines.get(i).trim())
-                    i = i + 1
-                html.push(_mdd_render_markdown_task_list(task_lines, source_line))
-                continue
-            if _mdd_is_bullet_line(trimmed):
-                val source_line = i + 1
-                var list_lines: [text] = []
-                while i < lines.len() and _mdd_is_bullet_line(lines.get(i).trim()):
-                    list_lines.push(lines.get(i).trim())
-                    i = i + 1
-                html.push(_mdd_render_markdown_list(list_lines, source_line))
-                continue
-            if _mdd_is_ordered_line(trimmed):
-                val source_line = i + 1
-                var ordered_lines: [text] = []
-                while i < lines.len() and _mdd_is_ordered_line(lines.get(i).trim()):
-                    ordered_lines.push(lines.get(i).trim())
-                    i = i + 1
-                html.push(_mdd_render_markdown_ordered_list(ordered_lines, source_line))
-                continue
-            if _mdd_is_blockquote_line(trimmed):
-                val source_line = i + 1
-                var quote_lines: [text] = []
-                while i < lines.len() and _mdd_is_blockquote_line(lines.get(i).trim()):
-                    quote_lines.push(lines.get(i).trim())
-                    i = i + 1
-                html.push(_mdd_render_markdown_blockquote(quote_lines, source_line))
-                continue
-            val heading_level = markdown_heading_level(trimmed)
-            if heading_level > 0:
-                html.push("<h" + heading_level.to_text() + " data-source-line=\"" + (i + 1).to_text() + "\">" + markdown_inline_text(markdown_strip_heading_marker(trimmed)) + "</h" + heading_level.to_text() + ">")
-            elif _mdd_is_image_line(trimmed):
-                html.push(_mdd_render_markdown_image(trimmed, i + 1))
-            else:
-                html.push("<p data-source-line=\"" + (i + 1).to_text() + "\">" + markdown_inline_text(trimmed) + "</p>")
-        i = i + 1
+            html.push("<p>" + _mdd_escape_html(trimmed) + "</p>")
     html.join("")
-
-fn _mdd_is_table_row(line: text) -> bool:
-    line.starts_with("|") and line.ends_with("|")
-
-fn _mdd_is_code_fence(line: text) -> bool:
-    line.starts_with("```")
-
-fn _mdd_is_horizontal_rule(line: text) -> bool:
-    line == "---" or line == "***" or line == "___"
-
-fn _mdd_is_task_line(line: text) -> bool:
-    line.starts_with("- [ ] ") or line.starts_with("- [x] ") or line.starts_with("- [X] ") or line.starts_with("* [ ] ") or line.starts_with("* [x] ") or line.starts_with("* [X] ")
-
-fn _mdd_is_bullet_line(line: text) -> bool:
-    (line.starts_with("- ") or line.starts_with("* ")) and not _mdd_is_task_line(line)
-
-fn _mdd_ordered_label_start(line: text) -> i64:
-    var i = 0
-    while i < line.len():
-        val ch = line.char_at(i)
-        if not (ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9"):
-            break
-        i = i + 1
-    if i > 0 and i + 1 < line.len() and line.char_at(i) == "." and line.char_at(i + 1) == " ":
-        return i + 2
-    -1
-
-fn _mdd_is_ordered_line(line: text) -> bool:
-    _mdd_ordered_label_start(line) > 0
-
-fn _mdd_is_blockquote_line(line: text) -> bool:
-    line.starts_with("> ")
-
-fn _mdd_render_markdown_list(lines: [text], source_line: i64) -> text:
-    var html: [text] = []
-    html.push("<ul class=\"md-writer-list\" data-source-line=\"" + source_line.to_text() + "\">")
-    for line in lines:
-        html.push("<li>" + markdown_inline_text(line.slice(2, line.len()).trim()) + "</li>")
-    html.push("</ul>")
-    html.join("")
-
-fn _mdd_render_markdown_task_list(lines: [text], source_line: i64) -> text:
-    var html: [text] = []
-    html.push("<ul class=\"md-writer-task-list\" data-source-line=\"" + source_line.to_text() + "\">")
-    for line in lines:
-        val checked = line.starts_with("- [x] ") or line.starts_with("- [X] ") or line.starts_with("* [x] ") or line.starts_with("* [X] ")
-        val checked_attr = if checked then " checked" else: ""
-        html.push("<li data-task=\"true\" data-checked=\"" + checked.to_text() + "\"><input type=\"checkbox\" disabled" + checked_attr + ">" + markdown_inline_text(line.slice(6, line.len()).trim()) + "</li>")
-    html.push("</ul>")
-    html.join("")
-
-fn _mdd_render_markdown_ordered_list(lines: [text], source_line: i64) -> text:
-    var html: [text] = []
-    html.push("<ol class=\"md-writer-list md-writer-ordered-list\" data-source-line=\"" + source_line.to_text() + "\">")
-    for line in lines:
-        val label_start = _mdd_ordered_label_start(line)
-        html.push("<li>" + markdown_inline_text(line.slice(label_start, line.len()).trim()) + "</li>")
-    html.push("</ol>")
-    html.join("")
-
-fn _mdd_render_markdown_blockquote(lines: [text], source_line: i64) -> text:
-    var html: [text] = []
-    html.push("<blockquote class=\"md-writer-quote\" data-source-line=\"" + source_line.to_text() + "\">")
-    for line in lines:
-        html.push("<p>" + markdown_inline_text(line.slice(2, line.len()).trim()) + "</p>")
-    html.push("</blockquote>")
-    html.join("")
-
-fn _mdd_render_markdown_code_block(language: text, lines: [text], source_line: i64) -> text:
-    val lang_attr = if language == "" then "" else: " data-language=\"" + _mdd_escape_html(language) + "\""
-    "<pre class=\"md-writer-code\" data-source-line=\"" + source_line.to_text() + "\"" + lang_attr + "><code>" + _mdd_escape_html(lines.join("\n")) + "</code></pre>"
-
-fn _mdd_render_markdown_table(lines: [text], source_line: i64) -> text:
-    var html: [text] = []
-    html.push("<table class=\"md-writer-table\" data-source-line=\"" + source_line.to_text() + "\"><tbody>")
-    val alignments = _mdd_table_alignments(lines)
-    var row_index = 0
-    for line in lines:
-        if _mdd_is_table_separator(line):
-            continue
-        val cell_tag = if row_index == 0 then "th" else: "td"
-        html.push("<tr>")
-        var col = 0
-        for cell in _mdd_split_table_row(line):
-            html.push("<" + cell_tag + _mdd_table_cell_attrs(alignments, row_index, col) + ">" + markdown_inline_text(cell.trim()) + "</" + cell_tag + ">")
-            col = col + 1
-        html.push("</tr>")
-        row_index = row_index + 1
-    html.push("</tbody></table>")
-    html.join("")
-
-fn _mdd_table_alignments(lines: [text]) -> [text]:
-    var alignments: [text] = []
-    for line in lines:
-        if _mdd_is_table_separator(line):
-            for cell in _mdd_split_table_row(line):
-                val spec = cell.trim()
-                if spec.starts_with(":") and spec.ends_with(":"):
-                    alignments.push("center")
-                elif spec.ends_with(":"):
-                    alignments.push("right")
-                elif spec.starts_with(":"):
-                    alignments.push("left")
-                else:
-                    alignments.push("")
-            return alignments
-    alignments
-
-fn _mdd_table_cell_attrs(alignments: [text], row: i64, col: i64) -> text:
-    var attrs = " data-row-index=\"" + row.to_text() + "\" data-column-index=\"" + col.to_text() + "\""
-    if col >= 0 and col < alignments.len():
-        val align = alignments.get(col)
-        if align != "":
-            attrs = attrs + " data-align=\"" + align + "\" style=\"text-align:" + align + "\""
-    attrs
-
-fn _mdd_is_image_line(line: text) -> bool:
-    line.starts_with("![") and line.ends_with(")") and line.index_of("](") > 1
-
-fn _mdd_render_markdown_image(line: text, source_line: i64) -> text:
-    val sep = line.index_of("](")
-    val alt = line.slice(2, sep)
-    val src = _mdd_safe_markdown_url(line.slice(sep + 2, line.len() - 1))
-    "<figure class=\"md-writer-image\" data-source-line=\"" + source_line.to_text() + "\"><img src=\"" + _mdd_escape_html(src) + "\" alt=\"" + _mdd_escape_html(alt) + "\"><figcaption>" + _mdd_escape_html(alt) + "</figcaption></figure>"
-
-fn _mdd_safe_markdown_url(value: text) -> text:
-    val clean = value.trim()
-    val lower = clean.lower()
-    var compact = ""
-    var i = 0
-    while i < lower.len():
-        val ch = lower.char_at(i)
-        if ch != " " and ch != "\t" and ch != "\n" and ch != "\r":
-            compact = compact + ch
-        i = i + 1
-    if compact.starts_with("javascript:") or compact.starts_with("vbscript:") or compact.starts_with("data:") or compact.starts_with("file:") or compact.starts_with("//"):
-        return "#"
-    clean
 
 fn _mdd_escape_html(s: text) -> text:
     var result: [text] = []

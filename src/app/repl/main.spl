@@ -6,10 +6,18 @@
 extern fn input() -> text
 extern fn stdout_write(s: text)
 extern fn stdout_flush()
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(name: text) -> text
+extern fn rt_platform_name() -> text
+extern fn rt_cli_get_args() -> [text]
 
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
-use std.io_runtime.{file_write, file_delete, file_exists, getpid, process_run, file_read, env_get, platform_name, get_args}
 
 # Module-level state (avoids closure mutation bug)
 # Use text instead of arrays to avoid .len()/.push() path call issues
@@ -23,34 +31,34 @@ var REPL_TEMP_PATH: text = ""
 var REPL_HISTORY_TEXT: text = ""
 
 fn repl_init_temp_path():
-    val pid = getpid()
+    val pid = rt_getpid()
     REPL_TEMP_PATH = "/tmp/simple_repl_{pid}.spl"
 
 fn repl_find_simple_binary() -> text:
-    val env_bin = env_get("SIMPLE_BINARY")
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
     if env_bin != "":
         return env_bin
 
-    val is_win = platform_name() == "windows"
+    val is_win = rt_platform_name() == "windows"
     val ext = if is_win: ".exe" else: ""
 
-    if file_exists("bin/simple{ext}"):
+    if rt_file_exists("bin/simple{ext}"):
         return "bin/simple{ext}"
     if not is_win:
-        if file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
             return "bin/release/aarch64-apple-darwin-macho/simple"
-        if file_exists("bin/release/macos-arm64/simple"):
+        if rt_file_exists("bin/release/macos-arm64/simple"):
             return "bin/release/macos-arm64/simple"
-        if file_exists("bin/release/darwin-aarch64/simple"):
+        if rt_file_exists("bin/release/darwin-aarch64/simple"):
             return "bin/release/darwin-aarch64/simple"
-        if file_exists("bin/release/macos-x86_64/simple"):
+        if rt_file_exists("bin/release/macos-x86_64/simple"):
             return "bin/release/macos-x86_64/simple"
-        if file_exists("bin/release/linux-x86_64/simple"):
+        if rt_file_exists("bin/release/linux-x86_64/simple"):
             return "bin/release/linux-x86_64/simple"
     else:
-        if file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
+        if rt_file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
             return "bin/release/x86_64-pc-windows-msvc/simple.exe"
-        if file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
+        if rt_file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
             return "bin/release/x86_64-pc-windows-gnu/simple.exe"
     "bin/simple{ext}"
 
@@ -97,7 +105,7 @@ fn repl_clean_args(args: [text]) -> [text]:
     cleaned
 
 fn repl_get_args() -> [text]:
-    val all_args = get_args()
+    val all_args = rt_cli_get_args()
     var args: [text] = []
     var found_repl = false
     var i = 0
@@ -163,10 +171,10 @@ fn repl_handle_command(line: text) -> bool:
         if file_path == "":
             print "Usage: :load <file>"
             return true
-        if not file_exists(file_path):
+        if not rt_file_exists(file_path):
             print "Error: file not found: {file_path}"
             return true
-        val content = file_read(file_path)
+        val content = rt_file_read_text(file_path) ?? ""
         if content != "":
             REPL_ACCUMULATED = REPL_ACCUMULATED + content + "\n"
             print "Loaded: {file_path}"
@@ -239,9 +247,9 @@ fn repl_eval_code(code: text):
     # Try adding to accumulated state and running
     val prev = REPL_ACCUMULATED
     REPL_ACCUMULATED = REPL_ACCUMULATED + code + "\n"
-    file_write(REPL_TEMP_PATH, REPL_ACCUMULATED)
+    rt_file_write_text(REPL_TEMP_PATH, REPL_ACCUMULATED)
     val simple_bin = repl_find_simple_binary()
-    val (out, err, exit_code) = process_run("bash", ["-c", "{simple_bin} run " + REPL_TEMP_PATH + " </dev/null 2>&1"])
+    val (out, err, exit_code) = rt_process_run("bash", ["-c", "{simple_bin} run " + REPL_TEMP_PATH + " </dev/null 2>&1"])
     if exit_code != 0:
         REPL_ACCUMULATED = prev
         if err.trim() != "":
@@ -259,9 +267,9 @@ fn repl_eval_expression(code: text):
     val wrapper_name = "__repl_expr_{REPL_EXPR_COUNT}"
     val wrapper = "fn {wrapper_name}():\n    val __r = ({code})\n    print __r\n{wrapper_name}()\n"
     val full = REPL_ACCUMULATED + wrapper
-    file_write(REPL_TEMP_PATH, full)
+    rt_file_write_text(REPL_TEMP_PATH, full)
     val simple_bin = repl_find_simple_binary()
-    val (out, err, exit_code) = process_run("bash", ["-c", "{simple_bin} run " + REPL_TEMP_PATH + " </dev/null 2>&1"])
+    val (out, err, exit_code) = rt_process_run("bash", ["-c", "{simple_bin} run " + REPL_TEMP_PATH + " </dev/null 2>&1"])
     if exit_code == 0 and out.trim() != "":
         print out.trim()
     elif exit_code != 0:
@@ -323,8 +331,8 @@ fn run_repl() -> i64:
         repl_evaluate(line)
 
     # Clean up temp file
-    if file_exists(REPL_TEMP_PATH):
-        file_delete(REPL_TEMP_PATH)
+    if rt_file_exists(REPL_TEMP_PATH):
+        rt_file_delete(REPL_TEMP_PATH)
 
     0
 

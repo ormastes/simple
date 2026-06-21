@@ -390,44 +390,19 @@ pub extern "C" fn rt_tls_server_create(
     cert_path: crate::value::RuntimeValue,
     key_path: crate::value::RuntimeValue,
 ) -> i64 {
-    tls_server_create_on_impl("0.0.0.0", port, cert_path, key_path)
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_server_create_on(
-    host: crate::value::RuntimeValue,
-    port: i64,
-    cert_path: crate::value::RuntimeValue,
-    key_path: crate::value::RuntimeValue,
-) -> i64 {
-    let Some((host_ptr, host_len)) = runtime_text_ptr_len(host) else { return -1; };
-    let host_str = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(host_ptr as *const u8, host_len as usize)) };
-    tls_server_create_on_impl(host_str, port, cert_path, key_path)
-}
-
-fn tls_server_create_on_impl(
-    host_str: &str,
-    port: i64,
-    cert_path: crate::value::RuntimeValue,
-    key_path: crate::value::RuntimeValue,
-) -> i64 {
-    if host_str.is_empty() || host_str.contains('/') || host_str.contains('\\') {
-        eprintln!("rt_tls_server_create_on: invalid bind host");
-        return -1;
-    }
     let Some(cert_path_str) = runtime_value_to_path_string(cert_path) else { return -1; };
     let Some(key_path_str) = runtime_value_to_path_string(key_path) else { return -1; };
     if cert_path_str.is_empty() || key_path_str.is_empty() {
-        eprintln!("rt_tls_server_create_on: cert_path or key_path is empty");
+        eprintln!("rt_tls_server_create: cert_path or key_path is empty");
         return -1;
     }
     let certs = match load_tls_certs(std::path::Path::new(&cert_path_str)) {
         Ok(c) => c,
-        Err(e) => { eprintln!("rt_tls_server_create_on: {}", e); return -1; }
+        Err(e) => { eprintln!("rt_tls_server_create: {}", e); return -1; }
     };
     let key = match load_tls_key(std::path::Path::new(&key_path_str)) {
         Ok(k) => k,
-        Err(e) => { eprintln!("rt_tls_server_create_on: {}", e); return -1; }
+        Err(e) => { eprintln!("rt_tls_server_create: {}", e); return -1; }
     };
     let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
     let config = match rustls::ServerConfig::builder_with_provider(provider)
@@ -436,12 +411,12 @@ fn tls_server_create_on_impl(
             .map_err(|e| rustls::Error::General(format!("{}", e))))
     {
         Ok(c) => c,
-        Err(e) => { eprintln!("rt_tls_server_create_on: build config: {}", e); return -1; }
+        Err(e) => { eprintln!("rt_tls_server_create: build config: {}", e); return -1; }
     };
-    let addr = format!("{}:{}", host_str, port);
+    let addr = format!("0.0.0.0:{}", port);
     let listener = match std::net::TcpListener::bind(&addr) {
         Ok(l) => l,
-        Err(e) => { eprintln!("rt_tls_server_create_on: bind {}: {}", addr, e); return -1; }
+        Err(e) => { eprintln!("rt_tls_server_create: bind {}: {}", addr, e); return -1; }
     };
     let handle = next_rustls_listener_handle();
     TLS_LISTENERS.lock().unwrap().insert(

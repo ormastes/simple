@@ -1,0 +1,64 @@
+use common.wine_kernel32_fls.{
+    wine_kernel32_execute_fls,
+    wine_kernel32_fls_alloc,
+    wine_kernel32_fls_free,
+    wine_kernel32_fls_get_value,
+    wine_kernel32_fls_set_value,
+    wine_kernel32_fls_table_new
+}
+
+describe "Wine KERNEL32 FLS bridge":
+    it "executes a bounded allocate, set, get, and free FLS sequence":
+        val result = wine_kernel32_execute_fls(
+            ["FlsAlloc", "FlsSetValue", "FlsGetValue", "FlsFree"],
+            wine_kernel32_fls_table_new(),
+            "fiber-local-startup-state",
+            "fls-destructor"
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.index).to_equal(0)
+        expect(result.value).to_equal("fiber-local-startup-state")
+        expect(result.callback).to_equal("fls-destructor")
+        expect(result.table.slots.len()).to_equal(0)
+        expect(result.table.callback_log).to_equal("fls-destructor:fiber-local-startup-state")
+        expect(result.operations).to_equal("FlsAlloc FlsSetValue FlsGetValue FlsFree")
+
+    it "exposes direct FLS slot helpers":
+        val allocated = wine_kernel32_fls_alloc(wine_kernel32_fls_table_new(), "fls-destructor")
+        val set_value = wine_kernel32_fls_set_value(allocated.table, allocated.index, "teb-fiber-slot")
+        val got_value = wine_kernel32_fls_get_value(set_value.table, allocated.index)
+        val freed = wine_kernel32_fls_free(got_value.table, got_value.index)
+
+        expect(allocated.ok).to_equal(true)
+        expect(allocated.index).to_equal(0)
+        expect(got_value.value).to_equal("teb-fiber-slot")
+        expect(got_value.callback).to_equal("fls-destructor")
+        expect(freed.ok).to_equal(true)
+        expect(freed.table.slots.len()).to_equal(0)
+        expect(freed.table.callback_log).to_equal("fls-destructor:teb-fiber-slot")
+
+    it "keeps FLS dispatch ordered and bounded":
+        val out_of_order = wine_kernel32_execute_fls(
+            ["FlsSetValue", "FlsAlloc", "FlsGetValue", "FlsFree"],
+            wine_kernel32_fls_table_new(),
+            "fiber-local-startup-state",
+            "fls-destructor"
+        )
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("kernel32-fls-sequence-expected:FlsAlloc")
+
+        val wrong_family = wine_kernel32_execute_fls(
+            ["FlsAlloc", "FlsSetValue", "FlsGetValue", "HeapAlloc"],
+            wine_kernel32_fls_table_new(),
+            "fiber-local-startup-state",
+            "fls-destructor"
+        )
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:HeapAlloc")
+
+    it "rejects invalid FLS indexes":
+        val table = wine_kernel32_fls_table_new()
+        expect(wine_kernel32_fls_set_value(table, 0, "missing").error).to_equal("FlsSetValue:invalid-fls-index")
+        expect(wine_kernel32_fls_get_value(table, 0).error).to_equal("FlsGetValue:invalid-fls-index")
+        expect(wine_kernel32_fls_free(table, 0).error).to_equal("FlsFree:invalid-fls-index")

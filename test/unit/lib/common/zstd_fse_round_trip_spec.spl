@@ -1,0 +1,120 @@
+use std.spec.{describe, it, expect}
+use std.common.compress.zstd_fse.{
+    ZstdFseDecodeTable,
+    zstd_fse_build_encode_table,
+    zstd_fse_encode_symbols,
+    zstd_fse_build_decode_table,
+    zstd_fse_init_state,
+    zstd_fse_get_entry
+}
+use std.common.compress.zstd_bits.{
+    zstd_msb_bits_init,
+    zstd_msb_bits_read
+}
+use std.common.compress.{CompressionError}
+
+# Decode a bitstream produced by `zstd_fse_encode_symbols` back into the
+# original symbol sequence. Mirrors the FSE decoder loop in
+# `src/lib/common/compress/zstd.spl` (Huffman weight decode), but for a
+# *single* state stream and a fixed symbol count.
+fn _zstd_fse_decode_for_test(
+    decode_table: ZstdFseDecodeTable,
+    bitstream: [u8],
+    symbol_count: i64
+) -> Result<[i64], CompressionError>:
+    val reader_res = zstd_msb_bits_init(bitstream, 0, bitstream.len())
+    if reader_res.is_err():
+        return Err(reader_res.unwrap_err())
+    var reader = reader_res.unwrap()
+    val init_res = zstd_msb_bits_read(reader, decode_table.table_log)
+    if init_res.is_err():
+        return Err(init_res.unwrap_err())
+    val (raw_state, after_init, _init_padded) = init_res.unwrap()
+    reader = after_init
+    val state_res = zstd_fse_init_state(raw_state, decode_table)
+    if state_res.is_err():
+        return Err(state_res.unwrap_err())
+    var state = state_res.unwrap()
+    var symbols: [i64] = []
+    var produced = 0
+    while produced < symbol_count:
+        val entry_res = zstd_fse_get_entry(decode_table, state)
+        if entry_res.is_err():
+            return Err(entry_res.unwrap_err())
+        val entry = entry_res.unwrap()
+        symbols.push(entry.symbol)
+        produced = produced + 1
+        if produced == symbol_count:
+            break
+        val bits_res = zstd_msb_bits_read(reader, entry.bits)
+        if bits_res.is_err():
+            return Err(bits_res.unwrap_err())
+        val (low_bits, after_bits, _padded) = bits_res.unwrap()
+        reader = after_bits
+        val next_res = zstd_fse_init_state(entry.baseline + low_bits, decode_table)
+        if next_res.is_err():
+            return Err(next_res.unwrap_err())
+        state = next_res.unwrap()
+    Ok(symbols)
+
+fn _round_trip(table_log: i64, counts: [i64], input: [i64]) -> Result<[i64], CompressionError>:
+    val enc_res = zstd_fse_build_encode_table(table_log, counts)
+    if enc_res.is_err():
+        return Err(enc_res.unwrap_err())
+    val enc = enc_res.unwrap()
+    val bitstream_res = zstd_fse_encode_symbols(enc, input)
+    if bitstream_res.is_err():
+        return Err(bitstream_res.unwrap_err())
+    val bitstream = bitstream_res.unwrap()
+    val dec_res = zstd_fse_build_decode_table(table_log, counts)
+    if dec_res.is_err():
+        return Err(dec_res.unwrap_err())
+    val dec = dec_res.unwrap()
+    _zstd_fse_decode_for_test(dec, bitstream, input.len())
+
+describe "zstd fse encoder round-trip":
+    it "round-trips a tiny three-symbol alphabet":
+        # table_size = 32 (table_log=5). counts sum to 32.
+        val counts = [12, 12, 8]
+        val input = [0, 1, 2, 1, 0, 2, 1, 0]
+        val out_res = _round_trip(5, counts, input)
+        expect(out_res.is_err()).to_equal(false)
+        expect(out_res.unwrap()).to_equal(input)
+
+    it "round-trips a small symbol stream with a less-than-one symbol":
+        # Symbol 2 has probability 1/32 (count == -1) so it occupies a
+        # high slot; symbols 0 and 1 share the body of the table.
+        # 15 + 16 + |-1| = 32 = table_size.
+        val counts = [15, 16, -1]
+        val input = [0, 1, 0, 1, 2, 0, 1, 0, 1]
+        val out_res = _round_trip(5, counts, input)
+        expect(out_res.is_err()).to_equal(false)
+        expect(out_res.unwrap()).to_equal(input)
+
+    it "round-trips a longer mixed sequence":
+        val counts = [10, 10, 6, 6]
+        val input = [
+            0, 1, 2, 3, 0, 1, 2, 3,
+            0, 0, 1, 1, 2, 3, 0, 1,
+            2, 3, 0, 1, 2, 3, 0, 1
+        ]
+        val out_res = _round_trip(5, counts, input)
+        expect(out_res.is_err()).to_equal(false)
+        expect(out_res.unwrap()).to_equal(input)
+
+    it "round-trips at table_log = 6":
+        # 64-slot table; mix of high and low probabilities.
+        # 20+14+10+8+6+4+1+1 = 64 (last two are |-1|=1 each).
+        val counts = [20, 14, 10, 8, 6, 4, -1, -1]
+        val input = [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6]
+        val out_res = _round_trip(6, counts, input)
+        expect(out_res.is_err()).to_equal(false)
+        expect(out_res.unwrap()).to_equal(input)
+
+    it "round-trips a single-symbol-dominant stream":
+        # One dominant symbol with all the mass except a single low-prob.
+        val counts = [30, -1, -1]
+        val input = [0, 0, 0, 0, 1, 0, 0, 2, 0, 0, 0]
+        val out_res = _round_trip(5, counts, input)
+        expect(out_res.is_err()).to_equal(false)
+        expect(out_res.unwrap()).to_equal(input)

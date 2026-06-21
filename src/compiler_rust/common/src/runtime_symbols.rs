@@ -434,7 +434,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_index_set",
     "rt_slice",
     "rt_contains",
-    "rt_len",
     // String operations
     "rt_string_new",
     "rt_string_concat",
@@ -466,10 +465,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_utf8_validate",
     "rt_utf8_find_invalid",
     "rt_text_count_codepoints",
-    // Time operations backed by src/runtime/runtime_time.c
-    "rt_time_now_nanos",
-    "rt_time_now_micros",
-    "rt_time_now_unix_micros",
     "rt_swi_build",
     "rt_swi_char_to_byte",
     "rt_swi_byte_to_char",
@@ -640,12 +635,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_io_tcp_set_read_timeout",
     "rt_io_tcp_set_write_timeout",
     "rt_io_tcp_shutdown",
-    "rt_event_loop_create",
-    "rt_event_loop_register",
-    "rt_event_loop_deregister",
-    "rt_event_loop_poll",
-    "rt_event_loop_poll_get_fd",
-    "rt_event_loop_close",
     "rt_value_raw_i64",
     "rt_tls_client_connect",
     "rt_tls_client_connect_with_sni",
@@ -1463,11 +1452,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_host_gpu_queue_in_flight_count",
     "rt_host_gpu_queue_last_status",
     "rt_host_gpu_queue_last_backend_handle",
-    "rt_host_gpu_queue_last_device_time_us",
-    "rt_host_gpu_queue_emit_payload_text",
-    "rt_host_gpu_queue_last_payload_size",
-    "rt_host_gpu_queue_last_payload_hash",
-    "rt_host_gpu_queue_last_payload_text",
     "rt_handle_free",
     "rt_handle_get",
     "rt_handle_is_valid",
@@ -1513,8 +1497,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_mutex_new",
     "rt_mutex_try_lock",
     "rt_mutex_unlock",
-    "rt_native_profile_count",
-    "rt_native_profile_event",
     "rt_net_free_addr_string",
     "rt_object_class_id",
     "rt_object_field_count",
@@ -1901,8 +1883,6 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.len() > 10);
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_array_new"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_byte_array_new"));
-        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_len"));
-        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_time_now_unix_micros"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_println_value"));
     }
 

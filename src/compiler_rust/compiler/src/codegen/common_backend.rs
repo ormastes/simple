@@ -198,12 +198,6 @@ pub struct CodegenBackend<M: Module> {
     pub module: M,
     pub ctx: Context,
     pub func_ids: BTreeMap<String, cranelift_module::FuncId>,
-    /// Callee name → true Simple return `TypeId` (NOT the ABI signature type).
-    /// f64 returns are passed as i64 bits through the integer return register, so
-    /// the Cranelift signature reports I64; this map preserves the real f64 type
-    /// so `build_vreg_types` can stamp `MirInst::Call` results correctly. Keyed
-    /// identically to `func_ids` (raw + mangled name).
-    pub fn_return_types: BTreeMap<String, crate::hir::TypeId>,
     pub runtime_funcs: HashMap<&'static str, cranelift_module::FuncId>,
     pub global_ids: BTreeMap<String, cranelift_module::DataId>,
     pub body_stub: Option<cranelift_module::FuncId>,
@@ -744,7 +738,6 @@ impl<M: Module> CodegenBackend<M> {
             module,
             ctx,
             func_ids: BTreeMap::new(),
-            fn_return_types: BTreeMap::new(),
             runtime_funcs: HashMap::new(),
             global_ids: BTreeMap::new(),
             body_stub: None,
@@ -1003,13 +996,8 @@ impl<M: Module> CodegenBackend<M> {
 
             // Always register under the raw name so local calls resolve
             func_ids.insert(func.name.clone(), func_id);
-            // Record the true Simple return type (keyed identically) so
-            // build_vreg_types can recover f64 returns hidden behind the i64
-            // return ABI.
-            self.fn_return_types.insert(func.name.clone(), func.return_type);
             // Also register under the mangled name if different
             if symbol_name != func.name {
-                self.fn_return_types.insert(symbol_name.clone(), func.return_type);
                 func_ids.insert(symbol_name, func_id);
             }
         }
@@ -1260,7 +1248,6 @@ impl<M: Module> CodegenBackend<M> {
                 &mut self.ctx.func,
                 func,
                 &mut self.func_ids,
-                &self.fn_return_types,
                 &self.runtime_funcs,
                 &self.global_ids,
                 &self.import_map,
@@ -2167,17 +2154,6 @@ mod tests {
     }
 
     #[test]
-    fn backend_does_not_declare_native_profile_counter_without_instrumentation() {
-        let mut module = MirModule::new();
-        module.functions.push(main_returning_zero());
-
-        let mut backend = test_backend();
-        backend.compile_all_functions(&module).expect("compile");
-
-        assert!(!backend.runtime_funcs.contains_key("rt_native_profile_count"));
-    }
-
-    #[test]
     fn backend_generated_interp_bridge_helpers_are_declared_without_source_reference() {
         let mut main = MirFunction::new("main".to_string(), TypeId::I64, Visibility::Public);
         let arg = main.new_vreg();
@@ -2193,7 +2169,7 @@ mod tests {
                 dest: Some(dest),
                 func_name: "fallback_function".to_string(),
                 args: vec![arg],
-                boxed_result: false,
+            boxed_result: false,
             });
         main.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(dest));
 

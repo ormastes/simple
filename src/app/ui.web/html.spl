@@ -3,8 +3,6 @@
 # Generates complete HTML pages for the web UI renderer,
 # including CSS styles and JavaScript for WebSocket communication.
 
-use std.io_runtime.{file_read, file_exists, file_write}
-
 use common.ui.widget.{UIState, UITree}
 use app.ui.render.html_widgets.{render_html_tree}
 use common.ui.ios_css.{generate_ios_css}
@@ -48,15 +46,15 @@ fn generate_html_page(state: UIState, ws_port: i32) -> text:
     html = "{html}  <style>{css}</style>\n"
     html = "{html}</head>\n"
     html = "{html}<body>\n"
-    html = "{html}  <main id=\"app\" role=\"application\" aria-label=\"Simple Web application\" tabindex=\"0\" data-ui-web-shell=\"ready\" data-ui-web-keyboard-root=\"true\">{body_html}</main>\n"
-    html = "{html}  <div id=\"ui-web-status\" class=\"sr-only\" role=\"status\" aria-live=\"polite\" aria-atomic=\"true\" data-ui-web-status=\"connecting\" data-ui-web-retry-count=\"0\" data-ui-web-retry-delay-ms=\"0\">Connecting to Simple Web runtime</div>\n"
-    html = "{html}  <button id=\"ui-web-reconnect\" class=\"sr-only\" type=\"button\" data-ui-web-action=\"reconnect\" aria-controls=\"ui-web-status\" aria-label=\"Reconnect Simple Web runtime\">Reconnect Simple Web runtime</button>\n"
-    html = "{html}  <nav id=\"ui-web-browser-navigation\" class=\"sr-only\" aria-label=\"Browser navigation controls\" data-ui-web-browser-navigation=\"ready\"><button type=\"button\" data-browser-nav=\"back\" aria-label=\"Back\">Back</button><button type=\"button\" data-browser-nav=\"forward\" aria-label=\"Forward\">Forward</button><button type=\"button\" data-browser-nav=\"reload\" aria-label=\"Reload\">Reload</button><input type=\"url\" data-browser-address=\"true\" aria-label=\"Address\" autocomplete=\"off\" inputmode=\"url\"></nav>\n"
-    html = "{html}  <noscript><div role=\"alert\" data-ui-web-degraded=\"javascript-disabled\">Simple Web requires JavaScript for live updates.</div></noscript>\n"
+    html = "{html}  <div id=\"app\">{body_html}</div>\n"
     html = "{html}  <script>{js}</script>\n"
     html = "{html}</body>\n"
     html = "{html}</html>"
     return html
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
 
 fn wm_root_data_attrs(theme: text) -> text:
     """Root attributes required by the generated WM CSS token selectors."""
@@ -69,8 +67,8 @@ fn generate_wm_html_page(theme: text, title: text, ws_port: i32) -> text:
     val boot_js = generate_wm_js(ws_port)
     # Embed wm.js inline to avoid extra HTTP request
     var wm_js = ""
-    if file_exists("src/app/ui.web/wm.js"):
-        wm_js = file_read("src/app/ui.web/wm.js")
+    if rt_file_exists("src/app/ui.web/wm.js"):
+        wm_js = rt_file_read_text("src/app/ui.web/wm.js")
 
     var html = "<!DOCTYPE html>\n"
     html = html + "<html lang=\"en\" " + wm_root_data_attrs(theme) + ">\n"
@@ -164,7 +162,7 @@ fn generate_wm_modern_preview_html(theme: text) -> text:
 
 fn write_wm_modern_preview_html(path: text, theme: text) -> bool:
     """Write a standalone modern WM preview artifact for browser review."""
-    file_write(path, generate_wm_modern_preview_html(theme))
+    rt_file_write_text(path, generate_wm_modern_preview_html(theme))
 
 fn wm_modern_preview_evidence_report(path: text, theme: text) -> text:
     val html = generate_wm_modern_preview_html(theme)
@@ -440,7 +438,6 @@ fn generate_css(theme: text) -> text:
     parts.push("body::before { content: ''; position: fixed; inset: 0; pointer-events: none; background: radial-gradient(circle at 20% 20%, rgba(255,255,255,0.10), transparent 30%), radial-gradient(circle at 80% 0%, rgba(255,255,255,0.05), transparent 24%), radial-gradient(circle at 75% 85%, rgba({accent_rgb},0.12), transparent 28%); opacity: 0.9; z-index: 0; }\n")
     parts.push("body::after { content: ''; position: fixed; inset: 0; pointer-events: none; background: linear-gradient(135deg, rgba(255,255,255,0.04), transparent 30%, rgba(255,255,255,0.02)); mix-blend-mode: screen; z-index: 0; }\n")
     parts.push("code, pre, .monospace { font-family: 'Fira Code', 'Cascadia Code', 'SF Mono', monospace; font-size: 13px; }\n")
-    parts.push(".sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }\n")
     parts.push("#app { position: relative; z-index: 1; display: flex; flex-direction: column; min-height: 100vh; padding: 16px 18px 22px; gap: 14px; }\n")
     parts.push("#app > * { position: relative; z-index: 1; }\n")
 
@@ -2187,98 +2184,31 @@ fn generate_js(ws_port: i32) -> text:
     var js = "const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';\n"
     js = "{js}const wsHost = location.host ? location.host : ('localhost:' + {ws_port} + '');\n"
     js = "{js}let authToken = null;\n"
-    js = "{js}let reconnectTimer = null;\n"
-    js = "{js}let reconnectAttempts = 0;\n"
-    js = "{js}let reconnectDelayMs = 2000;\n"
-    js = "{js}const resumeStorageKey = 'simple-web:resume:' + location.origin + location.pathname;\n"
     js = "{js}function browserWsUrl() {lb} return wsProto + '://' + wsHost + '/ui/ws'; {rb}\n"
     js = "{js}let ws = null;\n"
     js = "{js}let currentFocusId = '';\n"
-    js = "{js}function setBrowserStatus(state, message) {lb}\n"
-    js = "{js}  var el = document.getElementById('ui-web-status');\n"
-    js = "{js}  if (el) {lb} el.setAttribute('data-ui-web-status', state); el.setAttribute('data-ui-web-retry-count', String(reconnectAttempts)); el.setAttribute('data-ui-web-retry-delay-ms', String(reconnectDelayMs)); el.textContent = message; {rb}\n"
-    js = "{js}{rb}\n"
-    js = "{js}function resetReconnectState() {lb} reconnectAttempts = 0; reconnectDelayMs = 2000; if (reconnectTimer !== null) {lb} clearTimeout(reconnectTimer); reconnectTimer = null; {rb} {rb}\n"
-    js = "{js}function scheduleReconnect(reason, fn) {lb}\n"
-    js = "{js}  if (reconnectTimer !== null) return;\n"
-    js = "{js}  reconnectAttempts = reconnectAttempts + 1;\n"
-    js = "{js}  setBrowserStatus('degraded', reason + '; reconnecting in ' + reconnectDelayMs + 'ms');\n"
-    js = "{js}  var delay = reconnectDelayMs;\n"
-    js = "{js}  reconnectDelayMs = Math.min(reconnectDelayMs * 2, 30000);\n"
-    js = "{js}  reconnectTimer = setTimeout(function() {lb} reconnectTimer = null; fn(); {rb}, delay);\n"
-    js = "{js}{rb}\n"
-    js = "{js}function manualReconnect() {lb} resetReconnectState(); setBrowserStatus('connecting', 'Reconnecting Simple Web runtime'); if (ws) {lb} try {lb} ws.close(); {rb} catch (err) {lb} {rb} ws = null; {rb} authenticateAndConnect(); {rb}\n"
-    js = "{js}function loadResumeCursor() {lb}\n"
-    js = "{js}  try {lb} var raw = window.localStorage ? window.localStorage.getItem(resumeStorageKey) : ''; return raw ? JSON.parse(raw) : null; {rb} catch (err) {lb} return null; {rb}\n"
-    js = "{js}{rb}\n"
-    js = "{js}function storeResumeCursor(cursor) {lb}\n"
-    js = "{js}  try {lb} if (window.localStorage) window.localStorage.setItem(resumeStorageKey, JSON.stringify(cursor)); {rb} catch (err) {lb} {rb}\n"
-    js = "{js}{rb}\n"
-    js = "{js}function sendResumeFromDurableCursor() {lb}\n"
-    js = "{js}  var cursor = loadResumeCursor();\n"
-    js = "{js}  if (cursor && ws && ws.readyState === WebSocket.OPEN) {lb} ws.send(JSON.stringify({lb} t: 'resume_session', snapshot_revision: cursor.snapshot_revision || 0, last_sequence: cursor.last_sequence || 0 {rb})); return true; {rb}\n"
-    js = "{js}  return false;\n"
-    js = "{js}{rb}\n"
-    js = "{js}function persistWireCursor(data) {lb}\n"
-    js = "{js}  var payload = data && data.payload ? data.payload : {lb}{rb};\n"
-    js = "{js}  var revision = payload.snapshot_revision || payload.revision || 0;\n"
-    js = "{js}  var sequence = payload.to_sequence || data.seq || payload.last_sequence || 0;\n"
-    js = "{js}  if (data && (data.t === 'snapshot' || data.t === 'patch_batch' || data.t === 'resume_current')) {lb} storeResumeCursor({lb} snapshot_revision: Number(revision) || 0, last_sequence: Number(sequence) || 0 {rb}); {rb}\n"
-    js = "{js}{rb}\n"
-    js = "{js}function normalizeBrowserAddress(raw) {lb}\n"
-    js = "{js}  var value = (raw || '').trim();\n"
-    js = "{js}  if (value === '') return 'about:blank';\n"
-    js = "{js}  if (value.startsWith('http://') || value.startsWith('https://') || value.startsWith('about:') || value.startsWith('/') || value.startsWith('#')) return value;\n"
-    js = "{js}  return 'https://' + value;\n"
-    js = "{js}{rb}\n"
-    js = "{js}function sendBrowserNavigationIntent(kind, value) {lb}\n"
-    js = "{js}  sendEvent({lb}type: 'browser_navigation', action: kind, url: value || '', source: 'simple-web-shell'{rb});\n"
-    js = "{js}{rb}\n"
-    js = "{js}function bindBrowserNavigationControls() {lb}\n"
-    js = "{js}  document.querySelectorAll('[data-browser-nav]').forEach(function(control) {lb}\n"
-    js = "{js}    control.addEventListener('click', function() {lb} sendBrowserNavigationIntent(control.getAttribute('data-browser-nav') || '', ''); {rb});\n"
-    js = "{js}  {rb});\n"
-    js = "{js}  document.querySelectorAll('[data-browser-address]').forEach(function(input) {lb}\n"
-    js = "{js}    input.addEventListener('keydown', function(e) {lb} if (e.key === 'Enter') {lb} sendBrowserNavigationIntent('address', normalizeBrowserAddress(input.value)); e.preventDefault(); {rb} {rb});\n"
-    js = "{js}  {rb});\n"
-    js = "{js}{rb}\n"
     js = "{js}function authenticateAndConnect() {lb}\n"
-    js = "{js}  setBrowserStatus('authenticating', 'Authenticating Simple Web session');\n"
     js = "{js}  fetch('/ui/login', {lb} method: 'POST', headers: {lb} 'Content-Type': 'application/json' {rb}, body: JSON.stringify({lb} capability_grant: 'legacy' {rb}) {rb})\n"
     js = "{js}    .then(function(resp) {lb} if (!resp.ok) throw new Error('login failed: ' + resp.status); return resp.json(); {rb})\n"
     js = "{js}    .then(function(data) {lb} authToken = data.token; connect(); {rb})\n"
-    js = "{js}    .catch(function() {lb} scheduleReconnect('Authentication failed', authenticateAndConnect); {rb});\n"
+    js = "{js}    .catch(function() {lb} setTimeout(authenticateAndConnect, 2000); {rb});\n"
     js = "{js}{rb}\n"
 
     # WebSocket connection with auto-reconnect
     js = "{js}function connect() {lb}\n"
     js = "{js}  if (!authToken) {lb} authenticateAndConnect(); return; {rb}\n"
-    js = "{js}  setBrowserStatus('connecting', 'Connecting to Simple Web runtime');\n"
     js = "{js}  ws = new WebSocket(browserWsUrl(), ['simple-ui', 'bearer.' + encodeURIComponent(authToken)]);\n"
-    js = "{js}  ws.onopen = function() {lb}\n"
-    js = "{js}    resetReconnectState();\n"
-    js = "{js}    setBrowserStatus('connected', 'Connected to Simple Web runtime');\n"
-    js = "{js}    if (!sendResumeFromDurableCursor()) {lb} ws.send(JSON.stringify({lb} t: 'open_session' {rb})); {rb}\n"
-    js = "{js}  {rb};\n"
     js = "{js}  ws.onmessage = function(e) {lb}\n"
     js = "{js}    const data = JSON.parse(e.data);\n"
-    js = "{js}    persistWireCursor(data);\n"
-    js = "{js}    if (data.seq) sendEvent({lb}t: 'ack', last_applied_sequence: Number(data.seq) || 0{rb});\n"
     js = "{js}    if (data.type === 'render') {lb}\n"
     js = "{js}      document.getElementById('app').innerHTML = data.html;\n"
     js = "{js}      restoreFocus();\n"
     js = "{js}    {rb}\n"
     js = "{js}  {rb};\n"
-    js = "{js}  ws.onerror = function() {lb}\n"
-    js = "{js}    setBrowserStatus('degraded', 'Simple Web connection error');\n"
-    js = "{js}  {rb};\n"
     js = "{js}  ws.onclose = function() {lb}\n"
-    js = "{js}    scheduleReconnect('Simple Web connection closed', connect);\n"
+    js = "{js}    setTimeout(connect, 2000);\n"
     js = "{js}  {rb};\n"
     js = "{js}{rb}\n"
-    js = "{js}var reconnectButton = document.getElementById('ui-web-reconnect');\n"
-    js = "{js}if (reconnectButton) {lb} reconnectButton.addEventListener('click', manualReconnect); {rb}\n"
-    js = "{js}bindBrowserNavigationControls();\n"
     js = "{js}connect();\n"
 
     # Helper: send event to backend

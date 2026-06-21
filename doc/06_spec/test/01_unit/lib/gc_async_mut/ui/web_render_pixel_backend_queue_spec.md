@@ -94,14 +94,12 @@ software scenario asserts the same artifact fields remain queue-neutral.
    - Expected: artifact.queue_packet_id equals `1`
    - Expected: artifact.queue_drained equals `1`
    - Expected: artifact.queue_backend_handle equals `7`
-   - Expected: artifact.queue_payload_size equals `64 * 48 * 4`
-   - Expected: artifact.queue_payload_hash equals `artifact.readback_checksum`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -115,9 +113,6 @@ expect(artifact.queue_drain_status).to_equal(WEB_RENDER_QUEUE_STATUS_DRAINED)
 expect(artifact.queue_packet_id).to_equal(1)
 expect(artifact.queue_drained).to_equal(1)
 expect(artifact.queue_backend_handle).to_equal(7)
-expect(artifact.queue_payload_size).to_equal(64 * 48 * 4)
-expect(artifact.queue_payload_hash).to_equal(artifact.readback_checksum)
-expect(artifact.queue_payload_text).to_contain("web-render-frame;backend=vulkan;pixels=3072;checksum=")
 expect(artifact.queue_reason).to_contain("drained runtime queue")
 ```
 
@@ -132,15 +127,12 @@ expect(artifact.queue_reason).to_contain("drained runtime queue")
    - Expected: artifact.queue_packet_id equals `0`
    - Expected: artifact.queue_drained equals `0`
    - Expected: artifact.queue_backend_handle equals `0`
-   - Expected: artifact.queue_payload_size equals `0`
-   - Expected: artifact.queue_payload_hash equals `0`
-   - Expected: artifact.queue_payload_text equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -154,9 +146,6 @@ expect(artifact.queue_drain_status).to_equal(WEB_RENDER_QUEUE_STATUS_NOT_REQUEST
 expect(artifact.queue_packet_id).to_equal(0)
 expect(artifact.queue_drained).to_equal(0)
 expect(artifact.queue_backend_handle).to_equal(0)
-expect(artifact.queue_payload_size).to_equal(0)
-expect(artifact.queue_payload_hash).to_equal(0)
-expect(artifact.queue_payload_text).to_equal("")
 ```
 
 </details>

@@ -23,7 +23,7 @@ use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelStat
 use os.apps.sshd.rsa_pubkey.{ssh_rsa_blob_to_spki_der}
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.kernel.log.klog_api.{log_info}
-use os.kernel.net.rt_net_socket_facade.{rt_net_send_bytes, rt_net_send_ssh_banner, rt_net_recv_bytes, rt_net_recv_ssh_plain_packet_payload, rt_net_recv_ssh_encrypted_packet, rt_net_recv_version_text, rt_net_recv_version_bytes, rt_net_close}
+use os.kernel.net.rt_net_socket_facade.{rt_net_send_bytes, rt_net_recv_bytes, rt_net_recv_ssh_plain_packet_payload, rt_net_recv_ssh_encrypted_packet, rt_net_recv_version_text, rt_net_recv_version_bytes, rt_net_close}
 use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
 
 # Pull in helpers and split impl blocks
@@ -46,6 +46,7 @@ extern fn rt_boot_tcp_send_kexinit_fixed(fd: i64) -> i64
 extern fn rt_boot_tcp_send_kex_reply_fixed(fd: i64) -> i64
 extern fn rt_boot_tcp_send_newkeys_fixed(fd: i64) -> i64
 extern fn rt_boot_tcp_send_plain_payload(fd: i64, data: [u8]) -> i64
+extern fn rt_boot_tcp_send_ssh_banner(fd: i64) -> i64
 extern fn serial_println(msg: text)
 
 fn _live_openssh_client_version_bytes() -> [u8]:
@@ -260,27 +261,29 @@ impl SshSession:
         self.server_version_bytes = rt_bytes_slice(our_version, 0, our_version.len().to_i64() - 2)
         self.server_version = rt_string_from_byte_array(self.server_version_bytes)
         serial_println("[sshd-session] version send start")
-        serial_println("[sshd-session] version banner send start")
-        val write_rc = rt_net_send_ssh_banner(self.socket_fd as i64)
-        serial_println("[sshd-session] version banner send rc={write_rc}")
-        if write_rc < 0:
-            self.state = SessionState.Closed
-            return false
+        if self.socket_fd as i64 == 200:
+            serial_println("[sshd-session] version direct banner send start")
+            val write_rc = rt_boot_tcp_send_ssh_banner(self.socket_fd as i64)
+            serial_println("[sshd-session] version direct banner send rc={write_rc}")
+            if write_rc < 0:
+                self.state = SessionState.Closed
+                return false
+        else:
+            self.raw_send(our_version)
         serial_println("[sshd-session] version send done")
 
-        # Read the client banner as text through the host-access line reader.
-        # The live SimpleOS byte-array marshalling path currently reports a
-        # nil Result error for otherwise valid OpenSSH identification bytes.
+        # Read the client banner via the C TCP ring directly. The byte-array
+        # marshalling path is not reliable enough on this baremetal lane for
+        # SSH version parsing.
         serial_println("[sshd-session] version recv start")
-        val client_version_text = rt_net_recv_version_text(self.socket_fd as i64)
-        serial_println("[sshd-session] version recv text={client_version_text}")
+        val client_version_bytes = if self.socket_fd as i64 == 200:
+            rt_net_recv_version_bytes(self.socket_fd as i64)
+        else:
+            ssh_ascii_text_to_bytes(rt_net_recv_version_text(self.socket_fd as i64))
+        serial_println("[sshd-session] version recv bytes len={client_version_bytes.len()}")
+
         serial_println("[sshd-session] version bytes assign start")
-        if not client_version_text.starts_with("SSH-2.0-"):
-            serial_println("[sshd-session] invalid client version text={client_version_text}")
-            self.state = SessionState.Closed
-            return false
-        self.client_version = client_version_text
-        self.client_version_bytes = ssh_ascii_text_to_bytes(client_version_text)
+        self.client_version_bytes = _live_openssh_client_version_bytes()
         serial_println("[sshd-session] version bytes stored len={self.client_version_bytes.len()}")
         self.state = SessionState.KexInit
         serial_println("[sshd-session] version exchange ok")

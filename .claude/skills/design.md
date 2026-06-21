@@ -8,23 +8,14 @@
 
 ## Workflow
 
-1. For broad plans, merge lower-model sidecar findings when available (Codex
-   Spark, Claude Haiku, or Claude Sonnet), then run this pass as the
-   normal/highest-capability review before accepting broad design claims.
-2. Define shared interface names and manual-facing setup/checker helper names
-   before specs or implementation are accepted. Placeholder helpers must fail
-   explicitly (`assert(false)` or equivalent).
-3. Create detailed design: data structures, algorithms, module interactions, error handling
-4. Output: `doc/05_design/<domain>/<topic>/<feature>.md`
-5. Agent task breakdown: `doc/03_plan/<domain>/<topic>/<feature>.md`
+1. Create detailed design: data structures, algorithms, module interactions, error handling
+2. Output: `doc/05_design/<domain>/<topic>/<feature>.md`
+3. Agent task breakdown: `doc/03_plan/<domain>/<topic>/<feature>.md`
 
 ## Quality Check
 
 1. Ask user: "Should design change?"
-2. Confirm matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
-   `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
-   process docs were updated when the workflow or tool contract changed
-3. If yes, loop back
+2. If yes, loop back
 
 ## Outputs
 | Artifact | Location |

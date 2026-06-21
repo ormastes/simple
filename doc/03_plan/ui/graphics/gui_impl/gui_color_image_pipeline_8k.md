@@ -64,10 +64,7 @@ conversion stages.
   orientation/extra channels, Modular pixel decode subset, then VarDCT subset.
 - Keep every web/browser/image milestone tied to exact RGBA bitmap evidence.
 
-## 2026-06-21 Evidence Status
-
-Current report:
-`doc/09_report/gui_color_image_pipeline_8k_evidence_2026-06-21.md`.
+## 2026-05-31 Evidence Status
 
 - Done: 8K BGRA8 packed-surface planning keeps the default hot path at
   132,710,400 bytes and does not initialize Lab/XYZ transforms, TIFF decode, or
@@ -80,10 +77,7 @@ Current report:
 - Done: commandbar/taskbar/card web-layout rendering now records exact Simple
   and Node/Bun ARGB files, mismatch count 0, no blur/tolerance, and static pixel
   cache perf wins.
-- Remaining: JPEG XL evidence is metadata parsing, sparse 8K allocation,
-  structured color fail-closed routing, and tiling only. `NFR-GCI8K-008`
-  requires separate exact-pixel SPipe evidence before full JPEG XL pixel decode
-  or image URI decoded-pixel rendering can be claimed; Modular and VarDCT pixel
-  decode remain separate tasks.
+- Remaining: JPEG XL is only metadata-sized placeholder raster support today;
+  full pure Simple pixel decode still needs separate Modular and VarDCT tasks.
 - Remaining: live QEMU WM capture and QEMU-side GTK/Simple perf remain blocked
   until a real `QEMU_QMP_SOCKET` and guest setup are available.

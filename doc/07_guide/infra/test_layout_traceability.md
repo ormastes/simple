@@ -4,7 +4,7 @@ Use this guide when adding, moving, or reviewing executable SPipe tests and
 their generated docs.
 
 For scenario authoring and generated manual quality, also use
-`doc/07_guide/infra/sspec_scenario_manual.md`. Layout correctness is not
+`doc/07_guide/testing/sspec_scenario_manual.md`. Layout correctness is not
 enough: scenario-oriented generated docs must read like manuals, with detailed
 edge/internal cases folded or skipped by policy.
 

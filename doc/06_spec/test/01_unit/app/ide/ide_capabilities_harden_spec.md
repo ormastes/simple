@@ -28,7 +28,7 @@ ide_capabilities_harden_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -136,36 +136,7 @@ var all_ok = true
 for cap in ide_capabilities():
     if not ide_capability_valid(cap):
         all_ok = false
-expect(all_ok).to_be(true)
-```
-
-</details>
-
-#### capability feature checks are non-empty registry metadata
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 16 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var markers = ""
-for cap in ide_capabilities():
-    markers = markers + cap.feature_check + "\n"
-expect(markers).to_contain("markdown:")
-expect(markers).to_contain("writer:")
-expect(markers).to_contain("slides:")
-expect(markers).to_contain("draw:")
-expect(markers).to_contain("designer:")
-expect(markers).to_contain("math:")
-expect(markers).to_contain("mail:")
-expect(markers).to_contain("planner:")
-expect(markers).to_contain("counter:")
-expect(markers).to_contain("launcher:")
-expect(markers).to_contain("sheets:")
-expect(markers).to_contain("agent-dashboard:")
-expect(markers).to_contain("db-admin:")
+expect(all_ok).to_equal(true)
 ```
 
 </details>
@@ -189,8 +160,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

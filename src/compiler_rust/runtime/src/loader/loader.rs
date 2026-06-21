@@ -660,7 +660,71 @@ fn resolve_builtin_runtime_symbol(name: &str) -> Option<usize> {
             simple_runtime_abi::lookup_registered_static_runtime_symbol(aliased)
                 .or_else(|| simple_runtime_abi::lookup_registered_static_runtime_symbol(normalized))
                 .map(|ptr| ptr as usize)
+                // Fallback: runtime externs (e.g. rt_io_tcp_socket_create) that are
+                // defined in runtime_native.c are NOT in the static RUNTIME_SYMBOL_ENTRIES
+                // table (build.rs only scans .rs + 4 LINKED_C_SOURCES). But `bin/simple run
+                // x.smf` runs INSIDE the host process, which links `native_all` and therefore
+                // exports every rt_* symbol. Resolve any missing rt_* extern from the current
+                // process image. Gated on the `rt_` prefix so we never mis-resolve arbitrary
+                // names (user functions are handled by a separate resolver, not this path).
+                .or_else(|| {
+                    if normalized.starts_with("rt_") {
+                        resolve_process_runtime_symbol(normalized)
+                    } else {
+                        None
+                    }
+                })
         }
+    }
+}
+
+/// dlsym a runtime symbol from the current process image. Used as a last-resort
+/// fallback for rt_* externs that exist in the host binary (via `native_all`) but
+/// are absent from the statically-generated RUNTIME_SYMBOL_ENTRIES table.
+fn resolve_process_runtime_symbol(name: &str) -> Option<usize> {
+    use std::sync::OnceLock;
+
+    #[cfg(unix)]
+    {
+        // Handle to the current process image (NULL => global symbol table).
+        // Cached: dlopen(NULL) is cheap but the handle is process-wide and stable.
+        static PROCESS_HANDLE: OnceLock<usize> = OnceLock::new();
+        let handle = *PROCESS_HANDLE.get_or_init(|| {
+            let h = unsafe { libc::dlopen(std::ptr::null(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+            h as usize
+        });
+        if handle == 0 {
+            return None;
+        }
+        let c_name = std::ffi::CString::new(name).ok()?;
+        let sym = unsafe { libc::dlsym(handle as *mut libc::c_void, c_name.as_ptr()) };
+        if sym.is_null() {
+            None
+        } else {
+            Some(sym as usize)
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+        static PROCESS_HANDLE: OnceLock<usize> = OnceLock::new();
+        let handle = *PROCESS_HANDLE.get_or_init(|| {
+            let h = unsafe { GetModuleHandleW(std::ptr::null()) };
+            h as usize
+        });
+        if handle == 0 {
+            return None;
+        }
+        let c_name = std::ffi::CString::new(name).ok()?;
+        let sym = unsafe { GetProcAddress(handle as _, c_name.as_ptr() as *const u8) };
+        sym.map(|f| f as *const () as usize)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = name;
+        None
     }
 }
 

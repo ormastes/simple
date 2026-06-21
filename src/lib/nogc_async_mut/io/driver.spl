@@ -51,8 +51,6 @@ extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
 extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
 extern fn rt_io_tcp_write_bytes(fd: i64, data: [u8]) -> i64
-extern fn rt_io_tcp_sendfile_path(fd: i64, path: text, offset: i64, len: i64) -> i64
-extern fn rt_io_tcp_sendfile_path_with_header(fd: i64, header: text, path: text, offset: i64, len: i64) -> i64
 extern fn rt_io_tcp_close(fd: i64) -> bool
 extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool
 extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
@@ -382,12 +380,6 @@ class IoDriver:
     me submit_sendfile(sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64:
         return self._push_op(_OP_SENDFILE, sock_fd, file_fd, "", 0, offset, len, "", 0)
 
-    me submit_sendfile_path(sock_fd: i64, path: text, offset: i64, len: i64) -> i64:
-        return self._push_op(_OP_SENDFILE, sock_fd, 0, "", 0, offset, len, path, 0)
-
-    me submit_sendfile_path_with_header(sock_fd: i64, header: text, path: text, offset: i64, len: i64) -> i64:
-        return self._push_op(_OP_SENDFILE, sock_fd, 0, header, 0, offset, len, path, 0)
-
     # ---- UDP Operations ----
 
     me submit_udp_recv(fd: i64, buf_size: i64) -> i64:
@@ -497,8 +489,7 @@ class IoDriver:
             else:
                 accept_scan = accept_scan + 1
         if accept_fast_index >= 0 and max > 0:
-            # ponytail: never sleep on accept while active connection ops are queued.
-            val accept_ms = if self._p_id.len() > 1: 0 elif timeout_ms > 0: timeout_ms else: 1
+            val accept_ms = if self._p_id.len() > 1: 1 elif timeout_ms > 0: timeout_ms else: 1
             val accept_res = rt_io_tcp_accept_timeout(self._p_fd[accept_fast_index], accept_ms)
             if accept_res >= 0:
                 self._complete_fd(self._p_id[accept_fast_index], accept_res, 0, "", self._p_fd[accept_fast_index])
@@ -542,17 +533,7 @@ class IoDriver:
         var has_ev = self._ev_fd >= 0
         var ev_has_results = false
         if has_ev:
-            var has_immediate_op = false
-            var immediate_scan = 0
-            while immediate_scan < self._p_id.len():
-                val scan_type = self._p_type[immediate_scan]
-                if scan_type != _OP_ACCEPT and scan_type != _OP_RECV and scan_type != _OP_UDP_RECV:
-                    has_immediate_op = true
-                    immediate_scan = self._p_id.len()
-                else:
-                    immediate_scan = immediate_scan + 1
-            val ev_timeout = if has_immediate_op: 0 else: timeout_ms
-            val raw_count = rt_event_loop_poll(self._ev_fd, 64, ev_timeout)
+            val raw_count = rt_event_loop_poll(self._ev_fd, 64, timeout_ms)
             var ri = 0
             while ri < raw_count:
                 val ready_fd = rt_event_loop_poll_get_fd(ri)
@@ -594,7 +575,7 @@ class IoDriver:
             val oid = self._p_id[i]
 
             if ot == _OP_ACCEPT:
-                val a_ms = if self._c_id.len() > 0 or self._p_id.len() > 1: 0 elif timeout_ms > 0: timeout_ms else: 1
+                val a_ms = if self._c_id.len() > 0: 1 elif timeout_ms > 0: timeout_ms else: 1
                 val res = rt_io_tcp_accept_timeout(fd, a_ms)
                 if res >= 0:
                     self._complete_fd(oid, res, 0, "", fd)
@@ -664,8 +645,9 @@ class IoDriver:
                 if rt_file_exists(path):
                     val fh = self._next_fh
                     self._next_fh = fh + 1
+                    val content = rt_file_read_text(path)
                     self._fh_ids.push(fh)
-                    self._fh_data.push(path)
+                    self._fh_data.push(content)
                     self._complete(oid, fh, 0, "")
                 else:
                     self._complete(oid, -2, 0, "")
@@ -673,16 +655,7 @@ class IoDriver:
                 continue
 
             elif ot == _OP_SENDFILE:
-                val path = if self._p_path[i].len() > 0: self._p_path[i] else: self._find_file(self._p_fd2[i])
-                val fast_res = if self._p_data[i].len() > 0:
-                    rt_io_tcp_sendfile_path_with_header(fd, self._p_data[i], path, self._p_offset[i], self._p_length[i])
-                else:
-                    rt_io_tcp_sendfile_path(fd, path, self._p_offset[i], self._p_length[i])
-                if fast_res >= 0:
-                    self._complete_fd(oid, fast_res, 0, "", fd)
-                    i = i + 1
-                    continue
-                val content = rt_file_read_text(path)
+                val content = self._find_file(self._p_fd2[i])
                 val off = self._p_offset[i]
                 var end_pos = off + self._p_length[i]
                 if end_pos > content.len():
@@ -858,10 +831,7 @@ class IoDriver:
         "pure-simple"
 
     fn supports_sendfile(self) -> bool:
-        true
-
-    fn file_size_bytes(self, path: text) -> i64:
-        rt_file_size(path)
+        false
 
     fn supports_zero_copy(self) -> bool:
         false
@@ -871,7 +841,7 @@ class IoDriver:
             "pure-simple",
             true,
             true,
-            true,
+            false,
             false
         )
 

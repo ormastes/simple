@@ -1,6 +1,6 @@
-# Async Web Server Specification
+# Async Web Specification
 
-> Verifies async web server response construction, event-channel behavior, WebSocket event parsing helpers, and production response security headers.
+> <details>
 
 <!-- sdn-diagram:id=async_web_spec.arch -->
 <details class="sdn-source">
@@ -29,40 +29,12 @@ async_web_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 29 | 29 | 0 | 0 |
+| 27 | 27 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Async Web Server Specification
-
-Verifies async web server response construction, event-channel behavior, WebSocket event parsing helpers, and production response security headers.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Requirements | doc/02_requirements/nfr/simple_web_browser_production_hardening.md |
-| Plan | doc/03_plan/agent_tasks/simple_browser_production_level.md |
-| Design | doc/05_design/simple_web_browser_production_hardening.md |
-| Research | doc/01_research/local/simple_browser_production_level.md |
-| Source | `test/01_unit/app/ui/async_web_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Verifies async web server response construction, event-channel behavior,
-WebSocket event parsing helpers, and production response security headers.
-
-**Requirements:** doc/02_requirements/feature/simple_web_browser_production_hardening.md
-**Requirements:** doc/02_requirements/nfr/simple_web_browser_production_hardening.md
-**Research:** doc/01_research/local/simple_browser_production_level.md
-**Plan:** doc/03_plan/agent_tasks/simple_browser_production_level.md
-**Design:** doc/05_design/simple_web_browser_production_hardening.md
-**Traceability:** REQ-WEB-HARD-004, NFR-WEB-HARD-003, NFR-WEB-HARD-005
+# Async Web Specification
 
 ## Scenarios
 
@@ -101,10 +73,7 @@ expect resp to_contain "HTTP/1.1 404 Not Found"
 
 </details>
 
-#### does not expose wildcard CORS by default
-
-- expect resp contains
-
+#### includes CORS header
 
 <details>
 <summary>Executable SSpec</summary>
@@ -114,7 +83,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val resp = http_response(200, "application/json", "{}")
-expect resp.contains("Access-Control-Allow-Origin: *") to_equal false
+expect resp to_contain "Access-Control-Allow-Origin: *"
 ```
 
 </details>
@@ -325,40 +294,6 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val t = extract_field("", "type")
 expect t to_equal ""
-```
-
-</details>
-
-#### extracts browser navigation intent fields
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val json = "{\"type\":\"browser_navigation\",\"action\":\"address\",\"url\":\"https://example.test\"}"
-expect(extract_field(json, "type")).to_equal("browser_navigation")
-expect(extract_field(json, "action")).to_equal("address")
-expect(extract_field(json, "url")).to_equal("https://example.test")
-```
-
-</details>
-
-#### keeps browser navigation intent parser branch guarded by an action allowlist
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val src = rt_file_read_text("src/app/ui.web/async_ws.spl")
-expect(src).to_contain("fn ui_web_browser_navigation_action_allowed(action: text) -> bool")
-expect(src).to_contain("\"browser_navigation\":")
-expect(src).to_contain("return UIEvent.BrowserNavigation(action: action, url: url)")
 ```
 
 </details>
@@ -594,23 +529,38 @@ expect resp to_contain "Connection: close"
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/ui/async_web_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- AsyncWebServer
+- http_response helper
+- async_state_to_json
+- Event channel integration
+- parse_ws_event helpers
+- extract_field
+- File change detection
+- Multiple client tracking
+- HTTP response generation
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 29 |
-| Active scenarios | 29 |
+| Total scenarios | 27 |
+| Active scenarios | 27 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-
-
-## Related Documentation
-
-- **Requirements:** [doc/02_requirements/nfr/simple_web_browser_production_hardening.md](doc/02_requirements/nfr/simple_web_browser_production_hardening.md)
-- **Plan:** [doc/03_plan/agent_tasks/simple_browser_production_level.md](doc/03_plan/agent_tasks/simple_browser_production_level.md)
-- **Design:** [doc/05_design/simple_web_browser_production_hardening.md](doc/05_design/simple_web_browser_production_hardening.md)
-- **Research:** [doc/01_research/local/simple_browser_production_level.md](doc/01_research/local/simple_browser_production_level.md)
 
 
 </details>

@@ -28,7 +28,7 @@ spipe_docgen_scenario_body_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 57 | 57 | 0 | 0 |
+| 56 | 56 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -269,7 +269,7 @@ expect(structure.contains("<summary>Advanced: shows the primary flow in a detail
 
 #### folds scenarios from folder manual config
 
-- file write
+1. file write
 
 
 <details>
@@ -315,9 +315,9 @@ expect(structure).to_contain("#### user continues from setup")
 
 #### expands prev inline setup without rendering Previous label
 
-- "        user open app
-- "    # @prev
-- "        user enter login
+1. "        user open app
+2. "    # @prev
+3. "        user enter login
    - Expected: structure does not contain `#### app is open`
    - Expected: structure does not contain `Previous:`
 
@@ -347,8 +347,8 @@ expect(structure.contains("Previous:")).to_equal(false)
 
 #### expands bare prev from the nearest previous scenario
 
-- "        admin start server
-- "        operator send request
+1. "        admin start server
+2. "        operator send request
    - Expected: structure does not contain `#### server is running`
 
 
@@ -376,10 +376,10 @@ expect(structure).to_contain("```simple\nadmin.start_server()\noperator.send_req
 
 #### expands include scenario body at the call site
 
-- "        user confirm dialog
-- "        user add item
-- "        # @include
-- "        user finish checkout
+1. "        user confirm dialog
+2. "        user add item
+3. "        # @include
+4. "        user finish checkout
    - Expected: structure does not contain `#### user confirms dialog`
    - Expected: structure does not contain `# @include`
 
@@ -410,16 +410,15 @@ expect(structure.contains("# @include")).to_equal(false)
 
 #### renders step helper calls as manual steps
 
-- "        step
-- "        step
-   - Expected: structure does not contain `1. Open the dashboard`
-   - Expected: structure does not contain `2. Choose the status filter`
+1. "        step
+2. "        step
+   - Expected: structure does not contain `1. Open the dashboard\n\n2. Choose the status filter`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -431,12 +430,11 @@ val source = "describe \"Step helper\":\n" +
     "        expect(\"filtered\").to_equal(\"filtered\")\n"
 val structure = extract_test_structure(source)
 expect(structure).to_contain("#### operator follows a readable flow")
-expect(structure).to_contain("- Open the dashboard")
+expect(structure).to_contain("1. Open the dashboard")
 expect(structure).to_contain("   - Expected: \"ready\" equals `ready`")
-expect(structure).to_contain("- Choose the status filter")
+expect(structure).to_contain("2. Choose the status filter")
 expect(structure).to_contain("   - Expected: \"filtered\" equals `filtered`")
-expect(structure.contains("1. Open the dashboard")).to_equal(false)
-expect(structure.contains("2. Choose the status filter")).to_equal(false)
+expect(structure.contains("1. Open the dashboard\n\n2. Choose the status filter")).to_equal(false)
 expect(structure).to_contain("```simple\nstep(\"Open the dashboard\")")
 ```
 
@@ -444,20 +442,18 @@ expect(structure).to_contain("```simple\nstep(\"Open the dashboard\")")
 
 #### includes inline scenario step helpers in generated manual steps
 
-- "        step
-- "        step
-- "        # @include
-- "        step
+1. "        step
+2. "        step
+3. "        # @include
+4. "        step
    - Expected: structure does not contain `#### operator has an authenticated session`
-   - Expected: structure does not contain `1. Open the sign-in page`
-   - Expected: structure does not contain `2. Submit valid credentials`
-   - Expected: structure does not contain `3. Open the actions panel`
+   - Expected: structure does not contain `1. Open the sign-in page\n\n2. Submit valid credentials`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -473,12 +469,10 @@ val source = "describe \"Inline step include\":\n" +
 val structure = extract_test_structure(source)
 expect(structure.contains("#### operator has an authenticated session")).to_equal(false)
 expect(structure).to_contain("#### operator reviews dashboard actions")
-expect(structure).to_contain("- Open the sign-in page")
-expect(structure).to_contain("- Submit valid credentials")
-expect(structure).to_contain("- Open the actions panel")
-expect(structure.contains("1. Open the sign-in page")).to_equal(false)
-expect(structure.contains("2. Submit valid credentials")).to_equal(false)
-expect(structure.contains("3. Open the actions panel")).to_equal(false)
+expect(structure).to_contain("1. Open the sign-in page")
+expect(structure).to_contain("2. Submit valid credentials")
+expect(structure).to_contain("3. Open the actions panel")
+expect(structure.contains("1. Open the sign-in page\n\n2. Submit valid credentials")).to_equal(false)
 expect(structure).to_contain("   - Expected: \"actions\" equals `actions`")
 expect(structure).to_contain("```simple\nstep(\"Open the sign-in page\")\nstep(\"Submit valid credentials\")\nstep(\"Open the actions panel\")")
 ```
@@ -487,8 +481,8 @@ expect(structure).to_contain("```simple\nstep(\"Open the sign-in page\")\nstep(\
 
 #### renders warning for missing prev scenario target
 
-- "    # @prev
-- "        user enter login
+1. "    # @prev
+2. "        user enter login
    - Expected: structure does not contain `# @manual-warning`
 
 
@@ -512,9 +506,9 @@ expect(structure.contains("# @manual-warning")).to_equal(false)
 
 #### renders warning for missing include target and removes metadata from source
 
-- "        user start flow
-- "        # @include
-- "        user finish flow
+1. "        user start flow
+2. "        # @include
+3. "        user finish flow
    - Expected: structure does not contain `# @include`
 
 
@@ -540,10 +534,10 @@ expect(structure.contains("# @include")).to_equal(false)
 
 #### renders warning for prev scenario expansion cycles
 
-- "    # @prev
-- "        setup first
-- "    # @prev
-- "        setup second
+1. "    # @prev
+2. "        setup first
+3. "    # @prev
+4. "        setup second
 
 
 <details>
@@ -571,10 +565,10 @@ expect(structure).to_contain("```simple\nsetup.second()\n```")
 
 #### renders warning for include scenario expansion cycles
 
-- "        # @include
-- "        flow first
-- "        # @include
-- "        flow second
+1. "        # @include
+2. "        flow first
+3. "        # @include
+4. "        flow second
    - Expected: structure does not contain `# @include`
 
 
@@ -658,7 +652,7 @@ expect(structure.contains("<summary>Advanced: shows primary matrix operator flow
 
 #### renders bare capture as after step tui scenario evidence
 
-- "        user open app
+1. "        user open app
    - Expected: structure does not contain `**Scenario capture:** tui after_step`
    - Expected: structure).to_contain("```simple\nuser.open_app()\nexpect(\"open\" equals `"open")\n```"`
 
@@ -677,7 +671,7 @@ val source = "describe \"Capture policy\":\n" +
     "        expect(\"open\").to_equal(\"open\")\n"
 val structure = extract_test_structure(source)
 expect(structure).to_contain("#### captures app after every step")
-expect(structure).to_contain("- User open app\n   - TUI capture: after_step")
+expect(structure).to_contain("1. User open app\n   - TUI capture: after_step")
 expect(structure.contains("**Scenario capture:** tui after_step")).to_equal(false)
 expect(structure).to_contain("```simple\nuser.open_app()\nexpect(\"open\").to_equal(\"open\")\n```")
 ```
@@ -686,9 +680,9 @@ expect(structure).to_contain("```simple\nuser.open_app()\nexpect(\"open\").to_eq
 
 #### renders explicit capture kind and mode from enum-like metadata
 
-- "    # @capture
-- "        user open app
-- "        user finish flow
+1. "    # @capture
+2. "        user open app
+3. "        user finish flow
    - Expected: structure does not contain `1. User open app\n   - GUI capture: after_scenario`
    - Expected: structure does not contain `**Scenario capture:** gui after_scenario`
 
@@ -707,7 +701,7 @@ val source = "describe \"Capture policy\":\n" +
     "        user.finish_flow()\n" +
     "        expect(\"done\").to_equal(\"done\")\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- User open app\n\n- User finish flow\n   - GUI capture: after_scenario (HTML preferred when available)")
+expect(structure).to_contain("1. User open app\n\n2. User finish flow\n   - GUI capture: after_scenario (HTML preferred when available)")
 expect(structure.contains("1. User open app\n   - GUI capture: after_scenario")).to_equal(false)
 expect(structure.contains("**Scenario capture:** gui after_scenario")).to_equal(false)
 ```
@@ -716,9 +710,9 @@ expect(structure.contains("**Scenario capture:** gui after_scenario")).to_equal(
 
 #### renders step capture metadata without keeping metadata in source code
 
-- "        user open app
-- "        # @capture
-- "        user submit login
+1. "        user open app
+2. "        # @capture
+3. "        user submit login
    - Expected: structure does not contain `**Step captures:**`
    - Expected: structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\" equals `"ok")\n```"`
    - Expected: structure does not contain `# @capture(api)`
@@ -738,8 +732,8 @@ val source = "describe \"Capture policy\":\n" +
     "        user.submit_login()\n" +
     "        expect(\"ok\").to_equal(\"ok\")\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- User open app")
-expect(structure).to_contain("- User submit login\n   - API capture: after_step")
+expect(structure).to_contain("1. User open app")
+expect(structure).to_contain("2. User submit login\n   - API capture: after_step")
 expect(structure.contains("**Step captures:**")).to_equal(false)
 expect(structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\").to_equal(\"ok\")\n```")
 expect(structure.contains("# @capture(api)")).to_equal(false)
@@ -749,10 +743,10 @@ expect(structure.contains("# @capture(api)")).to_equal(false)
 
 #### lets step capture off suppress inherited scenario capture
 
-- "        user open app
-- "        # @capture
-- "        user enter password
-- "        user submit login
+1. "        user open app
+2. "        # @capture
+3. "        user enter password
+4. "        user submit login
    - Expected: structure does not contain `Capture: off`
    - Expected: structure does not contain `# @capture(off)`
 
@@ -772,8 +766,8 @@ val source = "describe \"Capture policy\":\n" +
     "        user.enter_password()\n" +
     "        user.submit_login()\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- User open app\n   - TUI capture: after_step")
-expect(structure).to_contain("- User enter password\n\n- User submit login\n   - TUI capture: after_step")
+expect(structure).to_contain("1. User open app\n   - TUI capture: after_step")
+expect(structure).to_contain("2. User enter password\n\n3. User submit login\n   - TUI capture: after_step")
 expect(structure.contains("Capture: off")).to_equal(false)
 expect(structure.contains("# @capture(off)")).to_equal(false)
 ```
@@ -782,7 +776,7 @@ expect(structure.contains("# @capture(off)")).to_equal(false)
 
 #### falls back to capture summary when no manual step can be derived
 
-- "    # @capture
+1. "    # @capture
    - Expected: structure does not contain `1. `
 
 
@@ -806,8 +800,8 @@ expect(structure.contains("1. ")).to_equal(false)
 
 #### does not render fallback capture summaries for capture off
 
-- "    # @capture
-- "        # @capture
+1. "    # @capture
+2. "        # @capture
    - Expected: structure does not contain `Scenario capture`
    - Expected: structure does not contain `Step captures`
    - Expected: structure does not contain `off before`
@@ -837,10 +831,8 @@ expect(structure.contains("# @capture(off)")).to_equal(false)
 
 #### renders explicit step metadata before folded executable source
 
-- "        user open app
-- "        user submit login
-   - Expected: structure does not contain `1. User open app`
-   - Expected: structure does not contain `2. Submit login form`
+1. "        user open app
+2. "        user submit login
    - Expected: structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\" equals `"ok")\n```"`
    - Expected: structure does not contain `# @step: Submit login form`
 
@@ -848,7 +840,7 @@ expect(structure.contains("# @capture(off)")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -859,10 +851,8 @@ val source = "describe \"Manual steps\":\n" +
     "        user.submit_login()\n" +
     "        expect(\"ok\").to_equal(\"ok\")\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- User open app")
-expect(structure).to_contain("- Submit login form")
-expect(structure.contains("1. User open app")).to_equal(false)
-expect(structure.contains("2. Submit login form")).to_equal(false)
+expect(structure).to_contain("1. User open app")
+expect(structure).to_contain("2. Submit login form")
 expect(structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\").to_equal(\"ok\")\n```")
 expect(structure.contains("# @step: Submit login form")).to_equal(false)
 ```
@@ -871,15 +861,14 @@ expect(structure.contains("# @step: Submit login form")).to_equal(false)
 
 #### renders expected result bullets from contains assertions
 
-- "        val output = send mcp
-   - Expected: structure does not contain `1. Operator lists MCP tools`
+1. "        val output = send mcp
    - Expected: structure does not contain `   - Evidence:`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -891,8 +880,7 @@ val source = "describe \"Manual expected results\":\n" +
     "        expect(output.contains(\"\\\"protocolVersion\\\":\\\"2025-06-18\\\"\")).to_equal(true)\n" +
     "        expect(output.contains(\"error\")).to_equal(false)\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator lists MCP tools")
-expect(structure.contains("1. Operator lists MCP tools")).to_equal(false)
+expect(structure).to_contain("1. Operator lists MCP tools")
 expect(structure.contains("   - Evidence:")).to_equal(false)
 expect(structure).to_contain("   - Expected: output contains `debug_create_session`")
 expect(structure).to_contain("   - Expected: output contains `\"protocolVersion\":\"2025-06-18\"`")
@@ -903,8 +891,8 @@ expect(structure).to_contain("   - Expected: output does not contain `error`")
 
 #### places exec capture and evidence under the producing step
 
-- "        # @capture
-- "        val output = run smoke
+1. "        # @capture
+2. "        val output = run smoke
    - Expected: structure does not contain `# @capture(exec)`
 
 
@@ -923,7 +911,7 @@ val source = "describe \"Manual expected results\":\n" +
     "        expect(output.contains(\"PASS smoke\")).to_equal(true)\n" +
     "        expect(output.contains(\"panic\")).to_equal(false)\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator runs the smoke command\n   - Exec capture: after_step\n   - Evidence: execution result verified by 2 expected checks")
+expect(structure).to_contain("1. Operator runs the smoke command\n   - Exec capture: after_step\n   - Evidence: execution result verified by 2 expected checks")
 expect(structure).to_contain("   - Expected: output contains `PASS smoke`")
 expect(structure).to_contain("   - Expected: output does not contain `panic`")
 expect(structure.contains("# @capture(exec)")).to_equal(false)
@@ -933,8 +921,8 @@ expect(structure.contains("# @capture(exec)")).to_equal(false)
 
 #### keeps concrete scenario helper provider evidence manual-readable
 
-- "        # @capture
-- "        val protocol evidence = capture api protocol fields
+1. "        # @capture
+2. "        val protocol evidence = capture api protocol fields
    - Expected: structure does not contain `# @capture(protocol)`
 
 
@@ -953,7 +941,7 @@ val source = "describe \"MCP manual provider evidence\":\n" +
     "        expect(protocol_evidence.body.contains(\"params: jsonrpc=2.0; method=tools/list; id=2\")).to_equal(true)\n" +
     "        expect(protocol_evidence.body.contains(\"response fields: protocolVersion=2025-06-18; result.tools=present; error=absent\")).to_equal(true)\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator records the MCP tools/list provider evidence\n   - Protocol capture: after_step\n   - Evidence: protocol response verified by 2 expected checks")
+expect(structure).to_contain("1. Operator records the MCP tools/list provider evidence\n   - Protocol capture: after_step\n   - Evidence: protocol response verified by 2 expected checks")
 expect(structure).to_contain("   - Expected: protocol_evidence.body contains `params: jsonrpc=2.0; method=tools/list; id=2`")
 expect(structure).to_contain("   - Expected: protocol_evidence.body contains `response fields: protocolVersion=2025-06-18; result.tools=present; error=absent`")
 expect(structure).to_contain("capture_api_protocol_fields(\"MCP tools/list protocol exchange\"")
@@ -964,10 +952,10 @@ expect(structure.contains("# @capture(protocol)")).to_equal(false)
 
 #### places concrete provider artifacts under the producing step
 
-- "        # @capture
-- "        # @artifact
-- "        ui open screen
-- "        operator review payload
+1. "        # @capture
+2. "        # @artifact
+3. "        ui open screen
+4. "        operator review payload
    - Expected: structure does not contain `# @artifact`
 
 
@@ -988,8 +976,8 @@ val source = "describe \"Manual artifacts\":\n" +
     "        # @artifact: artifacts/protocol.json\n" +
     "        operator.review_payload()\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator opens the captured screen\n   - TUI capture: after_step\n   - Artifact: text `artifacts/screen.ansi`")
-expect(structure).to_contain("- Operator reviews protocol payload\n   - Artifact: json `artifacts/protocol.json`")
+expect(structure).to_contain("1. Operator opens the captured screen\n   - TUI capture: after_step\n   - Artifact: text `artifacts/screen.ansi`")
+expect(structure).to_contain("2. Operator reviews protocol payload\n   - Artifact: json `artifacts/protocol.json`")
 expect(structure.contains("# @artifact")).to_equal(false)
 expect(structure).to_contain("```simple\nui.open_screen()\noperator.review_payload()\n```")
 ```
@@ -998,7 +986,7 @@ expect(structure).to_contain("```simple\nui.open_screen()\noperator.review_paylo
 
 #### summarizes long expected result values but keeps full source folded
 
-- "        val output = send mcp
+1. "        val output = send mcp
    - Expected: structure does not contain `Create a debug session with a long schema payload``
    - Expected: structure).to_contain("expect(output contains `"{\\"jsonrpc\\":\\"2.0\\",\\"result\\":{\\"tools\\":[{\\"name\\":\\"debug_cre... (full value in folded executable source)`
 
@@ -1016,7 +1004,7 @@ val source = "describe \"Manual expected results\":\n" +
     "        val output = send_mcp(input)\n" +
     "        expect(output.contains(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")).to_equal(true)\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator checks protocol payload")
+expect(structure).to_contain("1. Operator checks protocol payload")
 expect(structure).to_contain("full value in folded executable source")
 expect(structure.contains("Create a debug session with a long schema payload`")).to_equal(false)
 expect(structure).to_contain("expect(output.contains(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")).to_equal(true)")
@@ -1026,7 +1014,7 @@ expect(structure).to_contain("expect(output.contains(\"{\\\"jsonrpc\\\":\\\"2.0\
 
 #### summarizes long direct json equality values but keeps full source folded
 
-- "        val payload = read payload
+1. "        val payload = read payload
    - Expected: structure does not contain `Create a debug session with a long schema payload``
    - Expected: structure).to_contain("expect(payload equals `"{\\"jsonrpc\\":\\"2.0\\",\\"result\\":{\\"tools\\":[{\\"name\\":\\"debug_cre... (full value in folded executable source)`
 
@@ -1044,7 +1032,7 @@ val source = "describe \"Manual expected results\":\n" +
     "        val payload = read_payload()\n" +
     "        expect(payload).to_equal(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator verifies the exact payload")
+expect(structure).to_contain("1. Operator verifies the exact payload")
 expect(structure).to_contain("   - Expected: payload equals `{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"debug_create_session\",\"des... (full value in folded executable source)`")
 expect(structure.contains("Create a debug session with a long schema payload`")).to_equal(false)
 expect(structure).to_contain("expect(payload).to_equal(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")")
@@ -1054,8 +1042,8 @@ expect(structure).to_contain("expect(payload).to_equal(\"{\\\"jsonrpc\\\":\\\"2.
 
 #### renders quoted step metadata before folded executable source
 
-- "        # @step
-- "        user open dashboard
+1. "        # @step
+2. "        user open dashboard
    - Expected: structure does not contain `# @step("Open the dashboard")`
 
 
@@ -1071,7 +1059,7 @@ val source = "describe \"Manual steps\":\n" +
     "        # @step(\"Open the dashboard\")\n" +
     "        user.open_dashboard()\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Open the dashboard")
+expect(structure).to_contain("1. Open the dashboard")
 expect(structure).to_contain("```simple\nuser.open_dashboard()\n```")
 expect(structure.contains("# @step(\"Open the dashboard\")")).to_equal(false)
 ```
@@ -1080,8 +1068,8 @@ expect(structure.contains("# @step(\"Open the dashboard\")")).to_equal(false)
 
 #### allows capture metadata between step label and action
 
-- "        # @capture
-- "        user submit login
+1. "        # @capture
+2. "        user submit login
    - Expected: structure does not contain `unused step metadata`
    - Expected: structure does not contain `# @step: Submit login form`
    - Expected: structure does not contain `# @capture(api)`
@@ -1100,7 +1088,7 @@ val source = "describe \"Manual steps\":\n" +
     "        # @capture(api)\n" +
     "        user.submit_login()\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Submit login form\n   - API capture: after_step")
+expect(structure).to_contain("1. Submit login form\n   - API capture: after_step")
 expect(structure.contains("unused step metadata")).to_equal(false)
 expect(structure).to_contain("```simple\nuser.submit_login()\n```")
 expect(structure.contains("# @step: Submit login form")).to_equal(false)
@@ -1111,10 +1099,10 @@ expect(structure.contains("# @capture(api)")).to_equal(false)
 
 #### allows step metadata before executable setup lines
 
-- "    # @capture
-- "        val input = init request
-- "        val output = send mcp
-- "        val ok = output contains
+1. "    # @capture
+2. "        val input = init request
+3. "        val output = send mcp
+4. "        val ok = output contains
    - Expected: structure).to_contain("```simple\nval input = init_request(\"1\")\nval output = send_mcp(input)\nval ok = output contains `"protocolVersion")\nexpect(ok`
    - Expected: structure does not contain `unused step metadata`
    - Expected: structure does not contain `# @step: Operator`
@@ -1137,8 +1125,8 @@ val source = "describe \"Manual steps\":\n" +
     "        val ok = output.contains(\"protocolVersion\")\n" +
     "        expect(ok).to_equal(true)\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator sends an initialize request")
-expect(structure).to_contain("- Operator verifies the initialize response\n   - Protocol capture: after_scenario\n   - Evidence: protocol response verified by 1 expected check")
+expect(structure).to_contain("1. Operator sends an initialize request")
+expect(structure).to_contain("2. Operator verifies the initialize response\n   - Protocol capture: after_scenario\n   - Evidence: protocol response verified by 1 expected check")
 expect(structure).to_contain("```simple\nval input = init_request(\"1\")\nval output = send_mcp(input)\nval ok = output.contains(\"protocolVersion\")\nexpect(ok).to_equal(true)\n```")
 expect(structure.contains("unused step metadata")).to_equal(false)
 expect(structure.contains("# @step: Operator")).to_equal(false)
@@ -1148,11 +1136,11 @@ expect(structure.contains("# @step: Operator")).to_equal(false)
 
 #### keeps prev executable source stable with step-local capture metadata
 
-- "        # @capture
-- "        val init = build init
-- "        val req = build request
-- "    # @prev
-- "        val output = send
+1. "        # @capture
+2. "        val init = build init
+3. "        val req = build request
+4. "    # @prev
+5. "        val output = send
    - Expected: structure).to_contain("```simple\nval init = build_init()\nval req = build_request()\nval input = init + req\n\nval output = send(input)\nexpect(output equals `"ok")\n```"`
    - Expected: structure does not contain `val req = build_request()\nval req = build_request()`
 
@@ -1178,8 +1166,8 @@ val source = "describe \"Manual steps\":\n" +
     "        val output = send(input)\n" +
     "        expect(output).to_equal(\"ok\")\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator initializes protocol\n   - Protocol capture: after_step")
-expect(structure).to_contain("- Operator checks response")
+expect(structure).to_contain("1. Operator initializes protocol\n   - Protocol capture: after_step")
+expect(structure).to_contain("2. Operator checks response")
 expect(structure).to_contain("```simple\nval init = build_init()\nval req = build_request()\nval input = init + req\n\nval output = send(input)\nexpect(output).to_equal(\"ok\")\n```")
 expect(structure.contains("val req = build_request()\nval req = build_request()")).to_equal(false)
 ```
@@ -1188,8 +1176,8 @@ expect(structure.contains("val req = build_request()\nval req = build_request()"
 
 #### allows capture off between step label and action
 
-- "        # @capture
-- "        user enter password
+1. "        # @capture
+2. "        user enter password
    - Expected: structure does not contain `TUI capture: after_step`
    - Expected: structure does not contain `Capture: off`
    - Expected: structure does not contain `unused step metadata`
@@ -1211,7 +1199,7 @@ val source = "describe \"Manual steps\":\n" +
     "        # @capture(off)\n" +
     "        user.enter_password()\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Enter password")
+expect(structure).to_contain("1. Enter password")
 expect(structure.contains("TUI capture: after_step")).to_equal(false)
 expect(structure.contains("Capture: off")).to_equal(false)
 expect(structure.contains("unused step metadata")).to_equal(false)
@@ -1224,8 +1212,8 @@ expect(structure.contains("# @capture(off)")).to_equal(false)
 
 #### does not derive manual steps from control flow lines
 
-- "        if user needs login
-- "            user open login
+1. "        if user needs login
+2. "            user open login
    - Expected: structure does not contain `1. if user needs login`
    - Expected: structure).to_contain("```simple\nif user.needs_login():\n    user.open_login()\nexpect(\"ready\" equals `"ready")\n```"`
 
@@ -1244,7 +1232,7 @@ val source = "describe \"Manual steps\":\n" +
     "        expect(\"ready\").to_equal(\"ready\")\n"
 val structure = extract_test_structure(source)
 expect(structure.contains("1. if user needs login")).to_equal(false)
-expect(structure).to_contain("- User open login")
+expect(structure).to_contain("1. User open login")
 expect(structure).to_contain("```simple\nif user.needs_login():\n    user.open_login()\nexpect(\"ready\").to_equal(\"ready\")\n```")
 ```
 
@@ -1252,7 +1240,7 @@ expect(structure).to_contain("```simple\nif user.needs_login():\n    user.open_l
 
 #### renders checker-style calls as readable manual steps
 
-- "        Then login succeeds
+1. "        Then login succeeds
 
 
 <details>
@@ -1266,7 +1254,7 @@ val source = "describe \"Manual steps\":\n" +
     "    it \"shows checker helper prose\":\n" +
     "        Then_login_succeeds()\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Then login succeeds")
+expect(structure).to_contain("1. Then login succeeds")
 expect(structure).to_contain("```simple\nThen_login_succeeds()\n```")
 ```
 
@@ -1274,7 +1262,7 @@ expect(structure).to_contain("```simple\nThen_login_succeeds()\n```")
 
 #### warns about empty step metadata without leaking it into source
 
-- "        user open app
+1. "        user open app
    - Expected: structure does not contain ````simple\n# @step`
 
 
@@ -1291,7 +1279,7 @@ val source = "describe \"Manual steps\":\n" +
     "        user.open_app()\n"
 val structure = extract_test_structure(source)
 expect(structure).to_contain("**Manual warnings:**\n- invalid step metadata value: empty (expected # @step: Text or # @step(\"Text\"))")
-expect(structure).to_contain("- User open app")
+expect(structure).to_contain("1. User open app")
 expect(structure).to_contain("```simple\nuser.open_app()\n```")
 expect(structure.contains("```simple\n# @step")).to_equal(false)
 ```
@@ -1321,8 +1309,8 @@ expect(structure.contains("```simple\n# @step")).to_equal(false)
 
 #### renders multiple manual warnings without blanking entries
 
-- "    # @capture
-- "        user open app
+1. "    # @capture
+2. "        user open app
 
 
 <details>
@@ -1342,7 +1330,7 @@ val structure = extract_test_structure(source)
 expect(structure).to_contain("- invalid manual visibility metadata: # @manual: spotlight (expected show, folded, detail, or skip)")
 expect(structure).to_contain("- invalid capture metadata value: video (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)")
 expect(structure).to_contain("- invalid step metadata value: empty (expected # @step: Text or # @step(\"Text\"))")
-expect(structure).to_contain("- User open app")
+expect(structure).to_contain("1. User open app")
 ```
 
 </details>
@@ -1370,8 +1358,8 @@ expect(structure).to_contain("expect(\"visible\").to_equal(\"visible\")")
 
 #### warns about invalid scenario capture metadata without rendering a false capture
 
-- "    # @capture
-- "        user open app
+1. "    # @capture
+2. "        user open app
    - Expected: structure does not contain `**Scenario capture:** tui after_step`
    - Expected: structure does not contain `# @capture(video)`
 
@@ -1398,9 +1386,9 @@ expect(structure.contains("# @capture(video)")).to_equal(false)
 
 #### warns about invalid step capture metadata and strips it from source
 
-- "        user open app
-- "        # @capture
-- "        user capture screen
+1. "        user open app
+2. "        # @capture
+3. "        user capture screen
    - Expected: structure does not contain `# @capture(video)`
 
 
@@ -1523,10 +1511,10 @@ match parsed_result:
 
 #### writes test manuals under doc test folder except formal verification
 
-- metadata: FeatureMetadata empty
+1. metadata: FeatureMetadata empty
    - Expected: e equals ``
    - Expected: path equals `/tmp/test/01_unit/app/lint_spec.md`
-- metadata: FeatureMetadata empty
+2. metadata: FeatureMetadata empty
    - Expected: e equals ``
    - Expected: path equals `/tmp/00_formal_verification/compiler/cache_correctness_spec.md`
 
@@ -1573,7 +1561,7 @@ match formal_result:
 
 #### generates auto docs with scenarios immediately after the title
 
-- metadata: FeatureMetadata empty
+1. metadata: FeatureMetadata empty
    - Expected: e equals ``
    - Expected: before_scenarios equals `# Manual First\n\n`
    - Expected: before_scenarios does not contain `## At a Glance`
@@ -1617,56 +1605,9 @@ match result:
 
 </details>
 
-#### lets manual-first docs open with visible scenarios instead of folded summary card
-
-- metadata: FeatureMetadata empty
-   - Expected: e equals ``
-   - Expected: before_scenarios equals `# Manual First Layout\n\n`
-   - Expected: generated does not contain `<summary>Full Scenario Manual</summary>`
-   - Expected: generated does not contain `| Tests | Active | Skipped | Pending |`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 27 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val doc = SspecDoc(
-    file_path: "test/feature/app/manual_first_layout_spec.spl",
-    raw_content: "# @manual-layout: manual-first\n" +
-        "describe \"Manual First Layout\":\n" +
-        "    # @manual: show\n" +
-        "    it \"operator performs the primary flow\":\n" +
-        "        val status = \"open\"\n" +
-        "        expect(status).to_equal(\"open\")\n",
-    doc_blocks: [],
-    feature_title: "Manual First Layout",
-    feature_ids: [],
-    metadata: FeatureMetadata.empty()
-)
-val result = generate_feature_doc(doc, "/tmp")
-match result:
-    case Err(e):
-        expect(e).to_equal("")
-    case Ok(path):
-        val generated = read_file(path)
-        val before_scenarios = generated.split("## Scenarios")[0]
-        val after_scenarios_parts = generated.split("## Scenarios")
-        expect(before_scenarios).to_equal("# Manual First Layout\n\n")
-        expect(generated.contains("<summary>Full Scenario Manual</summary>")).to_equal(false)
-        expect(generated.contains("| Tests | Active | Skipped | Pending |")).to_equal(false)
-        expect(after_scenarios_parts.len()).to_be_greater_than(1)
-        expect(after_scenarios_parts[1]).to_contain("#### operator performs the primary flow")
-        expect(after_scenarios_parts[1]).to_contain("## Scenario Summary")
-```
-
-</details>
-
 #### links screenshots and embeds TUI capture evidence in generated docs
 
-- file write
+1. file write
    - Expected: e equals ``
    - Expected: generated does not contain `![Screenshots: main.png](doc/06_spec/image/feature/app/ui_capture_spec/main.png)`
    - Expected: generated does not contain ``N/A``
@@ -1726,7 +1667,7 @@ match result:
 
 #### lets users link all evidence instead of embedding TUI captures
 
-- file write
+1. file write
    - Expected: e equals ``
    - Expected: generated does not contain `![TUI Captures: tui.png]`
    - Expected: generated does not contain `<summary>spipe_docgen_ui_capture_links.txt</summary>`
@@ -1849,8 +1790,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 57 |
-| Active scenarios | 57 |
+| Total scenarios | 56 |
+| Active scenarios | 56 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -677,7 +677,7 @@ mod interpreter_branch_coverage {
                 dest: None,
                 func_name: "noop".to_string(),
                 args: vec![],
-                boxed_result: false,
+            boxed_result: false,
             },
         )
         .unwrap();

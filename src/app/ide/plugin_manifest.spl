@@ -6,34 +6,12 @@
 
 use app.plugin.registry.{PluginEntry, plugin_entry_new, plugin_manifest_to_text, parse_plugin_manifest_text}
 use app.ide.capabilities.{ide_capabilities}
-use app.office.libreoffice.{libreoffice_plugin_entries}
 
 struct IdePluginManifestProbe:
     entry_count: i64
     roundtrip_count: i64
-    contribution_kind_count: i64
-    libreoffice_entry_count: i64
-    libreoffice_roundtrip_count: i64
     manifest_text: text
     names: [text]
-    contribution_kinds: [text]
-
-struct IdePluginRegistryInvalidationProbe:
-    generation: i64
-    entry_count: i64
-    roundtrip_count: i64
-    valid: bool
-
-fn ide_plugin_contribution_kinds() -> [text]:
-    var kinds: [text] = []
-    for cap in ide_capabilities():
-        var seen = false
-        for kind in kinds:
-            if kind == cap.plugin_kind:
-                seen = true
-        if not seen:
-            kinds.push(cap.plugin_kind)
-    kinds
 
 fn ide_plugin_entries() -> [PluginEntry]:
     var entries: [PluginEntry] = []
@@ -53,50 +31,27 @@ fn ide_plugin_manifest_probe() -> IdePluginManifestProbe:
     val entries = ide_plugin_entries()
     val text = plugin_manifest_to_text(entries)
     val parsed = parse_plugin_manifest_text(text)
-    val libreoffice_entries = libreoffice_plugin_entries()
-    val libreoffice_text = plugin_manifest_to_text(libreoffice_entries)
-    val libreoffice_parsed = parse_plugin_manifest_text(libreoffice_text)
     var names: [text] = []
     for entry in parsed:
         names.push(entry.name)
-    val contribution_kinds = ide_plugin_contribution_kinds()
     IdePluginManifestProbe(
         entry_count: entries.len(),
         roundtrip_count: parsed.len(),
-        contribution_kind_count: contribution_kinds.len(),
-        libreoffice_entry_count: libreoffice_entries.len(),
-        libreoffice_roundtrip_count: libreoffice_parsed.len(),
         manifest_text: text,
-        names: names,
-        contribution_kinds: contribution_kinds
+        names: names
     )
 
 fn ide_plugin_manifest_summary() -> text:
     val probe = ide_plugin_manifest_probe()
-    "plugins: entries={probe.entry_count} roundtrip={probe.roundtrip_count} names={probe.names.len()} kinds={probe.contribution_kind_count} libre={probe.libreoffice_entry_count} libre_roundtrip={probe.libreoffice_roundtrip_count}"
+    "plugins: entries={probe.entry_count} roundtrip={probe.roundtrip_count} names={probe.names.len()}"
 
-fn ide_plugin_registry_invalidation_probe(previous_generation: i64) -> IdePluginRegistryInvalidationProbe:
-    val entries = ide_plugin_entries()
-    val text = plugin_manifest_to_text(entries)
-    val parsed = parse_plugin_manifest_text(text)
-    IdePluginRegistryInvalidationProbe(
-        generation: previous_generation + 1,
-        entry_count: entries.len(),
-        roundtrip_count: parsed.len(),
-        valid: ide_plugin_manifest_validate(parsed) == ""
-    )
-
-# Returns an error description if any entry has an empty name/library/version,
-# duplicate name, or malformed IDE function symbols. Returns "" when the manifest
-# is valid.
+# Returns an error description if any entry has an empty name or version,
+# or if there are duplicate names.  Returns "" when the manifest is valid.
 fn ide_plugin_manifest_validate(entries: [PluginEntry]) -> text:
     var seen_names: [text] = []
-    var seen_functions: [text] = []
     for entry in entries:
         if entry.name == "":
             return "manifest error: entry with empty name"
-        if entry.library == "":
-            return "manifest error: entry '" + entry.name + "' has empty library"
         if entry.version == "":
             return "manifest error: entry '" + entry.name + "' has empty version"
         var dup = false
@@ -106,29 +61,6 @@ fn ide_plugin_manifest_validate(entries: [PluginEntry]) -> text:
         if dup:
             return "manifest error: duplicate plugin name '" + entry.name + "'"
         seen_names.push(entry.name)
-        if not entry.name.starts_with("ide."):
-            return "manifest error: entry '" + entry.name + "' has invalid IDE name"
-        if entry.functions.len() != 2:
-            return "manifest error: entry '" + entry.name + "' has invalid function count"
-        val raw_cap_id = entry.name.slice(4, entry.name.len())
-        val cap_id = raw_cap_id.replace("-", "_")
-        val capability_fn = "ide_capability_" + cap_id
-        val feature_check_fn = "ide_feature_check_" + cap_id
-        var has_capability_fn = false
-        var has_feature_check_fn = false
-        for function_name in entry.functions:
-            if function_name == "":
-                return "manifest error: entry '" + entry.name + "' has empty function"
-            if function_name == capability_fn:
-                has_capability_fn = true
-            if function_name == feature_check_fn:
-                has_feature_check_fn = true
-            for seen_function in seen_functions:
-                if seen_function == function_name:
-                    return "manifest error: duplicate function '" + function_name + "'"
-            seen_functions.push(function_name)
-        if not has_capability_fn or not has_feature_check_fn:
-            return "manifest error: entry '" + entry.name + "' has malformed function"
     ""
 
 fn ide_plugin_manifest_is_valid() -> bool:

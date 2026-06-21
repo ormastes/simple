@@ -12,7 +12,7 @@ The 8K GUI color/image lane keeps the default render target as packed 32-bit pix
 
 `src/lib/common/image/image_info.spl` owns lightweight image metadata and color-profile routing. It detects TIFF, JPEG XL, PNG iCCP, JPEG APP2 ICC, and TIFF ICC metadata without initializing decoders or transform caches. Unsupported profile subsets fail closed with typed reasons. RGB/XYZ ICC profiles may use the current packed-sRGB identity path; RGB/Lab ICC profiles are not treated as identity and return `icc-rgb-lab-transform-pending`.
 
-`examples/11_advanced/browser/feature/paint/image_decode.spl` owns staged pure-Simple decode integration. TIFF has exact RGBA capability slices for current supported variants. JPEG XL currently provides metadata, container/codestream parsing, split partial codestream stitching, color metadata routing, and sparse intrinsic-size placeholders; per `NFR-GCI8K-008`, full Modular or VarDCT pixel decode and image URI decoded-pixel rendering require separate exact-pixel SPipe evidence before they enter the accepted claim.
+`examples/11_advanced/browser/feature/paint/image_decode.spl` owns staged pure-Simple decode integration. TIFF has exact RGBA capability slices for current supported variants. JPEG XL currently provides metadata, container/codestream parsing, split partial codestream stitching, color metadata routing, and sparse intrinsic-size placeholders; full Modular or VarDCT pixel decode remains outside the current accepted claim.
 
 ## Boundaries
 

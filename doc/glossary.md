@@ -1,70 +1,7 @@
 # Key words and key points
 
 ## Sub-Glossaries
-- [SDD Diagram Draw](#sdd-diagram-draw) / [SDD (Simple Diagram Document)](#sdd-simple-diagram-document) — Office Draw and Markdown diagram format, stored as `.sdd.sdn` and backed by SDN graph data with geometry, connectors, canvas metadata, grouping, and style rules.
 - [Simple Feature Module (SFM)](simple_feature_module_glossary.md) — `.sfm` feature-module format, layers, DI/AOP, security level, profiles, VERSION.md ([tldr](simple_feature_module_glossary_tldr.md)).
-
-## Calc Display-Safe Recalc
-Calc display-safe recalc is the Office Sheets app path that refreshes
-`FormulaVal.cached_display` through `evaluate_formula_display_text_checked` for
-runner-verifiable formulas such as `COUNTA`, exact-match `VLOOKUP`, `LEN`,
-`LOWER`, `UPPER`, and `TRIM`. It is separate from full numeric formula parity,
-which still depends on the tracked f64 backend blocker.
-
-## Designer Auto-Layout
-Designer auto-layout is the pure `app.office.ui_editor` layout materialization
-path for HTML UI design documents. Frame nodes with horizontal or vertical
-layout metadata place child nodes using integer gap/padding and child
-constraints, then expose resolved absolute geometry in HTML and SDD output.
-
-## HTML UI Design Document
-HTML UI Design Document is the named Office Designer format produced by
-`app.office.ui_editor`. It is a pure HTML canvas for Figma-like positioned
-frames/components and exports to SDD-compatible node tables instead of creating
-a separate design-file substrate.
-
-## Writer Markdown
-Writer Markdown is the Simple Office Writer surface. Markdown is the source
-format and HTML is the render target; the older `WordApp` rich-text module is a
-compatibility UI path, not the product document model.
-
-## IDE Plugin Kernel
-IDE Plugin Kernel is the proposed Simple-native plugin architecture for the IDE
-and Office suite. It combines VS Code-style manifests, contribution points,
-activation events, and extension-host placement with Eclipse-style extension
-registry, service registry, and invalidation, while keeping Simple MDSOC
-visibility rules. The architecture is documented in
-`doc/04_architecture/ide_plugin_architecture.md`.
-
-## Plugin Contribution Point
-A Plugin Contribution Point is a declarative place where a plugin adds behavior
-without importing host or sibling internals. Initial contribution points include
-commands, menus, views, custom editors, document kinds, renderers, importers,
-exporters, diagnostics, diagram shapes, designer tools, sheet functions, slide
-layouts, services, and aspect hooks.
-
-## Plugin DI Service Token
-A Plugin DI Service Token is the named contract a plugin provides or consumes
-through the IDE Plugin Kernel service container. Tokens are scoped to global,
-workspace, document, surface, or request lifetimes and may require capability
-grants for privileged host services.
-
-## Plugin Aspect Hook
-A Plugin Aspect Hook is a constrained AOP extension point owned by the host, not
-arbitrary method interception. Hooks wrap known lifecycle points such as command
-dispatch, document save, rendering, diagnostics, plugin activation, plugin
-deactivation, and resource invalidation.
-
-## SDD Diagram Draw
-SDD Diagram Draw is the product-facing Simple IDE Draw capability. It stores
-diagrams as SDD (Simple Diagram Document) `.sdd.sdn` files, renders through the
-pure `std.editor.services.sdn_graph` HTML preview path, and exposes
-draw.io-style grouping/connectors plus Figma-like geometry fields (`x`, `y`,
-`width`, `height`, `layer`, `parent`) without introducing a separate diagram
-file format. The stored SDN is a diagram document, not a relationship-only
-graph: nodes carry shape, CSS label, role, absolute location, size, layer, and
-parent/container data; connectors carry route, anchors, waypoints, labels,
-style, kind, and editable handle metadata.
 
 ## Crate
 Package and module are used in many different meaning across different languages.
@@ -645,32 +582,6 @@ A filesystem that uses database techniques (B-tree indexing, WAL journaling, pag
 ## SDN (Simple Data Notation)
 
 Human-readable, version-control-friendly data format used by all Simple database modules. Analogous to JSON but with richer type annotations. All `*.sdn` files use atomic file I/O (shared read locks, exclusive write-rename pattern) to prevent corruption. Core infrastructure: `StringInterner` (20–40% space savings), `SdnTable`/`SdnRow` (in-memory table), `QueryBuilder` (fluent filter/sort/limit API). Defined in `src/lib/nogc_sync_mut/database/core.spl`.
-
-## SDD (Simple Diagram Document)
-
-SDN-backed diagram dialect for Markdown docs and IDE diagram previews. Preferred
-files use `.sdd.sdn`. The product-facing Draw capability name is **SDD Diagram
-Draw**; the app catalog can still show the short app name `Draw`. SDD is the
-canonical diagram substrate for Office Draw work, not a relationship-only graph
-format. It keeps compact graph syntax and adds diagram-editor
-metadata: root node/edge counts, node shape, x/y position, width/height, layer,
-document/render order, parent/container membership for draw.io-like groups,
-canvas/page metadata, connector route, waypoints, start/end anchors, optional
-label-point overrides, rendered endpoint/waypoint/label handles, node
-duplication with offset geometry, guarded multi-node layout, and safe
-stylesheet resource metadata. The selected connector handle edit actions expose
-stable handle indexes, endpoint/opposite-node ids, connector segment
-counts/endpoints/midpoints/orientations, connector label points that can be
-cleared back to rendered path midpoints, draw canvas/page metadata, rendered
-SVG connector paths, reusable CSS labels, connector duplication, style-rule
-delete/inspection, and resolved style-table paint rules, direct node
-create/label/shape/style/layer/role/parent/geometry/canvas/delete and connector
-create/label/style/kind/reconnect/delete edit operations, transient
-selection rendering, pure node/connector inspector snapshots, guarded multi-node
-align/distribute operations, and weave-based batch style or layout edits.
-Implemented in
-`src/lib/editor/services/sdn_graph.spl`; guide:
-`doc/07_guide/lib/api/sdn_graph.md`.
 
 ---
 

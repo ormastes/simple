@@ -28,7 +28,7 @@ backend_alias_browser_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -88,6 +88,35 @@ expect(BrowserBackend.create(64, 48, "cpu-simd").unwrap().gpu_backend()).to_equa
 
 </details>
 
+#### uses the resolved auto backend for repeated pure Simple render frames
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val state = _backend_alias_browser_state()
+val backend = BrowserBackend.create(64, 48, "auto").unwrap()
+val resolved = backend.gpu_backend()
+
+expect(resolved.len()).to_be_greater_than(0)
+expect(resolved).to_not_equal("auto")
+expect(resolved).to_equal(web_render_resolved_engine2d_backend_name(1, 1, "auto"))
+
+backend.render_frame(state.tree, state)
+expect(backend.gpu_backend()).to_equal(resolved)
+expect(backend.last_artifact_engine2d_backend).to_equal(resolved)
+
+backend.resize(80, 48)
+backend.render_frame(state.tree, state)
+expect(backend.gpu_backend()).to_equal(resolved)
+expect(backend.last_artifact_engine2d_backend).to_equal(resolved)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -107,8 +136,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

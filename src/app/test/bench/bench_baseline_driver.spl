@@ -2,7 +2,7 @@
 #
 # Measures REAL workloads entirely in-module (avoids cross-module BenchResult
 # struct bug: interp_cross_module_struct_return_unit_2026-06-13).
-# Timing uses time_now_unix_micros() declared locally.
+# Timing uses rt_time_now_unix_micros() declared locally.
 # Results are accumulated as primitive arrays and written via bench_emit_rows.
 #
 # Run:  bin/simple run src/app/test/bench/bench_baseline_driver.spl
@@ -13,7 +13,11 @@
 
 use app.test.bench.bench_report.{bench_emit_rows}
 
-use std.io_runtime.{time_now_unix_micros, process_run, file_exists}
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
 
 # ============================================================================
 # Workload functions — top-level (no closures to avoid capture limitations)
@@ -67,39 +71,39 @@ fn string_concat_loop(n: i64) -> i64:
 fn _time_fib30(iters: i64) -> i64:
     # Warmup
     val _w = fib(30)
-    val t0 = time_now_unix_micros()
+    val t0 = rt_time_now_unix_micros()
     var i: i64 = 0
     while i < iters:
         val _r = fib(30)
         i = i + 1
-    time_now_unix_micros() - t0
+    rt_time_now_unix_micros() - t0
 
 fn _time_fib_iter(n_fib: i64, iters: i64) -> i64:
     val _w = fib_iter(n_fib)
-    val t0 = time_now_unix_micros()
+    val t0 = rt_time_now_unix_micros()
     var i: i64 = 0
     while i < iters:
         val _r = fib_iter(n_fib)
         i = i + 1
-    time_now_unix_micros() - t0
+    rt_time_now_unix_micros() - t0
 
 fn _time_sum_loop(n: i64, iters: i64) -> i64:
     val _w = sum_loop(n)
-    val t0 = time_now_unix_micros()
+    val t0 = rt_time_now_unix_micros()
     var i: i64 = 0
     while i < iters:
         val _r = sum_loop(n)
         i = i + 1
-    time_now_unix_micros() - t0
+    rt_time_now_unix_micros() - t0
 
 fn _time_string_concat(n: i64, iters: i64) -> i64:
     val _w = string_concat_loop(n)
-    val t0 = time_now_unix_micros()
+    val t0 = rt_time_now_unix_micros()
     var i: i64 = 0
     while i < iters:
         val _r = string_concat_loop(n)
         i = i + 1
-    time_now_unix_micros() - t0
+    rt_time_now_unix_micros() - t0
 
 # ============================================================================
 # Integer-to-text helper (no import to avoid cycle)
@@ -306,13 +310,13 @@ fn main():
     #     (never faked). Internal timing makes these directly comparable to script rows.
     val simple_bin = "bin/simple"
     var smf_emitted = false
-    if file_exists(simple_bin):
+    if rt_file_exists(simple_bin):
         val workload = "src/app/test/bench/bench_smf_workload.spl"
         val smf_path = "/tmp/bench_smf_workload.smf"
         print("Compiling + running SMF workload ...")
-        val (co, ce, ccode) = process_run(simple_bin, ["compile", workload, "-o", smf_path])
+        val (co, ce, ccode) = rt_process_run(simple_bin, ["compile", workload, "-o", smf_path])
         if ccode == 0:
-            val (ro, re, rcode) = process_run(simple_bin, ["run", smf_path])
+            val (ro, re, rcode) = rt_process_run(simple_bin, ["run", smf_path])
             if rcode == 0:
                 val s_fib30 = _extract_us(ro, "fib_recursive(30)")
                 val s_fibiter = _extract_us(ro, "fib_iterative(35)")

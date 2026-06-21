@@ -5,23 +5,24 @@
 ## Quick Stats
 
 - **Total Features:** 4
-- **Complete Documentation:** 3 (75%)
-- **Stubs Remaining:** 1
-- **Total Lines:** 234
-- **Warnings:** 3
+- **Complete Documentation:** 4 (100%)
+- **Stubs Remaining:** 0
+- **Total Lines:** 40
+- **Warnings:** 20
 
 ---
 
-## Other (3 features)
+## Other (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [HTML/CSS RenderDoc goal status gate](test/03_system/check/html_css_renderdoc_goal_status_spec.md) | Minimal | N/A | 2 | 20% | 32 lines |
-| [Chrome opacity rounding policy specification](test/03_system/check/chrome_opacity_rounding_policy_spec.md) | Minimal | N/A | 3 | 20% | 32 lines |
-| [GUI RenderDoc feature coverage status gate](test/03_system/check/gui_renderdoc_feature_coverage_status_spec.md) | Minimal | N/A | 2 | 20% | 33 lines |
+| [Simple Web Browser Production Hardening Live Endpoint Specification](test/03_system/gui/simple_web_browser_production_hardening_spec.md) | Minimal | N/A | 6 | 20% | 10 lines |
+| [Production GUI/Web Renderer Parity Hardening Specification](test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.md) | Minimal | N/A | 8 | 20% | 10 lines |
 
-## Standard Library (1 features)
+## Application (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Widget Html Children Specification](test/01_unit/lib/common/ui/widget_html_children_spec.md) | Auto-generated | N/A | 2 | 0% | 137 lines |
+| [Simple Web Browser Production Auth Hardening Specification](test/01_unit/app/ui/web_auth_hardening_spec.md) | Minimal | N/A | 19 | 20% | 10 lines |
+| [Simple Web Browser WebSocket Handler Hardening Specification](test/01_unit/app/ui/ws_handler_spec.md) | Minimal | N/A | 13 | 20% | 10 lines |
+

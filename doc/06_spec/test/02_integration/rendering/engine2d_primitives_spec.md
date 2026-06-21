@@ -1,6 +1,6 @@
 # Engine2d Primitives Specification
 
-> <details>
+> 1. var engine = make engine
 
 <!-- sdn-diagram:id=engine2d_primitives_spec.arch -->
 <details class="sdn-source">
@@ -42,19 +42,22 @@ engine2d_primitives_spec -> std
 
 #### fills entire buffer with color
 
-- var engine = make engine
-- engine clear
-- engine present
+1. var engine = make engine
+
+2. engine clear
+
+3. engine present
    - Expected: pixel_at(pixels, 0, 0, 100) equals `red`
    - Expected: pixel_at(pixels, 99, 0, 100) equals `red`
    - Expected: pixel_at(pixels, 0, 99, 100) equals `red`
    - Expected: pixel_at(pixels, 99, 99, 100) equals `red`
    - Expected: pixel_at(pixels, 50, 50, 100) equals `red`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -78,16 +81,20 @@ engine.shutdown()
 
 #### overwrites previous content
 
-- var engine = make engine
-- engine clear
-- engine clear
-- engine present
+1. var engine = make engine
+
+2. engine clear
+
+3. engine clear
+
+4. engine present
    - Expected: pixel_at(pixels, 50, 50, 100) equals `blue`
-- engine shutdown
+
+5. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -109,17 +116,20 @@ engine.shutdown()
 
 #### produces colored region at target coordinates
 
-- var engine = make engine
-- engine draw rect filled
-- engine present
+1. var engine = make engine
+
+2. engine draw rect filled
+
+3. engine present
    - Expected: pixel_at(pixels, 15, 15, 100) equals `green`
    - Expected: pixel_at(pixels, 10, 10, 100) equals `green`
    - Expected: pixel_at(pixels, 29, 29, 100) equals `green`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -143,18 +153,21 @@ engine.shutdown()
 
 #### does not affect pixels outside the rectangle
 
-- var engine = make engine
-- engine draw rect filled
-- engine present
+1. var engine = make engine
+
+2. engine draw rect filled
+
+3. engine present
    - Expected: pixel_at(pixels, 5, 5, 100) equals `bg`
    - Expected: pixel_at(pixels, 50, 50, 100) equals `bg`
    - Expected: pixel_at(pixels, 9, 15, 100) equals `bg`
    - Expected: pixel_at(pixels, 15, 9, 100) equals `bg`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -178,17 +191,20 @@ engine.shutdown()
 
 #### handles rectangle at origin
 
-- var engine = make engine
-- engine draw rect filled
-- engine present
+1. var engine = make engine
+
+2. engine draw rect filled
+
+3. engine present
    - Expected: pixel_at(pixels, 0, 0, 100) equals `white`
    - Expected: pixel_at(pixels, 4, 4, 100) equals `white`
    - Expected: pixel_at(pixels, 5, 5, 100) equals `rgb(0, 0, 0)`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -211,15 +227,18 @@ engine.shutdown()
 
 #### center pixel has the drawn color
 
-- var engine = make engine
-- engine draw circle filled
-- engine present
+1. var engine = make engine
+
+2. engine draw circle filled
+
+3. engine present
    - Expected: pixel_at(pixels, 50, 50, 100) equals `yellow`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -239,19 +258,22 @@ engine.shutdown()
 
 #### pixels near center are filled
 
-- var engine = make engine
-- engine draw circle filled
-- engine present
+1. var engine = make engine
+
+2. engine draw circle filled
+
+3. engine present
    - Expected: pixel_at(pixels, 50, 50, 100) equals `cyan`
    - Expected: pixel_at(pixels, 45, 50, 100) equals `cyan`
    - Expected: pixel_at(pixels, 55, 50, 100) equals `cyan`
    - Expected: pixel_at(pixels, 50, 45, 100) equals `cyan`
    - Expected: pixel_at(pixels, 50, 55, 100) equals `cyan`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -275,16 +297,19 @@ engine.shutdown()
 
 #### pixels far outside circle are background
 
-- var engine = make engine
-- engine draw circle filled
-- engine present
+1. var engine = make engine
+
+2. engine draw circle filled
+
+3. engine present
    - Expected: pixel_at(pixels, 5, 5, 100) equals `bg`
    - Expected: pixel_at(pixels, 95, 95, 100) equals `bg`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -307,17 +332,20 @@ engine.shutdown()
 
 #### produces pixels along a horizontal path
 
-- var engine = make engine
-- engine draw line
-- engine present
+1. var engine = make engine
+
+2. engine draw line
+
+3. engine present
    - Expected: pixel_at(pixels, 0, 0, 100) equals `white`
    - Expected: pixel_at(pixels, 50, 0, 100) equals `white`
    - Expected: pixel_at(pixels, 99, 0, 100) equals `white`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -339,15 +367,18 @@ engine.shutdown()
 
 #### does not draw on unrelated rows
 
-- var engine = make engine
-- engine draw line
-- engine present
+1. var engine = make engine
+
+2. engine draw line
+
+3. engine present
    - Expected: pixel_at(pixels, 50, 1, 100) equals `bg`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -367,17 +398,20 @@ engine.shutdown()
 
 #### draws a vertical line
 
-- var engine = make engine
-- engine draw line
-- engine present
+1. var engine = make engine
+
+2. engine draw line
+
+3. engine present
    - Expected: pixel_at(pixels, 10, 0, 100) equals `magenta`
    - Expected: pixel_at(pixels, 10, 50, 100) equals `magenta`
    - Expected: pixel_at(pixels, 10, 99, 100) equals `magenta`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -400,16 +434,19 @@ engine.shutdown()
 
 #### top pixel differs from bottom pixel
 
-- var engine = make engine
-- engine draw gradient rect
-- engine present
+1. var engine = make engine
+
+2. engine draw gradient rect
+
+3. engine present
    - Expected: top_px equals `top_color`
    - Expected: bottom_px equals `bottom_color`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -437,14 +474,17 @@ engine.shutdown()
 
 #### middle row is an interpolated color
 
-- var engine = make engine
-- engine draw gradient rect
-- engine present
-- engine shutdown
+1. var engine = make engine
+
+2. engine draw gradient rect
+
+3. engine present
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -471,15 +511,18 @@ engine.shutdown()
 
 #### produces non-background pixels
 
-- var engine = make engine
-- engine draw text
-- engine present
+1. var engine = make engine
+
+2. engine draw text
+
+3. engine present
    - Expected: found_text_pixel is true
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -511,15 +554,18 @@ engine.shutdown()
 
 #### center region has the drawn color
 
-- var engine = make engine
-- engine draw rounded rect
-- engine present
+1. var engine = make engine
+
+2. engine draw rounded rect
+
+3. engine present
    - Expected: pixel_at(pixels, 50, 10, 100) equals `color`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -543,15 +589,18 @@ engine.shutdown()
 
 #### interior pixel has the drawn color
 
-- var engine = make engine
-- engine draw triangle filled
-- engine present
+1. var engine = make engine
+
+2. engine draw triangle filled
+
+3. engine present
    - Expected: pixel_at(pixels, 50, 60, 100) equals `orange`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -574,16 +623,20 @@ engine.shutdown()
 
 #### clip limits drawing to clip region
 
-- var engine = make engine
-- engine set clip
-- engine draw rect filled
-- engine present
+1. var engine = make engine
+
+2. engine set clip
+
+3. engine draw rect filled
+
+4. engine present
    - Expected: pixel_at(pixels, 70, 70, 100) equals `bg`
-- engine shutdown
+
+5. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -607,16 +660,20 @@ engine.shutdown()
 
 #### clip allows drawing inside clip region
 
-- var engine = make engine
-- engine set clip
-- engine draw rect filled
-- engine present
+1. var engine = make engine
+
+2. engine set clip
+
+3. engine draw rect filled
+
+4. engine present
    - Expected: pixel_at(pixels, 15, 15, 100) equals `blue`
-- engine shutdown
+
+5. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -637,17 +694,22 @@ engine.shutdown()
 
 #### clear_clip allows full drawing
 
-- var engine = make engine
-- engine set clip
-- engine clear clip
-- engine draw rect filled
-- engine present
+1. var engine = make engine
+
+2. engine set clip
+
+3. engine clear clip
+
+4. engine draw rect filled
+
+5. engine present
    - Expected: pixel_at(pixels, 70, 70, 100) equals `green`
-- engine shutdown
+
+6. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -673,18 +735,21 @@ engine.shutdown()
 
 #### blits pixel data onto framebuffer
 
-- var engine = make engine
-- engine draw image
-- engine present
+1. var engine = make engine
+
+2. engine draw image
+
+3. engine present
    - Expected: pixel_at(pixels, 10, 10, 100) equals `red`
    - Expected: pixel_at(pixels, 11, 10, 100) equals `green`
    - Expected: pixel_at(pixels, 10, 11, 100) equals `green`
    - Expected: pixel_at(pixels, 11, 11, 100) equals `red`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -709,18 +774,21 @@ engine.shutdown()
 
 #### does not affect pixels outside image bounds
 
-- var engine = make engine
-- engine draw image
-- engine present
+1. var engine = make engine
+
+2. engine draw image
+
+3. engine present
    - Expected: pixel_at(pixels, 19, 20, 100) equals `bg`
    - Expected: pixel_at(pixels, 22, 20, 100) equals `bg`
    - Expected: pixel_at(pixels, 20, 19, 100) equals `bg`
    - Expected: pixel_at(pixels, 20, 22, 100) equals `bg`
-- engine shutdown
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -747,13 +815,14 @@ engine.shutdown()
 
 #### returns correct buffer size
 
-- var engine = make engine
+1. var engine = make engine
    - Expected: pixels.len() equals `10000`
-- engine shutdown
+
+2. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -769,18 +838,23 @@ engine.shutdown()
 
 #### returns a copy that does not change after further drawing
 
-- var engine = make engine
-- engine clear
-- engine present
+1. var engine = make engine
+
+2. engine clear
+
+3. engine present
    - Expected: pixel_at(snapshot, 0, 0, 100) equals `red`
-- engine clear
-- engine present
+
+4. engine clear
+
+5. engine present
    - Expected: pixel_at(snapshot, 0, 0, 100) equals `red`
-- engine shutdown
+
+6. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -807,7 +881,7 @@ engine.shutdown()
 #### renders the core primitive scene bit-exactly
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

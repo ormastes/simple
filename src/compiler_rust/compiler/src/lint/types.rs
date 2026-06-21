@@ -99,8 +99,6 @@ pub enum LintName {
     DummyAccessor,
     /// Child method name is close to an inherited method name
     SimilarParentMethodName,
-    /// Application/library code declares a raw `rt_*` runtime intrinsic directly
-    RawRtAccess,
 }
 
 impl LintName {
@@ -138,7 +136,6 @@ impl LintName {
             LintName::NonDetCallInDetFn => "non_det_call_in_det_fn",
             LintName::DummyAccessor => "dummy_accessor",
             LintName::SimilarParentMethodName => "similar_parent_method_name",
-            LintName::RawRtAccess => "raw_rt_access",
         }
     }
 
@@ -176,7 +173,6 @@ impl LintName {
             "non_det_call_in_det_fn" => Some(LintName::NonDetCallInDetFn),
             "dummy_accessor" => Some(LintName::DummyAccessor),
             "similar_parent_method_name" => Some(LintName::SimilarParentMethodName),
-            "raw_rt_access" => Some(LintName::RawRtAccess),
             "unknown_annotation" => {
                 // Meta-lint: suppresses both unknown_decorator and unknown_attribute
                 // Handled specially in config.rs apply_attributes
@@ -221,7 +217,6 @@ impl LintName {
             LintName::NonDetCallInDetFn => LintLevel::Warn,
             LintName::DummyAccessor => LintLevel::Warn,
             LintName::SimilarParentMethodName => LintLevel::Warn,
-            LintName::RawRtAccess => LintLevel::Warn,
         }
     }
 
@@ -886,45 +881,6 @@ override parent behavior.
 
 Use @name_checked on the child method when the near-match is intentional.
 "#.to_string(),
-            LintName::RawRtAccess => r#"Lint: raw_rt_access
-Level: warn (default)
-
-=== What it checks ===
-
-Warns when application or library code declares a raw runtime intrinsic directly
-via `extern fn rt_<name>(...)`. Only privileged tiers — source files under
-`src/lib/` or `src/runtime/` — may declare `rt_*` externs.
-
-=== Why it matters ===
-
-`rt_*` intrinsics are unstable, unchecked runtime entry points. Declaring them
-outside the privileged runtime tiers bypasses the std wrapper layer that provides
-type-safe, GC/effect-aware, portable APIs. Direct use couples application code to
-runtime internals that can change without notice.
-
-=== Examples ===
-
-Triggers the lint (in src/app/**, examples/**, or user projects):
-    extern fn rt_file_write_text(path: text, content: text) -> bool
-    extern fn rt_getpid() -> i64
-
-Does not trigger:
-    use std.io_runtime.*           # use the std wrapper
-    extern fn clang(...)           # non-rt_ FFI is fine
-    # declarations under src/lib/ or src/runtime/ (privileged tiers)
-
-=== How to fix ===
-
-Use the corresponding std wrapper instead of the raw intrinsic, e.g.
-`std.io_runtime.file_read` / `std.io_runtime.file_write`. If the wrapper does not
-exist yet, add it in the privileged tier (src/lib/ or src/runtime/) and call that.
-
-=== Suppression policy ===
-
-Do not suppress by default. The fix is to route through a std wrapper. Only after
-explicit reviewer confirmation should a narrowly scoped suppression with a
-concrete reason be added.
-"#.to_string(),
         }
     }
 
@@ -962,7 +918,6 @@ concrete reason be added.
             LintName::NonDetCallInDetFn,
             LintName::DummyAccessor,
             LintName::SimilarParentMethodName,
-            LintName::RawRtAccess,
         ]
     }
 }

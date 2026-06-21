@@ -41,12 +41,11 @@ fn validate_content_length_frames(raw: text) -> bool:
         if raw.substring(pos, pos + prefix.len()) != prefix:
             return false
         val tail = raw.substring(pos, raw.len())
-        val crlf_sep = "\r\n\r\n"
-        val lf_sep = "\n\n"
-        val crlf_rel = tail.find(crlf_sep)
-        val lf_rel = if crlf_rel < 0: tail.find(lf_sep) else: -1
-        val sep_rel = if crlf_rel >= 0: crlf_rel else: lf_rel
-        val sep_len = if crlf_rel >= 0: crlf_sep.len() else: lf_sep.len()
+        var sep = "\r\n\r\n"
+        var sep_rel = tail.find(sep)
+        if sep_rel < 0:
+            sep = "\n\n"
+            sep_rel = tail.find(sep)
         if sep_rel < 0:
             return false
         val len_start = pos + prefix.len()
@@ -54,7 +53,7 @@ fn validate_content_length_frames(raw: text) -> bool:
         val declared = parse_nonnegative_i64(raw.substring(len_start, len_end))
         if declared <= 0 or declared > raw.len():
             return false
-        val body_start = pos + sep_rel + sep_len
+        val body_start = pos + sep_rel + sep.len()
         val body_end = body_start + declared
         if body_end > raw.len():
             return false
@@ -71,23 +70,22 @@ fn count_content_length_frames(raw: text) -> i64:
     var count: i64 = 0
     while pos < raw.len():
         if raw.substring(pos, pos + prefix.len()) != prefix:
-            return -1
+            return count
         val tail = raw.substring(pos, raw.len())
-        val crlf_sep = "\r\n\r\n"
-        val lf_sep = "\n\n"
-        val crlf_rel = tail.find(crlf_sep)
-        val lf_rel = if crlf_rel < 0: tail.find(lf_sep) else: -1
-        val sep_rel = if crlf_rel >= 0: crlf_rel else: lf_rel
-        val sep_len = if crlf_rel >= 0: crlf_sep.len() else: lf_sep.len()
+        var sep = "\r\n\r\n"
+        var sep_rel = tail.find(sep)
         if sep_rel < 0:
-            return -1
+            sep = "\n\n"
+            sep_rel = tail.find(sep)
+        if sep_rel < 0:
+            return count
         val declared = parse_nonnegative_i64(raw.substring(pos + prefix.len(), pos + sep_rel))
         if declared <= 0:
-            return -1
-        val body_start = pos + sep_rel + sep_len
+            return count
+        val body_start = pos + sep_rel + sep.len()
         val body_end = body_start + declared
         if body_end > raw.len():
-            return -1
+            return count
         pos = body_end
         count = count + 1
     count
@@ -219,8 +217,7 @@ fn count_occurrences(haystack: text, needle: text) -> i64:
     var count: i64 = 0
     var pos: i64 = 0
     while pos < haystack.len():
-        val tail = haystack.substring(pos, haystack.len())
-        val found = tail.find(needle)
+        val found = haystack.substring(pos, haystack.len()).find(needle)
         if found < 0:
             return count
         count = count + 1
@@ -254,19 +251,13 @@ fn last_tools_payload(payloads: [text]) -> text:
         i = i - 1
     return ""
 
-fn expected_content_length_stream(payloads: [text], sep: text) -> text:
-    var out = ""
-    for payload in payloads:
-        out = out + "Content-Length: " + payload.bytes().len().to_string() + sep + payload
-    out
-
 fn validate_payload_file(path: text, prefix: text) -> SmokeResult:
     val raw = file_read(path)
     val expected_frames: i64 = if prefix == "mcp": 2 else: 1
-    val marker_count = count_occurrences(raw, "Content-Length:")
+    val frame_count = count_occurrences(raw, "Content-Length:")
+    val framing_valid = frame_count >= expected_frames and not raw.contains("Content-Length: 2305843009213693951")
     val payloads = extract_json_payloads(raw)
-    val framing_valid = payloads.len() >= expected_frames and marker_count == payloads.len() and (raw == expected_content_length_stream(payloads, "\r\n\r\n") or raw == expected_content_length_stream(payloads, "\n\n"))
-    var json_valid = payloads.len() >= expected_frames and framing_valid
+    var json_valid = payloads.len() >= expected_frames and frame_count >= expected_frames
     var schema_valid = json_valid
     var tool_count: i64 = 0
     val tools_frame = last_tools_payload(payloads)

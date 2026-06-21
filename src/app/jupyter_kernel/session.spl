@@ -1,30 +1,33 @@
 # Jupyter Kernel - Session state management
 # Accumulates cell code and executes via subprocess
 
-use std.io_runtime.{file_delete, file_exists, file_write, getpid, process_run}
-
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 # Session state (module-level to avoid closure mutation bug)
 var SESSION_CODE_HISTORY: [text] = []
 var SESSION_TEMP_PATH: text = ""
 
 fn find_simple_runtime() -> text:
-    if file_exists("bin/simple"):
+    if rt_file_exists("bin/simple"):
         return "bin/simple"
-    if file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
         return "bin/release/aarch64-apple-darwin-macho/simple"
-    if file_exists("bin/release/macos-arm64/simple"):
+    if rt_file_exists("bin/release/macos-arm64/simple"):
         return "bin/release/macos-arm64/simple"
-    if file_exists("bin/release/darwin-aarch64/simple"):
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
         return "bin/release/darwin-aarch64/simple"
-    if file_exists("bin/release/macos-x86_64/simple"):
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
         return "bin/release/macos-x86_64/simple"
-    if file_exists("bin/release/linux-x86_64/simple"):
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
         return "bin/release/linux-x86_64/simple"
     "bin/simple"
 
 fn session_init():
-    val pid = getpid()
+    val pid = rt_getpid()
     SESSION_TEMP_PATH = "/tmp/simple_jupyter_{pid}.spl"
 
 fn session_execute(code: text, exec_count: i64) -> (text, text, bool):
@@ -37,13 +40,13 @@ fn session_execute(code: text, exec_count: i64) -> (text, text, bool):
         full_code = full_code + SESSION_CODE_HISTORY[i] + "\n"
         i = i + 1
 
-    file_write(SESSION_TEMP_PATH, full_code)
+    rt_file_write_text(SESSION_TEMP_PATH, full_code)
 
     val runtime = find_simple_runtime()
     if runtime == "":
         SESSION_CODE_HISTORY = session_remove_last(SESSION_CODE_HISTORY)
         return ("", "Simple runtime not found", false)
-    val (stdout, stderr, exit_code) = process_run(runtime, ["run", SESSION_TEMP_PATH])
+    val (stdout, stderr, exit_code) = rt_process_run(runtime, ["run", SESSION_TEMP_PATH])
 
     if exit_code != 0:
         # Remove failed cell from history

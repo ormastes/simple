@@ -42,7 +42,7 @@ Extend existing stubs into full implementations.
 1. Extend `src/lib/editor/render/block_model.spl` -- the stub defines
    `struct RenderBlock`; add variants (heading, paragraph, code, list, table,
    callout, hr, blank), add `BlockModel` (list of `RenderBlock` with
-   line-mapping), add `block_model_from_lines(lines: [text]) -> BlockModel`
+   line-mapping), add `block_model_from_lines(lines: List<String>) -> BlockModel`
 2. Extend `src/lib/editor/view/md_editing.spl` -- the stub defines
    `MdEditorState`, `MdMotionResult`, `MdCommandResult` with minimal fields;
    enrich `MdEditorState` to wrap `EditorDocument`, `BlockModel`, cursor
@@ -93,7 +93,7 @@ Implement cursor motion primitives and vim-mode overlay.
 Implement GFM-compatible table editing.
 
 1. Create `src/lib/editor/extensions/builtin/md_table_ops.spl` --
-   `md_table_parse(lines: [text], row: i64) -> MdTable?` detecting
+   `md_table_parse(lines: List<String>, row: Int) -> MdTable?` detecting
    pipe-delimited table blocks
 2. `md_table_add_row`, `md_table_delete_row`, `md_table_add_col`,
    `md_table_delete_col`, `md_table_align_col(col, align)`
@@ -108,7 +108,7 @@ Implement GFM-compatible table editing.
 
 1. Create `src/lib/editor/extensions/builtin/md_callout_ops.spl` --
    parse `> [!TYPE]` blocks (note, warning, tip, important, caution),
-   `md_callout_insert(type: text) -> MdCommandResult`,
+   `md_callout_insert(type: String) -> MdCommandResult`,
    `md_callout_toggle_fold`, `md_callout_change_type`
 2. Syntax highlight support in `block_model.spl` -- `RenderBlock.Callout`
    variant with type and fold state
@@ -120,9 +120,9 @@ Implement GFM-compatible table editing.
 
 ### Phase 6: Stdlib Gaps (S)
 
-1. Implement `str.slice(start, end) -> text` in
+1. Implement `str.slice(start, end) -> String` in
    `src/lib/common/text/` (or as a runtime extern `rt_string_slice`)
-2. Implement `discover_extensions(path: text) -> [ExtensionManifest]`
+2. Implement `discover_extensions(path: String) -> List<ExtensionManifest>`
    in `src/lib/editor/extensions/roots.spl`
 3. Verify all three controller files compile with `bin/simple check`
 

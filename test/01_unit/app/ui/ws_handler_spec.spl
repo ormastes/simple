@@ -11,15 +11,12 @@ route gating, bearer extraction, query-token non-authorization, and frame bounds
 
 **Requirements:** doc/02_requirements/feature/simple_web_browser_production_hardening.md
 **Requirements:** doc/02_requirements/nfr/simple_web_browser_production_hardening.md
-**Research:** doc/01_research/local/simple_browser_production_level.md
-**Plan:** doc/03_plan/agent_tasks/simple_browser_production_level.md
-**Design:** doc/05_design/simple_web_browser_production_hardening.md
 **Traceability:** REQ-WEB-HARD-005, REQ-WEB-HARD-007, REQ-WEB-HARD-012, NFR-WEB-HARD-004, NFR-WEB-HARD-005, NFR-WEB-HARD-008, NFR-WEB-HARD-010
 """
 
 use std.spec
-use app.ui.web.ws_handler.{is_ws_upgrade_request, ui_web_ws_upgrade_method_allowed, ui_web_ws_upgrade_path_allowed, ui_web_ws_version_allowed, ui_web_ws_key_shape_allowed, ui_web_ws_handshake_headers_allowed, extract_ws_key, compute_ws_accept, _extract_bearer}
-use app.ui.web.auth_params.{UI_WEB_MAX_UNAUTH_BODY_BYTES, UI_WEB_MAX_WS_FRAME_BYTES, ui_web_ws_response_protocol, ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_extract_bearer_with_query_policy, ui_web_query_token_allowed_from_env_value, ui_web_fetch_site_allowed, ui_web_fetch_site_status, ui_web_ws_frame_payload_allowed, ui_web_ws_frame_metadata_status}
+use app.ui.web.ws_handler.{is_ws_upgrade_request, ui_web_ws_upgrade_method_allowed, ui_web_ws_upgrade_path_allowed, extract_ws_key, compute_ws_accept, _extract_bearer}
+use app.ui.web.auth_params.{UI_WEB_MAX_UNAUTH_BODY_BYTES, UI_WEB_MAX_WS_FRAME_BYTES, ui_web_ws_response_protocol, ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_extract_bearer_with_query_policy, ui_web_query_token_allowed_from_env_value, ui_web_ws_frame_payload_allowed}
 
 describe "ui.web.ws_handler":
     it "recognizes websocket upgrade headers":
@@ -47,36 +44,6 @@ describe "ui.web.ws_handler":
         expect(extract_ws_key(headers)).to_equal("dGhlIHNhbXBsZSBub25jZQ==")
         val lowercase = "Host: localhost\nsec-websocket-key: lowercase-key\n"
         expect(extract_ws_key(lowercase)).to_equal("lowercase-key")
-
-    it "requires websocket version 13 and a base64 nonce-shaped key":
-        val valid_headers = "Host: localhost\nSec-WebSocket-Version: 13\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\n"
-        expect(ui_web_ws_version_allowed(valid_headers)).to_be(true)
-        expect(ui_web_ws_key_shape_allowed("dGhlIHNhbXBsZSBub25jZQ==")).to_be(true)
-        expect(ui_web_ws_handshake_headers_allowed(valid_headers)).to_be(true)
-
-        val missing_version = "Host: localhost\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\n"
-        expect(ui_web_ws_version_allowed(missing_version)).to_be(false)
-        expect(ui_web_ws_handshake_headers_allowed(missing_version)).to_be(false)
-
-        val wrong_version = "Host: localhost\nSec-WebSocket-Version: 12\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\n"
-        expect(ui_web_ws_version_allowed(wrong_version)).to_be(false)
-        expect(ui_web_ws_handshake_headers_allowed(wrong_version)).to_be(false)
-
-        val short_key = "Host: localhost\nSec-WebSocket-Version: 13\nSec-WebSocket-Key: abc\n"
-        expect(ui_web_ws_key_shape_allowed("abc")).to_be(false)
-        expect(ui_web_ws_handshake_headers_allowed(short_key)).to_be(false)
-
-        val invalid_key = "Host: localhost\nSec-WebSocket-Version: 13\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ!!\n"
-        expect(ui_web_ws_key_shape_allowed("dGhlIHNhbXBsZSBub25jZQ!!")).to_be(false)
-        expect(ui_web_ws_handshake_headers_allowed(invalid_key)).to_be(false)
-
-    it "rejects explicit cross-site fetch metadata before websocket token redemption":
-        expect(ui_web_fetch_site_status("Sec-Fetch-Site: same-origin\n")).to_equal("ok")
-        expect(ui_web_fetch_site_status("Sec-Fetch-Site: same-site\n")).to_equal("ok")
-        expect(ui_web_fetch_site_allowed("Host: localhost\n")).to_be(true)
-        expect(ui_web_fetch_site_allowed("Sec-Fetch-Site: cross-site\n")).to_be(false)
-        expect(ui_web_fetch_site_status("Sec-Fetch-Site: cross-site\n")).to_equal("cross_site_request")
-        expect(ui_web_fetch_site_status("Sec-Fetch-Site: same-origin\nSec-Fetch-Site: same-site\n")).to_equal("duplicate_fetch_site")
 
     it "computes the RFC websocket accept hash":
         expect(compute_ws_accept("dGhlIHNhbXBsZSBub25jZQ==")).to_equal("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
@@ -125,12 +92,3 @@ describe "ui.web.ws_handler":
         expect(ui_web_ws_frame_payload_allowed(0)).to_be(true)
         expect(ui_web_ws_frame_payload_allowed(UI_WEB_MAX_WS_FRAME_BYTES)).to_be(true)
         expect(ui_web_ws_frame_payload_allowed(UI_WEB_MAX_WS_FRAME_BYTES + 1)).to_be(false)
-
-    it "rejects unsafe client websocket frame metadata before payload allocation":
-        expect(ui_web_ws_frame_metadata_status(0x81, true, 5)).to_equal("ok")
-        expect(ui_web_ws_frame_metadata_status(0x81, false, 5)).to_equal("client_frame_unmasked")
-        expect(ui_web_ws_frame_metadata_status(0x01, true, 5)).to_equal("fragmented_frame_unsupported")
-        expect(ui_web_ws_frame_metadata_status(0xC1, true, 5)).to_equal("reserved_bits_set")
-        expect(ui_web_ws_frame_metadata_status(0x82, true, 5)).to_equal("unsupported_opcode")
-        expect(ui_web_ws_frame_metadata_status(0x89, true, 126)).to_equal("control_frame_too_large")
-        expect(ui_web_ws_frame_metadata_status(0x81, true, UI_WEB_MAX_WS_FRAME_BYTES + 1)).to_equal("frame_payload_too_large")

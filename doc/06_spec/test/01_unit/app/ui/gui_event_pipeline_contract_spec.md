@@ -43,7 +43,7 @@ gui_event_pipeline_contract_spec -> std
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -51,9 +51,6 @@ val src = rt_file_read_text("src/app/ui.ipc/protocol.spl")
 expect(src.contains("tid = extract_json_field(json_str, \"id\")")).to_equal(true)
 expect(src.contains("return UIEvent.FocusEvent(target_id: tid, kind: kind)")).to_equal(true)
 expect(src.contains("return UIEvent.InputChange(target_id: tid, value: val_str)")).to_equal(true)
-expect(src.contains("fn ipc_browser_navigation_action_allowed(action: text) -> bool")).to_equal(true)
-expect(src.contains("if event_type == \"browser_navigation\"")).to_equal(true)
-expect(src.contains("return UIEvent.BrowserNavigation(action: action, url: url)")).to_equal(true)
 ```
 
 </details>
@@ -63,7 +60,7 @@ expect(src.contains("return UIEvent.BrowserNavigation(action: action, url: url)"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -72,7 +69,6 @@ expect(src.contains("UIEvent.MouseEvent(x, y, button, kind):")).to_equal(true)
 expect(src.contains("UIEvent.ScrollEvent(x, y, dx, dy):")).to_equal(true)
 expect(src.contains("UIEvent.FocusEvent(target_id, kind):")).to_equal(true)
 expect(src.contains("UIEvent.InputChange(target_id, value):")).to_equal(true)
-expect(src.contains("UIEvent.BrowserNavigation(action, url):")).to_equal(true)
 expect(src.contains("UIEvent.FetchResult(request_id, url, status, headers, body, error):")).to_equal(true)
 ```
 
@@ -83,16 +79,15 @@ expect(src.contains("UIEvent.FetchResult(request_id, url, status, headers, body,
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = rt_file_read_text("src/lib/nogc_sync_mut/ui/session.spl")
+val src = rt_file_read_text("src/lib/common/ui/session.spl")
 expect(src.contains("event_kind = \"mouse_\" + kind")).to_equal(true)
 expect(src.contains("event_kind = \"scroll\"")).to_equal(true)
 expect(src.contains("event_kind = \"focus_\" + kind")).to_equal(true)
 expect(src.contains("event_kind = \"input_change\"")).to_equal(true)
-expect(src.contains("event_kind = \"browser_navigation\"")).to_equal(true)
 expect(src.contains("event_kind = \"fetch_result\"")).to_equal(true)
 ```
 

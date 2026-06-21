@@ -27,7 +27,7 @@ browser_session_html_tag_std_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -95,23 +95,6 @@ expect(session.render_html_document().contains("Hidden template text")).to_equal
 
 </details>
 
-#### covers selectedcontent as the current HTML customizable select placeholder element
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val session = _open_body("<select><button><selectedcontent>Chosen label</selectedcontent></button><option>Chosen label</option></select>")
-expect(session.source_html).to_contain("<selectedcontent>")
-expect(session.current_body_html).to_contain("<selectedcontent>")
-expect(session.render_html_document()).to_contain("<selectedcontent>")
-```
-
-</details>
-
 ## At a Glance
 
 | Field | Value |
@@ -131,8 +114,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

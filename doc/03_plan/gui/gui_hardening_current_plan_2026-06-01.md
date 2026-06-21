@@ -187,17 +187,16 @@
    the next gated production glyph compositing slice.
  - `doc/06_spec/unit/browser_engine/text_painter_spec.md`: generated scenario
    manual for the text painter, including the calibrated paint-run scenario.
- - `doc/09_report/gui_color_image_pipeline_8k_current_2026-06-01.md`:
-   historical packed 8K surface and lazy codec/profile evidence; the
-   2026-06-21 report below is the current source of truth for this lane.
- - `doc/09_report/gui_color_image_pipeline_8k_evidence_2026-06-21.md`: 8K lane
+ - `doc/09_report/gui_color_image_pipeline_8k_current_2026-06-01.md`: current
+   packed 8K surface and lazy codec/profile evidence.
+ - `doc/09_report/gui_color_image_pipeline_8k_evidence_2026-06-01.md`: 8K lane
    canonical evidence with non-identity ICC and JPEG XL non-default structured
    color fail-closed behavior. The refreshed release-binary run reports
    `gui_color_image_pipeline_8k_status=pass`, `framebuffer_bytes=132710400`,
    `lab_xyz_full_frame_bytes=796262400`, `initializes_color_transforms=false`,
    `initializes_tiff_decoder=false`, `initializes_jpegxl_decoder=false`, and a
-   D65 Lab/XYZ red round trip. Current evidence keeps full JPEG XL pixel decode
-   and image URI decoded-pixel rendering as separate follow-up scope.
+   D65 Lab/XYZ red round trip. Focused image specs pass `77/77` and TIFF raster
+   specs pass `17/17`.
  - `doc/09_report/vector_font_compute_current_2026-06-01.md`: focused
    vector-font GPU glyph readback evidence.
  - `doc/09_report/vector_font_compute_matrix_current_2026-06-01.md`: full
@@ -421,12 +420,12 @@
    renderer completion audit and Chrome parity blocker analysis.
  - `doc/03_plan/gui_renderer_restart_plan_2026-05-29.md`: restart-era platform
    and renderer lane evidence.
- - `doc/02_requirements/ui/graphics/gui_color_image_pipeline_8k.md` and
+ - `doc/02_requirements/feature/gui_color_image_pipeline_8k.md` and
    `doc/02_requirements/nfr/gui_color_image_pipeline_8k.md`: selected 8K Option
    A requirements.
- - `doc/04_architecture/compiler/graphics/gui_color_image_pipeline_8k.md` and
-   `doc/05_design/compiler/graphics/gui_color_image_pipeline_8k.md`: 8K
-   architecture and detail design.
+ - `doc/04_architecture/compiler/gui_color_image_pipeline_8k.md` and
+   `doc/05_design/gui_color_image_pipeline_8k.md`: 8K architecture and detail
+   design.
  
  ## Remaining Work
  

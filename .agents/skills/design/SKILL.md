@@ -1,6 +1,6 @@
 ---
 name: design
-description: Create architecture, UI design, system tests, and detail design for a feature. Self-sufficient if prerequisites are missing; uses lower-model sidecars and highest-review when available.
+description: Create architecture, UI design, system tests, and detail design for a feature. Self-sufficient — if research/requirements missing, does them first. Does not depend on any other LLM.
 ---
 
 # Design — Self-Sufficient
@@ -13,18 +13,6 @@ description: Create architecture, UI design, system tests, and detail design for
 |----------|------|-----------|
 | Requirements | `doc/02_requirements/feature/<feature>.md` | Run $research first |
 | NFR | `doc/02_requirements/nfr/<feature>.md` | Run $research first |
-
-## Phase 0: Cooperative Review Setup
-
-- For broad plans, split independent architecture, UI, test, and risk checks
-  across lower-model parallel agents when available (for example Codex Spark,
-  Claude Haiku, or Claude Sonnet).
-- A normal/highest-capability LLM must review and accept the merged result
-  before final requirements, done marks, exclusions, or broad architecture
-  claims are treated as complete.
-- The first/highest-capability pass defines shared interface names,
-  manual-facing setup/checker helper names, and temporary helper placeholders.
-  Placeholder helpers must fail explicitly (`assert(false)` or equivalent).
 
 ## Phase 1: UI Design (if applicable)
 
@@ -50,9 +38,6 @@ description: Create architecture, UI design, system tests, and detail design for
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
 - Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 - Every REQ-NNN must have at least one test
-- Define shared interface names and manual-facing setup/checker helper names
-  before implementation. Temporary placeholder helpers must fail explicitly
-  (`assert(false)` or equivalent), not pass silently.
 - Scenario-oriented specs must generate docs that read like hand-written
   manuals: primary flows visible, setup expanded through `@prev`/`@inline`,
   executable SPipe folded, and advanced/edge/matrix/stress details folded or
@@ -77,9 +62,6 @@ description: Create architecture, UI design, system tests, and detail design for
 - Generate/read mirrored `doc/06_spec/...` for scenario-oriented specs and
   update steps/captures/visibility until the manual is usable without opening
   the source test.
-- Confirm matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
-  `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
-  instructions were updated when the workflow or tool contract changed.
 - Ask user if architecture/design needs changes
 
 ## Rules

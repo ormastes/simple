@@ -45,7 +45,6 @@ browser_host_event_roundtrip_spec -> app
 - rt host gpu queue reset
 - text widget
 - button
-- browser queue image widget
 - backend push event
 - backend record event dispatch
 - backend render frame
@@ -59,15 +58,14 @@ browser_host_event_roundtrip_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 rt_host_gpu_queue_reset()
 val root = panel("browser_queue_root", "Browser Queue", [
     text_widget("browser_queue_copy", "Queued frame"),
-    button("browser_queue_action", "Run", "run"),
-    browser_queue_image_widget()
+    button("browser_queue_action", "Run", "run")
 ])
 val tree = build_tree_with_title(root, "Browser Queue", "dark")
 val state = init_state(tree)

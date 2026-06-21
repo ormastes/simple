@@ -118,38 +118,6 @@ pub(super) fn handle_command(
                     let window = Arc::new(window);
                     window.set_visible(true);
                     window.focus_window();
-
-                    #[cfg(target_os = "macos")]
-                    {
-                        use objc2::rc::Retained;
-                        use objc2::runtime::AnyObject;
-                        use objc2_app_kit::{
-                            NSApplication, NSApplicationActivationPolicy, NSView, NSWindow,
-                        };
-                        use objc2_foundation::MainThreadMarker;
-                        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-                        let mtm = MainThreadMarker::new()
-                            .expect("winit window creation must run on the main thread on macOS");
-                        let app = NSApplication::sharedApplication(mtm);
-                        let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-                        unsafe { app.finishLaunching() };
-                        unsafe { app.activate() };
-
-                        if let Ok(handle) = window.window_handle() {
-                            if let RawWindowHandle::AppKit(appkit) = handle.as_raw() {
-                                let ns_view_ptr = appkit.ns_view.as_ptr().cast::<NSView>();
-                                if let Some(ns_view) = unsafe { Retained::retain(ns_view_ptr) } {
-                                    if let Some(ns_window) = ns_view.window() {
-                                        let _: &NSWindow = &ns_window;
-                                        ns_window.makeKeyAndOrderFront(None::<&AnyObject>);
-                                        unsafe { ns_window.orderFrontRegardless() };
-                                    }
-                                }
-                            }
-                        }
-                    }
-
                     if let (Some(w), Some(h)) = (config.min_width, config.min_height) {
                         window.set_min_inner_size(Some(PhysicalSize::new(w, h)));
                     }

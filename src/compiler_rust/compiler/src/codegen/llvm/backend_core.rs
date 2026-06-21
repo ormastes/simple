@@ -386,22 +386,21 @@ impl LlvmBackend {
 
         // Build a static i8 data global for `bytes`, return its i64 pointer value.
         let mut str_const_counter: u32 = 0;
-        let make_str_ptr =
-            |bytes: &[u8], counter: &mut u32| -> Result<inkwell::values::IntValue<'static>, CompileError> {
-                let cval = ctx.const_string(bytes, false);
-                let name = format!("{}.str.{}", init_name, *counter);
-                *counter += 1;
-                let g = m.add_global(cval.get_type(), None, &name);
-                g.set_initializer(&cval);
-                g.set_constant(true);
-                g.set_linkage(inkwell::module::Linkage::Private);
-                let p = builder
-                    .build_pointer_cast(g.as_pointer_value(), ptr_type, "str_p")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("str ptr cast", &e))?;
-                builder
-                    .build_ptr_to_int(p, i64_type, "str_pi")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("str ptrtoint", &e))
-            };
+        let make_str_ptr = |bytes: &[u8], counter: &mut u32| -> Result<inkwell::values::IntValue<'static>, CompileError> {
+            let cval = ctx.const_string(bytes, false);
+            let name = format!("{}.str.{}", init_name, *counter);
+            *counter += 1;
+            let g = m.add_global(cval.get_type(), None, &name);
+            g.set_initializer(&cval);
+            g.set_constant(true);
+            g.set_linkage(inkwell::module::Linkage::Private);
+            let p = builder
+                .build_pointer_cast(g.as_pointer_value(), ptr_type, "str_p")
+                .map_err(|e| crate::error::factory::llvm_build_failed("str ptr cast", &e))?;
+            builder
+                .build_ptr_to_int(p, i64_type, "str_pi")
+                .map_err(|e| crate::error::factory::llvm_build_failed("str ptrtoint", &e))
+        };
 
         // Resolve the global symbol for `global_name`, trying the direct key then
         // the `<prefix>__<name>` mangled form (struct keys are not pre-mangled).
@@ -418,22 +417,24 @@ impl LlvmBackend {
             None
         };
 
-        let store_to_global =
-            |global_name: &str, val: inkwell::values::IntValue<'static>| -> Result<(), CompileError> {
-                if let Some(g) = resolve_global(global_name) {
-                    builder
-                        .build_store(g.as_pointer_value(), val)
-                        .map_err(|e| crate::error::factory::llvm_build_failed("init store", &e))?;
-                }
-                // If not found, the global lives in another module (cross-module) — skip.
-                Ok(())
-            };
+        let store_to_global = |global_name: &str,
+                               val: inkwell::values::IntValue<'static>|
+         -> Result<(), CompileError> {
+            if let Some(g) = resolve_global(global_name) {
+                builder
+                    .build_store(g.as_pointer_value(), val)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("init store", &e))?;
+            }
+            // If not found, the global lives in another module (cross-module) — skip.
+            Ok(())
+        };
 
         let call_i64 = |f: inkwell::values::FunctionValue<'static>,
                         args: &[inkwell::values::IntValue<'static>],
                         tag: &str|
          -> Result<inkwell::values::IntValue<'static>, CompileError> {
-            let metas: Vec<inkwell::values::BasicMetadataValueEnum> = args.iter().map(|a| (*a).into()).collect();
+            let metas: Vec<inkwell::values::BasicMetadataValueEnum> =
+                args.iter().map(|a| (*a).into()).collect();
             let cs = builder
                 .build_call(f, &metas, tag)
                 .map_err(|e| crate::error::factory::llvm_build_failed(tag, &e))?;

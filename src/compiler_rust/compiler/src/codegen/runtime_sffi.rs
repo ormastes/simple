@@ -841,7 +841,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_status", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_backend_handle", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_device_time_us", &[], &[I64]),
-    RuntimeFuncSpec::new("rt_host_gpu_queue_emit_payload_text", &[I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_payload_size", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_payload_hash", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_payload_text", &[], &[I64]),
@@ -1197,16 +1196,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Process execution
     // =========================================================================
     // Native libsimple_runtime.a process functions use C strings and SplArray pointers.
-    // rt_process_run(cmd_ptr, cmd_len, args: RuntimeValue) -> RuntimeValue — the
-    // Rust runtime (env_process.rs) takes a ptr+len command + a tagged args
-    // array, NOT the legacy C-runtime (const char*, SplArray*) shape. Marshaled
-    // via expand_text_args (text index [0]), not the C-runtime cstr path.
-    RuntimeFuncSpec::new("rt_process_run", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_run", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_execute", &[I64, I64], &[I32]),
-    // rt_process_run_timeout(cmd_ptr, cmd_len, args: RuntimeValue, timeout_ms) ->
-    // RuntimeValue — same ptr+len/tagged-args Rust ABI as rt_process_run.
-    RuntimeFuncSpec::new("rt_process_run_timeout", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_run_timeout", &[I64, I64, I64], &[I64]),
     // rt_process_is_running(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_is_running", &[I64], &[I64]),
     // rt_process_wait(pid, timeout_ms) -> exit_code
@@ -1342,7 +1335,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cranelift_end_function", &[I64], &[I64]),                  // ctx -> func_id
     RuntimeFuncSpec::new("rt_cranelift_define_function", &[I64, I64, I64], &[I8]), // module, func_id, ctx -> success (JIT)
     RuntimeFuncSpec::new("rt_cranelift_aot_define_function", &[I64, I64, I64, I64], &[I8]), // module, name_ptr, name_len, ctx -> success (AOT)
-    RuntimeFuncSpec::new("rt_native_profile_count", &[I64], &[]),                           // name_ptr -> ()
     // Block management
     RuntimeFuncSpec::new("rt_cranelift_create_block", &[I64], &[I64]), // ctx -> block
     RuntimeFuncSpec::new("rt_cranelift_switch_to_block", &[I64, I64], &[]), // ctx, block -> ()

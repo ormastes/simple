@@ -1,6 +1,6 @@
 # If Else Implicit Return Specification
 
-> <details>
+> 1. fn get sign
 
 <!-- sdn-diagram:id=if_else_implicit_return_spec.arch -->
 <details class="sdn-source">
@@ -42,9 +42,9 @@ if_else_implicit_return_spec
 
 #### returns value from if branch
 
-- fn get sign
-- expect get sign
-- expect get sign
+1. fn get sign
+2. expect get sign
+3. expect get sign
 
 
 <details>
@@ -68,9 +68,9 @@ expect get_sign(-5) == "negative"
 
 #### returns value from else branch
 
-- fn is even
-- expect is even
-- expect is even
+1. fn is even
+2. expect is even
+3. expect is even
 
 
 <details>
@@ -94,9 +94,9 @@ expect is_even(3) == false
 
 #### returns complex expressions
 
-- fn double or triple
-- expect double or triple
-- expect double or triple
+1. fn double or triple
+2. expect double or triple
+3. expect double or triple
 
 
 <details>
@@ -122,10 +122,10 @@ expect double_or_triple(5, false) == 15
 
 #### returns from elif branch
 
-- fn classify
-- expect classify
-- expect classify
-- expect classify
+1. fn classify
+2. expect classify
+3. expect classify
+4. expect classify
 
 
 <details>
@@ -152,12 +152,12 @@ expect classify(5) == "positive"
 
 #### returns from multiple elif branches
 
-- fn grade
-- expect grade
-- expect grade
-- expect grade
-- expect grade
-- expect grade
+1. fn grade
+2. expect grade
+3. expect grade
+4. expect grade
+5. expect grade
+6. expect grade
 
 
 <details>
@@ -192,11 +192,11 @@ expect grade(55) == "F"
 
 #### returns from nested if-else
 
-- fn nested check
-- expect nested check
-- expect nested check
-- expect nested check
-- expect nested check
+1. fn nested check
+2. expect nested check
+3. expect nested check
+4. expect nested check
+5. expect nested check
 
 
 <details>
@@ -230,9 +230,9 @@ expect nested_check(false, false) == "neither"
 
 #### returns after variable declaration
 
-- fn add with check
-- expect add with check
-- expect add with check
+1. fn add with check
+2. expect add with check
+3. expect add with check
 
 
 <details>
@@ -260,9 +260,9 @@ expect add_with_check(80, 50) == 100
 
 #### returns after loop
 
-- fn sum until
-- expect sum until
-- expect sum until
+1. fn sum until
+2. expect sum until
+3. expect sum until
 
 
 <details>
@@ -296,9 +296,9 @@ expect sum_until(20) == 100
 
 #### works with integer return
 
-- fn max val
-- expect max val
-- expect max val
+1. fn max val
+2. expect max val
+3. expect max val
 
 
 <details>
@@ -322,9 +322,9 @@ expect max_val(5, 10) == 10
 
 #### works with text return
 
-- fn greeting
-- expect greeting
-- expect greeting
+1. fn greeting
+2. expect greeting
+3. expect greeting
 
 
 <details>
@@ -348,9 +348,9 @@ expect greeting(false) == "Hi"
 
 #### works with boolean return
 
-- fn both positive
-- expect both positive
-- expect both positive
+1. fn both positive
+2. expect both positive
+3. expect both positive
 
 
 <details>
@@ -376,9 +376,9 @@ expect both_positive(-1, 2) == false
 
 #### works with early return and implicit else
 
-- fn absolute
-- expect absolute
-- expect absolute
+1. fn absolute
+2. expect absolute
+3. expect absolute
 
 
 <details>
@@ -401,10 +401,10 @@ expect absolute(5) == 5
 
 #### works with guard clause pattern
 
-- fn safe divide
-- expect safe divide
-- expect safe divide
-- expect safe divide
+1. fn safe divide
+2. expect safe divide
+3. expect safe divide
+4. expect safe divide
 
 
 <details>
@@ -433,11 +433,11 @@ expect safe_divide(-10, 2) == -1
 
 #### returns function call result
 
-- fn double
-- fn conditional double
-- double
-- expect conditional double
-- expect conditional double
+1. fn double
+2. fn conditional double
+3. double
+4. expect conditional double
+5. expect conditional double
 
 
 <details>

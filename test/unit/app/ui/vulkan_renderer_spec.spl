@@ -1,0 +1,64 @@
+"""Vulkan Engine2D renderer smoke tests.
+
+This spec intentionally targets the current Engine2D Vulkan backend instead of
+the retired std.ui.gui.vulkan_ffi import path. It must pass on Windows hosts
+without a Vulkan ICD while still exercising real drawing and readback when the
+backend initializes.
+"""
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.color.{rgb}
+
+fn pixel_at(pixels: [u32], x: i32, y: i32, w: i32) -> u32:
+    pixels[y * w + x]
+
+describe "Vulkan Engine2D renderer smoke":
+
+    context "construction":
+
+        it "creates an uninitialized Vulkan backend object":
+            var backend = VulkanBackend.create()
+            expect(backend.name()).to_equal("vulkan")
+            expect(backend.width()).to_equal(0)
+            expect(backend.height()).to_equal(0)
+            expect(backend.read_pixels().len()).to_equal(0)
+
+        it "reports either initialized state or a diagnostic":
+            var backend = VulkanBackend.create()
+            val initialized = backend.init(8, 8)
+            if initialized:
+                expect(backend.width()).to_equal(8)
+                expect(backend.height()).to_equal(8)
+                backend.shutdown()
+            else:
+                expect(backend.last_error.len()).to_be_greater_than(0)
+                expect(backend.read_pixels().len()).to_equal(0)
+
+    context "drawing":
+
+        it "clear and readback work when Vulkan initializes":
+            var backend = VulkanBackend.create()
+            if backend.init(8, 8):
+                val bg = rgb(1, 2, 3)
+                backend.clear(bg)
+                backend.present()
+                val pixels = backend.read_pixels()
+                expect(pixels.len()).to_equal(64)
+                expect(pixel_at(pixels, 0, 0, 8)).to_equal(bg)
+                expect(pixel_at(pixels, 7, 7, 8)).to_equal(bg)
+                backend.shutdown()
+
+        it "draw_rect_filled updates only the requested region when Vulkan initializes":
+            var backend = VulkanBackend.create()
+            if backend.init(8, 8):
+                val bg = rgb(10, 20, 30)
+                val fg = rgb(200, 50, 25)
+                backend.clear(bg)
+                backend.draw_rect_filled(2, 2, 3, 3, fg)
+                backend.present()
+                val pixels = backend.read_pixels()
+                expect(pixel_at(pixels, 3, 3, 8)).to_equal(fg)
+                expect(pixel_at(pixels, 0, 0, 8)).to_equal(bg)
+                expect(pixel_at(pixels, 7, 7, 8)).to_equal(bg)
+                backend.shutdown()

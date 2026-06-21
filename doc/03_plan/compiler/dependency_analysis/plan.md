@@ -2,49 +2,7 @@
 
 Date: 2026-06-10
 SPipe lane: `.spipe/dep-analysis-handshake-perf/state.md`
-Status: Done for the dependency-analysis, lazy-parse, and MCP handshake
-evidence lane as of 2026-06-18
-
-## Cleanup Closure (2026-06-18)
-
-The recent-plan cleanup lane rechecked the user-facing dependency tool and the
-lazy-parser/MCP evidence gates. A small CLI argument-normalization fix landed in
-`src/app/deps/scanner.spl` and is used by `src/app/deps/main.spl` because
-`bin/simple deps ...` and `bin/simple run src/app/deps/main.spl ...` were
-passing the app path as `argv[0]`; `normalize_deps_args` now strips `deps`,
-app-path prefixes, and `--`.
-
-Closure evidence:
-
-- `SIMPLE_LIB=src bin/simple deps fast src/app/mcp/main.spl` prints 9 direct
-  imports, transitive file lists, and `=== CYCLES === none`.
-- `SIMPLE_LIB=src bin/simple deps normal src/app/mcp/main.spl` prints shared and
-  exclusive transitive counts per import.
-- `SIMPLE_LIB=src bin/simple deps deep src/app/mcp/main.spl` prints a 38-file
-  report with SCRIPT, SMF, and NATIVE sections.
-- `SIMPLE_LIB=src bin/simple test test/01_unit/app/deps/deps_tool_spec.spl --mode=interpreter`
-  reports 20 passed assertions, including the new CLI normalization cases.
-- `SIMPLE_LIB=src bin/simple test test/01_unit/app/deps/deps_deep_spec.spl --mode=interpreter`
-  reports 14 passed assertions.
-- `SIMPLE_LIB=src bin/simple check src/app/deps --mode=interpreter` passes all 3
-  deps app files.
-- `SIMPLE_LIB=src bin/simple test test/01_unit/compiler/interpreter/module_loader_lazy_spec.spl --mode=interpreter`
-  and `SIMPLE_LIB=src SIMPLE_LAZY_PARSE=1 bin/simple test test/01_unit/compiler/interpreter/module_loader_lazy_spec.spl --mode=interpreter`
-  each report 4 passed assertions.
-- `timeout 120 sh scripts/check/check-mcp-native-smoke.shs` passes with
-  `mcp_startup_ms=67`, `lsp_mcp_startup_ms=46`, `mcp_stale_stamp_reprobe_ok=true`,
-  `mcp_tools_count=151`, and `lsp_tools_count=11`.
-- Guide/manual/follow-up artifacts are present at
-  `doc/07_guide/compiler/deps_tool.md`,
-  `doc/07_guide/compiler/deps_tool_tldr.md`,
-  `doc/07_guide/app/mcp/startup_performance.md`,
-  `doc/07_guide/app/mcp/startup_performance_tldr.md`,
-  `doc/06_spec/system/compiler/modules/tooling/simple_deps.md`,
-  `doc/06_spec/test/01_unit/app/deps/deps_tool_spec.md`,
-  `doc/06_spec/test/01_unit/app/deps/deps_deep_spec.md`, and
-  `.codex/skills/sp_dev/SKILL.md`.
-
-No external-platform evidence is required for this lane.
+Status: Wave 1 complete; Wave 2 in progress
 
 ## 1. Research ground truth (2026-06-10)
 
@@ -114,7 +72,7 @@ Wave 1 (parallel Sonnet) — DONE 2026-06-10:
 - W1-D DONE — `src/app/mcp/` narrowed: 61→49 modules, 130→72 ms load,
   handshake ~0.52 s (was ~0.55 s); dap_bridge dead re-import removed.
 
-Wave 2 (after W1) — DONE 2026-06-18 (replanned 2026-06-10 into small parallel
+Wave 2 (after W1) — IN PROGRESS (replanned 2026-06-10 into small parallel
 tasks; phase 1 tasks touch NEW files only so they can run alongside the
 E0410 export-sweep agents that own existing src/compiler, src/app, src/lib
 files; shared-file wiring edits land in the orchestrator integration pass):
@@ -125,7 +83,7 @@ Phase 1 (parallel now):
       signature extraction vs full parse over a fixed sample of real
       modules — same fn/class/export surface; (b) parse-time benchmark
       outline-vs-full (pattern: `test/05_perf/mcp_json_perf_spec.spl`).
-- [x] W2-A2 (full-strength, new module only) — lazy loader bridge in NEW
+- [ ] W2-A2 (full-strength, new module only) — lazy loader bridge in NEW
       `src/compiler/10.frontend/core/interpreter/module_loader_lazy.spl`:
       outline-parse module, register body spans for on-first-call
       materialization via the existing deferred-module system, gated by
@@ -155,13 +113,7 @@ Phase 2 (integration, after E0410 sweeps land):
 - [x] W2-D (orchestrator) — AC-5 re-measured post-reductions:
       mcp_startup_ms 2707 → 1309–1314 via check-mcp-native-smoke.shs
       (exit 0, all direct-rt gates true).
-- W2-C docs/guides/spipe-skill updates + tldrs (Sonnet) — DONE. Artifacts:
-      `doc/07_guide/compiler/deps_tool.md`,
-      `doc/07_guide/compiler/deps_tool_tldr.md`,
-      `doc/07_guide/app/mcp/startup_performance.md`,
-      `doc/07_guide/app/mcp/startup_performance_tldr.md`,
-      `doc/06_spec/system/compiler/modules/tooling/simple_deps.md`, and
-      `.codex/skills/sp_dev/SKILL.md`.
+- W2-C docs/guides/spipe-skill updates + tldrs (Sonnet) — DONE.
 
 Continuous: jj commit per agent batch (explicit paths), pull/rebase, push with
 origin file-count guard.

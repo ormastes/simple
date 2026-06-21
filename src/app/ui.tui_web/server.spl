@@ -14,12 +14,12 @@ use common.ui.event.{process_event}
 use app.ui.tui_web.backend.{TuiWebBackend}
 use app.ui.tui_web.html.{generate_tui_html_page}
 use app.ui.tui_web.screen_to_html.{screen_to_html}
-use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text}
+use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text, escape_json_string}
 use app.ui.test_api.handler.{handle_test_request}
 use app.ui.test_api.mount.{test_api_matches, dispatch_and_format}
-use common.text_advanced.{escape_json}
-use std.io_runtime.{file_exists, file_read}
 
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
 
 # =========================================================================
 # TUI Web Server
@@ -63,8 +63,8 @@ class TuiWebServer:
                     Ok(_):
                         pass_dn
 
-                val content = if file_exists(file_path):
-                    file_read(file_path)
+                val content = if rt_file_exists(file_path):
+                    rt_file_read_text(file_path)
                 else:
                     ""
                 return Ok(TuiWebServer(
@@ -174,10 +174,10 @@ class TuiWebServer:
 
     me check_file_changes():
         """Check if the .ui.sdn file has changed and reload if so."""
-        if not file_exists(self.file_path):
+        if not rt_file_exists(self.file_path):
             return
 
-        val current_content = file_read(self.file_path)
+        val current_content = rt_file_read_text(self.file_path)
         if current_content != self.last_file_content:
             self.last_file_content = current_content
             val tree_result = parse_ui_file(self.file_path)
@@ -205,7 +205,7 @@ class TuiWebServer:
 
         # Send initial TUI HTML render via WebSocket
         val tui_html = self.backend.current_html
-        val escaped = escape_json(tui_html)
+        val escaped = escape_json_string(tui_html)
         val msg = "{\"type\": \"render\", \"html\": \"{escaped}\"}"
         send_ws_text(stream, msg)
 
@@ -222,7 +222,7 @@ class TuiWebServer:
                         self.session.dispatch(event)
                         self._render_current_state()
                         val updated_html = self.backend.current_html
-                        val esc = escape_json(updated_html)
+                        val esc = escape_json_string(updated_html)
                         val update_msg = "{\"type\": \"render\", \"html\": \"{esc}\"}"
                         send_ws_text(stream, update_msg)
                 Err(_):
@@ -310,24 +310,8 @@ fn _parse_ws_event(data: text) -> UIEvent?:
         val name = _extract_field(data, "name")
         if name != "":
             return UIEvent.Action(name: name)
-    elif event_type == "browser_navigation":
-        val action = _extract_field(data, "action")
-        val url = _extract_field(data, "url")
-        if _browser_navigation_action_allowed(action):
-            return UIEvent.BrowserNavigation(action: action, url: url)
 
     return nil
-
-fn _browser_navigation_action_allowed(action: text) -> bool:
-    if action == "back":
-        return true
-    if action == "forward":
-        return true
-    if action == "reload":
-        return true
-    if action == "address":
-        return true
-    return false
 
 fn _extract_field(json: text, field: text) -> text:
     """Extract a string field value from a simple JSON object."""

@@ -1,0 +1,385 @@
+# test/unit/compiler/backend/neon_int_emit_spec.spl
+#
+# Feature ID: #COMPILER-BACKEND-NATIVE-NEON-INT
+# Category:   Compiler | Backend | Native | AArch64 NEON Integer Arithmetic Encoding
+#
+# Byte-level golden tests for ARMv8-A NEON integer arithmetic emit functions:
+#   ADD  Vd.4S, Vn.4S, Vm.4S  (ARMv8 ARM §C7.2.2)
+#   SUB  Vd.4S, Vn.4S, Vm.4S  (ARMv8 ARM §C7.2.318)
+#   MUL  Vd.4S, Vn.4S, Vm.4S  (ARMv8 ARM §C7.2.192)
+#   AND  Vd.16B, Vn.16B, Vm.16B  (ARMv8 ARM §C7.2.7)
+#   ORR  Vd.16B, Vn.16B, Vm.16B  (ARMv8 ARM §C7.2.197)
+#   EOR  Vd.16B, Vn.16B, Vm.16B  (ARMv8 ARM §C7.2.75)
+#   SHL  Vd.4S, Vn.4S, #imm  (ARMv8 ARM §C7.2.269)
+#   SSHR Vd.4S, Vn.4S, #imm  (ARMv8 ARM §C7.2.279)
+#   CMEQ Vd.4S, Vn.4S, Vm.4S  (ARMv8 ARM §C7.2.27)
+#   CMGT Vd.4S, Vn.4S, Vm.4S  (ARMv8 ARM §C7.2.33)
+#
+# All instructions are 4-byte fixed-width, little-endian per ARMv8 ABI.
+# Encoding: 3-reg: base | (Rm << 16) | (Rn << 5) | Rd
+#           imm:   base | ((imm & 0x1F) << 16) | (Rn << 5) | Rd
+#
+# NOTE: ADD V.4S base is 0x4EA08400 (opcode field=10000, size=10, U=0, Q=1).
+# The task spec had 0x4EA01C00 which is ORR, and 0x4E209C00 for MUL which is
+# MUL V.16B (size=00). Corrected per ARMv8 ARM §C7.2 three-same format.
+#
+# Interpreter-mode note (per .claude/rules/testing.md):
+#   The test runner in interpreter mode only verifies file loading and
+#   describe/it block reachability.  Assertions inside it-blocks are not
+#   executed.  Compiled-mode execution will exercise them.
+
+use compiler.backend.native.encode_aarch64_neon_int.{emit_addv_4s, emit_subv_4s, emit_mulv_4s, emit_andv_16b, emit_orrv_16b, emit_eorv_16b, emit_shlv_4s, emit_sshrv_4s, emit_cmpeqv_4s, emit_cmgtv_4s}
+
+# ============================================================================
+# ADD V.4S — base 0x4EA08400
+# V0, V0, V0 => word = 0x4EA08400 => LE: 0x00, 0x84, 0xA0, 0x4E
+# ============================================================================
+
+describe "emit_addv_4s — integer add 4x32-bit lanes":
+    it "ADD V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        var b = emit_addv_4s(0, 0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x84)
+        expect(b[2]).to_equal(0xA0)
+        expect(b[3]).to_equal(0x4E)
+
+    it "ADD V1.4S, V2.4S, V3.4S encodes register fields correctly":
+        # word = 0x4EA08400 | (3 << 16) | (2 << 5) | 1
+        #      = 0x4EA08400 | 0x30000 | 0x40 | 1
+        #      = 0x4EA38441
+        # LE bytes: 0x41, 0x84, 0xA3, 0x4E
+        var b = emit_addv_4s(1, 2, 3)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x41)
+        expect(b[1]).to_equal(0x84)
+        expect(b[2]).to_equal(0xA3)
+        expect(b[3]).to_equal(0x4E)
+
+    it "emit_addv_4s always returns 4 bytes":
+        var b = emit_addv_4s(5, 6, 7)
+        expect(b.len()).to_equal(4)
+
+# ============================================================================
+# SUB V.4S — base 0x6EA08400
+# V0, V0, V0 => LE: 0x00, 0x84, 0xA0, 0x6E
+# ============================================================================
+
+describe "emit_subv_4s — integer subtract 4x32-bit lanes":
+    it "SUB V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        var b = emit_subv_4s(0, 0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x84)
+        expect(b[2]).to_equal(0xA0)
+        expect(b[3]).to_equal(0x6E)
+
+    it "SUB V1.4S, V2.4S, V3.4S encodes register fields correctly":
+        # word = 0x6EA08400 | (3 << 16) | (2 << 5) | 1 = 0x6EA38441
+        # LE bytes: 0x41, 0x84, 0xA3, 0x6E
+        var b = emit_subv_4s(1, 2, 3)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x41)
+        expect(b[1]).to_equal(0x84)
+        expect(b[2]).to_equal(0xA3)
+        expect(b[3]).to_equal(0x6E)
+
+    it "emit_subv_4s always returns 4 bytes":
+        var b = emit_subv_4s(4, 5, 6)
+        expect(b.len()).to_equal(4)
+
+# ============================================================================
+# MUL V.4S — base 0x4EA09C00
+# V0, V0, V0 => LE: 0x00, 0x9C, 0xA0, 0x4E
+# ============================================================================
+
+describe "emit_mulv_4s — integer multiply 4x32-bit lanes":
+    it "MUL V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        var b = emit_mulv_4s(0, 0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x9C)
+        expect(b[2]).to_equal(0xA0)
+        expect(b[3]).to_equal(0x4E)
+
+    it "MUL V2.4S, V3.4S, V4.4S encodes register fields correctly":
+        # word = 0x4EA09C00 | (4 << 16) | (3 << 5) | 2
+        #      = 0x4EA09C00 | 0x40000 | 0x60 | 2
+        #      = 0x4EA49C62
+        # LE bytes: 0x62, 0x9C, 0xA4, 0x4E
+        var b = emit_mulv_4s(2, 3, 4)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x62)
+        expect(b[1]).to_equal(0x9C)
+        expect(b[2]).to_equal(0xA4)
+        expect(b[3]).to_equal(0x4E)
+
+    it "emit_mulv_4s always returns 4 bytes":
+        var b = emit_mulv_4s(7, 8, 9)
+        expect(b.len()).to_equal(4)
+
+# ============================================================================
+# AND V.16B — base 0x4E201C00
+# V0, V0, V0 => LE: 0x00, 0x1C, 0x20, 0x4E
+# ============================================================================
+
+describe "emit_andv_16b — bitwise AND 128-bit":
+    it "AND V0.16B, V0.16B, V0.16B encodes to base opcode bytes":
+        var b = emit_andv_16b(0, 0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x1C)
+        expect(b[2]).to_equal(0x20)
+        expect(b[3]).to_equal(0x4E)
+
+    it "AND V1.16B, V2.16B, V3.16B encodes register fields correctly":
+        # word = 0x4E201C00 | (3 << 16) | (2 << 5) | 1
+        #      = 0x4E201C00 | 0x30000 | 0x40 | 1
+        #      = 0x4E231C41
+        # LE bytes: 0x41, 0x1C, 0x23, 0x4E
+        var b = emit_andv_16b(1, 2, 3)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x41)
+        expect(b[1]).to_equal(0x1C)
+        expect(b[2]).to_equal(0x23)
+        expect(b[3]).to_equal(0x4E)
+
+    it "emit_andv_16b always returns 4 bytes":
+        var b = emit_andv_16b(3, 4, 5)
+        expect(b.len()).to_equal(4)
+
+# ============================================================================
+# ORR V.16B — base 0x4EA01C00
+# V0, V0, V0 => LE: 0x00, 0x1C, 0xA0, 0x4E
+# ============================================================================
+
+describe "emit_orrv_16b — bitwise OR 128-bit":
+    it "ORR V0.16B, V0.16B, V0.16B encodes to base opcode bytes":
+        var b = emit_orrv_16b(0, 0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x1C)
+        expect(b[2]).to_equal(0xA0)
+        expect(b[3]).to_equal(0x4E)
+
+    it "ORR V1.16B, V2.16B, V3.16B encodes register fields correctly":
+        # word = 0x4EA01C00 | (3 << 16) | (2 << 5) | 1
+        #      = 0x4EA01C00 | 0x30000 | 0x40 | 1
+        #      = 0x4EA31C41
+        # LE bytes: 0x41, 0x1C, 0xA3, 0x4E
+        var b = emit_orrv_16b(1, 2, 3)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x41)
+        expect(b[1]).to_equal(0x1C)
+        expect(b[2]).to_equal(0xA3)
+        expect(b[3]).to_equal(0x4E)
+
+    it "emit_orrv_16b always returns 4 bytes":
+        var b = emit_orrv_16b(6, 7, 8)
+        expect(b.len()).to_equal(4)
+
+# ============================================================================
+# EOR V.16B — base 0x6E201C00
+# V0, V0, V0 => LE: 0x00, 0x1C, 0x20, 0x6E
+# ============================================================================
+
+describe "emit_eorv_16b — bitwise XOR 128-bit":
+    it "EOR V0.16B, V0.16B, V0.16B encodes to base opcode bytes":
+        var b = emit_eorv_16b(0, 0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x1C)
+        expect(b[2]).to_equal(0x20)
+        expect(b[3]).to_equal(0x6E)
+
+    it "EOR V1.16B, V2.16B, V3.16B encodes register fields correctly":
+        # word = 0x6E201C00 | (3 << 16) | (2 << 5) | 1
+        #      = 0x6E201C00 | 0x30000 | 0x40 | 1
+        #      = 0x6E231C41
+        # LE bytes: 0x41, 0x1C, 0x23, 0x6E
+        var b = emit_eorv_16b(1, 2, 3)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x41)
+        expect(b[1]).to_equal(0x1C)
+        expect(b[2]).to_equal(0x23)
+        expect(b[3]).to_equal(0x6E)
+
+    it "emit_eorv_16b always returns 4 bytes":
+        var b = emit_eorv_16b(9, 10, 11)
+        expect(b.len()).to_equal(4)
+
+# ============================================================================
+# SHL V.4S — base 0x4F205400
+# imm=0: word = 0x4F205400 | 0 = 0x4F205400 => LE: 0x00, 0x54, 0x20, 0x4F
+# imm=1: bits[20:16] = 1 => word = 0x4F215400 => LE: 0x00, 0x54, 0x21, 0x4F
+# ============================================================================
+
+describe "emit_shlv_4s — left shift immediate 4x32-bit lanes":
+    it "SHL V0.4S, V0.4S, #0 encodes to base opcode bytes":
+        var b = emit_shlv_4s(0, 0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x54)
+        expect(b[2]).to_equal(0x20)
+        expect(b[3]).to_equal(0x4F)
+
+    it "SHL V0.4S, V0.4S, #1 encodes imm=1 in bits[20:16]":
+        # word = 0x4F205400 | (1 << 16) = 0x4F215400
+        # LE: 0x00, 0x54, 0x21, 0x4F
+        var b = emit_shlv_4s(0, 0, 1)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x54)
+        expect(b[2]).to_equal(0x21)
+        expect(b[3]).to_equal(0x4F)
+
+    it "SHL V1.4S, V2.4S, #4 encodes register and imm correctly":
+        # word = 0x4F205400 | (4 << 16) | (2 << 5) | 1
+        #      = 0x4F205400 | 0x40000 | 0x40 | 1
+        #      = 0x4F245441
+        # LE: 0x41, 0x54, 0x24, 0x4F
+        var b = emit_shlv_4s(1, 2, 4)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x41)
+        expect(b[1]).to_equal(0x54)
+        expect(b[2]).to_equal(0x24)
+        expect(b[3]).to_equal(0x4F)
+
+    it "emit_shlv_4s always returns 4 bytes":
+        var b = emit_shlv_4s(3, 4, 8)
+        expect(b.len()).to_equal(4)
+
+# ============================================================================
+# SSHR V.4S — base 0x4F200400
+# imm=1: (32-1) & 0x1F = 31 = 0x1F => bits[20:16]=0x1F
+#   word = 0x4F200400 | (0x1F << 16) = 0x4F3F0400 => LE: 0x00, 0x04, 0x3F, 0x4F
+# imm=32: (32-32) & 0x1F = 0 => bits[20:16]=0
+#   word = 0x4F200400 => LE: 0x00, 0x04, 0x20, 0x4F
+# ============================================================================
+
+describe "emit_sshrv_4s — signed right shift immediate 4x32-bit lanes":
+    it "SSHR V0.4S, V0.4S, #32 encodes max shift (imm=32, bits[20:16]=0)":
+        # (32 - 32) & 0x1F = 0 => word = 0x4F200400
+        # LE: 0x00, 0x04, 0x20, 0x4F
+        var b = emit_sshrv_4s(0, 0, 32)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x04)
+        expect(b[2]).to_equal(0x20)
+        expect(b[3]).to_equal(0x4F)
+
+    it "SSHR V0.4S, V0.4S, #1 encodes imm=1 (bits[20:16]=31=0x1F)":
+        # (32 - 1) & 0x1F = 31 = 0x1F => word = 0x4F200400 | (0x1F << 16) = 0x4F3F0400
+        # LE: 0x00, 0x04, 0x3F, 0x4F
+        var b = emit_sshrv_4s(0, 0, 1)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x04)
+        expect(b[2]).to_equal(0x3F)
+        expect(b[3]).to_equal(0x4F)
+
+    it "SSHR V1.4S, V2.4S, #4 encodes register and imm correctly":
+        # (32 - 4) & 0x1F = 28 = 0x1C => word = 0x4F200400 | (0x1C << 16) | (2 << 5) | 1
+        #      = 0x4F200400 | 0x1C0000 | 0x40 | 1
+        #      = 0x4F3C0441
+        # LE: 0x41, 0x04, 0x3C, 0x4F
+        var b = emit_sshrv_4s(1, 2, 4)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x41)
+        expect(b[1]).to_equal(0x04)
+        expect(b[2]).to_equal(0x3C)
+        expect(b[3]).to_equal(0x4F)
+
+    it "emit_sshrv_4s always returns 4 bytes":
+        var b = emit_sshrv_4s(5, 6, 8)
+        expect(b.len()).to_equal(4)
+
+# ============================================================================
+# CMEQ V.4S — base 0x6EA08C00
+# V0, V0, V0 => LE: 0x00, 0x8C, 0xA0, 0x6E
+# ============================================================================
+
+describe "emit_cmpeqv_4s — compare equal 4x32-bit lanes":
+    it "CMEQ V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        var b = emit_cmpeqv_4s(0, 0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x8C)
+        expect(b[2]).to_equal(0xA0)
+        expect(b[3]).to_equal(0x6E)
+
+    it "CMEQ V1.4S, V2.4S, V3.4S encodes register fields correctly":
+        # word = 0x6EA08C00 | (3 << 16) | (2 << 5) | 1
+        #      = 0x6EA08C00 | 0x30000 | 0x40 | 1
+        #      = 0x6EA38C41
+        # LE: 0x41, 0x8C, 0xA3, 0x6E
+        var b = emit_cmpeqv_4s(1, 2, 3)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x41)
+        expect(b[1]).to_equal(0x8C)
+        expect(b[2]).to_equal(0xA3)
+        expect(b[3]).to_equal(0x6E)
+
+    it "emit_cmpeqv_4s always returns 4 bytes":
+        var b = emit_cmpeqv_4s(4, 5, 6)
+        expect(b.len()).to_equal(4)
+
+# ============================================================================
+# CMGT V.4S — base 0x4EA03400
+# V0, V0, V0 => LE: 0x00, 0x34, 0xA0, 0x4E
+# ============================================================================
+
+describe "emit_cmgtv_4s — compare signed greater-than 4x32-bit lanes":
+    it "CMGT V0.4S, V0.4S, V0.4S encodes to base opcode bytes":
+        var b = emit_cmgtv_4s(0, 0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x34)
+        expect(b[2]).to_equal(0xA0)
+        expect(b[3]).to_equal(0x4E)
+
+    it "CMGT V1.4S, V2.4S, V3.4S encodes register fields correctly":
+        # word = 0x4EA03400 | (3 << 16) | (2 << 5) | 1
+        #      = 0x4EA03400 | 0x30000 | 0x40 | 1
+        #      = 0x4EA33441
+        # LE: 0x41, 0x34, 0xA3, 0x4E
+        var b = emit_cmgtv_4s(1, 2, 3)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x41)
+        expect(b[1]).to_equal(0x34)
+        expect(b[2]).to_equal(0xA3)
+        expect(b[3]).to_equal(0x4E)
+
+    it "emit_cmgtv_4s always returns 4 bytes":
+        var b = emit_cmgtv_4s(7, 8, 9)
+        expect(b.len()).to_equal(4)
+
+# ============================================================================
+# Cross-instruction property tests
+# ============================================================================
+
+describe "ADD vs SUB U-bit distinction":
+    it "ADD and SUB with same regs match bytes 0-2 and differ at byte[3] by U-bit (0x20)":
+        # ADD base 0x4EA08400 vs SUB base 0x6EA08400: differ in bit 29 (byte[3] 0x4E vs 0x6E)
+        var a = emit_addv_4s(0, 0, 0)
+        var s = emit_subv_4s(0, 0, 0)
+        expect(a[0]).to_equal(s[0])
+        expect(a[1]).to_equal(s[1])
+        expect(a[2]).to_equal(s[2])
+        expect(s[3] - a[3]).to_equal(0x20)
+
+describe "AND vs EOR U-bit distinction":
+    it "AND (U=0) and EOR (U=1) with same regs differ at byte[3] by 0x20":
+        var a = emit_andv_16b(0, 0, 0)
+        var e = emit_eorv_16b(0, 0, 0)
+        expect(a[0]).to_equal(e[0])
+        expect(a[1]).to_equal(e[1])
+        expect(a[2]).to_equal(e[2])
+        expect(e[3] - a[3]).to_equal(0x20)
+
+describe "SHL vs SSHR base opcode byte consistency":
+    it "SHL and SSHR for same rd/rn share byte[3] = 0x4F":
+        var sh = emit_shlv_4s(0, 0, 0)
+        var ss = emit_sshrv_4s(0, 0, 32)
+        expect(sh[3]).to_equal(0x4F)
+        expect(ss[3]).to_equal(0x4F)

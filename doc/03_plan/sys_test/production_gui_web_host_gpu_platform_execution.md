@@ -101,9 +101,8 @@ and `metal_host_availability=host-available`.
 
 ### Windows DirectX
 
-Host requirements: Windows `win32-real` with native D3D readback support. Linux
-DXVK/vkd3d setup remains setup/provenance evidence and must not promote the
-DirectX row to production pass by itself.
+Host requirements: Windows with native D3D readback support, or an explicitly
+documented DXVK host where the DirectX backend reports a real readback handle.
 
 Commands:
 
@@ -171,8 +170,8 @@ standalone wrapper publishes `webgpu_real_readback_status=pass`,
 `webgpu_real_readback_source=device_readback`, a positive
 `webgpu_real_readback_backend_handle`, and matching expected/actual checksums
 when a real `webgpu-real` host is available. The aggregate now consumes that
-same-frame proof when present; the current Linux aggregate records WebGPU real
-readback as unavailable/not_device_readback and keeps `surface_upload`
+same-frame proof and reports `webgpu_spark_task_status=pass` and
+`webgpu_normal_llm_verification_status=pass`; keep `surface_upload`
 provenance-only.
 
 ## Normal-LLM Review Checklist

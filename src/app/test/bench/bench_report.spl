@@ -10,7 +10,12 @@
 
 use app.test.bench.bench_harness.{BenchResult}
 
-use std.io_runtime.{file_write, dir_create_all, time_now_unix_micros, file_exists, file_read, process_run}
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 # ============================================================================
 # Shared SMF-capture helpers (used by the per-domain bench drivers)
@@ -25,9 +30,9 @@ use std.io_runtime.{file_write, dir_create_all, time_now_unix_micros, file_exist
 # ============================================================================
 
 fn bench_find_simple_bin() -> text:
-    if file_exists("bin/simple"):
+    if rt_file_exists("bin/simple"):
         return "bin/simple"
-    if file_exists("bin/release/x86_64-unknown-linux-gnu/simple_seed"):
+    if rt_file_exists("bin/release/x86_64-unknown-linux-gnu/simple_seed"):
         return "bin/release/x86_64-unknown-linux-gnu/simple_seed"
     ""
 
@@ -80,7 +85,7 @@ fn bench_extract_us(output: text, name: text) -> i64:
 fn bench_script_capture(simple_bin: text, workload: text) -> text:
     if simple_bin.len() == 0:
         return ""
-    val (out, err, code) = process_run(simple_bin, ["run", workload])
+    val (out, err, code) = rt_process_run(simple_bin, ["run", workload])
     if code == 0:
         out
     else:
@@ -90,10 +95,10 @@ fn bench_script_capture(simple_bin: text, workload: text) -> text:
 fn bench_smf_capture(simple_bin: text, workload: text, smf_path: text) -> text:
     if simple_bin.len() == 0:
         return ""
-    val (co, ce, ccode) = process_run(simple_bin, ["compile", workload, "-o", smf_path])
+    val (co, ce, ccode) = rt_process_run(simple_bin, ["compile", workload, "-o", smf_path])
     if ccode != 0:
         return ""
-    val (ro, re, rcode) = process_run(simple_bin, ["run", smf_path])
+    val (ro, re, rcode) = rt_process_run(simple_bin, ["run", smf_path])
     if rcode == 0:
         ro
     else:
@@ -138,12 +143,12 @@ fn bench_emit(results: [BenchResult], report_path: text, table_path: text):
     # Ensure parent directories exist.
     val report_dir = _dirname(report_path)
     val table_dir = _dirname(table_path)
-    dir_create_all(report_dir)
-    dir_create_all(table_dir)
+    rt_dir_create_all(report_dir)
+    rt_dir_create_all(table_dir)
 
     val date_str = _simple_date()
     val report_md = bench_results_to_md_report(results, "Benchmark Run", date_str)
-    val report_ok = file_write(report_path, report_md)
+    val report_ok = rt_file_write_text(report_path, report_md)
     if report_ok:
         print("bench_emit: wrote report -> " + report_path)
     else:
@@ -151,12 +156,12 @@ fn bench_emit(results: [BenchResult], report_path: text, table_path: text):
 
     # Persistent table: append new rows (with date prefix) to existing file.
     val table_md = _build_table_append(results, date_str)
-    val existing: text = if file_exists(table_path):
-        file_read(table_path)
+    val existing: text = if rt_file_exists(table_path):
+        rt_file_read_text(table_path)
     else:
         ""
     val new_content = existing + "\n" + table_md
-    val table_ok = file_write(table_path, new_content)
+    val table_ok = rt_file_write_text(table_path, new_content)
     if table_ok:
         print("bench_emit: updated metrics -> " + table_path)
     else:
@@ -231,7 +236,7 @@ fn _dirname(path: text) -> text:
 fn _simple_date() -> text:
     # Produce a simple timestamp string from unix micros.
     # Prints as "unix_<micros>" — a sortable opaque key when strftime is unavailable.
-    val us = time_now_unix_micros()
+    val us = rt_time_now_unix_micros()
     "unix_" + _i64_to_text(us)
 
 # ============================================================================
@@ -257,24 +262,24 @@ fn _simple_date() -> text:
 fn bench_emit_rows(names: [text], modes: [text], metrics: [text], values: [i64], units: [text], arch: text, date_str: text, report_path: text, table_path: text) -> bool:
     val report_dir = _dirname(report_path)
     val table_dir = _dirname(table_path)
-    dir_create_all(report_dir)
-    dir_create_all(table_dir)
+    rt_dir_create_all(report_dir)
+    rt_dir_create_all(table_dir)
 
     val table_block = _rows_to_md_table(names, modes, metrics, values, units, arch)
     val report_md = _rows_to_md_report(names, modes, metrics, values, units, arch, date_str, table_block)
-    val report_ok = file_write(report_path, report_md)
+    val report_ok = rt_file_write_text(report_path, report_md)
     if report_ok:
         print("bench_emit_rows: wrote report -> " + report_path)
     else:
         print("bench_emit_rows: ERROR writing report -> " + report_path)
 
     val append_block = _rows_build_table_append(names, modes, metrics, values, units, arch, date_str, table_block)
-    val existing: text = if file_exists(table_path):
-        file_read(table_path)
+    val existing: text = if rt_file_exists(table_path):
+        rt_file_read_text(table_path)
     else:
         ""
     val new_content = existing + "\n" + append_block
-    val table_ok = file_write(table_path, new_content)
+    val table_ok = rt_file_write_text(table_path, new_content)
     if table_ok:
         print("bench_emit_rows: updated metrics -> " + table_path)
     else:

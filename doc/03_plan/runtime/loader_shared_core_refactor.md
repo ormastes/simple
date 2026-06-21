@@ -142,23 +142,3 @@ Status after the 2026-04-27 shared-helper and lifecycle-coverage passes:
     lifecycle ownership state (`lifecycle_unload_module(...)`).
   - Shared refactor is currently safe only at the helper-level
     bookkeeping/data-selection seams already landed.
-
-2026-06-18 cleanup evidence refresh:
-
-- PASS: `SIMPLE_LIB=src bin/simple test test/01_unit/compiler/loader/metadata_symbols_spec.spl --mode=interpreter`
-  reported 6 passed, 0 failed.
-- PASS: `SIMPLE_LIB=src bin/simple test test/01_unit/compiler/loader/unload_ownership_spec.spl --mode=interpreter`
-  reported 2 passed, 0 failed.
-- PASS: `SIMPLE_LIB=src bin/simple test test/01_unit/compiler/loader/module_loader_crash_fix_spec.spl --mode=interpreter`
-  reported 3 passed, 0 failed.
-- Generated/manual spec docs now exist for the three passed helper/crash-fix
-  specs under `doc/06_spec/test/01_unit/compiler/loader/`.
-- FAIL: `SIMPLE_LIB=src bin/simple test test/01_unit/compiler/loader/module_loader_spec.spl --mode=interpreter`
-  reported 8 passed and 14 failed.
-- MISSING: this plan lists `doc/05_design/loader_shared_core_refactor.md` as a
-  design-seed output, but that file is not present in the current checkout.
-
-Closure status: not done. Keep the helper-level stop boundary, but do not mark
-Track E closed until the primary module-loader spec is green and the missing
-design artifact is either restored or the plan is updated to point at the
-canonical replacement.

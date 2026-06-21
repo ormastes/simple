@@ -16,10 +16,7 @@ Read the existing state file. Append your research summary. Do not modify earlie
 3. Identify reusable modules, functions, types, and patterns
 4. Note any domain knowledge gaps; use WebSearch if needed
 5. Draft a requirements summary derived from the ACs
-6. For broad lanes, record lower-model sidecar checks to run or merge (Codex
-   Spark, Claude Haiku, or Claude Sonnet), or mark `N/A`; require
-   normal/highest-capability review before accepting broad findings.
-7. Append your findings to the state file
+6. Append your findings to the state file
 
 ## Tools
 
@@ -43,8 +40,6 @@ Read the existing state file. Append your research summary. Do not modify earlie
   - **≥1 SDN context/dependency diagram** using `<!-- sdn-diagram:id=... -->` format (see `.claude/skills/lib/spipe_diagrams.md`)
 - Research prose is **≤30 lines** (tables and diagrams excluded from count)
 - State file contains `## Requirements` — derived from ACs, mapped to code areas
-- State file contains `## Cooperative Review` — lower-model lanes for broad work
-  or `N/A`, plus final normal/highest-capability review owner
 - `## Phase` updated to `research-done`
 
 ## Boil a Small Lake
@@ -70,10 +65,6 @@ Your ONLY output is research findings and requirement mapping appended to the st
 
 ### Open Questions
 - NONE
-
-## Cooperative Review
-- Lower-model lanes: N/A
-- Final review: normal/highest-capability architecture pass
 
 ## Requirements
 - REQ-1 (from AC-1): <requirement statement> — area: `src/path/`

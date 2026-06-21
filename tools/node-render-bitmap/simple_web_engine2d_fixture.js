@@ -53,9 +53,6 @@ function renderHtmlToPixels() {
   if (scene === "simple-web-layout-child-scope") {
     return renderLayoutChildScope();
   }
-  if (scene === "simple-web-layout-entity-css-debug") {
-    return loadSimpleLayoutTransportBaseline();
-  }
   if (scene === "simple-web-engine2d-two-block-content") {
     return renderTwoBlockContent();
   }
@@ -105,8 +102,7 @@ function isSimpleLayoutBenchmarkScene() {
     scene === "simple-web-layout-image-text-command-taskbar" ||
     scene === "simple-web-layout-selector-inline-override" ||
     scene === "simple-web-layout-descendant-scope" ||
-    scene === "simple-web-layout-child-scope" ||
-    scene === "simple-web-layout-entity-css-debug";
+    scene === "simple-web-layout-child-scope";
 }
 
 function loadSimpleLayoutTransportBaseline() {

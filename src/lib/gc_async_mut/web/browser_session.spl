@@ -48,19 +48,9 @@ use std.gc_async_mut.web.browser_session_cookies.{
 }
 use std.gc_async_mut.web.browser_session_html.{
     html_to_text, expand_stylesheet_text, insert_stylesheet_sources,
-    browser_session_debug_max_stylesheet_bytes,
     _guest_runtime_probe_url, _extract_simple_js_assignment
 }
 use std.gc_async_mut.web.browser_session_context.{browser_session_is_secure_context}
-
-val BROWSER_SESSION_FETCH_MAX_RESPONSE_BYTES: i32 = 4096
-val BROWSER_SESSION_DOCUMENT_MAX_RESPONSE_BYTES: i32 = 16384
-
-fn browser_session_debug_max_fetch_response_bytes() -> i32:
-    BROWSER_SESSION_FETCH_MAX_RESPONSE_BYTES
-
-fn browser_session_debug_max_document_response_bytes() -> i32:
-    BROWSER_SESSION_DOCUMENT_MAX_RESPONSE_BYTES
 
 class BrowserHistoryEntry:
     url: text
@@ -801,10 +791,6 @@ impl BrowserSession:
                 self.pending_url = ""
                 self.is_loading = false
                 return Err(response.error)
-            if response.body.len() > BROWSER_SESSION_DOCUMENT_MAX_RESPONSE_BYTES:
-                self.pending_url = ""
-                self.is_loading = false
-                return Err("document response exceeds browser session limit")
             self._apply_response_headers(response.headers)
             self._trace_guest("document headers applied")
             return self.commit_navigation_html(response.body)
@@ -818,22 +804,6 @@ impl BrowserSession:
             return self._commit_module_response(response)
         if response.kind == "fetch":
             if val Some(state) = self.runtime_state:
-                if response.body.len() > BROWSER_SESSION_FETCH_MAX_RESPONSE_BYTES:
-                    var runtime = state.runtime
-                    var interpreter = runtime.interpreter
-                    val _ = interpreter.resolve_async_fetch_response(
-                        response.request_id,
-                        response.url,
-                        response.status,
-                        response.headers,
-                        "",
-                        "fetch response exceeds browser session limit"
-                    )
-                    runtime.interpreter = interpreter
-                    state.runtime = runtime
-                    self.runtime_state = Some(state)
-                    self._flush_runtime_side_effects()
-                    return Err("fetch response exceeds browser session limit")
                 self._apply_response_headers(response.headers)
                 var runtime = state.runtime
                 if val Some(updated_state) = self.runtime_state:
@@ -862,11 +832,10 @@ impl BrowserSession:
                 load.warnings.push("stylesheet load error: {response.error}")
             else:
                 self._apply_response_headers(response.headers)
-                if response.body.len() <= browser_session_debug_max_stylesheet_bytes():
-                    val expanded = expand_stylesheet_text(load.document_url, response.url, response.body)
-                    load.current_style_html = load.current_style_html + expanded.html
-                    if expanded.sources.len() > 0:
-                        load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+                val expanded = expand_stylesheet_text(load.document_url, response.url, response.body)
+                load.current_style_html = load.current_style_html + expanded.html
+                if expanded.sources.len() > 0:
+                    load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
             return self._advance_stylesheet_loading()
         Err("no active stylesheet load")
 

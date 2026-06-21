@@ -15,7 +15,7 @@ Validate the restored IDE product surface and Office plugin wiring for:
 
 | ID | Requirement | Evidence |
 |----|-------------|----------|
-| REQ-001 | IDE feature-check lists all six supported capability groups. | `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
+| REQ-001 | IDE feature-check lists all five supported capability groups. | `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
 | REQ-002 | TUI and GUI feature-check reports stay in parity except selected launch mode. | `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
 | REQ-003 | IDE capability owners resolve to existing Markdown, Office, editor MCP, and DB modules. | `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
 | REQ-004 | The real IDE CLI entrypoint prints complete TUI and GUI feature-check manuals. | `test/02_integration/app/ide/ide_feature_check_integration_spec.spl` |

@@ -1,11 +1,12 @@
 # Office Plugin Registration
 #
-# Registers the Office apps as separate plugins layered on the shared Markdown,
-# CSS/HTML, and SDN substrates. Each plugin declares the headless actions it
-# contributes, using the same registry manifest format as the IDE adapter.
+# Registers Word, PPT (slides), and Excel (sheets) as three SEPARATE plugins
+# layered on the shared markdown / CSS substrate
+# (`std.common.render_scene.office_style_resolver` + `common.markdown`). Each
+# plugin declares the functions it contributes, using the project's existing
+# plugin registry manifest format (the same path the IDE plugin adapter uses).
 
 use app.plugin.registry.{PluginEntry, plugin_entry_new, plugin_manifest_to_text, parse_plugin_manifest_text}
-use app.office.llm_catalog.{office_llm_feature_catalog}
 
 # A snapshot of the office plugin manifest for verification / display.
 struct OfficePluginProbe:
@@ -14,14 +15,21 @@ struct OfficePluginProbe:
     manifest_text: text
 
 fn office_plugin_entries() -> [PluginEntry]:
-    """Office apps as separate plugins on the shared document/design substrates."""
+    """The three office apps as separate plugins on the shared md/CSS module.
+
+    Each entry's `library` points at the module that renders/computes through the
+    shared office style resolver, so Word/PPT/Excel are distinct plugins over one
+    substrate rather than monolithic apps."""
     var entries: [PluginEntry] = []
-    for row in office_llm_feature_catalog():
-        entries.push(plugin_entry_new(
-            "office-" + row.app_name.lower(),
-            row.owner_module,
-            "0.1.0",
-            row.actions))
+    entries.push(plugin_entry_new(
+        "office-word", "app.office.word.html_render", "0.1.0",
+        ["render_block_html", "render_document_html"]))
+    entries.push(plugin_entry_new(
+        "office-ppt", "app.office.slides.html_render", "0.1.0",
+        ["render_slide_html"]))
+    entries.push(plugin_entry_new(
+        "office-excel", "app.office.sheets.formula", "0.1.0",
+        ["evaluate_formula", "evaluate_formula_display_text"]))
     entries
 
 fn office_plugin_names() -> [text]:
@@ -43,29 +51,18 @@ fn office_plugin_manifest_probe() -> OfficePluginProbe:
         manifest_text: manifest)
 
 fn office_plugin_validate(entries: [PluginEntry]) -> text:
-    """Return a non-empty error message if the manifest is malformed, else ""."""
+    """Return a non-empty error message if the manifest is malformed (empty
+    name/version or duplicate plugin name), else ""."""
     var seen: [text] = []
-    var seen_functions: [text] = []
     for entry in entries:
         if entry.name == "":
             return "manifest error: entry with empty name"
-        if entry.library == "":
-            return "manifest error: entry '" + entry.name + "' has empty library"
         if entry.version == "":
             return "manifest error: entry '" + entry.name + "' has empty version"
         for s in seen:
             if s == entry.name:
                 return "manifest error: duplicate plugin name '" + entry.name + "'"
         seen.push(entry.name)
-        if entry.functions.len() == 0:
-            return "manifest error: entry '" + entry.name + "' has no functions"
-        for function_name in entry.functions:
-            if function_name == "":
-                return "manifest error: entry '" + entry.name + "' has empty function"
-            for seen_function in seen_functions:
-                if seen_function == function_name:
-                    return "manifest error: duplicate function '" + function_name + "'"
-            seen_functions.push(function_name)
     ""
 
 fn office_plugin_is_valid() -> bool:

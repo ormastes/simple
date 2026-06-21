@@ -1,6 +1,6 @@
 # STDLIB Module Comprehensive Test
 
-> <details>
+> 1. check
 
 <!-- sdn-diagram:id=queue_unit_spec.arch -->
 <details class="sdn-source">
@@ -51,7 +51,7 @@ queue_unit_spec -> std
 
 #### basic operation 1
 
-- check
+1. check
 
 
 <details>
@@ -68,7 +68,7 @@ check(1 + 1 == 2)
 
 #### basic operation 2
 
-- check
+1. check
 
 
 <details>
@@ -87,7 +87,7 @@ check(x.len() == 4)
 
 #### basic operation 3
 
-- check
+1. check
 
 
 <details>
@@ -106,7 +106,7 @@ check(arr.len() == 3)
 
 #### type conversion 1
 
-- check
+1. check
 
 
 <details>
@@ -125,7 +125,7 @@ check(s.len() == 2)
 
 #### type conversion 2
 
-- check
+1. check
 
 
 <details>
@@ -144,7 +144,7 @@ check(num > 0)
 
 #### collection operations 1
 
-- check
+1. check
 
 
 <details>
@@ -166,7 +166,7 @@ check(sum == 15)
 
 #### collection operations 2
 
-- check
+1. check
 
 
 <details>
@@ -186,8 +186,8 @@ check(result.len() == 4)
 
 #### collection operations 3
 
-- evens = evens append
-- check
+1. evens = evens append
+2. check
 
 
 <details>
@@ -210,7 +210,7 @@ check(evens.len() == 2)
 
 #### string operations 1
 
-- check
+1. check
 
 
 <details>
@@ -229,7 +229,7 @@ check(s.starts_with("hel"))
 
 #### string operations 2
 
-- check
+1. check
 
 
 <details>
@@ -248,7 +248,7 @@ check(s.ends_with("rld"))
 
 #### string operations 3
 
-- check
+1. check
 
 
 <details>
@@ -267,8 +267,8 @@ check(s.contains("str"))
 
 #### option handling 1
 
-- check
-- check
+1. check
+2. check
 
 
 <details>
@@ -288,7 +288,7 @@ check(opt? == 42)
 
 #### option handling 2
 
-- check
+1. check
 
 
 <details>
@@ -307,7 +307,7 @@ check(not opt.?)
 
 #### option handling 3
 
-- check
+1. check
 
 
 <details>
@@ -327,7 +327,7 @@ check(result == 100)
 
 #### option handling 4
 
-- check
+1. check
 
 
 <details>
@@ -347,8 +347,8 @@ check(result == 99)
 
 #### error path 1
 
-- check
-- check
+1. check
+2. check
 
 
 <details>
@@ -370,7 +370,7 @@ else:
 
 #### error path 2
 
-- check
+1. check
 
 
 <details>
@@ -389,7 +389,7 @@ check(arr.len() == 0)
 
 #### error path 3
 
-- check
+1. check
 
 
 <details>
@@ -408,7 +408,7 @@ check(error == nil)
 
 #### edge case 1 - empty
 
-- check
+1. check
 
 
 <details>
@@ -427,8 +427,8 @@ check(s.len() == 0)
 
 #### edge case 2 - zero
 
-- check
-- check
+1. check
+2. check
 
 
 <details>
@@ -447,7 +447,7 @@ check(not (0 > 0))
 
 #### edge case 3 - negative
 
-- check
+1. check
 
 
 <details>
@@ -465,7 +465,7 @@ check(-1 < 0)
 
 #### edge case 4 - large
 
-- check
+1. check
 
 
 <details>
@@ -483,7 +483,7 @@ check(999999 > 0)
 
 #### edge case 5 - single element
 
-- check
+1. check
 
 
 <details>
@@ -502,7 +502,7 @@ check(arr.len() == 1)
 
 #### boundary 1 - min
 
-- check
+1. check
 
 
 <details>
@@ -521,7 +521,7 @@ check(arr.len() == 3)
 
 #### boundary 2 - max
 
-- check
+1. check
 
 
 <details>
@@ -540,8 +540,8 @@ check(arr.len() == 3)
 
 #### conditional 1
 
-- check
-- check
+1. check
+2. check
 
 
 <details>
@@ -562,8 +562,8 @@ else:
 
 #### conditional 2
 
-- check
-- check
+1. check
+2. check
 
 
 <details>
@@ -585,9 +585,9 @@ else:
 
 #### conditional 3
 
-- check
-- check
-- check
+1. check
+2. check
+3. check
 
 
 <details>
@@ -614,7 +614,7 @@ else:
 
 #### loop 1 - for
 
-- check
+1. check
 
 
 <details>
@@ -641,7 +641,7 @@ check(count == 10)
 
 #### loop 2 - while
 
-- check
+1. check
 
 
 <details>
@@ -668,7 +668,7 @@ check(count == 5)
 
 #### loop 3 - break
 
-- check
+1. check
 
 
 <details>
@@ -697,7 +697,7 @@ check(count == 5)
 
 #### loop 4 - continue
 
-- check
+1. check
 
 
 <details>
@@ -723,8 +723,8 @@ check(executed == 5)
 
 #### match 1
 
-- Some
-- nil: check
+1. Some
+2. nil: check
 
 
 <details>
@@ -745,8 +745,8 @@ match opt:
 
 #### match 2
 
-- Some
-- nil: check
+1. Some
+2. nil: check
 
 
 <details>
@@ -767,7 +767,7 @@ match opt:
 
 #### match 3
 
-- check
+1. check
 
 
 <details>
@@ -791,9 +791,9 @@ check(result == "two")
 
 #### nested 1
 
-- check
-- check
-- check
+1. check
+2. check
+3. check
 
 
 <details>
@@ -817,7 +817,7 @@ else:
 
 #### nested 2
 
-- check
+1. check
 
 
 <details>
@@ -837,8 +837,8 @@ for i in 0..3:
 
 #### complex 1
 
-- result = result append
-- check
+1. result = result append
+2. check
 
 
 <details>
@@ -861,9 +861,9 @@ check(result.len() == 2)
 
 #### complex 2
 
-- check
-- check
-- check
+1. check
+2. check
+3. check
 
 
 <details>
@@ -884,8 +884,8 @@ check(dict["c"] == 3)
 
 #### integration 1
 
-- processed = processed append
-- check
+1. processed = processed append
+2. check
 
 
 <details>
@@ -910,7 +910,7 @@ check(sum == 12)
 
 #### integration 2
 
-- check
+1. check
 
 
 <details>

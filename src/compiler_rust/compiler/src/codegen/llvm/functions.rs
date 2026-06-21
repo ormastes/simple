@@ -376,16 +376,6 @@ impl LlvmBackend {
             let fn_type = i64_type.fn_type(&param_types, false);
             module.add_function(resolved_name, fn_type, None)
         });
-        let profile_counters_enabled = std::env::var("SIMPLE_NATIVE_PROFILE_COUNTERS").ok().as_deref() == Some("1");
-        let profile_filter = std::env::var("SIMPLE_NATIVE_PROFILE_FILTER").ok();
-        let profile_selected = profile_filter
-            .as_deref()
-            .map(|needles| {
-                needles
-                    .split(',')
-                    .any(|needle| !needle.is_empty() && func.name.contains(needle))
-            })
-            .unwrap_or(true);
 
         // Create basic blocks for each MIR block
         let mut llvm_blocks = HashMap::new();
@@ -441,22 +431,6 @@ impl LlvmBackend {
         if !func.blocks.is_empty() {
             let entry_bb = llvm_blocks[&func.blocks[0].id];
             builder.position_at_end(entry_bb);
-
-            if profile_counters_enabled && profile_selected {
-                let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
-                let counter_fn = module.get_function("rt_native_profile_count").unwrap_or_else(|| {
-                    let fn_type = self.context_ref().void_type().fn_type(&[i8_ptr_type.into()], false);
-                    let f = module.add_function("rt_native_profile_count", fn_type, None);
-                    f.set_linkage(inkwell::module::Linkage::External);
-                    f
-                });
-                let name_ptr = builder
-                    .build_global_string_ptr(resolved_name, "native_profile_name")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("profile name", &e))?;
-                builder
-                    .build_call(counter_fn, &[name_ptr.as_pointer_value().into()], "")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("profile counter call", &e))?;
-            }
 
             let implicit_slots = implicit_local_param_slots(func);
 
@@ -898,9 +872,7 @@ impl LlvmBackend {
             } => {
                 self.compile_indirect_call(*dest, *callee, param_types, return_type, args, vreg_map, builder)?;
             }
-            MirInst::InterpCall {
-                dest, func_name, args, ..
-            } => {
+            MirInst::InterpCall { dest, func_name, args, .. } => {
                 self.compile_interp_call(*dest, func_name, args, vreg_map, builder, module)?;
             }
             MirInst::InterpEval { dest, expr_index } => {

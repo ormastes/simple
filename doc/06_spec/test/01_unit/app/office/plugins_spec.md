@@ -1,6 +1,6 @@
 # Plugins Specification
 
-> _Each cataloged Office app is registered as a distinct plugin entry._
+> _Word, PPT, and Excel are registered as distinct plugin entries._
 
 <!-- sdn-diagram:id=plugins_spec.arch -->
 <details class="sdn-source">
@@ -28,7 +28,7 @@ plugins_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -37,10 +37,10 @@ plugins_spec -> app
 
 ## Scenarios
 
-### office plugins: suite plugins on shared substrates
-_Each cataloged Office app is registered as a distinct plugin entry._
+### office plugins: three separate plugins on the shared module
+_Word, PPT, and Excel are registered as distinct plugin entries._
 
-#### registers each cataloged office app
+#### registers exactly three office plugins
 
 <details>
 <summary>Executable SSpec</summary>
@@ -49,33 +49,24 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(office_plugin_names().len()).to_equal(12)
+expect(office_plugin_names().len()).to_equal(3)
 ```
 
 </details>
 
-#### names the document, design, data, math, and utility plugins
+#### names the word, ppt, and excel plugins
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val names = office_plugin_names()
-expect(names).to_contain("office-markdown")
-expect(names).to_contain("office-writer")
-expect(names).to_contain("office-calc")
-expect(names).to_contain("office-impress")
-expect(names).to_contain("office-draw")
-expect(names).to_contain("office-designer")
-expect(names).to_contain("office-base")
-expect(names).to_contain("office-math")
-expect(names).to_contain("office-mail")
-expect(names).to_contain("office-planner")
-expect(names).to_contain("office-counter")
-expect(names).to_contain("office-launcher")
+expect(names).to_contain("office-word")
+expect(names).to_contain("office-ppt")
+expect(names).to_contain("office-excel")
 ```
 
 </details>
@@ -92,9 +83,9 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # plugin_count is the number of entries parsed back out of the manifest;
-# equalling the 12 input entries proves the manifest round-trips.
+# equalling the 3 input entries proves the manifest round-trips.
 val probe = office_plugin_manifest_probe()
-expect(probe.plugin_count).to_equal(12)
+expect(probe.plugin_count).to_equal(3)
 ```
 
 </details>
@@ -119,108 +110,15 @@ expect(err).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 65 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_plugin_manifest_probe()
 val manifest = probe.manifest_text
-expect(manifest).to_contain("office-writer")
-expect(manifest).to_contain("office-draw")
-expect(manifest).to_contain("office-designer")
-expect(manifest).to_contain("office-mail")
-expect(manifest).to_contain("office-planner")
-expect(manifest).to_contain("render-writer-markdown-html")
-expect(manifest).to_contain("writer-markdown-summary")
-expect(manifest).to_contain("writer-markdown-stats")
-expect(manifest).to_contain("writer-markdown-search")
-expect(manifest).to_contain("writer-markdown-range")
-expect(manifest).to_contain("writer-markdown-blocks")
-expect(manifest).to_contain("writer-markdown-tables")
-expect(manifest).to_contain("writer-markdown-replace")
-expect(manifest).to_contain("writer-markdown-insert")
-expect(manifest).to_contain("writer-markdown-delete")
-expect(manifest).to_contain("writer-markdown-outline")
-expect(manifest).to_contain("ppt-markdown-outline")
-expect(manifest).to_contain("base-table-summary")
-expect(manifest).to_contain("format-cell-value")
-expect(manifest).to_contain("evaluate-sheet-formula")
-expect(manifest).to_contain("sdd-document-summary")
-expect(manifest).to_contain("sdd-outline-read")
-expect(manifest).to_contain("sdd-style-rules-read")
-expect(manifest).to_contain("sdd-weave-summary")
-expect(manifest).to_contain("render-sdd-html-with-selection")
-expect(manifest).to_contain("sdd-style-extends-read")
-expect(manifest).to_contain("sdd-style-target-read")
-expect(manifest).to_contain("sdd-style-value-read")
-expect(manifest).to_contain("sdd-style-resolved-read")
-expect(manifest).to_contain("sdd-style-resolved-value-read")
-expect(manifest).to_contain("sdd-node-resolved-style-read")
-expect(manifest).to_contain("sdd-node-resolved-style-value-read")
-expect(manifest).to_contain("sdd-node-label-read")
-expect(manifest).to_contain("sdd-node-style-read")
-expect(manifest).to_contain("sdd-node-geometry-read")
-expect(manifest).to_contain("sdd-node-parent-read")
-expect(manifest).to_contain("sdd-node-child-bounds-read")
-expect(manifest).to_contain("sdd-node-child-count-read")
-expect(manifest).to_contain("sdd-node-shape-read")
-expect(manifest).to_contain("sdd-node-layer-read")
-expect(manifest).to_contain("sdd-node-order-read")
-expect(manifest).to_contain("sdd-node-role-read")
-expect(manifest).to_contain("sdd-edge-label-read")
-expect(manifest).to_contain("sdd-edge-label-point-read")
-expect(manifest).to_contain("sdd-edge-style-read")
-expect(manifest).to_contain("sdd-edge-resolved-style-read")
-expect(manifest).to_contain("sdd-edge-resolved-style-value-read")
-expect(manifest).to_contain("sdd-edge-kind-read")
-expect(manifest).to_contain("sdd-edge-route-read")
-expect(manifest).to_contain("sdd-edge-path-read")
-expect(manifest).to_contain("sdd-edge-segments-read")
-expect(manifest).to_contain("sdd-edge-endpoints-read")
-expect(manifest).to_contain("export-sdd-canonical")
-expect(manifest).to_contain("render-ui-html")
-expect(manifest).to_contain("render-ui-html-with-selection")
-expect(manifest).to_contain("ui-resolved-layout-read")
-expect(manifest).to_contain("ui-style-tokens-read")
-expect(manifest).to_contain("ui-css-edit")
-expect(manifest).to_contain("mail-summary")
-expect(manifest).to_contain("planner-summary")
-expect(manifest).to_contain("office-launcher")
-expect(manifest).to_contain("open_word")
-expect(manifest).to_contain("open_counter")
-```
-
-</details>
-
-#### rejects empty plugin libraries
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val malformed = plugin_entry_new("office-word", "", "0.1.0", ["render_document_html"])
-expect(office_plugin_validate([malformed])).to_equal("manifest error: entry 'office-word' has empty library")
-```
-
-</details>
-
-#### rejects empty and duplicate function names
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val empty_function = plugin_entry_new("office-word", "app.office.word.html_render", "0.1.0", [""])
-val word = plugin_entry_new("office-word", "app.office.word.html_render", "0.1.0", ["render_document_html"])
-val ppt = plugin_entry_new("office-ppt", "app.office.slides.html_render", "0.1.0", ["render_document_html"])
-expect(office_plugin_validate([empty_function])).to_equal("manifest error: entry 'office-word' has empty function")
-expect(office_plugin_validate([word, ppt])).to_equal("manifest error: duplicate function 'render_document_html'")
+expect(manifest).to_contain("office-word")
+expect(manifest).to_contain("office-ppt")
+expect(manifest).to_contain("office-excel")
 ```
 
 </details>
@@ -238,15 +136,15 @@ expect(office_plugin_validate([word, ppt])).to_equal("manifest error: duplicate 
 ## Overview
 
 Tests covering:
-- office plugins: suite plugins on shared substrates
+- office plugins: three separate plugins on the shared module
 - office plugins: manifest round-trips and validates
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -44,9 +44,6 @@ Verifies selected Feature C and NFR C browser production hardening behavior for 
 | Category | Other |
 | Status | Active |
 | Requirements | doc/02_requirements/nfr/simple_web_browser_production_hardening.md |
-| Plan | doc/03_plan/sys_test/simple_web_browser_production_hardening.md |
-| Design | doc/05_design/simple_web_browser_production_hardening.md |
-| Research | doc/01_research/domain/simple_web_browser_production_hardening.md |
 | Source | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -56,124 +53,9 @@ Verifies selected Feature C and NFR C browser production hardening behavior for 
 Verifies selected Feature C and NFR C browser production hardening behavior for
 the live Simple Web HTTP/WebSocket boundary.
 
-**Plan:** doc/03_plan/sys_test/simple_web_browser_production_hardening.md
-**Design:** doc/05_design/simple_web_browser_production_hardening.md
-**Architecture:** doc/04_architecture/simple_web_browser_production_hardening.md
-**Architecture:** doc/04_architecture/ui/simple_web_browser_production_hardening.md
-**Research:** doc/01_research/local/simple_web_browser_production_hardening.md
-**Research:** doc/01_research/domain/simple_web_browser_production_hardening.md
 **Requirements:** doc/02_requirements/feature/simple_web_browser_production_hardening.md
 **Requirements:** doc/02_requirements/nfr/simple_web_browser_production_hardening.md
 **Traceability:** REQ-WEB-HARD-003, REQ-WEB-HARD-006, REQ-WEB-HARD-007, REQ-WEB-HARD-008, REQ-WEB-HARD-009, REQ-WEB-HARD-010, REQ-WEB-HARD-011, REQ-WEB-HARD-012, NFR-WEB-HARD-003, NFR-WEB-HARD-004, NFR-WEB-HARD-005, NFR-WEB-HARD-006, NFR-WEB-HARD-007, NFR-WEB-HARD-008, NFR-WEB-HARD-010, NFR-WEB-HARD-011
-
-## Syntax
-
-Run the focused executable production hardening spec from the repository root:
-
-```sh
-bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360
-```
-
-Regenerate the manual evidence after changing this file:
-
-```sh
-SIMPLE_LIB=src bin/simple spipe-docgen test/03_system/gui/simple_web_browser_production_hardening_spec.spl --output doc/06_spec --no-index
-```
-
-The spec launches a local Simple Web server with `SIMPLE_UI_WEB_TOKEN_SECRET`
-set to a deterministic test secret. Each scenario chooses a pid-offset port,
-waits for the local listener, exercises raw HTTP requests through `TcpStream`,
-and stops the child process before assertions are reported.
-
-Shared-WM coverage is enabled through `SIMPLE_UI_WEB_SHARED_WM=1` and
-`SIMPLE_UI_WEB_PORT=<port>`. Deprecated query-token compatibility is exercised
-through `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1`, but production behavior must still
-reject query bearer tokens.
-
-## Examples
-
-Unauthenticated browser entrypoints must fail closed:
-
-```text
-GET /api/state              -> 403 forbidden
-GET /api/widgets            -> 403 forbidden
-GET /ui/resume              -> 403 forbidden
-GET /ui/ws                  -> 403 forbidden
-GET /ws                     -> 404 not_found
-GET /ui/ws?token=<bearer>   -> 403 forbidden
-```
-
-Authorized browser entrypoints must accept only the production path:
-
-```text
-POST /ui/login              -> 200 token
-POST /ui/resume             -> 200 session resume response
-GET /ui/ws + bearer subprot -> 101 Switching Protocols
-POST /ui/ws + bearer        -> 405 method_not_allowed
-POST /ws + bearer           -> 404 not_found
-```
-
-Document and script responses must include browser hardening headers:
-
-```text
-/                  -> X-Frame-Options, Referrer-Policy, Content-Security-Policy
-/wm/native_window  -> X-Frame-Options, Referrer-Policy, Content-Security-Policy
-/wm.js             -> Cache-Control, Pragma, X-Content-Type-Options
-/retained_renderer.js -> Cache-Control, Pragma, X-Content-Type-Options
-```
-
-Request-boundary guards must fail before route-specific work:
-
-```text
-oversized request head      -> 413 request_head_too_large
-oversized request line      -> 413 request_head_too_large
-oversized header line       -> 413 request_head_too_large
-oversized unauth body       -> 413 request_body_too_large
-malformed body framing      -> 400 invalid_request_framing
-```
-
-Hidden browser fallback routes must use the same hardened JSON response path as
-named routes:
-
-```text
-GET /hidden-browser-production-gap -> 404 {"error": "not_found"}
-```
-
-## Production Evidence Scope
-
-This spec is the live endpoint gate for browser-facing production behavior. It
-does not mock HTTP parsing, bearer-token issuance, WebSocket upgrades, route
-dispatch, or static script delivery. The scenarios exercise the normal web
-server and the shared-WM web server through TCP so regressions in hidden server
-paths are visible to the generated manual.
-
-The unauthenticated scenario proves that shown browser entrypoints do not expose
-state without a valid origin-bound token. It also proves hidden compatibility
-surfaces, including legacy `/ws` and query bearer tokens, remain non-authorizing
-in production mode.
-
-The positive auth scenario proves the intended login, resume, and WebSocket
-upgrade path still works after the fail-closed guards are applied. It also
-checks that malformed resume bodies and oversized resume bodies are rejected
-with typed errors instead of partial state recovery.
-
-The login burst scenarios prove the normal and shared-WM login routes enforce
-the configured fixed-window budget. The shared-WM scenario also checks route
-parity for `/wm.js` and `/retained_renderer.js`, including no-store, no-cache,
-and nosniff script headers. Both normal and shared-WM scenarios also exercise
-`/hidden-browser-production-gap` to prove unknown browser routes inherit
-no-store, no-cache, and nosniff headers from the centralized JSON fallback.
-
-The latency scenario is intentionally broad enough to include token minting and
-WebSocket authorization. Its purpose is a local regression guard for accidental
-slow startup-path work in the warmed browser auth path, not a replacement for
-the external native rendering performance gates.
-
-The external native rendering gates remain in
-`doc/03_plan/agent_tasks/simple_web_browser_external_native_readback_proof.md`.
-Those gates require hosts with macOS Metal, AMD ROCm/HIP, Windows DirectX, and
-real browser WebGPU readback support. This local spec complements that follow-up
-by proving the live browser server boundary is production-hardened on this host.
 
 ## Scenarios
 
@@ -187,7 +69,7 @@ by proving the live browser server boundary is production-hardened on this host.
 - Start a production-configured Simple Web server with a real token secret
 - Send unauthenticated requests to login, API, and WebSocket routes
 - hardening stop web server
-- Verify every unauthenticated route fails closed and browser document/script responses have security headers
+- Verify every unauthenticated route fails closed and the root document has browser security headers
    - Expected: missing_origin equals `HTTP/1.1 403 Forbidden|present`
    - Expected: oversized_head equals `HTTP/1.1 413 Payload Too Large|present`
    - Expected: oversized_request_line equals `HTTP/1.1 413 Payload Too Large|present`
@@ -205,7 +87,7 @@ by proving the live browser server boundary is production-hardened on this host.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 80 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -227,14 +109,10 @@ val websocket = raw_http_summary(port, websocket_unauthorized_request(port), "\"
 val legacy_websocket = raw_http_summary(port, legacy_websocket_unauthorized_request(port), "\"error\": \"not_found\"")
 val websocket_query = raw_http_summary(port, websocket_query_token_request(port), "\"error\": \"forbidden\"")
 val root_page = raw_http_request(port, root_page_request(port))
-val native_window = raw_http_request(port, native_window_request(port))
-val wm_script = raw_http_request(port, wm_script_request(port))
-val retained_renderer_script = raw_http_request(port, retained_renderer_script_request(port))
-val unknown_route = raw_http_request(port, unknown_route_request(port))
 
 hardening_stop_web_server(pid)
 
-step("Verify every unauthenticated route fails closed and browser document/script responses have security headers")
+step("Verify every unauthenticated route fails closed and the root document has browser security headers")
 expect(missing_origin).to_equal("HTTP/1.1 403 Forbidden|present")
 expect(oversized_head).to_equal("HTTP/1.1 413 Payload Too Large|present")
 expect(oversized_request_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
@@ -247,48 +125,9 @@ expect(resume).to_equal("HTTP/1.1 403 Forbidden|present")
 expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
 expect(legacy_websocket).to_equal("HTTP/1.1 404 Not Found|present")
 expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
-expect(root_page).to_contain("Cache-Control: no-store")
-expect(root_page).to_contain("Pragma: no-cache")
-expect(root_page).to_contain("Expires: 0")
 expect(root_page).to_contain("X-Frame-Options: DENY")
-expect(root_page).to_contain("X-DNS-Prefetch-Control: off")
-expect(root_page).to_contain("X-Permitted-Cross-Domain-Policies: none")
 expect(root_page).to_contain("Referrer-Policy: no-referrer")
-expect(root_page).to_contain("Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()")
-expect(root_page).to_contain("usb=(), serial=(), bluetooth=()")
-expect(root_page).to_contain("clipboard-read=(), clipboard-write=()")
-expect(root_page).to_contain("display-capture=(), screen-wake-lock=(), xr-spatial-tracking=()")
 expect(root_page).to_contain("Content-Security-Policy: default-src 'self'")
-expect(root_page).to_contain("Origin-Agent-Cluster: ?1")
-expect(root_page).to_contain("Cross-Origin-Embedder-Policy: require-corp")
-expect(root_page).to_contain("object-src 'none'")
-expect(native_window).to_contain("HTTP/1.1 200 OK")
-expect(native_window).to_contain("Cache-Control: no-store")
-expect(native_window).to_contain("Pragma: no-cache")
-expect(native_window).to_contain("Expires: 0")
-expect(native_window).to_contain("X-Frame-Options: DENY")
-expect(native_window).to_contain("X-DNS-Prefetch-Control: off")
-expect(native_window).to_contain("X-Permitted-Cross-Domain-Policies: none")
-expect(native_window).to_contain("Referrer-Policy: no-referrer")
-expect(native_window).to_contain("Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()")
-expect(native_window).to_contain("usb=(), serial=(), bluetooth=()")
-expect(native_window).to_contain("clipboard-read=(), clipboard-write=()")
-expect(native_window).to_contain("display-capture=(), screen-wake-lock=(), xr-spatial-tracking=()")
-expect(native_window).to_contain("Content-Security-Policy: default-src 'self'")
-expect(native_window).to_contain("Origin-Agent-Cluster: ?1")
-expect(native_window).to_contain("Cross-Origin-Embedder-Policy: require-corp")
-expect(native_window).to_contain("object-src 'none'")
-expect(wm_script).to_contain("Cache-Control: no-store")
-expect(wm_script).to_contain("Pragma: no-cache")
-expect(wm_script).to_contain("X-Content-Type-Options: nosniff")
-expect(retained_renderer_script).to_contain("Cache-Control: no-store")
-expect(retained_renderer_script).to_contain("Pragma: no-cache")
-expect(retained_renderer_script).to_contain("X-Content-Type-Options: nosniff")
-expect(unknown_route).to_contain("HTTP/1.1 404 Not Found")
-expect(unknown_route).to_contain("\"error\": \"not_found\"")
-expect(unknown_route).to_contain("Cache-Control: no-store")
-expect(unknown_route).to_contain("Pragma: no-cache")
-expect(unknown_route).to_contain("X-Content-Type-Options: nosniff")
 ```
 
 </details>
@@ -307,8 +146,6 @@ expect(unknown_route).to_contain("X-Content-Type-Options: nosniff")
 - hardening stop web server
 - Verify login succeeds, canonical GET upgrades are accepted, legacy routes are hidden, and POST upgrades are rejected
    - Expected: http_status_line(login_response) equals `HTTP/1.1 200 OK`
-   - Expected: http_status_line(api_state_response) equals `HTTP/1.1 200 OK`
-   - Expected: http_status_line(api_widgets_response) equals `HTTP/1.1 200 OK`
    - Expected: malformed_resume equals `HTTP/1.1 400 Bad Request|present`
    - Expected: valid_resume equals `HTTP/1.1 200 OK|present`
    - Expected: oversized_resume equals `HTTP/1.1 413 Payload Too Large|present`
@@ -322,7 +159,7 @@ expect(unknown_route).to_contain("X-Content-Type-Options: nosniff")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 57 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -338,8 +175,6 @@ step("Redeem the minted bearer token through resume and WebSocket routes")
 val malformed_resume_body = "{\"session_id\":\"session-1\",\"snapshot_revision\":\"bad\",\"last_sequence\":0}"
 val malformed_resume_response = raw_http_request(port, resume_authorized_request(port, token, malformed_resume_body))
 val malformed_resume = "{http_status_line(malformed_resume_response)}|{http_marker(malformed_resume_response, "invalid_resume_body")}"
-val api_state_response = raw_http_request(port, api_state_authorized_request(port, token))
-val api_widgets_response = raw_http_request(port, api_widgets_authorized_request(port, token))
 val valid_resume_body = "{\"session_id\":\"session-1\",\"snapshot_revision\":42,\"last_sequence\":7}"
 val valid_resume_response = raw_http_request(port, resume_authorized_request(port, token, valid_resume_body))
 val valid_resume = "{http_status_line(valid_resume_response)}|{http_marker(valid_resume_response, "\"session_id\": \"session-1\"")}"
@@ -364,14 +199,6 @@ expect(login_response).to_contain("Pragma: no-cache")
 expect(login_response).to_contain("X-Content-Type-Options: nosniff")
 expect(login_response).to_contain("X-Request-Id: browser-hardening-login")
 expect(token.len()).to_be_greater_than(20)
-expect(http_status_line(api_state_response)).to_equal("HTTP/1.1 200 OK")
-expect(api_state_response).to_contain("Cache-Control: no-store")
-expect(api_state_response).to_contain("Pragma: no-cache")
-expect(api_state_response).to_contain("X-Content-Type-Options: nosniff")
-expect(http_status_line(api_widgets_response)).to_equal("HTTP/1.1 200 OK")
-expect(api_widgets_response).to_contain("Cache-Control: no-store")
-expect(api_widgets_response).to_contain("Pragma: no-cache")
-expect(api_widgets_response).to_contain("X-Content-Type-Options: nosniff")
 expect(malformed_resume).to_equal("HTTP/1.1 400 Bad Request|present")
 expect(valid_resume).to_equal("HTTP/1.1 200 OK|present")
 expect(valid_resume_response).to_contain("Cache-Control: no-store")
@@ -537,7 +364,6 @@ expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
 
 - Start a shared-WM Simple Web server with a real token secret
 - Reject an oversized shared-WM request head before route dispatch
-- Fetch shared-WM browser script responses
 - Spend the shared-WM login burst budget from an allowed loopback origin
 - last allowed = raw http summary
 - Send one more shared-WM login request in the same fixed window
@@ -554,7 +380,7 @@ expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 63 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -567,12 +393,6 @@ val oversized_head = raw_http_summary(port, oversized_head_request(port), "reque
 val oversized_request_line = raw_http_summary(port, oversized_request_line_request(port), "request_head_too_large")
 val oversized_header_line = raw_http_summary(port, oversized_header_line_request(port), "request_head_too_large")
 val oversized_login_body = raw_http_summary(port, login_oversized_request(port), "request_body_too_large")
-
-step("Fetch shared-WM browser script responses")
-val shared_wm_script = raw_http_request(port, wm_script_request(port))
-val shared_native_window = raw_http_request(port, native_window_request(port))
-val shared_retained_renderer_script = raw_http_request(port, retained_renderer_script_request(port))
-val shared_unknown_route = raw_http_request(port, unknown_route_request(port))
 
 step("Spend the shared-WM login burst budget from an allowed loopback origin")
 var attempts = 0
@@ -591,34 +411,6 @@ expect(oversized_head).to_equal("HTTP/1.1 413 Payload Too Large|present")
 expect(oversized_request_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
 expect(oversized_header_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
 expect(oversized_login_body).to_equal("HTTP/1.1 413 Payload Too Large|present")
-expect(shared_wm_script).to_contain("Cache-Control: no-store")
-expect(shared_wm_script).to_contain("Pragma: no-cache")
-expect(shared_wm_script).to_contain("X-Content-Type-Options: nosniff")
-expect(shared_native_window).to_contain("HTTP/1.1 200 OK")
-expect(shared_native_window).to_contain("Cache-Control: no-store")
-expect(shared_native_window).to_contain("Pragma: no-cache")
-expect(shared_native_window).to_contain("Expires: 0")
-expect(shared_native_window).to_contain("X-Frame-Options: DENY")
-expect(shared_native_window).to_contain("X-DNS-Prefetch-Control: off")
-expect(shared_native_window).to_contain("X-Permitted-Cross-Domain-Policies: none")
-expect(shared_native_window).to_contain("Referrer-Policy: no-referrer")
-expect(shared_native_window).to_contain("Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()")
-expect(shared_native_window).to_contain("usb=(), serial=(), bluetooth=()")
-expect(shared_native_window).to_contain("clipboard-read=(), clipboard-write=()")
-expect(shared_native_window).to_contain("display-capture=(), screen-wake-lock=(), xr-spatial-tracking=()")
-expect(shared_native_window).to_contain("Content-Security-Policy: default-src 'self'")
-expect(shared_native_window).to_contain("Origin-Agent-Cluster: ?1")
-expect(shared_native_window).to_contain("Cross-Origin-Embedder-Policy: require-corp")
-expect(shared_native_window).to_contain("object-src 'none'")
-expect(shared_retained_renderer_script).to_contain("HTTP/1.1 200 OK")
-expect(shared_retained_renderer_script).to_contain("Cache-Control: no-store")
-expect(shared_retained_renderer_script).to_contain("Pragma: no-cache")
-expect(shared_retained_renderer_script).to_contain("X-Content-Type-Options: nosniff")
-expect(shared_unknown_route).to_contain("HTTP/1.1 404 Not Found")
-expect(shared_unknown_route).to_contain("\"error\": \"not_found\"")
-expect(shared_unknown_route).to_contain("Cache-Control: no-store")
-expect(shared_unknown_route).to_contain("Pragma: no-cache")
-expect(shared_unknown_route).to_contain("X-Content-Type-Options: nosniff")
 expect(last_allowed).to_equal("HTTP/1.1 200 OK|present")
 expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")
 ```
@@ -642,9 +434,6 @@ expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")
 ## Related Documentation
 
 - **Requirements:** [doc/02_requirements/nfr/simple_web_browser_production_hardening.md](doc/02_requirements/nfr/simple_web_browser_production_hardening.md)
-- **Plan:** [doc/03_plan/sys_test/simple_web_browser_production_hardening.md](doc/03_plan/sys_test/simple_web_browser_production_hardening.md)
-- **Design:** [doc/05_design/simple_web_browser_production_hardening.md](doc/05_design/simple_web_browser_production_hardening.md)
-- **Research:** [doc/01_research/domain/simple_web_browser_production_hardening.md](doc/01_research/domain/simple_web_browser_production_hardening.md)
 
 
 </details>

@@ -16,17 +16,31 @@ use std::os::unix::io::AsRawFd;
 
 /// Handle for a prefetch operation that can be waited on
 pub struct PrefetchHandle {
+    #[cfg(unix)]
+    child_pid: Option<libc::pid_t>,
+    #[cfg(windows)]
     thread_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl PrefetchHandle {
     /// Wait for prefetch operation to complete
     pub fn wait(self) -> io::Result<()> {
-        if let Some(handle) = self.thread_handle {
-            handle
-                .join()
-                .map_err(|_| io::Error::new(io::ErrorKind::Other, "prefetch thread panicked"))?;
+        #[cfg(unix)]
+        {
+            if let Some(pid) = self.child_pid {
+                wait_for_child(pid)?;
+            }
         }
+
+        #[cfg(windows)]
+        {
+            if let Some(handle) = self.thread_handle {
+                handle
+                    .join()
+                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "prefetch thread panicked"))?;
+            }
+        }
+
         Ok(())
     }
 }
@@ -67,26 +81,69 @@ pub fn prefetch_files<P: AsRef<Path>>(files: &[P]) -> io::Result<PrefetchHandle>
 
 #[cfg(unix)]
 fn prefetch_files_unix<P: AsRef<Path>>(files: &[P]) -> io::Result<PrefetchHandle> {
-    // ponytail: thread, not fork. The previous fork() ran on the driver's
-    // "simple-main" worker thread, so the warmer child inherited comm
-    // "simple-main". Named commands (`simple run …/mcp/main.spl`) dispatch
-    // without ever calling wait_for_prefetch(), so that child was never
-    // reaped -> a permanent zombie per long-lived server. A finished-but-
-    // unjoined thread leaks nothing. Matches the Windows path below.
+    use std::os::unix::process::CommandExt;
+
+    // Convert paths to owned for transfer to child
     let file_paths: Vec<std::path::PathBuf> = files.iter().map(|p| p.as_ref().to_path_buf()).collect();
 
-    let thread = std::thread::Builder::new()
-        .name("prefetch".to_string())
-        .stack_size(128 * 1024)
-        .spawn(move || {
-            for path in &file_paths {
-                let _ = prefetch_file_mmap(path);
-            }
-        })?;
+    unsafe {
+        // Ignore SIGPIPE before fork to prevent child/parent crash
+        // when pipe is broken (e.g., terminal closed during bootstrap)
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
 
-    Ok(PrefetchHandle {
-        thread_handle: Some(thread),
-    })
+        match libc::fork() {
+            -1 => {
+                // Fork failed
+                Err(io::Error::last_os_error())
+            }
+            0 => {
+                // Child process - do prefetching
+                // Reset signal disposition for child safety
+                libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+                for path in &file_paths {
+                    let _ = prefetch_file_mmap(path);
+                }
+                // Exit child process
+                libc::_exit(0);
+            }
+            child_pid => {
+                // Parent process - return handle
+                Ok(PrefetchHandle {
+                    child_pid: Some(child_pid),
+                })
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_child(pid: libc::pid_t) -> io::Result<()> {
+    use std::ptr;
+
+    unsafe {
+        let mut status: libc::c_int = 0;
+        loop {
+            let result = libc::waitpid(pid, &mut status as *mut libc::c_int, 0);
+
+            if result == -1 {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EINTR) {
+                    // Interrupted by signal, retry
+                    continue;
+                }
+                return Err(err);
+            }
+
+            if result == pid {
+                // Child exited
+                if libc::WIFEXITED(status) {
+                    return Ok(());
+                } else {
+                    return Err(io::Error::other("prefetch child did not exit normally"));
+                }
+            }
+        }
+    }
 }
 
 /// Prefetch a single file using mmap + madvise
@@ -129,10 +186,9 @@ fn prefetch_file_mmap<P: AsRef<Path>>(path: P) -> io::Result<()> {
             let _ = libc::madvise(addr, file_size, libc::MADV_WILLNEED);
         }
 
-        // Pages are now in the kernel page cache, which persists independent
-        // of this mapping. Unmap so we don't leak address space — we run in a
-        // long-lived thread now, not a child that _exit()s immediately.
-        let _ = libc::munmap(addr, file_size);
+        // Keep mapping active to warm cache
+        // The child process will exit with the mapping still active,
+        // which ensures the pages stay in the kernel's page cache.
 
         Ok(())
     }

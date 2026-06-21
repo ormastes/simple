@@ -10,16 +10,12 @@ Minimize Simple generated executable size by making the default runtime path pur
 
 ## Assumed Requirement Path
 
-This plan assumes runtime Option A and NFR Option 1 from:
+This plan assumes feature Option A and NFR Option 1 from:
 
-- `doc/02_requirements/runtime/rust_runtime_minimization_options.md`
+- `doc/02_requirements/feature/rust_runtime_minimization_options.md`
 - `doc/02_requirements/nfr/rust_runtime_minimization_options.md`
 
-Final requirements must not be written until the user selects options. The
-missing final artifacts are:
-
-- `doc/02_requirements/runtime/rust_runtime_minimization.md`
-- `doc/02_requirements/nfr/rust_runtime_minimization.md`
+Final requirements must not be written until the user selects options.
 
 ## Phase 0 - Baseline And Conflict Cleanup
 

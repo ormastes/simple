@@ -1,41 +1,11 @@
 # VHDL MIR Backend ABI Parity Task
 
-> Status: Rust MIR backend ABI plumbing implemented; parity evidence incomplete
+> Status: Simple-side ABI layer complete (VHDL-PARITY-020); Rust MIR backend deferred
 
 Date: 2026-04-23 (updated 2026-05-19)
 Task ID: VHDL-PARITY-016
 Owner: Rust MIR backend parity agent
-Status: needs-evidence — Simple-side complete in `src/compiler/70.backend/backend/vhdl/vhdl_abi.spl` (302 lines, 37/37 tests pass). Rust MIR backend Workers 1-6 style plumbing is implemented, but backend parity system specs are not green yet.
-
-## 2026-06-18 Cleanup Refresh
-
-The Rust MIR backend work is no longer just pending implementation. Current
-evidence shows the core plumbing exists:
-
-- `MirModule` carries `type_registry`.
-- HIR lowering copies `hir.types` into `module.type_registry`.
-- VHDL codegen has entity filtering, return ABI, hardware-call lowering
-  scaffolding, tuple field state, and virtual `rt_tuple_get` projection support.
-- MIR lowering recognizes labeled tuple paths needed by the backend.
-
-Focused Rust checks pass:
-
-```sh
-cd src/compiler_rust && cargo test -p simple-compiler vhdl_return_abi_uses_labeled_tuple_ports -- --nocapture
-cd src/compiler_rust && cargo test -p simple-compiler vhdl_rt_tuple_get_projects_constant_index_from_virtual_tuple -- --nocapture
-```
-
-The plan remains open because parity system specs still fail:
-
-```sh
-bin/simple test test/03_system/compiler/vhdl_mir_backend_multi_output_spec.spl
-bin/simple test test/03_system/compiler/vhdl_mir_backend_call_port_map_spec.spl
-```
-
-Smallest closure action: unskip or finish
-`vhdl_mir_backend_multi_output_spec.spl` with concrete assertions and
-GHDL-backed checks, then do the same for
-`vhdl_mir_backend_call_port_map_spec.spl`.
+Status: Simple-side complete — `src/compiler/70.backend/backend/vhdl/vhdl_abi.spl` (302 lines, 37/37 tests pass). Rust MIR backend Workers 1-6 remain pending.
 
 ## Goal
 

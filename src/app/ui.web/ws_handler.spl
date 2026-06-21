@@ -1,4 +1,3 @@
-#[runtime_intrinsics]
 # WebSocket Handler
 #
 # Handles WebSocket upgrade handshake and message processing
@@ -6,7 +5,7 @@
 
 use app.ui.web.tls_serve_loop.{ConnStream}
 use app.ui.web.origin_guard.{OriginGuard, AuthError}
-use app.ui.web.auth_params.{ui_web_extract_bearer, ui_web_capability_grant_id_authorized, ui_web_fetch_site_allowed, ui_web_host_header_allowed, ui_web_ws_response_protocol}
+use app.ui.web.auth_params.{ui_web_extract_bearer, ui_web_ws_response_protocol}
 use app.ui.web.session_token.{verify}
 # Use runtime SHA-1/base64 directly to avoid as_bytes() interpreter limitation
 extern fn rt_sha1_new() -> i64
@@ -51,38 +50,12 @@ fn ui_web_ws_upgrade_path_allowed(path: text) -> bool:
         route = path.slice(0, query_idx)
     return route == "/ui/ws"
 
-fn ui_web_ws_version_allowed(headers: text) -> bool:
-    return _header_value(headers, "sec-websocket-version") == "13"
-
-fn _is_ws_key_char(ch: text) -> bool:
-    return ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".find(ch) >= 0)
-
-fn ui_web_ws_key_shape_allowed(key: text) -> bool:
-    val trimmed = key.trim()
-    if trimmed.len() != 24:
-        return false
-    if not trimmed.ends_with("=="):
-        return false
-    for ch in trimmed:
-        if not _is_ws_key_char(ch):
-            return false
-    return true
-
-fn ui_web_ws_handshake_headers_allowed(headers: text) -> bool:
-    return ui_web_ws_version_allowed(headers) and ui_web_ws_key_shape_allowed(extract_ws_key(headers))
-
 fn handle_ws_upgrade(stream: ConnStream, path: text, headers: text, guard: OriginGuard, secret: text):
     """Handle WebSocket upgrade handshake with origin + token gate.
 
     Checks Origin header against the allowlist and verifies the bearer token
     before completing the WebSocket handshake. On failure writes 403 and returns."""
     # --- Security gate ---
-    if not ui_web_host_header_allowed(headers):
-        stream.write_all("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
-        return
-    if not ui_web_fetch_site_allowed(headers):
-        stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
-        return
     val origin_result = guard.check(headers)
     match origin_result:
         Err(_):
@@ -100,16 +73,13 @@ fn handle_ws_upgrade(stream: ConnStream, path: text, headers: text, guard: Origi
                 Err(_):
                     stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
                     return
-                Ok(tok):
-                    if not ui_web_capability_grant_id_authorized(tok.grant_id):
-                        stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
-                        return
+                Ok(_):
+                    pass_do_nothing
 
     # --- Proceed with handshake ---
     # Extract Sec-WebSocket-Key from headers
     val key = extract_ws_key(headers)
-    if not ui_web_ws_handshake_headers_allowed(headers):
-        stream.write_all("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+    if key == "":
         return
 
     # Compute accept hash

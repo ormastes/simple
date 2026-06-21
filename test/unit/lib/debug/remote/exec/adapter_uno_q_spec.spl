@@ -1,0 +1,158 @@
+# @cover src/lib/nogc_sync_mut/debug/remote/exec/adapter_uno_q.spl 80%
+"""
+# UNO Q Adapter Specification
+
+**Feature IDs:** #UNOQ-PORT
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Draft
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Verifies `UnoQAdapter` creation, port defaults, OpenOCD argument generation,
+probe configuration, and `MemoryMap.uno_q()` factory. Does NOT test live
+OpenOCD connectivity (gated by D-6: requires external probe).
+
+## Behavior
+
+- Default ports: GDB 27333, telnet 27444, TCL 27666 (no collision with H7/R4)
+- Default probe: `interface/stlink.cfg`
+- OpenOCD args include `target/stm32u5x.cfg` and the probe config
+- `MemoryMap.uno_q()` has SRAM1-only conservative layout (D-5)
+- Adapter starts disconnected
+"""
+
+use std.nogc_sync_mut.debug.remote.exec.adapter_uno_q.{
+    UnoQAdapter,
+    default_uno_q_gdb_port,
+    default_uno_q_telnet_port,
+    default_uno_q_tcl_port,
+    uno_q_openocd_args
+}
+use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap}
+
+
+# ============================================================================
+# Test Group 1: Port defaults
+# ============================================================================
+
+describe "UnoQAdapter port defaults":
+    """
+    ## Port Allocation (D-4)
+
+    Validates unique port assignment: GDB 27333, telnet 27444, TCL 27666.
+    No collision with STM32H7 (23333) or Arduino R4 (25333).
+    """
+
+    it "AC-3: default gdb port is 27333":
+        val port = default_uno_q_gdb_port()
+        expect(port).to_equal(27333)
+
+    it "AC-3: default telnet port is 27444":
+        val port = default_uno_q_telnet_port()
+        expect(port).to_equal(27444)
+
+    it "AC-3: default tcl port is 27666":
+        val port = default_uno_q_tcl_port()
+        expect(port).to_equal(27666)
+
+
+# ============================================================================
+# Test Group 2: OpenOCD argument generation
+# ============================================================================
+
+describe "UnoQAdapter openocd args":
+    """
+    ## OpenOCD Invocation
+
+    Validates that `uno_q_openocd_args()` builds the correct argument
+    string containing both the probe interface and STM32U5x target config.
+    """
+
+    it "AC-3: openocd args contain stm32u5x.cfg":
+        val args = uno_q_openocd_args("interface/stlink.cfg")
+        expect(args).to_contain("stm32u5x.cfg")
+
+    it "AC-3: openocd args contain probe config":
+        val args = uno_q_openocd_args("interface/stlink.cfg")
+        expect(args).to_contain("interface/stlink.cfg")
+
+    it "AC-3: openocd args with jlink probe":
+        val args = uno_q_openocd_args("interface/jlink.cfg")
+        expect(args).to_contain("interface/jlink.cfg")
+
+
+# ============================================================================
+# Test Group 3: Adapter construction
+# ============================================================================
+
+describe "UnoQAdapter construction":
+    """
+    ## Factory Methods
+
+    Validates adapter creation with default and custom configurations.
+    Adapter must start disconnected (connect requires live hardware).
+    """
+
+    it "AC-3: new() has gdb_port 27333":
+        val adapter = UnoQAdapter.new()
+        expect(adapter.gdb_port).to_equal(27333)
+
+    it "AC-3: new() starts disconnected":
+        val adapter = UnoQAdapter.new()
+        expect(adapter.connected).to_equal(false)
+
+    it "AC-3: new() has default stlink probe":
+        val adapter = UnoQAdapter.new()
+        expect(adapter.probe_cfg).to_equal("interface/stlink.cfg")
+
+    it "AC-3: with_probe overrides probe_cfg":
+        val adapter = UnoQAdapter.with_probe("interface/cmsis-dap.cfg")
+        expect(adapter.probe_cfg).to_equal("interface/cmsis-dap.cfg")
+
+    it "AC-3: with_ports overrides gdb_port":
+        val adapter = UnoQAdapter.with_ports(9999, 9998)
+        expect(adapter.gdb_port).to_equal(9999)
+
+    it "AC-3: with_ports overrides telnet_port":
+        val adapter = UnoQAdapter.with_ports(9999, 9998)
+        expect(adapter.telnet_port).to_equal(9998)
+
+
+# ============================================================================
+# Test Group 4: MemoryMap.uno_q() — conservative SRAM1 layout (D-5)
+# ============================================================================
+
+describe "MemoryMap uno_q":
+    """
+    ## Conservative Memory Layout (D-5)
+
+    SRAM1-only (192 KB, 0x20000000-0x20030000):
+    - code: 0x20002000-0x20020000 (120 KB)
+    - data: 0x20020000-0x2002E000 (56 KB)
+    - stack_top: 0x20030000
+    """
+
+    it "AC-3: code_start is 0x20002000":
+        val mm = MemoryMap.uno_q()
+        expect(mm.code_start).to_equal(0x20002000)
+
+    it "AC-3: code_end is 0x20020000":
+        val mm = MemoryMap.uno_q()
+        expect(mm.code_end).to_equal(0x20020000)
+
+    it "AC-3: data_start is 0x20020000":
+        val mm = MemoryMap.uno_q()
+        expect(mm.data_start).to_equal(0x20020000)
+
+    it "AC-3: data_end is 0x2002E000":
+        val mm = MemoryMap.uno_q()
+        expect(mm.data_end).to_equal(0x2002E000)
+
+    it "AC-3: stack_top is 0x20030000":
+        val mm = MemoryMap.uno_q()
+        expect(mm.stack_top).to_equal(0x20030000)

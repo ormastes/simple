@@ -2,11 +2,6 @@
 
 use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{WebGPUResourceTable}
 
-val WEBGPU_QUEUE_MAX_SUBMIT_BUFFERS: i32 = 64
-val WEBGPU_COMMAND_ENCODER_MAX_DRAW_VERTICES: i64 = 1048576
-val WEBGPU_COMMAND_ENCODER_MAX_DISPATCH_WORKGROUPS: i64 = 1048576
-val WEBGPU_SHADER_MAX_SOURCE_BYTES: i32 = 4096
-
 pub class GPUShaderModule:
     id: i32
     label: text
@@ -82,9 +77,6 @@ pub class WebGPUCommandEncoder:
         if not self.active_render or vertex_count <= 0 or instance_count <= 0:
             self.valid = false
             return false
-        if vertex_count > WEBGPU_COMMAND_ENCODER_MAX_DRAW_VERTICES / instance_count:
-            self.valid = false
-            return false
         self.draw_call_count = self.draw_call_count + 1
         true
 
@@ -92,14 +84,7 @@ pub class WebGPUCommandEncoder:
         if not self.active_compute or x <= 0 or y <= 0 or z <= 0:
             self.valid = false
             return false
-        if x > WEBGPU_COMMAND_ENCODER_MAX_DISPATCH_WORKGROUPS / y:
-            self.valid = false
-            return false
-        val xy = x * y
-        if xy > WEBGPU_COMMAND_ENCODER_MAX_DISPATCH_WORKGROUPS / z:
-            self.valid = false
-            return false
-        self.dispatched_workgroups = self.dispatched_workgroups + (xy * z)
+        self.dispatched_workgroups = self.dispatched_workgroups + (x * y * z)
         true
 
     me end_compute_pass() -> bool:
@@ -173,25 +158,19 @@ pub class WebGPUContext:
         true
 
     me create_shader_module(label: text, source: text) -> GPUShaderModule:
-        val valid = self.device_ready and source.trim() != "" and source.len() <= WEBGPU_SHADER_MAX_SOURCE_BYTES
-        if not valid:
-            return GPUShaderModule(id: -1, label: label, source: source, valid: false)
+        val valid = self.device_ready and source.trim() != ""
         val module = GPUShaderModule(id: self.next_shader_id, label: label, source: source, valid: valid)
         self.next_shader_id = self.next_shader_id + 1
         module
 
     me create_render_pipeline(vertex: GPUShaderModule, fragment: GPUShaderModule) -> GPUPipelineHandle:
         val valid = self.device_ready and vertex.valid and fragment.valid
-        if not valid:
-            return GPUPipelineHandle(id: -1, valid: false, kind: "render")
         val pipeline = GPUPipelineHandle(id: self.next_pipeline_id, valid: valid, kind: "render")
         self.next_pipeline_id = self.next_pipeline_id + 1
         pipeline
 
     me create_compute_pipeline(shader: GPUShaderModule) -> GPUPipelineHandle:
         val valid = self.device_ready and shader.valid
-        if not valid:
-            return GPUPipelineHandle(id: -1, valid: false, kind: "compute")
         val pipeline = GPUPipelineHandle(id: self.next_pipeline_id, valid: valid, kind: "compute")
         self.next_pipeline_id = self.next_pipeline_id + 1
         pipeline
@@ -206,10 +185,6 @@ pub class WebGPUContext:
         if offset < 0 or size < 0:
             self.last_error = "invalid queue write range"
             return false
-        val buffer_size = self.resources.buffer_size(buffer_id)
-        if offset > buffer_size or size > buffer_size - offset:
-            self.last_error = "queue write range exceeds buffer size"
-            return false
         self.queue.write_count = self.queue.write_count + 1
         true
 
@@ -219,9 +194,6 @@ pub class WebGPUContext:
     me queue_submit(buffers: [GPUCommandBufferHandle]) -> bool:
         if self.device_lost:
             self.last_error = "WebGPU device is lost"
-            return false
-        if buffers.len() > WEBGPU_QUEUE_MAX_SUBMIT_BUFFERS:
-            self.last_error = "queue submit command buffer count exceeds limit"
             return false
         for buffer in buffers:
             if not buffer.valid:

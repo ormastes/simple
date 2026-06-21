@@ -3,32 +3,6 @@ use std.database.vector.types.{VectorDbConfig, VectorDbError, VectorEntry, Searc
 use std.database.vector.distance.{compute_distance, l2_norm}
 use std.database.vector.codec.{encode_vector, decode_vector, encode_metadata, decode_metadata}
 use std.database.vector.index.{BruteForceIndex}
-use std.database.vector.search_offload.{
-    VectorSearchOffloadExecution,
-    VectorSearchDeviceOffloadExecution,
-    vector_search_offload_execute,
-    vector_search_offload_execute_device_validated
-}
-use std.database.query_offload.{
-    DbQueryAccumulatedOffloadExecution,
-    db_query_offload_execute_vector_device_validated,
-    db_query_offload_execute_accumulating,
-    db_query_vector
-}
-use std.database.storage_mode_offload.{DbStorageVectorDeviceOffloadExecution}
-use std.web_db_offload.contract.{GpuWdbBudget}
-use std.web_db_offload.queue.{GpuWdbQueueState}
-use std.web_db_offload.library.{GpuWdbLibraryRegistry}
-use std.web_db_offload.device_backend.{GpuWdbDeviceBackend}
-use std.web_db_offload.scheduler.{GpuWdbBatchAccumulator, GpuWdbScheduleClass}
-
-struct VectorSearchAccumulatedOffloadExecution:
-    results: [SearchResult]
-    accumulated: DbQueryAccumulatedOffloadExecution
-
-struct VectorStoreQueryDeviceOffloadExecution:
-    results: [SearchResult]
-    query_execution: DbStorageVectorDeviceOffloadExecution
 
 class VectorDatabase:
     meta_db: SdnDatabase
@@ -117,8 +91,9 @@ class VectorDatabase:
                 val id = row.get("id")
                 val vec_text = row.get("vector")
                 if valid.? and id.? and vec_text.? and valid == "1":
-                    if val decoded_vec = decode_vector(vec_text):
-                        val add_result = idx.add(id, decoded_vec)
+                    val vec = decode_vector(vec_text)
+                    if vec.?:
+                        val add_result = idx.add(id, vec)
                         if add_result.?:
                             count = count + 1
                 j = j + 1
@@ -173,10 +148,8 @@ class VectorDatabase:
         val norm_text = row.get("norm")
         if not vec_text.?:
             return nil
-        var vector: [f64] = []
-        if val decoded_vec = decode_vector(vec_text):
-            vector = decoded_vec
-        else:
+        val vec = decode_vector(vec_text)
+        if not vec.?:
             return nil
         val meta = if meta_text.?: decode_metadata(meta_text) else {}
         var norm = 0.0
@@ -186,7 +159,7 @@ class VectorDatabase:
                 norm = parsed
         VectorEntry(
             id: id,
-            vector: vector,
+            vector: vec,
             metadata: meta,
             norm: norm
         )
@@ -255,179 +228,6 @@ class VectorDatabase:
             i = i + 1
         Ok(results)
 
-    fn search_with_offload(query: [f64], k: i64, state: GpuWdbQueueState,
-                           registry: GpuWdbLibraryRegistry,
-                           gpu_available: bool, generation_current: bool,
-                           cpu_fallback_available: bool,
-                           budget: GpuWdbBudget) -> Result<VectorSearchOffloadExecution, VectorDbError>:
-        val cpu = me.search(query, k)?
-        Ok(vector_search_offload_execute(
-            me.config.metric,
-            me.entry_count,
-            me.config.dimensions,
-            true,
-            state,
-            registry,
-            gpu_available,
-            generation_current,
-            cpu_fallback_available,
-            budget,
-            cpu
-        ))
-
-    fn search_with_device_backend_validated(query: [f64], k: i64,
-                                            state: GpuWdbQueueState,
-                                            backend: GpuWdbDeviceBackend,
-                                            generation_current: bool,
-                                            expected_backend_generation: i64,
-                                            cpu_fallback_available: bool,
-                                            budget: GpuWdbBudget,
-                                            gpu_candidate_results: [SearchResult],
-                                            started_us: i64,
-                                            finished_us: i64,
-                                            measured_device_time_us: i64,
-                                            timing_source: text) -> Result<VectorSearchDeviceOffloadExecution, VectorDbError>:
-        val cpu = me.search(query, k)?
-        Ok(vector_search_offload_execute_device_validated(
-            me.config.metric,
-            me.entry_count,
-            me.config.dimensions,
-            true,
-            state,
-            backend,
-            generation_current,
-            expected_backend_generation,
-            cpu_fallback_available,
-            budget,
-            cpu,
-            gpu_candidate_results,
-            started_us,
-            finished_us,
-            measured_device_time_us,
-            timing_source
-        ))
-
-    fn search_with_query_device_backend_validated(query: [f64], k: i64,
-                                                  state: GpuWdbQueueState,
-                                                  backend: GpuWdbDeviceBackend,
-                                                  generation_current: bool,
-                                                  expected_backend_generation: i64,
-                                                  cpu_fallback_available: bool,
-                                                  budget: GpuWdbBudget,
-                                                  gpu_candidate_results: [SearchResult],
-                                                  started_us: i64,
-                                                  finished_us: i64,
-                                                  measured_device_time_us: i64,
-                                                  timing_source: text) -> Result<VectorStoreQueryDeviceOffloadExecution, VectorDbError>:
-        val cpu = me.search(query, k)?
-        Ok(VectorStoreQueryDeviceOffloadExecution(
-            results: cpu,
-            query_execution: db_query_offload_execute_vector_device_validated(
-                db_query_vector(
-                    me.config.metric,
-                    me.entry_count,
-                    me.config.dimensions,
-                    true,
-                    generation_current,
-                    cpu
-                ),
-                state,
-                backend,
-                expected_backend_generation,
-                cpu_fallback_available,
-                budget,
-                gpu_candidate_results,
-                started_us,
-                finished_us,
-                measured_device_time_us,
-                timing_source
-            )
-        ))
-
-    fn search_with_offload_accumulating(query: [f64], k: i64,
-                                        state: GpuWdbQueueState,
-                                        registry: GpuWdbLibraryRegistry,
-                                        gpu_available: bool,
-                                        generation_current: bool,
-                                        cpu_fallback_available: bool,
-                                        budget: GpuWdbBudget,
-                                        schedule_class: GpuWdbScheduleClass,
-                                        accumulator: GpuWdbBatchAccumulator) -> Result<VectorSearchAccumulatedOffloadExecution, VectorDbError>:
-        val cpu = me.search(query, k)?
-        Ok(VectorSearchAccumulatedOffloadExecution(
-            results: cpu,
-            accumulated: db_query_offload_execute_accumulating(
-                db_query_vector(
-                    me.config.metric,
-                    me.entry_count,
-                    me.config.dimensions,
-                    true,
-                    generation_current,
-                    cpu
-                ),
-                state,
-                registry,
-                gpu_available,
-                cpu_fallback_available,
-                budget,
-                schedule_class,
-                accumulator
-            )
-        ))
-
-    fn search_with_filter_offload(query: [f64], k: i64, filter: Dict<text, text>,
-                                  state: GpuWdbQueueState,
-                                  registry: GpuWdbLibraryRegistry,
-                                  gpu_available: bool, generation_current: bool,
-                                  cpu_fallback_available: bool,
-                                  budget: GpuWdbBudget) -> Result<VectorSearchOffloadExecution, VectorDbError>:
-        val cpu = me.search_with_filter(query, k, filter)?
-        Ok(vector_search_offload_execute(
-            me.config.metric,
-            me.entry_count,
-            me.config.dimensions,
-            true,
-            state,
-            registry,
-            gpu_available,
-            generation_current,
-            cpu_fallback_available,
-            budget,
-            cpu
-        ))
-
-    fn search_with_filter_offload_accumulating(query: [f64], k: i64,
-                                               filter: Dict<text, text>,
-                                               state: GpuWdbQueueState,
-                                               registry: GpuWdbLibraryRegistry,
-                                               gpu_available: bool,
-                                               generation_current: bool,
-                                               cpu_fallback_available: bool,
-                                               budget: GpuWdbBudget,
-                                               schedule_class: GpuWdbScheduleClass,
-                                               accumulator: GpuWdbBatchAccumulator) -> Result<VectorSearchAccumulatedOffloadExecution, VectorDbError>:
-        val cpu = me.search_with_filter(query, k, filter)?
-        Ok(VectorSearchAccumulatedOffloadExecution(
-            results: cpu,
-            accumulated: db_query_offload_execute_accumulating(
-                db_query_vector(
-                    me.config.metric,
-                    me.entry_count,
-                    me.config.dimensions,
-                    true,
-                    generation_current,
-                    cpu
-                ),
-                state,
-                registry,
-                gpu_available,
-                cpu_fallback_available,
-                budget,
-                schedule_class,
-                accumulator
-            )
-        ))
-
     fn count() -> i64:
         me.entry_count
 
@@ -451,8 +251,9 @@ class VectorDatabase:
             val id = row.get("id")
             val vec_text = row.get("vector")
             if valid.? and id.? and vec_text.? and valid == "1":
-                if val decoded_vec = decode_vector(vec_text):
-                    val res = me.index.add(id, decoded_vec)
+                val vec = decode_vector(vec_text)
+                if vec.?:
+                    val res = me.index.add(id, vec)
                     if res.?:
                         count = count + 1
             i = i + 1

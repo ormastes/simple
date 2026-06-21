@@ -69,11 +69,7 @@ Linux unavailable state when a platform child check passes on its required host.
 - macOS Metal: run the same wrapper on Darwin with `xcrun metal`, `xcrun metallib`, and native raw Metal readback evidence. Linux `host-unavailable` is not a Metal pass.
 - ROCm/HIP: run on an AMD ROCm host with `hipcc`, loader libraries, device visibility, and verified HSACO for `HIP_ARCH`; Linux hosts without that stack remain typed unavailable.
 - Windows DirectX: do not claim production readiness from DXVK setup alone. Run and promote the existing `scripts/check/check-directx-native-readback.shs` wrapper on a Windows `win32-real` host only when it returns `device_readback`, a positive backend handle, and matching checksums.
-- WebGPU: run `scripts/check/check-webgpu-real-readback.shs` for real
-  `device_readback` proof, but the current Linux aggregate report still records
-  `webgpu_real` as unavailable/not-device-readback. The separate WebGPU
-  `surface_upload` provenance remains useful but is still not a device-readback
-  proof.
+- WebGPU: real `device_readback` evidence now passes through `scripts/check/check-webgpu-real-readback.shs`; the separate WebGPU `surface_upload` provenance remains useful but is still not a device-readback proof.
 
 The wrapper records DirectX structured/native-gate status and WebGPU `surface_upload`
 focused spec results as presentation/upload provenance. These fields are useful

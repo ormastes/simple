@@ -11,10 +11,6 @@ Run: `scripts/gui/macos-gui-run.shs examples/06_io/ui/web_render_backend_gui.spl
 
 Invariant: chromium is a peer **shell**, never a draw-lane flag. Compare only via
 two independently produced artifacts + an absolute oracle — never memorized pixels.
-For macOS Vulkan/RenderDoc proof, compare Electron Chromium, original Chrome,
-and pure-Simple Engine2D with `scripts/setup/setup-gui-web-2d-vulkan-env.shs
---renderdoc`; browser bitmaps with `vulkan-angle-unavailable` are fallback
-evidence, not a Vulkan-backed pass.
 
 ```sdn
 web_render_backend:

@@ -1807,13 +1807,13 @@ static void rt_send_arp_reply(const spl_u8 *rx) {
     rt_send_frame(frame, 42);
 }
 
-static spl_i64 rt_send_tcp_packet(spl_u8 flags, const spl_u8 *payload, spl_u16 payload_len) {
+static void rt_send_tcp_packet(spl_u8 flags, const spl_u8 *payload, spl_u16 payload_len) {
     spl_u8 frame[256];
     spl_u16 ip_len = (spl_u16)(20U + 20U + payload_len);
     spl_u16 tcp_len = (spl_u16)(20U + payload_len);
     spl_u32 sum;
     if (14U + ip_len > sizeof(frame)) {
-        return -2;
+        return;
     }
     rt_memzero(frame, sizeof(frame));
     rt_build_eth(frame, g_boot_tcp_peer_mac, 0x0800U);
@@ -1854,9 +1854,7 @@ static spl_i64 rt_send_tcp_packet(spl_u8 flags, const spl_u8 *payload, spl_u16 p
         if (flags & 0x01U) {
             g_boot_tcp_send_next = g_boot_tcp_send_next + 1U;
         }
-        return (spl_i64)payload_len;
     }
-    return -1;
 }
 
 static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
@@ -1956,8 +1954,6 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
     } else if (flags & 0x01U) {
         g_boot_tcp_recv_next = seq + 1U;
         rt_send_tcp_packet(0x10U, (const spl_u8 *)0, 0);
-    } else if ((flags & 0x10U) && !g_boot_tcp_client_announced) {
-        g_boot_tcp_client_ready = 1;
     }
 }
 
@@ -2447,6 +2443,10 @@ spl_i64 rt_boot_tcp_accept_timeout(spl_i64 fd, spl_i64 ms) {
             g_boot_tcp_client_announced = 1;
             return 200;
         }
+        if (polls > 5000ULL && g_boot_tcp_client_open && !g_boot_tcp_client_announced) {
+            g_boot_tcp_client_announced = 1;
+            return 200;
+        }
     }
     return -1;
 }
@@ -2507,16 +2507,10 @@ spl_i64 rt_boot_tcp_write_auto(spl_i64 fd) {
 
 spl_i64 rt_boot_tcp_send_ssh_banner(spl_i64 fd) {
     static const spl_u8 ssh_banner[] = "SSH-2.0-SimpleOS_1.0\r\n";
-    spl_i64 sent;
     if (fd != 200 || !g_boot_tcp_client_open) {
         return -1;
     }
-    sent = rt_send_tcp_packet(0x18U, ssh_banner, (spl_u16)(sizeof(ssh_banner) - 1ULL));
-    if (sent < 0) {
-        uart_line("BTCP SSH BANNER DROP");
-        return sent;
-    }
-    uart_line("BTCP SSH BANNER SENT");
+    rt_send_tcp_packet(0x18U, ssh_banner, (spl_u16)(sizeof(ssh_banner) - 1ULL));
     return (spl_i64)(sizeof(ssh_banner) - 1ULL);
 }
 

@@ -57,8 +57,8 @@ expect h.xmax == 0
 
 #### marks deleted with xmax
 
-- var h = MvccHeader create
-- h mark deleted
+1. var h = MvccHeader create
+2. h mark deleted
 
 
 <details>
@@ -95,8 +95,8 @@ expect t.data == "hello"
 
 #### marks tuple deleted
 
-- var t = MvccTuple create
-- t delete
+1. var t = MvccTuple create
+2. t delete
 
 
 <details>
@@ -117,9 +117,9 @@ expect t.header.xmax == 10
 
 #### detects active transactions
 
-- expect snap is txn active
-- expect snap is txn active
-- expect snap is txn active
+1. expect snap is txn active
+2. expect snap is txn active
+3. expect snap is txn active
 
 
 <details>
@@ -141,7 +141,7 @@ expect snap.is_txn_active(2) == false
 
 #### committed insert is visible
 
-- expect mvcc is visible
+1. expect mvcc is visible
 
 
 <details>
@@ -160,7 +160,7 @@ expect mvcc_is_visible(tuple, snap) == true
 
 #### active insert is not visible
 
-- expect mvcc is visible
+1. expect mvcc is visible
 
 
 <details>
@@ -179,7 +179,7 @@ expect mvcc_is_visible(tuple, snap) == false
 
 #### future insert is not visible
 
-- expect mvcc is visible
+1. expect mvcc is visible
 
 
 <details>
@@ -198,9 +198,9 @@ expect mvcc_is_visible(tuple, snap) == false
 
 #### deleted tuple is not visible
 
-- var tuple = MvccTuple create
-- tuple delete
-- expect mvcc is visible
+1. var tuple = MvccTuple create
+2. tuple delete
+3. expect mvcc is visible
 
 
 <details>
@@ -220,9 +220,9 @@ expect mvcc_is_visible(tuple, snap) == false
 
 #### tuple deleted by active txn is still visible
 
-- var tuple = MvccTuple create
-- tuple delete
-- expect mvcc is visible
+1. var tuple = MvccTuple create
+2. tuple delete
+3. expect mvcc is visible
 
 
 <details>
@@ -244,10 +244,10 @@ expect mvcc_is_visible(tuple, snap) == true
 
 #### inserts and scans tuples
 
-- var table = MvccTable new
-- table insert
-- table insert
-- expect visible len
+1. var table = MvccTable new
+2. table insert
+3. table insert
+4. expect visible len
 
 
 <details>
@@ -269,11 +269,11 @@ expect visible.len() == 2
 
 #### counts visible tuples
 
-- var table = MvccTable new
-- table insert
-- table insert
-- table insert
-- expect table count visible
+1. var table = MvccTable new
+2. table insert
+3. table insert
+4. table insert
+5. expect table count visible
 
 
 <details>
@@ -295,11 +295,11 @@ expect table.count_visible(snap) == 2
 
 #### delete hides tuple from scan
 
-- var table = MvccTable new
-- table insert
-- table insert
-- table delete matching
-- expect table count visible
+1. var table = MvccTable new
+2. table insert
+3. table insert
+4. table delete matching
+5. expect table count visible
 
 
 <details>
@@ -323,7 +323,7 @@ expect table.count_visible(snap) == 1
 
 #### assigns incrementing txn ids
 
-- var mgr = MvccTxnManager new
+1. var mgr = MvccTxnManager new
 
 
 <details>
@@ -343,9 +343,9 @@ expect h2.txn_id > h1.txn_id
 
 #### tracks active transactions in snapshot
 
-- var mgr = MvccTxnManager new
-- expect snap is txn active
-- expect snap is txn active
+1. var mgr = MvccTxnManager new
+2. expect snap is txn active
+3. expect snap is txn active
 
 
 <details>
@@ -367,10 +367,10 @@ expect snap.is_txn_active(h2.txn_id) == true
 
 #### commit removes from active
 
-- var mgr = MvccTxnManager new
-- mgr commit
-- expect snap is txn active
-- expect mgr get status
+1. var mgr = MvccTxnManager new
+2. mgr commit
+3. expect snap is txn active
+4. expect mgr get status
 
 
 <details>
@@ -392,10 +392,10 @@ expect mgr.get_status(h1.txn_id) == "committed"
 
 #### abort removes from active
 
-- var mgr = MvccTxnManager new
-- mgr abort
-- expect snap is txn active
-- expect mgr get status
+1. var mgr = MvccTxnManager new
+2. mgr abort
+3. expect snap is txn active
+4. expect mgr get status
 
 
 <details>

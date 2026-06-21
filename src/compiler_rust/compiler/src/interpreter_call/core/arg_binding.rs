@@ -99,16 +99,11 @@ pub(crate) fn bind_args_with_injected(
         // Some-wrap their plain returns, so passing such a value to a `param: T`
         // site (e.g. `if v != nil: emit(v)` where v came from a `-> WidgetNode?`
         // call and `emit(node: WidgetNode)`) must not leave it Option-wrapped.
-        if let (
-            Some(t),
-            Value::Enum {
-                enum_name,
-                variant,
-                payload,
-            },
-        ) = (ty, &value)
-        {
-            if enum_name == "Option" && variant == "Some" && super::function_exec::return_type_unwraps_option_some(t) {
+        if let (Some(t), Value::Enum { enum_name, variant, payload }) = (ty, &value) {
+            if enum_name == "Option"
+                && variant == "Some"
+                && super::function_exec::return_type_unwraps_option_some(t)
+            {
                 if let Some(inner) = payload {
                     return (**inner).clone();
                 }
@@ -147,7 +142,8 @@ pub(crate) fn bind_args_with_injected(
                     } else if positional_idx < var_idx {
                         // Regular parameter before variadic
                         let param = params_to_bind[positional_idx];
-                        let val = coerce_param(wrap_trait_object!(spread_item, param.ty.as_ref()), param.ty.as_ref());
+                        let val =
+                            coerce_param(wrap_trait_object!(spread_item, param.ty.as_ref()), param.ty.as_ref());
                         validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                         bound.insert(param.name.clone(), val);
                     } else {
@@ -395,16 +391,11 @@ pub(crate) fn bind_args_with_values(
         // Some-wrap their plain returns, so passing such a value to a `param: T`
         // site (e.g. `if v != nil: emit(v)` where v came from a `-> WidgetNode?`
         // call and `emit(node: WidgetNode)`) must not leave it Option-wrapped.
-        if let (
-            Some(t),
-            Value::Enum {
-                enum_name,
-                variant,
-                payload,
-            },
-        ) = (ty, &value)
-        {
-            if enum_name == "Option" && variant == "Some" && super::function_exec::return_type_unwraps_option_some(t) {
+        if let (Some(t), Value::Enum { enum_name, variant, payload }) = (ty, &value) {
+            if enum_name == "Option"
+                && variant == "Some"
+                && super::function_exec::return_type_unwraps_option_some(t)
+            {
                 if let Some(inner) = payload {
                     return (**inner).clone();
                 }

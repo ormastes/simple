@@ -16,7 +16,11 @@ use std.play.types.*
 use std.play.xvfb.{wrap_cmd}
 use std.common.text_advanced.{escape_json}
 
-use std.io_runtime.{process_run, file_exists, file_write, mkdir_p, time_now_unix_micros}
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
 
 val ARTIFACTS_ROOT = "doc/08_tracking/test/play"
 
@@ -31,11 +35,11 @@ struct DetectedTarget:
     args: [text]
 
 fn _detect_target(target_dir: text) -> DetectedTarget:
-    if file_exists("{target_dir}/.vscode-test.mjs"):
+    if rt_file_exists("{target_dir}/.vscode-test.mjs"):
         return DetectedTarget(kind: "vscode", command: "npx", args: ["vscode-test"])
-    if file_exists("{target_dir}/playwright.config.js") or file_exists("{target_dir}/playwright.config.ts") or file_exists("{target_dir}/playwright.config.mjs"):
+    if rt_file_exists("{target_dir}/playwright.config.js") or rt_file_exists("{target_dir}/playwright.config.ts") or rt_file_exists("{target_dir}/playwright.config.mjs"):
         return DetectedTarget(kind: "playwright", command: "npx", args: ["playwright", "test"])
-    if file_exists("{target_dir}/package.json"):
+    if rt_file_exists("{target_dir}/package.json"):
         return DetectedTarget(kind: "npm", command: "npm", args: ["test"])
     DetectedTarget(kind: "unknown", command: "", args: [])
 
@@ -88,14 +92,14 @@ fn _guess_pass_fail(stdout: text, stderr: text, exit_code: i64) -> (i64, i64):
 # ----------------------------------------------------------------------------
 
 fn _make_artifacts_dir() -> text:
-    val ts = time_now_unix_micros()
+    val ts = rt_time_now_unix_micros()
     val dir = "{ARTIFACTS_ROOT}/orch-{ts}"
-    mkdir_p(dir)
+    rt_mkdir_p(dir)
     dir
 
 fn _write_summary(dir: text, target_dir: text, kind: text, cmd: text, args: [text], stdout: text, stderr: text, exit_code: i64, passed: i64, failed: i64, duration_ms: i64):
-    file_write("{dir}/stdout.log", stdout)
-    file_write("{dir}/stderr.log", stderr)
+    rt_file_write_text("{dir}/stdout.log", stdout)
+    rt_file_write_text("{dir}/stderr.log", stderr)
     var arg_parts: [text] = []
     for a in args:
         arg_parts.push("\"{a}\"")
@@ -110,10 +114,10 @@ fn _write_summary(dir: text, target_dir: text, kind: text, cmd: text, args: [tex
         "passed: {passed}\n" +
         "failed: {failed}\n" +
         "duration_ms: {duration_ms}\n"
-    file_write("{dir}/summary.sdn", body)
+    rt_file_write_text("{dir}/summary.sdn", body)
 
 fn orchestrator_run(target_dir: text, _rest: [text]) -> Result<text, PlayError>:
-    if not file_exists(target_dir):
+    if not rt_file_exists(target_dir):
         return Err(play_error_with_detail(ERR_NOT_FOUND, "target directory not found", target_dir))
 
     val detected = _detect_target(target_dir)
@@ -136,9 +140,9 @@ fn orchestrator_run(target_dir: text, _rest: [text]) -> Result<text, PlayError>:
     # Xvfb-wrap on Linux without DISPLAY.
     val (cmd, wrapped_args) = wrap_cmd("sh", ["-c", shell_line])
 
-    val start = time_now_unix_micros()
-    val result = process_run(cmd, wrapped_args)
-    val end = time_now_unix_micros()
+    val start = rt_time_now_unix_micros()
+    val result = rt_process_run(cmd, wrapped_args)
+    val end = rt_time_now_unix_micros()
     val duration_ms = (end - start) / 1000
 
     val stdout = result.0

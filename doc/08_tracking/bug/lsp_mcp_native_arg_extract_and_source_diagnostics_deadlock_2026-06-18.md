@@ -69,27 +69,6 @@ So 10/11 LSP tools work today; `lsp_diagnostics` is degraded to a message (no ha
    spawns a delegate (zombie child + parent `futex_wait`). Then re-enable
    diagnostics via `SIMPLE_LSP_ENABLE_DIAGNOSTICS=1`.
 
-## Runtime fix landed 2026-06-18 (pending rebuild+deploy)
-
-Root cause confirmed in the C runtime: `rt_process_run` (`src/runtime/runtime_native.c`)
-used `popen()` + `fgets()`-until-EOF. `pclose()` reaps the shell fine, but `fgets`
-blocks forever when a reparented descendant (e.g. `simple check`'s delegate driver)
-keeps the stdout pipe write-end open, so EOF never arrives.
-
-Fix: read the pipe via `poll()` with a 3s idle timeout instead of `fgets`-to-EOF.
-Real EOF (all write-ends closed) still breaks immediately — no added latency for the
-common case — but a descendant-held pipe now returns after the stream goes idle
-(capturing the command's output) instead of hanging. Validated in a standalone C
-harness: a normal command returns instantly with full output; a command that
-backgrounds a 30s descendant returns in ~3s with its output intact (no hang).
-
-NOT yet live: `rt_process_run` is the C runtime baked into the self-hosted `bin/simple`,
-so the fix requires rebuilding `libsimple_runtime.a` and relinking `bin/simple`
-(full bootstrap). Until then `lsp_diagnostics` stays gated off. After deploy, flip the
-gate (remove the `SIMPLE_LSP_ENABLE_DIAGNOSTICS` guard in `run_lsp_diagnostics`).
-Parity TODO: the Rust interpreter `rt_process_run` (`interpreter_extern/system.rs`,
-`Command::output()`) has the same EOF-wait issue on the cargo-seed path.
-
 ## Repro
 
 ```sh

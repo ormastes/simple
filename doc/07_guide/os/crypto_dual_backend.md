@@ -9,11 +9,6 @@ Implementation entrypoint:
 
 ## Modes
 
-These mode names apply to runtime-vs-pure algorithm wrappers such as hashes,
-signatures, key exchange helpers, compression, and similar value-returning
-functions. Server stacks use the related but stricter `alpha` / `beta` /
-`release` contract described below.
-
 ### `alpha`
 
 Current default mode. **Fail-closed.**
@@ -116,34 +111,3 @@ Reference integration:
 
 This is the pattern to extend to compression, key exchange helpers, signature
 families, and other runtime/pure pairs.
-
-## Server Protocol Stacks
-
-Pure Simple SSH and HTTPS servers use `alpha`, `beta`, and `release` names, not
-`normal`, because production server startup needs an explicit no-bypass term:
-
-- `alpha`: Simple protocol path stays active and may compare against a native
-  SSH/TLS protocol wrapper when one is explicitly configured.
-- `beta`: Simple protocol path stays active and may record native-wrapper
-  comparison diagnostics.
-- `release`: production mode. Simple protocol path only; no `rt_ssh_*` or
-  `rt_tls_server_*` complete protocol wrapper may be used as the server path.
-
-Runtime/SFFI is still allowed in server `release` mode, but only for host access:
-TCP accept/read/write, time, entropy, certificate/key filesystem access, and
-process execution. Runtime/SFFI must not replace SSH version exchange, KEX,
-auth, channel handling, TLS record/handshake/application-data handling, or HTTP
-request parsing/routing.
-
-Current server contract surfaces:
-
-- `src/lib/nogc_sync_mut/net/pure_server.spl`
-- `src/lib/nogc_async_mut/net/pure_server.spl`
-- `src/app/test/pure_simple_server_release_smoke.spl`
-- `doc/07_guide/lib/networking/pure_simple_servers.md`
-
-The release smoke is the system-level guard for this policy. It checks hosted
-Linux and SimpleOS adapters, release composition plans, alpha/beta/release mode
-behavior, rejection of synthetic native protocol bypass adapters, SSH auth
-success/failure, HTTPS response construction, HTTP request parsing/routing, and
-TLS record rejection on unsupported handshake versions.

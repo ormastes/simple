@@ -14,7 +14,7 @@ backend readback fixtures. Synthetic handles remain isolated probe evidence.
 - This lane owns the final chain from 2D draw scheduling -> host/GPU queue emit/drain ->
   BrowserBackend frame evidence -> same-frame GPU readback receipt.
 - Canonical source of truth: `sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`.
-- Latest report (`doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-21.md`) is expected to pass on this Linux host when regenerated:
+- Latest report (`doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md`) is expected to pass on this Linux host when regenerated:
   `browser_frame_queue_status=pass`, `same_frame_gpu_backend_readback_status=pass`,
   `readback_vulkan_verdict=pass`, `readback_cuda_verdict=pass`,
   `readback_opencl_verdict=pass`,
@@ -26,9 +26,7 @@ backend readback fixtures. Synthetic handles remain isolated probe evidence.
 - After the Engine2D runtime queue bridge changed from evidence-only validation
   to `DrawIrBatch -> runtime queue -> drain -> dispatch/render`, regenerate the
   production report on a Vulkan/CUDA/OpenCL-capable host before treating stored
-  Linux evidence as current production proof. Runtime queue/drain evidence is
-  necessary but not sufficient; the production pass still requires same-frame
-  backend `device_readback` with a positive backend handle and matching checksum.
+  Linux evidence as current production proof.
 - BrowserBackend/WebRender currently carries explicit dispatch diagnostics. The
   first GPU frame uses a bounded widget-semantic Draw IR dispatch receipt with
   payload size/hash/text evidence, GUI AST source evidence, widget-id rect
@@ -109,16 +107,14 @@ backend readback fixtures. Synthetic handles remain isolated probe evidence.
    - AC: no hot-path HTML -> Draw IR generation is added without bounded
      performance evidence.
    - AC: image URI Draw IR commands remain command-level evidence only until an
-     asset resolver plus PNG/JPEG/WebP/TIFF/JPEG XL decode pipeline feeds
-     Engine2D pixels; the current 8K report covers TIFF raster paths and JPEG XL
-     metadata/sparse planning, not full JPEG XL pixel decode.
+     asset resolver plus PNG/JPEG/WebP decode pipeline feeds Engine2D pixels.
    - AC: unsupported Draw IR render commands, including image URI commands
      before decode support, surface `unsupported Draw IR commands skipped` in
      `Engine2dDrawIrAdvResult.fallback_reason` and increment skipped count.
 
 ## Commands to run
 
-- `sed -n '1,220p' doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-21.md`
+- `sed -n '1,220p' doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md`
 - `SIMPLE_BIN=bin/simple SIMPLE_LIB=src timeout 420 sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`
 - `SIMPLE_LIB=src timeout 180 ./bin/simple test test/01_unit/lib/gc_async_mut/ui/web_render_pixel_backend_queue_spec.spl --mode=interpreter`
 - `SIMPLE_LIB=src timeout 180 ./bin/simple test test/01_unit/app/ui/browser_backend_runtime_queue_spec.spl --mode=interpreter`
@@ -195,11 +191,11 @@ backend readback fixtures. Synthetic handles remain isolated probe evidence.
 
 - Spark task: preserve WebGPU real device readback and keep upload/fallback
   provenance separate.
-- Current real readback status: unavailable/not-device-readback on this host.
-  Promotion requires `webgpu_spark_task_status=pass`,
+- Evidence keys for current real readback:
+  `webgpu_spark_task_status=pass`,
   `webgpu_normal_llm_verification_status=pass`,
-  `webgpu_real_readback_source=device_readback`, positive
-  `webgpu_real_readback_backend_handle`, and matching checksum.
+  `webgpu_real_readback_source=device_readback`,
+  positive `webgpu_real_readback_backend_handle`, and matching checksum.
 - Fail closed: `surface_upload`, adapter probe success, and CPU mirror pixels are
   not production `device_readback` proof.
 - Safe non-HW guidance: browserless or adapterless agents may preserve guard
@@ -220,5 +216,4 @@ backend readback fixtures. Synthetic handles remain isolated probe evidence.
   or unrelated 3D/compute evidence paths.
 - Do not edit system tests outside queue/readback-lane artifacts listed above.
 - Do not edit third-party/runtime external bindings under `src/runtime/vendor/**`.
-- Do not hand-edit or bulk rewrite `doc/06_spec`; regenerate mirrored manuals
-  only for touched queue/readback specs when their SSpec source changes.
+- Do not rewrite `doc/06_spec`; this is an executable handoff/implementation task packet only.

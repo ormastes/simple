@@ -7,7 +7,11 @@
 use app.pkg.manifest.{PackageManifest, Dependency, parse_manifest_file, parse_manifest}
 use app.pkg.version.{SemVer, VersionConstraint}
 use app.pkg.lock.{LockEntry, LockFile, parse_lock_file, write_lock_file}
-use std.io_runtime.{file_exists, file_read, process_run, env_get}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
 
 # Resolved dependency with exact version/commit info
 struct ResolvedDep:
@@ -41,10 +45,10 @@ impl ResolutionResult:
 
 # Get the global cache directory (~/.simple/packages/)
 fn get_cache_dir() -> text:
-    val home = env_get("HOME")
+    val home = rt_env_get("HOME")
     if home == "" or home == nil:
         # Fallback for Windows
-        val userprofile = env_get("USERPROFILE")
+        val userprofile = rt_env_get("USERPROFILE")
         if userprofile != "" and userprofile != nil:
             return "{userprofile}/.simple/packages"
         return ".simple/packages"
@@ -53,15 +57,15 @@ fn get_cache_dir() -> text:
 
 # Run a shell command and return (stdout, stderr, exit_code)
 fn run_shell(command: text) -> (text, text, i64):
-    val os = env_get("OS")
+    val os = rt_env_get("OS")
     var is_windows = false
     if os != nil and os != "":
         is_windows = os.lower().contains("windows")
 
     if is_windows:
-        process_run("cmd.exe", ["/c", command])
+        rt_process_run("cmd.exe", ["/c", command])
     else:
-        process_run("/bin/sh", ["-c", command])
+        rt_process_run("/bin/sh", ["-c", command])
 
 
 # Clone or fetch a git repository to the cache
@@ -69,7 +73,7 @@ fn git_clone_or_fetch(dep: Dependency, cache_dir: text) -> Result<ResolvedDep, t
     val cache_key = dep.cache_key()
     val dest = "{cache_dir}/{cache_key}"
 
-    if file_exists("{dest}/.git"):
+    if rt_file_exists("{dest}/.git"):
         # Already cloned, fetch latest
         print "  Fetching {dep.name}..."
         val (_, fetch_err, fetch_code) = run_shell("cd \"{dest}\" && git fetch --quiet 2>&1")
@@ -117,9 +121,9 @@ fn git_clone_or_fetch(dep: Dependency, cache_dir: text) -> Result<ResolvedDep, t
     # Try to read version from the dep's own package.sdn
     var version = "0.0.0"
     val dep_manifest_path = "{dest}/package.sdn"
-    if file_exists(dep_manifest_path):
-        val dep_source = file_read(dep_manifest_path)
-        if dep_source != "":
+    if rt_file_exists(dep_manifest_path):
+        val dep_source = rt_file_read_text(dep_manifest_path)
+        if dep_source != "" and dep_source != nil:
             val dep_manifest = parse_manifest(dep_source)
             match dep_manifest:
                 case Ok(m):
@@ -141,15 +145,15 @@ fn git_clone_or_fetch(dep: Dependency, cache_dir: text) -> Result<ResolvedDep, t
 
 # Resolve a path dependency
 fn resolve_path_dep(dep: Dependency) -> Result<ResolvedDep, text>:
-    if not file_exists(dep.path):
+    if not rt_file_exists(dep.path):
         return Err("Path dependency '{dep.name}' not found at: {dep.path}")
 
     # Try to read version from the dep's own package.sdn
     var version = "0.0.0"
     val dep_manifest_path = "{dep.path}/package.sdn"
-    if file_exists(dep_manifest_path):
-        val dep_source = file_read(dep_manifest_path)
-        if dep_source != "":
+    if rt_file_exists(dep_manifest_path):
+        val dep_source = rt_file_read_text(dep_manifest_path)
+        if dep_source != "" and dep_source != nil:
             val dep_manifest = parse_manifest(dep_source)
             match dep_manifest:
                 case Ok(m):
@@ -182,7 +186,7 @@ fn resolve_dep(dep: Dependency, cache_dir: text, lock_entry: LockEntry?) -> Resu
                 # Check if already cached at this commit
                 val cache_key = dep.cache_key()
                 val dest = "{cache_dir}/{cache_key}"
-                if file_exists("{dest}/.git"):
+                if rt_file_exists("{dest}/.git"):
                     # Verify commit matches
                     val (commit_out, _, _) = run_shell("cd \"{dest}\" && git rev-parse HEAD")
                     val current_commit = commit_out.trim()

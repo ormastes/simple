@@ -43,17 +43,6 @@ types in `src/lib/common/compress/types.spl` (extend existing): `LzToken` enum
 façade shape (`CompressionCodec`, `CompressionOptions`, `compress_bytes`,
 `try_compress_bytes`, `encoder_finish_checked`).
 
-Status 2026-06-18: Phase 0 type barrier is implemented under the existing typed
-compression namespace. Evidence: `src/lib/common/bytes/checksum.spl` owns
-`Crc32` and `Adler32`; `src/lib/common/compress/typed/types.spl` defines
-`LzToken`, `HuffTable`, `FseTable`, `SymbolFreqs`, `Plaintext`, and
-`Compressed`; `src/lib/common/compress/typed/__init__.spl` exports those names;
-`SIMPLE_LIB=src bin/simple check src/lib/common/compress/typed/types.spl
-src/lib/common/compress/typed/__init__.spl` passed; and
-`SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/compress/typed/types_spec.spl
---mode=interpreter` passed 28 tests. The plan remains open for Phase 1 codec
-refactors and Phase 2 hardening/parity.
-
 ### Phase 1 — Codec refactor onto custom types (disjoint scope)
 | Sub-team | Scope (files) | Custom types | C oracle |
 |----------|---------------|--------------|----------|
@@ -66,20 +55,6 @@ Staged subset (finish, not expand): LZ4 block+frame, DEFLATE/gzip, Zstd frame,
 LZMA2/XZ frame — full round-trip, real levels, checksum, framed dictionary
 (`dictionary_id`). bzip2/Brotli-complete/PPMd/ZPAQ deferred. Strict `block_mode`
 semantics per existing research (lz4 block+frame; zstd/lzma2 frame-only).
-
-Status 2026-06-18: The typed codec slice has focused passing evidence. Present
-modules: `src/lib/common/compress/typed/lz4_typed.spl`,
-`deflate_typed.spl`, `zstd_typed.spl`, and `lzma2_typed.spl`. Focused
-interpreter checks passed: `types_spec.spl` 28 tests, `lz4_typed_spec.spl` 11
-tests, `deflate_typed_spec.spl` 20 tests, `zstd_typed_spec.spl` 33 tests, and
-`lzma2_typed_spec.spl` 30 tests. Generated manuals exist under
-`doc/06_spec/test/01_unit/lib/common/compress/typed/`.
-
-Current limitations: LZ4 typed evidence is block-level while the facade owns
-frame-level behavior; Zstd typed evidence covers raw/RLE frame blocks and keeps
-full FSE compressed-block decode deferred; LZMA2 typed evidence covers
-uncompressed chunks, XZ framing, and range-coder scaffolding while the full range
-model remains deferred; external C-oracle parity is not recorded as green.
 
 ### Phase 2 — Hardening & parity
 Corruption handling + typed `CompressionError`, duplicate-path unification
@@ -105,14 +80,3 @@ No items produced = red flag.
 (full round-trip, not subset), alpha scalar-vs-SIMD and C-oracle parity green,
 `sh scripts/check/check-core-runtime-smoke.shs bin/simple`, `verify` →
 `STATUS: PASS`.
-
-Current remaining closure gates as of 2026-06-18:
-
-- Connect the typed codec slices to the public `common.compress` facade where
-  they are still parallel implementations.
-- Record or explicitly defer C-oracle parity for zlib/libdeflate, libzstd/FSE,
-  liblz4, and liblzma.
-- Close the deferred full FSE compressed-block and full LZMA range-model items,
-  or move them to explicit follow-up plans outside this staged subset.
-- Run the broader `bin/simple test`, `bin/simple build lint`,
-  `check-core-runtime-smoke`, and verify gates before marking this plan done.

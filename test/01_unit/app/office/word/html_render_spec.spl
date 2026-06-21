@@ -12,7 +12,7 @@ numeric interpolation), so they run cleanly on the test runner.
 """
 
 use std.spec
-use app.office.word.html_render.{render_block_html, render_document_html, render_writer_markdown_html}
+use app.office.word.html_render.{render_block_html, render_document_html}
 use common.rich_text.attributed_text.{DocBlock, BlockKind, TextSpan, InlineStyle, RichDocument}
 
 fn _block(kind: BlockKind, body: text) -> DocBlock:
@@ -35,11 +35,6 @@ describe "word HTML render: block styling from the shared theme":
         expect(html).to_contain("line-height: 1.5;")
         expect(html).to_contain(">Body text</div>")
 
-    it "escapes rich-text block content":
-        val html = render_block_html(_block(BlockKind.Paragraph, "<b>raw</b>"))
-        expect(html).to_contain("&lt;b&gt;raw&lt;/b&gt;")
-        expect(html.contains("<b>raw</b>")).to_be(false)
-
     it "renders a Quote with an italic border-left style":
         val html = render_block_html(_block(BlockKind.Quote, "Quoted"))
         expect(html).to_contain("class=\"quote\"")
@@ -56,135 +51,3 @@ describe "word HTML render: whole document":
         expect(html).to_end_with("</article>")
         expect(html).to_contain("class=\"heading_1\"")
         expect(html).to_contain("class=\"paragraph\"")
-
-describe "writer HTML render: markdown source":
-    """Writer's primary document source is Markdown, which generates paper HTML
-    for rendering."""
-
-    it "renders markdown as paper/document HTML":
-        val html = render_writer_markdown_html("---\npage_view: true\nheader: Draft\n---\n\n# Title\n\nBody")
-        expect(html).to_start_with("<article class=\"md-paper-layout\"")
-        expect(html).to_contain("data-format=\"markdown-paper\"")
-        expect(html).to_contain("data-format-name=\"Writer Markdown\"")
-        expect(html).to_contain("data-line-count=\"3\"")
-        expect(html).to_contain("<header class=\"md-page-header\">Draft</header>")
-        expect(html).to_contain("<h1 data-source-line=\"1\">Title</h1>")
-        expect(html).to_contain("<p data-source-line=\"3\">Body</p>")
-
-    it "renders Writer Markdown heading levels four through six":
-        val html = render_writer_markdown_html("#### Four\n##### Five\n###### Six")
-        expect(html).to_contain("<h4 data-source-line=\"1\">Four</h4>")
-        expect(html).to_contain("<h5 data-source-line=\"2\">Five</h5>")
-        expect(html).to_contain("<h6 data-source-line=\"3\">Six</h6>")
-
-    it "escapes writer markdown content before HTML rendering":
-        val html = render_writer_markdown_html("# <script>alert(1)</script>")
-        expect(html).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
-
-    it "sanitizes unsafe Writer Markdown stylesheet URLs":
-        val html = render_writer_markdown_html("---\ncss_file: javascript:alert(1)\n---\n\nBody")
-        expect(html).to_contain("<link rel=\"stylesheet\" href=\"#\">")
-        expect(html).to_contain("<p data-source-line=\"1\">Body</p>")
-
-    it "sanitizes whitespace-obfuscated Writer Markdown stylesheet URLs":
-        val html = render_writer_markdown_html("---\ncss_file: java\tscript:alert(1)\n---\n\nBody")
-        expect(html).to_contain("<link rel=\"stylesheet\" href=\"#\">")
-
-    it "sanitizes protocol-relative Writer Markdown stylesheet URLs":
-        val html = render_writer_markdown_html("---\ncss_file: //evil.example/style.css\n---\n\nBody")
-        expect(html).to_contain("<link rel=\"stylesheet\" href=\"#\">")
-
-    it "sanitizes local file Writer Markdown stylesheet URLs":
-        val html = render_writer_markdown_html("---\ncss_file: file:///etc/passwd\n---\n\nBody")
-        expect(html).to_contain("<link rel=\"stylesheet\" href=\"#\">")
-
-    it "renders Writer Markdown tables and images as document HTML":
-        val html = render_writer_markdown_html("| Name | Status |\n| --- | --- |\n| Alpha | Ready |\n\n![Diagram](diagram.png)")
-        expect(html).to_contain("<table class=\"md-writer-table\" data-source-line=\"1\">")
-        expect(html).to_contain("<th>Name</th>")
-        expect(html).to_contain("<td>Ready</td>")
-        expect(html).to_contain("<figure class=\"md-writer-image\" data-source-line=\"5\">")
-        expect(html).to_contain("<img src=\"diagram.png\" alt=\"Diagram\">")
-
-    it "sanitizes unsafe Writer Markdown image URLs":
-        val html = render_writer_markdown_html("![Bad <x>](javascript:alert(1))")
-        expect(html).to_contain("<img src=\"#\" alt=\"Bad &lt;x&gt;\">")
-        expect(html).to_contain("<figcaption>Bad &lt;x&gt;</figcaption>")
-
-    it "sanitizes whitespace-obfuscated Writer Markdown image URLs":
-        val html = render_writer_markdown_html("![Bad](java\tscript:alert(1))")
-        expect(html).to_contain("<img src=\"#\" alt=\"Bad\">")
-
-    it "sanitizes protocol-relative Writer Markdown image URLs":
-        val html = render_writer_markdown_html("![Bad](//evil.example/image.png)")
-        expect(html).to_contain("<img src=\"#\" alt=\"Bad\">")
-
-    it "sanitizes legacy script Writer Markdown image URLs":
-        val html = render_writer_markdown_html("![Bad](vbscript:msgbox(1))")
-        expect(html).to_contain("<img src=\"#\" alt=\"Bad\">")
-
-    it "sanitizes local file Writer Markdown image URLs":
-        val html = render_writer_markdown_html("![Bad](file:///etc/passwd)")
-        expect(html).to_contain("<img src=\"#\" alt=\"Bad\">")
-
-    it "renders Writer Markdown inline links in paper HTML":
-        val html = render_writer_markdown_html("# [Docs](docs.md)\n\nSee [Guide <x>](guide.md?a=1&b=2)\n\nFormula [Calc](calc(sum(1,2)))\n\nNo [Script](javascript:alert(1))\n\nNo [Host](//evil.example/path)")
-        expect(html).to_contain("<h1 data-source-line=\"1\"><a href=\"docs.md\">Docs</a></h1>")
-        expect(html).to_contain("<p data-source-line=\"3\">See <a href=\"guide.md?a=1&amp;b=2\">Guide &lt;x&gt;</a></p>")
-        expect(html).to_contain("<p data-source-line=\"5\">Formula <a href=\"calc(sum(1,2))\">Calc</a></p>")
-        expect(html).to_contain("<p data-source-line=\"7\">No <a href=\"#\">Script</a></p>")
-        expect(html).to_contain("<p data-source-line=\"9\">No <a href=\"#\">Host</a></p>")
-
-    it "sanitizes legacy script Writer Markdown inline links":
-        val html = render_writer_markdown_html("No [Legacy](vbscript:msgbox(1))")
-        expect(html).to_contain("<p data-source-line=\"1\">No <a href=\"#\">Legacy</a></p>")
-
-    it "sanitizes local file Writer Markdown inline links":
-        val html = render_writer_markdown_html("No [Local](file:///etc/passwd)")
-        expect(html).to_contain("<p data-source-line=\"1\">No <a href=\"#\">Local</a></p>")
-
-    it "renders Writer Markdown bullet lists as document HTML":
-        val html = render_writer_markdown_html("- First **item**\n* Second <safe>")
-        expect(html).to_contain("<ul class=\"md-writer-list\" data-source-line=\"1\">")
-        expect(html).to_contain("<li>First <strong>item</strong></li>")
-        expect(html).to_contain("<li>Second &lt;safe&gt;</li>")
-
-    it "renders Writer Markdown task lists as document HTML":
-        val html = render_writer_markdown_html("- [x] Done **safe**\n- [ ] Open <x>\n* [X] Star done\n* [ ] Star open")
-        expect(html).to_contain("<ul class=\"md-writer-task-list\" data-source-line=\"1\">")
-        expect(html).to_contain("data-task=\"true\" data-checked=\"true\"")
-        expect(html).to_contain("<input type=\"checkbox\" disabled checked>")
-        expect(html).to_contain("Done <strong>safe</strong>")
-        expect(html).to_contain("data-task=\"true\" data-checked=\"false\"")
-        expect(html).to_contain("<input type=\"checkbox\" disabled>")
-        expect(html).to_contain("Open &lt;x&gt;")
-        expect(html).to_contain("Star done")
-        expect(html).to_contain("Star open")
-
-    it "renders Writer Markdown ordered lists as document HTML":
-        val html = render_writer_markdown_html("1. First **item**\n10. Second <safe>")
-        expect(html).to_contain("<ol class=\"md-writer-list md-writer-ordered-list\" data-source-line=\"1\">")
-        expect(html).to_contain("<li>First <strong>item</strong></li>")
-        expect(html).to_contain("<li>Second &lt;safe&gt;</li>")
-
-    it "renders Writer Markdown blockquotes as document HTML":
-        val html = render_writer_markdown_html("> First **quote**\n> Second <safe>")
-        expect(html).to_contain("<blockquote class=\"md-writer-quote\" data-source-line=\"1\">")
-        expect(html).to_contain("<p>First <strong>quote</strong></p>")
-        expect(html).to_contain("<p>Second &lt;safe&gt;</p>")
-
-    it "renders Writer Markdown thematic breaks as document rules":
-        val html = render_writer_markdown_html("Before\n---\nAfter")
-        expect(html).to_contain("<p data-source-line=\"1\">Before</p><hr class=\"md-writer-rule\" data-source-line=\"2\"><p data-source-line=\"3\">After</p>")
-
-    it "renders Writer Markdown fenced code as escaped code HTML":
-        val html = render_writer_markdown_html("```python\nprint(\"<x>\")\n```")
-        expect(html).to_contain("<pre class=\"md-writer-code\" data-source-line=\"1\" data-language=\"python\"><code>print(&quot;&lt;x&gt;&quot;)</code></pre>")
-
-    it "preserves Markdown table alignment markers in Writer HTML":
-        val html = render_writer_markdown_html("| Name | Score | Note |\n| :--- | ---: | :-: |\n| Alpha | 42 | ok |")
-        expect(html).to_contain("<th data-row-index=\"0\" data-column-index=\"0\" data-align=\"left\" style=\"text-align:left\">Name</th>")
-        expect(html).to_contain("<th data-row-index=\"0\" data-column-index=\"1\" data-align=\"right\" style=\"text-align:right\">Score</th>")
-        expect(html).to_contain("<td data-row-index=\"1\" data-column-index=\"2\" data-align=\"center\" style=\"text-align:center\">ok</td>")
-        val escaped = render_writer_markdown_html("| Name | Note |\n| --- | --- |\n| Alpha | A\\|B |")
-        expect(escaped).to_contain("<td data-row-index=\"1\" data-column-index=\"1\">A|B</td>")

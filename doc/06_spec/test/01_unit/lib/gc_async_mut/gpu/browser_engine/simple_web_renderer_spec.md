@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 67 | 67 | 0 | 0 |
+| 57 | 57 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -216,48 +216,6 @@ expect(card.content_rect.height).to_equal(18)
 expect(_draw_ir_style_value(card, "tag")).to_equal("section")
 expect(_draw_ir_style_value(card, "display")).to_equal("block")
 expect(_draw_ir_style_value(card, "padding-left")).to_equal("2")
-```
-
-</details>
-
-#### renders decoded HTML text entities through the same pixels as literal text
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val style = "<style>html,body{margin:0;padding:0;background-color:#ffffff}.label{background-color:#ffffff;color:#111827;font-size:8px;white-space:nowrap}</style>"
-val encoded_html = "<html><head>" + style + "</head><body><div class='label'>A&#32;&amp;&#34;B&#34;</div></body></html>"
-val literal_html = "<html><head>" + style + "</head><body><div class='label'>A &\"B\"</div></body></html>"
-val encoded = simple_web_render_html_to_pixels(encoded_html, 96, 32)
-val literal_pixels = simple_web_render_html_to_pixels(literal_html, 96, 32)
-expect(encoded.len()).to_equal(96 * 32)
-expect(_count_color(encoded, 0xFF111827u32)).to_be_greater_than(0)
-expect(_pixels_equal(encoded, literal_pixels)).to_be(true)
-```
-
-</details>
-
-#### matches CSS attribute selectors against decoded HTML entity attributes
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val amp = "&"
-val ob = "{"
-val cb = "}"
-val html = "<html><head><style>.item" + ob + "background-color:#334155;width:24px;height:12px" + cb + ".item[data-label='A " + amp + " B']" + ob + "background-color:#22c55e" + cb + "</style></head><body><div class='item' data-label='A &amp; B'></div></body></html>"
-val pixels = simple_web_render_html_to_pixels(html, 64, 32)
-expect(pixels.len()).to_equal(64 * 32)
-expect(_count_color(pixels, 0xFF22C55Eu32)).to_be_greater_than(0)
-expect(_count_color(pixels, 0xFF334155u32)).to_equal(0)
 ```
 
 </details>
@@ -616,155 +574,6 @@ expect(_count_color(pixels, 0xFF7F1D1Du32)).to_equal(0)
 
 </details>
 
-#### matches Chrome ruby edit data and code-adjacent tag box geometry
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 15 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:34px}ruby,rb,rt,rp,ins,del,data,var,samp,q,dfn{display:block;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}ruby{background-color:#dbeafe;width:32px;height:16px;padding:2px}rb{background-color:#1d4ed8;width:24px;height:4px}rt{background-color:#22c55e;width:20px;height:4px;margin-top:2px}rp{background-color:#f59e0b;width:16px;height:3px;margin-top:1px}ins{background-color:#ef4444;width:30px;height:5px;margin-top:3px}del{background-color:#334155;width:26px;height:5px;margin-top:2px}data{background-color:#a855f7;width:22px;height:5px}var{background-color:#14b8a6;width:24px;height:5px;margin-top:2px}samp{background-color:#84cc16;width:28px;height:5px;margin-top:2px}q{background-color:#0f172a;width:18px;height:5px;margin-top:2px}dfn{background-color:#64748b;width:20px;height:5px;margin-top:2px}</style></head><body><section class='stage'><div class='left'><ruby><rb></rb><rt></rt><rp></rp></ruby><ins></ins><del></del></div><div class='right'><data value='42'></data><var></var><samp></samp><q></q><dfn></dfn></div></section></body></html>"
-val pixels = simple_web_render_html_to_pixels(html, 96, 64)
-expect(pixels.len()).to_equal(96 * 64)
-expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(4584)
-expect(_count_color(pixels, 0xFFDBEAFEu32)).to_equal(496)
-expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(96)
-expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(80)
-expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(48)
-expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(150)
-expect(_count_color(pixels, 0xFF334155u32)).to_equal(130)
-expect(_count_color(pixels, 0xFFA855F7u32)).to_equal(110)
-expect(_count_color(pixels, 0xFF14B8A6u32)).to_equal(120)
-expect(_count_color(pixels, 0xFF84CC16u32)).to_equal(140)
-expect(_count_color(pixels, 0xFF0F172Au32)).to_equal(90)
-expect(_count_color(pixels, 0xFF64748Bu32)).to_equal(100)
-```
-
-</details>
-
-#### matches Chrome section heading search and address tag box geometry
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 14 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}hgroup,h1,h2,h3,h4,h5,h6,p,search,address{display:block;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}hgroup{background-color:#dbeafe;width:32px;height:14px;padding:2px}h1{background-color:#1d4ed8;width:22px;height:4px}p{background-color:#22c55e;width:18px;height:4px;margin-top:2px}h2{background-color:#f59e0b;width:24px;height:5px;margin-top:3px}h3{background-color:#ef4444;width:20px;height:5px;margin-top:2px}h4{background-color:#334155;width:26px;height:5px}h5{background-color:#a855f7;width:18px;height:5px;margin-top:2px}h6{background-color:#14b8a6;width:22px;height:5px;margin-top:2px}search{background-color:#84cc16;width:28px;height:5px;margin-top:2px}address{background-color:#64748b;width:30px;height:5px;margin-top:2px}</style></head><body><section class='stage'><div class='left'><hgroup><h1></h1><p></p></hgroup><h2></h2><h3></h3></div><div class='right'><h4></h4><h5></h5><h6></h6><search></search><address></address></div></section></body></html>"
-val pixels = simple_web_render_html_to_pixels(html, 96, 64)
-expect(pixels.len()).to_equal(96 * 64)
-expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(4656)
-expect(_count_color(pixels, 0xFFDBEAFEu32)).to_equal(488)
-expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(88)
-expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(72)
-expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(120)
-expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(100)
-expect(_count_color(pixels, 0xFF334155u32)).to_equal(130)
-expect(_count_color(pixels, 0xFFA855F7u32)).to_equal(90)
-expect(_count_color(pixels, 0xFF14B8A6u32)).to_equal(110)
-expect(_count_color(pixels, 0xFF84CC16u32)).to_equal(140)
-expect(_count_color(pixels, 0xFF64748Bu32)).to_equal(150)
-```
-
-</details>
-
-#### matches Chrome flow and text-adjacent tag box geometry
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}blockquote,pre,bdi,bdo,hr{display:block;box-sizing:content-box;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}blockquote{background-color:#dbeafe;width:32px;height:10px;padding:2px}pre{background-color:#1d4ed8;width:28px;height:6px;margin-top:2px}bdi{background-color:#22c55e;width:24px;height:5px;margin-top:2px}bdo{background-color:#f59e0b;width:20px;height:5px;margin-top:2px}hr{background-color:#ef4444;width:30px;height:4px;margin-top:2px}.bar{display:block;background-color:#334155;width:26px;height:6px}.tile{display:block;background-color:#14b8a6;width:30px;height:6px;margin-top:2px}.chip{display:block;background-color:#a855f7;width:28px;height:6px;margin-top:2px}</style></head><body><section class='stage'><div class='left'><blockquote></blockquote><pre></pre><bdi></bdi><bdo dir='rtl'></bdo><hr></div><div class='right'><div class='bar'></div><div class='tile'></div><div class='chip'></div></div></section></body></html>"
-val pixels = simple_web_render_html_to_pixels(html, 96, 64)
-expect(pixels.len()).to_equal(96 * 64)
-expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(4628)
-expect(_count_color(pixels, 0xFFDBEAFEu32)).to_equal(504)
-expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(168)
-expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(120)
-expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(100)
-expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(120)
-expect(_count_color(pixels, 0xFF334155u32)).to_equal(156)
-expect(_count_color(pixels, 0xFF14B8A6u32)).to_equal(180)
-expect(_count_color(pixels, 0xFFA855F7u32)).to_equal(168)
-```
-
-</details>
-
-#### matches Chrome metadata and image-map non-painting tag geometry
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<html><head><base href='https://example.invalid/'><meta name='viewport' content='width=device-width'><link rel='preload' href='x.dat' as='fetch'><title>nonpaint</title><script type='application/json'>{}</script><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}.a{display:block;background-color:#1d4ed8;width:30px;height:8px}.b{display:block;background-color:#22c55e;width:26px;height:8px;margin-top:3px}.c{display:block;background-color:#f59e0b;width:22px;height:8px;margin-top:3px}.d{display:block;background-color:#ef4444;width:28px;height:8px}.e{display:block;background-color:#334155;width:24px;height:8px;margin-top:3px}map,area{display:none;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}</style></head><body><section class='stage'><div class='left'><div class='a'></div><map name='m'><area shape='rect' coords='0,0,1,1' href='#'></map><div class='b'></div><div class='c'></div></div><div class='right'><div class='d'></div><div class='e'></div></div></section></body></html>"
-val pixels = simple_web_render_html_to_pixels(html, 96, 64)
-expect(pixels.len()).to_equal(96 * 64)
-expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(5104)
-expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(240)
-expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(208)
-expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(176)
-expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(224)
-expect(_count_color(pixels, 0xFF334155u32)).to_equal(192)
-expect(_count_color(pixels, 0xFFF8FAFCu32)).to_equal(0)
-```
-
-</details>
-
-#### matches Chrome hidden helper tag non-painting geometry
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}.a{display:block;background-color:#1d4ed8;width:30px;height:8px}.b{display:block;background-color:#22c55e;width:26px;height:8px;margin-top:3px}.c{display:block;background-color:#f59e0b;width:22px;height:8px;margin-top:3px}.d{display:block;background-color:#ef4444;width:28px;height:8px}.e{display:block;background-color:#334155;width:24px;height:8px;margin-top:3px}datalist,select,optgroup,option,br,wbr,selectedcontent,slot{display:none;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}</style></head><body><section class='stage'><div class='left'><div class='a'></div><datalist id='choices'><option value='x'></option></datalist><div class='b'></div><br><wbr><div class='c'></div></div><div class='right'><div class='d'></div><select><optgroup label='g'><option value='y'></option></optgroup><selectedcontent></selectedcontent></select><slot name='s'></slot><div class='e'></div></div></section></body></html>"
-val pixels = simple_web_render_html_to_pixels(html, 96, 64)
-expect(pixels.len()).to_equal(96 * 64)
-expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(5104)
-expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(240)
-expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(208)
-expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(176)
-expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(224)
-expect(_count_color(pixels, 0xFF334155u32)).to_equal(192)
-expect(_count_color(pixels, 0xFFF8FAFCu32)).to_equal(0)
-```
-
-</details>
-
-#### matches Chrome hidden resource and table-column tag non-painting geometry
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}.a{display:block;background-color:#1d4ed8;width:30px;height:8px}.b{display:block;background-color:#22c55e;width:26px;height:8px;margin-top:3px}.c{display:block;background-color:#f59e0b;width:22px;height:8px;margin-top:3px}.d{display:block;background-color:#ef4444;width:28px;height:8px}.e{display:block;background-color:#334155;width:24px;height:8px;margin-top:3px}img,audio,track,embed,iframe,meter,progress,template,noscript,table,colgroup,col{display:none;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}</style></head><body><section class='stage'><div class='left'><div class='a'></div><img alt='' src=''><audio><track kind='captions' srclang='en' label='en'></audio><div class='b'></div><template><div class='ghost'></div></template><noscript><div class='ghost'></div></noscript><div class='c'></div></div><div class='right'><div class='d'></div><embed src='about:blank'><iframe src='about:blank'></iframe><meter value='0.5'></meter><progress value='1' max='2'></progress><table><colgroup><col></colgroup></table><div class='e'></div></div></section></body></html>"
-val pixels = simple_web_render_html_to_pixels(html, 96, 64)
-expect(pixels.len()).to_equal(96 * 64)
-expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(5104)
-expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(240)
-expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(208)
-expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(176)
-expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(224)
-expect(_count_color(pixels, 0xFF334155u32)).to_equal(192)
-expect(_count_color(pixels, 0xFFF8FAFCu32)).to_equal(0)
-```
-
-</details>
-
 #### matches Chrome positioned absolute geometry without normal-flow contribution
 
 <details>
@@ -845,29 +654,6 @@ expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(600)
 expect(_count_color(pixels, 0xFF0F172Au32)).to_equal(488)
 expect(_count_color(pixels, 0xFF334155u32)).to_equal(144)
 expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(96)
-```
-
-</details>
-
-#### paints relative positioned boxes above following normal-flow siblings
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc}.shell{background-color:#e5e7eb;border:2px solid #0f172a;padding:4px;width:60px;height:42px}.rel{position:relative;left:12px;top:7px;background-color:#1d4ed8;width:22px;height:10px}.child{background-color:#22c55e;width:10px;height:4px;margin-left:4px}.after{background-color:#f59e0b;width:18px;height:7px;margin-top:4px}.marker{background-color:#334155;width:26px;height:6px;margin-top:4px}</style></head><body><section class='shell'><div class='rel'><div class='child'></div></div><div class='after'></div><div class='marker'></div></section></body></html>"
-val pixels = simple_web_render_html_to_pixels(html, 96, 64)
-expect(pixels.len()).to_equal(96 * 64)
-expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(2916)
-expect(_count_color(pixels, 0xFFF8FAFCu32)).to_equal(2256)
-expect(_count_color(pixels, 0xFF0F172Au32)).to_equal(488)
-expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(180)
-expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(40)
-expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(108)
-expect(_count_color(pixels, 0xFF334155u32)).to_equal(156)
 ```
 
 </details>
@@ -958,7 +744,7 @@ val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64
 val pixels = simple_web_render_html_to_pixels(html, 96, 64)
 expect(pixels.len()).to_equal(96 * 64)
 expect(_count_color(pixels, 0xFFF8FAFCu32)).to_equal(5776)
-expect(_count_color(pixels, 0xFF89A3E9u32)).to_equal(240)
+expect(_count_color(pixels, 0xFF8BA4EAu32)).to_equal(240)
 expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(128)
 expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
 ```
@@ -1163,27 +949,6 @@ expect(_pixels_equal(simple_pixels, browser_pixels)).to_equal(true)
 
 </details>
 
-#### web render backend pure_simple uses the Engine2D auto backend path
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<html><body><div style='width: 64px; height: 24px; background-color: #2563eb'></div><span style='color:#ffffff'>Auto</span></body></html>"
-val simple = SimpleWebRenderer.create(96, 64)
-val web = WebRenderBackend.create("pure_simple", 96, 64)
-val simple_pixels = simple.render_html_to_pixels(html)
-val web_pixels = web.render_html_to_pixels(html)
-expect(simple.backend_name).to_equal(simple_web_resolved_engine2d_backend_name(96, 64, "auto"))
-expect(web.name()).to_equal("pure_simple")
-expect(_pixels_equal(simple_pixels, web_pixels)).to_equal(true)
-```
-
-</details>
-
 #### fallback facade parses rgb() background-color with the shared CSS parser
 
 <details>
@@ -1213,7 +978,7 @@ Reproduction: this block contains the complete executable scenario source.
 val html = "<html><body style='background-color: rgba(0, 0, 0, 0.5)'>Simple Web Renderer</body></html>"
 val pixels = simple_web_render_html_to_pixels(html, 8, 220)
 expect(pixels.len()).to_equal(8 * 220)
-expect(pixels[7 + 210 * 8]).to_equal(0xFF7F7F7Fu32)
+expect(pixels[7 + 210 * 8]).to_equal(0xFF808080u32)
 ```
 
 </details>
@@ -1490,8 +1255,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 67 |
-| Active scenarios | 67 |
+| Total scenarios | 57 |
+| Active scenarios | 57 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

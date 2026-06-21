@@ -228,30 +228,6 @@ Background: `doc/07_guide/runtime/process_kill_safety.md` (session-killing
 - [ ] After next multi-day parallel-agent session: confirm no recurrence of
       the journal signature (`Activating special unit exit.target` on the
       user manager outside reboots).
-      2026-06-18 cleanup check: NOT CLOSED. `journalctl --user --since
-      "2026-06-11 15:32:00" --no-pager -o short-iso | rg
-      'Activating special unit exit\.target|exit\.target'` found 26 user
-      `exit.target` hits, including 2026-06-12 09:46/09:47 and multiple
-      2026-06-14 user-manager exit events. System boot time was
-      2026-05-31 02:41, so these are not explained by a host reboot in this
-      local evidence window. Keep this item open; next step is a narrow
-      recurrence diagnostic around each hit to distinguish normal session logout
-      from the original simultaneous SSH/tmux teardown signature.
-      2026-06-18 narrow diagnostic: STILL NOT CLOSED. The follow-up journal
-      scan found 26 post-deploy `exit.target` lines total, and representative
-      windows show user-manager shutdowns still stopping `tmux-spawn-*` scopes:
-      2026-06-12 09:46/09:47, 2026-06-14 07:25/14:19/14:57/15:14/15:56/18:18,
-      2026-06-16 06:53, 2026-06-17 00:39, and 2026-06-18 06:41/06:42. The
-      2026-06-18 window included `Failed to kill control group ... Invalid
-      argument`, `Failed with result 'timeout'`, and a tmux child scope with
-      22.7G memory peak. `loginctl show-user ormastes` reported `Linger=yes`,
-      `State=active`, and active sessions, so this is not explained by linger
-      being disabled. The remaining closure action is now to fix or document the
-      user-manager/tmux scope lifetime boundary so tmux child panes are not
-      tied to transient session teardown, then repeat the same journal query
-      after another multi-day session. Do not mark done until this exact
-      post-deploy `exit.target` + tmux-scope teardown pattern stops recurring
-      or is intentionally reclassified with an operator-approved runbook.
 
 ## Non-goals
 

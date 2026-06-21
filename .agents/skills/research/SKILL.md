@@ -36,10 +36,6 @@ After selection:
 ## Multi-LLM Collaboration (optional)
 
 If another LLM already did research, **extend it** — never overwrite.
-For broad plan/research lanes, assign independent checks to lower-model
-parallel agents when available (for example Codex Spark, Claude Haiku, or
-Claude Sonnet), then require normal/highest-capability LLM review before
-accepting merged findings, requirements, done marks, or broad exclusions.
 
 ## Rules
 

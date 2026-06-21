@@ -9,7 +9,7 @@ Date: 2026-06-01
 - REQ-GCI8K-003 and NFR-GCI8K-003: surface plans record `initializes_color_transforms=false`, `initializes_tiff_decoder=false`, and `initializes_jpegxl_decoder=false`.
 - REQ-GCI8K-004: `surface_matches_packed_color_plan` rejects non-32-bit formats such as RGB565 from the packed 8K hot path.
 - REQ-GCI8K-005: `decode_tiff` and `tiff_image_raster_spec.spl` cover endian, strip, tile, PackBits, planar, palette, gray, RGB/RGBA, high-bit-depth, and Lab-like slices.
-- REQ-GCI8K-006 and NFR-GCI8K-008: `jpeg_xl_image_info` covers staged codestream/container metadata, split partial codestream stitching, 8K intrinsic dimensions, and color metadata routing without claiming full pixel decode; rendered JPEG XL pixels still require separate exact-pixel SPipe evidence.
+- REQ-GCI8K-006: `jpeg_xl_image_info` covers staged codestream/container metadata, split partial codestream stitching, 8K intrinsic dimensions, and color metadata routing without claiming full pixel decode.
 - REQ-GCI8K-007: browser decode paths use shared `std.common.image.image_info` metadata and shared color helpers.
 - REQ-GCI8K-008 and NFR-GCI8K-007: unsupported color/profile/codec paths return typed reasons such as `compressed-icc-transform-pending`, `icc-rgb-lab-transform-pending`, and JPEG XL malformed-container diagnostics.
 - REQ-GCI8K-009 and NFR-GCI8K-006: accepted raster milestones use exact RGBA arrays, packed values, checksums, or mismatch-free evidence; no blur/tolerance acceptance is used.

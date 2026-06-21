@@ -39,17 +39,6 @@ GPU batches require kind, mode, input generation, max bytes, backend, and CPU
 fallback policy. Initial implementation should include a CPU fallback backend
 and a deterministic evidence backend before real CUDA/platform execution.
 
-Shared coarse batch profiles make the transport boundary explicit:
-
-| Profile | Data path | CPU-owned path |
-|---------|-----------|----------------|
-| Web payload | pinned host batch | HTTP accept/parse/route/response |
-| RAM DB | GPU-resident or pinned batch | DB planner and validation |
-| SSD DB | SSD-staged GPU batch | WAL, checkpoint, durability, invalidation |
-| NoSQL document | GPU index/document batch | metadata filters and storage |
-| Vector DB | GPU index/vector batch | metadata filters and result validation |
-| Proxy/control | CPU-only | all TCP/HTTP/proxy forwarding |
-
 ## DB Modes
 
 RAM-only mode admits column/vector batches into GPU-resident or pinned buffers.

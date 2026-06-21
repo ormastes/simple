@@ -6,21 +6,6 @@ Status: Candidate plan pending requirement selection
 
 Agents are not alone in the codebase. Each agent owns a disjoint write scope and must not revert edits outside that scope.
 
-## Cleanup Selection Blocker (2026-06-18)
-
-This plan is blocked before implementation closure because feature/NFR option
-artifacts exist but final selected requirements do not.
-
-Existing option artifacts:
-
-- `doc/02_requirements/ui/graphics/graphics_backend_acceleration_options.md`
-- `doc/02_requirements/nfr/graphics_backend_acceleration_options.md`
-
-Missing final artifacts:
-
-- `doc/02_requirements/ui/graphics/graphics_backend_acceleration.md`
-- `doc/02_requirements/nfr/graphics_backend_acceleration.md`
-
 ## Agent A: Backend Probe Contract
 
 Ownership:

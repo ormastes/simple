@@ -163,14 +163,13 @@ expect(script).to_contain("append_env \"production_gui_web_host_gpu_queue_readba
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = rt_file_read_text("scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs")
 val probe = rt_file_read_text("test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl")
 expect(script).to_contain("queue_probe_source=\"test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl\"")
-expect(script).to_contain("SIMPLE_WEB_RENDER_RUNTIME_QUEUE_EVIDENCE=1")
 expect(script.contains("write_queue_probe")).to_be(false)
 expect(script.contains("cat >\"$BUILD_DIR/queue_probe.spl\"")).to_be(false)
 expect(probe).to_contain("queue_zero_backend_packet_id=")

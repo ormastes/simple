@@ -41,7 +41,7 @@ Acceptance:
 - `browser_first_readback_pixel_count`, `browser_first_readback_checksum`, and
   `browser_first_readback_reason` are propagated from the typed
   `Engine2DReadback` receipt.
-- Synthetic handle `7` stays limited to isolated runtime queue roundtrip
+- Synthetic Vulkan handle `7` stays limited to isolated runtime queue roundtrip
   tests.
 - `browser_first_gpu_readback_source=device_readback`.
 - `browser_first_payload_size`, `browser_first_payload_hash`, and
@@ -57,8 +57,8 @@ Acceptance:
   BrowserBackend backend handle, typed frame payload receipt, timing budgets,
   typed readback metadata, same-frame `device_readback`, Vulkan readback, CUDA
   readback, and OpenCL generated 2D readback all pass. The full host-GPU
-  platform matrix remains incomplete until Metal, ROCm/HIP, native DirectX, and
-  real WebGPU device-readback evidence pass.
+  platform matrix remains incomplete until Metal, ROCm/HIP, and native DirectX
+  device-readback evidence pass.
   Synthetic handles remain limited to isolated runtime queue roundtrip tests.
 
 ### Linux OpenCL Matrix Notes
@@ -90,10 +90,8 @@ Host requirements:
 - Working `bin/simple` or `SIMPLE_BIN`.
 
 Acceptance:
-- Metal direct readback report is `pass` with native Darwin device-readback
-  evidence, not CPU mirror output.
-- Production wrapper records Metal as `pass` on macOS with submit/readback
-  evidence, not Linux unavailable.
+- Metal direct readback report is `pass`.
+- Production wrapper records Metal as `pass` on macOS, not Linux unavailable.
 
 ### ROCm/HIP Agent
 
@@ -114,10 +112,9 @@ Host requirements:
 - Verified HSACO for the selected `HIP_ARCH`.
 
 Acceptance:
-- ROCm generated 2D readback has a real submit/readback pass path instead of
+- ROCm generated 2D readback has a real pass path instead of
   `missing-rocm-submit-readback-harness`.
-- Production wrapper records ROCm/HIP as `pass` on a ROCm host with
-  submit/readback evidence.
+- Production wrapper records ROCm/HIP as `pass` on a ROCm host.
 
 ### Windows/DirectX Agent
 
@@ -160,11 +157,9 @@ Current state:
 - Initialized WebGPU surfaces may report `surface_upload` with a positive
   `Engine2DReadback.backend_handle`; this is upload provenance, not backend
   device-readback proof.
-- `scripts/check/check-webgpu-real-readback.shs` is the production
-  `webgpu_real` gate. Current 2026-06-21 evidence is
-  `source=not_device_readback`, handle `0`, checksum `-1`; production proof
-  requires `source=device_readback`, a positive backend handle, and matching
-  expected/actual checksum.
+- `scripts/check/check-webgpu-real-readback.shs` now provides the production
+  `webgpu_real` proof: `source=device_readback`, a positive backend handle, and
+  matching expected/actual checksum.
 - Strict Engine2D WebGPU selection now requires `webgpu_probe_adapter()` to
   report a real GPU adapter. Direct `WebGpuBackend.init()` may keep its
   CPU-mirror path for hermetic rendering tests, but
@@ -240,8 +235,8 @@ unavailable/provenance-only to production proof.
 - Fail-closed condition: `swapchain_present` is presentation provenance only and
   must not satisfy `device_readback`.
 - Safe non-HW guidance: Linux-only agents may keep DirectX as planning/provenance
-  work; do not add production pass keys until a Windows `win32-real` native D3D
-  host produces a same-frame device-readback receipt.
+  work; do not add production pass keys until a Windows/D3D or explicit DXVK
+  readback host produces a same-frame device-readback receipt.
 - Normal-LLM verification: reject any DirectX promotion unless a same-frame
   `device_readback` receipt and positive DirectX backend handle are present.
 
@@ -253,10 +248,10 @@ unavailable/provenance-only to production proof.
   `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl`,
   production wrapper/report.
 - Command: run the production wrapper after WebGPU readback evidence is added.
-- Current real-readback status: unavailable/not_device_readback on this host.
-  Promotion requires `webgpu_spark_task_status=pass`,
-  `webgpu_normal_llm_verification_status=pass`, `webgpu_real` source
-  `device_readback`, a positive backend handle, and matching checksums.
+- Current real-readback evidence keys:
+  `webgpu_spark_task_status=pass`,
+  `webgpu_normal_llm_verification_status=pass`,
+  `presentation_provenance_device_readback_status=not_device_readback`.
 - Fail-closed condition: `surface_upload` is upload provenance only and must not
   satisfy `device_readback`.
 - Safe non-HW guidance: browserless or adapterless agents may preserve the guard

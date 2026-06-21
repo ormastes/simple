@@ -1,0 +1,443 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
+    WebGPUCommandEncoder, WebGPUQueue,
+    GPURenderPassColorAttachment, GPURenderPassDepthStencilAttachment,
+    WEBGPU_COMMAND_BEGIN_RENDER_PASS, WEBGPU_COMMAND_END_RENDER_PASS,
+    WEBGPU_COMMAND_BEGIN_COMPUTE_PASS, WEBGPU_COMMAND_END_COMPUTE_PASS,
+    WEBGPU_COMMAND_SET_PIPELINE, WEBGPU_COMMAND_SET_BIND_GROUP,
+    WEBGPU_COMMAND_SET_VERTEX_BUFFER, WEBGPU_COMMAND_SET_INDEX_BUFFER,
+    WEBGPU_COMMAND_SET_SCISSOR_RECT, WEBGPU_COMMAND_SET_VIEWPORT,
+    WEBGPU_COMMAND_SET_STENCIL_REFERENCE, WEBGPU_COMMAND_SET_BLEND_CONSTANT,
+    WEBGPU_COMMAND_DRAW, WEBGPU_COMMAND_DRAW_INDEXED,
+    WEBGPU_COMMAND_DRAW_INDIRECT, WEBGPU_COMMAND_DRAW_INDEXED_INDIRECT,
+    WEBGPU_COMMAND_DISPATCH_WORKGROUPS,
+    WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER, WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE,
+    WEBGPU_COMMAND_WRITE_BUFFER, WEBGPU_COMMAND_WRITE_TEXTURE,
+    webgpu_validate_buffer_copy_with_resources,
+    webgpu_validate_texture_copy_with_resources,
+    webgpu_validate_queue_write_buffer_with_resources,
+    webgpu_validate_queue_write_texture_with_resources,
+    webgpu_validate_bind_group_dynamic_offsets_with_resources,
+    webgpu_validate_vertex_buffer_binding_with_resources,
+    webgpu_validate_index_buffer_binding_with_resources,
+    webgpu_validate_render_pass_descriptor_with_resources,
+    webgpu_validate_indirect_draw_buffer_with_resources
+}
+use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
+    WebGPUResourceTable,
+    WEBGPU_BUFFER_USAGE_COPY_SRC, WEBGPU_BUFFER_USAGE_COPY_DST,
+    WEBGPU_BUFFER_USAGE_INDEX, WEBGPU_BUFFER_USAGE_VERTEX,
+    WEBGPU_BUFFER_USAGE_UNIFORM, WEBGPU_BUFFER_USAGE_STORAGE, WEBGPU_BUFFER_USAGE_INDIRECT,
+    WEBGPU_TEXTURE_USAGE_COPY_SRC, WEBGPU_TEXTURE_USAGE_COPY_DST,
+    WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT,
+    WEBGPU_SHADER_STAGE_VERTEX, WEBGPU_SHADER_STAGE_FRAGMENT,
+    GPUBindGroupLayoutEntry, GPUBindGroupEntry
+}
+use std.gc_async_mut.gpu.browser_engine.webgpu_types.{
+    GPU_TEXTURE_FORMAT_RGBA8_UNORM, GPU_TEXTURE_FORMAT_BGRA8_UNORM,
+    GPU_TEXTURE_FORMAT_DEPTH24_PLUS, GPU_TEXTURE_FORMAT_DEPTH24_PLUS_STENCIL8
+}
+
+describe "Browser WebGPU command encoding":
+    describe "render pass recording":
+        it "records a render pass and submits a command buffer":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.set_pipeline(7)).to_equal(true)
+            expect(encoder.set_bind_group(0, 4)).to_equal(true)
+            expect(encoder.draw(3, 1)).to_equal(true)
+            expect(encoder.draw_indexed(6, 2, 4, -1, 1)).to_equal(true)
+            expect(encoder.end_render_pass()).to_equal(true)
+            val command_buffer = encoder.finish("frame-commands")
+            expect(command_buffer.valid).to_equal(true)
+            expect(command_buffer.command_count()).to_equal(6)
+            expect(command_buffer.commands[0].kind).to_equal(WEBGPU_COMMAND_BEGIN_RENDER_PASS)
+            expect(command_buffer.commands[1].kind).to_equal(WEBGPU_COMMAND_SET_PIPELINE)
+            expect(command_buffer.commands[2].kind).to_equal(WEBGPU_COMMAND_SET_BIND_GROUP)
+            expect(command_buffer.commands[2].dynamic_offset_count).to_equal(0)
+            expect(command_buffer.commands[3].kind).to_equal(WEBGPU_COMMAND_DRAW)
+            expect(command_buffer.commands[4].kind).to_equal(WEBGPU_COMMAND_DRAW_INDEXED)
+            expect(command_buffer.commands[4].vertex_count).to_equal(6)
+            expect(command_buffer.commands[4].instance_count).to_equal(2)
+            expect(command_buffer.commands[4].offset).to_equal(4)
+            expect(command_buffer.commands[4].destination_offset).to_equal(-1)
+            expect(command_buffer.commands[4].dynamic_offset_count).to_equal(1)
+            expect(command_buffer.commands[5].kind).to_equal(WEBGPU_COMMAND_END_RENDER_PASS)
+
+            var queue = WebGPUQueue.create()
+            expect(queue.submit([command_buffer])).to_equal(true)
+            expect(queue.submitted_count()).to_equal(1)
+            expect(queue.submitted_command_count()).to_equal(6)
+
+        it "rejects draw outside a render pass":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.draw(3, 1)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder draw requires an active render pass")
+            expect(encoder.draw_indexed(3, 1, 0, 0, 0)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder drawIndexed requires an active render pass")
+
+        it "rejects invalid indexed draw descriptors":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.draw_indexed(0, 1, 0, 0, 0)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder drawIndexed counts must be positive")
+            expect(encoder.draw_indexed(3, 1, -1, 0, 0)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder drawIndexed offsets must be non-negative")
+
+        it "records dynamic bind group offsets":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.set_bind_group_with_dynamic_offsets(0, 4, [0, 256])).to_equal(true)
+            expect(encoder.end_render_pass()).to_equal(true)
+            val command_buffer = encoder.finish("frame-commands")
+            expect(command_buffer.valid).to_equal(true)
+            expect(command_buffer.commands[1].kind).to_equal(WEBGPU_COMMAND_SET_BIND_GROUP)
+            expect(command_buffer.commands[1].dynamic_offset_count).to_equal(2)
+
+        it "rejects invalid dynamic bind group offsets":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.set_bind_group_with_dynamic_offsets(0, 4, [128])).to_equal(false)
+            expect(encoder.last_error).to_equal("GPUPassEncoder dynamic offsets must be 256-byte aligned")
+
+        it "records vertex and index buffer bindings":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.set_vertex_buffer(0, 11, 16, 96)).to_equal(true)
+            expect(encoder.set_index_buffer(12, "uint32", 32, 128)).to_equal(true)
+            expect(encoder.set_scissor_rect(4, 8, 320, 240)).to_equal(true)
+            expect(encoder.set_viewport(0, 0, 640, 480, 0.25, 0.75)).to_equal(true)
+            expect(encoder.set_stencil_reference(7)).to_equal(true)
+            expect(encoder.set_blend_constant(0.1, 0.2, 0.3, 0.4)).to_equal(true)
+            expect(encoder.end_render_pass()).to_equal(true)
+            val command_buffer = encoder.finish("mesh")
+            expect(command_buffer.valid).to_equal(true)
+            expect(command_buffer.commands[1].kind).to_equal(WEBGPU_COMMAND_SET_VERTEX_BUFFER)
+            expect(command_buffer.commands[1].slot).to_equal(0)
+            expect(command_buffer.commands[1].source_buffer_id).to_equal(11)
+            expect(command_buffer.commands[1].offset).to_equal(16)
+            expect(command_buffer.commands[1].size).to_equal(96)
+            expect(command_buffer.commands[2].kind).to_equal(WEBGPU_COMMAND_SET_INDEX_BUFFER)
+            expect(command_buffer.commands[2].source_buffer_id).to_equal(12)
+            expect(command_buffer.commands[2].offset).to_equal(32)
+            expect(command_buffer.commands[2].size).to_equal(128)
+            expect(command_buffer.commands[2].data_size).to_equal(32)
+            expect(command_buffer.commands[3].kind).to_equal(WEBGPU_COMMAND_SET_SCISSOR_RECT)
+            expect(command_buffer.commands[3].offset).to_equal(4)
+            expect(command_buffer.commands[3].destination_offset).to_equal(8)
+            expect(command_buffer.commands[3].width).to_equal(320)
+            expect(command_buffer.commands[3].height).to_equal(240)
+            expect(command_buffer.commands[4].kind).to_equal(WEBGPU_COMMAND_SET_VIEWPORT)
+            expect(command_buffer.commands[4].offset).to_equal(0)
+            expect(command_buffer.commands[4].destination_offset).to_equal(0)
+            expect(command_buffer.commands[4].width).to_equal(640)
+            expect(command_buffer.commands[4].height).to_equal(480)
+            expect(command_buffer.commands[4].viewport_min_depth).to_equal(0.25)
+            expect(command_buffer.commands[4].viewport_max_depth).to_equal(0.75)
+            expect(command_buffer.commands[5].kind).to_equal(WEBGPU_COMMAND_SET_STENCIL_REFERENCE)
+            expect(command_buffer.commands[5].data_size).to_equal(7)
+            expect(command_buffer.commands[6].kind).to_equal(WEBGPU_COMMAND_SET_BLEND_CONSTANT)
+            expect(command_buffer.commands[6].blend_constant_red).to_equal(0.1)
+            expect(command_buffer.commands[6].blend_constant_green).to_equal(0.2)
+            expect(command_buffer.commands[6].blend_constant_blue).to_equal(0.3)
+            expect(command_buffer.commands[6].blend_constant_alpha).to_equal(0.4)
+
+        it "validates vertex and index buffer bindings against resources":
+            var resources = WebGPUResourceTable.create()
+            val vertices = resources.create_buffer("vertices", 256, WEBGPU_BUFFER_USAGE_VERTEX)
+            val indices = resources.create_buffer("indices", 128, WEBGPU_BUFFER_USAGE_INDEX)
+            val wrong = resources.create_buffer("uniforms", 64, WEBGPU_BUFFER_USAGE_UNIFORM)
+            expect(webgpu_validate_vertex_buffer_binding_with_resources(resources, 0, vertices.id, 16, 128)).to_equal("")
+            expect(webgpu_validate_index_buffer_binding_with_resources(resources, indices.id, "uint16", 0, 64)).to_equal("")
+            expect(webgpu_validate_vertex_buffer_binding_with_resources(resources, 0, wrong.id, 0, 16)).to_equal("GPURenderPassEncoder vertex buffer missing VERTEX usage")
+            expect(webgpu_validate_index_buffer_binding_with_resources(resources, wrong.id, "uint32", 0, 16)).to_equal("GPURenderPassEncoder index buffer missing INDEX usage")
+            expect(webgpu_validate_vertex_buffer_binding_with_resources(resources, 0, vertices.id, 240, 32)).to_equal("GPURenderPassEncoder vertex buffer binding range exceeds buffer size")
+            expect(webgpu_validate_index_buffer_binding_with_resources(resources, indices.id, "uint8", 0, 16)).to_equal("GPURenderPassEncoder index buffer format must be uint16 or uint32")
+
+        it "rejects invalid vertex and index buffer commands":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.set_vertex_buffer(0, 3, 0, -1)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder setVertexBuffer requires an active render pass")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.set_vertex_buffer(-1, 3, 0, -1)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder vertex buffer slot must be non-negative")
+            expect(encoder.set_index_buffer(4, "float32", 0, -1)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder index buffer format must be uint16 or uint32")
+            expect(encoder.set_scissor_rect(-1, 0, 32, 32)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder scissor rect origin must be non-negative")
+            expect(encoder.set_scissor_rect(0, 0, 0, 32)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder scissor rect size must be positive")
+            expect(encoder.set_viewport(-1, 0, 32, 32, 0.0, 1.0)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder viewport origin must be non-negative")
+            expect(encoder.set_viewport(0, 0, 0, 32, 0.0, 1.0)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder viewport size must be positive")
+            expect(encoder.set_viewport(0, 0, 32, 32, -0.1, 1.0)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder viewport depth range must be between 0 and 1")
+            expect(encoder.set_viewport(0, 0, 32, 32, 0.75, 0.25)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder viewport minDepth must not exceed maxDepth")
+            expect(encoder.set_stencil_reference(-1)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder stencil reference must be non-negative")
+            var outside = WebGPUCommandEncoder.create("outside")
+            expect(outside.set_blend_constant(0.0, 0.0, 0.0, 1.0)).to_equal(false)
+            expect(outside.last_error).to_equal("GPURenderPassEncoder setBlendConstant requires an active render pass")
+
+        it "records indirect draw commands":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.draw_indirect(3, 16)).to_equal(true)
+            expect(encoder.draw_indexed_indirect(3, 32)).to_equal(true)
+            expect(encoder.end_render_pass()).to_equal(true)
+            val command_buffer = encoder.finish("indirect")
+            expect(command_buffer.valid).to_equal(true)
+            expect(command_buffer.command_count()).to_equal(4)
+            expect(command_buffer.commands[1].kind).to_equal(WEBGPU_COMMAND_DRAW_INDIRECT)
+            expect(command_buffer.commands[1].source_buffer_id).to_equal(3)
+            expect(command_buffer.commands[1].offset).to_equal(16)
+            expect(command_buffer.commands[1].size).to_equal(16)
+            expect(command_buffer.commands[2].kind).to_equal(WEBGPU_COMMAND_DRAW_INDEXED_INDIRECT)
+            expect(command_buffer.commands[2].size).to_equal(20)
+
+        it "rejects invalid indirect draw descriptors":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.draw_indirect(3, 0)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder drawIndirect requires an active render pass")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.draw_indirect(0, 0)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder indirect draw buffer must be valid")
+            expect(encoder.draw_indexed_indirect(3, 2)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder indirect draw offset must be 4-byte aligned")
+
+        it "validates render pass color and depth attachments before recording":
+            var resources = WebGPUResourceTable.create()
+            val color = resources.create_texture("color", 640, 480, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+            val depth = resources.create_texture("depth", 640, 480, 1, GPU_TEXTURE_FORMAT_DEPTH24_PLUS, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass_with_descriptor(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture(depth.id))).to_equal(true)
+            expect(encoder.command_count()).to_equal(1)
+            expect(encoder.commands[0].kind).to_equal(WEBGPU_COMMAND_BEGIN_RENDER_PASS)
+            expect(encoder.commands[0].slot).to_equal(1)
+            expect(encoder.commands[0].destination_texture_id).to_equal(depth.id)
+            expect(encoder.commands[0].width).to_equal(640)
+            expect(encoder.commands[0].height).to_equal(480)
+            expect(encoder.commands[0].depth_or_layers).to_equal(1)
+
+        it "records depth-only render pass descriptors for shadow and prepass workloads":
+            var resources = WebGPUResourceTable.create()
+            val depth = resources.create_texture("depth-only", 1024, 1024, 1, GPU_TEXTURE_FORMAT_DEPTH24_PLUS, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+            var encoder = WebGPUCommandEncoder.create("depth-prepass")
+            expect(encoder.begin_render_pass_with_descriptor(resources, [], GPURenderPassDepthStencilAttachment.texture_with_depth_ops(depth.id, "clear", "store"))).to_equal(true)
+            expect(encoder.commands[0].slot).to_equal(0)
+            expect(encoder.commands[0].destination_texture_id).to_equal(depth.id)
+            expect(encoder.commands[0].width).to_equal(1024)
+            expect(encoder.commands[0].height).to_equal(1024)
+
+        it "validates render pass depth and stencil attachment operations":
+            var resources = WebGPUResourceTable.create()
+            val color = resources.create_texture("color", 640, 480, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+            val depth = resources.create_texture("depth", 640, 480, 1, GPU_TEXTURE_FORMAT_DEPTH24_PLUS, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+            val depth_stencil = resources.create_texture("depth-stencil", 640, 480, 1, GPU_TEXTURE_FORMAT_DEPTH24_PLUS_STENCIL8, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture_with_depth_ops(depth.id, "load", "discard"))).to_equal("")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture_read_only(depth.id, true, false))).to_equal("")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture_read_only(depth.id, true, true))).to_equal("GPURenderPassDepthStencilAttachment stencil operations require a stencil-capable format")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture_with_depth_stencil_ops(depth_stencil.id, "clear", "store", "load", "discard"))).to_equal("")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture_with_depth_stencil_ops(depth.id, "clear", "store", "load", "discard"))).to_equal("GPURenderPassDepthStencilAttachment stencil operations require a stencil-capable format")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture_with_depth_ops(depth.id, "retain", "store"))).to_equal("GPURenderPassDepthStencilAttachment depthLoadOp must be 'clear' or 'load'")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture_with_depth_ops(depth.id, "load", "keep"))).to_equal("GPURenderPassDepthStencilAttachment depthStoreOp must be 'store' or 'discard'")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture_with_depth_stencil_ops(depth_stencil.id, "load", "store", "retain", "store"))).to_equal("GPURenderPassDepthStencilAttachment stencilLoadOp must be 'clear' or 'load'")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture_with_depth_stencil_ops(depth_stencil.id, "load", "store", "load", "keep"))).to_equal("GPURenderPassDepthStencilAttachment stencilStoreOp must be 'store' or 'discard'")
+
+        it "rejects invalid render pass attachment descriptors":
+            var resources = WebGPUResourceTable.create()
+            val color = resources.create_texture("color", 640, 480, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+            val sampled = resources.create_texture("sampled", 640, 480, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            val wrong_depth = resources.create_texture("wrong-depth", 640, 480, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+            val small_depth = resources.create_texture("small-depth", 320, 480, 1, GPU_TEXTURE_FORMAT_DEPTH24_PLUS, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [], GPURenderPassDepthStencilAttachment.none())).to_equal("GPURenderPassDescriptor requires at least one attachment")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(sampled.id)], GPURenderPassDepthStencilAttachment.none())).to_equal("GPURenderPassColorAttachment texture missing RENDER_ATTACHMENT usage")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(color.id), GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.none())).to_equal("GPURenderPassColorAttachment textures must be unique")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture(wrong_depth.id))).to_equal("GPURenderPassDepthStencilAttachment format must be depth-stencil-renderable")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture(small_depth.id))).to_equal("GPURenderPassDescriptor attachments must have matching dimensions")
+
+    describe "compute pass recording":
+        it "records dispatch workgroups":
+            var encoder = WebGPUCommandEncoder.create("compute")
+            expect(encoder.begin_compute_pass()).to_equal(true)
+            expect(encoder.set_pipeline(9)).to_equal(true)
+            expect(encoder.dispatch_workgroups(2, 3, 1)).to_equal(true)
+            expect(encoder.end_compute_pass()).to_equal(true)
+            val command_buffer = encoder.finish("compute-commands")
+            expect(command_buffer.valid).to_equal(true)
+            expect(command_buffer.command_count()).to_equal(4)
+            expect(command_buffer.commands[0].kind).to_equal(WEBGPU_COMMAND_BEGIN_COMPUTE_PASS)
+            expect(command_buffer.commands[1].kind).to_equal(WEBGPU_COMMAND_SET_PIPELINE)
+            expect(command_buffer.commands[2].kind).to_equal(WEBGPU_COMMAND_DISPATCH_WORKGROUPS)
+            expect(command_buffer.commands[2].workgroups_x).to_equal(2)
+            expect(command_buffer.commands[3].kind).to_equal(WEBGPU_COMMAND_END_COMPUTE_PASS)
+
+        it "rejects dispatch outside a compute pass":
+            var encoder = WebGPUCommandEncoder.create("compute")
+            expect(encoder.dispatch_workgroups(1, 1, 1)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPUComputePassEncoder dispatch requires an active compute pass")
+
+    describe "transfer commands":
+        it "records buffer and texture copies outside passes":
+            var encoder = WebGPUCommandEncoder.create("transfers")
+            expect(encoder.copy_buffer_to_buffer(1, 4, 2, 8, 64)).to_equal(true)
+            expect(encoder.copy_texture_to_texture(3, 4, 16, 8, 1)).to_equal(true)
+            val command_buffer = encoder.finish("copy-commands")
+            expect(command_buffer.valid).to_equal(true)
+            expect(command_buffer.command_count()).to_equal(2)
+            expect(command_buffer.commands[0].kind).to_equal(WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER)
+            expect(command_buffer.commands[0].source_buffer_id).to_equal(1)
+            expect(command_buffer.commands[0].destination_buffer_id).to_equal(2)
+            expect(command_buffer.commands[0].offset).to_equal(4)
+            expect(command_buffer.commands[0].destination_offset).to_equal(8)
+            expect(command_buffer.commands[0].size).to_equal(64)
+            expect(command_buffer.commands[1].kind).to_equal(WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE)
+            expect(command_buffer.commands[1].source_texture_id).to_equal(3)
+            expect(command_buffer.commands[1].destination_texture_id).to_equal(4)
+            expect(command_buffer.commands[1].width).to_equal(16)
+
+        it "rejects copies inside active passes":
+            var encoder = WebGPUCommandEncoder.create("transfers")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.copy_buffer_to_buffer(1, 0, 2, 0, 4)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPUCommandEncoder copyBufferToBuffer cannot run inside a pass")
+
+        it "rejects invalid copy descriptors":
+            var encoder = WebGPUCommandEncoder.create("transfers")
+            expect(encoder.copy_buffer_to_buffer(1, 0, 1, 0, 4)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPUCommandEncoder copyBufferToBuffer requires distinct buffers")
+            expect(encoder.copy_texture_to_texture(3, 4, 0, 8, 1)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPUCommandEncoder copyTextureToTexture size must be positive")
+
+    describe "queue writes":
+        it "records buffer and texture writes":
+            var queue = WebGPUQueue.create()
+            expect(queue.write_buffer(1, 16, 128)).to_equal(true)
+            expect(queue.write_texture(2, 4, 4, 1, 64)).to_equal(true)
+            expect(queue.write_count()).to_equal(2)
+            expect(queue.write_commands[0].kind).to_equal(WEBGPU_COMMAND_WRITE_BUFFER)
+            expect(queue.write_commands[0].destination_buffer_id).to_equal(1)
+            expect(queue.write_commands[0].offset).to_equal(16)
+            expect(queue.write_commands[0].data_size).to_equal(128)
+            expect(queue.write_commands[1].kind).to_equal(WEBGPU_COMMAND_WRITE_TEXTURE)
+            expect(queue.write_commands[1].destination_texture_id).to_equal(2)
+            expect(queue.write_commands[1].width).to_equal(4)
+
+        it "rejects invalid queue write descriptors":
+            var queue = WebGPUQueue.create()
+            expect(queue.write_buffer(-1, 0, 16)).to_equal(false)
+            expect(queue.last_error).to_equal("GPUQueue writeBuffer buffer must be valid")
+            expect(queue.write_texture(2, 4, 4, 1, 0)).to_equal(false)
+            expect(queue.last_error).to_equal("GPUQueue writeTexture data size must be positive")
+
+    describe "resource-aware transfer validation":
+        it "validates buffer copy resource usage and ranges":
+            var resources = WebGPUResourceTable.create()
+            val source = resources.create_buffer("source", 64, WEBGPU_BUFFER_USAGE_COPY_SRC)
+            val destination = resources.create_buffer("destination", 64, WEBGPU_BUFFER_USAGE_COPY_DST)
+            val wrong_usage = resources.create_buffer("wrong", 64, WEBGPU_BUFFER_USAGE_COPY_SRC)
+            expect(webgpu_validate_buffer_copy_with_resources(resources, source.id, 4, destination.id, 8, 16)).to_equal("")
+            expect(webgpu_validate_buffer_copy_with_resources(resources, 99, 0, destination.id, 0, 16)).to_equal("GPUCommandEncoder copyBufferToBuffer source buffer does not exist")
+            expect(webgpu_validate_buffer_copy_with_resources(resources, source.id, 0, wrong_usage.id, 0, 16)).to_equal("GPUCommandEncoder copyBufferToBuffer destination buffer missing COPY_DST usage")
+            expect(webgpu_validate_buffer_copy_with_resources(resources, source.id, 48, destination.id, 0, 32)).to_equal("GPUCommandEncoder copyBufferToBuffer source range exceeds buffer size")
+
+        it "validates texture copy resource usage format and ranges":
+            var resources = WebGPUResourceTable.create()
+            val source = resources.create_texture("source", 16, 16, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_COPY_SRC)
+            val destination = resources.create_texture("destination", 16, 16, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_COPY_DST)
+            val wrong_format = resources.create_texture("wrong-format", 16, 16, 1, GPU_TEXTURE_FORMAT_BGRA8_UNORM, WEBGPU_TEXTURE_USAGE_COPY_DST)
+            val wrong_usage = resources.create_texture("wrong-usage", 16, 16, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            expect(webgpu_validate_texture_copy_with_resources(resources, source.id, destination.id, 8, 8, 1)).to_equal("")
+            expect(webgpu_validate_texture_copy_with_resources(resources, 99, destination.id, 8, 8, 1)).to_equal("GPUCommandEncoder copyTextureToTexture source texture does not exist")
+            expect(webgpu_validate_texture_copy_with_resources(resources, source.id, wrong_format.id, 8, 8, 1)).to_equal("GPUCommandEncoder copyTextureToTexture formats must match")
+            expect(webgpu_validate_texture_copy_with_resources(resources, source.id, wrong_usage.id, 8, 8, 1)).to_equal("GPUCommandEncoder copyTextureToTexture destination texture missing COPY_DST usage")
+            expect(webgpu_validate_texture_copy_with_resources(resources, source.id, destination.id, 32, 8, 1)).to_equal("GPUCommandEncoder copyTextureToTexture source range exceeds texture size")
+
+        it "validates queue writes against resources":
+            var resources = WebGPUResourceTable.create()
+            val buffer = resources.create_buffer("upload", 64, WEBGPU_BUFFER_USAGE_COPY_DST)
+            val texture = resources.create_texture("upload-texture", 16, 16, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_COPY_DST)
+            val wrong_buffer = resources.create_buffer("readback", 64, WEBGPU_BUFFER_USAGE_COPY_SRC)
+            val wrong_texture = resources.create_texture("sampled", 16, 16, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            expect(webgpu_validate_queue_write_buffer_with_resources(resources, buffer.id, 4, 16)).to_equal("")
+            expect(webgpu_validate_queue_write_buffer_with_resources(resources, wrong_buffer.id, 0, 16)).to_equal("GPUQueue writeBuffer buffer missing COPY_DST usage")
+            expect(webgpu_validate_queue_write_buffer_with_resources(resources, buffer.id, 48, 32)).to_equal("GPUQueue writeBuffer range exceeds buffer size")
+            expect(webgpu_validate_queue_write_texture_with_resources(resources, texture.id, 8, 8, 1, 64)).to_equal("")
+            expect(webgpu_validate_queue_write_texture_with_resources(resources, wrong_texture.id, 8, 8, 1, 64)).to_equal("GPUQueue writeTexture texture missing COPY_DST usage")
+            expect(webgpu_validate_queue_write_texture_with_resources(resources, texture.id, 32, 8, 1, 64)).to_equal("GPUQueue writeTexture range exceeds texture size")
+
+        it "validates dynamic bind group offsets against layout and buffers":
+            var resources = WebGPUResourceTable.create()
+            val uniform = resources.create_buffer("uniforms", 1024, WEBGPU_BUFFER_USAGE_UNIFORM)
+            val storage = resources.create_buffer("storage", 512, WEBGPU_BUFFER_USAGE_STORAGE)
+            val layout = resources.create_bind_group_layout("dynamic", [
+                GPUBindGroupLayoutEntry.dynamic_buffer(0, WEBGPU_SHADER_STAGE_VERTEX),
+                GPUBindGroupLayoutEntry.dynamic_storage_buffer(1, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val bind_group = resources.create_bind_group("dynamic-0", layout.id, [
+                GPUBindGroupEntry.buffer_range(0, uniform.id, 128, 512),
+                GPUBindGroupEntry.buffer(1, storage.id)
+            ])
+            expect(webgpu_validate_bind_group_dynamic_offsets_with_resources(resources, 0, bind_group.id, [256, 0])).to_equal("")
+            expect(webgpu_validate_bind_group_dynamic_offsets_with_resources(resources, 0, bind_group.id, [256])).to_equal("GPUPassEncoder dynamic offset count must match bind group layout")
+            expect(webgpu_validate_bind_group_dynamic_offsets_with_resources(resources, 0, bind_group.id, [512, 0])).to_equal("GPUPassEncoder dynamic offset exceeds buffer size")
+            expect(webgpu_validate_bind_group_dynamic_offsets_with_resources(resources, 0, 99, [0, 0])).to_equal("GPUPassEncoder bind group does not exist")
+
+        it "records bind groups with resource-aware dynamic offset validation":
+            var resources = WebGPUResourceTable.create()
+            val uniform = resources.create_buffer("uniforms", 1024, WEBGPU_BUFFER_USAGE_UNIFORM)
+            val layout = resources.create_bind_group_layout("dynamic", [
+                GPUBindGroupLayoutEntry.dynamic_buffer(0, WEBGPU_SHADER_STAGE_VERTEX)
+            ])
+            val bind_group = resources.create_bind_group("dynamic-0", layout.id, [
+                GPUBindGroupEntry.buffer(0, uniform.id)
+            ])
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.set_bind_group_with_dynamic_offsets_and_resources(resources, 0, bind_group.id, [256])).to_equal(true)
+            expect(encoder.commands[1].bind_group_id).to_equal(bind_group.id)
+            expect(encoder.commands[1].dynamic_offset_count).to_equal(1)
+            expect(encoder.set_bind_group_with_dynamic_offsets_and_resources(resources, 0, bind_group.id, [1024])).to_equal(false)
+            expect(encoder.last_error).to_equal("GPUPassEncoder dynamic offset exceeds buffer size")
+
+        it "validates indirect draw buffers against resources":
+            var resources = WebGPUResourceTable.create()
+            val indirect = resources.create_buffer("indirect", 64, WEBGPU_BUFFER_USAGE_INDIRECT)
+            val wrong_usage = resources.create_buffer("uniforms", 64, WEBGPU_BUFFER_USAGE_UNIFORM)
+            expect(webgpu_validate_indirect_draw_buffer_with_resources(resources, indirect.id, 16, 16)).to_equal("")
+            expect(webgpu_validate_indirect_draw_buffer_with_resources(resources, 99, 0, 16)).to_equal("GPURenderPassEncoder indirect draw buffer does not exist")
+            expect(webgpu_validate_indirect_draw_buffer_with_resources(resources, wrong_usage.id, 0, 16)).to_equal("GPURenderPassEncoder indirect draw buffer missing INDIRECT usage")
+            expect(webgpu_validate_indirect_draw_buffer_with_resources(resources, indirect.id, 48, 20)).to_equal("GPURenderPassEncoder indirect draw range exceeds buffer size")
+
+    describe "encoder and queue validation":
+        it "rejects finish while a pass is active":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            val command_buffer = encoder.finish("bad")
+            expect(command_buffer.valid).to_equal(false)
+            expect(command_buffer.error).to_equal("GPUCommandEncoder cannot finish while a pass is active")
+
+        it "rejects recording after finish":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            val command_buffer = encoder.finish("empty")
+            expect(command_buffer.valid).to_equal(true)
+            expect(encoder.begin_render_pass()).to_equal(false)
+            expect(encoder.last_error).to_equal("GPUCommandEncoder is already finished")
+
+        it "rejects empty queue submissions":
+            var queue = WebGPUQueue.create()
+            expect(queue.submit([])).to_equal(false)
+            expect(queue.last_error).to_equal("GPUQueue submit requires at least one command buffer")
+
+        it "rejects mixed invalid submissions atomically":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            val valid = encoder.finish("empty")
+            val invalid = encoder.finish("already-finished")
+            var queue = WebGPUQueue.create()
+            expect(valid.valid).to_equal(true)
+            expect(invalid.valid).to_equal(false)
+            expect(queue.submit([valid, invalid])).to_equal(false)
+            expect(queue.last_error).to_equal("GPUQueue cannot submit an invalid command buffer")
+            expect(queue.submitted_count()).to_equal(0)

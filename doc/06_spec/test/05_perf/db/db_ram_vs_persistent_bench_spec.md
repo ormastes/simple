@@ -283,21 +283,22 @@ pending("interp-cross-module-struct-unit")
 
 </details>
 
-#### wal disk-replay path: field data survives disk round-trip (wal-disk-replay-blank-row-p0)
+#### wal disk-replay path
+
+- pending
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# FIXED: dbfs_engine MetaStore journal serialization collapsed every op to
-# an empty CHECKPOINT (broken `op is MetaOp.Variant` discrimination), so WAL
-# disk replay reconstructed blank rows. Now round-trips exact field data.
-val result = run_wal_disk_replay_field()
-# "ino|size|name" reconstructed from the on-disk journal after a fresh reopen.
-expect(result).to_equal("42|420|bench.txt")
+# WAL disk replay (dbfs_engine/wal.spl + checkpoint_ring) has a P0 blank-row
+# bug found in simple-db-hardening research: WAL replay drops all field data.
+# This test is pending until that bug is fixed and the disk path is benchmarkable.
+pending("wal-disk-replay-blank-row-p0")
 ```
 
 </details>

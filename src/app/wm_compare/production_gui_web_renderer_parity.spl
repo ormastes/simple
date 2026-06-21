@@ -6,7 +6,8 @@
 use common.ui.builder.{button, column, image, label, build_tree_with_title, with_icon}
 use common.ui.state.{init_state}
 use app.ui.render.html_widgets.{render_html_tree}
-use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
 use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
 use std.gc_async_mut.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
@@ -17,9 +18,6 @@ use std.nogc_sync_mut.io.time_ops.{time_now_micros}
 
 val GENERATED_GUI_RENDER_TIMING_BUDGET_US: i64 = 1000000
 val BACKEND_EXECUTED_RENDER_TIMING_BUDGET_US: i64 = 250000
-val GUI_8K_WIDTH: i32 = 7680
-val GUI_8K_HEIGHT: i32 = 4320
-val GUI_8K_PACKED_BYTES_PER_PIXEL: i64 = 4
 
 struct ProductionGuiWebParityReport:
     width: i32
@@ -117,22 +115,6 @@ var _generated_gui_widget_backend_parity_cache_values: [ProductionGuiWebParityRe
 
 fn exact_pixel_comparison_match() -> ExactPixelComparison:
     ExactPixelComparison(different_pixels: 0, match_percentage: 10000, max_channel_diff: 0)
-
-fn gui_8k_packed_framebuffer_bytes() -> i64:
-    (GUI_8K_WIDTH as i64) * (GUI_8K_HEIGHT as i64) * GUI_8K_PACKED_BYTES_PER_PIXEL
-
-fn gui_8k_packed_row_stride_bytes() -> i64:
-    (GUI_8K_WIDTH as i64) * GUI_8K_PACKED_BYTES_PER_PIXEL
-
-fn gui_8k_pixel_count() -> i64:
-    (GUI_8K_WIDTH as i64) * (GUI_8K_HEIGHT as i64)
-
-fn gui_8k_format_eligible_for_packed_hot_path(format: text) -> bool:
-    val f = format.trim()
-    f == "ARGB32" or f == "RGBA32" or f == "BGRA32"
-
-fn gui_8k_default_lazy_init_count() -> i32:
-    0
 
 fn positive_elapsed_us(start_us: i64) -> i64:
     val elapsed = time_now_micros() - start_us
@@ -240,20 +222,25 @@ fn compare_exact_pixels(a: [u32], b: [u32], width: i32, height: i32) -> ExactPix
     val pct = if total > 0: (same * 10000) / (total as i64) else: 0
     ExactPixelComparison(different_pixels: different, match_percentage: pct, max_channel_diff: max_diff)
 
-fn render_reduced_gui_widget_scene_engine2d(width: i32, height: i32, backend_name: text) -> [u32]:
-    var engine = Engine2D.create_with_backend(width, height, backend_name)
-    engine.clear(0xFF102030u32)
-    engine.draw_rect_filled(4, 4, 4, 4, 0xFF010204u32)
-    engine.present()
-    val pixels = engine.read_pixels()
-    engine.shutdown()
+fn render_reduced_gui_widget_scene_software(width: i32, height: i32) -> [u32]:
+    var backend = SoftwareBackend.create()
+    backend.init(width, height)
+    backend.clear(0xFF102030u32)
+    backend.draw_rect_filled(4, 4, 4, 4, 0xFF010204u32)
+    backend.present()
+    val pixels = backend.read_pixels()
+    backend.shutdown()
     pixels
 
-fn render_reduced_gui_widget_scene_software(width: i32, height: i32) -> [u32]:
-    render_reduced_gui_widget_scene_engine2d(width, height, "software")
-
 fn render_reduced_gui_widget_scene_cpu_simd(width: i32, height: i32) -> [u32]:
-    render_reduced_gui_widget_scene_engine2d(width, height, "cpu_simd")
+    var backend = CpuBackend.create()
+    backend.init(width, height)
+    backend.clear(0xFF102030u32)
+    backend.draw_rect_filled(4, 4, 4, 4, 0xFF010204u32)
+    backend.present()
+    val pixels = backend.read_pixels()
+    backend.shutdown()
+    pixels
 
 fn render_reduced_gui_widget_scene_metal(width: i32, height: i32) -> MetalReducedSceneResult:
     if not is_macos():

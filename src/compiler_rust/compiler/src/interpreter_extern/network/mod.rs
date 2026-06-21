@@ -91,19 +91,11 @@ pub fn rt_http_request(args: &[Value]) -> Result<Value, CompileError> {
     }
     let method = match args.first() {
         Some(Value::Str(s)) => s.clone(),
-        _ => {
-            return Ok(err_tuple(
-                "rt_http_request: missing or invalid method argument".to_string(),
-            ))
-        }
+        _ => return Ok(err_tuple("rt_http_request: missing or invalid method argument".to_string())),
     };
     let url = match args.get(1) {
         Some(Value::Str(s)) => s.clone(),
-        _ => {
-            return Ok(err_tuple(
-                "rt_http_request: missing or invalid url argument".to_string(),
-            ))
-        }
+        _ => return Ok(err_tuple("rt_http_request: missing or invalid url argument".to_string())),
     };
     // headers: [text] of "Key: Value" (first colon splits; SigV4 Authorization values
     // contain '/' and ',' but no colon before the first one, so this is safe).
@@ -130,29 +122,17 @@ pub fn rt_http_request(args: &[Value]) -> Result<Value, CompileError> {
     for (k, v) in &header_pairs {
         req = req.set(k, v);
     }
-    let send_result = if body.is_empty() {
-        req.call()
-    } else {
-        req.send_string(&body)
-    };
+    let send_result = if body.is_empty() { req.call() } else { req.send_string(&body) };
     match send_result {
         Ok(response) => {
             let status = response.status() as i64;
             let body = response.into_string().unwrap_or_default();
-            Ok(Value::Tuple(vec![
-                Value::Int(status),
-                Value::Str(body),
-                Value::Str(String::new()),
-            ]))
+            Ok(Value::Tuple(vec![Value::Int(status), Value::Str(body), Value::Str(String::new())]))
         }
         // ureq surfaces non-2xx/3xx as Err(Status); return the real code + body, not -1.
         Err(ureq::Error::Status(code, response)) => {
             let body = response.into_string().unwrap_or_default();
-            Ok(Value::Tuple(vec![
-                Value::Int(code as i64),
-                Value::Str(body),
-                Value::Str(String::new()),
-            ]))
+            Ok(Value::Tuple(vec![Value::Int(code as i64), Value::Str(body), Value::Str(String::new())]))
         }
         Err(e) => Ok(err_tuple(format!("rt_http_request error: {e}"))),
     }

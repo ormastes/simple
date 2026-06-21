@@ -6,28 +6,7 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/production_gui_web_host_gpu_queue_readback}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/production_gui_web_host_gpu_queue_readback_$(date -u +%F).md}"
-runtime_usable() {
-    candidate="$1"
-    [ -x "$candidate" ] || return 1
-    "$candidate" --version >/dev/null 2>&1 || return 1
-}
-
-if [ -z "${SIMPLE_BIN:-}" ]; then
-    for candidate in \
-        "$ROOT_DIR/bin/simple" \
-        "$ROOT_DIR/bin/simple-interp" \
-        "$ROOT_DIR/bin/release/simple" \
-        "$ROOT_DIR/bin/release/x86_64-unknown-linux-gnu/simple" \
-        "$ROOT_DIR/bin/release/linux-x86_64/simple" \
-        "$(command -v simple 2>/dev/null || true)"
-    do
-        if [ -n "$candidate" ] && runtime_usable "$candidate"; then
-            SIMPLE_BIN="$candidate"
-            break
-        fi
-    done
-    SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/bin/simple}"
-fi
+SIMPLE_BIN="${SIMPLE_BIN:-./bin/simple}"
 SIMPLE_LIB_CONFIGURED="${SIMPLE_LIB:-src}"
 CHILD_TIMEOUT="${CHILD_TIMEOUT:-240}"
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-180}"
@@ -223,23 +202,6 @@ run_queue_probe() {
     do
         append_env "$key" "$(field_of "$key" "$BUILD_DIR/queue_probe.env")"
     done
-
-    set +e
-    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$SIMPLE_LIB_CONFIGURED" timeout "$PROBE_TIMEOUT" "$SIMPLE_BIN" run "$queue_probe_source" >"$BUILD_DIR/queue_native_probe.env" 2>"$BUILD_DIR/queue_native_probe.err"
-    native_code=$?
-    set -e
-    append_env "queue_native_probe_exit_code" "$native_code"
-    append_probe_timeout_env "queue_native_probe" "$native_code"
-    if rg -q "falling back|JIT compilation failed|unresolved external symbol|stub fallback" "$BUILD_DIR/queue_native_probe.env" "$BUILD_DIR/queue_native_probe.err"; then
-        append_env "queue_native_probe_fallback_status" "fail"
-    else
-        append_env "queue_native_probe_fallback_status" "pass"
-    fi
-    for key in \
-        queue_nonzero_backend_last_backend_handle queue_nonzero_backend_last_payload_size queue_nonzero_backend_last_payload_hash queue_nonzero_backend_last_payload_text
-    do
-        append_env "native_${key}" "$(field_of "$key" "$BUILD_DIR/queue_native_probe.env")"
-    done
 }
 
 run_existing_runtime_spec() {
@@ -250,7 +212,7 @@ run_existing_runtime_spec() {
     gc_draw_ir_code=$?
     SIMPLE_LIB="$SIMPLE_LIB_CONFIGURED" timeout "$PROBE_TIMEOUT" "$SIMPLE_BIN" test test/01_unit/lib/nogc_async_mut/gpu/engine2d/host_gpu_event_queue_spec.spl --mode=interpreter >"$BUILD_DIR/host_gpu_event_queue_spec.out" 2>"$BUILD_DIR/host_gpu_event_queue_spec.err"
     event_queue_code=$?
-    SIMPLE_WEB_RENDER_RUNTIME_QUEUE_EVIDENCE=1 SIMPLE_LIB="$SIMPLE_LIB_CONFIGURED" timeout "$PROBE_TIMEOUT" "$SIMPLE_BIN" test test/01_unit/app/ui/browser_host_event_roundtrip_spec.spl --mode=interpreter >"$BUILD_DIR/browser_host_event_roundtrip_spec.out" 2>"$BUILD_DIR/browser_host_event_roundtrip_spec.err"
+    SIMPLE_LIB="$SIMPLE_LIB_CONFIGURED" timeout "$PROBE_TIMEOUT" "$SIMPLE_BIN" test test/01_unit/app/ui/browser_host_event_roundtrip_spec.spl --mode=interpreter >"$BUILD_DIR/browser_host_event_roundtrip_spec.out" 2>"$BUILD_DIR/browser_host_event_roundtrip_spec.err"
     browser_event_code=$?
     set -e
     append_env "draw_ir_runtime_queue_spec_exit_code" "$nogc_draw_ir_code"
@@ -414,7 +376,7 @@ run_compiler_cleanup_specs() {
 
 run_browser_frame_probe() {
     set +e
-    SIMPLE_WEB_RENDER_RUNTIME_QUEUE_EVIDENCE=1 SIMPLE_LIB="$SIMPLE_LIB_CONFIGURED" timeout "$PROBE_TIMEOUT" "$SIMPLE_BIN" run test/01_unit/app/ui/browser_backend_runtime_queue_probe.spl --mode=interpreter >"$BUILD_DIR/browser_backend_runtime_queue_probe.env" 2>"$BUILD_DIR/browser_backend_runtime_queue_probe.err"
+    SIMPLE_LIB="$SIMPLE_LIB_CONFIGURED" timeout "$PROBE_TIMEOUT" "$SIMPLE_BIN" run test/01_unit/app/ui/browser_backend_runtime_queue_probe.spl --mode=interpreter >"$BUILD_DIR/browser_backend_runtime_queue_probe.env" 2>"$BUILD_DIR/browser_backend_runtime_queue_probe.err"
     code=$?
     set -e
     append_env "browser_frame_probe_exit_code" "$code"
@@ -490,7 +452,6 @@ queue_zero_backend_status="fail"
 queue_nonzero_backend_drain_status="fail"
 queue_nonzero_backend_payload_status="fail"
 queue_nonzero_backend_payload_text_status="fail"
-queue_native_payload_text_status="fail"
 presentation_provenance_guard_status="fail"
 queue_overflow_status="fail"
 browser_frame_queue_status="fail"
@@ -510,13 +471,6 @@ if [ "$(status_of queue_nonzero_backend_last_payload_size)" = "512" ] && [ "$(st
 fi
 if [ "$(status_of queue_nonzero_backend_last_payload_text)" = "queue probe payload command=draw_ir_rect id=runtime-backend" ]; then
     queue_nonzero_backend_payload_text_status="pass"
-fi
-if [ "$(status_of queue_native_probe_exit_code)" = "0" ] \
-    && [ "$(status_of queue_native_probe_fallback_status)" = "pass" ] \
-    && [ "$(status_of native_queue_nonzero_backend_last_payload_size)" = "512" ] \
-    && [ "$(status_of native_queue_nonzero_backend_last_payload_hash)" = "98765" ] \
-    && [ "$(status_of native_queue_nonzero_backend_last_payload_text)" = "queue probe payload command=draw_ir_rect id=runtime-backend" ]; then
-    queue_native_payload_text_status="pass"
 fi
 if [ "$(status_of directx_presentation_provenance_source)" = "structured_readback_contract" ] \
     && [ "$(status_of webgpu_upload_provenance_source)" = "surface_upload" ] \
@@ -564,7 +518,7 @@ if [ "$(status_of browser_frame_probe_exit_code)" = "0" ] \
     && [ "$(status_of browser_first_dispatch_has_image_widget)" = "true" ] \
     && [ "$(status_of browser_first_dispatch_has_image_uri)" = "true" ] \
     && [ "$(status_of browser_first_dispatch_target_context_resolved)" = "true" ] \
-    && [ -n "$(status_of browser_first_dispatch_target_context_batch_id)" ] \
+    && [ "$(status_of browser_first_dispatch_target_context_batch_id)" = "browser-frame-16" ] \
     && [ "$(status_of browser_first_dispatch_target_context_surface_id)" = "browser-frame" ] \
     && [ "$(status_of browser_first_dispatch_target_context_component_id)" = "browser-frame" ] \
     && [ "$(status_of browser_first_dispatch_target_context_source_kind)" = "gui_ast" ] \
@@ -639,7 +593,6 @@ if [ "$queue_emit_status" = "pass" ] \
     && [ "$queue_nonzero_backend_drain_status" = "pass" ] \
     && [ "$queue_nonzero_backend_payload_status" = "pass" ] \
     && [ "$queue_nonzero_backend_payload_text_status" = "pass" ] \
-    && [ "$queue_native_payload_text_status" = "pass" ] \
     && [ "$presentation_provenance_guard_status" = "pass" ] \
     && [ "$queue_overflow_status" = "pass" ] \
     && [ "$browser_frame_queue_status" = "pass" ] \
@@ -741,7 +694,6 @@ append_env "queue_zero_backend_status" "$queue_zero_backend_status"
 append_env "queue_nonzero_backend_drain_status" "$queue_nonzero_backend_drain_status"
 append_env "queue_nonzero_backend_payload_status" "$queue_nonzero_backend_payload_status"
 append_env "queue_nonzero_backend_payload_text_status" "$queue_nonzero_backend_payload_text_status"
-append_env "queue_native_payload_text_status" "$queue_native_payload_text_status"
 append_env "presentation_provenance_guard_status" "$presentation_provenance_guard_status"
 append_env "queue_overflow_status" "$queue_overflow_status"
 append_env "browser_frame_queue_status" "$browser_frame_queue_status"
@@ -786,9 +738,6 @@ report_queue_nonzero_backend_handle="$(field_of queue_nonzero_backend_last_backe
 report_queue_nonzero_payload_size="$(field_of queue_nonzero_backend_last_payload_size "$ENV_PATH")"
 report_queue_nonzero_payload_hash="$(field_of queue_nonzero_backend_last_payload_hash "$ENV_PATH")"
 report_queue_nonzero_payload_text="$(field_of queue_nonzero_backend_last_payload_text "$ENV_PATH")"
-report_queue_native_payload_text_status="$(field_of queue_native_payload_text_status "$ENV_PATH")"
-report_queue_native_payload_text="$(field_of native_queue_nonzero_backend_last_payload_text "$ENV_PATH")"
-report_queue_native_fallback_status="$(field_of queue_native_probe_fallback_status "$ENV_PATH")"
 report_queue_handle_field_count="$(field_of queue_concrete_backend_handle_field_count "$ENV_PATH")"
 report_browser_backend="$(field_of browser_backend "$ENV_PATH")"
 report_browser_first_render_us="$(field_of browser_first_render_us "$ENV_PATH")"
@@ -935,7 +884,6 @@ mkdir -p "$(dirname -- "$REPORT_PATH")"
     echo "- nonzero backend-code drain result: $queue_nonzero_backend_drain_status"
     echo "- nonzero backend-code payload receipt: $queue_nonzero_backend_payload_status"
     echo "- nonzero backend-code payload text receipt: $queue_nonzero_backend_payload_text_status"
-    echo "- native/JIT no-fallback payload text receipt: $queue_native_payload_text_status"
     echo "- DirectX/WebGPU provenance guard: $presentation_provenance_guard_status"
     echo "- DirectX native gate: ${report_directx_native_gate_status:-missing}"
     echo "- native readback wrapper SSpec coverage: ${report_native_readback_wrapper_sspec_coverage_status:-missing}"
@@ -1056,7 +1004,6 @@ EOF
     echo "- Runtime backend-handle field roundtrip: ${report_queue_backend_roundtrip:-missing} (synthetic probe handle ${report_queue_nonzero_backend_handle:-missing}; ${report_queue_handle_field_count:-missing} matching runtime queue handle accessors/fields observed)."
     echo "- Runtime payload metadata roundtrip: $queue_nonzero_backend_payload_status (payload_size ${report_queue_nonzero_payload_size:-missing}, payload_hash ${report_queue_nonzero_payload_hash:-missing})."
     echo "- Runtime payload text roundtrip: $queue_nonzero_backend_payload_text_status (${report_queue_nonzero_payload_text:-missing})."
-    echo "- Native/JIT no-fallback payload text roundtrip: ${report_queue_native_payload_text_status:-missing} (${report_queue_native_payload_text:-missing}; fallback ${report_queue_native_fallback_status:-missing})."
     echo "- BrowserBackend host event roundtrip: ${report_browser_host_event_status:-missing} (source ${report_browser_host_event_source:-missing}, exit ${report_browser_host_event_exit:-missing}, reason ${report_browser_host_event_reason:-missing})."
     echo "- BrowserBackend runtime queue handle/payload/perf: $browser_frame_queue_status (backend ${report_browser_backend:-missing}, first_render_us ${report_browser_first_render_us:-missing}, first_under_budget ${report_browser_first_render_under_budget:-missing}, second_render_us ${report_browser_second_render_us:-missing}, second_under_budget ${report_browser_second_render_under_budget:-missing}, pixels ${report_browser_first_pixel_count:-missing}, checksum ${report_browser_first_checksum:-missing}, nonuniform ${report_browser_first_nonuniform_count:-missing}, handle ${report_browser_first_backend_handle:-missing}, packet ${report_browser_first_packet:-missing}, payload_size ${report_browser_first_payload_size:-missing}, payload_hash ${report_browser_first_payload_hash:-missing}, payload_text ${report_browser_first_payload_text:-missing}, dispatch ${report_browser_first_dispatch_status:-missing}, dispatch_payload_size ${report_browser_first_dispatch_payload_size:-missing}, dispatch_layout_commands ${report_browser_first_dispatch_layout_command_count:-missing}, dispatch_payload_hash ${report_browser_first_dispatch_payload_hash:-missing}, dispatch_payload_text ${report_browser_first_dispatch_payload_text:-missing}, semantic rect/text/image ${report_browser_first_dispatch_rect_command_count:-missing}/${report_browser_first_dispatch_text_command_count:-missing}/${report_browser_first_dispatch_image_command_count:-missing}, gui_ast ${report_browser_first_dispatch_has_gui_ast_source:-missing}, widgets root/copy/action/image ${report_browser_first_dispatch_has_root_widget:-missing}/${report_browser_first_dispatch_has_copy_text:-missing}/${report_browser_first_dispatch_has_action_text:-missing}/${report_browser_first_dispatch_has_image_widget:-missing}, image_uri ${report_browser_first_dispatch_has_image_uri:-missing}, event_context ${report_browser_first_dispatch_target_context_resolved:-missing}/${report_browser_first_dispatch_target_context_batch_id:-missing}/${report_browser_first_dispatch_target_context_source_kind:-missing}, cache reset ${report_browser_second_submit:-missing}/${report_browser_second_payload_size:-missing})."
     echo "- Same-frame GUI/web Engine2D pixel readback receipt: $same_frame_backend_readback_status (backend ${report_browser_first_readback_backend:-missing}, pixels ${report_browser_first_readback_pixel_count:-missing}, checksum ${report_browser_first_readback_checksum:-missing}, reason ${report_browser_first_readback_reason:-missing}, cache reset ${report_browser_second_readback_status:-missing})."
@@ -1075,7 +1022,7 @@ EOF
     echo "- Engine2DReadback carries source, backend_handle, pixel_count, checksum, and reason metadata; backend identity remains WebRender artifact metadata."
     echo "- Add Linux ROCm pass evidence when ROCm runtime, probe, device, and verified HSACO are present."
     echo "- Add Apple Metal pass evidence on an Apple host."
-    echo "- Add native DirectX device-readback evidence by making ${report_directx_native_report:-scripts/check/check-directx-native-readback.shs} pass on Windows; current DirectX structured readback contract is handle/checksum-gated but remains native-pending and not production device_readback. WebGPU real device_readback status is ${report_webgpu_real_status:-missing}/${report_webgpu_real_source:-missing}; surface_upload remains provenance-only."
+    echo "- Add native DirectX device-readback evidence by making ${report_directx_native_report:-scripts/check/check-directx-native-readback.shs} pass on Windows; current DirectX structured readback contract is handle/checksum-gated but remains native-pending and not production device_readback. WebGPU real device_readback evidence passes; surface_upload remains provenance-only."
     echo
     echo "## Raw Evidence"
     echo

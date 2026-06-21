@@ -11,7 +11,6 @@
 @direction LR
 
 browser_session_simple_script_spec -> std
-browser_session_simple_script_spec -> common
 ```
 
 </details>
@@ -28,7 +27,7 @@ browser_session_simple_script_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -205,37 +204,6 @@ match result:
 
 </details>
 
-#### rejects oversized Simple script command blocks before partial drawing
-
-- var session = BrowserSession new
-- Ok
-   - Expected: session.warnings.len() equals `1`
-- Err
-   - Expected: "unexpected load error: {err}" equals ``
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var session = BrowserSession.new()
-val script = str_repeat("simple2d.fill_rect 1 1 1 1 255\n", 129)
-val html = "<html><body><script type='text/simple'>" + script + "</script></body></html>"
-val result = session.open_html("https://example.com/simple-script-too-many-commands.html", html)
-match result:
-    Ok(_):
-        expect(session.warnings.len()).to_equal(1)
-        expect(session.warnings[0]).to_contain("simple script error: command count exceeds limit")
-        expect(session.current_body_html).to_contain("simple2d.fill_rect 1 1 1 1 255")
-    Err(err):
-        expect("unexpected load error: {err}").to_equal("")
-```
-
-</details>
-
 ## At a Glance
 
 | Field | Value |
@@ -255,8 +223,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -309,7 +309,7 @@ user?.name ?? "Unknown"               # Combined
 ### Arrays
 
 ```simple
-val nums = [1, 2, 3]                 # [i64]
+val nums = [1, 2, 3]                 # Array<i64>
 val empty: [i64] = []                # Empty array with type
 ```
 

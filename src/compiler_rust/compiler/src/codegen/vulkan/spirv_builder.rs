@@ -352,12 +352,6 @@ impl SpirvModule {
                     .unreachable()
                     .map_err(|e| CompileError::Codegen(format!("Failed to emit unreachable: {}", e)))?;
             }
-
-            Terminator::Switch { .. } => {
-                return Err(CompileError::Codegen(
-                    "switch terminator is not yet supported in SPIR-V/Vulkan compute codegen".to_string(),
-                ));
-            }
         }
 
         Ok(())

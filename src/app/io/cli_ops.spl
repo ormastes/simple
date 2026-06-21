@@ -3,13 +3,21 @@
 
 # Extern fn declarations (runtime resolves at file level)
 
-use std.io_runtime.{get_args, exit, process_run, env_get, env_set, getpid}
+extern fn rt_cli_get_args() -> [text]
 extern fn sys_get_args() -> [text]
+extern fn rt_exit(code: i64)
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_cli_run_tests(args: [text], gc_log: bool, gc_off: bool) -> i64
+extern fn rt_cli_handle_compile(args: [text]) -> i64
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 
 # --- Shell/file helpers (local copies to avoid circular imports) ---
 
 fn _cli_is_windows_platform() -> bool:
-    val os_env = env_get("OS")
+    val os_env = rt_env_get("OS")
     if os_env == nil:
         false
     else:
@@ -34,7 +42,7 @@ pub fn _cli_shell(command: text) -> _CliProcessResult:
         ("cmd.exe", ["/c", command])
     else:
         ("/bin/sh", ["-c", command])
-    val (stdout, stderr, code) = process_run(shell_path, shell_args)
+    val (stdout, stderr, code) = rt_process_run(shell_path, shell_args)
     _CliProcessResult(stdout: stdout, stderr: stderr, exit_code: code)
 
 fn _cli_shell_bool(command: text) -> bool:
@@ -74,15 +82,15 @@ pub fn _cli_process_run(cmd: text, args: [text]) -> (text, text, i64):
     var resolved_cmd = cmd
     if _cli_is_windows_platform():
         if not cmd.ends_with(".exe") and not cmd.ends_with(".cmd") and not cmd.ends_with(".bat"):
-            val check = process_run("where", [cmd + ".exe"])
+            val check = rt_process_run("where", [cmd + ".exe"])
             if check.2 == 0:
                 resolved_cmd = cmd + ".exe"
     else:
         if not cmd.contains("/"):
-            val check = process_run("which", [cmd])
+            val check = rt_process_run("which", [cmd])
             if check.2 == 0 and check.0.trim() != "":
                 resolved_cmd = check.0.trim()
-    process_run(resolved_cmd, args)
+    rt_process_run(resolved_cmd, args)
 
 pub fn _cli_run_workspace_root_guard() -> i64:
     val (stdout, stderr, code) = _cli_process_run("sh", ["scripts/check-workspace-root-guard.shs", "audit", "--staged"])
@@ -93,13 +101,13 @@ pub fn _cli_run_workspace_root_guard() -> i64:
     code
 
 pub fn _cli_driver_binary() -> text:
-    val override = env_get("SIMPLE_BOOTSTRAP_DRIVER") ?? ""
+    val override = rt_env_get("SIMPLE_BOOTSTRAP_DRIVER") ?? ""
     if override != "":
         # Self-exec guard: an inherited override that points at THIS binary
         # would delegate to ourselves recursively without bound (simple.bak
         # fork bomb OOM-killed the user session, 2026-06-12).
         if not _cli_is_windows_platform():
-            val override_pid = getpid()
+            val override_pid = rt_getpid()
             val override_same = _cli_shell("test /proc/{override_pid}/exe -ef '{override}'")
             if override_same.exit_code == 0:
                 return ""
@@ -109,7 +117,7 @@ pub fn _cli_driver_binary() -> text:
     # bin/release/<triple>/simple is the self-hosted CLI, simple_seed is the
     # Rust seed it delegates to). Absolute path, so this works from any cwd.
     if not _cli_is_windows_platform():
-        val my_pid = getpid()
+        val my_pid = rt_getpid()
         val exe_result = _cli_shell("readlink -f /proc/{my_pid}/exe")
         val exe_path = exe_result.stdout.trim()
         if exe_path != "":
@@ -131,7 +139,7 @@ pub fn _cli_driver_binary() -> text:
     # ourselves recursively without bound (fork bomb, 2026-06-10). Return ""
     # so callers take their in-process fallback instead.
     if not _cli_is_windows_platform():
-        val pid = getpid()
+        val pid = rt_getpid()
         val same = _cli_shell("test /proc/{pid}/exe -ef '{candidate}'")
         if same.exit_code == 0:
             return ""
@@ -139,16 +147,16 @@ pub fn _cli_driver_binary() -> text:
 
 pub fn _cli_frontend_delegate_binary() -> text:
     # Loop guard: if we ARE the delegate child, return "" to avoid re-delegating.
-    val loop_flag = env_get("SIMPLE_FRONTEND_DELEGATED") ?? ""
+    val loop_flag = rt_env_get("SIMPLE_FRONTEND_DELEGATED") ?? ""
     if loop_flag == "1":
         return ""
 
     # Env override: explicit delegate path.
-    val override = env_get("SIMPLE_FRONTEND_DELEGATE") ?? ""
+    val override = rt_env_get("SIMPLE_FRONTEND_DELEGATE") ?? ""
     if override != "":
         if _cli_file_exists_impl(override):
             if not _cli_is_windows_platform():
-                val pid = getpid()
+                val pid = rt_getpid()
                 val same = _cli_shell("test /proc/{pid}/exe -ef '{override}'")
                 if same.exit_code != 0:
                     return override
@@ -163,7 +171,7 @@ pub fn _cli_frontend_delegate_binary() -> text:
 
     # Sibling seed: look for simple_seed next to our own executable.
     if not _cli_is_windows_platform():
-        val pid = getpid()
+        val pid = rt_getpid()
         val exe_result = _cli_shell("readlink -f /proc/{pid}/exe")
         val exe_path = exe_result.stdout.trim()
         if exe_path != "":
@@ -180,7 +188,7 @@ pub fn _cli_frontend_delegate_binary() -> text:
 
 pub fn _cli_run_frontend_delegate(delegate: text, args: [text]) -> i64:
     # Set loop guard so the delegate child does not re-delegate.
-    env_set("SIMPLE_FRONTEND_DELEGATED", "1")
+    rt_env_set("SIMPLE_FRONTEND_DELEGATED", "1")
     val result = _cli_process_run(delegate, args)
     if result.0 != "":
         print_raw(result.0)
@@ -193,7 +201,7 @@ pub fn _cli_run_frontend_delegate(delegate: text, args: [text]) -> i64:
 # ============================================================================
 
 fn get_args() -> [text]:
-    val raw_args = get_args() ?? []
+    val raw_args = rt_cli_get_args() ?? []
     if raw_args.len() > 0:
         return raw_args
 
@@ -204,10 +212,10 @@ fn get_args() -> [text]:
     []
 
 fn exit(code: i64):
-    exit(code)
+    rt_exit(code)
 
 fn cli_get_args() -> [text]:
-    val raw_args = get_args()
+    val raw_args = rt_cli_get_args()
     if raw_args != nil and raw_args.len() > 0:
         return raw_args
 
@@ -218,7 +226,7 @@ fn cli_get_args() -> [text]:
     []
 
 fn cli_exit(code: i64):
-    exit(code)
+    rt_exit(code)
 
 fn cli_file_exists(path: text) -> bool:
     _cli_file_exists_impl(path)

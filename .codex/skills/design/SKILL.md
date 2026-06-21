@@ -23,18 +23,6 @@ description: "Codex design skill (Step 4 in cooperative pipeline). Architecture 
 | NFR | `doc/02_requirements/nfr/<feature>.md` | Run research first |
 | UI Design (optional) | `doc/05_design/<feature>_tui.md` | Do inline (Gemini Step 3 skipped) |
 
-## Phase 0: Cooperative Review Setup
-
-- For broad plans, split independent architecture, UI, test, and risk checks
-  across lower-model parallel agents when available (for example Codex Spark,
-  Claude Haiku, or Claude Sonnet).
-- A normal/highest-capability LLM must review and accept the merged result
-  before final requirements, done marks, exclusions, or broad architecture
-  claims are treated as complete.
-- The first/highest-capability pass defines shared interface names,
-  manual-facing setup/checker helper names, and temporary helper placeholders.
-  Placeholder helpers must fail explicitly (`assert(false)` or equivalent).
-
 ## Phase 1: UI Design (if applicable and Gemini Step 3 skipped)
 
 - TUI layout: `doc/05_design/<feature>_tui.md`
@@ -67,9 +55,6 @@ Output: `doc/04_architecture/<feature>.md`
 - SPipe BDD tests with **built-in matchers only**
 - Every REQ-NNN must have at least one test
 - Include edge cases and error paths
-- Define shared interface names and manual-facing setup/checker helper names
-  before implementation. Temporary placeholder helpers must fail explicitly
-  (`assert(false)` or equivalent), not pass silently.
 - For scenario-oriented specs, design the generated `doc/06_spec/...` output as
   a hand-written-quality manual: primary user/operator/system flows visible,
   setup scenarios expanded silently through `@prev`, reusable setup hidden via
@@ -143,7 +128,7 @@ specs:
    manual visibility until the primary flow is understandable without opening
    the source test.
 
-Reference: `doc/07_guide/infra/sspec_scenario_manual.md`.
+Reference: `doc/07_guide/testing/sspec_scenario_manual.md`.
 
 ## Phase 4: Detail Design
 
@@ -161,9 +146,6 @@ Reference: `doc/07_guide/infra/sspec_scenario_manual.md`.
 - Check generated manual quality for scenario-oriented specs before accepting
   the design. A doc that exposes raw test mechanics as the primary flow is not
   design-complete.
-- Confirm matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
-  `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
-  instructions were updated when the workflow or tool contract changed.
 - Verify architecture alignment with MDSOC rules
 - Ask user if architecture/design needs changes
 

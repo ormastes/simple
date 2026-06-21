@@ -21,13 +21,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
 #include <errno.h>
 #include <math.h>
 #include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <signal.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #if defined(_WIN32)
@@ -37,207 +35,11 @@
 #if !defined(_WIN32)
 #include <sys/mman.h>
 #include <sys/socket.h>
-#include <sys/sendfile.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <poll.h>
 #include <pthread.h>
-#endif
-
-typedef struct {
-    const char* name;
-    uint64_t count;
-} RtNativeProfileSlot;
-
-#ifndef RT_NATIVE_PROFILE_MAX
-#define RT_NATIVE_PROFILE_MAX 8192
-#endif
-typedef struct RtNativeProfileOwner {
-    RtNativeProfileSlot slots[RT_NATIVE_PROFILE_MAX];
-    size_t used;
-    uint64_t emitted;
-    uint64_t dropped;
-    struct RtNativeProfileOwner* next;
-} RtNativeProfileOwner;
-
-static RtNativeProfileOwner* rt_native_profile_owners = NULL;
-static int rt_native_profile_atexit_registered = 0;
-static int rt_native_profile_dumped = 0;
-#if defined(_MSC_VER)
-static __declspec(thread) RtNativeProfileOwner* rt_native_profile_owner = NULL;
-#else
-static _Thread_local RtNativeProfileOwner* rt_native_profile_owner = NULL;
-#endif
-#if !defined(_WIN32)
-static pthread_mutex_t rt_native_profile_lock = PTHREAD_MUTEX_INITIALIZER;
-#define RT_NATIVE_PROFILE_LOCK() pthread_mutex_lock(&rt_native_profile_lock)
-#define RT_NATIVE_PROFILE_UNLOCK() pthread_mutex_unlock(&rt_native_profile_lock)
-#else
-#define RT_NATIVE_PROFILE_LOCK() ((void)0)
-#define RT_NATIVE_PROFILE_UNLOCK() ((void)0)
-#endif
-
-static void rt_native_profile_dump(void);
-#if !defined(_WIN32)
-static void rt_native_profile_signal_dump(int sig);
-#endif
-
-static RtNativeProfileOwner* rt_native_profile_register_owner(void) {
-    RtNativeProfileOwner* owner = (RtNativeProfileOwner*)calloc(1, sizeof(RtNativeProfileOwner));
-    if (!owner) return NULL;
-
-    RT_NATIVE_PROFILE_LOCK();
-    if (!rt_native_profile_atexit_registered) {
-        atexit(rt_native_profile_dump);
-#if !defined(_WIN32)
-        signal(SIGINT, rt_native_profile_signal_dump);
-        signal(SIGTERM, rt_native_profile_signal_dump);
-#endif
-        rt_native_profile_atexit_registered = 1;
-    }
-    owner->next = rt_native_profile_owners;
-    rt_native_profile_owners = owner;
-    RT_NATIVE_PROFILE_UNLOCK();
-
-    rt_native_profile_owner = owner;
-    return owner;
-}
-
-void rt_native_profile_count(const char* name) {
-    if (!name || !*name) return;
-    RtNativeProfileOwner* owner = rt_native_profile_owner;
-    if (!owner) {
-        owner = rt_native_profile_register_owner();
-        if (!owner) return;
-    }
-    for (size_t i = 0; i < owner->used; i++) {
-        if (strcmp(owner->slots[i].name, name) == 0) {
-            owner->slots[i].count++;
-            owner->emitted++;
-            return;
-        }
-    }
-    if (owner->used < RT_NATIVE_PROFILE_MAX) {
-        owner->slots[owner->used].name = name;
-        owner->slots[owner->used].count = 1;
-        owner->used++;
-        owner->emitted++;
-    } else {
-        owner->dropped++;
-    }
-}
-
-static int rt_native_profile_slot_cmp(const void* lhs, const void* rhs) {
-    const RtNativeProfileSlot* a = *(const RtNativeProfileSlot* const*)lhs;
-    const RtNativeProfileSlot* b = *(const RtNativeProfileSlot* const*)rhs;
-    if (a->count < b->count) return 1;
-    if (a->count > b->count) return -1;
-    return strcmp(a->name, b->name);
-}
-
-static size_t rt_native_profile_merge_slots(RtNativeProfileSlot* rows, uint64_t* dropped) {
-    size_t used = 0;
-    if (dropped) *dropped = 0;
-    for (RtNativeProfileOwner* owner = rt_native_profile_owners; owner; owner = owner->next) {
-        if (dropped) *dropped += owner->dropped;
-        for (size_t i = 0; i < owner->used; i++) {
-            const char* name = owner->slots[i].name;
-            uint64_t count = owner->slots[i].count;
-            int found = 0;
-            for (size_t j = 0; j < used; j++) {
-                if (strcmp(rows[j].name, name) == 0) {
-                    rows[j].count += count;
-                    found = 1;
-                    break;
-                }
-            }
-            if (!found && used < RT_NATIVE_PROFILE_MAX) {
-                rows[used].name = name;
-                rows[used].count = count;
-                used++;
-            } else if (!found && dropped) {
-                (*dropped)++;
-            }
-        }
-    }
-    return used;
-}
-
-static void rt_native_profile_report_summary(FILE* fp, uint64_t dropped) {
-    uint64_t emitted = 0;
-    uint64_t capacity = 0;
-    for (RtNativeProfileOwner* owner = rt_native_profile_owners; owner; owner = owner->next) {
-        emitted += owner->emitted;
-        capacity += RT_NATIVE_PROFILE_MAX;
-    }
-    fprintf(fp, "# profile_summary emitted=%llu dropped=%llu capacity=%llu\n",
-            (unsigned long long)emitted,
-            (unsigned long long)dropped,
-            (unsigned long long)capacity);
-}
-
-static void rt_native_profile_dump(void) {
-    const char* out = getenv("SIMPLE_NATIVE_PROFILE_OUT");
-    if (!out || !*out || !rt_native_profile_owners) return;
-    if (rt_native_profile_dumped) return;
-    rt_native_profile_dumped = 1;
-    FILE* fp = strcmp(out, "stderr") == 0 ? stderr : fopen(out, "w");
-    if (!fp) return;
-
-    RT_NATIVE_PROFILE_LOCK();
-    RtNativeProfileSlot* merged = (RtNativeProfileSlot*)calloc(RT_NATIVE_PROFILE_MAX, sizeof(RtNativeProfileSlot));
-    if (merged) {
-        uint64_t dropped = 0;
-        size_t used = rt_native_profile_merge_slots(merged, &dropped);
-        RtNativeProfileSlot** rows = (RtNativeProfileSlot**)malloc(sizeof(RtNativeProfileSlot*) * used);
-        for (size_t i = 0; rows && i < used; i++) rows[i] = &merged[i];
-        if (rows) qsort(rows, used, sizeof(RtNativeProfileSlot*), rt_native_profile_slot_cmp);
-        fputs("count\tfunction\n", fp);
-        for (size_t i = 0; rows && i < used; i++) {
-            fprintf(fp, "%llu\t%s\n", (unsigned long long)rows[i]->count, rows[i]->name);
-        }
-        rt_native_profile_report_summary(fp, dropped);
-        free(rows);
-        free(merged);
-    }
-    RT_NATIVE_PROFILE_UNLOCK();
-
-    if (fp != stderr) fclose(fp);
-}
-
-#if !defined(_WIN32)
-static void rt_native_profile_signal_dump(int sig) {
-    const char* out = getenv("SIMPLE_NATIVE_PROFILE_OUT");
-    if (out && *out && !rt_native_profile_dumped && rt_native_profile_owners) {
-        rt_native_profile_dumped = 1;
-        FILE* fp = strcmp(out, "stderr") == 0 ? stderr : fopen(out, "w");
-        if (fp) {
-            fputs("count\tfunction\n", fp);
-            RtNativeProfileSlot merged[RT_NATIVE_PROFILE_MAX];
-            memset(merged, 0, sizeof(merged));
-            uint64_t dropped = 0;
-            size_t used = rt_native_profile_merge_slots(merged, &dropped);
-            for (size_t i = 0; i < used; i++) {
-                fprintf(fp, "%llu\t%s\n", (unsigned long long)merged[i].count, merged[i].name);
-            }
-            rt_native_profile_report_summary(fp, dropped);
-            if (fp != stderr) fclose(fp);
-        }
-    }
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
-#endif
-
-#if !defined(_WIN32)
-static void rt_tcp_ignore_sigpipe(void) {
-    static int ignored = 0;
-    if (!ignored) {
-        signal(SIGPIPE, SIG_IGN);
-        ignored = 1;
-    }
-}
 #endif
 
 bool rt_dir_create(const char* path, bool recursive) {
@@ -341,40 +143,9 @@ void rt_host_gpu_queue_reset(void);
 
 int64_t rt_cuda_available(void) { return 0; }
 int64_t rt_cuda_device_count(void) { return 0; }
-
-/* Real Vulkan availability + device count via runtime dlopen (no hard link dep).
- * Replicates the minimal stable Vulkan ABI so the runtime needs no vulkan headers.
- * Any failure -> 0 (safe fallback). Validated against vulkaninfo device count. */
-#include <dlfcn.h>
-struct RtVkApplicationInfo_ { int sType; const void* pNext; const char* pAppName; unsigned appVer; const char* pEngName; unsigned engVer; unsigned apiVer; };
-struct RtVkInstanceCreateInfo_ { int sType; const void* pNext; unsigned flags; const struct RtVkApplicationInfo_* pApp; unsigned layerCount; const char* const* layers; unsigned extCount; const char* const* exts; };
-static int rt_vulkan_count_cached = -1;
-static void rt_vulkan_detect(void) {
-    if (rt_vulkan_count_cached >= 0) return;
-    rt_vulkan_count_cached = 0;
-    void* lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
-    if (!lib) lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-    if (!lib) lib = dlopen("libvulkan.1.dylib", RTLD_NOW | RTLD_LOCAL); /* macOS/MoltenVK */
-    if (!lib) return;
-    typedef int  (*rt_pfn_create)(const struct RtVkInstanceCreateInfo_*, const void*, void**);
-    typedef int  (*rt_pfn_enum)(void*, unsigned*, void**);
-    typedef void (*rt_pfn_destroy)(void*, const void*);
-    rt_pfn_create  pCreate  = (rt_pfn_create)dlsym(lib, "vkCreateInstance");
-    rt_pfn_enum    pEnum    = (rt_pfn_enum)dlsym(lib, "vkEnumeratePhysicalDevices");
-    rt_pfn_destroy pDestroy = (rt_pfn_destroy)dlsym(lib, "vkDestroyInstance");
-    if (!pCreate || !pEnum) return;
-    struct RtVkApplicationInfo_ ai; memset(&ai, 0, sizeof(ai)); ai.sType = 0; ai.apiVer = (1u << 22);
-    struct RtVkInstanceCreateInfo_ ici; memset(&ici, 0, sizeof(ici)); ici.sType = 1; ici.pApp = &ai;
-    void* inst = 0;
-    if (pCreate(&ici, 0, &inst) != 0 || !inst) return;
-    unsigned ndev = 0;
-    if (pEnum(inst, &ndev, 0) == 0) rt_vulkan_count_cached = (int)ndev;
-    if (pDestroy) pDestroy(inst, 0);
-    /* lib handle intentionally kept open for process lifetime */
-}
-int32_t rt_vk_available(void) { rt_vulkan_detect(); return rt_vulkan_count_cached > 0 ? 1 : 0; }
-int64_t rt_vulkan_is_available(void) { rt_vulkan_detect(); return rt_vulkan_count_cached > 0 ? 1 : 0; }
-int64_t rt_vulkan_device_count(void) { rt_vulkan_detect(); return (int64_t)(rt_vulkan_count_cached > 0 ? rt_vulkan_count_cached : 0); }
+int32_t rt_vk_available(void) { return 0; }
+int64_t rt_vulkan_is_available(void) { return 0; }
+int64_t rt_vulkan_device_count(void) { return 0; }
 
 static int64_t rt_host_gpu_queue_now_us(void) {
     struct timespec ts;
@@ -761,18 +532,6 @@ static void rt_core_print_value_to(FILE* stream, int64_t value) {
 
     if (rt_core_is_int(value)) {
         fprintf(stream, "%lld", (long long)rt_core_as_int(value));
-        return;
-    }
-
-    if (rt_core_is_float(value)) {
-        /* Decode the NaN-boxed f64 (low 3 bits are the TAG_FLOAT tag) and
-         * format identically to rt_to_string so print(x) and str(x) agree.
-         * Without this an f64 RuntimeValue fell through to the <value:0x..>
-         * hex fallback. */
-        uint64_t bits = ((uint64_t)value) & ~RT_VALUE_TAG_MASK;
-        double f;
-        memcpy(&f, &bits, sizeof(f));
-        fprintf(stream, "%.17g", f);
         return;
     }
 
@@ -1349,72 +1108,6 @@ int64_t rt_string_to_int(int64_t value) {
     if (n > 0) memcpy(buf, s->data, (size_t)n);
     buf[n] = '\0';
     return (int64_t)strtoll(buf, NULL, 10);
-}
-
-typedef struct RtCoreStringBuilder {
-    char* data;
-    uint64_t len;
-    uint64_t cap;
-} RtCoreStringBuilder;
-
-static int rt_string_builder_reserve(RtCoreStringBuilder* b, uint64_t needed) {
-    if (!b) return 0;
-    if (needed <= b->cap) return 1;
-    uint64_t next = b->cap ? b->cap : 64;
-    while (next < needed) {
-        if (next > UINT64_MAX / 2) {
-            next = needed;
-            break;
-        }
-        next *= 2;
-    }
-    char* grown = (char*)realloc(b->data, (size_t)next + 1);
-    if (!grown) return 0;
-    b->data = grown;
-    b->cap = next;
-    return 1;
-}
-
-int64_t rt_string_builder_new(void) {
-    RtCoreStringBuilder* b = (RtCoreStringBuilder*)calloc(1, sizeof(RtCoreStringBuilder));
-    if (!b) return 0;
-    return (int64_t)(uintptr_t)b;
-}
-
-int64_t rt_string_builder_push(int64_t handle, int64_t value) {
-    RtCoreStringBuilder* b = (RtCoreStringBuilder*)(uintptr_t)handle;
-    RtCoreString* s = rt_core_as_string(value);
-    if (!b || !s) return 0;
-    uint64_t needed = b->len + s->len;
-    if (needed < b->len || !rt_string_builder_reserve(b, needed)) return 0;
-    if (s->len > 0) {
-        memcpy(b->data + b->len, s->data, (size_t)s->len);
-    }
-    b->len = needed;
-    b->data[b->len] = '\0';
-    return 1;
-}
-
-int64_t rt_string_builder_finish(int64_t handle) {
-    RtCoreStringBuilder* b = (RtCoreStringBuilder*)(uintptr_t)handle;
-    if (!b) return rt_core_nil();
-    int64_t result = rt_string_new((const uint8_t*)b->data, b->len);
-    free(b->data);
-    free(b);
-    return result;
-}
-
-int64_t rt_string_builder_len(int64_t handle) {
-    RtCoreStringBuilder* b = (RtCoreStringBuilder*)(uintptr_t)handle;
-    if (!b) return -1;
-    return (int64_t)b->len;
-}
-
-void rt_string_builder_free(int64_t handle) {
-    RtCoreStringBuilder* b = (RtCoreStringBuilder*)(uintptr_t)handle;
-    if (!b) return;
-    free(b->data);
-    free(b);
 }
 
 void rt_print_str(const uint8_t* ptr, uint64_t len) {
@@ -2581,20 +2274,6 @@ int rt_file_exists(const char* path) {
     return 0;
 }
 
-int64_t rt_file_size(const char* path) {
-    if (!path) return rt_value_int(-1);
-    struct stat st;
-    if (stat(path, &st) != 0) return rt_value_int(-1);
-    return rt_value_int((int64_t)st.st_size);
-}
-
-int64_t rt_file_stat(const char* path) {
-    if (!path) return 0;
-    struct stat st;
-    if (stat(path, &st) != 0) return 0;
-    return (int64_t)st.st_mtime;
-}
-
 int rt_file_delete(const char* path) {
     if (!path) return 0;
     return remove(path) == 0 ? 1 : 0;
@@ -2605,7 +2284,7 @@ const char* rt_env_get(const char* key) {
     return spl_env_get(key);
 }
 
-/* rt_file_write, rt_file_copy, rt_file_append
+/* rt_file_write, rt_file_copy, rt_file_size, rt_file_stat, rt_file_append
  * are still defined in runtime.c only — add them here when needed. */
 
 static char* rt_core_string_to_cpath(int64_t value) {
@@ -2880,53 +2559,16 @@ SplArray* rt_process_run(const char* cmd, SplArray* args) {
     if (!stdout_buf) stdout_buf = spl_strdup("");
     if (stdout_buf) stdout_buf[0] = '\0';
     char chunk[512];
-    /* Read via poll() with an idle timeout rather than fgets()-until-EOF.
-     * popen()'s direct child (a shell) exits as soon as its foreground command
-     * finishes, and pclose() then reaps it cleanly. But if that command spawned
-     * a detached/reparented descendant (e.g. `simple check` spawning a delegate
-     * driver), the descendant keeps the stdout pipe write-end open, so EOF never
-     * arrives and a plain fgets()/read() loop would block forever — the historic
-     * rt_process_run deadlock. Stopping after IDLE_LIMIT_MS of no further data
-     * captures the command's output and returns even when a descendant still
-     * holds the pipe. Real EOF (all write-ends closed) still breaks immediately,
-     * so the common no-descendant case has no added latency. */
-    int out_fd = pipe ? fileno(pipe) : -1;
-    if (out_fd >= 0 && stdout_buf) {
-        struct pollfd pfd;
-        pfd.fd = out_fd;
-        pfd.events = POLLIN;
-        const int POLL_MS = 200;
-        const int IDLE_LIMIT_MS = 3000;
-        int idle_ms = 0;
-        while (1) {
-            pfd.revents = 0;
-            int pr = poll(&pfd, 1, POLL_MS);
-            if (pr < 0) {
-                if (errno == EINTR) continue;
-                break;
-            }
-            if (pr == 0) {
-                idle_ms += POLL_MS;
-                if (idle_ms >= IDLE_LIMIT_MS) break; /* descendant likely holds the pipe */
-                continue;
-            }
-            ssize_t n = read(out_fd, chunk, sizeof(chunk));
-            if (n < 0) {
-                if (errno == EINTR) continue;
-                break;
-            }
-            if (n == 0) break; /* real EOF: all write-ends closed */
-            idle_ms = 0;
-            if (len + (size_t)n + 1 > cap) {
-                while (len + (size_t)n + 1 > cap) cap *= 2;
-                char* grown = (char*)realloc(stdout_buf, cap);
-                if (!grown) break;
-                stdout_buf = grown;
-            }
-            memcpy(stdout_buf + len, chunk, (size_t)n);
-            len += (size_t)n;
-            stdout_buf[len] = '\0';
+    while (fgets(chunk, sizeof(chunk), pipe)) {
+        size_t chunk_len = strlen(chunk);
+        if (len + chunk_len + 1 > cap) {
+            while (len + chunk_len + 1 > cap) cap *= 2;
+            stdout_buf = (char*)realloc(stdout_buf, cap);
+            if (!stdout_buf) break;
         }
+        memcpy(stdout_buf + len, chunk, chunk_len);
+        len += chunk_len;
+        stdout_buf[len] = '\0';
     }
     int status = pclose(pipe);
     int exit_code = status == -1 ? -1 : (status >> 8);
@@ -2939,32 +2581,9 @@ SplArray* rt_process_run(const char* cmd, SplArray* args) {
     return result;
 }
 
-/* Reads a whole file as a binary-safe [u8]. Compiled native code represents a
- * [u8] value as a byte SplArray (same as rt_bytes_from_raw), so this must return
- * an SplArray*, not a raw char*. The old version returned spl_file_read()'s
- * NUL-terminated char* — wrong type (compiled .len() read a bogus header) AND it
- * truncated at the first zero byte, corrupting real chunk data. Reads by file
- * size, so embedded NULs survive; always returns a non-NULL array. */
-SplArray* rt_file_read_bytes(const char* path) {
-    if (!path) return rt_byte_array_new(0);
-    FILE* f = fopen(path, "rb");
-    if (!f) return rt_byte_array_new(0);
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_byte_array_new(0); }
-    long sz = ftell(f);
-    if (sz < 0) { fclose(f); return rt_byte_array_new(0); }
-    rewind(f);
-    SplArray* arr = rt_byte_array_new_len((uint64_t)sz);
-    RtCoreArray* array = rt_core_array_ptr(arr);
-    if (array) {
-        if (array->data && sz > 0) {
-            size_t rd = fread(array->data, 1, (size_t)sz, f);
-            array->len = (int64_t)rd;
-        } else {
-            array->len = 0;
-        }
-    }
-    fclose(f);
-    return arr;
+char* rt_file_read_bytes(const char* path) {
+    /* Reads file into a buffer; for native linking, returns raw bytes as char* */
+    return spl_file_read(path);
 }
 
 int64_t rt_file_read_all_text(int64_t path_tagged) {
@@ -2980,23 +2599,13 @@ int64_t rt_file_read_all_text(int64_t path_tagged) {
 }
 
 
-/* Native ABI (confirmed empirically): the codegen passes a `text` argument as
- * (ptr, len) and a `[u8]` argument flattened to (data_ptr, data_len). So the
- * Simple extern `rt_file_write_bytes(path: text, data: [u8])` lowers to a FOUR-
- * argument C call: (path_ptr, path_len, data_ptr, data_len). The old THREE-param
- * signature `(const char* path, const void* data, int64_t len)` was off by one —
- * it received path_len in `data` and the data pointer in `len`, writing 0 bytes
- * for every chunk. Binary-safe: writes exactly data_len bytes (NULs included).
- * See doc/08_tracking/bug/native_sffi_file_byte_io_u8_marshalling_2026-06-20.md. */
-int rt_file_write_bytes(const char* path, int64_t path_len, const unsigned char* data_ptr, int64_t data_len) {
-    (void)path_len; /* path is a NUL-terminated cstring */
-    if (!path) return 0;
+int rt_file_write_bytes(const char* path, const void* data, int64_t len) {
+    if (!path || !data) return 0;
     FILE* f = fopen(path, "wb");
     if (!f) return 0;
-    size_t written = 0;
-    if (data_ptr && data_len > 0) written = fwrite(data_ptr, 1, (size_t)data_len, f);
+    size_t written = fwrite(data, 1, (size_t)len, f);
     fclose(f);
-    return (data_len == 0 || written == (size_t)data_len) ? 1 : 0;
+    return written == (size_t)len ? 1 : 0;
 }
 
 /* IF-13 wave-4d: truncate (or zero-extend) `path` to exactly `size` bytes.
@@ -3435,18 +3044,12 @@ int64_t rt_io_tcp_read_line(int64_t fd) {
 }
 
 int64_t rt_io_tcp_write(int64_t fd, int64_t data_val) {
-#if !defined(_WIN32)
-    rt_tcp_ignore_sigpipe();
-#endif
     RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
     if (!ca || !ca->data || ca->len <= 0) return 0;
     return (int64_t)write((int)fd, ca->data, (size_t)ca->len);
 }
 
 int64_t rt_io_tcp_write_text(int64_t fd, int64_t text_val) {
-#if !defined(_WIN32)
-    rt_tcp_ignore_sigpipe();
-#endif
     RtCoreString* s = rt_core_as_string(text_val);
     if (!s || s->len == 0) return 0;
     return (int64_t)write((int)fd, s->data, (size_t)s->len);
@@ -3454,153 +3057,6 @@ int64_t rt_io_tcp_write_text(int64_t fd, int64_t text_val) {
 
 int64_t rt_io_tcp_write_bytes(int64_t fd, int64_t data_val) {
     return rt_io_tcp_write(fd, data_val);
-}
-
-#if !defined(_WIN32)
-#define RT_SENDFILE_FD_CACHE_MAX 64
-typedef struct {
-    char* path;
-    int fd;
-    int64_t expires_at_ms;
-} RtSendfileFdCacheEntry;
-
-static _Thread_local RtSendfileFdCacheEntry rt_sendfile_fd_cache[RT_SENDFILE_FD_CACHE_MAX];
-
-static int64_t rt_now_monotonic_ms(void) {
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
-    return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);
-}
-
-static int64_t rt_sendfile_fd_cache_ttl_ms(void) {
-    const char* raw = getenv("SIMPLE_HTTP_STATIC_METADATA_CACHE_MS");
-    if (!raw || !*raw) return 0;
-    char* end = NULL;
-    long long ttl = strtoll(raw, &end, 10);
-    if (end == raw || ttl <= 0) return 0;
-    return (int64_t)ttl;
-}
-
-static int rt_sendfile_open_path(const char* path, int64_t* cached_out) {
-    if (cached_out) *cached_out = 0;
-    int64_t ttl = rt_sendfile_fd_cache_ttl_ms();
-    if (ttl <= 0) return open(path, O_RDONLY);
-
-    int64_t now = rt_now_monotonic_ms();
-    int free_slot = -1;
-    for (int i = 0; i < RT_SENDFILE_FD_CACHE_MAX; i++) {
-        RtSendfileFdCacheEntry* e = &rt_sendfile_fd_cache[i];
-        if (!e->path) {
-            if (free_slot < 0) free_slot = i;
-            continue;
-        }
-        if (strcmp(e->path, path) == 0) {
-            if (now > 0 && e->expires_at_ms >= now && e->fd >= 0) {
-                if (cached_out) *cached_out = 1;
-                return e->fd;
-            }
-            close(e->fd);
-            free(e->path);
-            e->path = NULL;
-            e->fd = -1;
-            e->expires_at_ms = 0;
-            if (free_slot < 0) free_slot = i;
-        }
-    }
-
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return fd;
-    if (free_slot >= 0 && now > 0) {
-        RtSendfileFdCacheEntry* e = &rt_sendfile_fd_cache[free_slot];
-        e->path = spl_strdup(path);
-        if (e->path) {
-            e->fd = fd;
-            e->expires_at_ms = now + ttl;
-            if (cached_out) *cached_out = 1;
-            return fd;
-        }
-    }
-    return fd;
-}
-
-static void rt_sendfile_release_fd(int fd, int64_t cached) {
-    if (!cached && fd >= 0) close(fd);
-}
-#endif
-
-int64_t rt_io_tcp_sendfile_path(int64_t fd, int64_t path_val, int64_t offset, int64_t length) {
-#if defined(_WIN32)
-    (void)fd; (void)path_val; (void)offset; (void)length;
-    return -1;
-#else
-    rt_tcp_ignore_sigpipe();
-    char* path = rt_core_string_to_cpath(path_val);
-    if (!path) return -1;
-    int64_t cached_fd = 0;
-    int file_fd = rt_sendfile_open_path(path, &cached_fd);
-    free(path);
-    if (file_fd < 0) return -1;
-    off_t off = (off_t)rt_core_numeric_arg(offset);
-    int64_t total = 0;
-    int64_t remaining = rt_core_numeric_arg(length);
-    while (remaining > 0) {
-        ssize_t n = sendfile((int)fd, file_fd, &off, (size_t)remaining);
-        if (n > 0) {
-            total += (int64_t)n;
-            remaining -= (int64_t)n;
-            continue;
-        }
-        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
-        break;
-    }
-    rt_sendfile_release_fd(file_fd, cached_fd);
-    return total > 0 ? total : -1;
-#endif
-}
-
-int64_t rt_io_tcp_sendfile_path_with_header(int64_t fd, int64_t header_val, int64_t path_val, int64_t offset, int64_t length) {
-#if defined(_WIN32)
-    (void)fd; (void)header_val; (void)path_val; (void)offset; (void)length;
-    return -1;
-#else
-    rt_tcp_ignore_sigpipe();
-    char* path = rt_core_string_to_cpath(path_val);
-    if (!path) return -1;
-    int64_t cached_fd = 0;
-    int file_fd = rt_sendfile_open_path(path, &cached_fd);
-    free(path);
-    if (file_fd < 0) return -1;
-    off_t off = (off_t)rt_core_numeric_arg(offset);
-    int64_t remaining = rt_core_numeric_arg(length);
-    RtCoreString* header = rt_core_as_string(header_val);
-    int64_t total = 0;
-    if (header && header->len > 0) {
-        uint64_t pos = 0;
-        while (pos < header->len) {
-            ssize_t n = write((int)fd, header->data + pos, (size_t)(header->len - pos));
-            if (n > 0) {
-                pos += (uint64_t)n;
-                total += (int64_t)n;
-                continue;
-            }
-            if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
-            rt_sendfile_release_fd(file_fd, cached_fd);
-            return total > 0 ? total : -1;
-        }
-    }
-    while (remaining > 0) {
-        ssize_t n = sendfile((int)fd, file_fd, &off, (size_t)remaining);
-        if (n > 0) {
-            total += (int64_t)n;
-            remaining -= (int64_t)n;
-            continue;
-        }
-        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
-        break;
-    }
-    rt_sendfile_release_fd(file_fd, cached_fd);
-    return total > 0 ? total : -1;
-#endif
 }
 
 int64_t rt_io_tcp_flush(int64_t fd) {
@@ -3971,7 +3427,6 @@ void __simple_runtime_init(void) {
 }
 
 void __simple_runtime_shutdown(void) {
-    rt_native_profile_dump();
     fflush(stdout);
     fflush(stderr);
 }

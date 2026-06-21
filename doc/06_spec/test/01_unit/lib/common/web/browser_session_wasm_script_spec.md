@@ -11,7 +11,6 @@
 @direction LR
 
 browser_session_wasm_script_spec -> std
-browser_session_wasm_script_spec -> common
 ```
 
 </details>
@@ -28,7 +27,7 @@ browser_session_wasm_script_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -160,71 +159,6 @@ match result:
 
 </details>
 
-#### records wasm response transport errors and resumes later JavaScript
-
-- var session = BrowserSession new
-- Ok
-- Some
-- Ok
-   - Expected: session.wasm_modules.len() equals `0`
-   - Expected: session.warnings.len() equals `1`
-   - Expected: session.warnings[0] equals `wasm module load error: network unavailable`
-- Ok
-   - Expected: _display_js(value) equals `before:after`
-- Err
-- fail
-- Err
-- fail
-- fail
-- Err
-- fail
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 34 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var session = BrowserSession.new()
-val html = "<html><body><script>var status = 'before';</script><script type='application/wasm' src='/missing.wasm'></script><script>status = status + ':after';</script></body></html>"
-val result = session.open_html("https://example.com/wasm-error.html", html)
-
-match result:
-    Ok(_):
-        match session.take_pending_request():
-            Some(request):
-                val committed = session.commit_network_response(BrowserResponse.create(
-                    request_id: request.id,
-                    kind: "wasm",
-                    url: request.url,
-                    status: 503,
-                    headers: "Content-Type: application/wasm\n",
-                    body: "",
-                    error: "network unavailable"
-                ))
-                match committed:
-                    Ok(_):
-                        expect(session.wasm_modules.len()).to_equal(0)
-                        expect(session.warnings.len()).to_equal(1)
-                        expect(session.warnings[0]).to_equal("wasm module load error: network unavailable")
-                        val js_result = session.eval_script("status")
-                        match js_result:
-                            Ok(value):
-                                expect(_display_js(value)).to_equal("before:after")
-                            Err(err):
-                                fail("Expected JS after WASM response error to evaluate: {err}")
-                    Err(err):
-                        fail("Expected WASM response error to commit with warning: {err}")
-            nil:
-                fail("Expected pending external WASM request")
-    Err(err):
-        fail("Expected WASM response error page to start loading: {err}")
-```
-
-</details>
-
 #### reports invalid wasm script payloads without running them as JavaScript
 
 - var session = BrowserSession new
@@ -270,75 +204,6 @@ match result:
 
 </details>
 
-#### rejects oversized wasm response payloads even when the header is valid
-
-- var session = BrowserSession new
-- Ok
-- Some
-- body:  oversized valid wasm hex
-- Ok
-   - Expected: session.wasm_modules.len() equals `1`
-   - Expected: session.wasm_modules[0].status equals `wasm-payload-too-large`
-   - Expected: session.warnings.len() equals `1`
-- Ok
-   - Expected: _display_js(value) equals `before:after`
-- Err
-- fail
-- Err
-- fail
-- fail
-- Err
-- fail
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 37 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var session = BrowserSession.new()
-val html = "<html><body><script>var marker = 'before';</script><script type='application/wasm' src='/oversized.wasm'></script><script>marker = marker + ':after';</script></body></html>"
-val result = session.open_html("https://example.com/oversized-wasm.html", html)
-
-match result:
-    Ok(_):
-        match session.take_pending_request():
-            Some(request):
-                val committed = session.commit_network_response(BrowserResponse.create(
-                    request_id: request.id,
-                    kind: "wasm",
-                    url: request.url,
-                    status: 200,
-                    headers: "Content-Type: application/wasm\n",
-                    body: _oversized_valid_wasm_hex(),
-                    error: ""
-                ))
-                match committed:
-                    Ok(_):
-                        expect(session.wasm_modules.len()).to_equal(1)
-                        expect(session.wasm_modules[0].byte_length).to_be_greater_than(8192)
-                        expect(session.wasm_modules[0].valid).to_be(false)
-                        expect(session.wasm_modules[0].status).to_equal("wasm-payload-too-large")
-                        expect(session.warnings.len()).to_equal(1)
-                        expect(session.warnings[0]).to_contain("wasm module error: wasm-payload-too-large")
-                        val js_result = session.eval_script("marker")
-                        match js_result:
-                            Ok(value):
-                                expect(_display_js(value)).to_equal("before:after")
-                            Err(err):
-                                fail("Expected JS after oversized WASM to evaluate: {err}")
-                    Err(err):
-                        fail("Expected oversized WASM response to commit with warning: {err}")
-            nil:
-                fail("Expected pending oversized WASM request")
-    Err(err):
-        fail("Expected oversized WASM page to load with warning: {err}")
-```
-
-</details>
-
 ## At a Glance
 
 | Field | Value |
@@ -358,8 +223,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

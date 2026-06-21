@@ -140,10 +140,6 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     "rt_host_gpu_queue_in_flight_count",
     "rt_host_gpu_queue_last_status",
     "rt_host_gpu_queue_last_backend_handle",
-    "rt_host_gpu_queue_last_device_time_us",
-    "rt_host_gpu_queue_last_payload_size",
-    "rt_host_gpu_queue_last_payload_hash",
-    "rt_host_gpu_queue_last_payload_text",
     // I/O functions (print now adds newline by default, like Python)
     "print",      // prints with newline (new behavior)
     "print_raw",  // prints without newline (for old print behavior)

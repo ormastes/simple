@@ -64,7 +64,7 @@ _Append contract: monotonic LSNs, readable records._
 #### first append returns LSN > 0
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -81,7 +81,7 @@ expect(lsn > 0).to_equal(true)
 #### successive appends produce strictly increasing LSNs
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -100,7 +100,7 @@ expect(lsn2 > lsn1).to_equal(true)
 #### appended record is readable by LSN before flush
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -121,7 +121,7 @@ _Flush advances durable_lsn._
 #### durable_lsn is 0 before any flush
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -135,12 +135,12 @@ expect(wal.durable_lsn()).to_equal(0)
 
 #### durable_lsn equals tail_lsn after flush
 
-- wal flush
+1. wal flush
    - Expected: wal.durable_lsn() equals `lsn.value`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -157,13 +157,14 @@ expect(wal.durable_lsn()).to_equal(lsn.value)
 
 #### flush is idempotent
 
-- wal append
-- wal flush
+1. wal append
+
+2. wal flush
    - Expected: r.is_ok() is true
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -184,13 +185,14 @@ _Recovery cursor starts at intent_log_head._
 
 #### recovery_cursor starts at intent_log_head after flush
 
-- wal append
-- wal flush
+1. wal append
+
+2. wal flush
    - Expected: cursor.start_lsn() equals `head`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -209,14 +211,16 @@ expect(cursor.start_lsn()).to_equal(head)
 
 #### recovery cursor iterates all committed records
 
-- wal append
-- wal append
-- wal flush
+1. wal append
+
+2. wal append
+
+3. wal flush
    - Expected: records.len() equals `2`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

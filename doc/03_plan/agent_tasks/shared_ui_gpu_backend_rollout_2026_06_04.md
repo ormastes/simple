@@ -19,10 +19,6 @@ Small task ownership:
 - Verify: focused checks for touched `.spl` files, focused SSpecs, optimizer
   scans, `doc/06_spec` executable-spec layout guard, and SPipe command wiring.
 
-Evidence note: historical "Web Engine2D Metal-offload spec passes" entries are
-focused SSpec coverage only. They are not native Metal host readback proof; the
-production Metal gate still requires Darwin device-readback evidence.
-
 Independent work packets:
 
 1. Engine2D AA text helper: hoist loop-invariant scale, glyph-width, and row

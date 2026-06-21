@@ -2,7 +2,7 @@
 # Simple UI, GUI, Web, and 2D Stack Architecture - TLDR
 
 This is the short version of
-`doc/04_architecture/ui/simple_gui_stack.md` (draft-v4, 2026-06-21). The key decision is to keep GUI
+`doc/04_architecture/ui/simple_gui_stack.md`. The key decision is to keep GUI
 semantics, event routing, layout policy, dirty-region truth, and typed IR in
 Simple, while allowing a render optimization plugin to accelerate Draw IR
 batches through CPU/GPU backends.
@@ -86,9 +86,7 @@ Host input
   Draw IR through Engine2D with CPU fallback metadata and pixel readback.
   URI-only image commands fail closed until resolved-image input is supplied;
   the advanced path renders caller-provided resolved ARGB buffers but does not
-  decode PNG, JPEG, WebP, TIFF, or JPEG XL bytes; current 8K evidence covers
-  TIFF raster paths and JPEG XL metadata/sparse planning, not full JPEG XL
-  pixel decode.
+  decode PNG, JPEG, or WebP bytes.
 - Engine2D split contract: `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl`.
 - No-GC Draw IR runtime queue owner:
   `src/lib/nogc_async_mut/gpu/engine2d/draw_ir_runtime_queue.spl`.
@@ -121,7 +119,7 @@ Host input
   preserves `surface_upload` handles for upload provenance, not device-readback
   proof; DirectX preserves `swapchain_present` handles for presentation
   provenance, not device-readback proof; CPU, cache, and not-requested fallbacks
-  stay handle `0`. Synthetic handle `7` remains isolated runtime queue
+  stay handle `0`. Synthetic Vulkan handle `7` remains isolated runtime queue
   roundtrip evidence.
 - Current standalone backend readback reports: CUDA generated 2D and OpenCL
   generated 2D pass with `submit_attempted=true` and
@@ -138,17 +136,6 @@ Host input
   source / checksum row plus DirectX native verdict and gate fields.
   Linux Metal and ROCm/HIP remain typed unavailable without matching host
   runtimes.
-- GUI item/rendering coverage status is summarized by
-  `sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs`. The wrapper
-  does not launch Electron, Chrome, or RenderDoc; it checks current
-  `WidgetKind` -> HTML renderer dispatch coverage, summarizes the 18-case
-  Electron Simple Web layout manifest, points at the production parity wrapper,
-  and reports the active RenderDoc completion gate. Use strict mode
-  `GUI_RENDERDOC_STATUS_STRICT=1` only when a host is expected to have durable
-  Simple and original Chrome/Vulkan `.rdc` evidence.
-  Current 2026-06-19 layout-manifest evidence is 16 exact Electron cases, 2
-  tracked text-raster divergences, and 0 hard failures; RenderDoc remains the
-  completion blocker.
 - Current runtime gaps: compiler/interpreter GPU packets consume the active
   backend handle, submit at lane begin, and complete after lane end, but still
   complete as typed `UNAVAILABLE` when none is registered; `SUBMITTED` is

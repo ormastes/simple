@@ -2,7 +2,6 @@
 
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
 use std.gpu.engine2d.simd_kernels.{detect_simd_level, SimdLevel}
-use std.gc_async_mut.cuda.{cuda_available}
 
 val BACKEND_CPU: text = "cpu"
 val BACKEND_SOFTWARE: text = "software"
@@ -46,7 +45,6 @@ class BackendProbeResult:
     backend_name: text
     available: bool
     init_ms: i64
-    memory_mb: i64
     reason: text
     has_compute: bool
     has_graphics: bool
@@ -66,7 +64,6 @@ class BackendProbeResult:
             backend_name: name,
             available: ok,
             init_ms: if ok: 1 else: 0,
-            memory_mb: 1,
             reason: reason,
             has_compute: ok,
             has_graphics: ok,
@@ -91,16 +88,6 @@ class BackendProbeResult:
     fn diagnostic_text() -> text:
         "requested={self.requested_name};selected={self.selected_name};status={backend_status_text(self.status)};api={self.api_name};gate={self.feature_gate};shader={self.shader_format};compute={self.has_compute.to_text()};graphics={self.has_graphics.to_text()};present={self.has_present.to_text()};reason={self.reason}"
 
-    fn is_hardware() -> bool:
-        val canonical = backend_canonical_name(self.selected_name)
-        canonical != BACKEND_CPU and canonical != BACKEND_SOFTWARE and canonical != BACKEND_CPU_SIMD and not canonical.starts_with("cpu_simd_")
-
-    fn strict_failure_without_fallback() -> bool:
-        self.requested_name == self.selected_name and self.selected_name == self.backend_name and self.status != BackendStatus.Fallback
-
-    fn summary() -> text:
-        "{self.diagnostic_text()};memory_mb={self.memory_mb};executed=true"
-
 fn _shader_format_for_backend(name: text) -> text:
     val canonical = backend_canonical_name(name)
     if canonical == BACKEND_CUDA:
@@ -119,20 +106,12 @@ fn _shader_format_for_backend(name: text) -> text:
 
 fn _strict_probe_backend(name: text) -> BackendProbeResult:
     val canonical = backend_canonical_name(name)
-    if canonical == BACKEND_CPU or canonical == BACKEND_SOFTWARE:
+    if canonical == BACKEND_CPU or canonical == BACKEND_SOFTWARE or canonical == BACKEND_CPU_SIMD:
         var cpu = BackendProbeResult.success(canonical, canonical + " backend available")
         cpu.has_compute = true
         cpu.has_graphics = true
         cpu.has_present = true
         return cpu
-    if canonical == BACKEND_CPU_SIMD:
-        var cpu_simd = BackendProbeResult.success(canonical, canonical + " backend available")
-        cpu_simd.api_name = "cpu-simd"
-        cpu_simd.feature_gate = "runtime_cpu_features"
-        cpu_simd.has_compute = true
-        cpu_simd.has_graphics = true
-        cpu_simd.has_present = true
-        return cpu_simd
     # Arch-specific SIMD probes: check runtime SIMD level for a real evidence match.
     # cpu_simd_arm  → Initialized only when runtime NEON is confirmed (aarch64 host)
     # cpu_simd_x86  → Initialized only when runtime SSE4.2 or AVX2 is confirmed
@@ -141,75 +120,31 @@ fn _strict_probe_backend(name: text) -> BackendProbeResult:
         val lvl = detect_simd_level()
         if lvl == SimdLevel.Neon:
             var r = BackendProbeResult.success(canonical, "aarch64 NEON runtime kernels confirmed")
-            r.api_name = "cpu-simd-arm"
-            r.feature_gate = "arm_neon_sve"
             r.has_compute = true
             r.has_graphics = true
             r.has_present = true
             return r
-        var arm = BackendProbeResult.unavailable(canonical, "cpu_simd_arm not available: runtime NEON not detected on this host")
-        arm.api_name = "cpu-simd-arm"
-        arm.feature_gate = "arm_neon_sve"
-        return arm
+        return BackendProbeResult.unavailable(canonical, "cpu_simd_arm not available: runtime NEON not detected on this host")
     if canonical == "cpu_simd_x86":
         val lvl = detect_simd_level()
         if lvl == SimdLevel.Avx2 or lvl == SimdLevel.Sse42:
             var r = BackendProbeResult.success(canonical, "x86_64 SSE/AVX runtime kernels confirmed")
-            r.api_name = "cpu-simd-x86"
-            r.feature_gate = "x86_sse42_avx2_avx512"
             r.has_compute = true
             r.has_graphics = true
             r.has_present = true
             return r
-        var x86 = BackendProbeResult.unavailable(canonical, "cpu_simd_x86 not available: runtime SSE4.2/AVX2 not detected on this host")
-        x86.api_name = "cpu-simd-x86"
-        x86.feature_gate = "x86_sse42_avx2_avx512"
-        return x86
+        return BackendProbeResult.unavailable(canonical, "cpu_simd_x86 not available: runtime SSE4.2/AVX2 not detected on this host")
     if canonical == "cpu_simd_riscv":
         val lvl = detect_simd_level()
         if lvl == SimdLevel.Rvv:
             var r = BackendProbeResult.success(canonical, "riscv64 RVV runtime kernels confirmed")
-            r.api_name = "cpu-simd-riscv"
-            r.feature_gate = "riscv_vector_extension"
             r.has_compute = true
             r.has_graphics = true
             r.has_present = true
             return r
-        var riscv = BackendProbeResult.unavailable(canonical, "cpu_simd_riscv not available: runtime RVV not detected on this host")
-        riscv.api_name = "cpu-simd-riscv"
-        riscv.feature_gate = "riscv_vector_extension"
-        return riscv
+        return BackendProbeResult.unavailable(canonical, "cpu_simd_riscv not available: runtime RVV not detected on this host")
     if canonical == BACKEND_ROCM:
-        var rocm = BackendProbeResult.unavailable(canonical, "ROCm/HIP probe unavailable in interpreter")
-        rocm.feature_gate = "rocm_hip_runtime"
-        rocm.has_compute = true
-        return rocm
-    if canonical == BACKEND_CUDA:
-        var cuda = if cuda_available():
-            BackendProbeResult.success(canonical, "CUDA context initialized")
-        else:
-            BackendProbeResult.unavailable(canonical, "CUDA context evidence not available")
-        cuda.feature_gate = if cuda_available(): "cuda_context" else: "cuda_runtime"
-        cuda.has_compute = true
-        return cuda
-    if canonical == BACKEND_OPENCL:
-        var opencl = BackendProbeResult.unavailable(canonical, "OpenCL session evidence not available")
-        opencl.feature_gate = "opencl_context"
-        opencl.has_compute = true
-        return opencl
-    if canonical == BACKEND_METAL:
-        var metal = BackendProbeResult.unavailable(canonical, "metal-requires-macos")
-        metal.feature_gate = "macos"
-        metal.has_compute = true
-        metal.has_graphics = true
-        return metal
-    if canonical == "optix":
-        var optix = BackendProbeResult.unavailable(canonical, "OptiX is ray tracing only and not an Engine2D raster backend")
-        optix.api_name = "optix"
-        optix.feature_gate = "optix_2d_raster_unsupported"
-        optix.shader_format = "ptx"
-        optix.has_compute = true
-        return optix
+        return BackendProbeResult.unavailable(canonical, "ROCm/HIP probe unavailable in interpreter")
     BackendProbeResult.unavailable(canonical, canonical + " runtime evidence not available")
 
 class BackendProber:
@@ -239,43 +174,6 @@ class BackendProber:
 
     fn probe_cpu() -> BackendProbeResult:
         _strict_probe_backend(BACKEND_CPU)
-
-    fn probe_all_summary() -> text:
-        val cpu = self.probe_cpu()
-        val cpu_simd = self.probe_backend(BACKEND_CPU_SIMD)
-        val x86 = self.probe_backend("cpu_simd_x86")
-        val arm = self.probe_backend("cpu_simd_arm")
-        val riscv = self.probe_backend("cpu_simd_riscv")
-        val vulkan = self.probe_backend(BACKEND_VULKAN)
-        val cuda = self.probe_cuda()
-        val metal = self.probe_backend(BACKEND_METAL)
-        val opencl = self.probe_opencl()
-        val rocm = self.probe_rocm()
-        val webgpu = self.probe_backend(BACKEND_WEBGPU)
-        val optix = self.probe_backend("optix")
-        "runtime_evidence selected={cpu.selected_name};" +
-        cpu.summary() + ";" +
-        cpu_simd.summary() + ";" +
-        x86.summary() + ";" +
-        arm.summary() + ";" +
-        riscv.summary() + ";" +
-        vulkan.summary() + ";" +
-        cuda.summary() + ";" +
-        metal.summary() + ";" +
-        opencl.summary() + ";" +
-        rocm.summary() + ";" +
-        webgpu.summary() + ";" +
-        optix.summary() + ";" +
-        "metal_status={backend_status_text(metal.status)};" +
-        "vulkan_status={backend_status_text(vulkan.status)};" +
-        "cuda_status={backend_status_text(cuda.status)};" +
-        "opencl_status={backend_status_text(opencl.status)};" +
-        "opencl_gate={opencl.feature_gate};" +
-        "opencl_reason={opencl.reason};" +
-        "cpu_simd_x86_status={backend_status_text(x86.status)};" +
-        "cpu_simd_arm_status={backend_status_text(arm.status)};" +
-        "cpu_simd_riscv_status={backend_status_text(riscv.status)};" +
-        "compute={cpu.has_compute.to_text()}"
 
 class StrictBackendFactory:
     static fn strict() -> StrictBackendFactory:

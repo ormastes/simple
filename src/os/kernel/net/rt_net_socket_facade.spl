@@ -12,7 +12,6 @@ extern fn rt_boot_tcp_write_text(fd: i64, data: text) -> i64
 extern fn rt_boot_tcp_write_bytes(fd: i64, data: [u8]) -> i64
 extern fn rt_boot_tcp_read_bytes(max_len: i64) -> [u8]
 extern fn rt_boot_tcp_read_ssh_plain_packet_payload(fd: i64) -> [u8]
-extern fn rt_boot_tcp_send_ssh_banner(fd: i64) -> i64
 extern fn rt_boot_tcp_take_version_text(fd: i64) -> text
 extern fn rt_boot_tcp_take_version_bytes(fd: i64) -> [u8]
 extern fn rt_boot_tcp_close(fd: i64) -> i64
@@ -170,16 +169,6 @@ fn _rt_net_bytes_to_text(data: [u8]) -> text:
         i = i + 1
     out
 
-fn _rt_net_ascii_text_to_bytes_with_crlf(line: text) -> [u8]:
-    var out: [u8] = []
-    var i: u64 = 0
-    while i < line.len():
-        out.push((line.char_at(i).to_i64() & 0xFF).to_u8())
-        i = i + 1
-    out.push(0x0D)
-    out.push(0x0A)
-    out
-
 @export("C", name: "rt_net_socket")
 fn rt_net_socket(proto: i64) -> i64:
     if proto != 1:
@@ -271,24 +260,6 @@ fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64:
         return -1
     rt_boot_tcp_write_bytes(entry.unwrap().os_fd.to_i64(), data)
 
-@export("C", name: "rt_net_send_ssh_banner")
-fn rt_net_send_ssh_banner(sock_fd: i64) -> i64:
-    serial_println("[rt-net] banner send fn sock_fd={sock_fd}")
-    if sock_fd == 200:
-        val rc = rt_boot_tcp_send_ssh_banner(sock_fd)
-        serial_println("[rt-net] banner send raw-fast rc={rc}")
-        return rc
-    val entry = _rt_net_find(sock_fd)
-    if entry == nil:
-        return -1
-    if entry.unwrap().os_fd < 0:
-        return -1
-    if not _rt_net_ensure_ready():
-        return -1
-    val rc = rt_boot_tcp_send_ssh_banner(entry.unwrap().os_fd.to_i64())
-    serial_println("[rt-net] banner send entry rc={rc}")
-    rc
-
 @export("C", name: "rt_net_recv_bytes")
 fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]:
     val entry = _rt_net_find(sock_fd)
@@ -325,16 +296,13 @@ fn rt_net_recv_version_text(sock_fd: i64) -> text:
             return ""
         if not _rt_net_ensure_ready():
             return ""
-        val text = rt_boot_tcp_take_version_text(entry.unwrap().os_fd.to_i64())
-        serial_println("[rt-net] version recv entry helper done text={text}")
-        return text
     var line: [u8] = []
-    while line.len() < 255u64:
+    while true:
         val chunk = rt_boot_tcp_read_bytes(1)
         if chunk.len() == 0:
             break
         line.push(chunk[0])
-        if chunk[0].to_i64() == 10:
+        if chunk[0] == '\n':
             break
     if line.len() == 0:
         return ""
@@ -342,22 +310,9 @@ fn rt_net_recv_version_text(sock_fd: i64) -> text:
 
 @export("C", name: "rt_net_recv_version_bytes")
 fn rt_net_recv_version_bytes(sock_fd: i64) -> [u8]:
-    serial_println("[rt-net] version bytes recv fn sock_fd={sock_fd}")
     if sock_fd == 200:
-        serial_println("[rt-net] version bytes recv raw-fast")
         return rt_boot_tcp_take_version_bytes(sock_fd)
-    val entry = _rt_net_find(sock_fd)
-    if entry == nil:
-        serial_println("[rt-net] version bytes recv branch=nil")
-        return []
-    if entry.unwrap().os_fd < 0:
-        serial_println("[rt-net] version bytes recv branch=no-os-fd")
-        return []
-    serial_println("[rt-net] version bytes recv branch=entry os_fd={entry.unwrap().os_fd}")
-    val version_text = rt_net_recv_version_text(sock_fd)
-    if version_text == "":
-        return []
-    _rt_net_ascii_text_to_bytes_with_crlf(version_text)
+    []
 
 @export("C", name: "rt_net_recv_ssh_plain_packet_payload")
 fn rt_net_recv_ssh_plain_packet_payload(sock_fd: i64) -> [u8]:
@@ -386,15 +341,6 @@ fn rt_net_recv_ssh_plain_packet_payload(sock_fd: i64) -> [u8]:
             if not _rt_net_ensure_ready():
                 return []
             entry.unwrap().os_fd.to_i64()
-    val direct_payload = rt_boot_tcp_read_ssh_plain_packet_payload(os_fd)
-    if direct_payload.len() > 0u64:
-        _rt_net_last_plain_payload = direct_payload
-        _rt_net_last_plain_payload_len_value = direct_payload.len()
-        if direct_payload.len() > 512u64:
-            serial_println("[rt-net] plain recv payload len=large")
-        else:
-            serial_println("[rt-net] plain recv payload len={_rt_net_last_plain_payload_len_value}")
-        return direct_payload
     serial_println("[rt-net] plain recv header start os_fd={os_fd}")
     val header = _rt_net_read_exact(os_fd, 5u64)
     serial_println("[rt-net] plain recv header len={header.len()}")
@@ -439,18 +385,3 @@ fn rt_net_recv_ssh_plain_packet_payload(sock_fd: i64) -> [u8]:
         payload.push(_rt_net_last_plain_payload[i])
         i = i + 1
     payload
-
-@export("C", name: "rt_net_recv_ssh_encrypted_packet")
-fn rt_net_recv_ssh_encrypted_packet(sock_fd: i64) -> [u8]:
-    serial_println("[rt-net] encrypted recv fn sock_fd={sock_fd}")
-    if sock_fd == 200:
-        serial_println("[rt-net] encrypted recv raw-fast")
-        return rt_boot_tcp_read_bytes(4096)
-    val entry = _rt_net_find(sock_fd)
-    if entry == nil:
-        return []
-    if entry.unwrap().os_fd < 0:
-        return []
-    if not _rt_net_ensure_ready():
-        return []
-    rt_boot_tcp_read_bytes(4096)

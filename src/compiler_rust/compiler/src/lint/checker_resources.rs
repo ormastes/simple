@@ -602,52 +602,6 @@ impl LintChecker {
         check_use_stmts(self, items, source_family);
     }
 
-    /// Check that raw `rt_*` runtime intrinsics are not declared outside the
-    /// privileged runtime tiers.
-    ///
-    /// Only source files under `src/lib/` or `src/runtime/` may declare
-    /// `extern fn rt_<name>(...)`. Any other module (notably `src/app/**`,
-    /// `examples/**`, and external user projects) must route through a std
-    /// wrapper (e.g. `std.io_runtime`) instead of declaring the intrinsic.
-    pub fn check_raw_rt_access(&mut self, items: &[Node], source_file: &Path) {
-        // Privileged tiers may declare raw intrinsics directly. A module outside
-        // those tiers may also opt in with a file-level `@runtime_intrinsics` /
-        // `#[runtime_intrinsics]` marker — for code that legitimately implements or
-        // bridges the runtime (emulators, baremetal MMIO, crypto/protocol impls).
-        if source_path_is_privileged(source_file) || file_marks_runtime_intrinsics(items, source_file) {
-            return;
-        }
-
-        fn check_items(checker: &mut LintChecker, items: &[Node]) {
-            for node in items {
-                match node {
-                    Node::Extern(ext) if ext.name.starts_with("rt_") => {
-                        checker.emit(
-                            LintName::RawRtAccess,
-                            ext.span,
-                            format!(
-                                "application code must not declare raw runtime intrinsic `{}` directly",
-                                ext.name
-                            ),
-                            Some(
-                                "use the std wrapper (e.g. std.io_runtime.file_read / file_write) instead of extern fn rt_*"
-                                    .to_string(),
-                            ),
-                        );
-                    }
-                    Node::ModDecl(mod_decl) => {
-                        if let Some(ref body) = mod_decl.body {
-                            check_items(checker, body);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        check_items(self, items);
-    }
-
     /// Check if a bypass directory incorrectly contains .spl code files.
     ///
     /// When __init__.spl has `#[bypass]`, the directory must contain only
@@ -826,52 +780,6 @@ impl LintChecker {
             false
         }
     }
-}
-
-/// Returns true when the source file lives in a privileged runtime tier:
-/// any path containing a `src/lib/`, `src/runtime/`, or `src/compiler/`
-/// segment. The compiler itself defines and bridges the `rt_*` runtime
-/// interface, so it must declare those intrinsics directly (it cannot route
-/// through std wrappers without circularity). Robust to both relative and
-/// absolute paths since the segment pair appears regardless of prefix.
-fn source_path_is_privileged(source_file: &Path) -> bool {
-    let components: Vec<String> = source_file
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().to_string())
-        .collect();
-
-    components
-        .windows(2)
-        .any(|pair| pair[0] == "src" && (pair[1] == "lib" || pair[1] == "runtime" || pair[1] == "compiler"))
-}
-
-/// Returns true when a module opts out of the `raw_rt_access` lint via a
-/// file-level `@runtime_intrinsics` decorator or `#[runtime_intrinsics]`
-/// attribute. Used by code that legitimately implements/bridges the runtime
-/// (emulators, baremetal, crypto/protocol implementations). Mirrors the
-/// detection style of `runtime_family_from_attributes`.
-fn file_marks_runtime_intrinsics(items: &[Node], source_file: &Path) -> bool {
-    // AST ModDecl attributes (e.g. parsed `#[runtime_intrinsics]`).
-    for node in items {
-        if let Node::ModDecl(decl) = node {
-            if decl.attributes.iter().any(|attr| attr.name == "runtime_intrinsics") {
-                return true;
-            }
-        }
-    }
-    // Fall back to raw source-text scan for a file-level marker near the top.
-    if let Ok(source) = std::fs::read_to_string(source_file) {
-        for line in source.lines().take(30) {
-            let trimmed = line.trim();
-            if trimmed == "@runtime_intrinsics"
-                || trimmed.starts_with("@runtime_intrinsics ")
-                || trimmed == "#[runtime_intrinsics]"
-            {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 fn runtime_family_from_source_path(source_file: &Path) -> Option<RuntimeFamily> {

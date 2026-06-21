@@ -16,12 +16,7 @@ This agent CREATES the initial state file. All subsequent agents read and append
 3. If the request is ambiguous, ask up to 3 clarifying questions before proceeding
 4. Decompose the request into a single refined goal statement
 5. Write numbered acceptance criteria (AC-1, AC-2, ...) — each must be independently testable
-6. For broad lanes, record the cooperative review plan:
-   - split independent checks across lower-model sidecars when available
-     (Codex Spark, Claude Haiku, or Claude Sonnet)
-   - require normal/highest-capability review before accepting done marks,
-     broad exclusions, or release-blocking verification
-7. Create `.spipe/<feature>/state.md` with the output below
+6. Create `.spipe/<feature>/state.md` with the output below
 
 ## Entry Criteria
 
@@ -34,7 +29,6 @@ This agent CREATES the initial state file. All subsequent agents read and append
   - `## Task Type` — one of: `feature`, `bug`, `todo`, `code-quality`
   - `## Refined Goal` — one sentence, specific, no weasel words
   - `## Acceptance Criteria` — numbered list, each AC is testable with pass/fail
-  - `## Cooperative Review` — lower-model lanes to use, or `N/A` for narrow work
   - `## Phase` set to `dev-done`
 - The refined goal is specific enough that two developers would build the same thing
 - Every AC answers "how do I know this is done?" with a concrete check
@@ -66,9 +60,6 @@ Your ONLY output is the state file with a goal and acceptance criteria.
 
 ## Scope Exclusions
 <anything explicitly out of scope>
-
-## Cooperative Review
-<lower-model lanes and final normal/highest review, or N/A for narrow work>
 
 ## Phase
 dev-done

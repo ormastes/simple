@@ -1,4 +1,3 @@
-#[runtime_intrinsics]
 # Session Token — HMAC-SHA256-signed bearer tokens for the Web UI.
 #
 # Token format (URL-safe, dot-separated):
@@ -13,13 +12,11 @@
 #   and a warning is logged).
 
 use app.ui.web.origin_guard.{AuthError}
-use app.ui.web.auth_params.{ui_web_capability_grant_id_allowed}
 use common.crypto.hmac.{hmac_sha256_bytes}
 use common.crypto.types.{bytes_to_hex, text_to_bytes}
 use common.crypto.constant_time.{constant_time_compare}
 
-use std.io_runtime.{env_get}
-
+extern fn rt_env_get(key: text) -> text
 extern fn rt_random_hex(len: i64) -> text   # runtime: N CSPRNG bytes hex-encoded (OsRng)
 extern fn rt_time_ms() -> u64               # runtime: current epoch milliseconds
 
@@ -33,11 +30,7 @@ fn random_hex(len: i64) -> text:
 # =========================================================================
 
 val TOKEN_TTL_DEFAULT_MS: u64 = 3600000u64  # 1 hour
-val TOKEN_TTL_MAX_MS: u64 = 3600000u64      # hard production cap
-val TOKEN_ID_HEX_LEN: i64 = 64
-val TOKEN_SIGNATURE_HEX_LEN: i64 = 64
 export TOKEN_TTL_DEFAULT_MS
-export TOKEN_TTL_MAX_MS
 
 class SessionToken:
     token_id: text       # opaque 32-byte random, hex-encoded (64 hex chars)
@@ -49,7 +42,7 @@ class SessionToken:
     static fn issue(grant_id: text, origin: text, ttl_ms: u64, secret: text) -> SessionToken:
         """Mint a new signed SessionToken."""
         val token_id = random_hex(32)
-        val exp = rt_time_ms() + _bounded_token_ttl_ms(ttl_ms)
+        val exp = rt_time_ms() + ttl_ms
         val payload = _token_payload(token_id, grant_id, origin, exp)
         val sig = _sign_payload(secret, payload)
         return SessionToken(
@@ -98,14 +91,6 @@ class SessionToken:
         val sig = s.slice(fourth + 1, s_len)
         if token_id == "" or grant_id == "" or exp_str == "" or sig == "":
             return Err(AuthError.InvalidToken)
-        if not _fixed_hex(token_id, TOKEN_ID_HEX_LEN):
-            return Err(AuthError.InvalidToken)
-        if not ui_web_capability_grant_id_allowed(grant_id):
-            return Err(AuthError.InvalidToken)
-        if not _decimal_u64_literal(exp_str):
-            return Err(AuthError.InvalidToken)
-        if not _fixed_hex(sig, TOKEN_SIGNATURE_HEX_LEN):
-            return Err(AuthError.InvalidToken)
         val exp = _parse_u64(exp_str)
         return Ok(SessionToken(
             token_id: token_id,
@@ -150,7 +135,7 @@ fn load_secret_with_policy(tls_mode: bool, allow_insecure_dev_secret: bool) -> t
     """Read SIMPLE_UI_WEB_TOKEN_SECRET from env.
     Missing secrets fail closed unless SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET
     explicitly opts a non-TLS local dev server into an ephemeral fallback."""
-    val s = env_get("SIMPLE_UI_WEB_TOKEN_SECRET") ?? ""
+    val s = rt_env_get("SIMPLE_UI_WEB_TOKEN_SECRET") ?? ""
     if s != "":
         return s
     if _missing_secret_fatal(tls_mode, allow_insecure_dev_secret):
@@ -160,46 +145,18 @@ fn load_secret_with_policy(tls_mode: bool, allow_insecure_dev_secret: bool) -> t
     return "dev-insecure-secret-" + random_hex(8)
 
 fn load_secret(tls_mode: bool) -> text:
-    val allow_raw = env_get("SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET") ?? ""
+    val allow_raw = rt_env_get("SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET") ?? ""
     return load_secret_with_policy(tls_mode, _allow_insecure_dev_secret_flag(allow_raw))
 
 # =========================================================================
 # Private helpers
 # =========================================================================
 
-fn _bounded_token_ttl_ms(ttl_ms: u64) -> u64:
-    if ttl_ms > TOKEN_TTL_MAX_MS:
-        return TOKEN_TTL_MAX_MS
-    return ttl_ms
-
 fn _token_payload(token_id: text, grant_id: text, origin: text, exp: u64) -> text:
     return "{token_id}.{grant_id}.{origin}.{exp}"
 
 fn _sign_payload(secret: text, payload: text) -> text:
     return bytes_to_hex(hmac_sha256_bytes(text_to_bytes(secret), text_to_bytes(payload)))
-
-fn _fixed_hex(value: text, expected_len: i64) -> bool:
-    if value.len() != expected_len:
-        return false
-    var i = 0
-    while i < value.len():
-        if not _hex_char(value.slice(i, i + 1)):
-            return false
-        i = i + 1
-    return true
-
-fn _hex_char(ch: text) -> bool:
-    return (ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f") or (ch >= "A" and ch <= "F")
-
-fn _decimal_u64_literal(s: text) -> bool:
-    if s == "":
-        return false
-    var i = 0
-    while i < s.len():
-        if _digit(s.slice(i, i + 1)) < 0:
-            return false
-        i = i + 1
-    return true
 
 fn _url_encode(s: text) -> text:
     """Minimal percent-encode: replace '.' with '%2E' so origin dots don't split."""

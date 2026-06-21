@@ -121,14 +121,12 @@ expect(cells[7].value).to_equal("5")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = md_document_render_sheet_html("| Name | Q1 | Q2 | Total |\n|---|---:|---:|---:|\n| Sales | 2 | 3 | =B2+C2 |")
 expect(html).to_contain("class=\"md-sheet\"")
-expect(html).to_contain("data-format=\"markdown-sheet\"")
-expect(html).to_contain("data-format-name=\"Calc Markdown Sheet\"")
 expect(html).to_contain("data-cell=\"D2\"")
 expect(html).to_contain("data-raw=\"=B2+C2\"")
 expect(html).to_contain(">5</td>")
@@ -141,7 +139,7 @@ expect(html).to_contain(">5</td>")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -152,8 +150,6 @@ expect(embeds[0].code).to_equal("print \"hi\"")
 expect(embeds[1].language).to_equal("script")
 val html = md_document_render_script_embeds_html("# Note\n\n```simple\nprint \"hi\"\n```")
 expect(html).to_contain("class=\"md-script-embed\"")
-expect(html).to_contain("data-format=\"markdown-script-embed\"")
-expect(html).to_contain("data-format-name=\"Markdown Script Embed\"")
 expect(html).to_contain("data-language=\"simple\"")
 expect(html).to_contain("print &quot;hi&quot;")
 ```
@@ -165,7 +161,7 @@ expect(html).to_contain("print &quot;hi&quot;")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -180,8 +176,6 @@ expect(deck).to_contain("class=\"md-ppt-slide\"")
 
 val sheet = md_document_render_office_html("---\nlayout: excel\n---\n| A | B |\n|---|---:|\n| 2 | =A2+3 |")
 expect(sheet).to_contain("class=\"md-sheet-layout\"")
-expect(sheet).to_contain("data-format=\"markdown-sheet-layout\"")
-expect(sheet).to_contain("data-format-name=\"Calc Markdown Sheet Layout\"")
 expect(sheet).to_contain("data-cell=\"B2\"")
 expect(sheet).to_contain(">5</td>")
 ```

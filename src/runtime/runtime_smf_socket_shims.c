@@ -28,6 +28,48 @@
 // scope for this change.
 
 #include <stdint.h>
+
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#  pragma comment(lib, "Ws2_32.lib")
+
+static void _ws_init(void) {
+    static int done = 0;
+    if (!done) { WSADATA wd; WSAStartup(MAKEWORD(2,2), &wd); done = 1; }
+}
+
+int64_t rt_io_tcp_socket_create(int64_t family) {
+    _ws_init();
+    int af = (family == 6) ? AF_INET6 : AF_INET;
+    SOCKET s = socket(af, SOCK_STREAM, IPPROTO_TCP);
+    return (s == INVALID_SOCKET) ? -1 : (int64_t)s;
+}
+
+int64_t rt_io_tcp_listen(int64_t fd, int64_t backlog) {
+    return listen((SOCKET)fd, (int)backlog) == 0 ? 1 : 0;
+}
+
+int64_t rt_io_tcp_set_nonblocking(int64_t fd, int64_t enabled) {
+    u_long mode = enabled ? 1 : 0;
+    return ioctlsocket((SOCKET)fd, FIONBIO, &mode) == 0 ? 1 : 0;
+}
+
+int64_t rt_io_tcp_set_reuseaddr(int64_t fd, int64_t enabled) {
+    int flag = enabled ? 1 : 0;
+    return setsockopt((SOCKET)fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&flag, sizeof(flag)) == 0 ? 1 : 0;
+}
+
+int64_t rt_io_tcp_set_reuseport(int64_t fd, int64_t enabled) {
+    /* SO_REUSEPORT is not available on Windows; return 0 (not supported). */
+    (void)fd; (void)enabled; return 0;
+}
+
+#else /* POSIX */
+
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -62,6 +104,8 @@ int64_t rt_io_tcp_set_reuseport(int64_t fd, int64_t enabled) {
     (void)fd; (void)enabled; return 0;
 #endif
 }
+
+#endif /* _WIN32 */
 
 // Link-resolving stub: see header note. Requires host RuntimeValue text ABI to be
 // functional; provided here only so relocations resolve for the never-invoked path.

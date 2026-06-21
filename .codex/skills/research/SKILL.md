@@ -69,10 +69,6 @@ Codex excels at forked parallel research. When investigating a feature:
 
 - If Claude (Step 1) already produced `doc/01_research/local/<feature>.md`, **extend it** — never overwrite
 - If skipping to Step 2 directly, do all research phases yourself
-- For broad lanes, assign independent checks to lower-model parallel agents when
-  available (for example Codex Spark, Claude Haiku, or Claude Sonnet), then have
-  a normal/highest-capability LLM review and accept the merged findings before
-  requirements are finalized.
 - Tag Codex-produced artifacts with `<!-- codex-research -->` comment
 
 ## Artifacts Produced

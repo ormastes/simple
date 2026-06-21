@@ -22,7 +22,6 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
 2. **Design the manual shape first:** sketch which scenarios are primary flows
    (visible), which are edge/stress/matrix (folded), which are internal plumbing (skip)
 3. **Write step helpers** with names that read as manual sentences:
-   - Prefer the shared manual helper names defined by the architecture phase
    - Name functions so `user.open_editor()` renders as "User open editor"
    - Prefix checker functions with `Then_` so `Then_file_is_saved()` renders as "Then file is saved"
    - Use `@step "Human-readable text"` when the derived label is unclear
@@ -35,13 +34,8 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
    - `# @manual-file: folded` at file level for edge-case-heavy files
 6. Create spec files at `test/` paths mirroring the architecture's module paths
 7. Use ONLY built-in SPipe matchers (see below)
-8. Every new placeholder helper MUST fail explicitly (`assert(false)` or
-   equivalent) until implementation exists; no silent pass placeholders
-9. Append the spec file list, coverage matrix, manual rendering policy, and
-   cooperative review plan to state file. For broad spec lanes, name
-   lower-model sidecars to use or merge (Codex Spark, Claude Haiku, or Claude
-   Sonnet), or mark `N/A`; require normal/highest-capability review before
-   accepting broad coverage or generated-manual quality claims.
+8. Every spec MUST fail right now — the code does not exist yet
+9. Append the spec file list, coverage matrix, and manual rendering policy to state file
 
 ## SPipe Matchers (ONLY these)
 

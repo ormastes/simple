@@ -41,16 +41,8 @@ authorization + `cargo build` + `bootstrap-from-scratch.sh --deploy` + smoke-tes
 as the prior `Slice`/`Flat` fix (2026-06-12, comment ~line 78).
 
 ## Status
-- **RESOLVED 2026-06-18** — general seed fix landed + rebuilt + deployed + verified. Two parts:
-  1. Expression context (`expressions/primary/identifiers.rs`): `TokenKind::Unit =>
-     parse_keyword_identifier("unit")` (lowercase) — committed earlier; became live once the seed
-     was rebuilt this session.
-  2. Statement context (`parser_impl/core.rs`, the `TokenKind::Unit` arm): added `peek_next()`
-     lookahead — `unit <Identifier>:` parses as a unit-type declaration; a bare `unit` (anything
-     else after it) parses as an expression/identifier. Mirrors the Comptime/From disambiguation.
-  Verified live on the deployed seed (`x86_64-unknown-linux-gnu`):
-  `fn f(unit: text): unit` (bare implicit return), `return unit`, and `val r = unit` all print `ms`;
-  `unit Duration: i64 as ms` declarations still parse (regression OK).
-- The earlier pure-`.spl` workaround (rename `unit` → `unit_label` in bench code) is no longer
-  required, but is harmless and left in place.
-- `unit` is no longer effectively reserved — it works as a parameter/variable name.
+- **Workaround LANDED** (pure `.spl`): bench code renames `unit` → `unit_label`
+  (`src/app/test/bench/bench_harness.spl`, `bench_report.spl`). Keystone unblocked — struct-based
+  `bench_run_warm`/`bench_emit` and db/web/os doc emission can now proceed.
+- **General seed fix: OPEN** — pending user authorization (affects all user code with `unit`).
+- Treat `unit` as effectively reserved until the seed fix lands.

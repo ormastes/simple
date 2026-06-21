@@ -1,6 +1,6 @@
-# Engine2D Platform-Aware Backend Selection Specification
+# Engine Platform Specification
 
-> Verifies Engine2D platform-aware backend creation, priority ordering, compute dispatch selection, strict backend diagnostics, and CPU fallback behavior for unknown public render backend requests.
+> <details>
 
 <!-- sdn-diagram:id=engine_platform_spec.arch -->
 <details class="sdn-source">
@@ -32,48 +32,7 @@ engine_platform_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Engine2D Platform-Aware Backend Selection Specification
-
-Verifies Engine2D platform-aware backend creation, priority ordering, compute dispatch selection, strict backend diagnostics, and CPU fallback behavior for unknown public render backend requests.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Reference | `src/lib/gc_async_mut/gpu/engine2d/engine.spl` |
-| Requirements | N/A |
-| Plan | doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md |
-| Design | doc/05_design/ui/renderer_unification_2026-06-15.md |
-| Research | doc/01_research/ui/render_path/gui_web_2d_render_optimization_2026-06-16.md |
-| Source | `test/01_unit/lib/gpu/engine2d/engine_platform_spec.spl` |
-| Updated | 2026-06-21 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Verifies Engine2D platform-aware backend creation, priority ordering, compute
-dispatch selection, strict backend diagnostics, and CPU fallback behavior for
-unknown public render backend requests.
-
-**Source:** `src/lib/gc_async_mut/gpu/engine2d/engine.spl`
-**Requirements:** N/A
-**Research:** doc/01_research/ui/render_path/gui_web_2d_render_optimization_2026-06-16.md
-**Plan:** doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md
-**Design:** doc/05_design/ui/renderer_unification_2026-06-15.md
-
-## Syntax
-
-Use `Engine2D.create(...)`, `Engine2D.create_with_priority(...)`, and
-`Engine2D.create_compute_dispatch_for_backend(...)` to check render and compute
-backend selection without accepting silent GPU fallback.
-
-## Examples
-
-The scenarios verify automatic creation, public fallback semantics, priority
-canonicalization, compute dispatch metadata, strict diagnostic probes, and
-readback source reporting.
+# Engine Platform Specification
 
 ## Scenarios
 
@@ -467,6 +426,26 @@ expect(test_env_require("SIMPLE_GPU_TEST")).to_equal("blocked:SIMPLE_GPU_TEST")
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/gpu/engine2d/engine_platform_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- Engine2D
+- create (updated)
+- create_with_backend (updated)
+- create_with_priority
+- compute dispatch
+- FFI dispatch mode
+
 ## Scenario Summary
 
 | Metric | Count |
@@ -476,13 +455,6 @@ expect(test_env_require("SIMPLE_GPU_TEST")).to_equal("blocked:SIMPLE_GPU_TEST")
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-
-
-## Related Documentation
-
-- **Plan:** [doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md](doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md)
-- **Design:** [doc/05_design/ui/renderer_unification_2026-06-15.md](doc/05_design/ui/renderer_unification_2026-06-15.md)
-- **Research:** [doc/01_research/ui/render_path/gui_web_2d_render_optimization_2026-06-16.md](doc/01_research/ui/render_path/gui_web_2d_render_optimization_2026-06-16.md)
 
 
 </details>

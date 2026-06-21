@@ -1,6 +1,6 @@
 # Pure Db Sql Extended Specification
 
-> <details>
+> 1. file delete
 
 <!-- sdn-diagram:id=pure_db_sql_extended_spec.arch -->
 <details class="sdn-source">
@@ -41,24 +41,32 @@ pure_db_sql_extended_spec -> nogc_sync_mut
 
 #### persists rows and FTS metadata then rebuilds BM25 search after reopen
 
-- file delete
-- var db = PureDatabase open
-- db exec sql
-- db exec sql
-- db exec sql
+1. file delete
+
+2. var db = PureDatabase open
+
+3. db exec sql
+
+4. db exec sql
+
+5. db exec sql
    - Expected: warm.len() equals `1`
    - Expected: warm[0].row.values[0].to_text() equals `1`
-- db close
-- var reopened = PureDatabase open
+
+6. db close
+
+7. var reopened = PureDatabase open
    - Expected: rows.len() equals `2`
    - Expected: rebuilt.len() equals `1`
    - Expected: rebuilt[0].row.values[0].to_text() equals `1`
-- reopened close
-- file delete
+
+8. reopened close
+
+9. file delete
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -96,26 +104,36 @@ file_delete(path)
 
 #### invalidates rebuilt FTS search after post-reopen writes
 
-- file delete
-- var db = PureDatabase open
-- db exec sql
-- db exec sql
-- db fts5 search
-- db close
-- var reopened = PureDatabase open
+1. file delete
+
+2. var db = PureDatabase open
+
+3. db exec sql
+
+4. db exec sql
+
+5. db fts5 search
+
+6. db close
+
+7. var reopened = PureDatabase open
    - Expected: cold.len() equals `0`
-- reopened exec sql
+
+8. reopened exec sql
    - Expected: after_insert.len() equals `1`
    - Expected: after_insert[0].row.values[0].to_text() equals `2`
-- reopened exec sql
+
+9. reopened exec sql
    - Expected: after_update.len() equals `1`
    - Expected: after_update[0].row.values[0].to_text() equals `1`
-- reopened close
-- file delete
+
+10. reopened close
+
+11. file delete
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -149,11 +167,15 @@ file_delete(path)
 
 #### supports ORDER BY DESC
 
-- var db = r unwrap
-- db exec sql
-- db exec sql
-- db exec sql
-- db exec sql
+1. var db = r unwrap
+
+2. db exec sql
+
+3. db exec sql
+
+4. db exec sql
+
+5. db exec sql
    - Expected: rows.len() equals `3`
    - Expected: rows[0].values[0].to_text() equals `3`
    - Expected: rows[1].values[0].to_text() equals `2`
@@ -161,7 +183,7 @@ file_delete(path)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -184,18 +206,24 @@ expect(rows[2].values[0].to_text()).to_equal("1")
 
 #### supports BETWEEN
 
-- var db = r unwrap
-- db exec sql
-- db exec sql
-- db exec sql
-- db exec sql
-- db exec sql
-- db exec sql
+1. var db = r unwrap
+
+2. db exec sql
+
+3. db exec sql
+
+4. db exec sql
+
+5. db exec sql
+
+6. db exec sql
+
+7. db exec sql
    - Expected: rows.len() equals `3`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -217,19 +245,24 @@ expect(rows.len()).to_equal(3)
 
 #### supports IN list
 
-- var db = r unwrap
-- db exec sql
-- db exec sql
-- db exec sql
-- db exec sql
-- db exec sql
+1. var db = r unwrap
+
+2. db exec sql
+
+3. db exec sql
+
+4. db exec sql
+
+5. db exec sql
+
+6. db exec sql
    - Expected: rows.len() equals `2`
    - Expected: rows[0].values[0].to_text() equals `1`
    - Expected: rows[1].values[0].to_text() equals `3`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -252,17 +285,22 @@ expect(rows[1].values[0].to_text()).to_equal("3")
 
 #### supports LEFT JOIN
 
-- var db = r unwrap
-- db exec sql
-- db exec sql
-- db exec sql
-- db exec sql
-- db exec sql
+1. var db = r unwrap
+
+2. db exec sql
+
+3. db exec sql
+
+4. db exec sql
+
+5. db exec sql
+
+6. db exec sql
    - Expected: rows.len() equals `2`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -284,17 +322,21 @@ expect(rows[1].values[2].is_null()).to_be(true)
 
 #### supports SUM aggregate
 
-- var db = r unwrap
-- db exec sql
-- db exec sql
-- db exec sql
-- db exec sql
+1. var db = r unwrap
+
+2. db exec sql
+
+3. db exec sql
+
+4. db exec sql
+
+5. db exec sql
    - Expected: rows.len() equals `1`
    - Expected: rows[0].values[0].to_text() equals `60`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -315,16 +357,20 @@ expect(rows[0].values[0].to_text()).to_equal("60")
 
 #### supports GROUP BY with COUNT
 
-- var db = r unwrap
-- db exec sql
-- db exec sql
-- db exec sql
-- db exec sql
+1. var db = r unwrap
+
+2. db exec sql
+
+3. db exec sql
+
+4. db exec sql
+
+5. db exec sql
    - Expected: rows.len() equals `2`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -344,16 +390,19 @@ expect(rows.len()).to_equal(2)
 
 #### supports SQLite-style MATCH search in WHERE
 
-- var db = r unwrap
-- db exec sql
-- db exec sql
-- db exec sql
+1. var db = r unwrap
+
+2. db exec sql
+
+3. db exec sql
+
+4. db exec sql
    - Expected: rows.len() equals `1`
    - Expected: rows[0].values[0].to_text() equals `1`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -373,16 +422,19 @@ expect(rows[0].values[0].to_text()).to_equal("1")
 
 #### supports fts_match function in WHERE
 
-- var db = r unwrap
-- db exec sql
-- db exec sql
-- db exec sql
+1. var db = r unwrap
+
+2. db exec sql
+
+3. db exec sql
+
+4. db exec sql
    - Expected: rows.len() equals `1`
    - Expected: rows[0].values[0].to_text() equals `1`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

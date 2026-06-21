@@ -1,0 +1,68 @@
+# LLM Dashboard iOS Smoke Test (runs in interpreter mode)
+#
+# Tests that the LLM dashboard starts in iOS mode, serves HTTP 200,
+# and includes iOS CSS markers in the response body.
+# Run: bin/simple run test/system/llm_dashboard_ios_smoke.spl
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn ios_server_cmd(port: i64) -> text:
+    """Start dashboard in iOS mode on given port, curl the agents page, then kill server."""
+    return "(bin/simple agents --gui --ios --port {port} &); SERVER_PID=$!; sleep 2; HTTP_CODE=$(curl -s -o /tmp/ios_dash_{port}.html -w '%{{http_code}}' http://localhost:{port}/agents 2>/dev/null); kill $SERVER_PID 2>/dev/null; echo $HTTP_CODE"
+
+fn ios_body_check_cmd(port: i64, marker: text) -> text:
+    """Check that the response body file contains the given marker string."""
+    return "grep -q '{marker}' /tmp/ios_dash_{port}.html && echo found || echo missing"
+
+fn main():
+    var passed = 0
+    var failed = 0
+    val port = 3002
+
+    print "=== LLM Dashboard iOS Smoke Tests ==="
+
+    # Test 1: Server starts in iOS mode and returns HTTP 200 on /agents
+    print "[1] iOS mode server responds HTTP 200"
+    val (out1, _, c1) = rt_process_run("/bin/bash", ["-c", ios_server_cmd(port)])
+    val http_code = out1.trim()
+    if c1 == 0 and http_code == "200":
+        print "  ok: HTTP {http_code}"
+        passed = passed + 1
+    else:
+        print "  FAIL: exit={c1} http={http_code}"
+        failed = failed + 1
+
+    # Test 2: Response body contains iOS CSS marker -webkit-overflow-scrolling
+    print "[2] response body contains -webkit-overflow-scrolling"
+    val (out2, _, c2) = rt_process_run("/bin/bash", ["-c", ios_body_check_cmd(port, "-webkit-overflow-scrolling")])
+    if c2 == 0 and out2.trim() == "found":
+        print "  ok: iOS scroll marker present"
+        passed = passed + 1
+    else:
+        print "  FAIL: marker absent (exit={c2})"
+        failed = failed + 1
+
+    # Test 3: Response body contains iOS accent color #007AFF
+    print "[3] response body contains #007AFF"
+    val (out3, _, c3) = rt_process_run("/bin/bash", ["-c", ios_body_check_cmd(port, "#007AFF")])
+    if c3 == 0 and out3.trim() == "found":
+        print "  ok: iOS accent color present"
+        passed = passed + 1
+    else:
+        print "  FAIL: color absent (exit={c3})"
+        failed = failed + 1
+
+    # Test 4: Response body contains touch-target min-height: 44px
+    print "[4] response body contains min-height: 44px"
+    val (out4, _, c4) = rt_process_run("/bin/bash", ["-c", ios_body_check_cmd(port, "min-height: 44px")])
+    if c4 == 0 and out4.trim() == "found":
+        print "  ok: touch target min-height present"
+        passed = passed + 1
+    else:
+        print "  FAIL: touch target absent (exit={c4})"
+        failed = failed + 1
+
+    print ""
+    print "=== Results: {passed}/{passed + failed} passed ==="
+    if failed == 0:
+        print "ALL TESTS PASSED"

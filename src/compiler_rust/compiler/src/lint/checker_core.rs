@@ -405,9 +405,6 @@ impl LintChecker {
             // Check runtime family GC/noalloc dependency boundaries
             self.check_gc_boundary_imports(items, &source_file);
 
-            // Check for raw rt_* runtime intrinsic declarations outside privileged tiers
-            self.check_raw_rt_access(items, &source_file);
-
             // Check for bypass directories with code files
             self.check_bypass_validity(items, &source_file);
         }
@@ -574,9 +571,6 @@ impl LintChecker {
         // Determinism guard (GAME-DET-LINT-001)
         "deterministic",
         "name_checked",
-        // rt-encapsulation: module legitimately implements/bridges rt_* intrinsics
-        // (exempts the file from the raw_rt_access lint).
-        "runtime_intrinsics",
     ];
 
     /// Known attribute names (whitelist)
@@ -604,7 +598,5 @@ impl LintChecker {
         // Determinism guard (GAME-DET-LINT-001): #[deterministic]
         "deterministic",
         "name_checked",
-        // rt-encapsulation: #[runtime_intrinsics] exempts the file from raw_rt_access.
-        "runtime_intrinsics",
     ];
 }

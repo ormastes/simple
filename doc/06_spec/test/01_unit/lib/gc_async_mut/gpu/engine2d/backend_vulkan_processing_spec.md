@@ -1,6 +1,6 @@
-# Vulkan Backend Processing Specification
+# Backend Vulkan Processing Specification
 
-> Verifies the Vulkan Engine2D processing lane, including structured unavailable diagnostics, deterministic readback when a Vulkan device exists, and strict Engine2D creation without silent CPU fallback.
+> <details>
 
 <!-- sdn-diagram:id=backend_vulkan_processing_spec.arch -->
 <details class="sdn-source">
@@ -27,51 +27,12 @@ backend_vulkan_processing_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Vulkan Backend Processing Specification
-
-Verifies the Vulkan Engine2D processing lane, including structured unavailable diagnostics, deterministic readback when a Vulkan device exists, and strict Engine2D creation without silent CPU fallback.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Requirements | doc/02_requirements/ui/misc/shared_wm_renderer_unification.md |
-| Plan | doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md |
-| Design | doc/04_architecture/ui/simple_gui_stack.md |
-| Research | doc/09_report/vulkan_engine2d_readback_2026-06-17.md |
-| Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_processing_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Verifies the Vulkan Engine2D processing lane, including structured unavailable
-diagnostics, deterministic readback when a Vulkan device exists, and strict
-Engine2D creation without silent CPU fallback.
-
-**Requirements:** doc/02_requirements/ui/misc/shared_wm_renderer_unification.md
-**Research:** doc/09_report/vulkan_engine2d_readback_2026-06-17.md
-**Plan:** doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md
-**Design:** doc/04_architecture/ui/simple_gui_stack.md
-
-## Syntax
-
-Use `VulkanBackend.create().init(width, height)` for direct backend probes and
-`Engine2D.create_with_backend_strict(width, height, "vulkan")` when callers need
-a typed failure instead of CPU fallback.
-
-## Examples
-
-On hosts without Vulkan, strict creation returns `Err(BackendProbeResult)` with
-`requested_name`, `selected_name`, and `backend_name` set to `vulkan`. On hosts
-with Vulkan, it returns an Engine2D whose `backend_name()` is `vulkan`.
+# Backend Vulkan Processing Specification
 
 ## Scenarios
 
@@ -367,46 +328,6 @@ else:
 
 </details>
 
-#### strict Engine2D vulkan creation never falls back to CPU
-
-- Request strict Vulkan Engine2D creation
-- Confirm successful strict creation selected Vulkan
-   - Expected: engine.backend_name() equals `vulkan`
-- engine shutdown
-- Confirm unavailable strict creation reports Vulkan diagnostics
-   - Expected: diag.requested_name equals `vulkan`
-   - Expected: diag.selected_name equals `vulkan`
-   - Expected: diag.backend_name equals `vulkan`
-- assert true
-- assert false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 15 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Request strict Vulkan Engine2D creation")
-val result = Engine2D.create_with_backend_strict(4, 4, "vulkan")
-if result.is_ok():
-    step("Confirm successful strict creation selected Vulkan")
-    val engine = result.unwrap()
-    expect(engine.backend_name()).to_equal("vulkan")
-    engine.shutdown()
-else:
-    step("Confirm unavailable strict creation reports Vulkan diagnostics")
-    val diag = result.unwrap_err()
-    expect(diag.requested_name).to_equal("vulkan")
-    expect(diag.selected_name).to_equal("vulkan")
-    expect(diag.backend_name).to_equal("vulkan")
-    assert_true(diag.status == BackendStatus.Unavailable or diag.status == BackendStatus.Failed)
-    assert_false(diag.status == BackendStatus.Fallback)
-```
-
-</details>
-
 ### Vulkan compute processing lane — compute dispatch readback
 
 #### clear and readback
@@ -601,23 +522,33 @@ else:
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_processing_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- Vulkan compute processing lane — probe
+- Vulkan compute processing lane — structured errors
+- Vulkan compute processing lane — VulkanBackend init
+- Vulkan compute processing lane — compute dispatch readback
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-
-
-## Related Documentation
-
-- **Requirements:** [doc/02_requirements/ui/misc/shared_wm_renderer_unification.md](doc/02_requirements/ui/misc/shared_wm_renderer_unification.md)
-- **Plan:** [doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md](doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md)
-- **Design:** [doc/04_architecture/ui/simple_gui_stack.md](doc/04_architecture/ui/simple_gui_stack.md)
-- **Research:** [doc/09_report/vulkan_engine2d_readback_2026-06-17.md](doc/09_report/vulkan_engine2d_readback_2026-06-17.md)
 
 
 </details>

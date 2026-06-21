@@ -1212,7 +1212,14 @@ fn try_compile_builtin_method_call<M: Module>(
     let key_is_int = matches!(
         ctx.vreg_types.get(args.first().unwrap_or(&receiver)).copied(),
         Some(
-            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
         )
     );
     let mut call_args = vec![receiver_val];

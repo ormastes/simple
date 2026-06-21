@@ -210,9 +210,8 @@ claim full SimpleOS self-host completion.
 
 Checklist against the objective:
 
-- Named file: `doc/03_plan/compiler/bootstrap/simpleos_bootstrap_plan.md`
-  exists and records the current bootstrap status, phases, acceptance gates,
-  evidence, and blockers.
+- Named file: `doc/03_plan/simpleos_bootstrap_plan.md` exists and records the
+  current bootstrap status, phases, acceptance gates, evidence, and blockers.
 - Sysroot prerequisite: current local evidence passes after
   `sh src/os/port/llvm/sysroot.shs` produced `build/os/sysroot/include`,
   `build/os/sysroot/lib/libsimpleos_c.a`, `build/os/sysroot/lib/crt0.o`, and
@@ -230,14 +229,12 @@ Checklist against the objective:
 - Staged cross bootstrap: current local evidence does not pass. Stage 1 builds,
   Stage 2 is rejected as a 6,176-byte diagnostic stub, Stage 3 is not built,
   and convergence is not reached.
-- In-guest convergence: deferred/platform-only; requires the SimpleOS guest
-  execution path (`/bin/simple native-build`) and is excluded from host-bootstrap
-  completion until QEMU/platform evidence is in scope.
+- In-guest convergence: remains a documented future phase gated on guest-side
+  `/bin/simple native-build`; no current in-guest convergence evidence exists
+  in this audit.
 
 Stop condition for this plan document: complete once the file clearly separates
 passing prerequisite/dry-run evidence from the unresolved Stage 2, Rust seed,
-full MIR self-host blockers, and deferred platform-only in-guest convergence.
-The host-bootstrap implementation work is not complete until the staged
-cross-bootstrap acceptance item produces valid Stage 2/Stage 3 artifacts.
-In-guest convergence evidence is tracked only when QEMU/platform proof is in
-scope.
+and full MIR self-host blockers. The implementation work is not complete until
+the staged cross-bootstrap acceptance item produces valid Stage 2/Stage 3
+artifacts and the in-guest convergence phase has executable evidence.

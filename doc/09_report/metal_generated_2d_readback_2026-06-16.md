@@ -21,17 +21,12 @@ Date: 2026-06-16
 
 Generated Metal evidence is intentionally fail-closed until a verified metallib module, Metal runtime device/pipeline/encoder handles, submit, synchronization, and readback checksum are all present.
 
-Strict Engine2D Metal selection is gated separately by
-`test/01_unit/lib/gpu/engine2d/backend_probe_metal_host_gate_spec.spl`: it must
-report `feature_gate=macos` and `reason=metal-requires-macos` instead of a CPU
-fallback or generic runtime-evidence message.
-
 ## Host Validation Checklist (Darwin/macOS)
 - Ensure Xcode command-line tools are installed and discoverable: xcode-select --install.
 - Validate toolchain and runtime visibility: xcrun --find metal, xcrun --find metallib, system_profiler SPDisplaysDataType.
 - Refresh and rebuild generated toolchains:
-  SIMPLE_BIN=bin/simple SIMPLE_LIB=src sh scripts/check/check-portable-compute-toolchains.shs
+  SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=src sh scripts/check/check-portable-compute-toolchains.shs
 - Run proof lane directly:
-  SIMPLE_BIN=bin/simple sh scripts/check/check-metal-generated-2d-readback.shs
+  SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple sh scripts/check/check-metal-generated-2d-readback.shs
 - Promote through platform aggregate:
-  SIMPLE_BIN=bin/simple SIMPLE_LIB=src sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
+  SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=src sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs

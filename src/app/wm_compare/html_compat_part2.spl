@@ -27,12 +27,29 @@ use std.nogc_sync_mut.sffi.io.{
     dir_create_all}
 use app.common.string_builder.{StringBuilder}
 
-use std.io_runtime.{file_read_bytes}
+# rt_file_read_text and rt_file_read_bytes are wrapped in Option by the
+# bootstrap interpreter, so we declare them directly and use the `?? ""`
+# / `?? []` fallback pattern (matching the test_runner / database modules).
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 
+# rt_process_run is the raw runtime extern. We invoke it directly because
+# `capture_electron`'s `val (out, err, exit_code) = shell(...)` struct
+# destructure trips an interpreter bug ("variable `exit_code` not found"),
+# and the parent path uses `std.io.shell` which behaves slightly different
+# under bootstrap. Going through the runtime extern keeps the harness
+# portable across stages.
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 # NOTE: We do NOT use std.common.image.ppm_decode here. Its
 # `decode_ppm_to_argb` calls `data.len().to_i32()`, which crashes under
 # the bootstrap interpreter ("method `to_i32` not found on type i64").
 # We inline a minimal P6 decoder below using `as i32` casts.
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_cwd() -> text
 
 fn decode_ppm_local(data: [u8]) -> LocalPpm:
     """Decode a PPM P6/P3 byte array to ARGB u32 pixels.
@@ -282,7 +299,7 @@ fn _html_compat_load_chrome_fixture_pixels(id: text, width: i32, height: i32) ->
     # Temporary parity-gate scaffold for fixtures whose Chrome antialiasing is
     # more detailed than the current rectangle rasterizer. The real renderer
     # path still owns the approximate pixel model above.
-    val data: [u8] = file_read_bytes("test/09_baselines/html_compat/{id}/chrome.ppm") ?? []
+    val data: [u8] = rt_file_read_bytes("test/09_baselines/html_compat/{id}/chrome.ppm") ?? []
     if data.len() == 0:
         return []
     val ppm = decode_ppm_local(data)

@@ -1,0 +1,69 @@
+# @cover scripts/qemu_rv64_http_test.shs N/A
+# @cover scripts/qemu_rv32_http_test.shs N/A
+"""
+# HTTP Server on RISC-V Baremetal Specification
+
+**Feature IDs:** #B6-HTTP-BAREMETAL
+**Category:** Infrastructure
+**Status:** In Progress
+
+This spec intentionally does not claim HTTP/TLS production success while the
+RISC-V boot path lacks packet RX/TX. The default QEMU scripts remain the real
+production HTTP socket gates. Their `--expect-deferred` mode is the current
+boundary check: virtio discovery works, packet RX is unavailable, HTTP is
+deferred, and the kernel reaches the boot idle loop.
+"""
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn expect_script_has_deferred_boundary(path: text):
+    val script = rt_file_read_text(path)
+
+    expect(script).to_contain("--expect-deferred")
+    expect(script).to_contain("Network packet RX unavailable")
+    expect(script).to_contain("HTTP server deferred")
+    expect(script).to_contain("Entering boot idle loop")
+    expect(script).to_contain("DEFERRED PASSED")
+
+    val deferred_branch = script.find("EXPECT_DEFERRED")
+    val http_tests = script.find("Running HTTP smoke tests")
+    expect(deferred_branch).to_be_greater_than(-1)
+    expect(http_tests).to_be_greater_than(deferred_branch)
+
+fn expect_script_default_mode_remains_http_gate(path: text):
+    val script = rt_file_read_text(path)
+
+    expect(script).to_contain("Waiting for HTTP bind marker")
+    expect(script).to_contain("FAILED: HTTP server was deferred")
+    expect(script).to_contain("GET /health (HTTP)")
+    expect(script).to_contain("GET / (HTTP)")
+    expect(script).to_contain("GET /health (HTTPS)")
+    expect(script).to_contain("ALL PASSED")
+
+describe "HTTP baremetal QEMU gate":
+    it "keeps RV64 default mode as the production HTTP socket gate":
+        expect_script_default_mode_remains_http_gate("scripts/qemu_rv64_http_test.shs")
+
+    it "keeps RV32 default mode as the production HTTP socket gate":
+        expect_script_default_mode_remains_http_gate("scripts/qemu_rv32_http_test.shs")
+
+    it "documents RV64 deferred mode as the current non-production boundary":
+        expect_script_has_deferred_boundary("scripts/qemu_rv64_http_test.shs")
+
+    it "documents RV32 deferred mode as the current non-production boundary":
+        expect_script_has_deferred_boundary("scripts/qemu_rv32_http_test.shs")
+
+describe "HTTP baremetal production blockers":
+    it "records missing packet RX/TX before HTTP can be production-ready":
+        val plan = rt_file_read_text("doc/plans/riscv_rtl_simpleos_boot.md")
+
+        expect(plan).to_contain("packet RX/TX")
+        expect(plan).to_contain("QEMU HTTP test cannot yet prove an actual socket response")
+        expect(plan).to_contain("rt_io_tcp_accept_timeout()")
+
+    it "records TLS as blocked rather than production-ready":
+        val plan = rt_file_read_text("doc/plans/riscv_rtl_simpleos_boot.md")
+
+        expect(plan).to_contain("TLS Baremetal")
+        expect(plan).to_contain("Blocked, not complete")
+        expect(plan).to_contain("Tls13AcceptResult.Failed")

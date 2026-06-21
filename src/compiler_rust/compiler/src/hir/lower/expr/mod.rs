@@ -671,17 +671,45 @@ impl Lowerer {
         // Search pre-registered methods for ".method" suffix
         // Sort matches by name length (shortest = most specific) for deterministic resolution
         let suffix = format!(".{}", method);
-        if method == "read_pixels" {
-            let ms: Vec<(String, TypeId)> = self
-                .method_return_types
-                .iter()
-                .filter(|(name, _)| name.ends_with(&suffix))
-                .map(|(n, t)| (n.clone(), *t))
-                .collect();
-            eprintln!(
-                "[DIAG-LMRT] method={method} recv_ty={recv_ty:?} is_any={} matches={ms:?}",
-                recv_ty == TypeId::ANY
-            );
+        // When the impl matches DISAGREE on the return type, the shortest-name
+        // tiebreak below is unreliable: e.g. for `core.read_pixels()` on a
+        // trait-typed (ANY-aliased) `RenderBackend` receiver, an FFI wrapper's
+        // `RocmFfi.read_pixels -> Bool` outranked 16 backends returning `[u32]`
+        // purely by name length, so `fb` was typed `Bool` and indexing it
+        // failed → whole-module JIT fallback. For a trait-typed receiver the
+        // trait interface is authoritative, so prefer the trait method's
+        // declared return type when the impls conflict.
+        let mut seen_ret: Option<TypeId> = None;
+        let mut impls_disagree = false;
+        for (_, &rt) in self
+            .method_return_types
+            .iter()
+            .filter(|(name, _)| name.ends_with(&suffix))
+        {
+            match seen_ret {
+                None => seen_ret = Some(rt),
+                Some(prev) if prev != rt => {
+                    impls_disagree = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if impls_disagree {
+            let mut trait_names: Vec<&String> = self.module.trait_infos.keys().collect();
+            trait_names.sort();
+            for tn in trait_names {
+                if let Some(sig) = self
+                    .module
+                    .trait_infos
+                    .get(tn)
+                    .and_then(|ti| ti.methods.get(method))
+                {
+                    if sig.return_type != TypeId::ANY && sig.return_type != TypeId::VOID {
+                        return sig.return_type;
+                    }
+                }
+            }
         }
         if let Some((_, &ret_ty)) = self
             .method_return_types

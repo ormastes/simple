@@ -1,7 +1,7 @@
 # MCP Scenario Manual Quality Plan
 
 **Date:** 2026-05-30
-**Status:** Done
+**Status:** In progress
 **Parent plan:** `doc/03_plan/sspec_scenario_manual_capture_plan.md`
 
 ## Purpose
@@ -185,31 +185,3 @@ This plan depends on the feature requests in
 - `FR-SSPEC-MANUAL-0002` for typed protocol/API/exec evidence.
 - `FR-SSPEC-MANUAL-0003` for shared checker/capture helpers.
 - `FR-SSPEC-MANUAL-0004` for the repo-wide manual uplift.
-
-## Completion Evidence
-
-Completed on 2026-06-18 for the MCP stdio operator-flow slice.
-
-- Source restored to five executable operator scenarios in
-  `test/02_integration/app/mcp_stdio_integration_spec.spl`: initialize,
-  tools/list, unknown-tool error, safe editor subset, and folded
-  scoped-argument regression.
-- Primary scenarios carry explicit `# @manual: show`, `# @prev(...)`, and
-  `# @capture(protocol/api)` metadata; the scoped-argument regression remains
-  `# @manual: folded`.
-- The source carries `# @manual-layout: manual-first`, implemented in
-  `src/app/spipe_docgen/spipe_docgen/generator.spl` and documented in
-  `doc/07_guide/infra/sspec_scenario_manual.md`, so the generated page opens
-  directly on visible scenario steps instead of a folded summary-card wrapper.
-- `SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter`
-  passed with 5 scenarios.
-- `SIMPLE_LIB=src bin/simple spipe-docgen test/02_integration/app/mcp_stdio_integration_spec.spl --output doc/06_spec --no-index`
-  regenerated the canonical manual at
-  `doc/06_spec/test/02_integration/app/mcp_stdio_integration_spec.md`.
-- Canonical manual evidence now opens with `## Scenarios` and visible primary
-  MCP operator flows, keeps executable SSpec folded, shows protocol/API capture
-  evidence under steps, places `## Scenario Summary` after the scenario body,
-  and keeps the scoped-argument detail folded.
-- The stale duplicate manual at
-  `doc/06_spec/integration/app/mcp_stdio_integration_spec.md` was removed so
-  future agents use the canonical `doc/06_spec/test/...` path.

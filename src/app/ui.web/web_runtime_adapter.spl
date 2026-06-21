@@ -38,58 +38,6 @@ class WebRuntimeAdapter:
             out: out_ch
         )
 
-fn web_runtime_resume_frame(session_id: text, session: UISession, grant_id: text, revision: u64, last_sequence: i64) -> text:
-    val snap = session.access_snapshot()
-    val events = session.access_events
-    val current_rev = session.patch_stream.snapshot_revision
-    if revision != current_rev:
-        val payload = encode_snapshot(snap, current_rev)
-        val render_payload = web_render_snapshot_envelope_to_json(WebRenderSnapshotEnvelope(
-            target: WEB_RENDER_TARGET_SIMPLE_WEB,
-            surface_id: _runtime_surface_id(snap.active_surface),
-            revision: current_rev,
-            snapshot_json: payload
-        ))
-        return make_wire_frame("snapshot", session_id, "null", render_payload)
-    val result = session.patch_stream.patches_since(snap, events, last_sequence)
-    if result.snapshot != nil:
-        val payload = encode_snapshot(snap, current_rev)
-        val render_payload = web_render_snapshot_envelope_to_json(WebRenderSnapshotEnvelope(
-            target: WEB_RENDER_TARGET_SIMPLE_WEB,
-            surface_id: _runtime_surface_id(snap.active_surface),
-            revision: current_rev,
-            snapshot_json: payload
-        ))
-        return make_wire_frame("snapshot", session_id, "null", render_payload)
-    if result.patches.len() == 0:
-        val payload = "{\"snapshot_revision\": {current_rev}, \"last_sequence\": {last_sequence}}"
-        return make_wire_frame("resume_current", session_id, "null", payload)
-    val from_seq = last_sequence + 1
-    var to_seq = from_seq
-    for _ in result.patches:
-        to_seq = to_seq + 1
-    to_seq = to_seq - 1
-    val envelope = PatchEnvelope(
-        session_id: session_id,
-        snapshot_revision: current_rev,
-        from_sequence: from_seq,
-        to_sequence: to_seq,
-        patches: result.patches
-    )
-    val env_json = encode_envelope(envelope)
-    val render_payload = web_render_patch_envelope_to_json(WebRenderPatchEnvelope(
-        target: WEB_RENDER_TARGET_SIMPLE_WEB,
-        surface_id: _runtime_surface_id(snap.active_surface),
-        from_sequence: _sequence_to_u64(from_seq),
-        to_sequence: _sequence_to_u64(to_seq),
-        patches_json: env_json,
-        snapshot_json: ""
-    ))
-    val seq_str = "{from_seq}"
-    return make_wire_frame("patch_batch", session_id, seq_str, render_payload)
-
-export web_runtime_resume_frame
-
 impl WebRuntimeAdapter:
 
     me send_snapshot(self):

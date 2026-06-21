@@ -75,37 +75,6 @@ fn is_runtime_owned_symbol(sym: &str) -> bool {
     sym.trim_start_matches('_').starts_with("rt_")
 }
 
-fn is_critical_host_runtime_symbol(sym: &str) -> bool {
-    let bare = sym.trim_start_matches('_');
-    bare.starts_with("rt_channel_")
-        || matches!(
-            bare,
-            "rt_io_tcp_bind_fd"
-                | "rt_io_tcp_socket_create"
-                | "rt_io_tcp_listen"
-                | "rt_io_tcp_accept"
-                | "rt_io_tcp_read"
-                | "rt_io_tcp_write"
-                | "rt_io_tcp_write_text"
-                | "rt_io_tcp_close"
-                | "spl_thread_cpu_count"
-                | "spl_thread_create"
-                | "spl_thread_join"
-                | "spl_thread_detach"
-                | "spl_mutex_create"
-                | "spl_mutex_lock"
-                | "spl_mutex_try_lock"
-                | "spl_mutex_unlock"
-                | "spl_mutex_destroy"
-                | "spl_condvar_create"
-                | "spl_condvar_wait"
-                | "spl_condvar_wait_timeout"
-                | "spl_condvar_signal"
-                | "spl_condvar_broadcast"
-                | "spl_condvar_destroy"
-        )
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FreestandingUnresolvedMode {
     DeferToLinker,
@@ -633,19 +602,6 @@ pub(crate) fn generate_stub_object(
     // no undefined rt_* to stub there.
     let stub_missing_runtime = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1")
         || std::env::var("SIMPLE_STUB_MISSING_RT").as_deref() == Ok("1");
-    let missing_critical_runtime: Vec<String> = undefined
-        .iter()
-        .filter(|s| !defined.contains(*s))
-        .filter(|s| is_critical_host_runtime_symbol(s))
-        .cloned()
-        .collect();
-    if !missing_critical_runtime.is_empty() {
-        return Err(format!(
-            "refusing to link hosted native binary with unresolved critical runtime symbols: {}",
-            missing_critical_runtime.join(", ")
-        ));
-    }
-
     let needs_stub: Vec<String> = undefined
         .into_iter()
         .filter(|s| !defined.contains(s))

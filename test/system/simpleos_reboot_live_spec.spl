@@ -1,0 +1,61 @@
+# @tag:system
+#
+# Opt-in live QEMU validation for the SimpleOS x86 reboot reset path.
+
+use std.spec
+
+extern fn rt_env_get(name: text) -> text?
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+
+val SIMPLE_BIN: text = "src/compiler_rust/target/bootstrap/simple"
+val LINKER_SCRIPT: text = "examples/simple_os/arch/x86_64/linker.ld"
+val BUILD_SOURCES: text = "--source src/lib --source examples/simple_os"
+val BUILD_PREFIX: text =
+    "SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=\"$(pwd)/src\" PATH=\"/usr/bin:$PATH\" {SIMPLE_BIN} native-build"
+val QEMU_BASE: text =
+    "qemu-system-x86_64 -machine q35 -cpu qemu64 -serial stdio -display none -no-reboot"
+val DEBUG_EXIT: text = "-device isa-debug-exit,iobase=0xf4,iosize=0x04"
+
+fn _enabled() -> bool:
+    (rt_env_get("SIMPLEOS_QEMU_REBOOT_LIVE") ?? "") == "1"
+
+fn _run_shell(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
+
+fn _qemu_available() -> bool:
+    val result = _run_shell("command -v qemu-system-x86_64 >/dev/null 2>&1")
+    result[2] == 0
+
+fn _build_probe(output: text) -> bool:
+    val command = "{BUILD_PREFIX} {BUILD_SOURCES} --backend cranelift --entry-closure --entry examples/simple_os/arch/x86_64/reboot_probe_entry.spl --target x86_64-unknown-none -o {output} --linker-script {LINKER_SCRIPT}"
+    val result = _run_shell(command)
+    if result[2] != 0:
+        return false
+    rt_file_exists(output)
+
+fn _run_probe(kernel: text) -> (text, i64):
+    val command = "timeout 10s {QEMU_BASE} -m 384M -kernel {kernel} {DEBUG_EXIT} 2>&1 | tr -d '\\000'"
+    val result = _run_shell(command)
+    (result[0] + result[1], result[2])
+
+describe "SimpleOS x86 reboot reset live QEMU probe":
+    """Live reset validation, disabled unless SIMPLEOS_QEMU_REBOOT_LIVE=1."""
+
+    it "boots a probe that requests reset through the x86 reset-control port":
+        """When enabled, QEMU should terminate on guest reset before post-reset code runs."""
+        if not _enabled():
+            expect(_enabled()).to_equal(false)
+        elif not _qemu_available():
+            expect(_qemu_available()).to_equal(false)
+        else:
+            val output_path = "build/os/simpleos_reboot_probe_32.elf"
+            expect(_build_probe(output_path)).to_equal(true)
+            val result = _run_probe(output_path)
+            val serial = result[0]
+            val exit_code = result[1]
+            expect(serial.contains("[reboot-probe] before reset")).to_equal(true)
+            if exit_code == 0:
+                expect(exit_code).to_equal(0)
+            else:
+                expect(exit_code).to_equal(1)

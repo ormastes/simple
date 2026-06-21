@@ -2212,7 +2212,7 @@ fn compile_known_enum_constructor_call<M: Module>(
     let disc_val = builder.ins().iconst(types::I32, disc);
     let payload_val = match args {
         [] => builder.ins().iconst(types::I64, 3),
-        [single] => runtime_payload_value(ctx, builder, *single),
+        [single] => get_vreg_or_default(ctx, builder, single),
         many => {
             let capacity = builder.ins().iconst(types::I64, many.len() as i64);
             let array = call_runtime_1(ctx, builder, "rt_array_new", capacity);
@@ -2250,13 +2250,6 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // Print/IO (text → ptr, len)
         "rt_print_str" | "rt_println_str" | "rt_eprint_str" | "rt_eprintln_str" => Some(&[0]),
 
-        // Process run: the linked Rust runtime (env_process.rs) takes
-        // (cmd_ptr, cmd_len, args: RuntimeValue) — ptr+len command, tagged args
-        // array — NOT the C-runtime (const char*, SplArray*) shape. Marshal the
-        // command text as a (ptr, len) pair and leave args as a tagged
-        // RuntimeValue (do NOT route through the cstr / C-runtime paths).
-        "rt_process_run" | "rt_process_run_timeout" => Some(&[0]),
-
         // Environment variables
         "rt_env_get" | "rt_env_get_i64" | "rt_get_env" | "rt_env_exists" | "rt_env_remove" => Some(&[0]),
         "rt_env_set" | "rt_set_env" => Some(&[0, 1]),
@@ -2288,8 +2281,9 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_file_write_bytes" => Some(&[0]),
 
         // Directory operations
-        "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all" | "rt_dir_glob" | "rt_dir_walk"
-        | "rt_set_current_dir" => Some(&[0]),
+        "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all" | "rt_dir_glob" | "rt_dir_walk" | "rt_set_current_dir" => {
+            Some(&[0])
+        }
         "rt_file_find" => Some(&[0, 1]),
 
         // Async I/O driver text arguments
@@ -2362,7 +2356,7 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
         // Native process functions in libsimple_runtime.a use C strings and
         // SplArray pointers, not Rust RuntimeValue string ptr/len pairs.
-        "rt_process_spawn" | "rt_process_execute" => Some(&[0]),
+        "rt_process_run" | "rt_process_spawn" | "rt_process_execute" | "rt_process_run_timeout" => Some(&[0]),
         "rt_file_write_text" | "rt_file_append_text" => Some(&[0, 1]),
         "rt_dir_create" | "rt_dir_create_all" => Some(&[0]),
         "rt_cuda_launch_kernel" => Some(&[1]),
@@ -2383,7 +2377,9 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 
 fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static [usize], &'static [usize])> {
     match func_name {
-        "rt_process_spawn" | "rt_process_execute" => Some((&[0], &[1])),
+        "rt_process_run" | "rt_process_spawn" | "rt_process_execute" | "rt_process_run_timeout" => {
+            Some((&[0], &[1]))
+        }
         _ => None,
     }
 }
@@ -2979,27 +2975,7 @@ pub fn compile_call<M: Module>(
             emit_profiler_call(ctx, builder, func_name)?;
         }
         let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
-        let arg_vals: Vec<_> = args
-            .iter()
-            .map(|a| {
-                let v = get_vreg_or_default(ctx, builder, a);
-                // A cross-block f64 argument is carried through an i64-typed
-                // Cranelift Variable, so it arrives here as an I64 value. Passing
-                // it to `adapt_args_to_signature_with_signedness` against an f64
-                // param would `fcvt_from_sint` (value-convert) the raw bits as an
-                // integer — garbage (e.g. `consume(f())` saw 0). `vreg_types`
-                // records the true F64 type; reinterpret the bits back to f64 so
-                // adaptation sees F64==F64. Gated on `vreg_types` → no effect on
-                // genuine integer args.
-                if ctx.vreg_types.get(a).copied() == Some(TypeId::F64)
-                    && builder.func.dfg.value_type(v) == types::I64
-                {
-                    builder.ins().bitcast(types::F64, MemFlags::new(), v)
-                } else {
-                    v
-                }
-            })
-            .collect();
+        let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
         let arg_signed: Vec<Option<bool>> = args.iter().map(|arg| super::core::vreg_is_signed(ctx, *arg)).collect();
         let arg_vals = adapt_args_to_signature_with_signedness(builder, callee_ref, arg_vals, Some(&arg_signed));
         let call = adapted_call(builder, callee_ref, &arg_vals);
