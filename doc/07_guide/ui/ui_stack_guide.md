@@ -268,15 +268,15 @@ display), it's a `CompositorBackend` + `InputBackend` pair, not a
 ## 9. Running an on-screen GUI window on macOS
 
 The pure-Simple / hosted-winit GUI paths present pixels via
-`rt_winit_window_present_rgba`. On macOS a GUI program launched as a bare CLI
+the `winit_present_rgba` facade. On macOS a GUI program launched as a bare CLI
 process **will not show a window**: the process is never registered with the
 window server (`lsappinfo` shows it unregistered) and the window is created but
 never composites. Two things are required — both pure Simple / packaging, **no
 Rust-seed change**:
 
 1. **Poll the event loop continuously** in the app's frame loop — call
-   `rt_winit_event_loop_poll_events(el, 1)` in a tight loop, never
-   `rt_thread_sleep`. The interpreter owns the main thread, so a sleep leaves
+   `winit_poll_events(el, 1)` through the facade in a tight loop, never
+   `thread_sleep`. The interpreter owns the main thread, so a sleep leaves
    AppKit with no handler between frames and the window never composites.
    Present once, then re-present occasionally for static content. Examples:
    `examples/06_io/ui/web_engine2d_gui.spl`,
