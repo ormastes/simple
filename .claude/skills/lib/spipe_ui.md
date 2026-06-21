@@ -201,6 +201,13 @@ Electron writes a bitmap but logs `angle=vulkan` as unavailable, record
 must prove Vulkan via the Simple Vulkan/Engine2D readback or RenderDoc gate; a
 spec that skips hardware assertions when `probe_vulkan()` fails is not enough.
 
+For 8K GUI/web/2D performance claims, keep a retained row in `doc/09_report` or
+`doc/10_metrics` with viewport, backend, binary/source revision, readback mode,
+p50/p95, RSS or memory, fallback state, and checksum/readback proof; otherwise
+record an explicit blocker. For Metal claims, only macOS native raw Metal
+readback with backend handle and checksum/readback provenance is proof; other
+hosts report `metal-requires-macos`.
+
 ## Mobile (Tauri Android / iOS) sanity
 
 The mobile GUI lane runs the **real** `render_html_tree` + `generate_css`
