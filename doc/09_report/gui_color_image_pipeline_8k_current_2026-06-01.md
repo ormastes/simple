@@ -2,6 +2,8 @@
 
 - status: pass
 - surface: 7680x4320 BGRA8
+- pixel_count: 33177600
+- packed_row_stride_bytes: 30720
 - framebuffer_bytes: 132710400
 - lab_xyz_full_frame_bytes: 796262400
 - packed_hot_path: true
@@ -23,6 +25,8 @@
 - gui_color_image_pipeline_8k_width=7680
 - gui_color_image_pipeline_8k_height=4320
 - gui_color_image_pipeline_8k_bytes_per_pixel=4
+- gui_color_image_pipeline_8k_pixel_count=33177600
+- gui_color_image_pipeline_8k_packed_row_stride_bytes=30720
 - gui_color_image_pipeline_8k_framebuffer_bytes=132710400
 - gui_color_image_pipeline_8k_lab_xyz_full_frame_bytes=796262400
 - gui_color_image_pipeline_8k_uses_packed_hot_path=true

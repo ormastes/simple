@@ -88,10 +88,12 @@ default wide-color or codec initialization is required.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+expect(gui_8k_pixel_count()).to_equal(33177600)
+expect(gui_8k_packed_row_stride_bytes()).to_equal(30720)
 expect(gui_8k_packed_framebuffer_bytes()).to_equal(132710400)
 expect(gui_8k_default_lazy_init_count()).to_equal(0)
 ```
