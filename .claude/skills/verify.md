@@ -50,6 +50,11 @@ For each `*_spec.spl` in scope:
      must read as a manual: primary steps visible, setup expanded through
      `@prev`/`@inline`, executable SPipe folded by default, and edge/matrix
      detail folded or skipped by policy
+   - For broad SPipe lanes, the recorded cooperative review plan is complete
+     or explicitly `N/A`: lower-model sidecars such as Codex Spark, Claude
+     Haiku, or Claude Sonnet were merged/reviewed when used, and a
+     normal/highest-capability LLM accepted broad findings, generated-manual
+     quality, coverage claims, exclusions, and done marks before PASS
 3. **Check test coverage of requirements:**
    - Read the docstring header — extract `**Requirements:**` link
    - Read the requirement doc → list all REQ-NNN statements
