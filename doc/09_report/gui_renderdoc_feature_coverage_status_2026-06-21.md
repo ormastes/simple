@@ -16,10 +16,11 @@
 - External Chrome/Vulkan RenderDoc: unavailable (capture-not-requested)
 - Electron Chromium/Vulkan RenderDoc: unavailable (missing-renderdoc)
 - Electron Chromium/Vulkan gate: fail (missing-renderdoc)
-- GUI/web/2D Vulkan setup mode: --renderdoc-simple
+- GUI/web/2D Vulkan setup source: existing-evidence
+- GUI/web/2D Vulkan setup mode: --run
 - GUI/web/2D Vulkan loader: present (Apple M4 / MoltenVK)
 - GUI/web/2D Vulkan RenderDoc: unavailable (missing-renderdoccmd-in-search-paths)
-- GUI/web/2D Electron direct Vulkan: not-run (simple-renderdoc-only; ARGB )
+- GUI/web/2D Electron direct Vulkan: fail (vulkan-angle-unavailable; ARGB pass)
 - GUI/web/2D Chrome direct Vulkan: fail (vulkan-angle-unavailable; bitmap pass)
 - GUI/web/2D Simple Vulkan: pass (pass; backend vulkan)
 - macOS Vulkan: present (Apple M4 / MoltenVK)
@@ -118,9 +119,10 @@
 - html_css_rendering_manifest_traceability_fixture_scene_count=55
 - html_css_rendering_manifest_traceability_manifest_missing_fixture=
 - gui_web_2d_vulkan_setup_command=sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+- gui_web_2d_vulkan_setup_source=existing-evidence
 - gui_web_2d_vulkan_setup_exit_code=
 - gui_web_2d_vulkan_evidence_env=build/gui-web-2d-vulkan-env/evidence.env
-- gui_web_2d_vulkan_mode=--renderdoc-simple
+- gui_web_2d_vulkan_mode=--run
 - gui_web_2d_vulkan_uname_s=Darwin
 - gui_web_2d_vulkan_uname_m=arm64
 - gui_web_2d_vulkan_loader_status=present
@@ -134,10 +136,10 @@
 - gui_web_2d_vulkan_renderdoc_cmd=
 - gui_web_2d_vulkan_renderdoc_search_paths=RDOC_HOME_UNSET|/Users/ormastes/simple/build/tools/renderdoc|/Users/ormastes/simple/build/tools/renderdoc-*|/Applications/RenderDoc.app|/Users/ormastes/Applications/RenderDoc.app|/Users/ormastes/simple/build/tools/RenderDoc.app|/Users/ormastes/simple/build/tools/renderdoc/RenderDoc.app
 - gui_web_2d_vulkan_renderdoc_install_hint=Install RenderDoc.app manually or set RDOC_HOME to a RenderDoc bundle/tree containing renderdoccmd; keep Vulkan/MoltenVK installed separately with Homebrew.
-- gui_web_2d_vulkan_electron_argb_status=
-- gui_web_2d_vulkan_electron_argb_nonblank_pixel_count=
-- gui_web_2d_vulkan_electron_vulkan_status=not-run
-- gui_web_2d_vulkan_electron_vulkan_reason=simple-renderdoc-only
+- gui_web_2d_vulkan_electron_argb_status=pass
+- gui_web_2d_vulkan_electron_argb_nonblank_pixel_count=410618
+- gui_web_2d_vulkan_electron_vulkan_status=fail
+- gui_web_2d_vulkan_electron_vulkan_reason=vulkan-angle-unavailable
 - gui_web_2d_vulkan_chrome_bitmap_status=pass
 - gui_web_2d_vulkan_chrome_vulkan_status=fail
 - gui_web_2d_vulkan_chrome_vulkan_reason=vulkan-angle-unavailable
@@ -145,7 +147,7 @@
 - gui_web_2d_vulkan_simple_reason=pass
 - gui_web_2d_vulkan_simple_probe_status=Initialized
 - gui_web_2d_vulkan_simple_backend_name=vulkan
-- gui_web_2d_vulkan_renderdoc_simple_exit_code=1
+- gui_web_2d_vulkan_renderdoc_simple_exit_code=
 - gui_web_2d_vulkan_renderdoc_html_exit_code=
 - gui_web_2d_vulkan_renderdoc_electron_exit_code=
 - production_gui_web_renderer_parity_command=ELECTRON_BITMAP_TIMEOUT_SECS=20 sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
