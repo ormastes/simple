@@ -37,7 +37,11 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
 7. Use ONLY built-in SPipe matchers (see below)
 8. Every new placeholder helper MUST fail explicitly (`assert(false)` or
    equivalent) until implementation exists; no silent pass placeholders
-9. Append the spec file list, coverage matrix, and manual rendering policy to state file
+9. Append the spec file list, coverage matrix, manual rendering policy, and
+   cooperative review plan to state file. For broad spec lanes, name
+   lower-model sidecars to use or merge (Codex Spark, Claude Haiku, or Claude
+   Sonnet), or mark `N/A`; require normal/highest-capability review before
+   accepting broad coverage or generated-manual quality claims.
 
 ## SPipe Matchers (ONLY these)
 
