@@ -27,7 +27,7 @@ bin/simple test test/03_system/feature/language/host_gpu_lane_spec.spl
 ```
 
 Generated/manual mirror:
-`doc/06_spec/test/03_system/feature/language/host_gpu_lane_spec.md`
+`doc/06_spec/03_system/feature/language/host_gpu_lane_spec.md`
 
 ## Pass/Fail Criteria
 
