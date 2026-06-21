@@ -5,7 +5,7 @@
 `test/03_system/app/sound_engine/feature/sound_engine_spec.spl`
 
 ## Generated Manual
-`doc/06_spec/test/03_system/app/sound_engine/feature/sound_engine_spec.md`
+`doc/06_spec/03_system/app/sound_engine/feature/sound_engine_spec.md`
 
 ## Coverage
 - REQ-001: public API surface represented by lifecycle/playback/streaming/group/effects command contract.
