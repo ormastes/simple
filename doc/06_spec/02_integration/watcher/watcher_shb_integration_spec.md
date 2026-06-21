@@ -62,17 +62,15 @@ Tests end-to-end SHB cache generation and validation through the watcher.
 
 #### skips recompilation for unchanged files _(slow)_
 
-1. int reset
-
-2. int add source
-
-3. int compile shb
+- int reset
+- int add source
+- int compile shb
    - Expected: int_compile_log_len() equals `1`
    - Expected: status equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -98,14 +96,13 @@ expect(status).to_equal(0)
 
 #### detects missing SHB _(slow)_
 
-1. int reset
-
-2. int add source
+- int reset
+- int add source
    - Expected: status equals `3`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -129,25 +126,19 @@ expect(status).to_equal(3)
 
 #### processes multiple files _(slow)_
 
-1. int reset
-
-2. int add source
-
-3. int add source
-
-4. int add source
-
-5. int compile shb
-
-6. int compile shb
-
-7. int compile shb
+- int reset
+- int add source
+- int add source
+- int add source
+- int compile shb
+- int compile shb
+- int compile shb
    - Expected: int_compile_log_len() equals `3`
    - Expected: int_shb_paths_len() equals `3`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -176,20 +167,16 @@ expect(int_shb_paths_len()).to_equal(3)
 
 #### detects when dependency interface changes _(slow)_
 
-1. int reset
-
-2. int add source
-
-3. int add source
-
-4. int compile shb
-
-5. int add source
+- int reset
+- int add source
+- int add source
+- int compile shb
+- int add source
    - Expected: new_dep_hash != dep_hash is true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
