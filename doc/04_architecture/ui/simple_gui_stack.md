@@ -511,7 +511,7 @@ dispatch commands and forwards them to the web adapter protocol.
 | Web render API | `src/lib/common/ui/web_render_api.spl` | WebRender IR transport |
 | Web bridge | `src/app/ui.web/wm_bridge.spl` | Web host WM adapter |
 | Web WM bridge | `src/app/ui.web/wm_runtime_bridge.spl` | Web host WM runtime dispatch consumer |
-| Shared MDI demo | `src/app/ui_shared_mdi/main.spl` | Backend-neutral MDI IPC demo; environment toggles go through `app.io.env_ops.env_get` instead of local `rt_env_get` |
+| Shared MDI demo | `src/app/ui_shared_mdi/main.spl` | Backend-neutral MDI IPC demo; environment toggles go through `app.io.env_ops.env_get` instead of local runtime env declarations |
 
 ## Host Shell Targets
 
@@ -659,7 +659,7 @@ This iteration moved the stack toward the target above (see design doc
   shared by every SIMD-CPU/GPU lane; selection is now config/environment-driven
   without per-call-site changes. Engine2D env selection and the opt-in Vulkan
   GLSL gate read configuration through the stdlib I/O facade instead of local
-  `rt_env_get` declarations.
+  runtime env declarations.
 - **Three renderers, shared cheap base.** common renderer
   (`lib/common/render_scene` cascade + `lib/common/ui/draw_ir`) → web renderer
   (`browser_engine`) and slim text renderer (`editor/render/md_renderer.spl`).
