@@ -50,8 +50,8 @@ SimpleOS QEMU ARM64
 
 ## Non-Negotiable Constraints
 
-- WM modules must not call `rt_gui_*`, `rt_winit_*`, `rt_sdl_*`, `rt_cocoa_*`,
-  or web renderer runtime externs on the hot path.
+- WM modules must not call facade-bypassing native GUI or web renderer runtime
+  externs on the hot path.
 - Web renderer modules are not part of the GUI library release lane. Do not
   route GUI app content through `SimpleWebRenderer`, HTML layout, browser
   surfaces, or `WebRenderRequest` to meet this goal.
