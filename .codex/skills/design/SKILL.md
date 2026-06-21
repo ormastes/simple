@@ -166,7 +166,7 @@ Reference: `doc/07_guide/infra/sspec_scenario_manual.md`.
 | Generated spec docs | `doc/06_spec/<mirrored-test-path>/<feature>_spec.md` |
 | Test plan | `doc/03_plan/sys_test/<feature>.md` |
 | Detail design | `doc/05_design/<feature>.md` |
-| Agent tasks | `doc/03_plan/agent_tasks/<feature>.md` |
+| Agent tasks | `doc/03_plan/agent_tasks/<feature>.md` with sidecar lanes/`N/A`, merge owner, and final reviewer |
 | UI design (if applicable) | `doc/05_design/<feature>_tui.md` |
 
 ## Multi-LLM Collaboration
