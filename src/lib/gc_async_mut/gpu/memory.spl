@@ -13,6 +13,24 @@ use std.torch.sffi.{
     rt_torch_tensor_zeros
 }
 
+fn gpu_memory_torch_tensor_from_data(data: any, shape: [i64]) -> i64:
+    rt_torch_tensor_from_data(data, shape)
+
+fn gpu_memory_torch_tensor_to_cuda(handle: i64, device_id: i32) -> i64:
+    rt_torch_torchtensor_cuda(handle, device_id)
+
+fn gpu_memory_torch_tensor_to_cpu(handle: i64) -> i64:
+    rt_torch_torchtensor_cpu(handle)
+
+fn gpu_memory_torch_tensor_clone(handle: i64) -> i64:
+    rt_torch_torchtensor_clone(handle)
+
+fn gpu_memory_torch_tensor_free(handle: i64):
+    rt_torch_torchtensor_free(handle)
+
+fn gpu_memory_torch_tensor_zeros(shape: [i64]) -> i64:
+    rt_torch_tensor_zeros(shape)
+
 # ============================================================================
 # GPU Array Type
 # ============================================================================
@@ -56,9 +74,9 @@ class GpuArray[T]:
         """
         match self.backend:
             case GpuBackend.Cuda:
-                val cpu_handle = rt_torch_tensor_from_data(data, [data.len()])
-                val gpu_handle = rt_torch_torchtensor_cuda(cpu_handle, self.device_id)
-                rt_torch_torchtensor_free(cpu_handle)
+                val cpu_handle = gpu_memory_torch_tensor_from_data(data, [data.len()])
+                val gpu_handle = gpu_memory_torch_tensor_to_cuda(cpu_handle, self.device_id)
+                gpu_memory_torch_tensor_free(cpu_handle)
                 val wrapper = TorchTensorWrapper.from_handle(gpu_handle)
                 self.torch_tensor = Some(wrapper)
                 self.count = data.len()
@@ -80,11 +98,11 @@ class GpuArray[T]:
                 match self.torch_tensor:
                     case Some(tensor):
                         # Move to CPU first
-                        val cpu_handle = rt_torch_torchtensor_cpu(tensor.handle)
+                        val cpu_handle = gpu_memory_torch_tensor_to_cpu(tensor.handle)
                         # Note: Extracting raw data from tensor requires
                         # rt_torch_torchtensor_to_data SFFI (not yet available).
                         # The CPU tensor handle is valid for further torch ops.
-                        rt_torch_torchtensor_free(cpu_handle)
+                        gpu_memory_torch_tensor_free(cpu_handle)
                         var result: [T] = []
                         result
                     case nil:
@@ -109,9 +127,9 @@ class GpuArray[T]:
             case GpuBackend.Cuda:
                 match self.torch_tensor:
                     case Some(tensor):
-                        val cloned = rt_torch_torchtensor_clone(tensor.handle)
-                        val on_device = rt_torch_torchtensor_cuda(cloned, other.device_id)
-                        rt_torch_torchtensor_free(cloned)
+                        val cloned = gpu_memory_torch_tensor_clone(tensor.handle)
+                        val on_device = gpu_memory_torch_tensor_to_cuda(cloned, other.device_id)
+                        gpu_memory_torch_tensor_free(cloned)
                         other.torch_tensor = Some(TorchTensorWrapper.from_handle(on_device))
                         other.count = self.count
                         true
@@ -148,9 +166,9 @@ fn gpu_alloc[T](gpu: Gpu, count: i64) -> GpuArray[T]:
     """
     match gpu.backend:
         case GpuBackend.Cuda:
-            val cpu_handle = rt_torch_tensor_zeros([count])
-            val gpu_handle = rt_torch_torchtensor_cuda(cpu_handle, gpu.device_id)
-            rt_torch_torchtensor_free(cpu_handle)
+            val cpu_handle = gpu_memory_torch_tensor_zeros([count])
+            val gpu_handle = gpu_memory_torch_tensor_to_cuda(cpu_handle, gpu.device_id)
+            gpu_memory_torch_tensor_free(cpu_handle)
             val wrapper = TorchTensorWrapper.from_handle(gpu_handle)
             GpuArray[T](
                 backend: GpuBackend.Cuda,
@@ -212,4 +230,3 @@ fn gpu_alloc_zeros[T](gpu: Gpu, count: i64) -> GpuArray[T]:
 # ============================================================================
 # Exports
 # ============================================================================
-
