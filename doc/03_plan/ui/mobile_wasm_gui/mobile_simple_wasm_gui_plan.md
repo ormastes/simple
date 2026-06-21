@@ -42,8 +42,8 @@ false-green: logic-ran ≠ HTML-rendered).
 
 To unblock, the Simple **wasm backend** must: (a) export linear `memory`; and
 (b) make `simple_app_render`/`simple_app_event` return a readable `(ptr,len)`
-for the `text` (or export `rt_string_data`/`rt_string_len` accessors). This is
-compiler/ABI work in `src/compiler/70.backend` (wasm) + runtime string repr.
+for the `text` through a stable text ABI facade. This is compiler/ABI work in
+`src/compiler/70.backend` (wasm) + runtime string repr.
 
 ### Update (2026-06-06): WASM backend is skeletal — deeper than an ABI tweak
 
