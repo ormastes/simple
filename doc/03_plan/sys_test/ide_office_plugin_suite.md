@@ -25,7 +25,7 @@ Validate the restored IDE product surface and Office plugin wiring for:
 | REQ-005 | Normal IDE help and unknown-option behavior remain intact. | `test/02_integration/app/ide/ide_feature_check_integration_spec.spl` |
 | REQ-006 | Shared Office helpers used by Writer HTML render, slides, sheets, Base, and planner paths remain covered. | `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
 | REQ-007 | The TUI feature-check report stays within a 120-column terminal and publishes text capture evidence. | `build/test-artifacts/03_system/app/ide/feature/ide_office_plugin_suite/feature_check_tui.txt` |
-| REQ-008 | Generated SSpec docs read as operator manuals and report `0 stubs`. | `doc/06_spec/test/03_system/app/ide/feature/ide_office_plugin_suite_spec.md` |
+| REQ-008 | Generated SSpec docs read as operator manuals and report `0 stubs`. | `doc/06_spec/03_system/app/ide/feature/ide_office_plugin_suite_spec.md` |
 
 ## Execution
 
@@ -41,8 +41,8 @@ find doc/06_spec -name '*_spec.spl' | wc -l
 
 ## Manual Outputs
 
-- `doc/06_spec/test/03_system/app/ide/feature/ide_office_plugin_suite_spec.md`
-- `doc/06_spec/test/02_integration/app/ide/ide_feature_check_integration_spec.md`
+- `doc/06_spec/03_system/app/ide/feature/ide_office_plugin_suite_spec.md`
+- `doc/06_spec/02_integration/app/ide/ide_feature_check_integration_spec.md`
 
 ## Coverage Notes
 
