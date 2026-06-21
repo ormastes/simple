@@ -119,6 +119,13 @@ counts, pixel/readback hashes, fallback state, and p50/p95 baseline-vs-candidate
 timings. Do not count fallback-only or smoke-size software runs as a real GPU
 speedup.
 
+For 8K GUI/web/2D performance claims, keep a retained 8K evidence row in
+`doc/09_report` or `doc/10_metrics` that names viewport, backend, binary/source
+revision, readback mode, p50/p95 timing, RSS or memory budget, fallback state,
+and checksum/readback proof. If the host cannot produce the row, record an
+explicit blocker such as `8k-host-unavailable`; do not convert a small viewport,
+software fallback, or cached replay into an 8K pass.
+
 See also: [`web_render_backend_tldr.md`](web_render_backend_tldr.md).
 
 ## Production Browser Hardening

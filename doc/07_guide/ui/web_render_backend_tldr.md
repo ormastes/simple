@@ -22,6 +22,9 @@ web_render_backend:
   gate: check-electron-simple-web-engine2d-bitmap-evidence.shs  # mismatch=0
   perf: pure_simple interpreted+canvas-bound; keep viewport small; binary must
         carry the in-place array-write fix (2d4579a0) or every pixel write clones.
+  8k: retain a doc/09_report or doc/10_metrics row with viewport, backend,
+      binary/source revision, readback, p50/p95, RSS/memory, fallback state,
+      checksum proof; otherwise record an explicit 8K blocker.
 ```
 
 Full guide: [web_render_backend.md](web_render_backend.md)
