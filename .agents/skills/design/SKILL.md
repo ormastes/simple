@@ -51,7 +51,7 @@ description: Create architecture, UI design, system tests, and detail design for
 
 - Data structures, algorithms, module interactions, error handling
 - Output: `doc/05_design/<feature>.md`
-- Agent tasks: `doc/03_plan/agent_tasks/<feature>.md`
+- Agent tasks: `doc/03_plan/agent_tasks/<feature>.md` with sidecar lanes/`N/A`, merge owner, and final reviewer
 - Agent-task docs for broad lanes must list lower-model sidecar lanes or `N/A`,
   such as Codex Spark, Claude Haiku, or Claude Sonnet for parallel exploration,
   plus merge owner and final normal/highest-capability reviewer. Before those
