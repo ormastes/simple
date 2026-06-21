@@ -18,6 +18,7 @@ See: `doc/guide/llm_cooperative_dev_phase.md`
 | Skill | File | Purpose |
 |-------|------|---------|
 | `/research` | `.gemini/commands/research.toml` | Local + domain research |
+| `/sp_dev` | `.gemini/commands/sp_dev.toml` | Preferred full SPipe feature pipeline |
 | `/design` | `.gemini/commands/design.toml` | UI/UX design (Step 3 primary) |
 | `/impl` | `.gemini/commands/impl.toml` | 15-phase implementation |
 | `/verify` | `.gemini/commands/verify.toml` | Production readiness check |
@@ -41,7 +42,7 @@ Before starting any step, **check if prerequisite artifacts exist**:
 | UI design | `doc/05_design/<feature>_tui.md` | Create TUI/GUI mockups yourself |
 | Architecture | `doc/04_architecture/<feature>.md` | Design architecture yourself |
 | System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` | Create SPipe tests yourself |
-| Generated spec docs | `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md` | Generate from executable tests |
+| Generated spec docs | `doc/06_spec/test/03_system/app/<app_name>/feature/<feature>_spec.md` | Generate from executable tests |
 | Detail design | `doc/05_design/<feature>.md` | Create detail design yourself |
 | Implementation | `src/**/<feature>.spl` | Implement the feature |
 
@@ -121,6 +122,9 @@ If missing, do both:
 ### Requirement Options
 - Generate feature options with pros/cons/effort: `doc/02_requirements/feature/<feature>_options.md`
 - Generate NFR options: `doc/02_requirements/nfr/<feature>_options.md`
+- For broad lanes, record lower-model sidecars to use or merge (Codex Spark,
+  Claude Haiku, Claude Sonnet), or mark `N/A`. Normal/highest-capability review
+  must accept broad findings before options, exclusions, or done marks are trusted.
 - **Ask user** to select, then write final: `doc/02_requirements/feature/<feature>.md` and `doc/02_requirements/nfr/<feature>.md`
 
 ---
@@ -142,9 +146,15 @@ If missing, do all:
 
 ### System Test Design
 - SPipe BDD tests: `test/03_system/app/<app_name>/feature/<feature>_spec.spl`
-- Generated/manual SPipe docs: `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md`
+- Generated/manual SPipe docs: `doc/06_spec/test/03_system/app/<app_name>/feature/<feature>_spec.md`
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
 - Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
+- Define shared interface names and manual-facing setup/checker helper names
+  before implementation. Temporary helpers must fail explicitly with
+  `assert(false)` or equivalent.
+- Generate/read `doc/06_spec/...` as a scenario manual and revise steps,
+  captures, inline/previous expansion, and visibility until primary flows are
+  understandable without opening the source spec.
 
 ### Detail Design
 - Data structures, algorithms, module interactions, error handling
@@ -178,6 +188,14 @@ Production readiness check:
 
 Must show `STATUS: PASS` before release.
 
+Run:
+```bash
+sh scripts/audit/direct-env-runtime-guard.shs --working
+sh scripts/audit/direct-env-runtime-guard.shs --staged
+```
+New app leaf or `src/lib/gc_async_mut` env reads outside owner modules must use
+env facades, not local `rt_env_get`.
+
 ---
 
 ## Step 5: Release
@@ -203,6 +221,10 @@ This repo is a registered Gemini CLI extension via `gemini-extension.json`.
 - User MUST select requirements — never auto-select
 - All code in `.spl` — no Python, no Bash (except 3 bootstrap scripts)
 - SPipe matchers: built-in only (`to_equal`, `to_be`, `to_be_nil`, `to_contain`, etc.)
+- Broad lanes must complete lower-model sidecars or mark `N/A`, then pass
+  normal/highest-capability review before broad done marks or release PASS
+- `doc/06_spec` must contain generated/manual Markdown and evidence assets only;
+  executable `.spl` specs belong under `test/`
 - For MCP, LSP, and tool-server work, design must review startup path, hot request paths, cache or index strategy, invalidation strategy, and startup/latency/RSS targets
 - Production wrappers should execute cached compiled artifacts rather than raw source entrypoints
 - Repeated full-tree scans, repeated rereads, shell-outs, and retry sleeps in hot request handlers require explicit design justification and verification evidence
@@ -220,6 +242,6 @@ This repo is a registered Gemini CLI extension via `gemini-extension.json`.
 | 2 | UI design | `doc/05_design/<feature>_tui.md`, `_gui.md` |
 | 2 | Detail design | `doc/05_design/<feature>.md` |
 | 2 | System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` |
-| 2 | Generated spec docs | `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md` |
+| 2 | Generated spec docs | `doc/06_spec/test/03_system/app/<app_name>/feature/<feature>_spec.md` |
 | 3 | Source code | `src/**/<feature>.spl` |
 | 4 | Verify report | Terminal output (PASS/FAIL/WARN) |
