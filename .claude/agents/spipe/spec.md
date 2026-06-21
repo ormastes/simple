@@ -43,7 +43,10 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
 6. Create spec files at `test/` paths mirroring the architecture's module paths
 7. Use ONLY built-in SPipe matchers (see below)
 8. Every spec MUST fail right now — the code does not exist yet
-9. Append the spec file list, coverage matrix, and manual rendering policy to state file
+9. Run `simple spipe-docgen <spec> --output doc/06_spec --no-index` for each
+   changed spec and require complete documentation with `0 stubs`
+10. Append the spec file list, generated manual paths, coverage matrix, and
+    manual rendering policy to state file
 
 ## SPipe Matchers (ONLY these)
 
@@ -153,8 +156,10 @@ If the answer is no to any of these, rewrite the helpers and metadata.
 - **Manual visibility is assigned:** primary=show, edge=folded, plumbing=skip
 - **Capture kinds match the spec type** (see Evidence Kinds table)
 - **Inline/prev chains** connect setup to dependent scenarios
+- `spipe-docgen` generated mirrored `doc/06_spec/...` manuals with `0 stubs`
 - All specs WOULD FAIL (no implementation exists yet)
-- State file contains `## Specs` with file list, AC coverage matrix, and manual shape
+- State file contains `## Specs` with file list, generated manual paths, AC
+  coverage matrix, and manual shape
 - `## Phase` updated to `spec-done`
 
 ## Boil a Small Lake
@@ -172,6 +177,10 @@ Your ONLY output is spec files and the coverage matrix in the state file.
 ### Spec Files
 - `test/path/feature_spec.spl` — N specs covering AC-1, AC-2
 - `test/path/module_spec.spl` — N specs covering AC-3
+
+### Generated Manuals
+- `doc/06_spec/test/path/feature_spec.md` — complete, 0 stubs
+- `doc/06_spec/test/path/module_spec.md` — complete, 0 stubs
 
 ### Manual Shape
 | Scenario | Visibility | Capture | Inline/Prev |
@@ -193,5 +202,5 @@ spec-done
 - intake: Created state file with N acceptance criteria
 - research: Found N reusable modules, N existing files, N requirements drafted
 - arch: Designed N modules, N decisions, no circular deps
-- spec: Created N spec files, N total specs, 100% AC coverage, manual shape defined
+- spec: Created N spec files and N generated manuals, 0 doc stubs, 100% AC coverage, manual shape defined
 ```

@@ -91,6 +91,10 @@ describe "<Feature Name>":
 - Test descriptions start with "should" and describe behavior, not implementation
 - No test depends on external state or other tests
 - Error paths use `Result<T, E>` pattern, not exceptions
+- After writing or changing an SSpec file, run
+  `simple spipe-docgen <spec> --output doc/06_spec --no-index`. The generator
+  must report the affected spec as complete with `0 stubs`; if it reports an
+  auto/manual spec as a stub, fix the spec or docgen validation before handoff.
 - Scenario-oriented specs must produce manual-quality generated docs:
   primary scenarios visible, reusable setup hidden with `@inline` and expanded
   by `@prev`/`@include`, advanced/edge/matrix/stress details folded or skipped
@@ -221,6 +225,9 @@ Any REQ with 0 test cases is a **FAIL** — must be addressed.
 - `doc/06_spec` must not contain executable `.spl` specs. Run
   `find doc/06_spec -name '*_spec.spl' | wc -l` before completion and require
   `0`.
+- Generated manuals must be current for every changed SSpec and must not be
+  reported by `spipe-docgen` as stubs. Review the mirrored `.md` to confirm it
+  contains visible scenario steps plus folded executable SSpec blocks.
 - Mirror the executable path after stripping `test/`, for example
   `test/03_system/feature/usage/math_blocks_spec.spl` ->
   `doc/06_spec/test/03_system/feature/usage/math_blocks_spec.md`.
