@@ -764,6 +764,18 @@ static void rt_core_print_value_to(FILE* stream, int64_t value) {
         return;
     }
 
+    if (rt_core_is_float(value)) {
+        /* Decode the NaN-boxed f64 (low 3 bits are the TAG_FLOAT tag) and
+         * format identically to rt_to_string so print(x) and str(x) agree.
+         * Without this an f64 RuntimeValue fell through to the <value:0x..>
+         * hex fallback. */
+        uint64_t bits = ((uint64_t)value) & ~RT_VALUE_TAG_MASK;
+        double f;
+        memcpy(&f, &bits, sizeof(f));
+        fprintf(stream, "%.17g", f);
+        return;
+    }
+
     if (rt_core_is_special(value)) {
         switch (rt_core_special_payload(value)) {
             case RT_VALUE_SPECIAL_NIL:
