@@ -53,7 +53,7 @@
 11. Verify the `## Cooperative Review` plan from the state file was completed:
     lower-model sidecar lanes are either reviewed/merged or explicitly `N/A`,
     and the normal/highest-capability review accepted broad findings,
-    coverage claims, generated-manual quality, and done marks.
+    coverage claims, generated-manual quality, exclusions, and done marks.
 12. Run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
     `sh scripts/audit/direct-env-runtime-guard.shs --staged`; app leaf and
     `src/lib/gc_async_mut` env reads or process calls outside owner modules

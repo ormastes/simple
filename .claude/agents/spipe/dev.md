@@ -21,7 +21,12 @@ This agent CREATES the initial state file. All subsequent agents read and append
      matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
      `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/` docs are
      updated and generated SSpec docs read as operator manuals.
-6. Create `.spipe/<feature>/state.md` with the output below
+6. Add `## Cooperative Review`: for broad lanes, list lower-model sidecars
+   (Codex Spark, Claude Haiku, or Claude Sonnet), merge owner, final
+   normal/highest-capability reviewer, shared interface names, manual
+   setup/checker helper names, and fail-fast placeholders; otherwise write
+   `N/A` with one concrete reason.
+7. Create `.spipe/<feature>/state.md` with the output below
 
 ## Entry Criteria
 
@@ -34,6 +39,7 @@ This agent CREATES the initial state file. All subsequent agents read and append
   - `## Task Type` — one of: `feature`, `bug`, `todo`, `code-quality`
   - `## Refined Goal` — one sentence, specific, no weasel words
   - `## Acceptance Criteria` — numbered list, each AC is testable with pass/fail
+  - `## Cooperative Review` — sidecar/reviewer/interface/helper plan or `N/A`
   - `## Phase` set to `dev-done`
 - The refined goal is specific enough that two developers would build the same thing
 - Every AC answers "how do I know this is done?" with a concrete check
@@ -67,6 +73,9 @@ Your ONLY output is the state file with a goal and acceptance criteria.
 
 ## Scope Exclusions
 <anything explicitly out of scope>
+
+## Cooperative Review
+<N/A with reason, or lower-model sidecars, merge owner, final reviewer, shared interfaces, manual helper names, and fail-fast placeholders>
 
 ## Phase
 dev-done
