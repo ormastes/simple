@@ -40,6 +40,9 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   claiming completion: `bin/simple spipe-docgen <spec> --output doc/06_spec`,
   read the output like a manual, then revise steps/captures/visibility until
   primary flows are manual-quality and noisy details are folded or skipped.
+- For broad SPipe implementation lanes, complete or explicitly mark `N/A` the
+  lower-model sidecar plan, then require normal/highest-capability review before
+  claiming coverage, generated-manual quality, done marks, or broad exclusions.
 - Executable specs must stay under `test/`; generated/manual docs under
   `doc/06_spec` must be `.md` only. Require
   `find doc/06_spec -name '*_spec.spl' | wc -l` to print `0` before sync.
@@ -52,6 +55,8 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   verification-contract changes refreshed matching `doc/07_guide`,
   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
   and `.claude/agents/spipe/` process docs
+- Confirm the cooperative review plan is complete or explicitly `N/A` before
+  running final verify.
 - For GUI/web/2D RenderDoc+Vulkan work, use
   `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc`
   as the POSIX readiness/direct-run/capture wrapper and

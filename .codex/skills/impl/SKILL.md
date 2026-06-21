@@ -50,6 +50,9 @@ Skip if exist. See `design` skill for details.
 - Do not leave primary manual output dominated by raw test code. Executable
   SPipe should be folded detail; visible content should be scenario steps and
   typed evidence.
+- For broad SPipe implementation lanes, complete or explicitly mark `N/A` the
+  lower-model sidecar plan, then require normal/highest-capability review before
+  claiming coverage, generated-manual quality, done marks, or broad exclusions.
 - For Simple Web or other HTML-backed GUI behavior, capture and check HTML
   visible text when possible, then use GUI screenshots as fallback evidence.
 - Use `# @evidence-display: embed_tui`, `links`, or `embed_all` when generated
@@ -95,6 +98,8 @@ bin/simple test && bin/simple build lint
   verification-contract changes refreshed matching `doc/07_guide`,
   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
   and `.claude/agents/spipe/` process docs.
+- Confirm the cooperative review plan is complete or explicitly `N/A` before
+  running final verify.
 - For GUI/web/2D RenderDoc+Vulkan work, use
   `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc`
   as the POSIX readiness/direct-run/capture wrapper and
