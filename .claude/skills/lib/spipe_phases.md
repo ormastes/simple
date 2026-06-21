@@ -225,11 +225,15 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 7. Verify the `## Cooperative Review` plan is complete: lower-model lanes were
    merged/reviewed or marked `N/A`, then normal/highest-capability review
    accepted broad findings, coverage claims, generated-manual quality, and done marks
-8. Verify changed workflow/tool contracts refreshed matching `doc/07_guide`,
+8. For GUI/web queue proof, reject runtime-only evidence. Production proof
+   requires same-frame backend `device_readback`, a positive backend handle,
+   and matching checksum; runtime-only, synthetic-handle, upload-only, or
+   CPU-mirror evidence fails.
+9. Verify changed workflow/tool contracts refreshed matching `doc/07_guide`,
    `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
    and `.claude/agents/spipe/` process docs
-9. Mark ACs as checked in the state file
-10. If any test fails, document the failure and note whether it needs Phase 5 re-run
+10. Mark ACs as checked in the state file
+11. If any test fails, document the failure and note whether it needs Phase 5 re-run
 
 **Exit Criteria:**
 - All spec tests pass (or documented reason for interpreter-mode limitation)
@@ -238,6 +242,7 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - **Generated docs reviewed:** run `bin/simple spipe-docgen <spec> --output doc/06_spec`
   and verify output reads like a hand-written manual (not test plumbing)
 - Cooperative review plan complete or explicitly `N/A`
+- GUI/web queue proof is not runtime-only, synthetic-handle, upload-only, or CPU-mirror evidence
 - Process-doc freshness accepted before final verification, not repaired in release
 - **Diagram presence:** each phase doc (research, arch, refactor) has ≥1 SDN diagram
 - **Prose concision:** each phase doc ≤30 lines of prose (tables/diagrams excluded)
