@@ -10,7 +10,7 @@
 
 The 2D game engine is a layered architecture where pure types (no mutation, no FFI) sit at the bottom, mutable subsystems in the middle, and the game loop at the top. All code is Simple-native with FFI only at leaf modules for hardware access.
 
-**Architecture Note (2026-03-28):** Physics is now implemented in pure Simple (no rapier2d/Rust dependency). Windowing and framebuffer presentation use the SDL2 C runtime (`rt_sdl2_*`) instead of Rust winit. The FFI layer diagram below reflects the original design; see LIM-006 and LIM-007 in the limitations doc for resolution details.
+**Architecture Note (2026-03-28):** Physics is now implemented in pure Simple (no rapier2d/Rust dependency). Windowing and framebuffer presentation use the SDL2 presentation facade instead of Rust winit. The FFI layer diagram below reflects the original design; see LIM-006 and LIM-007 in the limitations doc for resolution details.
 
 ## Architecture
 
