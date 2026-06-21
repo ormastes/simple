@@ -35,7 +35,7 @@
 
 ## Focused Specs
 
-    spec_path=test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl
+    spec_path=test/03_system/gui/wm_compare/production_gui_8k_surface_planning_spec.spl
     Simple Test Runner v1.0.0-beta
 
     ───────────────────────────────────────────────────────────────
@@ -45,22 +45,22 @@
       Test files (*_test.spl):  0
     ───────────────────────────────────────────────────────────────
 
-    Running: test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl
-    [1/1] test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl
-      PASSED (66729ms)
+    Running: test/03_system/gui/wm_compare/production_gui_8k_surface_planning_spec.spl
+    [1/1] test/03_system/gui/wm_compare/production_gui_8k_surface_planning_spec.spl
+      PASSED (5069ms)
 
     ═══════════════════════════════════════════════════════════════
     Test Summary
     ═══════════════════════════════════════════════════════════════
     Files: 1
-    Passed: 10
+    Passed: 2
     Failed: 0
-    Duration: 66736ms
+    Duration: 5074ms
 
     ✓ All tests passed!
 
     Slowest tests:
-         66729ms  test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl [PERF BUG]
+          5069ms  test/03_system/gui/wm_compare/production_gui_8k_surface_planning_spec.spl
     spec_exit_code=0
     spec_path=test/01_unit/lib/common/color/color_lab_xyz_spec.spl
     Simple Test Runner v1.0.0-beta
@@ -74,7 +74,7 @@
 
     Running: test/01_unit/lib/common/color/color_lab_xyz_spec.spl
     [1/1] test/01_unit/lib/common/color/color_lab_xyz_spec.spl
-      PASSED (3624ms)
+      PASSED (3457ms)
 
     ═══════════════════════════════════════════════════════════════
     Test Summary
@@ -82,10 +82,10 @@
     Files: 1
     Passed: 4
     Failed: 0
-    Duration: 3627ms
+    Duration: 3460ms
 
     ✓ All tests passed!
 
     Slowest tests:
-          3624ms  test/01_unit/lib/common/color/color_lab_xyz_spec.spl
+          3457ms  test/01_unit/lib/common/color/color_lab_xyz_spec.spl
     spec_exit_code=0
