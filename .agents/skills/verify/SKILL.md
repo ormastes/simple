@@ -78,6 +78,10 @@ not create, rewrite, or weaken SPipe after verification.
   and production GUI/web parity evidence. If Chrome or Electron logs show
   `angle=vulkan` unavailable, report
   `vulkan-angle-unavailable` and fail the Vulkan proof even when pixels render.
+- Metal/Vulkan/8K claims require matching evidence: native Metal raw readback
+  on macOS, `metal-requires-macos` for Linux Metal, the Vulkan gate above for
+  Vulkan, and a retained 8K row or explicit blocker in `doc/09_report` /
+  `doc/10_metrics` for 8K performance.
 - For `simple run` script-startup changes, require evidence from
   `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` and confirm CLI
   argument scripts still avoid unnecessary compile/JIT startup unless

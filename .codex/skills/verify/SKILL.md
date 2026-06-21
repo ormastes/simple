@@ -132,6 +132,10 @@ Scan for stub patterns — any match is a **FAIL**:
   and production GUI/web parity evidence. If Chrome or Electron logs show
   `angle=vulkan` unavailable, report
   `vulkan-angle-unavailable` and fail the Vulkan proof even when pixels render.
+- **Metal/Vulkan/8K claims:** native Metal proof is macOS-only and must include
+  raw Metal readback; Linux Metal is only `metal-requires-macos`. Vulkan claims
+  need the readback/RenderDoc gate above. Any 8K performance claim needs a
+  retained 8K row or an explicit blocker in `doc/09_report` / `doc/10_metrics`.
 - **Core/MCP regression gate:** when compiler/core/lib or MCP/LSP files changed, require passing:
   - `<runtime> check src/compiler`
   - `<runtime> check src/lib`

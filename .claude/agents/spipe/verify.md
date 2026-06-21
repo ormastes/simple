@@ -67,12 +67,16 @@
     Electron RenderDoc proof, and production GUI/web parity evidence. If Chrome
     or Electron logs show `angle=vulkan` unavailable, report
     `vulkan-angle-unavailable` and fail the Vulkan proof even when pixels render.
-14. For GUI/web queue proof, reject runtime-only evidence. Runtime queue/drain
+14. Metal/Vulkan/8K claims require matching evidence: native Metal raw readback
+    on macOS, `metal-requires-macos` for Linux Metal, the Vulkan gate above for
+    Vulkan, and a retained 8K row or explicit blocker in `doc/09_report` /
+    `doc/10_metrics` for 8K performance.
+15. For GUI/web queue proof, reject runtime-only evidence. Runtime queue/drain
     receipts are necessary but not sufficient; production proof requires
     same-frame backend `device_readback`, a positive backend handle, and
     matching checksum. Synthetic handles, upload-only provenance, and CPU
     mirrors fail.
-15. Compile verification report:
+16. Compile verification report:
    - Test results (pass/fail counts)
    - Coverage percentage (target: 80%+)
    - Doc coverage for new code
