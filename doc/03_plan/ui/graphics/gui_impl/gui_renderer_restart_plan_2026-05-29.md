@@ -547,7 +547,7 @@ SIMPLE_LIB=src timeout 60s bin/simple test test/02_integration/rendering/vulkan_
 
 Result: checks passed for all three files. The SPIR-V sentinel spec passed
 `12/12` after aligning the stale Simple declaration from nonexistent
-`rt_vulkan_load_spirv` to runtime `rt_vulkan_compile_spirv` and narrowing the
+`vulkan_load_spirv_api` to `vulkan_compile_spirv_api` and narrowing the
 sentinel so it no longer claims pipeline/parity success. Strict Vulkan still
 fails `16/18`; the remaining blocker is the unsupported GLSL path and
 placeholder SPIR-V shader/pipeline behavior, not a stale symbol name.
@@ -562,8 +562,8 @@ SIMPLE_LIB=src timeout 60s bin/simple test test/02_integration/rendering/engine2
 ```
 
 Result: the Rust Vulkan runtime now caches SPIR-V bytes beside shader handles,
-so `rt_vulkan_create_compute_pipeline` can consume handles returned by
-`rt_vulkan_compile_spirv` instead of failing on a handle/raw-byte contract
+so `vulkan_create_compute_pipeline_api` can consume handles returned by
+`vulkan_compile_spirv_api` instead of failing on a handle/raw-byte contract
 mismatch. Focused Simple checks passed; `vulkan_spirv_spec` passed `12/12`,
 `engine2d_backend_spec` passed `8/8`, and `engine2d_cpu_vulkan_parity_spec`
 passed `3/3`. At this historical checkpoint, strict Vulkan was still the honest
@@ -612,9 +612,9 @@ Result: strict Vulkan passed `18/18` in 9772 ms. The JSON runner still reported
 `success: true`, so that shutdown/reporting quirk remains separate from the
 assertion evidence. The CPU/Vulkan focused parity spec passed `3/3`.
 Implementation fixes included: real SPIR-V blobs for clear and filled-rect,
-active backend/session routing through `rt_vulkan_compile_spirv`, interpreter
-registration for `rt_vulkan_compile_spirv` and `rt_vulkan_copy_to_buffer`,
-array-return readback via `rt_vulkan_read_buffer_bytes`, push-constant byte
+active backend/session routing through `vulkan_compile_spirv_api`, interpreter
+registration for `vulkan_compile_spirv_api` and `vulkan_copy_to_buffer_api`,
+array-return readback via `vulkan_read_buffer_bytes_api`, push-constant byte
 handling for `u8` arrays, aligned SPIR-V word loading, explicit compute-to-host
 `vkCmdPipelineBarrier`, returned push-constant packing arrays, and
 `BackendProbeResult.is_ok()` compatibility for the strict spec.
