@@ -368,7 +368,7 @@ event/readback row plus a DirectX native verdict/gate row.
 Known runtime/production gaps:
 
 - Compiler/interpreter GPU lane queue packets now consume
-  `rt_host_gpu_active_backend_handle()`, submit at lane begin, and complete after
+  `host_gpu_active_backend_handle()`, submit at lane begin, and complete after
   lane end; they still complete as typed `UNAVAILABLE` when no backend registers
   a positive active handle.
 - Rust and C runtime queues now share a `1024` pending-packet capacity, with
@@ -383,7 +383,7 @@ Known runtime/production gaps:
   `return` statements and still needs compiler-level cleanup/finally support
   before claiming arbitrary body-error cleanup.
 - Runtime packets can now expose a submitted backend-handle value through
-  `rt_host_gpu_queue_last_backend_handle()`. BrowserBackend Vulkan frames
+  `host_gpu_queue_last_backend_handle()`. BrowserBackend Vulkan frames
   mirror the positive `Engine2DReadback.backend_handle` plus readback
   pixel-count/checksum/reason metadata from the same-frame device readback, and
   CUDA/OpenCL/Metal/OpenGL/ROCM/Vulkan device-readback
