@@ -16,5 +16,4 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Metal Readback Proof Specification](perf/graphics_2d/metal_readback_proof_spec.md) | Auto-generated | N/A | 1 | 0% | 0 lines |
-
+| [Metal Readback Proof Specification](../../05_perf/graphics_2d/metal_readback_proof_spec.md) | Auto-generated | N/A | 1 | 0% | 0 lines |

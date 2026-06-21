@@ -72,7 +72,7 @@
 - `bin/simple test test/05_perf/graphics_2d/metal_readback_proof_spec.spl --mode=interpreter`: PASS, 1 test in 3,541 ms.
   - Adds a deterministic Metal compute proof that fills a 16x16 GPU buffer, downloads it through the raw-pointer `rt_metal_buffer_download` path, and verifies every downloaded word.
   - This closes the low-level Metal buffer readback proof for macOS.
-- `bin/simple spipe-docgen test/05_perf/graphics_2d/metal_readback_proof_spec.spl -o doc/06_spec/perf/graphics_2d`: generated `doc/06_spec/perf/graphics_2d/metal_readback_proof_spec.md`.
+- `bin/simple spipe-docgen test/05_perf/graphics_2d/metal_readback_proof_spec.spl -o doc/06_spec/05_perf/graphics_2d`: generated `doc/06_spec/05_perf/graphics_2d/metal_readback_proof_spec.md`.
 - `bin/simple test test/02_integration/rendering/metal_engine2d_readback_spec.spl --mode=interpreter`: PASS, 2 tests in 3,464 ms.
   - `MetalBackend.read_pixels()` now downloads the real Metal framebuffer after GPU-covered `clear` and `draw_rect_filled` operations.
   - CPU-only operations such as text invalidate GPU completeness and keep the deterministic software mirror fallback.
