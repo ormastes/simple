@@ -2,12 +2,14 @@
 
 Date: 2026-06-21
 
+## Status
+
+Resolved on 2026-06-21.
+
 ## Summary
 
 The GUI/web host-GPU queue evidence now passes on Linux, but the payload-text
-path is still proven through the runtime queue contract. This does not satisfy
-the longer-term "do not use rt / prefer better Simple native binary" target by
-itself.
+path also has focused native/JIT proof with fallback disabled.
 
 ## Evidence
 
@@ -17,22 +19,34 @@ itself.
 - Native C ABI surface: `src/runtime/runtime_native.c`
 - Codegen SFFI table entry: `src/compiler_rust/compiler/src/codegen/runtime_sffi.rs`
 
-## Gap
+## Resolved Gap
 
-Current verification proves queue payload text roundtrip and BrowserBackend
-same-frame readback evidence. It does not yet prove that the optimized
-Simple-native/JIT path can emit the same payload text without falling back to
-interpreter/runtime evidence.
+Earlier verification proved queue payload text roundtrip and BrowserBackend
+same-frame readback evidence through interpreter/runtime evidence only. The
+native/JIT path now exports and decodes the queue text ABI directly.
 
-## Required Fix
+## Fix
 
-Add a native/JIT proof for the same queue text scenario, or replace the
-runtime-text dependency with a Simple-owned alias/compiled path that carries the
-same payload text into the backend receipt.
+- `src/compiler_rust/runtime/src/host_gpu_lane.rs` exports
+  `rt_host_gpu_queue_emit_payload_text`, payload size/hash getters, and a
+  runtime-value text getter for JIT/native calls.
+- The interpreter bridge calls the internal Rust helper, so interpreter behavior
+  stays unchanged.
 
-Acceptance evidence:
+## Acceptance Evidence
 
-- `runtime_queue_probe.spl` equivalent passes with native/JIT fallback disabled.
-- BrowserBackend queue/readback wrapper records the native/JIT text path.
-- The generated `doc/06_spec/...` manual says whether the proof is interpreter,
-  native/JIT, or host-unavailable.
+Command:
+
+```bash
+SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \
+  src/compiler_rust/target/debug/simple run \
+  test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl
+```
+
+Result:
+
+- no `JIT compilation failed`, `falling back`, unresolved symbol, or stub
+  fallback message
+- `queue_nonzero_backend_last_backend_handle=7`
+- `queue_nonzero_backend_last_payload_hash=98765`
+- `queue_nonzero_backend_last_payload_text=queue probe payload command=draw_ir_rect id=runtime-backend`

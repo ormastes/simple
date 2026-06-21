@@ -6,6 +6,7 @@
 //! queue submitters attach below this boundary.
 
 use std::collections::VecDeque;
+use crate::value::{rt_string_data, rt_string_len, rt_string_new, RuntimeValue};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -185,7 +186,7 @@ pub extern "C" fn rt_host_gpu_queue_emit(
     payload_size: i64,
     backend_handle: i64,
 ) -> i64 {
-    rt_host_gpu_queue_emit_payload_text(lane_code, kind_code, payload_size, backend_handle, 0, "")
+    emit_payload_text(lane_code, kind_code, payload_size, backend_handle, 0, "")
 }
 
 pub fn rt_host_gpu_queue_emit_payload(
@@ -195,17 +196,29 @@ pub fn rt_host_gpu_queue_emit_payload(
     backend_handle: i64,
     payload_hash: i64,
 ) -> i64 {
-    rt_host_gpu_queue_emit_payload_text(
-        lane_code,
-        kind_code,
-        payload_size,
-        backend_handle,
-        payload_hash,
-        "",
-    )
+    emit_payload_text(lane_code, kind_code, payload_size, backend_handle, payload_hash, "")
 }
 
-pub fn rt_host_gpu_queue_emit_payload_text(
+#[no_mangle]
+pub extern "C" fn rt_host_gpu_queue_emit_payload_text(
+    lane_code: i64,
+    kind_code: i64,
+    payload_size: i64,
+    backend_handle: i64,
+    payload_hash: i64,
+    payload_text: RuntimeValue,
+) -> i64 {
+    let text_data = rt_string_data(payload_text);
+    let text_len = rt_string_len(payload_text);
+    let text = if text_data.is_null() || text_len <= 0 {
+        ""
+    } else {
+        std::str::from_utf8(unsafe { std::slice::from_raw_parts(text_data, text_len as usize) }).unwrap_or("")
+    };
+    emit_payload_text(lane_code, kind_code, payload_size, backend_handle, payload_hash, text)
+}
+
+pub fn emit_payload_text(
     lane_code: i64,
     kind_code: i64,
     payload_size: i64,
@@ -375,25 +388,30 @@ pub extern "C" fn rt_host_gpu_queue_last_backend_handle() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_host_gpu_queue_last_device_time_us() -> i64 {
-    queue_state()
-        .lock()
-        .map(|state| state.last_device_time_us)
-        .unwrap_or(0)
+    queue_state().lock().map(|state| state.last_device_time_us).unwrap_or(0)
 }
 
-pub fn rt_host_gpu_queue_last_payload_size() -> i64 {
+#[no_mangle]
+pub extern "C" fn rt_host_gpu_queue_last_payload_size() -> i64 {
     queue_state().lock().map(|state| state.last_payload_size).unwrap_or(0)
 }
 
-pub fn rt_host_gpu_queue_last_payload_hash() -> i64 {
+#[no_mangle]
+pub extern "C" fn rt_host_gpu_queue_last_payload_hash() -> i64 {
     queue_state().lock().map(|state| state.last_payload_hash).unwrap_or(0)
 }
 
-pub fn rt_host_gpu_queue_last_payload_text() -> String {
+pub fn last_payload_text_string() -> String {
     queue_state()
         .lock()
         .map(|state| state.last_payload_text.clone())
         .unwrap_or_default()
+}
+
+#[no_mangle]
+pub extern "C" fn rt_host_gpu_queue_last_payload_text() -> RuntimeValue {
+    let text = last_payload_text_string();
+    rt_string_new(text.as_ptr(), text.len() as u64)
 }
 
 #[cfg(test)]
