@@ -12,11 +12,16 @@ Read the existing state file. Append your architecture doc. Do not modify earlie
 ## Instructions
 
 1. Read `.spipe/<feature>/state.md` — extract requirements and research summary
-2. Design the module structure: which files, where they live, what each does
-3. Define the dependency map between modules (no circular deps allowed)
-4. Make explicit architecture decisions (ADR-style: context, decision, consequences)
-5. Specify file paths for every new or modified file
-6. Append your architecture to the state file
+2. If the state file names lower-model sidecar lanes, merge their findings, then
+   run this architecture pass as the normal/highest-capability review before
+   accepting broad design claims.
+3. Define shared interface names, public type/function names, and manual-facing
+   setup/checker helper names before specs or implementation are accepted.
+4. Design the module structure: which files, where they live, what each does
+5. Define the dependency map between modules (no circular deps allowed)
+6. Make explicit architecture decisions (ADR-style: context, decision, consequences)
+7. Specify file paths for every new or modified file
+8. Append your architecture to the state file
 
 ## Entry Criteria
 
@@ -30,6 +35,7 @@ Read the existing state file. Append your architecture doc. Do not modify earlie
   - Dependency map (A depends on B, no cycles)
   - Architecture decisions with rationale
   - Public API surface (function signatures, type names)
+  - Shared manual helper names for SSpec setup/checker flow
   - **≥1 SDN architecture diagram** (component/flow) using `<!-- sdn-diagram:id=... -->` format (see `.claude/skills/lib/spipe_diagrams.md`)
 - Architecture prose is **≤30 lines** (tables and diagrams excluded from count)
 - No circular dependencies in the module graph
@@ -67,6 +73,10 @@ Your ONLY output is the architecture doc appended to the state file.
 - `fn name(args) -> ReturnType` — <purpose>
 - `class TypeName` — <purpose>
 - ...
+
+### Manual Helper Names
+- `setup_<name>()` — <manual setup step>
+- `Then_<name>()` — <checker step; placeholder must fail explicitly>
 
 ### Requirement Coverage
 - REQ-1 -> module_a

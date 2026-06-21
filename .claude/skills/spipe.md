@@ -17,6 +17,13 @@ Codex routes SPipe development work through `$sp_dev`:
 
 **[.codex/skills/sp_dev/SKILL.md](../../.codex/skills/sp_dev/SKILL.md)**
 
+For broad SPipe lanes, split independent checks across lower-model sidecars
+when available (Codex Spark, Claude Haiku, or Claude Sonnet), then require a
+normal/highest-capability review before accepting done marks, broad exclusions,
+or release-blocking verification. The first architecture pass defines shared
+interface names and manual-facing setup/checker helper names; placeholder
+helpers must fail explicitly (`assert(false)` or equivalent).
+
 Check or install that wiring with:
 
 ```bash
