@@ -88,6 +88,8 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
   Chrome/Vulkan `.rdc` gates without treating missing host captures as pass.
 - The audit reports macOS RenderDoc package/support status separately from the
   Vulkan/MoltenVK readiness status.
+- The audit reports which Simple executable the GUI/web/2D Vulkan setup probe
+  selected, including whether it found a fresh macOS-capable driver.
 - Simple `.rdc` evidence must carry Vulkan runtime backend, RenderDoc API, and
   rendered-pixel proof through the aggregate audit.
 - Electron Chromium/Vulkan `.rdc` evidence is fail-closed and required before

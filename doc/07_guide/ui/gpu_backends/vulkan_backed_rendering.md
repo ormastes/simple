@@ -92,18 +92,20 @@ readback, and optional RenderDoc captures in
 
 ```sh
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
-SIMPLE_BIN=src/compiler_rust/target/release/simple \
-  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 ```
 
 On macOS, `vulkaninfo --summary` reporting `driverName = MoltenVK` proves only
 the host Vulkan loader path. It does not prove that Electron or Chrome accepted
 ANGLE Vulkan, and it does not install RenderDoc. The macOS setup evidence must
-also record `gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status` and
+also record the selected Simple driver through
+`gui_web_2d_vulkan_simple_bin_selection_reason`, plus
+`gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status` and
 `gui_web_2d_vulkan_renderdoc_macos_upstream_support_status`; this separates a
-valid Homebrew Vulkan/MoltenVK install from the absence of a Homebrew RenderDoc
-package or official upstream macOS RenderDoc support. If Chromium logs reject
+valid Simple Vulkan runtime probe and Homebrew Vulkan/MoltenVK install from the
+absence of a Homebrew RenderDoc package or official upstream macOS RenderDoc
+support. If Chromium logs reject
 `angle=vulkan`, record `vulkan-angle-unavailable` and keep the browser Vulkan
 gate failed. If `renderdoccmd` is missing, the setup evidence records
 `gui_web_2d_vulkan_renderdoc_reason`, package/support status, and the searched

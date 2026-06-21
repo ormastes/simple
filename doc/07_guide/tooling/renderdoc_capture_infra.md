@@ -96,13 +96,17 @@ Run direct launch probes for Electron, Chrome, and Simple Engine2D:
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 ```
 
-If `bin/simple` is older than the Rust runtime changes under test, build and
-pin the fresh executable for the Simple lane:
+On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
+`src/compiler_rust/target/debug/simple` when that binary advertises the macOS
+Vulkan loader paths (`libvulkan.1.dylib`). The selected executable is recorded
+as `gui_web_2d_vulkan_simple_bin`, with the reason in
+`gui_web_2d_vulkan_simple_bin_selection_reason`. If no fresh driver exists and
+`bin/simple` is older than the Rust runtime changes under test, build the
+driver and rerun:
 
 ```sh
 (cd src/compiler_rust && cargo build --release --bin simple)
-SIMPLE_BIN=src/compiler_rust/target/release/simple \
-  scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 ```
 
 On a prepared RenderDoc host, debug the supported macOS Simple lane first:
@@ -236,8 +240,9 @@ Current local macOS result on 2026-06-21:
 
 - `vulkaninfo --summary` reports Apple M4 through `driverName = MoltenVK`.
 - `SIMPLE_BIN=src/compiler_rust/target/release/simple
-  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc` proves the Simple
-  Engine2D Vulkan lane with `gui_web_2d_vulkan_simple_status=pass`,
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --run` proves the Simple
+  Engine2D Vulkan lane with `gui_web_2d_vulkan_simple_bin_selection_reason=macos-vulkan-loader-paths-present`,
+  `gui_web_2d_vulkan_simple_status=pass`,
   `gui_web_2d_vulkan_simple_probe_status=Initialized`, and
   `gui_web_2d_vulkan_simple_backend_name=vulkan`.
 - Electron Chromium writes a nonblank ARGB bitmap but records

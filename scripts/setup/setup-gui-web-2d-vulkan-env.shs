@@ -175,6 +175,27 @@ UNAME_M="$(uname -m 2>/dev/null || echo unknown)"
 renderdoc_home="$(rdoc_find_renderdoc_home "$ROOT_DIR" || true)"
 chrome_bin="$(rdoc_find_chrome "$ROOT_DIR" || true)"
 electron_bin="$(rdoc_find_electron "$ROOT_DIR" || true)"
+simple_bin="${SIMPLE_BIN:-bin/simple}"
+simple_bin_selection_reason="default"
+
+binary_has_macos_vulkan_loader_paths() {
+    [ -x "$1" ] && have strings && LC_ALL=C strings "$1" 2>/dev/null | grep -q 'libvulkan.1.dylib'
+}
+
+if [ -z "${SIMPLE_BIN+pinned}" ] || [ "$SIMPLE_BIN" = "bin/simple" ]; then
+    if [ "$UNAME_S" = "Darwin" ]; then
+        for candidate in \
+            "src/compiler_rust/target/release/simple" \
+            "src/compiler_rust/target/debug/simple" \
+            "$simple_bin"; do
+            if binary_has_macos_vulkan_loader_paths "$candidate"; then
+                simple_bin="$candidate"
+                simple_bin_selection_reason="macos-vulkan-loader-paths-present"
+                break
+            fi
+        done
+    fi
+fi
 
 append_kv "gui_web_2d_vulkan_mode" "$MODE"
 append_kv "gui_web_2d_vulkan_root" "$ROOT_DIR"
@@ -200,7 +221,8 @@ else
     append_kv "gui_web_2d_vulkan_renderdoc_reason" "$(rdoc_missing_renderdoc_reason)"
     append_kv "gui_web_2d_vulkan_renderdoc_install_hint" "$(rdoc_install_hint)"
 fi
-append_kv "gui_web_2d_vulkan_simple_bin" "${SIMPLE_BIN:-bin/simple}"
+append_kv "gui_web_2d_vulkan_simple_bin" "$simple_bin"
+append_kv "gui_web_2d_vulkan_simple_bin_selection_reason" "$simple_bin_selection_reason"
 
 VULKAN_SUMMARY="$BUILD_DIR/vulkaninfo-summary.out"
 if have vulkaninfo && vulkaninfo --summary >"$VULKAN_SUMMARY" 2>&1; then
@@ -307,6 +329,7 @@ if [ "$MODE" = "--run" ] || [ "$MODE" = "--renderdoc-simple" ] || [ "$MODE" = "-
     SIMPLE_WORK_DIR="$BUILD_DIR/simple-vulkan-readback"
     SIMPLE_VULKAN_READBACK_WORK_DIR="$SIMPLE_WORK_DIR" \
     REPORT_PATH="$SIMPLE_WORK_DIR/report.md" \
+    SIMPLE_BIN="$simple_bin" \
     SIMPLE_LIB="${SIMPLE_LIB:-src}" \
         sh "$ROOT_DIR/scripts/check/check-vulkan-engine2d-readback.shs" >"$SIMPLE_OUT" 2>&1
     simple_code=$?
