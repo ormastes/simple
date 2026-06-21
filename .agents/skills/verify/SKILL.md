@@ -39,6 +39,11 @@ not create, rewrite, or weaken SPipe after verification.
 - Shared interface/manual helper names match the design/spec/manual references
 - Placeholder helper definitions fail explicitly with `assert(false)` or
   `fail(...)`; silent no-op helpers are a FAIL
+- For broad SPipe lanes, the recorded cooperative review plan is complete or
+  explicitly `N/A`: lower-model sidecars such as Codex Spark, Claude Haiku, or
+  Claude Sonnet were merged/reviewed when used, and a normal/highest-capability
+  LLM accepted broad findings, generated-manual quality, coverage claims, and
+  done marks before PASS.
 
 ### 2. Implementation
 - No stub functions (`pass_todo`, weak `pass_do_nothing(...)`, weak `pass_dn(...)`, weak `todo(...)`)
@@ -99,6 +104,9 @@ not create, rewrite, or weaken SPipe after verification.
   updated the matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
   `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
   process docs before final verification
+- Cooperative lower-model sidecar review, if required by the SPipe state or
+  plan, is complete before final verification; otherwise the verifier records
+  why the lane is narrow enough for `N/A`.
 - Cross-references intact
 
 ## Report Format
