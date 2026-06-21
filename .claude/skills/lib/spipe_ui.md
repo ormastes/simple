@@ -171,18 +171,14 @@ vulkaninfo --summary  # must show the Apple GPU through MoltenVK
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
 ```
 
-Then collect the three RenderDoc/Vulkan lanes and the production parity lane:
+Then collect the Simple RenderDoc/Vulkan debug lane and the production parity
+lane:
 
 ```bash
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 
-RDOC_MACOS_RUN_CAPTURES=1 \
-BUILD_DIR=build/renderdoc/macos-portability-capture-current \
-REPORT_PATH=build/renderdoc/macos-portability-capture-current/report.md \
-  sh scripts/check/check-renderdoc-macos-portability-probe.shs
-
-RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe \
-  scripts/tool/renderdoc-evidence.shs capture-electron-html
+SIMPLE_BIN=src/compiler_rust/target/release/simple \
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple
 
 SIMPLE_VULKAN_READBACK_WORK_DIR=build/renderdoc/simple-vulkan-readback \
 SIMPLE_LIB=src \
@@ -193,7 +189,9 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 ```
 
 On a prepared RenderDoc host, `scripts/setup/setup-gui-web-2d-vulkan-env.shs
---renderdoc` runs the direct probes plus the shared RenderDoc capture helpers.
+--renderdoc-simple` is the supported macOS Simple debug path. The all-lane
+`--renderdoc` mode is for cross-surface evidence collection and should treat
+macOS Chrome/Electron captures as exploratory unless Chromium logs prove Vulkan.
 For Windows readiness, use
 `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check`. For Linux readiness,
 install a real GPU Vulkan ICD, Vulkan tools, shader tools, Chrome/Chromium,

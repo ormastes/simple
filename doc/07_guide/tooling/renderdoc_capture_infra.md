@@ -106,7 +106,14 @@ SIMPLE_BIN=src/compiler_rust/target/release/simple \
   scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 ```
 
-On a prepared RenderDoc host, include RenderDoc captures:
+On a prepared RenderDoc host, debug the supported macOS Simple lane first:
+
+```sh
+SIMPLE_BIN=src/compiler_rust/target/release/simple \
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple
+```
+
+Use the all-lane capture mode only for cross-surface evidence collection:
 
 ```sh
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
@@ -167,24 +174,23 @@ REPORT_PATH=build/renderdoc/macos-portability-capture-current/report.md \
 sh scripts/check/check-renderdoc-macos-portability-probe.shs
 ```
 
-The capture-mode probe must attempt all three Mac lanes:
+The supported macOS RenderDoc debug path is Simple-first:
 
 - Simple 2D/Engine2D Vulkan:
   `scripts/tool/renderdoc-evidence.shs capture-simple`, then
   `scripts/check/check-renderdoc-simple-gate.shs`.
-- Chrome HTML/CSS Vulkan:
-  `scripts/tool/renderdoc-evidence.shs capture-html`, then
-  `scripts/check/check-renderdoc-html-external-host-gate.shs`.
-- Electron HTML/CSS Vulkan:
-  `scripts/tool/renderdoc-evidence.shs capture-electron-html`, then
-  `scripts/check/check-renderdoc-electron-html-gate.shs`.
+
+On macOS, Chrome and Electron RenderDoc lanes are exploratory only. They may
+render pixels through Metal/OpenGL/SwiftShader while rejecting ANGLE Vulkan, so
+they must not be used as completion evidence unless their logs prove Vulkan and
+their `.rdc` files pass the same gates as Linux/Windows.
 
 For GUI/web/2D comparison work, collect both the browser-hosted surface and the
 Simple renderer surface from the same fixture:
 
 ```sh
-RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe \
-  scripts/tool/renderdoc-evidence.shs capture-electron-html
+SIMPLE_BIN=src/compiler_rust/target/release/simple \
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple
 
 SIMPLE_VULKAN_READBACK_WORK_DIR=build/renderdoc/simple-vulkan-readback \
 SIMPLE_LIB=src \
@@ -196,10 +202,11 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 
 Completion requires typed evidence, not screenshots alone:
 
-- RenderDoc `.rdc` files exist and start with `RDOC`.
+- For the supported macOS Simple debug lane, the Simple RenderDoc `.rdc` file
+  exists and starts with `RDOC`.
 - The Simple lane reports `rdoc_backend=simple`,
   `rdoc_scene=vulkan-engine2d`, and the Simple Vulkan gate passes.
-- The Electron/Chrome lane reports requested Vulkan/ANGLE metadata and its log
+- Any exploratory Electron/Chrome lane reports requested Vulkan/ANGLE metadata and its log
   does not contain Chromium's `angle=vulkan` unavailable failure. A rendered
   bitmap with that log is a browser fallback, not a Vulkan-backed browser proof.
 - The production GUI/web parity evidence still reports matching checksums,

@@ -56,7 +56,7 @@
     coverage claims, generated-manual quality, and done marks.
 12. For Mac GUI/web/2D RenderDoc+Vulkan evidence, keep proof scope macOS-only
     until Windows and Linux runbooks exist. Start from
-    `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc`
+    `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc`
     on POSIX hosts or `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check`
     only as readiness preparation. Verify MoltenVK host readiness, Simple
     Vulkan/Engine2D readback or RenderDoc proof, original Chrome RenderDoc proof,

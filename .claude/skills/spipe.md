@@ -138,8 +138,10 @@ Vulkan IO-level RenderDoc evidence.
 For Mac GUI/web/2D Vulkan comparison, keep the scope explicitly macOS until
 Windows and Linux evidence is added. Use
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check` for readiness,
-`--run` for direct Electron/Chrome/Simple launch probes, and `--renderdoc` only
-on a prepared RenderDoc host. The Mac setup starts with Homebrew Vulkan tooling
+`--run` for direct Electron/Chrome/Simple launch probes, and
+`--renderdoc-simple` for the supported macOS Simple RenderDoc debug path on a
+prepared RenderDoc host. Use all-lane `--renderdoc` only for cross-surface
+evidence collection. The Mac setup starts with Homebrew Vulkan tooling
 (`vulkan-tools`, `vulkan-loader`, `vulkan-headers`, `molten-vk`,
 `spirv-tools`, `glslang`) and `vulkaninfo --summary` showing the Apple GPU
 through MoltenVK. That only proves host readiness. Completion evidence still

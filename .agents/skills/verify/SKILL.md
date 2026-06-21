@@ -66,7 +66,7 @@ not create, rewrite, or weaken SPipe after verification.
   necessary but not sufficient; runtime-only, synthetic-handle, upload-only, or
   CPU-mirror evidence is a FAIL.
 - GUI/web/2D RenderDoc+Vulkan evidence must start from
-  `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc`
+  `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc`
   on POSIX hosts or `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check` on
   Windows. Require host Vulkan readiness, Simple Vulkan/Engine2D readback or
   RenderDoc proof, original Chrome RenderDoc proof, Electron RenderDoc proof,

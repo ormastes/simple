@@ -53,7 +53,7 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
   and `.claude/agents/spipe/` process docs
 - For GUI/web/2D RenderDoc+Vulkan work, use
-  `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc`
+  `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc`
   as the POSIX readiness/direct-run/capture wrapper and
   `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check` as the Windows
   readiness entrypoint. Refresh the guide, SPipe skill, verify mirrors, Simple

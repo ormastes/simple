@@ -356,6 +356,7 @@ original Chrome, and pure-Simple GUI/web/2D Vulkan comparison:
 ```sh
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
 ```
 
@@ -365,7 +366,7 @@ Rust executable and pin the Simple lane:
 ```sh
 (cd src/compiler_rust && cargo build --release --bin simple)
 SIMPLE_BIN=src/compiler_rust/target/release/simple \
-  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple
 ```
 
 The wrapper records a single evidence env under
@@ -377,8 +378,10 @@ be lane-specific:
   `--enable-features=Vulkan --use-angle=vulkan`;
 - Chromium logs do not contain the `angle=vulkan` unavailable failure;
 - Simple Engine2D Vulkan readback passes without blur/tolerance;
-- RenderDoc `.rdc` files exist, begin with `RDOC`, and pass the Simple,
-  original Chrome, and Electron gates;
+- For macOS Simple debug, the Simple RenderDoc `.rdc` file exists, begins with
+  `RDOC`, and passes the Simple gate when `renderdoccmd` is available.
+- For cross-platform browser completion, RenderDoc `.rdc` files exist, begin
+  with `RDOC`, and pass the original Chrome and Electron gates;
 - production GUI/web renderer parity remains `mismatch_count=0`.
 
 Current local macOS evidence from 2026-06-21:
@@ -423,8 +426,10 @@ Mac-first checks:
 - Run `scripts/setup/setup-renderdoc-env.shs --check` on macOS if an official
   or locally built RenderDoc command line is available; record unavailable
   status when RenderDoc cannot capture/replay on macOS.
-- Run `scripts/tool/renderdoc-evidence.shs capture-simple` only if the Simple
-  Vulkan capture program and RenderDoc CLI are both available on macOS.
+- Run `SIMPLE_BIN=src/compiler_rust/target/release/simple
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple` when the
+  Simple Vulkan capture program and RenderDoc CLI are both available on macOS.
+  This is the supported macOS RenderDoc debug path.
 - Run `scripts/tool/renderdoc-evidence.shs capture-html` only as an exploratory
   check. Chrome on macOS commonly routes through Metal/ANGLE rather than the
   same Linux Vulkan path, so a macOS browser capture is portability evidence,
@@ -432,9 +437,9 @@ Mac-first checks:
 - Use Xcode GPU Frame Capture for Metal-level inspection when the observed path
   is Metal/MoltenVK and RenderDoc cannot provide useful capture evidence.
 - Set `RDOC_MACOS_RUN_CAPTURES=1` only on a macOS host that already has
-  Vulkan/MoltenVK and RenderDoc CLI available. The wrapper will then call the
-  shared `capture-simple` and exploratory `capture-html` paths and run the
-  external-host gate against any HTML evidence file.
+  Vulkan/MoltenVK and RenderDoc CLI available. Prefer `--renderdoc-simple` for
+  Simple debugging; treat any browser capture from the legacy wrapper as
+  exploratory unless Chromium logs prove Vulkan.
 
 Any macOS result must write a report under `doc/09_report/` with:
 

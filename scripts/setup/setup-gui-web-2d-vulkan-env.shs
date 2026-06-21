@@ -3,7 +3,8 @@
 #
 # This wrapper is intentionally conservative: --check records host readiness
 # without launching GUI apps, --run launches direct Electron/Chrome/Simple probes,
-# and --renderdoc additionally asks the shared RenderDoc helper for captures.
+# --renderdoc-simple captures only the Simple Vulkan lane, and --renderdoc asks
+# the shared RenderDoc helper for all capture lanes.
 set -u
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -20,10 +21,12 @@ TIMEOUT_SECS="${GUI_WEB_2D_VULKAN_TIMEOUT_SECS:-45}"
 
 usage() {
     cat <<'EOF'
-usage: scripts/setup/setup-gui-web-2d-vulkan-env.shs [--check|--run|--renderdoc|--print-install]
+usage: scripts/setup/setup-gui-web-2d-vulkan-env.shs [--check|--run|--renderdoc-simple|--renderdoc|--print-install]
 
   --check         Record host Vulkan, RenderDoc, Chrome, and Electron readiness.
   --run           Also launch direct Electron, Chrome, and Simple Engine2D probes.
+  --renderdoc-simple
+                  Run the Simple Engine2D probe and Simple RenderDoc capture only.
   --renderdoc     Run --run plus the shared RenderDoc capture helpers and gates.
   --print-install Print platform setup commands without installing anything.
 
@@ -152,7 +155,7 @@ case "$MODE" in
         print_install
         exit 0
         ;;
-    --check|--run|--renderdoc)
+    --check|--run|--renderdoc-simple|--renderdoc)
         ;;
     *)
         usage >&2
@@ -216,11 +219,15 @@ append_file_value "gui_web_2d_vulkan_renderdoc_setup_cmd" "$SETUP_OUT" 's/^rdoc_
 append_file_value "gui_web_2d_vulkan_renderdoc_setup_search_paths" "$SETUP_OUT" 's/^rdoc_search_paths=//p'
 append_file_value "gui_web_2d_vulkan_renderdoc_setup_install_hint" "$SETUP_OUT" 's/^rdoc_install_hint=//p'
 
-if [ "$MODE" = "--run" ] || [ "$MODE" = "--renderdoc" ]; then
+if [ "$MODE" = "--run" ] || [ "$MODE" = "--renderdoc-simple" ] || [ "$MODE" = "--renderdoc" ]; then
     ELECTRON_OUT="$BUILD_DIR/electron.out"
     ELECTRON_LOG="$BUILD_DIR/electron.log"
     ELECTRON_ARGB="$BUILD_DIR/electron_argb.json"
-    if [ "$electron_bin" != "" ] && [ -x "$electron_bin" ]; then
+    if [ "$MODE" = "--renderdoc-simple" ]; then
+        append_kv "gui_web_2d_vulkan_electron_exit_code" ""
+        append_kv "gui_web_2d_vulkan_electron_vulkan_status" "not-run"
+        append_kv "gui_web_2d_vulkan_electron_vulkan_reason" "simple-renderdoc-only"
+    elif [ "$electron_bin" != "" ] && [ -x "$electron_bin" ]; then
         ELECTRON_CAPTURE_HTML="$HTML_PATH" \
         ELECTRON_CAPTURE_WIDTH="$WIDTH" \
         ELECTRON_CAPTURE_HEIGHT="$HEIGHT" \
@@ -251,7 +258,11 @@ if [ "$MODE" = "--run" ] || [ "$MODE" = "--renderdoc" ]; then
     CHROME_LOG="$BUILD_DIR/chrome.log"
     CHROME_SCREENSHOT="$BUILD_DIR/chrome.png"
     CHROME_USER_DATA="$BUILD_DIR/chrome-user-data"
-    if [ "$chrome_bin" != "" ] && [ -x "$chrome_bin" ]; then
+    if [ "$MODE" = "--renderdoc-simple" ]; then
+        append_kv "gui_web_2d_vulkan_chrome_exit_code" ""
+        append_kv "gui_web_2d_vulkan_chrome_vulkan_status" "not-run"
+        append_kv "gui_web_2d_vulkan_chrome_vulkan_reason" "simple-renderdoc-only"
+    elif [ "$chrome_bin" != "" ] && [ -x "$chrome_bin" ]; then
         rm -rf "$CHROME_USER_DATA"
         mkdir -p "$CHROME_USER_DATA"
         run_bound "$chrome_bin" $(rdoc_chrome_vulkan_flags) \
@@ -304,6 +315,14 @@ if [ "$MODE" = "--run" ] || [ "$MODE" = "--renderdoc" ]; then
         append_kv "gui_web_2d_vulkan_simple_status" "missing-evidence"
         append_kv "gui_web_2d_vulkan_simple_reason" "missing-evidence-env"
     fi
+fi
+
+if [ "$MODE" = "--renderdoc-simple" ]; then
+    RDOC_OUT="$BUILD_DIR/renderdoc"
+    RDOC_OUTPUT_DIR="$RDOC_OUT" "$ROOT_DIR/scripts/tool/renderdoc-evidence.shs" capture-simple >"$BUILD_DIR/renderdoc-simple.out" 2>&1
+    rdoc_simple_code=$?
+    append_kv "gui_web_2d_vulkan_renderdoc_simple_exit_code" "$rdoc_simple_code"
+    append_kv "gui_web_2d_vulkan_renderdoc_output_dir" "$RDOC_OUT"
 fi
 
 if [ "$MODE" = "--renderdoc" ]; then

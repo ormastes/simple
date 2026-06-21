@@ -52,8 +52,10 @@ Electron Chromium HTML/CSS capture. Tests should route through
 `test/helpers/renderdoc_capture_helper.shs` or the compatibility wrappers.
 For Mac GUI/web/2D RenderDoc+Vulkan work, use
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check` for readiness,
-`--run` for direct Electron/Chrome/Simple probes, and `--renderdoc` only on a
-prepared RenderDoc host. Install/refresh `vulkan-tools`, `vulkan-loader`,
+`--run` for direct Electron/Chrome/Simple probes, and `--renderdoc-simple` for
+the supported macOS Simple RenderDoc debug path on a prepared RenderDoc host.
+Use all-lane `--renderdoc` only for cross-surface evidence collection.
+Install/refresh `vulkan-tools`, `vulkan-loader`,
 `vulkan-headers`, `molten-vk`, `spirv-tools`, and `glslang`; prove MoltenVK
 with `vulkaninfo --summary`; then require Simple Vulkan/Engine2D evidence,
 original Chrome evidence, Electron Chromium evidence, and production GUI/web
