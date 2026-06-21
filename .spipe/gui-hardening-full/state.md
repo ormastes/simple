@@ -29,6 +29,32 @@ Harden and optimize the pure Simple GUI rendering stack so Engine2D, web, WM, im
 - Requiring unavailable hardware, display servers, QEMU guests, or platform toolchains to pass on this host without recording explicit unavailable diagnostics.
 - Claiming Node.js/Bun parity for the whole Simple JS engine before the concrete API/conformance and benchmark matrix exists.
 
+## Cooperative Review
+Broad lane: required. Lower-model sidecars may inspect bounded, disjoint
+evidence lanes only; they do not close acceptance criteria alone.
+
+- Codex Spark sidecar: focused GUI/web/2D Vulkan/Metal evidence-key presence,
+  no-blur/no-tolerance wording, and generated-manual readability checks.
+- Claude Haiku sidecar: bounded 8K color/image performance and retained-row
+  evidence scan, including explicit blockers when retained proof is absent.
+- Claude Sonnet sidecar: broader web/Electron/Node/Bun and WM/QEMU/GTK evidence
+  matrix review, with exclusions called out explicitly.
+- Merge owner: normal/highest-capability model for this SPipe lane.
+- Final reviewer: normal/highest-capability model must accept findings,
+  generated-manual quality, coverage claims, exclusions, and done marks.
+- Shared evidence interfaces: `GuiHardeningEvidenceLane`,
+  `GuiWeb2dVulkanEvidence`, `ExactBitmapNoBlurEvidence`, and
+  `Retained8kPerformanceEvidence`.
+- Manual setup/checker helper names:
+  `Given_gui_web_2d_vulkan_fixture`,
+  `When_gui_web_2d_vulkan_evidence_runs`,
+  `Then_exact_pixels_match_without_blur`,
+  `Then_backend_claims_fail_closed`, and
+  `Then_8k_perf_is_retained_or_blocked`.
+- Fail-fast placeholder policy: unresolved shared interfaces or manual helpers
+  must use `assert(false)` or `fail(...)`; silent no-op helper passes are not
+  valid evidence.
+
 ## Phase
 implementation-evidence-in-progress
 
