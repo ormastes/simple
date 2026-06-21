@@ -3,13 +3,10 @@ use os.qemu_runner.{OsTarget, get_desktop_browser_target, get_wm_simple_web_chec
 use std.nogc_sync_mut.sffi.io.{dir_create_all}
 use app.io.env_ops.{env_get as qmp_env_get}
 use app.io.mod.{process_run_timeout}
+use app.io.process_ops.{process_spawn_async, process_wait, process_is_running, process_kill}
 
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
-extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
-extern fn rt_process_is_running(pid: i64) -> bool
-extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -215,12 +212,12 @@ fn spawn_guest_with_qmp(target: OsTarget, qmp_socket: text, serial_log: text) ->
         shell_parts.push(qemu_args[arg_idx])
         arg_idx = arg_idx + 1
     val shell_cmd = _shell_command(shell_parts)
-    val pid = rt_process_spawn_async("/bin/sh", ["-c", "if command -v setsid >/dev/null 2>&1; then exec setsid {shell_cmd} 2> {_shell_quote(stderr_log)}; else exec {shell_cmd} 2> {_shell_quote(stderr_log)}; fi"])
+    val pid = process_spawn_async("/bin/sh", ["-c", "if command -v setsid >/dev/null 2>&1; then exec setsid {shell_cmd} 2> {_shell_quote(stderr_log)}; else exec {shell_cmd} 2> {_shell_quote(stderr_log)}; fi"])
     if pid <= 0:
         return Err("failed to spawn {qemu_bin}")
     if not _wait_for_qmp_socket(qmp_socket, 10000):
-        rt_process_kill(pid)
-        rt_process_wait(pid, 2000)
+        process_kill(pid)
+        process_wait(pid, 2000)
         _cleanup_stale_guest_identity(qmp_socket, serial_log, stderr_log)
         val stderr_tail = _tail_lines(read_qemu_stderr_log_path(stderr_log), 40)
         return Err("QMP socket did not appear at {qmp_socket}\nqemu stderr:\n{stderr_tail}")
@@ -228,9 +225,9 @@ fn spawn_guest_with_qmp(target: OsTarget, qmp_socket: text, serial_log: text) ->
 
 fn stop_guest(handle: QemuGuestHandle) -> bool:
     var stopped = true
-    if handle.pid > 0 and rt_process_is_running(handle.pid):
-        stopped = rt_process_kill(handle.pid)
-        rt_process_wait(handle.pid, 2000)
+    if handle.pid > 0 and process_is_running(handle.pid):
+        stopped = process_kill(handle.pid)
+        process_wait(handle.pid, 2000)
     _cleanup_stale_guest_identity(handle.qmp_socket, handle.serial_log, handle.stderr_log)
     if rt_file_exists(handle.qmp_socket):
         rt_file_delete(handle.qmp_socket)
@@ -298,7 +295,7 @@ fn _print_launch_failure_context(handle_pid: i64, qmp_socket: text, serial_log: 
     print "simpleos_desktop_qmp_stderr_log={stderr_log}"
     print "simpleos_desktop_qmp_missing_marker={marker}"
     print "simpleos_desktop_qmp_marker_timeout_ms={timeout_ms}"
-    print "simpleos_desktop_qmp_qemu_running={_bool_text(rt_process_is_running(handle_pid))}"
+    print "simpleos_desktop_qmp_qemu_running={_bool_text(process_is_running(handle_pid))}"
     print "simpleos_desktop_qmp_serial_bytes={serial_text.len()}"
     print "simpleos_desktop_qmp_stderr_bytes={stderr_text.len()}"
 
