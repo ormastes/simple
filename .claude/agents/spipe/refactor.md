@@ -31,11 +31,16 @@
    `set -o pipefail; bin/simple test <spec_file> 2>&1 | tail -40` for each spec from Phase 4
    If a refactor breaks specs, revert that change and note it in state file — do NOT loop trying to fix it
 6. Run `.claude/skills/spipe_doc_wiki_refactor.md` for any docs, wiki-style process knowledge, feature/layer expert links, stale command names, or stale file paths affected by the implementation
-7. Run numbered artifact guard:
+7. If workflow/tooling, evidence wrappers, generated spec shape, or
+   verification contracts changed, confirm matching `doc/07_guide`,
+   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, and
+   `.claude/agents/spipe/` instructions were refreshed or record `N/A` in the
+   state file.
+8. Run numbered artifact guard:
    `sh scripts/audit/numbered-artifact-guard.shs --working`
    `sh scripts/audit/numbered-artifact-guard.shs --staged`
-8. Run final lint pass: `set -o pipefail; bin/simple build lint 2>&1 | tail -30`
-9. Update state file with refactor status and doc/wiki refactor status
+9. Run final lint pass: `set -o pipefail; bin/simple build lint 2>&1 | tail -30`
+10. Update state file with refactor status and doc/wiki refactor status
 
 ## Rules
 
@@ -62,6 +67,7 @@ If a refactoring risks breaking behavior, skip it and note in state file.
 - [ ] No file exceeds 800 lines
 - [ ] All specs still pass: `bin/simple test <spec_file>` green for each
 - [ ] Doc/wiki refactor pass recorded in state file
+- [ ] Process docs/skills/agent instructions refreshed or explicitly `N/A`
 - [ ] Before/after structural diagram included when module boundaries changed (see `.claude/skills/lib/spipe_diagrams.md`)
 - [ ] Numbered artifact guard passes
 - [ ] State file updated: `phase: refactor` marked complete

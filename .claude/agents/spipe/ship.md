@@ -33,16 +33,20 @@
    /repo_and_pull_req push --target=$TARGET --level=$REVIEW_LEVEL
    ```
 6. Run `.claude/skills/spipe_doc_wiki_refactor.md` one final time to update stale guide, skill, command, and process links before closing the feature
-7. Run numbered artifact guard:
+7. Confirm workflow/tooling, evidence-wrapper, generated-spec-shape, or
+   verification-contract changes refreshed matching `doc/07_guide`,
+   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, and
+   `.claude/agents/spipe/` instructions, or the state file records `N/A`.
+8. Run numbered artifact guard:
    `sh scripts/audit/numbered-artifact-guard.shs --working`
    `sh scripts/audit/numbered-artifact-guard.shs --staged`
-8. Generate completion report at `doc/09_report/<feature>_complete_<date>.md`:
+9. Generate completion report at `doc/09_report/<feature>_complete_<date>.md`:
    - Feature summary (from Phase 1 intake)
    - Architecture decisions (from Phase 3)
    - Files created/modified (from Phases 4-6)
    - Test results (from Phase 7)
    - Timeline (phase timestamps from state)
-9. Update state file: mark `phase: ship` complete
+10. Update state file: mark `phase: ship` complete
 
 ## Report Template
 
@@ -81,6 +85,9 @@
 - **No code changes:** If something is broken, send back to appropriate phase
 - **Doc/wiki hygiene allowed:** Only stale docs, wiki-style process knowledge,
   skill links, command references, and completion-report content may change
+- **Process docs fresh:** Do not ship workflow/tooling/evidence/spec/verify
+  contract changes while matching guide, spec, skill, or SPipe-agent docs are
+  stale
 - **Commit message format:** `feat(<scope>): <description>` for features, `fix(<scope>):` for fixes
 - **Report must exist:** Do not skip the completion report
 - **Push must succeed:** Verify push completes without errors
