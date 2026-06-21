@@ -2,7 +2,7 @@
 # Simple UI, GUI, Web, and 2D Stack Architecture - TLDR
 
 This is the short version of
-`doc/04_architecture/ui/simple_gui_stack.md`. The key decision is to keep GUI
+`doc/04_architecture/ui/simple_gui_stack.md` (draft-v4, 2026-06-21). The key decision is to keep GUI
 semantics, event routing, layout policy, dirty-region truth, and typed IR in
 Simple, while allowing a render optimization plugin to accelerate Draw IR
 batches through CPU/GPU backends.
