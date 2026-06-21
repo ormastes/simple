@@ -17,7 +17,7 @@ commits per sub-batch, and pushes to origin/main frequently.
 - Engine2D backend-lane contract: `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`
   (drawing = framebuffer/present/readback; processing = compute kernels/offload)
 - DXVK/vkd3d shims exist but leaf is structured-handle only ("pending
-  rt_dlopen for real libvulkan"): `src/lib/nogc_async_mut/gpu/dxvk_d3d{9,10,11}.spl`,
+  dynamic-loader facade for real libvulkan"): `src/lib/nogc_async_mut/gpu/dxvk_d3d{9,10,11}.spl`,
   `vkd3d_d3d12.spl`, `vulkan_icd_sffi.spl`
 - Stack doc to keep current: `doc/04_architecture/ui/simple_gui_stack.md`
 
@@ -94,7 +94,7 @@ commits per sub-batch, and pushes to origin/main frequently.
    dxvk-native (meson via `pip install --user meson`, ninja present). No sudo.
    On build failure: record concrete blocker in the lane state file and
    continue with the structured-handle fallback (do not fake success).
-2. Wire the real `rt_dlopen` leaf in vulkan_icd_sffi/dxvk/vkd3d shims: when
+2. Wire the real dynamic-loader facade leaf in vulkan_icd_sffi/dxvk/vkd3d shims: when
    prefix libs (or system libvulkan for the ICD leaf) exist, route through
    them; otherwise keep structured handles. Dispatch-chain specs must assert
    WHICH leaf ran (evidence string `leaf=dlopen` vs `leaf=structured`).
