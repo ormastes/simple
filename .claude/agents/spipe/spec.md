@@ -19,12 +19,16 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
 ## Instructions
 
 1. Read `.spipe/<feature>/state.md` — extract acceptance criteria, requirements, and architecture
+   plus `## Cooperative Review`. If that section is `N/A`, preserve the reason.
 2. **Design the manual shape first:** sketch which scenarios are primary flows
    (visible), which are edge/stress/matrix (folded), which are internal plumbing (skip)
 3. **Write step helpers** with names that read as manual sentences:
    - Name functions so `user.open_editor()` renders as "User open editor"
    - Prefix checker functions with `Then_` so `Then_file_is_saved()` renders as "Then file is saved"
    - Use `@step "Human-readable text"` when the derived label is unclear
+   - For broad cooperative lanes, use the shared interface and manual
+     setup/checker helper names from `## Cooperative Review`; unresolved
+     placeholders must fail explicitly with `assert(false)` or `fail(...)`.
 4. **Write scenarios** using those helpers — each `it` block is a manual scenario
 5. **Add manual metadata:**
    - `# @inline` for reusable setup (not shown as standalone sections)
@@ -133,6 +137,9 @@ If the answer is no to any of these, rewrite the helpers and metadata.
 - Every AC-N has at least one `it` block
 - All specs use only built-in matchers
 - **Step helpers read as manual sentences** (no raw function calls in scenarios)
+- **Cooperative helper names match state:** broad lanes use the shared
+  interface/manual helper names from `## Cooperative Review`, or that section is
+  explicitly `N/A`
 - **Manual visibility is assigned:** primary=show, edge=folded, plumbing=skip
 - **Capture kinds match the spec type** (see Evidence Kinds table)
 - **Inline/prev chains** connect setup to dependent scenarios
