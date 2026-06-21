@@ -272,7 +272,7 @@ bounded implementation slices before deleting anything:
 - Scenario-oriented generated docs under `doc/06_spec/...` read as manuals, not
   raw test dumps, and executable `.spl` specs are absent from `doc/06_spec`
 - `sh scripts/audit/direct-env-runtime-guard.shs --working` and `--staged`
-  pass for app/gc env reads outside owner modules
+  pass for app/gc env reads and process-run calls outside owner modules
 - Summary table must show `STATUS: PASS` before proceeding to release
 
 ### Skills / Commands
