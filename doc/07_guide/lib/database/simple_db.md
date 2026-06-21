@@ -277,6 +277,35 @@ test/03_system/simple_db_nvfs_constants_spec.spl  # full tier NVFS constants
 | Feature requests | `doc/08_tracking/feature/simple_db_requests.md` |
 | Glossary | `doc/glossary.md` (see: Simple DB, DBFS, SDN) |
 
+## CRUD Performance Compare
+
+Use the repo wrapper for embedded-vs-baseline CRUD checks:
+
+```bash
+sh scripts/check/check-simple-db-perf-compare.shs
+```
+
+Strict mode is the release gate:
+
+```bash
+sh scripts/check/check-simple-db-perf-compare.shs --strict
+```
+
+The wrapper writes:
+
+- `doc/09_report/perf/simple_db_mode_compare_2026-06-21.md`
+- `doc/10_metrics/perf/simple_db_mode_compare.md`
+- `doc/09_report/perf/db_crud_sqlite_postgres_compare_2026-06-21.md`
+- `doc/10_metrics/perf/db_crud_sqlite_postgres_compare.md`
+
+Strict pass requires validated embedded rows to meet both SQLite and
+PostgreSQL baseline rows, no interpreter fallback, and measured full/server
+mode. Set `SIMPLE_DB_SERVER_BENCH_CMD` to a full/server benchmark command when
+the full engine checkout is available.
+
+Current blocker evidence is tracked in
+`doc/08_tracking/bug/simple_db_perf_native_server_blockers_2026-06-21.md`.
+
 ## Example Repository
 
 The full engine implementation lives in a separate git submodule:

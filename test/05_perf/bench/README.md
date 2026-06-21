@@ -67,6 +67,19 @@ bin/simple run test/perf/bench/durable_wal_fsync.spl
 python3 test/perf/bench/durable_wal_fsync.py
 ```
 
+## DB CRUD Compare Gate
+
+Use the wrapper for validated embedded CRUD timings against SQLite/PostgreSQL:
+
+```bash
+sh scripts/check/check-simple-db-perf-compare.shs
+sh scripts/check/check-simple-db-perf-compare.shs --strict
+```
+
+Strict mode is the release gate. It fails on target misses, interpreter
+fallback, or missing full/server-mode measurement. Provide server mode with
+`SIMPLE_DB_SERVER_BENCH_CMD` when the full DB checkout is available.
+
 ---
 
 ## CSV Output and Baselines

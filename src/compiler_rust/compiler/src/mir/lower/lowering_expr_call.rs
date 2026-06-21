@@ -330,10 +330,36 @@ impl<'a> MirLowerer<'a> {
                 let is_enum = self.is_known_enum_type_for_variant(enum_name, callee.ty);
 
                 if is_enum && !arg_regs.is_empty() {
-                    // For single-arg variants, use the arg directly as payload
-                    // For multi-arg variants, wrap args in an array as the payload
+                    // Single-arg variants store the argument directly as the
+                    // enum payload. Primitive payloads still need runtime
+                    // boxing, the same as multi-arg payload array entries.
                     let payload_reg = if arg_regs.len() == 1 {
-                        arg_regs[0]
+                        let arg_ty = args.first().map(|a| a.ty).unwrap_or(TypeId::ANY);
+                        let needs_box = matches!(
+                            arg_ty,
+                            TypeId::I8
+                                | TypeId::I16
+                                | TypeId::I32
+                                | TypeId::I64
+                                | TypeId::U8
+                                | TypeId::U16
+                                | TypeId::U32
+                                | TypeId::U64
+                                | TypeId::BOOL
+                        );
+                        if needs_box {
+                            self.with_func(|func, current_block| {
+                                let boxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::BoxInt {
+                                    dest: boxed,
+                                    value: arg_regs[0],
+                                });
+                                boxed
+                            })?
+                        } else {
+                            arg_regs[0]
+                        }
                     } else {
                         // Create an array with all args as the payload
                         let array_reg = self.with_func(|func, current_block| {
