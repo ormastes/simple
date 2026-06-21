@@ -26,7 +26,9 @@ backend readback fixtures. Synthetic handles remain isolated probe evidence.
 - After the Engine2D runtime queue bridge changed from evidence-only validation
   to `DrawIrBatch -> runtime queue -> drain -> dispatch/render`, regenerate the
   production report on a Vulkan/CUDA/OpenCL-capable host before treating stored
-  Linux evidence as current production proof.
+  Linux evidence as current production proof. Runtime queue/drain evidence is
+  necessary but not sufficient; the production pass still requires same-frame
+  backend `device_readback` with a positive backend handle and matching checksum.
 - BrowserBackend/WebRender currently carries explicit dispatch diagnostics. The
   first GPU frame uses a bounded widget-semantic Draw IR dispatch receipt with
   payload size/hash/text evidence, GUI AST source evidence, widget-id rect
