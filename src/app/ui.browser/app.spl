@@ -11,10 +11,8 @@ use nogc_sync_mut.ui.session.{UISession}
 use nogc_sync_mut.ui.access_store.{ui_access_store_runtime_open_with_override}
 use app.ui.browser.backend.{BrowserBackend}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event}
+use std.io_runtime.{file_exists, get_args, read_file}
 
-extern fn rt_file_read_text(path: text) -> text?
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_cli_get_args() -> [text]
 extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
 extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
@@ -27,6 +25,42 @@ extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
 extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
 extern fn rt_time_now_unix_micros() -> i64
+
+fn browser_winit_event_loop_new() -> i64:
+    rt_winit_event_loop_new()
+
+fn browser_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64:
+    rt_winit_window_new(el, w, h, title)
+
+fn browser_winit_event_loop_poll_events(el: i64, max: i64) -> i64:
+    rt_winit_event_loop_poll_events(el, max)
+
+fn browser_winit_event_get_type(ev: i64) -> i64:
+    rt_winit_event_get_type(ev)
+
+fn browser_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool):
+    rt_winit_event_keyboard_input(ev)
+
+fn browser_winit_event_mouse_moved(ev: i64) -> (f64, f64):
+    rt_winit_event_mouse_moved(ev)
+
+fn browser_winit_event_mouse_button(ev: i64) -> (i64, bool):
+    rt_winit_event_mouse_button(ev)
+
+fn browser_winit_event_free(ev: i64):
+    rt_winit_event_free(ev)
+
+fn browser_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64]):
+    rt_winit_window_present_rgba(win, w, h, pixels)
+
+fn browser_winit_window_free(win: i64):
+    rt_winit_window_free(win)
+
+fn browser_winit_event_loop_free(el: i64):
+    rt_winit_event_loop_free(el)
+
+fn browser_time_now_unix_micros() -> i64:
+    rt_time_now_unix_micros()
 
 val EVT_CLOSE: i64 = 3
 val EVT_KEYBOARD: i64 = 10
@@ -84,8 +118,8 @@ class BrowserApp:
                     Err(e):
                         return Err(e)
                     Ok(backend):
-                        val content = if rt_file_exists(file_path):
-                            rt_file_read_text(file_path) ?? ""
+                        val content = if file_exists(file_path):
+                            read_file(file_path) ?? ""
                         else:
                             ""
 
@@ -118,16 +152,16 @@ class BrowserApp:
         """Main browser engine loop with a real hosted window."""
         val width = (self.backend.viewport_width() * BROWSER_WINDOW_SCALE).to_i64()
         val height = (self.backend.viewport_height() * BROWSER_WINDOW_SCALE).to_i64()
-        val event_loop = rt_winit_event_loop_new()
+        val event_loop = browser_winit_event_loop_new()
         if event_loop == 0:
             print "Error: failed to create host event loop"
             self.backend.shutdown()
             return
 
-        val window = rt_winit_window_new(event_loop, width, height, HOST_WINDOW_TITLE)
+        val window = browser_winit_window_new(event_loop, width, height, HOST_WINDOW_TITLE)
         if window == 0:
             print "Error: failed to create host browser window"
-            rt_winit_event_loop_free(event_loop)
+            browser_winit_event_loop_free(event_loop)
             self.backend.shutdown()
             return
 
@@ -135,30 +169,30 @@ class BrowserApp:
         self.backend.render_frame(initial_state.tree, initial_state)
         self.present_host_window(window)
 
-        var next_present_at = rt_time_now_unix_micros() + 16000
+        var next_present_at = browser_time_now_unix_micros() + 16000
         while self.running:
             var had_event = false
-            var ev = rt_winit_event_loop_poll_events(event_loop, 1)
+            var ev = browser_winit_event_loop_poll_events(event_loop, 1)
             while ev != 0:
                 had_event = true
                 self.handle_host_event(ev)
-                rt_winit_event_free(ev)
-                ev = rt_winit_event_loop_poll_events(event_loop, 1)
+                browser_winit_event_free(ev)
+                ev = browser_winit_event_loop_poll_events(event_loop, 1)
 
             val should_poll_file = self.consume_file_change_poll(had_event)
             if should_poll_file:
                 if self.check_file_changes():
                     had_event = true
 
-            val now = rt_time_now_unix_micros()
+            val now = browser_time_now_unix_micros()
             if had_event or now >= next_present_at:
                 val state = self.session.current_state()
                 self.backend.render_frame(state.tree, state)
                 self.present_host_window(window)
                 next_present_at = now + 16000
 
-        rt_winit_window_free(window)
-        rt_winit_event_loop_free(event_loop)
+        browser_winit_window_free(window)
+        browser_winit_event_loop_free(event_loop)
         self.backend.shutdown()
 
     me consume_file_change_poll(had_event: bool) -> bool:
@@ -169,10 +203,10 @@ class BrowserApp:
 
     me check_file_changes() -> bool:
         """Check if the .ui.sdn file has changed and reload if so."""
-        if not rt_file_exists(self.file_path):
+        if not file_exists(self.file_path):
             return false
 
-        val current_content = rt_file_read_text(self.file_path) ?? ""
+        val current_content = read_file(self.file_path) ?? ""
         if current_content != self.last_file_content:
             self.last_file_content = current_content
             val tree_result = parse_ui_to_tree(self.file_path)
@@ -193,13 +227,13 @@ class BrowserApp:
                 self.session.dispatch(event)
 
     me handle_host_event(ev: i64):
-        val event_type = rt_winit_event_get_type(ev)
+        val event_type = browser_winit_event_get_type(ev)
         if event_type == EVT_CLOSE:
             self.running = false
             return
 
         if event_type == EVT_KEYBOARD:
-            val (_scancode, keycode, pressed) = rt_winit_event_keyboard_input(ev)
+            val (_scancode, keycode, pressed) = browser_winit_event_keyboard_input(ev)
             if pressed:
                 val translated = translate_key_event(keycode.to_i32(), 0)
                 if translated != nil:
@@ -207,7 +241,7 @@ class BrowserApp:
             return
 
         if event_type == EVT_MOUSE_MOVED:
-            val (mouse_x, mouse_y) = rt_winit_event_mouse_moved(ev)
+            val (mouse_x, mouse_y) = browser_winit_event_mouse_moved(ev)
             self.last_mouse_x = mouse_x.to_i32() / BROWSER_WINDOW_SCALE
             self.last_mouse_y = mouse_y.to_i32() / BROWSER_WINDOW_SCALE
             val translated = translate_mouse_event(
@@ -221,7 +255,7 @@ class BrowserApp:
             return
 
         if event_type == EVT_MOUSE_BUTTON:
-            val (button_code, pressed) = rt_winit_event_mouse_button(ev)
+            val (button_code, pressed) = browser_winit_event_mouse_button(ev)
             val action = if pressed:
                 "press"
             else:
@@ -237,7 +271,7 @@ class BrowserApp:
 
     me present_host_window(window: i64):
         val pixels = self.backend.pixels_rgba_i64()
-        rt_winit_window_present_rgba(
+        browser_winit_window_present_rgba(
             window,
             self.backend.viewport_width().to_i64(),
             self.backend.viewport_height().to_i64(),
@@ -253,7 +287,7 @@ fn run_browser_gui(file_path: text, port: i32) -> i64:
 
 fn run_browser_gui_with_access_store(file_path: text, port: i32, access_db_path: text) -> i64:
     """Start browser-engine mode for a .ui.sdn file."""
-    if not rt_file_exists(file_path):
+    if not file_exists(file_path):
         print "Error: File not found: {file_path}"
         return 1
 
@@ -270,7 +304,7 @@ fn run_browser_gui_with_access_store(file_path: text, port: i32, access_db_path:
 
 fn parse_backend_flag() -> text:
     """Parse --backend flag from CLI args. Defaults to auto-detect."""
-    val raw_args = rt_cli_get_args()
+    val raw_args = get_args()
     var i = 0
     while i < raw_args.len():
         val arg = raw_args[i]
