@@ -99,13 +99,18 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 
 On macOS, `vulkaninfo --summary` reporting `driverName = MoltenVK` proves only
 the host Vulkan loader path. It does not prove that Electron or Chrome accepted
-ANGLE Vulkan, and it does not install RenderDoc. If Chromium logs reject
+ANGLE Vulkan, and it does not install RenderDoc. The macOS setup evidence must
+also record `gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status` and
+`gui_web_2d_vulkan_renderdoc_macos_upstream_support_status`; this separates a
+valid Homebrew Vulkan/MoltenVK install from the absence of a Homebrew RenderDoc
+package or official upstream macOS RenderDoc support. If Chromium logs reject
 `angle=vulkan`, record `vulkan-angle-unavailable` and keep the browser Vulkan
 gate failed. If `renderdoccmd` is missing, the setup evidence records
-`gui_web_2d_vulkan_renderdoc_reason` and the searched RenderDoc paths; install
-`RenderDoc.app` manually or set `RDOC_HOME` before claiming `.rdc` evidence.
-Windows and Linux should reuse these same evidence keys when their capture
-runbooks are added.
+`gui_web_2d_vulkan_renderdoc_reason`, package/support status, and the searched
+RenderDoc paths; use a project-approved `RenderDoc.app`/fork or set `RDOC_HOME`
+to a tree containing `renderdoccmd` before claiming `.rdc` evidence. Windows
+and Linux should reuse these same evidence keys when their capture runbooks are
+added.
 
 ### Electron / Chromium parity (`scripts/check/check-electron-vulkan-web-parity.shs`)
 Renders a page through real Chromium (Electron + `xvfb`, via

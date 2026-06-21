@@ -140,8 +140,21 @@ through MoltenVK, for example `driverName = MoltenVK`. This proves the Vulkan
 loader/ICD path, not that Chrome, Electron, Simple, or RenderDoc used Vulkan.
 
 RenderDoc is a separate prerequisite on macOS. Homebrew may provide the Vulkan
-and MoltenVK stack without a RenderDoc package. Install `RenderDoc.app`
-manually or unpack an official RenderDoc tree, then point the scripts at it:
+and MoltenVK stack without a RenderDoc package. Record that package state
+before claiming the host is capture-ready:
+
+```sh
+HOMEBREW_NO_AUTO_UPDATE=1 brew info --cask renderdoc || true
+HOMEBREW_NO_AUTO_UPDATE=1 brew info renderdoc || true
+```
+
+The setup evidence exposes this as
+`gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status` and
+`gui_web_2d_vulkan_renderdoc_macos_upstream_support_status`. Upstream official
+RenderDoc support currently lists Windows/Linux/Android rather than macOS, so a
+macOS completion claim needs a project-approved `RenderDoc.app`/fork or an
+unpacked tree that actually contains `renderdoccmd`; a Vulkan-ready MoltenVK
+host is not enough. Point the scripts at the concrete bundle/tree:
 
 ```sh
 export RDOC_HOME=/Applications/RenderDoc.app
@@ -152,6 +165,8 @@ scripts/setup/setup-renderdoc-env.shs --register-vulkan-layer
 If `RDOC_HOME` is unset or invalid, the setup scripts now emit stable blocker
 keys such as `rdoc_status_reason`,
 `gui_web_2d_vulkan_renderdoc_reason`,
+`gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status`,
+`gui_web_2d_vulkan_renderdoc_macos_upstream_support_status`,
 `gui_web_2d_vulkan_renderdoc_search_paths`, and
 `gui_web_2d_vulkan_renderdoc_install_hint`. A missing `renderdoccmd` is an
 explicit unavailable state, not a skipped pass.

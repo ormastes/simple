@@ -20,6 +20,7 @@
 - GUI/web/2D Vulkan setup mode: --run
 - GUI/web/2D Vulkan loader: present (Apple M4 / MoltenVK)
 - GUI/web/2D Vulkan RenderDoc: unavailable (missing-renderdoccmd-in-search-paths)
+- GUI/web/2D Vulkan RenderDoc macOS package: homebrew-renderdoc-unavailable (upstream-official-builds-list-windows-linux-android-not-macos)
 - GUI/web/2D Electron direct Vulkan: fail (vulkan-angle-unavailable; ARGB pass)
 - GUI/web/2D Chrome direct Vulkan: fail (vulkan-angle-unavailable; bitmap pass)
 - GUI/web/2D Simple Vulkan: pass (pass; backend vulkan)
@@ -30,7 +31,7 @@
 - Production surface host: Darwin/arm64
 - Production Tauri surface capture: pass (pass; backend macos-wkwebview-snapshot; missing xvfb-run,dbus-run-session,xdotool,import,convert)
 - Production Chrome surface capture: pass (pass; backend chrome-live-bitmap)
-- blocked completion gates: 3
+- blocked completion gates: 4
 
 ## Commands
 
@@ -135,7 +136,11 @@
 - gui_web_2d_vulkan_renderdoc_setup_reason=missing-renderdoccmd-in-search-paths
 - gui_web_2d_vulkan_renderdoc_cmd=
 - gui_web_2d_vulkan_renderdoc_search_paths=RDOC_HOME_UNSET|/Users/ormastes/simple/build/tools/renderdoc|/Users/ormastes/simple/build/tools/renderdoc-*|/Applications/RenderDoc.app|/Users/ormastes/Applications/RenderDoc.app|/Users/ormastes/simple/build/tools/RenderDoc.app|/Users/ormastes/simple/build/tools/renderdoc/RenderDoc.app
-- gui_web_2d_vulkan_renderdoc_install_hint=Install RenderDoc.app manually or set RDOC_HOME to a RenderDoc bundle/tree containing renderdoccmd; keep Vulkan/MoltenVK installed separately with Homebrew.
+- gui_web_2d_vulkan_renderdoc_install_hint=Homebrew installs Vulkan/MoltenVK but does not currently provide a RenderDoc formula or cask on this host. Use a project-approved macOS RenderDoc.app/fork or unpacked tree containing renderdoccmd, then set RDOC_HOME.
+- gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status=homebrew-renderdoc-unavailable
+- gui_web_2d_vulkan_renderdoc_macos_upstream_support_status=upstream-official-builds-list-windows-linux-android-not-macos
+- gui_web_2d_vulkan_renderdoc_setup_macos_homebrew_package_status=homebrew-renderdoc-unavailable
+- gui_web_2d_vulkan_renderdoc_setup_macos_upstream_support_status=upstream-official-builds-list-windows-linux-android-not-macos
 - gui_web_2d_vulkan_electron_argb_status=pass
 - gui_web_2d_vulkan_electron_argb_nonblank_pixel_count=410618
 - gui_web_2d_vulkan_electron_vulkan_status=fail
@@ -404,5 +409,5 @@
 - html_renderdoc_capture_command=RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
 - electron_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-electron-html
 - blocked_completion_gate=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic
-- blocked_completion_gate_count=3
-- blocked_completion_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic|original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof
+- blocked_completion_gate_count=4
+- blocked_completion_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic|original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|production GUI/web parity evidence with live Tauri and Chrome captures

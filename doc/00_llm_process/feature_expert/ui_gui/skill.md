@@ -43,13 +43,19 @@ Required lanes:
 - RenderDoc `.rdc` evidence with `RDOC` magic for each capture lane.
 
 On macOS, Vulkan readiness means `vulkaninfo --summary` reports MoltenVK, not
-that Chrome/Electron accepted ANGLE Vulkan. If Electron or Chrome renders pixels
-but records `vulkan-angle-unavailable`, keep the browser Vulkan gate failed and
-compare only as fallback bitmap evidence. If `renderdoccmd` is unavailable, the
-setup scripts expose `rdoc_status_reason`,
-`gui_web_2d_vulkan_renderdoc_reason`, and install hints; do not treat missing
-RenderDoc as a skipped pass. Windows and Linux capture gates should be added
-later with the same evidence keys.
+that Chrome/Electron accepted ANGLE Vulkan and not that RenderDoc is installed.
+Homebrew covers the Vulkan/MoltenVK stack, but the macOS runbook must record
+`gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status` because this host
+has no `renderdoc` formula or cask. Upstream official RenderDoc support lists
+Windows/Linux/Android rather than macOS; use only a project-approved
+`RenderDoc.app`/fork or unpacked tree that actually contains `renderdoccmd`.
+If Electron or Chrome renders pixels but records `vulkan-angle-unavailable`,
+keep the browser Vulkan gate failed and compare only as fallback bitmap
+evidence. If `renderdoccmd` is unavailable, the setup scripts expose
+`rdoc_status_reason`, `gui_web_2d_vulkan_renderdoc_reason`, package/support
+status, and install hints; do not treat missing RenderDoc as a skipped pass.
+Windows and Linux capture gates should be added later with the same evidence
+keys.
 
 ## Update Rule
 

@@ -86,6 +86,8 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
   aggregate GUI audit can report `pass`.
 - The audit reports the active RenderDoc goal, Simple `.rdc`, and external
   Chrome/Vulkan `.rdc` gates without treating missing host captures as pass.
+- The audit reports macOS RenderDoc package/support status separately from the
+  Vulkan/MoltenVK readiness status.
 - Simple `.rdc` evidence must carry Vulkan runtime backend, RenderDoc API, and
   rendered-pixel proof through the aggregate audit.
 - Electron Chromium/Vulkan `.rdc` evidence is fail-closed and required before
@@ -158,7 +160,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 392 lines folded for reproduction.
+Runnable source: 402 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -272,6 +274,10 @@ expect(evidence).to_contain("renderdoc_goal_status_command=sh scripts/check/chec
 expect(evidence).to_contain("renderdoc_goal_blocked_gate=")
 expect(evidence).to_contain("renderdoc_goal_blocked_gate_count=")
 expect(evidence).to_contain("renderdoc_goal_blocked_gates=")
+expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_macos_upstream_support_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_setup_macos_homebrew_package_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_setup_macos_upstream_support_status=")
 expect(evidence).to_contain("simple_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple")
 expect(evidence).to_contain("simple_renderdoc_evidence_env=")
 expect(evidence).to_contain("simple_renderdoc_capture_status=")
@@ -352,6 +358,9 @@ expect(evidence).to_contain("electron_renderdoc_gate_capture_script=")
 expect(evidence).to_contain("electron_renderdoc_gate_requested_api=")
 expect(evidence).to_contain("electron_renderdoc_gate_requested_angle=")
 expect(evidence).to_contain("electron_renderdoc_gate_requested_features=")
+expect(evidence).to_contain("electron_renderdoc_gate_log=")
+expect(evidence).to_contain("electron_renderdoc_gate_vulkan_log_status=")
+expect(evidence).to_contain("electron_renderdoc_gate_vulkan_log_reason=")
 expect(evidence).to_contain("electron_renderdoc_gate_required_backend=electron")
 expect(evidence).to_contain("electron_renderdoc_gate_required_scene=html-css-electron")
 expect(evidence).to_contain("electron_renderdoc_gate_required_status=pass")
@@ -364,6 +373,7 @@ expect(evidence).to_contain("electron_renderdoc_gate_required_electron_suffix=to
 expect(evidence).to_contain("electron_renderdoc_gate_required_capture_script_suffix=tools/electron-live-bitmap/capture_html_argb.js")
 expect(evidence).to_contain("electron_renderdoc_gate_required_launch_flag_enable_features=--enable-features=Vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_required_launch_flag_use_angle=--use-angle=vulkan")
+expect(evidence).to_contain("electron_renderdoc_gate_required_vulkan_log_no_angle_failure=1")
 expect(evidence).to_contain("macos_portability_status=")
 expect(evidence).to_contain("macos_portability_reason=")
 expect(evidence).to_contain("macos_portability_evidence_env=")
@@ -379,6 +389,8 @@ expect(evidence).to_contain("macos_portability_run_captures=")
 expect(evidence).to_contain("macos_portability_capture_simple_status=")
 expect(evidence).to_contain("macos_portability_capture_html_status=")
 expect(evidence).to_contain("macos_portability_html_gate_status=")
+expect(evidence).to_contain("macos_portability_capture_electron_status=")
+expect(evidence).to_contain("macos_portability_electron_gate_status=")
 expect(evidence).to_contain("blocked_completion_gate=")
 expect(evidence).to_contain("blocked_completion_gate_count=")
 expect(evidence).to_contain("blocked_completion_gates=")
