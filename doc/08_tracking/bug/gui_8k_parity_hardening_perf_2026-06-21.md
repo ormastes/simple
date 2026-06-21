@@ -39,3 +39,13 @@ Result:
   spec.
 - Latest wrapper evidence passes with the 8K planning spec at about 5 seconds
   and no `[PERF BUG]` marker in the focused evidence report.
+
+## Remaining Image-Decode Follow-Up
+
+The resolved perf blocker covers 8K packed-surface planning and lazy startup.
+It does not complete full JPEG XL pixel decode. Current 8K evidence covers
+TIFF raster paths, JPEG XL metadata parsing, sparse 8K placeholder allocation,
+structured default-sRGB metadata, non-default color fail-closed routing, and
+exact raster tiling. Do not mark image URI rendering complete until the asset
+resolver feeds real PNG/JPEG/WebP/TIFF/JPEG XL pixels into Engine2D and full
+JPEG XL pixel decode has its own SPipe evidence.
