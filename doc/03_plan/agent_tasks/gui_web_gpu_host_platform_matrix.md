@@ -157,9 +157,11 @@ Current state:
 - Initialized WebGPU surfaces may report `surface_upload` with a positive
   `Engine2DReadback.backend_handle`; this is upload provenance, not backend
   device-readback proof.
-- `scripts/check/check-webgpu-real-readback.shs` now provides the production
-  `webgpu_real` proof: `source=device_readback`, a positive backend handle, and
-  matching expected/actual checksum.
+- `scripts/check/check-webgpu-real-readback.shs` is the production
+  `webgpu_real` gate. Current 2026-06-21 evidence is
+  `source=not_device_readback`, handle `0`, checksum `-1`; production proof
+  requires `source=device_readback`, a positive backend handle, and matching
+  expected/actual checksum.
 - Strict Engine2D WebGPU selection now requires `webgpu_probe_adapter()` to
   report a real GPU adapter. Direct `WebGpuBackend.init()` may keep its
   CPU-mirror path for hermetic rendering tests, but
