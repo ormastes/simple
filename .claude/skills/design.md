@@ -21,8 +21,9 @@
 ## Quality Check
 
 1. Ask user: "Should design change?"
-2. Confirm matching `doc/07_guide`, `doc/06_spec`, and skill/SPipe process docs
-   were updated when the workflow or tool contract changed
+2. Confirm matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
+   `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
+   process docs were updated when the workflow or tool contract changed
 3. If yes, loop back
 
 ## Outputs

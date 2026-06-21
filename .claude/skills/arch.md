@@ -33,8 +33,9 @@
 ## Quality Check
 
 1. Verify SPipe quality (target: A grade) — real assertions, edge cases, full REQ coverage
-2. Confirm matching `doc/07_guide`, `doc/06_spec`, and skill/SPipe process docs
-   were updated when the workflow or tool contract changed
+2. Confirm matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
+   `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
+   process docs were updated when the workflow or tool contract changed
 3. Ask user: "Should architecture change?"
 4. If yes, loop back
 
