@@ -20,7 +20,10 @@ See `lib/research_common.md` for shared format and templates.
 Spawn parallel agents:
 - **Agent 1:** Source code exploration via MCP + LSP (search `src/`)
 - **Agent 2:** Doc exploration via Obsidian CLI (search `doc/`)
-- Merge results into research summary
+- For broad lanes, prefer lower-model sidecars such as Codex Spark, Claude
+  Haiku, or Claude Sonnet, or mark sidecars `N/A`
+- Merge sidecar results into the research summary, then require a
+  normal/highest-capability review before accepting final research/options
 
 ### Output
 - `doc/01_research/<domain>/<topic>/<feature>.md`
