@@ -51,10 +51,13 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 3. Find related tests, specs, and documentation
 4. Note constraints: runtime limitations, language restrictions (from CLAUDE.md)
 5. Identify risks and unknowns
-6. Summarize findings as a structured research brief
+6. For broad lanes, record independent lower-model sidecar checks to run or
+   merge (Codex Spark, Claude Haiku, or Claude Sonnet), or mark `N/A`
+7. Summarize findings as a structured research brief
 
 **Exit Criteria:**
 - Research summary covers: related code (with file paths), reusable components, constraints, risks
+- Cooperative review plan names lower-model lanes for broad work, or says `N/A`
 - At least 3 specific file paths referenced from codebase exploration
 - Risks section is non-empty (even if "no significant risks identified")
 - Summary is under 200 lines
@@ -76,14 +79,18 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 **Actions:**
 1. Read research findings from state file
 2. Define module structure: which files to create/modify, where they live
-3. Define key interfaces: function signatures, class structures, trait boundaries
-4. Define data flow: input -> processing -> output
-5. Identify integration points with existing code
-6. Choose patterns appropriate to the Simple language (no inheritance, composition preferred)
+3. Merge lower-model sidecar findings when present, then run this phase as the
+   normal/highest-capability review before accepting broad architecture claims
+4. Define key interfaces: function signatures, class structures, trait boundaries
+   plus shared manual setup/checker helper names
+5. Define data flow: input -> processing -> output
+6. Identify integration points with existing code
+7. Choose patterns appropriate to the Simple language (no inheritance, composition preferred)
 
 **Exit Criteria:**
 - Module list with file paths (new and modified)
 - At least one interface definition (function signature or class structure)
+- Shared manual helper names are defined before specs or implementation
 - **≥1 SDN architecture diagram** (component/flow) using `<!-- sdn-diagram:id=... -->` format
 - Architecture prose ≤30 lines (tables and diagrams excluded)
 - No inheritance used (composition, traits, or mixins only)
@@ -117,6 +124,7 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - Every AC has at least one corresponding `it` block
 - Spec file(s) follow SPipe format (describe/it/expect with built-in matchers only)
 - **Step helpers read as manual sentences** — no raw function calls in scenario bodies
+- Placeholder helpers fail explicitly with `assert(false)` or equivalent
 - **Manual visibility assigned:** `@manual: show/folded/skip` on every scenario group
 - **Capture kinds match spec type** (tui/exec/protocol/api/log/binary)
 - **Inline/prev chains** connect setup to dependent scenarios
@@ -214,8 +222,11 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 5. **Run docgen** on each spec: `bin/simple spipe-docgen <spec> --output doc/06_spec`
 6. **Read generated docs** as scenario manuals — if they read like test plumbing,
    note which step helpers or visibility annotations need improvement
-7. Mark ACs as checked in the state file
-8. If any test fails, document the failure and note whether it needs Phase 5 re-run
+7. Verify changed workflow/tool contracts refreshed matching `doc/07_guide`,
+   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
+   and `.claude/agents/spipe/` process docs
+8. Mark ACs as checked in the state file
+9. If any test fails, document the failure and note whether it needs Phase 5 re-run
 
 **Exit Criteria:**
 - All spec tests pass (or documented reason for interpreter-mode limitation)
@@ -223,6 +234,7 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - Every AC is marked as verified with evidence
 - **Generated docs reviewed:** run `bin/simple spipe-docgen <spec> --output doc/06_spec`
   and verify output reads like a hand-written manual (not test plumbing)
+- Process-doc freshness accepted before final verification, not repaired in release
 - **Diagram presence:** each phase doc (research, arch, refactor) has ≥1 SDN diagram
 - **Prose concision:** each phase doc ≤30 lines of prose (tables/diagrams excluded)
 - If any AC cannot be verified, it is documented with a clear reason
