@@ -34,10 +34,9 @@ PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_
 - `scripts/setup/setup-gui-web-2d-vulkan-env.shs` records host readiness and,
   when requested, launches the direct Electron Chromium, Chrome, and Simple
   Engine2D Vulkan probes before optional RenderDoc captures.
-- `scripts/setup/setup-gui-web-2d-vulkan-env.ps1` is the Windows readiness
-  companion. It records installed tool paths and the requested Chromium Vulkan
-  flags; use it as the Windows host setup entrypoint before adding Windows
-  RenderDoc gates.
+- `scripts/setup/setup-gui-web-2d-vulkan-env.ps1` is a deferred Windows
+  readiness companion. It is not part of the current top-level GUI/web/2D
+  RenderDoc workflow.
 
 Compatibility wrappers remain:
 
@@ -81,9 +80,9 @@ keeps these states separate:
 - Simple Engine2D Vulkan readback availability;
 - optional RenderDoc `.rdc` capture availability and gate status.
 
-Current scope is macOS-first. Use this section to prove and debug the macOS
-path now; add Windows and Linux parity capture runbooks later using the same
-evidence keys rather than inventing platform-specific status names.
+Current top-level scope is macOS-only. Use this section to prove and debug the
+macOS path now. Add Windows and Linux parity capture runbooks later using the
+same evidence keys rather than inventing platform-specific status names.
 
 Run a readiness-only probe first:
 
@@ -250,62 +249,14 @@ Current local macOS result on 2026-06-21:
   `rdoc_capture_reason=missing-renderdoc` because `renderdoccmd` is not
   installed or discoverable on this host.
 
-### Windows Preparation
+### Deferred Windows/Linux Scope
 
-Windows evidence is prepared but not yet a replacement for the Linux
-Chrome/Vulkan RenderDoc gate. Start with the PowerShell readiness script:
-
-```powershell
-winget install KhronosGroup.VulkanSDK
-winget install Google.Chrome
-winget install BaldurKarlsson.RenderDoc
-npm --prefix tools/electron-shell install
-.\scripts\setup\setup-gui-web-2d-vulkan-env.ps1 -Check
-```
-
-Then register the RenderDoc Vulkan layer and record the direct-run intent:
-
-```powershell
-renderdoccmd.exe vulkanlayer --register --user
-renderdoccmd.exe vulkanlayer --explain
-.\scripts\setup\setup-gui-web-2d-vulkan-env.ps1 -Run
-```
-
-Before a Windows capture can satisfy completion evidence, add a Windows gate
-that validates `.rdc` magic, Chrome/Electron Vulkan logs, and Simple Engine2D
-Vulkan readback with the same evidence keys as the POSIX wrapper.
-
-### Linux Preparation
-
-Linux is the primary native Vulkan completion target. Install the Vulkan loader,
-tools, shader tools, a non-CPU GPU driver/ICD, Chrome or Chromium, Electron,
-and RenderDoc:
-
-```sh
-# Ubuntu/Debian
-sudo apt-get update
-sudo apt-get install vulkan-tools mesa-vulkan-drivers glslang-tools spirv-tools
-
-# Fedora
-sudo dnf install vulkan-tools mesa-vulkan-drivers glslang spirv-tools renderdoc
-
-# Arch
-sudo pacman -S vulkan-tools vulkan-icd-loader glslang spirv-tools renderdoc
-```
-
-Some distributions do not ship a current RenderDoc or vendor GPU driver in the
-default repositories. In that case, install the GPU vendor driver and official
-RenderDoc package/appimage, then run:
-
-```sh
-vulkaninfo --summary
-scripts/setup/setup-renderdoc-env.shs --register-vulkan-layer
-scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
-```
-
-Linux completion requires original Chrome and Electron Chromium to produce
-RenderDoc `.rdc` files with `RDOC` magic, no `vulkan-angle-unavailable` log
-failure, and Simple Engine2D Vulkan readback parity.
+Do not use this top-level guide to claim Windows or Linux GUI/web/2D RenderDoc
+completion yet. Add those runbooks later as separate platform sections that
+validate the same contract: host Vulkan readiness, Chrome/Electron Vulkan logs,
+Simple Engine2D Vulkan readback, and RenderDoc `.rdc` files with `RDOC` magic.
+The existing Windows readiness helper can seed that future work, but it is not
+currently a passing capture gate.
 
 ## Evidence Artifacts
 

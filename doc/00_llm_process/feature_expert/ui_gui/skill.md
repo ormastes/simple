@@ -24,9 +24,9 @@ Maintain feature-specific process knowledge for UI and GUI. Use this skill when 
 
 ## GUI/Web/2D Vulkan RenderDoc Verification
 
-Current canonical setup is macOS-first. Before claiming GUI/web/2D Vulkan
-parity, run the macOS host probe and compare all three lanes from the same
-fixture:
+Current canonical setup is macOS-only at the top level. Before claiming
+GUI/web/2D Vulkan parity, run the macOS host probe and compare all three lanes
+from the same fixture:
 
 ```sh
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
@@ -42,6 +42,10 @@ Required lanes:
 - Pure-Simple GUI/web/2D through Engine2D Vulkan readback.
 - RenderDoc `.rdc` evidence with `RDOC` magic for each capture lane.
 
+Do not report Windows or Linux GUI/web/2D RenderDoc status from this top-level
+Mac runbook yet. Those lanes should be added later with their own setup notes
+and the same evidence keys, after the macOS workflow is stable.
+
 On macOS, Vulkan readiness means `vulkaninfo --summary` reports MoltenVK, not
 that Chrome/Electron accepted ANGLE Vulkan and not that RenderDoc is installed.
 Homebrew covers the Vulkan/MoltenVK stack, but the macOS runbook must record
@@ -54,8 +58,6 @@ keep the browser Vulkan gate failed and compare only as fallback bitmap
 evidence. If `renderdoccmd` is unavailable, the setup scripts expose
 `rdoc_status_reason`, `gui_web_2d_vulkan_renderdoc_reason`, package/support
 status, and install hints; do not treat missing RenderDoc as a skipped pass.
-Windows and Linux capture gates should be added later with the same evidence
-keys.
 
 ## Update Rule
 

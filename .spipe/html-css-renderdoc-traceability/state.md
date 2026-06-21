@@ -16,7 +16,7 @@ Provide executable SSpec traceability for current HTML elements, CSS properties,
 - AC-4: Simple2D-backed Vulkan readback evidence passes on the local host.
 - AC-5: RenderDoc CLI is installed and registered for Vulkan capture.
 - AC-6: Chrome-on-Vulkan RenderDoc capture either produces Vulkan IO-level evidence or records a concrete host/environment blocker with non-repeated attempts and next required external action.
-- AC-7: macOS/MoltenVK is tracked as a separate portability probe that can produce supplemental evidence or a concrete blocker, without replacing the original Chrome-on-Linux-Vulkan RenderDoc gate.
+- AC-7: The top-level GUI/web/2D Vulkan RenderDoc runbook is macOS-only for now, records MoltenVK readiness separately from Chrome/Electron ANGLE Vulkan and RenderDoc readiness, and defers Windows/Linux capture gates until separate runbooks are added.
 
 ## Scope Exclusions
 Do not detach or rebind host GPUs to `vfio-pci` without explicit privileged operator approval.
@@ -29,3 +29,4 @@ dev-done
 - dev: Added macOS/MoltenVK portability probe to the plan. macOS evidence can supplement the investigation, but only original RenderDoc+Chrome Vulkan `.rdc` evidence closes the remaining Linux gate.
 - impl: Added `scripts/check/check-gui-renderdoc-feature-coverage-status.shs` as a non-launching restart audit for HTML/CSS traceability, WidgetKind HTML renderer dispatch, Electron layout manifest scope, production GUI/web parity evidence, and the active RenderDoc gates.
 - verify: 2026-06-19 `sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs` reports all 43 `WidgetKind` HTML dispatches covered and the 18-case Electron Simple Web layout manifest recorded. The gate remains incomplete because local Simple RenderDoc evidence is missing (`simple_renderdoc_reason=missing-simple-rdoc`) and original Chrome/Vulkan external RenderDoc capture is unavailable without a host-side `.rdc`.
+- docs: 2026-06-21 updated the GUI/web/2D Vulkan RenderDoc guide and UI GUI feature skill to make the top-level workflow macOS-only. Windows and Linux are explicitly deferred and must reuse the same evidence keys when their platform capture gates are added later.

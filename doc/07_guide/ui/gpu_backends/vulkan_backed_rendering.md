@@ -83,8 +83,8 @@ in-application frame markers. The interpreter exposes
 WITH these externs (`src/compiler_rust/target/release/simple`); it does not
 replace the self-hosted `bin/release/<triple>/simple`.
 
-### macOS GUI/web/2D Vulkan comparison
-The top-level macOS comparison wrapper is
+### macOS-only GUI/web/2D Vulkan comparison
+The top-level GUI/web/2D Vulkan comparison wrapper is macOS-only for now:
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs`. It records host MoltenVK
 readiness, direct Electron/Chrome launch evidence, Simple Engine2D Vulkan
 readback, and optional RenderDoc captures in
@@ -108,9 +108,11 @@ package or official upstream macOS RenderDoc support. If Chromium logs reject
 gate failed. If `renderdoccmd` is missing, the setup evidence records
 `gui_web_2d_vulkan_renderdoc_reason`, package/support status, and the searched
 RenderDoc paths; use a project-approved `RenderDoc.app`/fork or set `RDOC_HOME`
-to a tree containing `renderdoccmd` before claiming `.rdc` evidence. Windows
-and Linux should reuse these same evidence keys when their capture runbooks are
-added.
+to a tree containing `renderdoccmd` before claiming `.rdc` evidence.
+
+Windows and Linux are intentionally deferred from this top-level workflow. When
+those platform runbooks are added, reuse these same evidence keys instead of
+adding platform-specific status names.
 
 ### Electron / Chromium parity (`scripts/check/check-electron-vulkan-web-parity.shs`)
 Renders a page through real Chromium (Electron + `xvfb`, via
