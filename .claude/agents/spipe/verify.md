@@ -59,7 +59,7 @@
     `src/lib/gc_async_mut` env reads or process calls outside owner modules
     must use env/process facades, not local `rt_env_get`, `rt_process_run`,
     `rt_process_run_timeout`, `rt_process_spawn_async`, `rt_process_wait`,
-    `rt_process_is_running`, or `rt_process_kill`.
+    `rt_process_is_running`, `rt_process_is_alive`, or `rt_process_kill`.
 13. For Mac GUI/web/2D RenderDoc+Vulkan evidence, keep top-level proof scope
     macOS-only until Windows and Linux runbooks exist. Start from
     `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc`

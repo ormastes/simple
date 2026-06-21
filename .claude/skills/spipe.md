@@ -174,7 +174,8 @@ Before final verify, run `sh scripts/audit/direct-env-runtime-guard.shs --workin
 and `sh scripts/audit/direct-env-runtime-guard.shs --staged` so new app/gc env
 reads and process calls use env/process facades instead of local `rt_env_get`,
 `rt_process_run`, `rt_process_run_timeout`, `rt_process_spawn_async`,
-`rt_process_wait`, `rt_process_is_running`, or `rt_process_kill`.
+`rt_process_wait`, `rt_process_is_running`, `rt_process_is_alive`, or
+`rt_process_kill`.
 
 For IDE Office Markdown/PPT rendering hardening, keep the canonical guide at
 `doc/07_guide/app/ide_office_plugin_suite.md` current. Specs should prove the

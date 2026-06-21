@@ -172,7 +172,8 @@ For each source file in scope:
    - App leaf and `src/lib/gc_async_mut` env reads or process calls outside
      owner modules must use env/process facades, not local `rt_env_get`,
      `rt_process_run`, `rt_process_run_timeout`, `rt_process_spawn_async`,
-     `rt_process_wait`, `rt_process_is_running`, or `rt_process_kill`
+     `rt_process_wait`, `rt_process_is_running`, `rt_process_is_alive`, or
+     `rt_process_kill`
 
 ---
 

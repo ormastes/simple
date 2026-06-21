@@ -22,6 +22,7 @@ developers must **never** declare `extern fn rt_*` or call `rt_*` directly — u
 | `rt_process_spawn_async(cmd, args, env)` | `app.io.mod.process_spawn_async_env(cmd, args, env)` |
 | `rt_process_wait(pid, ms)` | `app.io.mod.process_wait(pid, ms)` |
 | `rt_process_is_running(pid)` | `app.io.mod.process_is_running(pid)` |
+| `rt_process_is_alive(pid)` | `app.io.mod.process_is_alive(pid)` |
 | `rt_process_kill(pid)` | `app.io.mod.process_kill(pid)` |
 | `rt_cli_get_args()` | `std.io_runtime.get_args()` |
 | `rt_getpid()` | `std.io_runtime.getpid()` |

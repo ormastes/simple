@@ -38,8 +38,8 @@ print r"raw: \d+"              # Raw string (no interpolation)
 - `simple lint` emits `LOG001` when production source uses bare `print`; script-style `print` remains allowed outside production source roots.
 - In app leaf code, use `app.io.mod` env/process facades such as
   `process_run_timeout`, `process_spawn_async`, `process_spawn_async_env`,
-  `process_wait`, `process_is_running`, and `process_kill`; do not declare
-  local `rt_process_*` externs outside owner modules.
+  `process_wait`, `process_is_running`, `process_is_alive`, and `process_kill`;
+  do not declare local `rt_process_*` externs outside owner modules.
 
 ### Functions
 
