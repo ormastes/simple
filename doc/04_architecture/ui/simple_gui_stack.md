@@ -511,6 +511,7 @@ dispatch commands and forwards them to the web adapter protocol.
 | Web render API | `src/lib/common/ui/web_render_api.spl` | WebRender IR transport |
 | Web bridge | `src/app/ui.web/wm_bridge.spl` | Web host WM adapter |
 | Web WM bridge | `src/app/ui.web/wm_runtime_bridge.spl` | Web host WM runtime dispatch consumer |
+| Shared MDI demo | `src/app/ui_shared_mdi/main.spl` | Backend-neutral MDI IPC demo; environment toggles go through `app.io.env_ops.env_get` instead of local `rt_env_get` |
 
 ## Host Shell Targets
 

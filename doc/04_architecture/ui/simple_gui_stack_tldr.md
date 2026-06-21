@@ -201,6 +201,7 @@ Host input
 | `src/os/smf/dynsmf_session.spl` | checked dynSMF manifest/session/unload |
 | `src/app/startup/dynsmf_autoload.spl` | CLI/env dynSMF startup policy |
 | `src/app/ui.web/wm_runtime_bridge.spl` | Web host WM runtime bridge |
+| `src/app/ui_shared_mdi/main.spl` | backend-neutral MDI IPC demo with env toggles through `app.io.env_ops.env_get` |
 
 ## Host Shells
 
