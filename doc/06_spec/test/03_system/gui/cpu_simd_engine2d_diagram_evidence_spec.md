@@ -1,6 +1,6 @@
 # CPU SIMD Engine2D Diagram Evidence Spec
 
-> Runs the CPU SIMD Engine2D evidence wrapper and verifies that the SIMD-backed
+> This scenario is the release gate for CPU SIMD drawing evidence in the GUI hardening lane.
 
 <!-- sdn-diagram:id=cpu_simd_engine2d_diagram_evidence_spec.arch -->
 <details class="sdn-source">
@@ -35,7 +35,7 @@ cpu_simd_engine2d_diagram_evidence_spec -> app
 
 # CPU SIMD Engine2D Diagram Evidence Spec
 
-Runs the CPU SIMD Engine2D evidence wrapper and verifies that the SIMD-backed
+This scenario is the release gate for CPU SIMD drawing evidence in the GUI hardening lane.
 
 ## At a Glance
 
@@ -51,9 +51,20 @@ Runs the CPU SIMD Engine2D evidence wrapper and verifies that the SIMD-backed
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-Runs the CPU SIMD Engine2D evidence wrapper and verifies that the SIMD-backed
-fill/copy/alpha/blit/scroll path renders a deterministic diagram exactly
-matching the scalar reference bitmap with no blur or tolerance.
+## Overview
+
+This scenario is the release gate for CPU SIMD drawing evidence in the GUI
+hardening lane.
+
+## Examples
+
+Run the scenario to confirm the evidence wrapper reports zero diagram
+mismatches and records the exact-bitmap no-blur policy.
+
+**Requirements:** .spipe/gui-hardening-full/state.md
+**Plan:** doc/03_plan/agent_tasks/gui_backend_perf.md
+**Design:** N/A
+**Research:** N/A
 
 ## Scenarios
 
