@@ -47,6 +47,9 @@ Skip if exist. See `design` skill for details.
   implementation is considered ready: generate the doc, read it as a manual,
   improve steps/captures/visibility/helper names, and regenerate until the
   primary flow is manual-quality.
+- If design introduced shared interface or manual setup/checker helper
+  placeholders, implement them or keep them failing explicitly with
+  `assert(false)` or equivalent. Silent no-op helpers are not valid coverage.
 - Do not leave primary manual output dominated by raw test code. Executable
   SPipe should be folded detail; visible content should be scenario steps and
   typed evidence.
