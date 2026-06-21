@@ -145,6 +145,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: rendering_manifest_css_missing equals ``
    - Expected: rendering_manifest_css_scope equals `implemented-simple-web-css`
    - Expected: rendering_manifest_total_css_count equals `traceability_css_count`
+   - Expected: rendering_manifest_unrendered_css_properties equals `traceability_unsupported_css_properties`
    - Expected: rendering_manifest_case_count equals `50`
    - Expected: rendering_manifest_required_case_count equals `50`
    - Expected: rendering_manifest_missing_fixture equals ``
@@ -168,7 +169,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 430 lines folded for reproduction.
+Runnable source: 438 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -195,6 +196,7 @@ expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_proper
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_scope=implemented-simple-web-css")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_total_css_property_count=")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_unrendered_spec_css_property_count=")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_unrendered_spec_css_properties=")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest_case_count=50")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_required_manifest_case_count=50")
 expect(evidence).to_contain("html_css_traceability_status=pass")
@@ -206,6 +208,7 @@ expect(evidence).to_contain("html_css_traceability_required_css_property_min_cou
 expect(evidence).to_contain("html_css_traceability_implemented_css_property_count=62")
 expect(evidence).to_contain("html_css_traceability_implemented_css_property_indexed_count=")
 expect(evidence).to_contain("html_css_traceability_unsupported_css_property_count=")
+expect(evidence).to_contain("html_css_traceability_unsupported_css_properties=")
 expect(evidence).to_contain("html_css_traceability_unsupported_css_property_missing_count=0")
 expect(evidence).to_contain("html_css_traceability_implemented_css_subset_spec=test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_generated_html_css_combinations_spec.spl")
 expect(evidence).to_contain("html_css_traceability_unsupported_css_inventory_spec=test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_css_inventory_traceability_spec.spl")
@@ -453,6 +456,7 @@ val rendering_manifest_css_missing = _value_of(evidence, "html_css_rendering_man
 val rendering_manifest_css_scope = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_scope")
 val rendering_manifest_total_css_count = _value_of(evidence, "html_css_rendering_manifest_traceability_total_css_property_count")
 val rendering_manifest_unrendered_css_count = _value_of(evidence, "html_css_rendering_manifest_traceability_unrendered_spec_css_property_count")
+val rendering_manifest_unrendered_css_properties = _value_of(evidence, "html_css_rendering_manifest_traceability_unrendered_spec_css_properties")
 val rendering_manifest_case_count = _value_of(evidence, "html_css_rendering_manifest_traceability_manifest_case_count")
 val rendering_manifest_required_case_count = _value_of(evidence, "html_css_rendering_manifest_traceability_required_manifest_case_count")
 val rendering_manifest_fixture_scene_count = _value_of(evidence, "html_css_rendering_manifest_traceability_fixture_scene_count")
@@ -463,6 +467,7 @@ val traceability_css_count = _value_of(evidence, "html_css_traceability_css_prop
 val traceability_implemented_css_count = _value_of(evidence, "html_css_traceability_implemented_css_property_count")
 val traceability_implemented_css_indexed_count = _value_of(evidence, "html_css_traceability_implemented_css_property_indexed_count")
 val traceability_unsupported_css_count = _value_of(evidence, "html_css_traceability_unsupported_css_property_count")
+val traceability_unsupported_css_properties = _value_of(evidence, "html_css_traceability_unsupported_css_properties")
 val traceability_unsupported_css_missing_count = _value_of(evidence, "html_css_traceability_unsupported_css_property_missing_count")
 val production_gate_status = _value_of(evidence, "production_gui_web_renderer_parity_gate_status")
 val production_gate_reason = _value_of(evidence, "production_gui_web_renderer_parity_gate_reason")
@@ -534,6 +539,9 @@ expect(rendering_manifest_css_missing).to_equal("")
 expect(rendering_manifest_css_scope).to_equal("implemented-simple-web-css")
 expect(rendering_manifest_total_css_count).to_equal(traceability_css_count)
 expect(rendering_manifest_unrendered_css_count.to_i64()).to_be_greater_than(300)
+expect(rendering_manifest_unrendered_css_properties).to_equal(traceability_unsupported_css_properties)
+expect(rendering_manifest_unrendered_css_properties).to_contain("accent-color")
+expect(rendering_manifest_unrendered_css_properties).to_contain("animation")
 expect(rendering_manifest_case_count).to_equal("50")
 expect(rendering_manifest_required_case_count).to_equal("50")
 expect(rendering_manifest_fixture_scene_count.to_i64()).to_be_greater_than(49)
@@ -544,6 +552,7 @@ expect(traceability_css_count.to_i64()).to_be_greater_than(389)
 expect(traceability_implemented_css_count).to_equal("62")
 expect(traceability_implemented_css_indexed_count.to_i64()).to_be_greater_than(50)
 expect(traceability_unsupported_css_count.to_i64()).to_be_greater_than(300)
+expect(traceability_unsupported_css_properties.len()).to_be_greater_than(1000)
 expect(traceability_unsupported_css_missing_count).to_equal("0")
 expect(production_gate_status.len()).to_be_greater_than(0)
 expect(production_gate_reason.len()).to_be_greater_than(0)

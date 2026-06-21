@@ -328,6 +328,9 @@ traceability gate as
 `html_css_rendering_manifest_traceability_total_css_property_count` and the
 remaining non-rendered inventory count as
 `html_css_rendering_manifest_traceability_unrendered_spec_css_property_count`.
+The matching implementation backlog names are emitted as
+`html_css_traceability_unsupported_css_properties` and
+`html_css_rendering_manifest_traceability_unrendered_spec_css_properties`.
 Those unsupported properties are assigned to the inventory SSpec, not claimed as
 rendered behavior, until they move into the implemented Simple Web CSS subset.
 
