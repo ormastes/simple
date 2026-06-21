@@ -18,6 +18,11 @@ developers must **never** declare `extern fn rt_*` or call `rt_*` directly — u
 | `rt_file_exists(p)` | `std.io_runtime.file_exists(p)` |
 | `rt_env_get(k)` | `std.io_runtime.env_get(k)` |
 | `rt_process_run(cmd, args)` | `std.io_runtime.process_run(...)` / `shell(...)` |
+| `rt_process_spawn_async(cmd, args)` | `app.io.mod.process_spawn_async(cmd, args)` |
+| `rt_process_spawn_async(cmd, args, env)` | `app.io.mod.process_spawn_async_env(cmd, args, env)` |
+| `rt_process_wait(pid, ms)` | `app.io.mod.process_wait(pid, ms)` |
+| `rt_process_is_running(pid)` | `app.io.mod.process_is_running(pid)` |
+| `rt_process_kill(pid)` | `app.io.mod.process_kill(pid)` |
 | `rt_cli_get_args()` | `std.io_runtime.get_args()` |
 | `rt_getpid()` | `std.io_runtime.getpid()` |
 | `rt_dir_list(p)` | `std.io_runtime.dir_list(p)` |
