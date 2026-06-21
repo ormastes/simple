@@ -9,14 +9,8 @@
 # **Feature IDs:** #TDMN-SYS-001 to #TDMN-SYS-020
 # **Category:** Infrastructure / System Test
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_dir_list(path: text) -> [text]
-extern fn rt_getpid() -> i64
-extern fn rt_time_now_unix_micros() -> i64
+use app.io.mod.{file_read_text, file_write, file_exists, file_delete}
+use app.io.mod.{dir_create_all, dir_list, getpid, time_now_unix_micros}
 
 fn simple_hash(s: text) -> i64:
     val bs = s.bytes()
@@ -30,7 +24,7 @@ fn simple_hash(s: text) -> i64:
     h
 
 fn list_dir_files(dir: text) -> [text]:
-    val names = rt_dir_list(dir) ?? []
+    val names = dir_list(dir) ?? []
     var full: [text] = []
     var i = 0
     while i < names.len():
@@ -47,32 +41,32 @@ var req_dir: text = ""
 var resp_dir: text = ""
 
 fn conc_setup():
-    val pid = rt_getpid()
-    val ts = rt_time_now_unix_micros()
+    val pid = getpid()
+    val ts = time_now_unix_micros()
     base_dir = "/tmp/test_daemon_conc_{pid}_{ts}"
     req_dir = "{base_dir}/requests"
     resp_dir = "{base_dir}/responses"
-    rt_dir_create_all(base_dir)
-    rt_dir_create_all(req_dir)
-    rt_dir_create_all(resp_dir)
+    dir_create_all(base_dir)
+    dir_create_all(req_dir)
+    dir_create_all(resp_dir)
 
 fn conc_cleanup():
     cleanup_conc_dir(req_dir)
     cleanup_conc_dir(resp_dir)
-    rt_file_delete(base_dir)
+    file_delete(base_dir)
 
 fn cleanup_conc_dir(dir: text):
-    if not rt_file_exists(dir):
+    if not file_exists(dir):
         return
     val files = list_dir_files(dir)
     var i = 0
     while i < files.len():
-        rt_file_delete(files[i])
+        file_delete(files[i])
         i = i + 1
 
 # Simulate agent writing a request
 fn agent_submit(agent_id: i64, test_path: text, kind: i64) -> text:
-    val ts = rt_time_now_unix_micros()
+    val ts = time_now_unix_micros()
     val req_id = "agent{agent_id}_{ts}"
     var parts: [text] = []
     parts.push("id={req_id}")
@@ -83,7 +77,7 @@ fn agent_submit(agent_id: i64, test_path: text, kind: i64) -> text:
     val content = parts.join("\n") + "\n"
     val hash = simple_hash(req_id)
     val path = "{req_dir}/{hash}_{req_id}.req"
-    rt_file_write_text(path, content)
+    file_write(path, content)
     req_id
 
 # Simulate daemon writing a response
@@ -91,39 +85,39 @@ fn daemon_respond(req_id: text, status: i64, test_path: text, passed: i64, faile
     var parts: [text] = []
     parts.push("request_id={req_id}")
     parts.push("status={status}")
-    parts.push("timestamp={rt_time_now_unix_micros()}")
+    parts.push("timestamp={time_now_unix_micros()}")
     parts.push("field.test_path={test_path}")
     parts.push("field.passed={passed}")
     parts.push("field.failed={failed}")
     parts.push("field.cached=false")
     val content = parts.join("\n") + "\n"
     val path = "{resp_dir}/{req_id}.resp"
-    rt_file_write_text(path, content)
+    file_write(path, content)
 
 fn daemon_respond_cached(req_id: text, test_path: text, passed: i64):
     var parts: [text] = []
     parts.push("request_id={req_id}")
     parts.push("status=6")
-    parts.push("timestamp={rt_time_now_unix_micros()}")
+    parts.push("timestamp={time_now_unix_micros()}")
     parts.push("field.test_path={test_path}")
     parts.push("field.passed={passed}")
     parts.push("field.failed=0")
     parts.push("field.cached=true")
     val content = parts.join("\n") + "\n"
     val path = "{resp_dir}/{req_id}.resp"
-    rt_file_write_text(path, content)
+    file_write(path, content)
 
 # Read all pending requests
 fn read_all_requests() -> [(text, text, i64)]:
     var results: [(text, text, i64)] = []
-    if not rt_file_exists(req_dir):
+    if not file_exists(req_dir):
         return results
     val files = list_dir_files(req_dir)
     var i = 0
     while i < files.len():
         val path = files[i]
         if path.ends_with(".req"):
-            val content = rt_file_read_text(path) ?? ""
+            val content = file_read_text(path) ?? ""
             val id = extract_val(content, "id=")
             val test_path = extract_val(content, "field.test_path=")
             val kind_str = extract_val(content, "kind=")
@@ -135,9 +129,9 @@ fn read_all_requests() -> [(text, text, i64)]:
 # Read a specific response
 fn read_response(req_id: text) -> (i64, text, i64, i64, bool):
     val path = "{resp_dir}/{req_id}.resp"
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return (-1, "", 0, 0, false)
-    val content = rt_file_read_text(path) ?? ""
+    val content = file_read_text(path) ?? ""
     val status = (extract_val(content, "status=")).to_i64() ?? -1
     val test_path = extract_val(content, "field.test_path=")
     val passed = (extract_val(content, "field.passed=")).to_i64() ?? 0
@@ -155,7 +149,7 @@ fn extract_val(content: text, prefix: text) -> text:
     ""
 
 fn count_req_files() -> i64:
-    if not rt_file_exists(req_dir):
+    if not file_exists(req_dir):
         return 0
     val files = list_dir_files(req_dir)
     var c: i64 = 0
@@ -167,7 +161,7 @@ fn count_req_files() -> i64:
     c
 
 fn count_resp_files() -> i64:
-    if not rt_file_exists(resp_dir):
+    if not file_exists(resp_dir):
         return 0
     val files = list_dir_files(resp_dir)
     var c: i64 = 0
@@ -196,7 +190,7 @@ fn delete_req_files_in_dir():
     var i = 0
     while i < files.len():
         if files[i].ends_with(".req"):
-            rt_file_delete(files[i])
+            file_delete(files[i])
         i = i + 1
 
 fn submit_n_agents_stress(n: i64, path_prefix: text) -> [text]:
