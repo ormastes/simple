@@ -275,6 +275,8 @@ bounded implementation slices before deleting anything:
 - **WARN items reviewed** -- acceptable with justification, or converted to tracked TODOs
 - Scenario-oriented generated docs under `doc/06_spec/...` read as manuals, not
   raw test dumps, and executable `.spl` specs are absent from `doc/06_spec`
+- Generated-manual quality and lower-model sidecar review are covered by verify
+  PASS; release does not repair or accept those gaps afterward
 - `sh scripts/audit/direct-env-runtime-guard.shs --working` and `--staged`
   pass for app/gc env reads and process calls outside owner modules
 - Summary table must show `STATUS: PASS` before proceeding to release
