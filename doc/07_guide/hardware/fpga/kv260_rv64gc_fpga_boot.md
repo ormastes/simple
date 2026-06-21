@@ -362,7 +362,7 @@ A serial console (FPGA PL UART, or a SimpleOS/RISC-V boot console) can be
 exposed as a telnet server so system tests drive it with any telnet client.
 The bridge lives at `std.nogc_sync_mut.io.telnet_serial_bridge`
 (spec: `src/lib/nogc_sync_mut/io/test/telnet_serial_bridge_spec.spl`, 10/10;
-mirror: `doc/06_spec/test/telnet_serial_bridge_spec.md`). It relays a serial
+mirror: `doc/06_spec/telnet_serial_bridge_spec.md`). It relays a serial
 capture file ⇄ TCP with full RFC 854 IAC negotiation.
 
 ```
