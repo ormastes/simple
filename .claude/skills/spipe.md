@@ -190,6 +190,15 @@ Simple, Electron, or Chrome Vulkan-backed capture is ready; blocker status
 GUI widget fixture evidence must also prove per-widget feature witnesses via
 `gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features`,
 not only widget/class presence.
+When the claim is that all GUI items are RenderDoc-tested, run
+`scripts/check/check-gui-widget-renderdoc-goal-status.shs`; require
+`gui_widget_renderdoc_goal_status=pass`,
+`gui_widget_renderdoc_goal_widget_feature_covered_count=43`,
+`gui_widget_renderdoc_goal_simple_gate_status=pass`,
+`gui_widget_renderdoc_goal_electron_gate_status=pass`, and
+`gui_widget_renderdoc_goal_blocked_gate_count=0`. Normal non-Mac runs may report
+`incomplete`, but release or completion claims must use `--strict` with real
+Simple Vulkan Engine2D and Electron Chromium/Vulkan `.rdc` evidence.
 Defer Windows and Linux claims until platform-specific runbooks validate the
 same evidence keys and RDOC gate contract.
 

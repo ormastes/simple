@@ -445,6 +445,17 @@ from the nested Simple/original Chrome RenderDoc lanes, Electron
 Chromium/Vulkan RenderDoc gate, and the production GUI/web core parity gate,
 so concurrent missing captures are not hidden by a single status reason.
 
+For the all-GUI-item claim, use the focused wrapper
+`scripts/check/check-gui-widget-renderdoc-goal-status.shs`. It composes the
+43/43 widget fixture feature witness gate with the Simple Vulkan Engine2D
+RenderDoc gate and the Electron Chromium/Vulkan HTML gate. Normal runs may
+return `gui_widget_renderdoc_goal_status=incomplete` on hosts without live
+macOS RenderDoc evidence; release/completion lanes should pass `--strict` and
+require `gui_widget_renderdoc_goal_widget_feature_covered_count=43`,
+`gui_widget_renderdoc_goal_simple_gate_status=pass`,
+`gui_widget_renderdoc_goal_electron_gate_status=pass`, and
+`gui_widget_renderdoc_goal_blocked_gate_count=0`.
+
 The current canonical evidence contract is:
 
 - Simple in-application path:
@@ -586,6 +597,25 @@ evidence, or non-Vulkan Chromium request metadata all keep the gate out of
 macOS does not provide native Vulkan drivers. Use the LunarG Vulkan SDK with
 MoltenVK, or another Metal-backed Vulkan portability implementation, when
 testing the Simple Vulkan path on macOS.
+
+The current GUI/web/2D Vulkan comparison runbook is macOS-only until Windows
+and Linux host runbooks validate the same evidence keys. Prepare a Homebrew
+host with:
+
+```sh
+brew install vulkan-tools vulkan-loader vulkan-headers molten-vk spirv-tools glslang
+vulkaninfo --summary
+```
+
+Then compare the Electron Chromium-backed baseline and the Simple GUI/web/2D
+Vulkan path with the existing readiness/run helpers, and close the all-widget
+RenderDoc proof with:
+
+```sh
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+sh scripts/check/check-gui-widget-renderdoc-goal-status.shs --strict
+```
 
 The setup helper resolves either an unpacked RenderDoc tree with
 `bin/renderdoccmd` or a macOS `RenderDoc.app` bundle, and prints both
