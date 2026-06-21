@@ -91,6 +91,6 @@ Codex excels at forked parallel research. When investigating a feature:
 - NEVER skip local research — always check `src/` and `doc/` first
 - Draft requirements are OPTIONS — user MUST select
 - All code examples in `.spl` — no Python, no Bash
-- Generics use `<>` not `[]` — `Option<T>`, `List<Int>`
+- Generics use `<>` for type parameters — `Option<T>`, `Result<T, E>`; arrays use `[]` like `[i64]`
 - NO inheritance — use composition, traits, mixins
 - Use `Result<T, E>` + `?` for error handling (no try/catch/throw)

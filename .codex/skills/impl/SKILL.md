@@ -136,7 +136,7 @@ Before declaring implementation complete, verify:
 ## Rules
 
 - All code in `.spl` — no Python, no Bash
-- Generics use `<>` not `[]` — `Option<T>`, `List<Int>`
+- Generics use `<>` for type parameters — `Option<T>`, `Result<T, E>`; arrays use `[]` like `[i64]`
 - Pattern binding: `if val` not `if let`
 - Constructors: `Point(x: 3, y: 4)` not `.new()`
 - `?` is operator only — never in names; use `.?` over `is_*` predicates

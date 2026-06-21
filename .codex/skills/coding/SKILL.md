@@ -53,12 +53,13 @@ fn add(a: i64, b: i64) -> i64:
 
 ### Generics
 
-**Use `<>` not `[]`:**
+**Use `<>` for type parameters; use `[]` for array types/literals:**
 ```simple
 Option<T>
-List<Int>
 Map<String, Int>
 Result<T, E>
+[i64]
+[T]
 ```
 
 ### Classes (NO INHERITANCE)
