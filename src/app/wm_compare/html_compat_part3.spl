@@ -23,33 +23,17 @@ use app.wm_compare.html_compat.*
 
 use std.cli.cli_util.{get_cli_args}
 use std.nogc_sync_mut.sffi.io.{
+    file_read_bytes,
+    file_write_bytes,
     file_write_text,
     dir_create_all}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 use app.common.string_builder.{StringBuilder}
 
-# rt_file_read_text and rt_file_read_bytes are wrapped in Option by the
-# bootstrap interpreter, so we declare them directly and use the `?? ""`
-# / `?? []` fallback pattern (matching the test_runner / database modules).
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_read_bytes(path: text) -> [u8]
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
-
-# rt_process_run is the raw runtime extern. We invoke it directly because
-# `capture_electron`'s `val (out, err, exit_code) = shell(...)` struct
-# destructure trips an interpreter bug ("variable `exit_code` not found"),
-# and the parent path uses `std.io.shell` which behaves slightly different
-# under bootstrap. Going through the runtime extern keeps the harness
-# portable across stages.
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 # NOTE: We do NOT use std.common.image.ppm_decode here. Its
 # `decode_ppm_to_argb` calls `data.len().to_i32()`, which crashes under
 # the bootstrap interpreter ("method `to_i32` not found on type i64").
 # We inline a minimal P6 decoder below using `as i32` casts.
-
-extern fn rt_env_get(key: text) -> text?
-extern fn rt_env_cwd() -> text
 
 fn compare_pair(fixture: Fixture, chrome: CaptureResult, simple: CaptureResult,
                 width: i32, height: i32) -> PairResult:
@@ -174,10 +158,10 @@ fn write_report(fixture: Fixture, chrome: CaptureResult, simple: CaptureResult,
     file_write_text(report_sdn_path(fixture.id), body)
 
 fn _copy_ppm_capture(src: text, dst: text) -> bool:
-    val bytes: [u8] = rt_file_read_bytes(src) ?? []
+    val bytes: [u8] = file_read_bytes(src)
     if bytes.len() == 0:
         return false
-    rt_file_write_bytes(dst, bytes)
+    file_write_bytes(dst, bytes)
 
 # ============================================================================
 # Run-One Driver
@@ -266,7 +250,7 @@ fn matches_only(fixture: Fixture, only: text) -> bool:
     only == "" or fixture.id == only
 
 fn _running_under_test(args: [text]) -> bool:
-    if (rt_env_get("SIMPLE_TEST_DEPTH") ?? "") != "":
+    if (env_get("SIMPLE_TEST_DEPTH") ?? "") != "":
         return true
     for arg in args:
         if arg == "test" or arg.ends_with("_spec.spl") or arg.contains("/test/") or arg.starts_with("test/"):
