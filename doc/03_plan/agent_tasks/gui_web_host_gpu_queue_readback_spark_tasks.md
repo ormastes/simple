@@ -14,7 +14,7 @@ backend readback fixtures. Synthetic handles remain isolated probe evidence.
 - This lane owns the final chain from 2D draw scheduling -> host/GPU queue emit/drain ->
   BrowserBackend frame evidence -> same-frame GPU readback receipt.
 - Canonical source of truth: `sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`.
-- Latest report (`doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md`) is expected to pass on this Linux host when regenerated:
+- Latest report (`doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-21.md`) is expected to pass on this Linux host when regenerated:
   `browser_frame_queue_status=pass`, `same_frame_gpu_backend_readback_status=pass`,
   `readback_vulkan_verdict=pass`, `readback_cuda_verdict=pass`,
   `readback_opencl_verdict=pass`,
@@ -114,7 +114,7 @@ backend readback fixtures. Synthetic handles remain isolated probe evidence.
 
 ## Commands to run
 
-- `sed -n '1,220p' doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md`
+- `sed -n '1,220p' doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-21.md`
 - `SIMPLE_BIN=bin/simple SIMPLE_LIB=src timeout 420 sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`
 - `SIMPLE_LIB=src timeout 180 ./bin/simple test test/01_unit/lib/gc_async_mut/ui/web_render_pixel_backend_queue_spec.spl --mode=interpreter`
 - `SIMPLE_LIB=src timeout 180 ./bin/simple test test/01_unit/app/ui/browser_backend_runtime_queue_spec.spl --mode=interpreter`
