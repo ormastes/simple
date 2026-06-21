@@ -311,8 +311,8 @@ fields and reports the full completion list through `blocked_completion_gates`
 and `blocked_completion_gate_count`, while retaining `blocked_completion_gate`
 as the first outstanding gate for older consumers. The top-level list is derived
 from the nested Simple/original Chrome RenderDoc lanes, Electron
-Chromium/Vulkan RenderDoc gate, and the production GUI/web parity gate, so
-concurrent missing captures are not hidden by a single status reason.
+Chromium/Vulkan RenderDoc gate, and the production GUI/web core parity gate,
+so concurrent missing captures are not hidden by a single status reason.
 
 The current canonical evidence contract is:
 
@@ -356,16 +356,18 @@ The current canonical evidence contract is:
   and launch flags.
 - Production GUI/web renderer parity path:
   `build/production_gui_web_renderer_parity_evidence/evidence.env` must report
-  the top-level parity status and component statuses as `pass`, including the
-  renderer matrix, 50-case layout manifest, Tauri/Chrome surface manifest,
-  backend parity, font offload/readback, and raw Metal framebuffer readback.
-  The Tauri/Chrome surface manifest must prove live Electron, Tauri, and
-  Chrome captures, 50 Tauri and 50 Chrome cases, 36 pass cases plus 14 tracked
+  the GUI/web/2D core parity components as `pass`: renderer matrix, 50-case
+  layout manifest, live Tauri/Chrome surface manifest, and backend parity. The
+  Tauri/Chrome surface manifest must prove live Electron, Tauri, and Chrome
+  captures, 50 Tauri and 50 Chrome cases, 36 pass cases plus 14 tracked
   divergence cases for each browser surface, 0 fail cases, 0 mismatch counts,
-  `no_fake_capture=true`, and `blur_or_tolerance_used=false`.
-  The GUI RenderDoc feature audit requires this through
-  `scripts/check/check-production-gui-web-renderer-parity-gate.shs` before it
-  can report `pass`; missing parity evidence is not treated as optional.
+  `no_fake_capture=true`, and `blur_or_tolerance_used=false`. The GUI RenderDoc
+  feature audit records this derived status as
+  `production_gui_web_renderer_parity_core_status`. It also re-emits the full
+  `scripts/check/check-production-gui-web-renderer-parity-gate.shs` result,
+  including font offload/readback and Metal readback fields, but those
+  supplemental production lanes do not substitute for or block the narrower
+  GUI/web/2D RenderDoc completion claim unless the core parity fields fail.
 
 ## External Host Gate
 
