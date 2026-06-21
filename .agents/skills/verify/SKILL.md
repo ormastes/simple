@@ -42,8 +42,8 @@ not create, rewrite, or weaken SPipe after verification.
 - For broad SPipe lanes, the recorded cooperative review plan is complete or
   explicitly `N/A`: lower-model sidecars such as Codex Spark, Claude Haiku, or
   Claude Sonnet were merged/reviewed when used, and a normal/highest-capability
-  LLM accepted broad findings, generated-manual quality, coverage claims, and
-  done marks before PASS.
+  LLM accepted broad findings, generated-manual quality, coverage claims,
+  exclusions, and done marks before PASS.
 
 ### 2. Implementation
 - No stub functions (`pass_todo`, weak `pass_do_nothing(...)`, weak `pass_dn(...)`, weak `todo(...)`)
