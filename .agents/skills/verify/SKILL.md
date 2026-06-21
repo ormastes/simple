@@ -24,6 +24,9 @@ not create, rewrite, or weaken SPipe after verification.
 - Every REQ-NNN has test coverage
 - Required executable SPipe specs exist under `test/...`; generated/manual
   scenario docs exist under the mirrored `doc/06_spec/.../*_spec.md` path
+- For changed specs, `simple spipe-docgen <spec> --output doc/06_spec --no-index`
+  reports complete documentation with `0 stubs`; a generated manual marked as a
+  stub is a FAIL even when the `.md` file exists.
 - Scenario-oriented generated docs read as manuals: primary steps visible,
   inline/previous setup expanded, executable SPipe folded by default, detailed
   edge/matrix/stress/helper cases folded or skipped by policy.

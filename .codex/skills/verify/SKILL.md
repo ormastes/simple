@@ -43,6 +43,9 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
 - Every REQ-NNN has at least one test
 - Every required SPipe generated/manual spec exists under `doc/06_spec/` at the
   path mirrored from the executable `test/...` spec
+- For changed specs, `simple spipe-docgen <spec> --output doc/06_spec --no-index`
+  reports complete documentation with `0 stubs`; a generated manual marked as a
+  stub is a FAIL even when the `.md` file exists.
 - Scenario-oriented generated docs read as manuals: primary scenario steps are
   visible first, `@inline`/`@prev` setup expands without redundant metadata,
   executable SPipe is folded by default, and advanced/edge/matrix/stress
