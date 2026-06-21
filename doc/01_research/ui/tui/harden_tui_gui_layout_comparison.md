@@ -373,7 +373,7 @@ The repo already has enough capture, comparison, backend, and system-test scaffo
   - nearest-rank p50/p95 conversion to microseconds.
   - host measurement conversion into `BackendMeasurementRecord`.
 - Added `test/03_system/wm_compare/backend_measurement_capture_spec.spl` with 2 scenarios covering the actual sample format and conversion into valid CPU SIMD measurement evidence.
-- Added `doc/06_spec/system/wm_compare/backend_measurement_capture_spec.md` as the manual scenario doc.
+- Added `doc/06_spec/03_system/gui/wm_compare/backend_measurement_capture_spec.md` as the manual scenario doc.
 - Recorded real host evidence in `doc/09_report/harden_tui_gui_layout_backend_measurement_2026-06-01.md` from:
   - command: `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/03_system/wm_compare/backend_measurement_report_spec.spl --mode=interpreter --clean`
   - samples: 37.71s / 929,240 KiB, 38.58s / 930,308 KiB, 38.89s / 930,160 KiB.
