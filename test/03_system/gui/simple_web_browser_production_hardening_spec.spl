@@ -135,19 +135,12 @@ by proving the live browser server boundary is production-hardened on this host.
 
 use std.spec.*
 use std.nogc_sync_mut.io.tcp.{TcpStream}
+use app.io.mod.{process_spawn_async, process_kill, thread_sleep, getpid, current_time_ms}
 use app.ui.web.auth_params.{UI_WEB_LOGIN_RATE_MAX_ATTEMPTS, UI_WEB_MAX_AUTH_JSON_BYTES, UI_WEB_MAX_REQUEST_HEAD_BYTES, UI_WEB_MAX_REQUEST_LINE_BYTES, UI_WEB_MAX_HEADER_LINE_BYTES}
-
-extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
-extern fn rt_process_kill(pid: i64) -> bool
-extern fn rt_thread_sleep(ms: i64)
-extern fn rt_getpid() -> i64
-extern fn rt_time_ms() -> u64
-extern fn rt_bytes_to_text(data: [u8]) -> text
 
 fn hardening_free_port(extra: i32) -> i32:
     val base = 21000
-    val pid_offset = rt_getpid() % 10000
+    val pid_offset = getpid() % 10000
     return base + pid_offset as i32 + extra
 
 fn hardening_start_web_server(port: i32) -> i64:
@@ -162,7 +155,7 @@ fn hardening_start_shared_wm_server(port: i32) -> i64:
 fn hardening_start_web_server_env(port: i32, extra_env: text) -> i64:
     val extra = if extra_env == "": "" else: "{extra_env} "
     val cmd = "exec env SIMPLE_LIB=src SIMPLE_UI_WEB_TOKEN_SECRET=simple-web-hardening-test-secret SIMPLE_UI_WEB_ALLOWED_ORIGINS=http://127.0.0.1:{port} SIMPLE_WEB_HARDENING_PORT={port} {extra}src/compiler_rust/target/release/simple run test/03_system/gui/ui_browser/simple_web_hardening_server.spl --mode=interpreter >/tmp/simple_web_hardening_{port}.log 2>&1"
-    val pid = rt_process_spawn_async("sh", ["-c", cmd])
+    val pid = process_spawn_async("sh", ["-c", cmd])
     hardening_wait_for_server(port)
     return pid
 
@@ -174,12 +167,12 @@ fn hardening_wait_for_server(port: i32):
                 stream.close()
                 return
             Err(_):
-                rt_thread_sleep(100)
+                thread_sleep(100)
                 attempt = attempt + 1
 
 fn hardening_stop_web_server(pid: i64):
     if pid > 0:
-        rt_process_kill(pid)
+        process_kill(pid)
 
 fn raw_http_request(port: i32, request: text) -> text:
     val addr = "127.0.0.1:{port}"
@@ -200,7 +193,7 @@ fn raw_http_request(port: i32, request: text) -> text:
                             return "READ_FAILED: {e}"
                         Ok(bytes):
                             stream.close()
-                            return rt_bytes_to_text(bytes)
+                            return text.from_bytes(bytes)
 
 fn http_status_line(response: text) -> text:
     if response.starts_with("HTTP/1.1 403 Forbidden"):
@@ -596,11 +589,11 @@ describe "Simple web browser production hardening live endpoints":
         val warmup_response = raw_http_request(port, login_allowed_request(port))
 
         step("Measure a warmed login plus authenticated WebSocket upgrade")
-        val start_ms = rt_time_ms()
+        val start_ms = current_time_ms()
         val login_response = raw_http_request(port, login_allowed_request(port))
         val token = http_json_string_field(login_response, "token")
         val websocket_response = raw_http_request(port, websocket_authorized_request(port, token))
-        val elapsed_ms = rt_time_ms() - start_ms
+        val elapsed_ms = current_time_ms() - start_ms
         val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
 
         hardening_stop_web_server(pid)
@@ -610,7 +603,7 @@ describe "Simple web browser production hardening live endpoints":
         expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
         expect(token.len()).to_be_greater_than(20)
         expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
-        expect(elapsed_ms).to_be_less_than(10000u64)
+        expect(elapsed_ms).to_be_less_than(10000)
 
     slow_it "rejects query bearer websocket compatibility even when deprecated env is set":
         """Production auth must reject query bearer tokens even when the old compatibility environment variable is present."""
