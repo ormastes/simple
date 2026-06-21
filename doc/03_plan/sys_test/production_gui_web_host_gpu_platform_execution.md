@@ -171,7 +171,7 @@ standalone wrapper publishes `webgpu_real_readback_status=pass`,
 `webgpu_real_readback_backend_handle`, and matching expected/actual checksums
 when a real `webgpu-real` host is available. The aggregate now consumes that
 same-frame proof when present; the current Linux aggregate records WebGPU real
-readback as unavailable/not-device-readback and keeps `surface_upload`
+readback as unavailable/not_device_readback and keeps `surface_upload`
 provenance-only.
 
 ## Normal-LLM Review Checklist
