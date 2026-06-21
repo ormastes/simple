@@ -18,6 +18,13 @@ Codex excels at architecture evaluation, pattern selection, and MDSOC design. Us
 
 ## Capabilities
 
+For broad architecture lanes, the architecture/test-plan handoff must list
+lower-model sidecar lanes or `N/A`, such as Codex Spark, Claude Haiku, or
+Claude Sonnet, plus merge owner and final normal/highest-capability reviewer.
+Before sidecars start, the primary/best model defines shared interface names,
+manual setup/checker helper names, and fail-fast placeholders (`assert(false)`
+or `fail(...)`) that sidecars must target.
+
 ### 1. MDSOC Pattern Application
 
 Multi-Dimensional Separation of Concerns patterns from `src/compiler/85.mdsoc/`:
