@@ -14,13 +14,12 @@ use app.test_daemon.session_types.{
 use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
 use app.test_daemon.types.{TestResult, TRESP_COMPLETED, TRESP_FAILED}
 use std.qemu.qmp_client.{QmpClient, qmp_connect, qmp_savevm, qmp_loadvm}
+use app.io.mod.{process_spawn_async, process_kill}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_hash_text(s: text) -> i64
 extern fn rt_shell_exec(cmd: text) -> text
 extern fn rt_shell_exit_code() -> i64
-extern fn rt_process_spawn_async(binary: text, args: [text]) -> i64
-extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_sleep_ms(ms: i64)
 
@@ -122,7 +121,7 @@ impl QemuAdapter:
             args.push(desc.config["drive"])
 
         # Spawn QEMU process
-        val pid = rt_process_spawn_async(qemu_binary, args)
+        val pid = process_spawn_async(qemu_binary, args)
         if pid <= 0:
             print "[qemu_adapter] failed to spawn {qemu_binary} for {session_id}"
             return lease
@@ -131,7 +130,7 @@ impl QemuAdapter:
         val connected = wait_for_qmp(qmp_socket, QEMU_BOOT_MAX_RETRIES, QEMU_BOOT_POLL_MS)
         if not connected:
             print "[qemu_adapter] QMP socket did not appear for {session_id}, killing pid {pid}"
-            rt_process_kill(pid)
+            process_kill(pid)
             return lease
 
         # Create golden snapshot for snapshot-based reuse
@@ -199,7 +198,7 @@ impl QemuAdapter:
         if policy == RESET_HARD:
             # Kill existing process
             if lease.pid > 0:
-                rt_process_kill(lease.pid)
+                process_kill(lease.pid)
                 rt_sleep_ms(500)
             # Hard reset requires the caller to re-start via start()
             # Return true to indicate kill succeeded
@@ -279,7 +278,7 @@ impl QemuAdapter:
             return true
 
         # Kill the QEMU process
-        val killed = rt_process_kill(lease.pid)
+        val killed = process_kill(lease.pid)
         if not killed:
             # Force kill
             rt_shell_exec("kill -9 {lease.pid} 2>/dev/null")

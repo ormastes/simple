@@ -274,8 +274,9 @@ The result must be `0`; executable SSpec belongs under `test/`, while
 `doc/06_spec` contains generated/manual Markdown and evidence assets only.
 Also run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
 `sh scripts/audit/direct-env-runtime-guard.shs --staged` before final verify so
-new app/gc env reads and process-run calls use env/process facades instead of
-local `rt_env_get`, `rt_process_run`, or `rt_process_run_timeout`.
+new app/gc env reads and process calls use env/process facades instead of local
+`rt_env_get`, `rt_process_run`, `rt_process_run_timeout`, `rt_process_wait`,
+`rt_process_is_running`, or `rt_process_kill`.
 
 ## LLM Fine-Tune Handoff
 
