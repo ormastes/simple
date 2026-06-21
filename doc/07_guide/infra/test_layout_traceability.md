@@ -33,26 +33,26 @@ buckets. Document the reason before adding the root.
 
 ## Mirrored SPipe Docs
 
-Generated/manual SPipe docs mirror executable test paths under a preserved
-`test/` segment:
+Generated/manual SPipe docs mirror executable test paths after stripping the
+leading `test/` segment:
 
 ```text
 test/<kind>/<domain>/<feature>_spec.spl
-doc/06_spec/test/<kind>/<domain>/<feature>_spec.md
+doc/06_spec/<kind>/<domain>/<feature>_spec.md
 ```
 
-The formal-verification lane is the only current exception: executable specs
-under `test/00_formal_verification/` generate directly under
+The formal-verification lane follows the same rule: executable specs under
+`test/00_formal_verification/` generate under
 `doc/06_spec/00_formal_verification/`.
 
 Examples:
 
 ```text
 test/03_system/feature/usage/math_blocks_spec.spl
-doc/06_spec/test/03_system/feature/usage/math_blocks_spec.md
+doc/06_spec/03_system/feature/usage/math_blocks_spec.md
 
 test/03_system/qemu/qmp_screendump_spec.spl
-doc/06_spec/test/03_system/qemu/qmp_screendump_spec.md
+doc/06_spec/03_system/qemu/qmp_screendump_spec.md
 
 test/00_formal_verification/compiler/lean_basic_spec.spl
 doc/06_spec/00_formal_verification/compiler/lean_basic_spec.md
@@ -89,7 +89,7 @@ traceability set:
 
 ```text
 test/02_integration/app/startup_argparse_mmap_perf_spec.spl
-doc/06_spec/test/02_integration/app/startup_argparse_mmap_perf_spec.md
+doc/06_spec/02_integration/app/startup_argparse_mmap_perf_spec.md
 ```
 
 Do not move the executable spec to `doc/06_spec`, and do not replace the fast
