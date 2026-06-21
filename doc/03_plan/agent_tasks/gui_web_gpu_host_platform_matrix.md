@@ -237,8 +237,8 @@ unavailable/provenance-only to production proof.
 - Fail-closed condition: `swapchain_present` is presentation provenance only and
   must not satisfy `device_readback`.
 - Safe non-HW guidance: Linux-only agents may keep DirectX as planning/provenance
-  work; do not add production pass keys until a Windows/D3D or explicit DXVK
-  readback host produces a same-frame device-readback receipt.
+  work; do not add production pass keys until a Windows `win32-real` native D3D
+  host produces a same-frame device-readback receipt.
 - Normal-LLM verification: reject any DirectX promotion unless a same-frame
   `device_readback` receipt and positive DirectX backend handle are present.
 

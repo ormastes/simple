@@ -101,8 +101,9 @@ and `metal_host_availability=host-available`.
 
 ### Windows DirectX
 
-Host requirements: Windows with native D3D readback support, or an explicitly
-documented DXVK host where the DirectX backend reports a real readback handle.
+Host requirements: Windows `win32-real` with native D3D readback support. Linux
+DXVK/vkd3d setup remains setup/provenance evidence and must not promote the
+DirectX row to production pass by itself.
 
 Commands:
 
