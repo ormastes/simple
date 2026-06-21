@@ -74,8 +74,9 @@ description: Create architecture, UI design, system tests, and detail design for
 - Generate/read mirrored `doc/06_spec/...` for scenario-oriented specs and
   update steps/captures/visibility until the manual is usable without opening
   the source test.
-- Confirm matching `doc/07_guide`, `doc/06_spec`, and skill instructions were
-  updated when the workflow or tool contract changed.
+- Confirm matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
+  `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
+  instructions were updated when the workflow or tool contract changed.
 - Ask user if architecture/design needs changes
 
 ## Rules
