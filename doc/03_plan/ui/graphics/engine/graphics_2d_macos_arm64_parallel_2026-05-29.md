@@ -20,8 +20,8 @@ Current renderer restart plan inspected:
   source with host `clang -O2` and measured on Apple M4 for `fill_1080p`,
   `blit_tiles`, and `clipped_scroll`.
 - Metal availability proof: completed as an unavailable/stub proof on macOS
-  ARM64. `rt_metal_is_available()` returned `false` on Apple M4, so
-  `rt_metal_init()` and Metal draw/readback paths were not reached.
+  ARM64. The Metal availability facade returned `false` on Apple M4, so
+  Metal initialization and draw/readback paths were not reached.
 - CUDA benchmark evidence: not relevant to macOS Metal. The existing Simple
   GPU benchmark attempts `libcuda.so` and fails gracefully because CUDA is not
   present on Apple Silicon.
@@ -32,9 +32,9 @@ Current renderer restart plan inspected:
 
 ## Remaining macOS-Required Evidence
 
-- Run on Apple Silicon with a runtime where `rt_metal_is_available()` returns
-  `true`.
-- Prove `rt_metal_init()` succeeds and records concrete device/context status.
+- Run on Apple Silicon with a runtime where the Metal availability facade
+  returns `true`.
+- Prove Metal initialization succeeds and records concrete device/context status.
 - Run a Metal smoke that clears/draws and validates sync readback pixel hashes.
 - Compare Metal-backed Engine2D output against the CPU baseline for matching
   scenes, dimensions, and hashes.
