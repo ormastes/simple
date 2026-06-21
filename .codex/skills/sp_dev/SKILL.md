@@ -213,8 +213,9 @@ Before marking a feature tracking row `status=done`, fill `requirement`,
 `<runtime> lint doc/08_tracking/feature/feature_db.sdn`.
 
 When a workflow or tool contract changes, update the matching `doc/07_guide`,
-`doc/06_spec`, and `.codex/skills/` or `.claude/skills/` instructions before
-handoff. Treat stale process docs as unfinished work, not release cleanup.
+`doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, and
+`.claude/agents/spipe/` instructions before handoff. Treat stale process docs
+as unfinished work, not release cleanup.
 
 For broad SPipe planning lanes, split independent research or implementation
 checks across lower-model parallel agents when available (for example Codex

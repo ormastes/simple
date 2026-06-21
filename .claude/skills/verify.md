@@ -142,7 +142,8 @@ For each source file in scope:
 4. **Process documentation freshness:**
    - Workflow, tool-contract, evidence-wrapper, or verification-contract changes
      must update the matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
-     `.claude/skills/`, and SPipe process docs before final verification
+     `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
+     process docs before final verification
 
 ---
 
