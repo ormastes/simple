@@ -173,6 +173,12 @@ Reference: `doc/07_guide/infra/sspec_scenario_manual.md`.
 
 - If Claude (Step 1) or Codex (Step 2) produced research, build on it
 - If Gemini (Step 3) produced UI design, incorporate it — do not overwrite
+- For broad design lanes, the primary/highest-capability model defines shared
+  interface names, manual `step("...")` text, setup/checker helper names, and
+  fail-fast SSpec placeholders before lower-model sidecars fan out.
+- Lower-model sidecars such as Codex Spark, Claude Haiku, or Claude Sonnet may
+  research or draft independent slices, but the primary/highest-capability model
+  must review and accept the merged design before handoff.
 - Tag Codex-produced artifacts with `<!-- codex-design -->` comment
 
 ## Rules
