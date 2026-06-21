@@ -171,6 +171,9 @@ Scan for stub patterns — any match is a **FAIL**:
   updated the matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
   `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
   process docs before final verification.
+- Cooperative lower-model sidecar review, if required by the SPipe state or
+  plan, is complete before final verification; otherwise the verifier records
+  why the lane is narrow enough for `N/A`.
 - Cross-references between docs intact
 - CHANGELOG updated for user-facing changes
 
