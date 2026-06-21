@@ -7,9 +7,9 @@
 
 ## Evidence
 - `test/03_system/feature/language/host_gpu_event_path_spec.spl`
-- `doc/06_spec/test/03_system/feature/language/host_gpu_event_path_spec.md`
+- `doc/06_spec/03_system/feature/language/host_gpu_event_path_spec.md`
 - `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.spl`
-- `doc/06_spec/test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.md`
+- `doc/06_spec/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.md`
 - `test/01_unit/app/ui/web_render_backend_api_spec.spl` covers the shared
   artifact queue metadata helper and BrowserBackend frame propagation through
   generated widget HTML.
