@@ -43,6 +43,10 @@ Runs the CPU SIMD Engine2D evidence wrapper and verifies that the SIMD-backed
 |-------|-------|
 | Category | Other |
 | Status | Active |
+| Requirements | .spipe/gui-hardening-full/state.md |
+| Plan | doc/03_plan/agent_tasks/gui_backend_perf.md |
+| Design | N/A |
+| Research | N/A |
 | Source | `test/03_system/gui/cpu_simd_engine2d_diagram_evidence_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -113,6 +117,12 @@ expect(report).to_contain("- evidence_log_cksum: ")
 | Slow scenarios | 1 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [.spipe/gui-hardening-full/state.md](.spipe/gui-hardening-full/state.md)
+- **Plan:** [doc/03_plan/agent_tasks/gui_backend_perf.md](doc/03_plan/agent_tasks/gui_backend_perf.md)
 
 
 </details>
