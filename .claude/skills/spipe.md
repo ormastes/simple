@@ -161,6 +161,15 @@ The aggregate audit must also expose comparison artifact status keys:
 `gui_web_2d_vulkan_chrome_screenshot_png_status`,
 `gui_web_2d_vulkan_simple_evidence_file_status`, and
 `gui_web_2d_vulkan_simple_backend_status`.
+Artifact presence is not a pixel-equivalence claim. Require
+`gui_web_2d_vulkan_pixel_comparison_status=pass`,
+`gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff`, ARGB metadata for
+Electron/Chrome/Simple, and the zero-mismatch pairwise diff statuses
+`gui_web_2d_vulkan_electron_chrome_pairwise_diff_status`,
+`gui_web_2d_vulkan_electron_simple_pairwise_diff_status`, and
+`gui_web_2d_vulkan_chrome_simple_pairwise_diff_status` before claiming the
+Electron baseline, Chrome Vulkan-backed render, and Simple GUI/web/2D Vulkan
+render match pixels.
 Browser Vulkan proof must be read from
 `gui_web_2d_vulkan_browser_backing_status`,
 `gui_web_2d_vulkan_browser_backing_reason`, and

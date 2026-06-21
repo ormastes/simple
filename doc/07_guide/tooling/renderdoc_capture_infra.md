@@ -119,7 +119,7 @@ comparison fixture and viewport through `gui_web_2d_vulkan_html_path`,
 artifacts `gui_web_2d_vulkan_electron_argb_path`,
 `gui_web_2d_vulkan_chrome_screenshot`, and
 `gui_web_2d_vulkan_simple_evidence_env`. The machine-checkable comparison
-contract is `gui_web_2d_vulkan_comparison_fixture_status`,
+artifact contract is `gui_web_2d_vulkan_comparison_fixture_status`,
 `gui_web_2d_vulkan_comparison_artifact_status`,
 `gui_web_2d_vulkan_comparison_artifact_reason`,
 `gui_web_2d_vulkan_electron_argb_viewport_match_status`,
@@ -134,6 +134,19 @@ contract is `gui_web_2d_vulkan_comparison_fixture_status`,
 the Electron baseline exists and is nonblank, the Chrome screenshot is a
 viewport-matching PNG, and the Simple evidence env proves the Vulkan backend
 before making a GUI/web/2D Vulkan comparison claim.
+Artifact evidence is not enough for a pixel-equivalence claim. The pairwise
+pixel comparison contract is `gui_web_2d_vulkan_pixel_comparison_status`,
+`gui_web_2d_vulkan_pixel_comparison_reason`, and
+`gui_web_2d_vulkan_pixel_comparison_mode`. It depends on ARGB metadata for all
+three surfaces (`gui_web_2d_vulkan_electron_argb_*`,
+`gui_web_2d_vulkan_chrome_argb_*`, and
+`gui_web_2d_vulkan_simple_argb_*`) plus zero-mismatch diff lanes:
+`gui_web_2d_vulkan_electron_chrome_pairwise_diff_status`,
+`gui_web_2d_vulkan_electron_simple_pairwise_diff_status`, and
+`gui_web_2d_vulkan_chrome_simple_pairwise_diff_status`. A status of
+`incomplete` with mode `artifact-only-no-pairwise-diff` means the run captured
+useful artifacts but did not prove Electron, Chrome, and Simple rendered the
+same GUI/web/2D pixels.
 The browser Vulkan-backed proof is a separate rollup:
 `gui_web_2d_vulkan_browser_backing_status`,
 `gui_web_2d_vulkan_browser_backing_reason`, and
@@ -149,10 +162,10 @@ The current blockers are machine-readable in
 `gui_web_2d_vulkan_renderdoc_blocker_gates`. These fields distinguish host
 Vulkan readiness, RenderDoc command availability, Simple RenderDoc gate status,
 Electron ANGLE Vulkan acceptance, Electron RenderDoc gate status, Chrome ANGLE
-Vulkan acceptance, and Chrome RenderDoc gate status. A blocker status of
-`blocked` means the GUI/web/2D comparison can still be useful, but at least one
-required Vulkan-backed `.rdc` proof lane is missing, and completion remains
-`incomplete`.
+Vulkan acceptance, Chrome RenderDoc gate status, and pairwise pixel comparison.
+A blocker status of `blocked` means the GUI/web/2D comparison can still be
+useful, but at least one required Vulkan-backed `.rdc` proof or pixel-diff lane
+is missing, and completion remains `incomplete`.
 
 On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
 `src/compiler_rust/target/debug/simple` when that binary advertises the macOS
@@ -292,6 +305,10 @@ Completion requires typed evidence, not screenshots alone:
 - The aggregate audit reports `gui_web_2d_vulkan_comparison_artifact_status=pass`
   or records an explicit `gui_web_2d_vulkan_comparison_artifact_reason` for the
   missing or mismatched comparison artifact.
+- The aggregate audit reports `gui_web_2d_vulkan_pixel_comparison_status=pass`
+  with `gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff`, proving
+  Electron, Chrome, and Simple ARGB outputs were pairwise compared with zero
+  mismatches.
 - The aggregate audit reports `gui_web_2d_vulkan_browser_backing_status=pass`
   and `gui_web_2d_vulkan_renderdoc_blocker_status=pass`; otherwise these fields
   are completion blockers, not warnings.
