@@ -28,6 +28,9 @@ Do NOT proceed with release if verification has any FAIL items.
 SPipe specs and SPipe coverage are verified before release. Do not create,
 rewrite, or weaken SPipe during release; if SPipe is missing, stale, or
 placeholder-based, stop and go back to verify/implementation.
+Verification must also have accepted matching `doc/07_guide`, `doc/06_spec`,
+skill, and SPipe process-doc freshness. Release must not repair those docs
+after STATUS: PASS.
 
 ## Steps
 
