@@ -11,13 +11,8 @@
 # NOTE: Each test is wrapped in a standalone function to work around
 # the nested closure capture bug (it blocks can't see module var mutations).
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_getpid() -> i64
-extern fn rt_time_now_unix_micros() -> i64
+use app.io.mod.{file_read_text, file_write, file_exists, file_delete}
+use app.io.mod.{dir_create_all, getpid, time_now_unix_micros}
 
 fn simple_hash(s: text) -> i64:
     val bs = s.bytes()
@@ -31,15 +26,15 @@ fn simple_hash(s: text) -> i64:
     h
 
 fn hash_file(path: text) -> i64:
-    val content = rt_file_read_text(path) ?? ""
+    val content = file_read_text(path) ?? ""
     simple_hash(content)
 
 fn make_test_dir() -> text:
-    val pid = rt_getpid()
-    val ts = rt_time_now_unix_micros()
+    val pid = getpid()
+    val ts = time_now_unix_micros()
     val dir = "/tmp/tdcache_test_{pid}_{ts}"
-    rt_dir_create_all(dir)
-    rt_dir_create_all("{dir}/src")
+    dir_create_all(dir)
+    dir_create_all("{dir}/src")
     dir
 
 fn build_big_content(n: i64) -> text:
@@ -57,7 +52,7 @@ fn build_big_content(n: i64) -> text:
 fn test_unchanged_file_fresh() -> bool:
     val dir = make_test_dir()
     val path = "{dir}/src/unchanged_spec.spl"
-    rt_file_write_text(path, "# test file\nval x = 42\n")
+    file_write(path, "# test file\nval x = 42\n")
 
     # Record hash
     val recorded_hash = hash_file(path)
@@ -67,35 +62,35 @@ fn test_unchanged_file_fresh() -> bool:
     val fresh = recorded_hash == current_hash
 
     # Cleanup
-    rt_file_delete(path)
-    rt_file_delete("{dir}/src")
-    rt_file_delete(dir)
+    file_delete(path)
+    file_delete("{dir}/src")
+    file_delete(dir)
     fresh
 
 fn test_modified_file_stale() -> bool:
     val dir = make_test_dir()
     val path = "{dir}/src/changing_spec.spl"
-    rt_file_write_text(path, "# version 1\nval x = 1\n")
+    file_write(path, "# version 1\nval x = 1\n")
 
     # Record hash
     val recorded_hash = hash_file(path)
 
     # Modify the file
-    rt_file_write_text(path, "# version 2\nval x = 2\n")
+    file_write(path, "# version 2\nval x = 2\n")
 
     # Check freshness — file changed, should be stale
     val current_hash = hash_file(path)
     val stale = recorded_hash != current_hash
 
-    rt_file_delete(path)
-    rt_file_delete("{dir}/src")
-    rt_file_delete(dir)
+    file_delete(path)
+    file_delete("{dir}/src")
+    file_delete(dir)
     stale
 
 fn test_new_file_not_cached() -> bool:
     val dir = make_test_dir()
     val path = "{dir}/src/new_spec.spl"
-    rt_file_write_text(path, "# brand new test\n")
+    file_write(path, "# brand new test\n")
 
     # No recorded hash — cache has nothing
     # We simulate by checking a lookup in an empty list
@@ -107,9 +102,9 @@ fn test_new_file_not_cached() -> bool:
             found = true
         i = i + 1
 
-    rt_file_delete(path)
-    rt_file_delete("{dir}/src")
-    rt_file_delete(dir)
+    file_delete(path)
+    file_delete("{dir}/src")
+    file_delete(dir)
     not found
 
 fn test_track_5_files() -> text:
@@ -120,11 +115,11 @@ fn test_track_5_files() -> text:
     val p3 = "{src}/t3_spec.spl"
     val p4 = "{src}/t4_spec.spl"
     val p5 = "{src}/t5_spec.spl"
-    rt_file_write_text(p1, "# test 1\n")
-    rt_file_write_text(p2, "# test 2\n")
-    rt_file_write_text(p3, "# test 3\n")
-    rt_file_write_text(p4, "# test 4\n")
-    rt_file_write_text(p5, "# test 5\n")
+    file_write(p1, "# test 1\n")
+    file_write(p2, "# test 2\n")
+    file_write(p3, "# test 3\n")
+    file_write(p4, "# test 4\n")
+    file_write(p5, "# test 5\n")
 
     # Record hashes
     var paths: [text] = [p1, p2, p3, p4, p5]
@@ -144,7 +139,7 @@ fn test_track_5_files() -> text:
         i = i + 1
 
     # Modify only p3
-    rt_file_write_text(p3, "# test 3 modified\n")
+    file_write(p3, "# test 3 modified\n")
 
     # Check: p1,p2 fresh, p3 stale, p4,p5 fresh
     val p1_fresh = hash_file(p1) == hashes[0]
@@ -156,10 +151,10 @@ fn test_track_5_files() -> text:
     # Cleanup
     i = 0
     while i < paths.len():
-        rt_file_delete(paths[i])
+        file_delete(paths[i])
         i = i + 1
-    rt_file_delete(src)
-    rt_file_delete(dir)
+    file_delete(src)
+    file_delete(dir)
 
     # Return encoded results
     var errors: [text] = []
@@ -183,23 +178,23 @@ fn test_track_5_files() -> text:
 fn test_rerecord_after_modification() -> text:
     val dir = make_test_dir()
     val path = "{dir}/src/rerecord_spec.spl"
-    rt_file_write_text(path, "# v1\n")
+    file_write(path, "# v1\n")
 
     # Record v1
     val hash_v1 = hash_file(path)
     val fresh_after_record = hash_file(path) == hash_v1
 
     # Modify
-    rt_file_write_text(path, "# v2\n")
+    file_write(path, "# v2\n")
     val stale_after_modify = hash_file(path) != hash_v1
 
     # Re-record with v2
     val hash_v2 = hash_file(path)
     val fresh_after_rerecord = hash_file(path) == hash_v2
 
-    rt_file_delete(path)
-    rt_file_delete("{dir}/src")
-    rt_file_delete(dir)
+    file_delete(path)
+    file_delete("{dir}/src")
+    file_delete(dir)
 
     var errors: [text] = []
     if not fresh_after_record:
@@ -217,8 +212,8 @@ fn test_invalidation() -> text:
     val dir = make_test_dir()
     val p1 = "{dir}/src/inv1_spec.spl"
     val p2 = "{dir}/src/inv2_spec.spl"
-    rt_file_write_text(p1, "# test 1\n")
-    rt_file_write_text(p2, "# test 2\n")
+    file_write(p1, "# test 1\n")
+    file_write(p2, "# test 2\n")
 
     # Record both
     var paths: [text] = [p1, p2]
@@ -238,10 +233,10 @@ fn test_invalidation() -> text:
             found_p1 = true
         i = i + 1
 
-    rt_file_delete(p1)
-    rt_file_delete(p2)
-    rt_file_delete("{dir}/src")
-    rt_file_delete(dir)
+    file_delete(p1)
+    file_delete(p2)
+    file_delete("{dir}/src")
+    file_delete(dir)
 
     var errors: [text] = []
     if count_before != 2:
@@ -259,7 +254,7 @@ fn test_persistence() -> text:
     val dir = make_test_dir()
     val cache_file = "{dir}/test_cache.sdn"
     val path = "{dir}/src/persist_spec.spl"
-    rt_file_write_text(path, "# persistent\n")
+    file_write(path, "# persistent\n")
 
     # Build cache content and save
     val hash = hash_file(path)
@@ -269,17 +264,17 @@ fn test_persistence() -> text:
     parts.push("status=2\n")
     parts.push("passed=10\n")
     parts.push("failed=0\n")
-    rt_file_write_text(cache_file, parts.join(""))
+    file_write(cache_file, parts.join(""))
 
-    val file_there = rt_file_exists(cache_file)
-    val content = rt_file_read_text(cache_file) ?? ""
+    val file_there = file_exists(cache_file)
+    val content = file_read_text(cache_file) ?? ""
     val has_path = content.contains("persist_spec.spl")
     val has_passed = content.contains("passed=10")
 
-    rt_file_delete(path)
-    rt_file_delete(cache_file)
-    rt_file_delete("{dir}/src")
-    rt_file_delete(dir)
+    file_delete(path)
+    file_delete(cache_file)
+    file_delete("{dir}/src")
+    file_delete(dir)
 
     var errors: [text] = []
     if not file_there:
@@ -296,30 +291,30 @@ fn test_persistence() -> text:
 fn test_empty_file() -> bool:
     val dir = make_test_dir()
     val path = "{dir}/src/empty_spec.spl"
-    rt_file_write_text(path, "")
+    file_write(path, "")
     val recorded_hash = hash_file(path)
     val fresh = hash_file(path) == recorded_hash
-    rt_file_delete(path)
-    rt_file_delete("{dir}/src")
-    rt_file_delete(dir)
+    file_delete(path)
+    file_delete("{dir}/src")
+    file_delete(dir)
     fresh
 
 fn test_large_content() -> text:
     val dir = make_test_dir()
     val big_content = build_big_content(100)
     val path = "{dir}/src/big_spec.spl"
-    rt_file_write_text(path, big_content)
+    file_write(path, big_content)
     val recorded_hash = hash_file(path)
     val fresh_before = hash_file(path) == recorded_hash
 
     # Add one more line
     val modified = big_content + "# one more line\n"
-    rt_file_write_text(path, modified)
+    file_write(path, modified)
     val stale_after = hash_file(path) != recorded_hash
 
-    rt_file_delete(path)
-    rt_file_delete("{dir}/src")
-    rt_file_delete(dir)
+    file_delete(path)
+    file_delete("{dir}/src")
+    file_delete(dir)
 
     var errors: [text] = []
     if not fresh_before:
@@ -334,12 +329,12 @@ fn test_large_content() -> text:
 fn test_special_chars_path() -> bool:
     val dir = make_test_dir()
     val path = "{dir}/src/test-with-dashes_and_underscores_spec.spl"
-    rt_file_write_text(path, "# special\n")
+    file_write(path, "# special\n")
     val recorded_hash = hash_file(path)
     val fresh = hash_file(path) == recorded_hash
-    rt_file_delete(path)
-    rt_file_delete("{dir}/src")
-    rt_file_delete(dir)
+    file_delete(path)
+    file_delete("{dir}/src")
+    file_delete(dir)
     fresh
 
 # ============================================================================
