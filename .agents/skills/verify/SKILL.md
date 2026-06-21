@@ -89,8 +89,9 @@ not create, rewrite, or weaken SPipe after verification.
 - Runtime facade boundary: new env reads or process calls in app leaf code
   or `src/lib/gc_async_mut` outside owner modules such as `app/io/*.spl` must
   use the stdlib/app/gc env/process facades, not local `rt_env_get`,
-  `rt_process_run`, `rt_process_run_timeout`, `rt_process_wait`,
-  `rt_process_is_running`, or `rt_process_kill` declarations/calls.
+  `rt_process_run`, `rt_process_run_timeout`, `rt_process_spawn_async`,
+  `rt_process_wait`, `rt_process_is_running`, or `rt_process_kill`
+  declarations/calls.
   Check with `sh scripts/audit/direct-env-runtime-guard.shs --working` and
   `sh scripts/audit/direct-env-runtime-guard.shs --staged`.
 - Security: input validation, no secrets
