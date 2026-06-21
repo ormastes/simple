@@ -76,6 +76,10 @@ If multiple LLMs participate in research:
 - Later LLMs **append and annotate** -- never overwrite prior research
 - Validate prior findings against current `src/` state
 - Identify gaps, add supplementary research
+- For broad lanes, split independent checks across lower-model sidecars when
+  available (Codex Spark, Claude Haiku, Claude Sonnet), then require a
+  normal/highest-capability review before accepting broad findings, done marks,
+  generated-manual quality, or exclusions. Record `N/A` for narrow work.
 
 ---
 
@@ -118,6 +122,12 @@ If multiple LLMs participate in research:
 - SPipe BDD tests with real assertions
 - Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 - Every REQ-NNN must have at least one test
+- Define shared interface names and manual-facing setup/checker helper names
+  before implementation. Temporary helper placeholders must fail explicitly
+  with `assert(false)` or equivalent.
+- Generate mirrored `doc/06_spec/...` manuals from SSpec and read them as
+  manuals; revise steps, captures, inline/previous expansion, and visibility
+  until primary flows are understandable without opening the source test.
 
 **2.4 Detail Design**
 - Data structures, algorithms, module interactions, error handling
@@ -197,6 +207,10 @@ If multiple LLMs participate in research:
 
 **3.15** Run `/verify` + VCS Sync.
 
+Broad implementation lanes must complete the recorded lower-model sidecar plan
+or mark it `N/A`, then pass normal/highest-capability review before claiming
+coverage, generated-manual quality, done marks, or broad exclusions.
+
 ### Skills / Commands
 
 | LLM | Invocation |
@@ -255,6 +269,8 @@ bounded implementation slices before deleting anything:
 
 - **Zero FAIL items** -- all stubs implemented, all REQs covered, all docs updated
 - **WARN items reviewed** -- acceptable with justification, or converted to tracked TODOs
+- Scenario-oriented generated docs under `doc/06_spec/...` read as manuals, not
+  raw test dumps, and executable `.spl` specs are absent from `doc/06_spec`
 - Summary table must show `STATUS: PASS` before proceeding to release
 
 ### Skills / Commands
