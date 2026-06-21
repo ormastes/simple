@@ -216,4 +216,5 @@ backend readback fixtures. Synthetic handles remain isolated probe evidence.
   or unrelated 3D/compute evidence paths.
 - Do not edit system tests outside queue/readback-lane artifacts listed above.
 - Do not edit third-party/runtime external bindings under `src/runtime/vendor/**`.
-- Do not rewrite `doc/06_spec`; this is an executable handoff/implementation task packet only.
+- Do not hand-edit or bulk rewrite `doc/06_spec`; regenerate mirrored manuals
+  only for touched queue/readback specs when their SSpec source changes.
