@@ -187,8 +187,9 @@
    the next gated production glyph compositing slice.
  - `doc/06_spec/unit/browser_engine/text_painter_spec.md`: generated scenario
    manual for the text painter, including the calibrated paint-run scenario.
- - `doc/09_report/gui_color_image_pipeline_8k_current_2026-06-01.md`: current
-   packed 8K surface and lazy codec/profile evidence.
+ - `doc/09_report/gui_color_image_pipeline_8k_current_2026-06-01.md`:
+   historical packed 8K surface and lazy codec/profile evidence; the
+   2026-06-21 report below is the current source of truth for this lane.
  - `doc/09_report/gui_color_image_pipeline_8k_evidence_2026-06-21.md`: 8K lane
    canonical evidence with non-identity ICC and JPEG XL non-default structured
    color fail-closed behavior. The refreshed release-binary run reports
