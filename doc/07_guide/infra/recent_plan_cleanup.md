@@ -21,15 +21,17 @@ marks, and concrete next closure actions for unfinished work.
    with acceptance criteria.
 2. Create or update the plan under `doc/03_plan/agent_tasks/`.
 3. Discover candidates with a dated query and record the query in the plan.
-4. Split review across disjoint Spark lanes, usually compiler, runtime, and
-   app/UI. Add review-discovered waves when normal review finds omissions.
+4. Split plan/research review across disjoint lower-model lanes when available,
+   usually Codex Spark, Claude Haiku, or Claude Sonnet for compiler, runtime,
+   and app/UI. Add review-discovered waves when normal review finds omissions.
 5. Use only these final states:
    - `mark-done`
    - `needs-evidence`
    - `needs-requirement-selection`
    - `needs-implementation`
    - `superseded/merge`
-6. Require normal LLM review before accepting done marks or broad exclusions.
+6. Require normal/highest-capability LLM review before accepting done marks,
+   merged lower-model findings, or broad exclusions.
 7. Run the generated-spec layout guard and SPipe command wiring check before
    handoff.
 8. Commit only the cleanup lane files. Preserve unrelated dirty worktree files.

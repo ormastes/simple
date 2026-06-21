@@ -17,10 +17,12 @@ See `lib/research_common.md` for shared format and templates.
 - **Obsidian CLI:** Search `doc/` vault for existing research/design/requirement docs
 
 ### Agent Team
-Spawn parallel agents:
+Spawn lower-model parallel agents for plan/research lanes when available:
 - **Agent 1:** Source code exploration via MCP + LSP (search `src/`)
 - **Agent 2:** Doc exploration via Obsidian CLI (search `doc/`)
-- Merge results into research summary
+- Prefer bounded sidecars such as Codex Spark, Claude Haiku, or Claude Sonnet.
+- Merge results into research summary, then require normal/highest-capability
+  LLM review before accepting final findings or broad exclusions.
 
 ### Output
 - `doc/01_research/<domain>/<topic>/<feature>.md`
