@@ -658,8 +658,8 @@ Open gaps tied to the active browser objective:
     `fixture=24_flex_wrap_reverse_basic count=4`, `status=pass`
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --mode=native --json --no-cache`
     still reports one failed file without an assertion detail
-  - the core-C native runtime now exports `rt_file_read_text_rv`, and the
-    diagnostic native file-read smoke passes, so the earlier file-read ABI
+  - the core-C native runtime now exposes the file-read result-value ABI, and
+    the diagnostic native file-read smoke passes, so the earlier file-read ABI
     blocker is closed
   - the latest reduction found a native renderer divergence before fixture 24:
     full-document metadata parsing (`head` + `meta` + `title`) made native
@@ -814,10 +814,10 @@ Open gaps tied to the active browser objective:
    - native compilation no longer fails first on the local iterable loops in the
      focused renderer/probe/Draw IR closure; the `parse_html()` close-tag stack
      path also avoids `pstack.pop()` by copying the kept stack prefix
-  - the Rust seed LLVM builtin-method path now maps `String.substring` to the
-    existing `rt_slice` runtime instead of nonexistent `rt_string_substring`;
-    the Pure Simple MIR lowering mirrors typed `text.substring` / `text.slice`
-    to native string slice calls
+  - the Rust seed LLVM builtin-method path now maps `String.substring` through
+    the existing string-slice runtime ABI instead of a nonexistent substring
+    runtime; the Pure Simple MIR lowering mirrors typed `text.substring` /
+    `text.slice` to native string slice calls
   - rebuilt bootstrap compiler evidence:
     `compile html_compat_geometry_probe_native_full_smoke.spl --native` emits
     the native binary, and running it prints `status=pass`
