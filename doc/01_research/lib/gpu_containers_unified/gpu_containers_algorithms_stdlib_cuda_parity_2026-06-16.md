@@ -218,5 +218,5 @@ during `/impl`.
 - `doc/01_research/language/gpu_fpga/sycl_vs_simple_unified_accelerator_research_2026-06-13.md` — SYCL parity gaps G1–G12, unify strategy
 - `doc/01_research/ui/render_path/gui_web_2d_render_optimization_2026-06-16.md` — render offload patterns, backend dispatch
 - `doc/01_research/ml/cuda/cuda_tbb_entry_compare.md` — CUDA vs TBB programming model
-- `doc/06_spec/test/01_unit/compiler/codegen/gpu_portable_compute_spec.md` — one-MIR→multi-backend spec
+- `doc/06_spec/01_unit/compiler/codegen/gpu_portable_compute_spec.md` — one-MIR→multi-backend spec
 - External: CCCL libcu++ Standard API (indexed `cccl-libcudacxx-standard-api`); Thrust execution policies; CUB device/block/warp primitives
