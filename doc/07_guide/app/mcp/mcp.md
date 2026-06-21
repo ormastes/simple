@@ -13,7 +13,7 @@ MCP scenarios are the exemplar for scenario-based generated manuals. New or
 changed MCP SPipe tests should generate `doc/06_spec/...` pages that read like
 operator manuals: initialize server, list tools, call a tool, inspect response,
 and diagnose failure, with protocol/API/exec/log captures attached to the step
-that produced them. Follow `doc/07_guide/testing/sspec_scenario_manual.md` and
+that produced them. Follow `doc/07_guide/infra/sspec_scenario_manual.md` and
 fold matrix, schema-detail, and edge-case rows by default.
 
 The concrete target shape and review checklist live in
