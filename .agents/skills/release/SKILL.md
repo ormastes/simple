@@ -30,6 +30,8 @@ description: Version bump and release. Accepts version argument (major/first, mi
 Run $verify first — must show STATUS: PASS.
 SPipe must already be complete and verified. Do not create or update SPipe in
 release; if SPipe is missing/stale, return to verify/implementation.
+Generated-manual quality and lower-model sidecar review must already be covered
+by verify PASS; release does not repair or accept them afterward.
 `find doc/06_spec -name '*_spec.spl' | wc -l` must return `0`.
 
 ## Push
