@@ -48,4 +48,4 @@ bin/simple test test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl --
 
 | REQ | Description | Test File | Generated Spec | Coverage |
 |-----|-------------|-----------|----------------|----------|
-| REQ-MCP-CMD-001 | Local MCP wrappers answer command-line initialize and tools/list handshakes within a time limit | `test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl` | `doc/06_spec/test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.md` | Full when all wrappers pass |
+| REQ-MCP-CMD-001 | Local MCP wrappers answer command-line initialize and tools/list handshakes within a time limit | `test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl` | `doc/06_spec/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.md` | Full when all wrappers pass |
