@@ -28,7 +28,7 @@ html_render_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -109,6 +109,81 @@ expect(html).to_contain(">First point</div>")
 
 </details>
 
+#### escapes text content before writing HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_slide_html(content_slide("s3", "A&B", "<script>bad</script>"))
+expect(html).to_contain(">A&amp;B</div>")
+expect(html).to_contain("&lt;script&gt;bad&lt;/script&gt;")
+expect(html.contains("<script>")).to_be(false)
+```
+
+</details>
+
+#### sanitizes invalid background colors
+
+- background: "url
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val slide = Slide(
+    id: "s4",
+    layout: SlideLayout.Blank,
+    elements: [],
+    notes: "",
+    background: "url(javascript:bad)"
+)
+val html = render_slide_html(slide)
+expect(html).to_contain("background: #ffffff;")
+```
+
+</details>
+
+#### positions slide elements with clamped boxes
+
+- kind: SlideElementKind TextBox
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val slide = Slide(
+    id: "s5",
+    layout: SlideLayout.Blank,
+    elements: [SlideElement(
+        id: "e1",
+        kind: SlideElementKind.TextBox(content: "Box"),
+        x: -10,
+        y: 20,
+        width: 300,
+        height: -40
+    )],
+    notes: "",
+    background: "#112233"
+)
+val html = render_slide_html(slide)
+expect(html).to_contain("position: relative; width: 960px; height: 540px;")
+expect(html).to_contain("left: 0px; top: 20px; width: 300px; height: 0px;")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -129,8 +204,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
