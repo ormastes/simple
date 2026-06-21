@@ -1,10 +1,45 @@
 # Native SFFI file byte I/O: [u8] marshalling broken
 
 **Filed:** 2026-06-20
-**Updated:** 2026-06-21 (Round 8 — root cause precisely located)
-**Status:** open — root-caused; full fix needs a self-hosted backend codegen
-change + `bin/simple` bootstrap (deferred as a larger change)
+**Updated:** 2026-06-21 (Round 8 — FIXED in runtime_native.c; no bootstrap needed)
+**Status:** RESOLVED for the `rt_file_read_bytes` / `rt_file_write_bytes`
+primitives. One downstream follow-up remains (see "Remaining").
 **Priority:** P1
+
+## RESOLVED (2026-06-21)
+
+The native `--compile` path links the **C** runtime (`src/runtime/runtime_native.c`,
+compiled fresh per build via `build_core_c_runtime_library`), NOT the Rust
+`file_ops.rs` (which was already correct) — so this was a plain C fix, **no
+bootstrap required**. Confirmed empirically by an in-function diagnostic:
+
+- The codegen lowers `text` as `(ptr, len)` and `[u8]` as `(ptr, len)`, so
+  `rt_file_write_bytes(path: text, data: [u8])` is a **4-argument** C call
+  `(path_ptr, path_len, data_ptr, data_len)`. The old C signature had only **3**
+  params `(const char*, const void*, int64_t)` — off by one — so `data` received
+  `path_len` and `len` received the data pointer → 0-byte writes. Fixed to the
+  4-param signature; writes exactly `data_len` bytes (NULs included).
+- `rt_file_read_bytes` returned a NUL-terminated `char*` (wrong type for `[u8]`,
+  and truncated at the first zero byte). Compiled `[u8]` is a byte `SplArray*`
+  (as `rt_bytes_from_raw`), so it now returns a binary-safe `SplArray*` read by
+  file size.
+
+Verified under `--compile --force-rebuild`:
+`test/01_unit/lib/nogc_sync_mut/sffi/native_byte_io_spec.spl` — byte-value
+round-trip, embedded-NUL preservation, and all-256-values, 3/3, mutation-checked
+(a flipped expected value correctly fails).
+
+## Remaining
+
+Fully un-gating the svllm FS byte tests
+(`std_fs_transport_spec.spl`, `svllm_fs_loader_system_spec.spl`) is blocked by a
+SEPARATE, pre-existing compiled-mode issue this fix merely EXPOSED (those tests
+never ran under `--compile` before): reading bytes through
+`StdFsNvfsClient.read_bytes` (which returns `Result<[u8], NvfsError>`) and then
+`unwrap()`-ing and indexing the array SIGSEGVs in native mode, while the direct
+`file_read_bytes(...) -> [u8]` path works. This is a `Result<[u8]>` unwrap/index
+codegen problem, not an SFFI marshalling one. Those byte tests stay gated until
+it is fixed; the rt_file primitives themselves are proven.
 
 ## Problem
 

@@ -2927,9 +2927,32 @@ SplArray* rt_process_run(const char* cmd, SplArray* args) {
     return result;
 }
 
-char* rt_file_read_bytes(const char* path) {
-    /* Reads file into a buffer; for native linking, returns raw bytes as char* */
-    return spl_file_read(path);
+/* Reads a whole file as a binary-safe [u8]. Compiled native code represents a
+ * [u8] value as a byte SplArray (same as rt_bytes_from_raw), so this must return
+ * an SplArray*, not a raw char*. The old version returned spl_file_read()'s
+ * NUL-terminated char* — wrong type (compiled .len() read a bogus header) AND it
+ * truncated at the first zero byte, corrupting real chunk data. Reads by file
+ * size, so embedded NULs survive; always returns a non-NULL array. */
+SplArray* rt_file_read_bytes(const char* path) {
+    if (!path) return rt_byte_array_new(0);
+    FILE* f = fopen(path, "rb");
+    if (!f) return rt_byte_array_new(0);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_byte_array_new(0); }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return rt_byte_array_new(0); }
+    rewind(f);
+    SplArray* arr = rt_byte_array_new_len((uint64_t)sz);
+    RtCoreArray* array = rt_core_array_ptr(arr);
+    if (array) {
+        if (array->data && sz > 0) {
+            size_t rd = fread(array->data, 1, (size_t)sz, f);
+            array->len = (int64_t)rd;
+        } else {
+            array->len = 0;
+        }
+    }
+    fclose(f);
+    return arr;
 }
 
 int64_t rt_file_read_all_text(int64_t path_tagged) {
@@ -2945,13 +2968,23 @@ int64_t rt_file_read_all_text(int64_t path_tagged) {
 }
 
 
-int rt_file_write_bytes(const char* path, const void* data, int64_t len) {
-    if (!path || !data) return 0;
+/* Native ABI (confirmed empirically): the codegen passes a `text` argument as
+ * (ptr, len) and a `[u8]` argument flattened to (data_ptr, data_len). So the
+ * Simple extern `rt_file_write_bytes(path: text, data: [u8])` lowers to a FOUR-
+ * argument C call: (path_ptr, path_len, data_ptr, data_len). The old THREE-param
+ * signature `(const char* path, const void* data, int64_t len)` was off by one —
+ * it received path_len in `data` and the data pointer in `len`, writing 0 bytes
+ * for every chunk. Binary-safe: writes exactly data_len bytes (NULs included).
+ * See doc/08_tracking/bug/native_sffi_file_byte_io_u8_marshalling_2026-06-20.md. */
+int rt_file_write_bytes(const char* path, int64_t path_len, const unsigned char* data_ptr, int64_t data_len) {
+    (void)path_len; /* path is a NUL-terminated cstring */
+    if (!path) return 0;
     FILE* f = fopen(path, "wb");
     if (!f) return 0;
-    size_t written = fwrite(data, 1, (size_t)len, f);
+    size_t written = 0;
+    if (data_ptr && data_len > 0) written = fwrite(data_ptr, 1, (size_t)data_len, f);
     fclose(f);
-    return written == (size_t)len ? 1 : 0;
+    return (data_len == 0 || written == (size_t)data_len) ? 1 : 0;
 }
 
 /* IF-13 wave-4d: truncate (or zero-extend) `path` to exactly `size` bytes.
