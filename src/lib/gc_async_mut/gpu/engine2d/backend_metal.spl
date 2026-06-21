@@ -9,9 +9,10 @@ use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback,
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult}
 use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance}
+use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_download_ptr, metal_set_bytes_ptr}
 use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
-use std.nogc_sync_mut.env.platform.{is_macos}
-use std.nogc_sync_mut.io.metal_sffi.{
+use std.gc_async_mut.env.platform.{is_macos}
+use std.gc_async_mut.io.metal_sffi.{
     metal_sffi_alloc_buffer, metal_sffi_free_buffer,
     metal_sffi_create_command_buffer, metal_sffi_commit_command_buffer,
     metal_sffi_wait_completed, metal_sffi_dispatch_compute,
@@ -23,8 +24,6 @@ extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64) -> i64
 extern fn rt_ptr_write_i32(ptr: i64, offset: i64, value: i64) -> i64
 extern fn rt_ptr_read_i64(ptr: i64, offset: i64) -> i64
-extern fn rt_metal_buffer_download(data_ptr: i64, buffer: i64, size: i64) -> i64
-extern fn rt_metal_set_bytes(encoder: i64, data_ptr: i64, length: i64, index: i64) -> i64
 
 enum MetalErrorKind:
     NotAvailable
@@ -349,7 +348,7 @@ impl MetalBackend:
         val host = rt_alloc(byte_size + 8)
         if host == 0:
             return []
-        val ok = rt_metal_buffer_download(host, self.d_framebuffer, byte_size)
+        val ok = metal_buffer_download_ptr(host, self.d_framebuffer, byte_size)
         if ok == 0:
             rt_free(host)
             return []
@@ -621,7 +620,7 @@ impl MetalBackend:
         if encoder == 0:
             return false
         metal_sffi_set_buffer(encoder, fb, 0, 0)
-        rt_metal_set_bytes(encoder, params, params_len, 1)
+        metal_set_bytes_ptr(encoder, params, params_len, 1)
         metal_sffi_dispatch_compute(encoder, pipeline, threads, 1, 1, block_x, 1, 1)
         metal_sffi_end_compute_encoder(encoder)
         metal_sffi_commit_command_buffer(cmd)
@@ -637,7 +636,7 @@ impl MetalBackend:
         if encoder == 0:
             return false
         metal_sffi_set_buffer(encoder, fb, 0, 0)
-        rt_metal_set_bytes(encoder, params, params_len, 1)
+        metal_set_bytes_ptr(encoder, params, params_len, 1)
         val block_x = 16
         val block_y = 16
         val grid_x = ((_metal_i64(w) + block_x - 1) / block_x) * block_x
