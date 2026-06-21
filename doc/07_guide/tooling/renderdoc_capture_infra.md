@@ -351,6 +351,13 @@ parity gates. GUI widget witness provenance is inspectable as widget/class
 pairs through `gui_widget_rendering_fixture_coverage_spec_widget_classes`,
 `gui_widget_rendering_fixture_coverage_render_fixture_widget_classes`, and
 `gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_classes`.
+The RenderDoc fixture also carries one semantic `data-render-feature` witness
+per widget; the audit exposes these as
+`gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features`,
+checks them against
+`gui_widget_rendering_fixture_coverage_expected_renderdoc_fixture_features`,
+and fails closed through
+`gui_widget_rendering_fixture_coverage_missing_renderdoc_fixture_features`.
 It also re-emits the full W3C CSS inventory count from the SSpec
 traceability gate as
 `html_css_rendering_manifest_traceability_total_css_property_count` and the

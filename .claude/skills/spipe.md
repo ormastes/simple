@@ -157,6 +157,9 @@ The aggregate audit must also expose comparison artifact status keys:
 `gui_web_2d_vulkan_electron_argb_viewport_match_status`,
 `gui_web_2d_vulkan_chrome_screenshot_file_status`, and
 `gui_web_2d_vulkan_simple_evidence_file_status`.
+GUI widget fixture evidence must also prove per-widget feature witnesses via
+`gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features`,
+not only widget/class presence.
 Defer Windows and Linux claims until platform-specific runbooks validate the
 same evidence keys and RDOC gate contract.
 

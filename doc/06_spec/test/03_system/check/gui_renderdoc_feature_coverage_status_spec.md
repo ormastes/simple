@@ -120,17 +120,21 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: widget_fixture_spec_count equals `43`
    - Expected: widget_fixture_render_fixture_count equals `43`
    - Expected: widget_fixture_renderdoc_fixture_count equals `43`
+   - Expected: widget_fixture_renderdoc_fixture_feature_count equals `43`
    - Expected: widget_fixture_missing_dispatch equals ``
    - Expected: widget_fixture_missing_classes equals ``
    - Expected: widget_fixture_missing equals ``
    - Expected: widget_fixture_missing_render_fixtures equals ``
    - Expected: widget_fixture_missing_renderdoc_fixtures equals ``
+   - Expected: widget_fixture_missing_renderdoc_fixture_features equals ``
    - Expected: widget_fixture_covered_widgets.split(",").len() equals `43`
    - Expected: widget_fixture_spec_widget_classes.split(",").len() equals `43`
    - Expected: widget_fixture_render_fixture_widgets.split(",").len() equals `43`
    - Expected: widget_fixture_render_fixture_widget_classes.split(",").len() equals `43`
    - Expected: widget_fixture_renderdoc_fixture_widgets.split(",").len() equals `43`
    - Expected: widget_fixture_renderdoc_fixture_widget_classes.split(",").len() equals `43`
+   - Expected: widget_fixture_renderdoc_fixture_widget_features.split(",").len() equals `43`
+   - Expected: widget_fixture_expected_renderdoc_fixture_features.split(",").len() equals `43`
 - Assert the Electron layout manifest and RenderDoc gates remain visible
    - Expected: manifest_cases equals `50`
    - Expected: display_none_flow_cases equals `1`
@@ -181,7 +185,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 491 lines folded for reproduction.
+Runnable source: 505 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -231,14 +235,17 @@ expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_missing_rende
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_missing_render_fixture_widgets=")
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_renderdoc_fixture_source=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_missing_renderdoc_fixture_widgets=")
+expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_missing_renderdoc_fixture_features=")
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_renderdoc_fixture_widgets=")
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_expected_classes=")
+expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_expected_renderdoc_fixture_features=")
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_spec_sources=")
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_covered_widgets=")
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_spec_widget_classes=")
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_render_fixture_widgets=")
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_render_fixture_widget_classes=")
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_classes=")
+expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features=")
 expect(evidence).to_contain("radio:widget-radio")
 expect(evidence).to_contain("heading:widget-heading")
 expect(evidence).to_contain("navigation_bar:widget-navigation-bar")
@@ -469,17 +476,21 @@ val widget_fixture_class_count = _value_of(evidence, "gui_widget_rendering_fixtu
 val widget_fixture_spec_count = _value_of(evidence, "gui_widget_rendering_fixture_coverage_spec_covered_count")
 val widget_fixture_render_fixture_count = _value_of(evidence, "gui_widget_rendering_fixture_coverage_render_fixture_covered_count")
 val widget_fixture_renderdoc_fixture_count = _value_of(evidence, "gui_widget_rendering_fixture_coverage_renderdoc_fixture_covered_count")
+val widget_fixture_renderdoc_fixture_feature_count = _value_of(evidence, "gui_widget_rendering_fixture_coverage_renderdoc_fixture_feature_covered_count")
 val widget_fixture_missing_dispatch = _value_of(evidence, "gui_widget_rendering_fixture_coverage_missing_dispatch_widgets")
 val widget_fixture_missing_classes = _value_of(evidence, "gui_widget_rendering_fixture_coverage_missing_renderer_classes")
 val widget_fixture_missing = _value_of(evidence, "gui_widget_rendering_fixture_coverage_missing_spec_widgets")
 val widget_fixture_missing_render_fixtures = _value_of(evidence, "gui_widget_rendering_fixture_coverage_missing_render_fixture_widgets")
 val widget_fixture_missing_renderdoc_fixtures = _value_of(evidence, "gui_widget_rendering_fixture_coverage_missing_renderdoc_fixture_widgets")
+val widget_fixture_missing_renderdoc_fixture_features = _value_of(evidence, "gui_widget_rendering_fixture_coverage_missing_renderdoc_fixture_features")
 val widget_fixture_covered_widgets = _value_of(evidence, "gui_widget_rendering_fixture_coverage_covered_widgets")
 val widget_fixture_spec_widget_classes = _value_of(evidence, "gui_widget_rendering_fixture_coverage_spec_widget_classes")
 val widget_fixture_render_fixture_widgets = _value_of(evidence, "gui_widget_rendering_fixture_coverage_render_fixture_widgets")
 val widget_fixture_render_fixture_widget_classes = _value_of(evidence, "gui_widget_rendering_fixture_coverage_render_fixture_widget_classes")
 val widget_fixture_renderdoc_fixture_widgets = _value_of(evidence, "gui_widget_rendering_fixture_coverage_renderdoc_fixture_widgets")
 val widget_fixture_renderdoc_fixture_widget_classes = _value_of(evidence, "gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_classes")
+val widget_fixture_renderdoc_fixture_widget_features = _value_of(evidence, "gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features")
+val widget_fixture_expected_renderdoc_fixture_features = _value_of(evidence, "gui_widget_rendering_fixture_coverage_expected_renderdoc_fixture_features")
 val widget_fixture_spec_sources = _value_of(evidence, "gui_widget_rendering_fixture_coverage_spec_sources")
 val manifest_cases = _value_of(evidence, "electron_layout_manifest_case_count")
 val display_none_flow_cases = _value_of(evidence, "electron_layout_manifest_tracked_css_display_none_flow_case_count")
@@ -549,17 +560,21 @@ expect(widget_fixture_class_count).to_equal("43")
 expect(widget_fixture_spec_count).to_equal("43")
 expect(widget_fixture_render_fixture_count).to_equal("43")
 expect(widget_fixture_renderdoc_fixture_count).to_equal("43")
+expect(widget_fixture_renderdoc_fixture_feature_count).to_equal("43")
 expect(widget_fixture_missing_dispatch).to_equal("")
 expect(widget_fixture_missing_classes).to_equal("")
 expect(widget_fixture_missing).to_equal("")
 expect(widget_fixture_missing_render_fixtures).to_equal("")
 expect(widget_fixture_missing_renderdoc_fixtures).to_equal("")
+expect(widget_fixture_missing_renderdoc_fixture_features).to_equal("")
 expect(widget_fixture_covered_widgets.split(",").len()).to_equal(43)
 expect(widget_fixture_spec_widget_classes.split(",").len()).to_equal(43)
 expect(widget_fixture_render_fixture_widgets.split(",").len()).to_equal(43)
 expect(widget_fixture_render_fixture_widget_classes.split(",").len()).to_equal(43)
 expect(widget_fixture_renderdoc_fixture_widgets.split(",").len()).to_equal(43)
 expect(widget_fixture_renderdoc_fixture_widget_classes.split(",").len()).to_equal(43)
+expect(widget_fixture_renderdoc_fixture_widget_features.split(",").len()).to_equal(43)
+expect(widget_fixture_expected_renderdoc_fixture_features.split(",").len()).to_equal(43)
 expect(widget_fixture_covered_widgets).to_contain("glass_title_bar")
 expect(widget_fixture_covered_widgets).to_contain("command_palette")
 expect(widget_fixture_covered_widgets).to_contain("empty_state")
@@ -571,6 +586,9 @@ expect(widget_fixture_renderdoc_fixture_widgets).to_contain("empty_state")
 expect(widget_fixture_renderdoc_fixture_widget_classes).to_contain("glass_title_bar:widget-glass-title-bar")
 expect(widget_fixture_renderdoc_fixture_widget_classes).to_contain("command_palette:widget-command-palette")
 expect(widget_fixture_renderdoc_fixture_widget_classes).to_contain("empty_state:widget-empty-state")
+expect(widget_fixture_renderdoc_fixture_widget_features).to_contain("glass_title_bar:window-titlebar")
+expect(widget_fixture_renderdoc_fixture_widget_features).to_contain("command_palette:command-search")
+expect(widget_fixture_renderdoc_fixture_widget_features).to_contain("empty_state:empty-feedback")
 expect(widget_fixture_render_fixture_widgets).to_contain("empty_state")
 expect(widget_fixture_spec_sources).to_contain("test/01_unit/app/ui/html_render_spec.spl")
 
