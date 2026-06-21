@@ -154,6 +154,19 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: rendering_manifest_case_count equals `50`
    - Expected: rendering_manifest_required_case_count equals `50`
    - Expected: rendering_manifest_missing_fixture equals ``
+   - Expected: full_rendering_goal_status equals `incomplete`
+   - Expected: full_rendering_goal_reason equals `full-css-rendering-incomplete`
+   - Expected: full_rendering_goal_html_status equals `pass`
+   - Expected: full_rendering_goal_html_total equals `105`
+   - Expected: full_rendering_goal_html_rendered equals `105`
+   - Expected: full_rendering_goal_implemented_css_status equals `pass`
+   - Expected: full_rendering_goal_implemented_css_total equals `63`
+   - Expected: full_rendering_goal_implemented_css_rendered equals `63`
+   - Expected: full_rendering_goal_full_css_status equals `incomplete`
+   - Expected: full_rendering_goal_full_css_total equals `traceability_css_count`
+   - Expected: full_rendering_goal_full_css_rendered equals `63`
+   - Expected: full_rendering_goal_full_css_unrendered equals `rendering_manifest_unrendered_css_count`
+   - Expected: full_rendering_goal_full_css_unrendered_properties equals `rendering_manifest_unrendered_css_properties`
    - Expected: traceability_status equals `pass`
    - Expected: traceability_html_count equals `105`
    - Expected: traceability_implemented_css_count equals `63`
@@ -203,7 +216,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 607 lines folded for reproduction.
+Runnable source: 647 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -235,6 +248,19 @@ expect(evidence).to_contain("html_css_rendering_manifest_traceability_unrendered
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_unrendered_spec_css_properties=")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest_case_count=50")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_required_manifest_case_count=50")
+expect(evidence).to_contain("html_css_full_rendering_goal_command=sh scripts/check/check-html-css-full-rendering-goal-status.shs")
+expect(evidence).to_contain("html_css_full_rendering_goal_status=incomplete")
+expect(evidence).to_contain("html_css_full_rendering_goal_reason=full-css-rendering-incomplete")
+expect(evidence).to_contain("html_css_full_rendering_goal_html_tag_status=pass")
+expect(evidence).to_contain("html_css_full_rendering_goal_html_tag_total_count=105")
+expect(evidence).to_contain("html_css_full_rendering_goal_html_tag_rendered_count=105")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_status=pass")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=63")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=63")
+expect(evidence).to_contain("html_css_full_rendering_goal_full_css_status=incomplete")
+expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=63")
+expect(evidence).to_contain("html_css_full_rendering_goal_full_css_unrendered_count=")
+expect(evidence).to_contain("html_css_full_rendering_goal_full_css_unrendered_properties=")
 expect(evidence).to_contain("html_css_traceability_status=pass")
 expect(evidence).to_contain("html_css_traceability_reason=pass")
 expect(evidence).to_contain("html_css_traceability_exit_code=0")
@@ -565,6 +591,19 @@ val rendering_manifest_case_count = _value_of(evidence, "html_css_rendering_mani
 val rendering_manifest_required_case_count = _value_of(evidence, "html_css_rendering_manifest_traceability_required_manifest_case_count")
 val rendering_manifest_fixture_scene_count = _value_of(evidence, "html_css_rendering_manifest_traceability_fixture_scene_count")
 val rendering_manifest_missing_fixture = _value_of(evidence, "html_css_rendering_manifest_traceability_manifest_missing_fixture")
+val full_rendering_goal_status = _value_of(evidence, "html_css_full_rendering_goal_status")
+val full_rendering_goal_reason = _value_of(evidence, "html_css_full_rendering_goal_reason")
+val full_rendering_goal_html_status = _value_of(evidence, "html_css_full_rendering_goal_html_tag_status")
+val full_rendering_goal_html_total = _value_of(evidence, "html_css_full_rendering_goal_html_tag_total_count")
+val full_rendering_goal_html_rendered = _value_of(evidence, "html_css_full_rendering_goal_html_tag_rendered_count")
+val full_rendering_goal_implemented_css_status = _value_of(evidence, "html_css_full_rendering_goal_implemented_css_status")
+val full_rendering_goal_implemented_css_total = _value_of(evidence, "html_css_full_rendering_goal_implemented_css_total_count")
+val full_rendering_goal_implemented_css_rendered = _value_of(evidence, "html_css_full_rendering_goal_implemented_css_rendered_count")
+val full_rendering_goal_full_css_status = _value_of(evidence, "html_css_full_rendering_goal_full_css_status")
+val full_rendering_goal_full_css_total = _value_of(evidence, "html_css_full_rendering_goal_full_css_total_count")
+val full_rendering_goal_full_css_rendered = _value_of(evidence, "html_css_full_rendering_goal_full_css_rendered_count")
+val full_rendering_goal_full_css_unrendered = _value_of(evidence, "html_css_full_rendering_goal_full_css_unrendered_count")
+val full_rendering_goal_full_css_unrendered_properties = _value_of(evidence, "html_css_full_rendering_goal_full_css_unrendered_properties")
 val traceability_status = _value_of(evidence, "html_css_traceability_status")
 val traceability_html_count = _value_of(evidence, "html_css_traceability_html_tag_count")
 val traceability_css_count = _value_of(evidence, "html_css_traceability_css_property_count")
@@ -696,6 +735,19 @@ expect(rendering_manifest_case_count).to_equal("50")
 expect(rendering_manifest_required_case_count).to_equal("50")
 expect(rendering_manifest_fixture_scene_count.to_i64()).to_be_greater_than(49)
 expect(rendering_manifest_missing_fixture).to_equal("")
+expect(full_rendering_goal_status).to_equal("incomplete")
+expect(full_rendering_goal_reason).to_equal("full-css-rendering-incomplete")
+expect(full_rendering_goal_html_status).to_equal("pass")
+expect(full_rendering_goal_html_total).to_equal("105")
+expect(full_rendering_goal_html_rendered).to_equal("105")
+expect(full_rendering_goal_implemented_css_status).to_equal("pass")
+expect(full_rendering_goal_implemented_css_total).to_equal("63")
+expect(full_rendering_goal_implemented_css_rendered).to_equal("63")
+expect(full_rendering_goal_full_css_status).to_equal("incomplete")
+expect(full_rendering_goal_full_css_total).to_equal(traceability_css_count)
+expect(full_rendering_goal_full_css_rendered).to_equal("63")
+expect(full_rendering_goal_full_css_unrendered).to_equal(rendering_manifest_unrendered_css_count)
+expect(full_rendering_goal_full_css_unrendered_properties).to_equal(rendering_manifest_unrendered_css_properties)
 expect(traceability_status).to_equal("pass")
 expect(traceability_html_count).to_equal("105")
 expect(traceability_css_count.to_i64()).to_be_greater_than(389)
@@ -802,6 +854,7 @@ expect(report).to_contain("- HTML/CSS rendering manifest traceability: pass (pas
 expect(report).to_contain("- HTML/CSS rendered tags: 105/105")
 expect(report).to_contain("- HTML/CSS rendered implemented properties: 63/63 (implemented-simple-web-css)")
 expect(report).to_contain("- HTML/CSS full CSS spec render gap:")
+expect(report).to_contain("- HTML/CSS full rendering goal: incomplete (full-css-rendering-incomplete; full CSS 63/")
 expect(report).to_contain("- Electron Chromium RenderDoc:")
 expect(report).to_contain("- Electron Chromium/Vulkan RenderDoc:")
 expect(report).to_contain("- Electron Chromium/Vulkan gate:")

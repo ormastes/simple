@@ -10,6 +10,7 @@ scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 scripts/tool/renderdoc-evidence.shs capture-simple
 scripts/tool/renderdoc-evidence.shs capture-html
 scripts/tool/renderdoc-evidence.shs capture-electron-html
+sh scripts/check/check-html-css-full-rendering-goal-status.shs
 RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/canonical-probe/simple/evidence.env \
   sh scripts/check/check-renderdoc-simple-gate.shs
 RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
@@ -424,6 +425,15 @@ The matching implementation backlog names are emitted as
 `html_css_rendering_manifest_traceability_unrendered_spec_css_properties`.
 Those unsupported properties are assigned to the inventory SSpec, not claimed as
 rendered behavior, until they move into the implemented Simple Web CSS subset.
+The focused full-rendering status gate
+`scripts/check/check-html-css-full-rendering-goal-status.shs` makes that split
+explicit: `html_css_full_rendering_goal_html_tag_status=pass` and
+`html_css_full_rendering_goal_implemented_css_status=pass` are required before
+the broader goal can progress, while
+`html_css_full_rendering_goal_full_css_status=incomplete` remains the honest
+state until every W3C CSS inventory property has rendered fixture coverage.
+Use `--strict` when a CI or release lane should fail unless the full CSS
+inventory is rendered.
 
 The nested HTML/CSS RenderDoc goal status gate reports every unsatisfied
 RenderDoc goal lane through `renderdoc_goal_blocked_gates` and
