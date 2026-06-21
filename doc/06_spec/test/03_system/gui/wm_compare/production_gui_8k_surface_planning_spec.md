@@ -56,6 +56,8 @@ Verifies the 8K packed-surface planning contract without running the full render
 Verifies the 8K packed-surface planning contract without running the full
 renderer parity scene suite. This keeps the 8K color/image evidence gate fast
 while the broader parity hardening spec continues to cover backend rendering.
+It proves lazy planning, not full JPEG XL pixel decode or image URI rendering
+through decoded pixels.
 
 **Requirements:** doc/02_requirements/feature/simple_web_browser_production_hardening.md
 **Requirements:** doc/02_requirements/nfr/simple_web_browser_production_hardening.md
