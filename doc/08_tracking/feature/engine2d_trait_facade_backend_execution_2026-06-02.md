@@ -48,7 +48,7 @@ dispatch. Acceptable approaches:
   the same colors and records SIMD hits.
 - [ ] On macOS, a spec proves `Engine2D.create_with_backend(16, 16, "metal")`
   returns exact pixels from GPU readback for the reduced scene.
-- [ ] The web renderer backend parity harness can use `Engine2D` directly without
+- [x] The web renderer backend parity harness can use `Engine2D` directly without
   falling back to direct concrete backend calls.
 
 ## Evidence
@@ -58,13 +58,16 @@ dispatch. Acceptable approaches:
 - 2026-06-21 focused run:
   `SIMPLE_LIB=src bin/simple test test/01_unit/gpu/engine2d_trait_facade_backend_spec.spl`
   passed 2 scenarios for `software` and `cpu_simd`.
+- 2026-06-21 focused run:
+  `SIMPLE_LIB=src bin/simple test test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl`
+  passed 8 scenarios after the reduced-scene software/cpu_simd harness was
+  routed through `Engine2D.create_with_backend(...)`.
 
 ## Remaining Work
 
 - Run or add the macOS Metal reduced-scene check on a host with native Metal
   readback.
-- Wire the web renderer parity harness through `Engine2D` directly after the
-  Metal evidence exists, then update the feature DB row to `done`.
+- Update the feature DB row to `done` after native Metal evidence exists.
 
 ## Notes
 
