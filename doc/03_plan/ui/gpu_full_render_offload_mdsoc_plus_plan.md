@@ -263,7 +263,7 @@ Performance targets:
 
 ## Phase 2: Metal Mirror, Then Other Backends
 
-Current queue/readback baseline (2026-06-15):
+Current queue/readback baseline (2026-06-21):
 
 - `scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`
   is the fail-closed production gate for GUI/web queue and readback evidence.
@@ -276,11 +276,14 @@ Current queue/readback baseline (2026-06-15):
   as skipped unsupported Draw IR commands rather than silently implying render
   support.
 - Platform matrix remains partial: Vulkan/CUDA/OpenCL fixture evidence passes
-  on the current Linux host, and WebGPU real device readback passes with a
-  positive handle/checksum. Metal requires native Darwin Metal readback, ROCm
-  requires AMD ROCm runtime/device/verified HSACO, and DirectX remains a
-  structured readback contract until native Windows D3D11 staging readback
-  proves `device_readback`.
+  on the current Linux host. WebGPU `surface_upload` is provenance-only, and
+  WebGPU real device readback is currently unavailable/not_device_readback
+  (`handle=0`, checksum `-1`) in
+  `doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-21.md`.
+  Metal requires native Darwin Metal readback, ROCm requires AMD ROCm
+  runtime/device/verified HSACO, and DirectX remains a structured readback
+  contract until native Windows D3D11 staging readback proves
+  `device_readback`.
 
 ### Phase 2A: Metal Parity
 
