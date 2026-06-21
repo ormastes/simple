@@ -42,7 +42,9 @@ Run the focused checks before handing off:
 bin/simple-interp src/app/ide/main.spl --feature-check --tui
 bin/simple-interp src/app/ide/main.spl --feature-check --gui
 SIMPLE_LIB=src bin/simple-interp test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl
+simple spipe-docgen test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl --output doc/06_spec --no-index
 find doc/06_spec -name '*_spec.spl' | wc -l
 ```
 
-The final command must print `0`.
+The docgen result must read like an operator manual and report `0 stubs`. The
+final command must print `0`.
