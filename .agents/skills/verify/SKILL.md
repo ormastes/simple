@@ -103,6 +103,7 @@ not create, rewrite, or weaken SPipe after verification.
 - WARN items reviewed
 - STATUS: PASS before release
 - Do not defer SPipe fixes or coverage updates to release
-- Do not mark PASS when workflow/tooling changes left stale guide, SPipe, or
-  skill instructions behind
+- Do not mark PASS when workflow/tooling changes left stale `doc/07_guide`,
+  `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
+  or `.claude/agents/spipe/` instructions behind
 - Do not mark PASS for compiler/core/lib or MCP/LSP work unless the matching smoke checks passed

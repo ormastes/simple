@@ -168,7 +168,8 @@ STATUS: FAIL (2 failures, 1 warning)
 - NEVER downgrade a FAIL to WARN — fix the issue
 - NEVER defer SPipe creation, cleanup, or requirement coverage updates to release
 - NEVER mark final verification PASS when workflow/tooling changes left stale
-  guide, SPipe, or skill instructions behind
+  `doc/07_guide`, `doc/06_spec`, `.codex/skills/`, `.agents/skills/`,
+  `.claude/skills/`, or `.claude/agents/spipe/` instructions behind
 - NEVER skip stub detection — STUB001 is non-negotiable
 - NEVER mark STATUS: PASS with outstanding FAILs
 - If verification finds issues, report them — do not auto-fix without user approval

@@ -180,8 +180,9 @@ STATUS: FAIL (5 failures must be fixed before release)
 - NEVER skip NFR checks — even if no NFR doc exists, note it as WARN
 - If no requirement doc exists for a feature, flag as WARN (not FAIL)
 - If design doc exists but is outdated (references deleted files/functions), flag as FAIL
-- If workflow/tooling changes left stale guide, SPipe, or skill instructions
-  behind, do not mark verification PASS
+- If workflow/tooling changes left stale `doc/07_guide`, `doc/06_spec`,
+  `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, or
+  `.claude/agents/spipe/` instructions behind, do not mark verification PASS
 - Read actual source code — do not trust file names or comments alone
 - Fail wrapper verification if a production MCP or LSP launcher executes raw source instead of a cached compiled artifact
 - Audit request handlers for repeated scans, repeated rereads, and per-request subprocesses in hot paths
