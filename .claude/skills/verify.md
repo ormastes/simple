@@ -46,6 +46,10 @@ For each `*_spec.spl` in scope:
      `fail(...)`, never silently pass or no-op
    - Shared interface/manual helper names must match design, spec, manual, and
      tooling references
+   - Mirrored `doc/06_spec/.../*_spec.md` output for scenario-oriented specs
+     must read as a manual: primary steps visible, setup expanded through
+     `@prev`/`@inline`, executable SPipe folded by default, and edge/matrix
+     detail folded or skipped by policy
 3. **Check test coverage of requirements:**
    - Read the docstring header — extract `**Requirements:**` link
    - Read the requirement doc → list all REQ-NNN statements
@@ -201,6 +205,8 @@ STATUS: FAIL (5 failures must be fixed before release)
 - If workflow/tooling changes left stale `doc/07_guide`, `doc/06_spec`,
   `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, or
   `.claude/agents/spipe/` instructions behind, do not mark verification PASS
+- Do not mark PASS for scenario-oriented specs whose mirrored `doc/06_spec`
+  output reads like raw test mechanics instead of an operator/user manual
 - Do not mark PASS if `direct-env-runtime-guard.shs --working` or `--staged`
   fails
 - Read actual source code — do not trust file names or comments alone
