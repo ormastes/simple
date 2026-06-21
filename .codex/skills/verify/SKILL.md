@@ -130,6 +130,9 @@ Scan for stub patterns — any match is a **FAIL**:
 - `doc/06_spec/` generated/manual docs follow the mirrored `test/` layout
 - Scenario manual guidance is followed for scenario-oriented specs; if not,
   return to design/implementation to improve the SPipe source and regenerate.
+- Workflow, tool-contract, evidence-wrapper, or verification-contract changes
+  updated the matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
+  `.claude/skills/`, and SPipe process docs before final verification.
 - Cross-references between docs intact
 - CHANGELOG updated for user-facing changes
 
@@ -163,6 +166,8 @@ STATUS: FAIL (2 failures, 1 warning)
 
 - NEVER downgrade a FAIL to WARN — fix the issue
 - NEVER defer SPipe creation, cleanup, or requirement coverage updates to release
+- NEVER mark final verification PASS when workflow/tooling changes left stale
+  guide, SPipe, or skill instructions behind
 - NEVER skip stub detection — STUB001 is non-negotiable
 - NEVER mark STATUS: PASS with outstanding FAILs
 - If verification finds issues, report them — do not auto-fix without user approval
