@@ -391,20 +391,18 @@ client.wait_for("modal_dialog", 3000)?
 ### Pattern: UI System Test
 
 ```simple
-extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
-extern fn rt_process_kill(pid: i64) -> bool
-extern fn rt_thread_sleep(ms: i64)
+use app.io.mod.{process_spawn_async, process_kill, thread_sleep}
 
 describe "My UI":
     it "clicks and checks":
-        val pid = rt_process_spawn_async("bin/simple",
+        val pid = process_spawn_async("bin/simple",
             ["ui", "web", "app.ui.sdn", "--port", "19042"])
-        rt_thread_sleep(1000)
+        thread_sleep(1000)
         val client = UITestClient.connect("127.0.0.1", 19042)?
         client.wait_ready(5000)?
         client.click("btn")?
         client.check_focused("btn")?
-        rt_process_kill(pid)
+        process_kill(pid)
 ```
 
 ---

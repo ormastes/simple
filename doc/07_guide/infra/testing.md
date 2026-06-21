@@ -829,16 +829,13 @@ client.wait_for("modal_dialog", 3000)?             # Wait for element
 # tag: slow, system
 
 use std.ui_test.client.{UITestClient}
-
-extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
-extern fn rt_process_kill(pid: i64) -> bool
-extern fn rt_thread_sleep(ms: i64)
+use app.io.mod.{process_spawn_async, process_kill, thread_sleep}
 
 describe "My App UI":
     it "clicks button and updates status":
-        val pid = rt_process_spawn_async("bin/simple",
+        val pid = process_spawn_async("bin/simple",
             ["ui", "web", "test/fixtures/ui/test_app.ui.sdn", "--port", "19042"])
-        rt_thread_sleep(1000)
+        thread_sleep(1000)
 
         val client = UITestClient.connect("127.0.0.1", 19042)
         match client:
@@ -847,9 +844,9 @@ describe "My App UI":
                 c.click("action_btn")
                 val focused = c.check_focused("action_btn")
                 expect(focused.is_ok()).to_equal(true)
-                rt_process_kill(pid)
+                process_kill(pid)
             Err(e):
-                rt_process_kill(pid)
+                process_kill(pid)
                 expect(e).to_equal("")
 ```
 
