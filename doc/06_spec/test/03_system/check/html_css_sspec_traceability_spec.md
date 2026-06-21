@@ -76,6 +76,8 @@ sh scripts/check/check-html-css-sspec-traceability.shs
 - The current W3C CSS inventory has at least 390 property-like entries assigned.
 - The implemented Simple Web CSS subset remains traceable to its generated
   combinations spec.
+- CSS properties outside the implemented Simple Web subset are checked against
+  concrete per-property tokens in the unsupported inventory SSpec.
 
 ## Scenarios
 
@@ -89,13 +91,14 @@ sh scripts/check/check-html-css-sspec-traceability.shs
    - Expected: html_count equals `105`
    - Expected: missing_html equals ``
    - Expected: missing_css_count equals `0`
+   - Expected: unsupported_missing equals ``
 - Verify the operator report was written
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -112,6 +115,8 @@ expect(evidence).to_contain("html_css_sspec_traceability_required_html_tag_count
 expect(evidence).to_contain("html_css_sspec_traceability_required_css_property_min_count=390")
 expect(evidence).to_contain("html_css_sspec_traceability_css_property_missing_count=0")
 expect(evidence).to_contain("html_css_sspec_traceability_implemented_css_property_count=62")
+expect(evidence).to_contain("html_css_sspec_traceability_implemented_css_property_missing_count=0")
+expect(evidence).to_contain("html_css_sspec_traceability_unsupported_css_property_missing_count=0")
 expect(evidence).to_contain("html_css_sspec_traceability_implemented_css_subset_spec=test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_generated_html_css_combinations_spec.spl")
 expect(evidence).to_contain("html_css_sspec_traceability_unsupported_css_inventory_spec=test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_css_inventory_traceability_spec.spl")
 
@@ -119,11 +124,17 @@ val html_count = _value_of(evidence, "html_css_sspec_traceability_html_tag_count
 val css_count = _value_of(evidence, "html_css_sspec_traceability_css_property_count")
 val missing_html = _value_of(evidence, "html_css_sspec_traceability_html_tag_missing")
 val missing_css_count = _value_of(evidence, "html_css_sspec_traceability_css_property_missing_count")
+val indexed_implemented_css_count = _value_of(evidence, "html_css_sspec_traceability_implemented_css_property_indexed_count")
+val unsupported_css_count = _value_of(evidence, "html_css_sspec_traceability_unsupported_css_property_count")
+val unsupported_missing = _value_of(evidence, "html_css_sspec_traceability_unsupported_css_property_missing")
 
 expect(html_count).to_equal("105")
 expect(css_count.to_i64()).to_be_greater_than(389)
 expect(missing_html).to_equal("")
 expect(missing_css_count).to_equal("0")
+expect(indexed_implemented_css_count.to_i64()).to_be_greater_than(55)
+expect(unsupported_css_count.to_i64()).to_be_greater_than(330)
+expect(unsupported_missing).to_equal("")
 
 step("Verify the operator report was written")
 val report = rt_file_read_text("build/test-html-css-sspec-traceability/report.md") ?? ""

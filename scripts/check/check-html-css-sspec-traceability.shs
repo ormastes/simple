@@ -113,6 +113,13 @@ def read_roots(roots: list[str]) -> str:
     return "".join(parts)
 
 
+def read_text(path: str) -> str:
+    file_path = ROOT / path
+    if not file_path.exists():
+        return ""
+    return file_path.read_text(encoding="utf-8", errors="ignore")
+
+
 def text_has_html_tag(blob: str, tag: str) -> bool:
     esc = re.escape(tag)
     return re.search(rf"<{esc}(\s|>|/)|['\"]{esc}['\"]|\b{esc}\b", blob, re.I) is not None
@@ -121,6 +128,11 @@ def text_has_html_tag(blob: str, tag: str) -> bool:
 def text_has_css_property(blob: str, prop: str) -> bool:
     esc = re.escape(prop)
     return re.search(rf"(^|[^a-zA-Z-]){esc}\s*:|['\"]{esc}['\"]|\b{esc}\b", blob, re.I | re.M) is not None
+
+
+def text_has_css_inventory_property(blob: str, prop: str) -> bool:
+    esc = re.escape(prop)
+    return re.search(rf"(?<![a-zA-Z0-9_-]){esc}(?![a-zA-Z0-9_-])", blob, re.I) is not None
 
 
 def emit(key: str, value) -> None:
@@ -134,17 +146,22 @@ def main() -> int:
 
     html_blob = read_roots(HTML_TEST_ROOTS)
     css_blob = read_roots(CSS_TEST_ROOTS)
+    inventory_blob = read_text(CSS_INVENTORY_SPEC)
 
     missing_html = [tag for tag in html if not text_has_html_tag(html_blob, tag)]
 
-    missing_css_assignment = []
+    indexed_implemented_css = [prop for prop in css if prop in CSS_SUPPORTED]
+    unsupported_css = [prop for prop in css if prop not in CSS_SUPPORTED]
+    missing_implemented_css_assignment = []
+    missing_unsupported_css_assignment = []
     for prop in css:
         if prop in CSS_SUPPORTED:
             if not text_has_css_property(css_blob, prop):
-                missing_css_assignment.append(prop)
+                missing_implemented_css_assignment.append(prop)
         else:
-            if CSS_INVENTORY_SPEC not in css_blob and not text_has_css_property(css_blob, prop):
-                missing_css_assignment.append(prop)
+            if not text_has_css_inventory_property(inventory_blob, prop):
+                missing_unsupported_css_assignment.append(prop)
+    missing_css_assignment = missing_implemented_css_assignment + missing_unsupported_css_assignment
 
     status = "pass"
     reason = "pass"
@@ -173,6 +190,12 @@ def main() -> int:
     emit("html_css_sspec_traceability_css_property_missing_count", len(missing_css_assignment))
     emit("html_css_sspec_traceability_css_property_missing", ",".join(missing_css_assignment[:120]))
     emit("html_css_sspec_traceability_implemented_css_property_count", len(CSS_SUPPORTED))
+    emit("html_css_sspec_traceability_implemented_css_property_indexed_count", len(indexed_implemented_css))
+    emit("html_css_sspec_traceability_implemented_css_property_missing_count", len(missing_implemented_css_assignment))
+    emit("html_css_sspec_traceability_implemented_css_property_missing", ",".join(missing_implemented_css_assignment[:120]))
+    emit("html_css_sspec_traceability_unsupported_css_property_count", len(unsupported_css))
+    emit("html_css_sspec_traceability_unsupported_css_property_missing_count", len(missing_unsupported_css_assignment))
+    emit("html_css_sspec_traceability_unsupported_css_property_missing", ",".join(missing_unsupported_css_assignment[:120]))
     emit("html_css_sspec_traceability_implemented_css_subset_spec", CSS_IMPLEMENTED_SPEC)
     emit("html_css_sspec_traceability_unsupported_css_inventory_spec", CSS_INVENTORY_SPEC)
     return 0 if status == "pass" else 1

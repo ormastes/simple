@@ -105,13 +105,13 @@ expect(implemented).to_contain("z-index")
 #### assigns unsupported W3C CSS properties to inventory traceability until implemented
 
 - Record the inventory SSpec owner for unsupported CSS properties
-- Keep representative unsupported properties visible without claiming renderer support
+- Keep the complete current unsupported W3C property inventory visible without claiming renderer support
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -119,10 +119,13 @@ step("Record the inventory SSpec owner for unsupported CSS properties")
 val owner = _unsupported_css_owner()
 expect(owner).to_contain("simple_web_css_inventory_traceability_spec.spl")
 
-step("Keep representative unsupported properties visible without claiming renderer support")
-val unsupported = "accent-color animation-delay aspect-ratio background-image border-radius grid-template-columns mask-image scroll-padding transform transition writing-mode"
+step("Keep the complete current unsupported W3C property inventory visible without claiming renderer support")
+val unsupported = _unsupported_css_inventory()
+expect(unsupported.split(" ").len()).to_be_greater_than(330)
 expect(unsupported).to_contain("accent-color")
 expect(unsupported).to_contain("grid-template-columns")
+expect(unsupported).to_contain("scroll-padding-inline-start")
+expect(unsupported).to_contain("view-transition-name")
 expect(unsupported).to_contain("writing-mode")
 ```
 
