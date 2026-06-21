@@ -66,7 +66,7 @@ ID tied to its current evidence artifact.
 | `REQ-WEB-HARD-004` | `src/app/ui.web/server.spl`; `src/app/ui.web/ui_routes.spl`; `src/app/ui.web/async_server.spl`; `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
 | `REQ-WEB-HARD-005` | `src/app/ui.web/wm.js`; `test/01_unit/app/ui/ws_handler_spec.spl`; query-token env non-authorization live evidence | passing |
 | `REQ-WEB-HARD-006` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
-| `REQ-WEB-HARD-007` | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; generated manual `doc/06_spec/test/03_system/gui/simple_web_browser_production_hardening_spec.md` | passing for canonical `/ui/ws` bearer upgrade and legacy `/ws` route hiding |
+| `REQ-WEB-HARD-007` | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; generated manual `doc/06_spec/03_system/gui/simple_web_browser_production_hardening_spec.md` | passing for canonical `/ui/ws` bearer upgrade and legacy `/ws` route hiding |
 | `REQ-WEB-HARD-008` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
 | `REQ-WEB-HARD-009` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
 | `REQ-WEB-HARD-010` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` child-process cleanup path | passing |
