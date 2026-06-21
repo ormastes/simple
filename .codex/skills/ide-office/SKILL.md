@@ -30,8 +30,11 @@ capsules, feature-check behavior, and plugin architecture rules.
    be visible in `--feature-check`.
 3. Keep TUI and GUI reports aligned; a feature should not appear in only one
    mode unless the spec documents why.
-4. Update plugin manifest coverage when adding IDE-visible Office tools.
-5. Add or update system assertions in
+4. Keep Office capsule wiring plugin-based: use manifest contributions,
+   scoped DI service tokens, and declared AOP hooks instead of sibling-private
+   imports.
+5. Update plugin manifest coverage when adding IDE-visible Office tools.
+6. Add or update system assertions in
    `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl`.
 
 ## Verification
