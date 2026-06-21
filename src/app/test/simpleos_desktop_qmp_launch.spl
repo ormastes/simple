@@ -2,10 +2,10 @@
 use os.qemu_runner.{OsTarget, get_desktop_browser_target, get_wm_simple_web_check_target, _x64_nvme_disk_args, build_os, build_qemu_command, ensure_desktop_disk_image}
 use std.nogc_sync_mut.sffi.io.{dir_create_all}
 use app.io.env_ops.{env_get as qmp_env_get}
+use app.io.mod.{process_run_timeout}
 
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
@@ -71,7 +71,7 @@ fn _timeout_ms() -> i64:
 fn _absolute_repo_path(path: text) -> text:
     if path.starts_with("/"):
         return path
-    val pwd = rt_process_run_timeout("pwd", [], 2000)
+    val pwd = process_run_timeout("pwd", [], 2000)
     if pwd[2] != 0:
         return path
     val cwd = pwd[0].trim()
@@ -130,11 +130,11 @@ fn _target_with_qmp(target: OsTarget, qmp_socket: text) -> OsTarget:
     )
 
 fn _qemu_available(qemu_system: text) -> bool:
-    val qemu_check = rt_process_run_timeout("which", [qemu_system], 5000)
+    val qemu_check = process_run_timeout("which", [qemu_system], 5000)
     qemu_check[2] == 0
 
 fn _source_newer_than_output(source_path: text, output_path: text) -> bool:
-    val newer = rt_process_run_timeout("sh", ["-c", "test \"$1\" -nt \"$2\"", "sh", source_path, output_path], 2000)
+    val newer = process_run_timeout("sh", ["-c", "test \"$1\" -nt \"$2\"", "sh", source_path, output_path], 2000)
     newer[2] == 0
 
 fn can_run_target(target: OsTarget) -> bool:
@@ -161,7 +161,7 @@ fn _cleanup_stale_guest_identity(qmp_socket: text, serial_log: text, stderr_log:
         "pkill -f " + _shell_quote("qemu-system.*" + qmp_socket) + " >/dev/null 2>&1 || true; " +
         "pkill -f " + _shell_quote("qemu-system.*" + serial_log) + " >/dev/null 2>&1 || true; " +
         "pkill -f " + _shell_quote("qemu-system.*" + stderr_log) + " >/dev/null 2>&1 || true"
-    rt_process_run_timeout("/bin/sh", ["-c", cleanup_cmd], 5000)
+    process_run_timeout("/bin/sh", ["-c", cleanup_cmd], 5000)
 
 fn _tail_lines(data: text, max_lines: i64) -> text:
     if max_lines <= 0:
@@ -187,7 +187,7 @@ fn read_qemu_stderr_log(handle: QemuGuestHandle) -> text:
 fn read_serial_log(handle: QemuGuestHandle) -> text:
     if not rt_file_exists(handle.serial_log):
         return ""
-    val (stdout, _stderr, exit_code) = rt_process_run_timeout(
+    val (stdout, _stderr, exit_code) = process_run_timeout(
         "/bin/sh",
         ["-c", "tr -cd '\\11\\12\\15\\40-\\176' < " + _shell_quote(handle.serial_log)],
         5000)
