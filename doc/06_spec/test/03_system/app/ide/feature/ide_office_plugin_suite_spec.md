@@ -180,7 +180,7 @@ Simple IDE feature check
 mode: tui
 capabilities: 11
 markdown: Markdown/Writer [document-renderer] -> std.editor.render.md_renderer (md, markdown, writer, html)
-  check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true
+  check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true html=true html_heading=true
   edit-command: md-edit=true stale-reject=true reason=stale-line
 slides: Impress/PPT [office-app] -> app.office.slides (ppt, presentation, slides)
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true
@@ -557,12 +557,14 @@ expect(summary).to_contain("wiki=true")
 
 - assert true
 - assert true
+- assert true
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -574,7 +576,10 @@ expect(probe.rendered_line_count).to_be_greater_than(2)
 expect(probe.preview_line_count).to_be_greater_than(2)
 assert_true(probe.contains_heading)
 assert_true(probe.contains_table)
+assert_true(probe.html_document)
+assert_true(probe.html_heading)
 expect(summary).to_contain("preview=")
+expect(summary).to_contain("html=true")
 ```
 
 </details>
