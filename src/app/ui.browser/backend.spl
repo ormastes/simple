@@ -22,10 +22,12 @@ use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, w
 use std.nogc_async_mut.gpu.engine2d.draw_ir_runtime_queue.{engine2d_draw_ir_payload_summary}
 use std.nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow.{engine2d_host_gpu_draw_ir_event_flow, engine2d_host_gpu_draw_ir_event_flow_summary}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
+use std.io_runtime.{write_file}
 
-# Runtime SFFI for snapshot writing (P3 ASCII PPM)
-extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
+
+fn browser_backend_time_us() -> i64:
+    rt_time_now_unix_micros()
 
 fn browser_semantic_render_ipc_json(state: UIState, viewport_w: i32, viewport_h: i32) -> text:
     val theme = state.tree.theme_name()
@@ -477,7 +479,7 @@ class BrowserBackend:
 
     me finish_event_render_roundtrip():
         if self.last_input_event_dispatch_us > 0:
-            val elapsed = rt_time_now_unix_micros() - self.last_input_event_dispatch_us
+            val elapsed = browser_backend_time_us() - self.last_input_event_dispatch_us
             self.last_input_event_to_render_us = if elapsed >= 0: elapsed else: 0
             self.last_input_event_roundtrip_status = "rendered"
 
@@ -520,7 +522,7 @@ class BrowserBackend:
             return
 
         # Step 1: Build DOM from widget tree
-        val dom_layout_start_us = rt_time_now_unix_micros()
+        val dom_layout_start_us = browser_backend_time_us()
         val root_node = tree.root_node()
         val dom = widget_to_dom(root_node)
 
@@ -529,12 +531,12 @@ class BrowserBackend:
 
         # Step 3: Cache layout for hit testing
         self.layout_cache = collect_layout_entries(layout, [])
-        self.last_render_dom_layout_us = rt_time_now_unix_micros() - dom_layout_start_us
+        self.last_render_dom_layout_us = browser_backend_time_us() - dom_layout_start_us
 
         # Step 4: Render the generated UI HTML through the shared SimpleWeb
         # Engine2D pixel path, then mirror those pixels into this backend's
         # legacy framebuffer for host-window present and snapshots.
-        val html_start_us = rt_time_now_unix_micros()
+        val html_start_us = browser_backend_time_us()
         var full_html = ""
         if profile.cacheable_static_shell and self.static_shell_cache_key == profile.cache_key and self.static_shell_full_html != "":
             self.static_shell_html_hits = self.static_shell_html_hits + 1
@@ -545,17 +547,17 @@ class BrowserBackend:
                 self.static_shell_cache_key = profile.cache_key
                 self.static_shell_full_html = full_html
                 self.static_shell_html_stores = self.static_shell_html_stores + 1
-        self.last_render_html_us = rt_time_now_unix_micros() - html_start_us
-        val pixel_start_us = rt_time_now_unix_micros()
+        self.last_render_html_us = browser_backend_time_us() - html_start_us
+        val pixel_start_us = browser_backend_time_us()
         var artifact = self.web_render_pixel_cache.html_request_to_pixel_artifact(req, full_html)
-        self.last_render_pixel_artifact_us = rt_time_now_unix_micros() - pixel_start_us
-        val dispatch_start_us = rt_time_now_unix_micros()
+        self.last_render_pixel_artifact_us = browser_backend_time_us() - pixel_start_us
+        val dispatch_start_us = browser_backend_time_us()
         artifact = browser_backend_dispatch_prepared_draw_ir(artifact, root_node, layout, self.width, self.height, revision)
-        self.last_render_draw_ir_dispatch_us = rt_time_now_unix_micros() - dispatch_start_us
-        val framebuffer_start_us = rt_time_now_unix_micros()
+        self.last_render_draw_ir_dispatch_us = browser_backend_time_us() - dispatch_start_us
+        val framebuffer_start_us = browser_backend_time_us()
         self.framebuffer = framebuffer_from_argb_pixels(self.width, self.height, artifact.pixels)
         self.present_pixels_cache_valid = false
-        self.last_render_framebuffer_copy_us = rt_time_now_unix_micros() - framebuffer_start_us
+        self.last_render_framebuffer_copy_us = browser_backend_time_us() - framebuffer_start_us
         self.web_render_target = artifact.target
         self.last_artifact_html = artifact.html
         self.last_artifact_capabilities = artifact.capability_summary
@@ -593,12 +595,12 @@ class BrowserBackend:
             else:
                 self.last_artifact_event_correlation_status = "event_frame_without_device_readback"
             self.last_artifact_event_correlation_summary = "event=" + self.last_artifact_event_correlation_id + ";frame_packet=" + artifact.queue_packet_id.to_text() + ";readback_source=" + artifact.gpu_readback_source + ";checksum=" + artifact.readback_checksum.to_text()
-        val state_store_start_us = rt_time_now_unix_micros()
+        val state_store_start_us = browser_backend_time_us()
         if profile.cacheable_static_shell:
             self.store_static_frame_state(tree, state, revision)
             self.static_frame_fast_stores = self.static_frame_fast_stores + 1
             self.static_frame_stores = self.static_frame_stores + 1
-        self.last_render_state_store_us = rt_time_now_unix_micros() - state_store_start_us
+        self.last_render_state_store_us = browser_backend_time_us() - state_store_start_us
         self.finish_event_render_roundtrip()
 
     me poll_events() -> [UIEvent]:
@@ -616,7 +618,7 @@ class BrowserBackend:
         self.event_queue = self.event_queue.push(event)
         self.input_event_enqueued_count = self.input_event_enqueued_count + 1
         self.input_event_pending_depth = self.event_queue.len().to_i64()
-        self.last_input_event_ingress_us = rt_time_now_unix_micros()
+        self.last_input_event_ingress_us = browser_backend_time_us()
         self.last_input_event_roundtrip_status = "queued"
         self.last_input_event_host_gpu_target_lane = ""
         self.last_input_event_host_gpu_forwarded = false
@@ -629,7 +631,7 @@ class BrowserBackend:
         val envelope_json = web_render_input_envelope_to_json(input_env)
         self.last_input_envelope_json = envelope_json
         self.input_event_dispatched_count = self.input_event_dispatched_count + 1
-        self.last_input_event_dispatch_us = rt_time_now_unix_micros()
+        self.last_input_event_dispatch_us = browser_backend_time_us()
         self.last_input_event_roundtrip_status = "dispatched"
         self.last_input_event_correlation_id = "browser-input-{self.input_event_dispatched_count}"
         val flow = engine2d_host_gpu_draw_ir_event_flow(self.last_input_event_correlation_id, "frame_batch", envelope_json.len().to_i64(), 4096, true, false, false, false, true, 16)
@@ -723,10 +725,10 @@ class BrowserBackend:
         """Write the current framebuffer to a PPM (P3 ASCII) file.
 
         Uses the P3 ASCII variant so the body is plain text and can be
-        written via rt_file_write_text without corrupting arbitrary bytes.
+        written through the text file facade without corrupting arbitrary bytes.
         Returns true on success, false otherwise.
         """
-        return rt_file_write_text(path, self.snapshot_ppm_text())
+        return write_file(path, self.snapshot_ppm_text())
 
     fn snapshot_ppm_text() -> text:
         """Return the current framebuffer as P3 ASCII PPM text."""
