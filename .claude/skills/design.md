@@ -27,8 +27,9 @@ Broad-lane agent-task docs must list lower-model sidecar lanes or `N/A`, such
 as Codex Spark, Claude Haiku, or Claude Sonnet for parallel exploration, plus
 merge owner and final normal/highest-capability reviewer. Before those sidecars
 start, the primary/best model defines the shared interface names, manual
-setup/checker helper names, and placeholder fail-fast helpers (`assert(false)`
-or `fail(...)`) that sidecars must target. If design changes workflow/tooling,
+`step("...")` flow helper names, setup/checker helper names, and placeholder
+fail-fast helpers (`assert(false)` or `fail(...)`) that sidecars must target.
+If design changes workflow/tooling,
 evidence wrappers, generated spec shape, or verification contracts, update the
 matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`, `.agents/skills/`,
 `.claude/skills/`, and `.claude/agents/spipe/` instructions before

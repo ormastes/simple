@@ -107,9 +107,10 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 1. Read architecture and ACs from state file
 2. **Design manual shape:** decide which scenarios are primary (show), edge (folded), plumbing (skip)
 3. For broad lanes, the primary/highest-capability pass defines shared
-   interface names, manual-facing setup/checker helper names, and fail-fast
-   placeholder helpers (`assert(false)` or `fail(...)`) before lower-model
-   sidecars such as Codex Spark, Claude Haiku, or Claude Sonnet fan out
+   interface names, manual `step("...")` flow helper names, setup/checker helper
+   names, and fail-fast placeholder helpers (`assert(false)` or `fail(...)`)
+   before lower-model sidecars such as Codex Spark, Claude Haiku, or Claude
+   Sonnet fan out
 4. **Write step helpers** named as manual sentences (`open_editor`, `Then_file_is_saved`)
 5. **Write scenarios** using helpers with `@inline`/`@prev` chains and `@capture` evidence
 6. Create SPipe test file(s) following `.claude/templates/spipe_template.spl`
@@ -128,8 +129,8 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - Coverage markers present
 - State file includes Manual Shape table alongside AC Coverage Matrix
 - Broad-lane state records cooperative sidecars or `N/A`, merge owner, final
-  normal/highest-capability reviewer, shared interfaces, manual helper names,
-  and any fail-fast placeholders
+  normal/highest-capability reviewer, shared interfaces, manual `step("...")`
+  flow helper names, setup/checker helper names, and any fail-fast placeholders
 
 ---
 
