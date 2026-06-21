@@ -140,7 +140,7 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 - Engine2DReadback carries source, backend_handle, pixel_count, checksum, and reason metadata; backend identity remains WebRender artifact metadata.
 - Add Linux ROCm pass evidence when ROCm runtime, probe, device, and verified HSACO are present.
 - Add Apple Metal pass evidence on an Apple host.
-- Add native DirectX device-readback evidence by making build/production_gui_web_host_gpu_queue_readback/directx_native/report.md pass on Windows; current DirectX structured readback contract is handle/checksum-gated but remains native-pending and not production device_readback. WebGPU real device_readback evidence passes; surface_upload remains provenance-only.
+- Add native DirectX device-readback evidence by making build/production_gui_web_host_gpu_queue_readback/directx_native/report.md pass on Windows; current DirectX structured readback contract is handle/checksum-gated but remains native-pending and not production device_readback. WebGPU real device_readback remains unavailable/not_device_readback in this report; surface_upload remains provenance-only.
 
 ## Raw Evidence
 
