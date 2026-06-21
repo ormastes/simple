@@ -1246,44 +1246,68 @@ const char* spl_get_arg(int64_t idx) {
 
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 /* ---- POSIX (Linux, macOS, FreeBSD, OpenBSD, NetBSD) ---- */
-static pid_t g_prefetch_pid = 0;
+#include <pthread.h>
+static pthread_t g_prefetch_thread;
+static int       g_prefetch_active = 0;
+
+static void* spl_prefetch_thread_func(void* param) {
+    char* path = (char*)param;
+    /* mmap file + MADV_POPULATE_READ to warm page cache */
+    int fd = open(path, O_RDONLY);
+    if (fd >= 0) {
+        struct stat st;
+        if (fstat(fd, &st) == 0 && st.st_size > 0) {
+            void* mapped = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+            if (mapped != MAP_FAILED) {
+#ifdef MADV_POPULATE_READ
+                madvise(mapped, (size_t)st.st_size, MADV_POPULATE_READ);
+#else
+                madvise(mapped, (size_t)st.st_size, MADV_SEQUENTIAL);
+                /* Touch first byte of each page to force read */
+                volatile char c;
+                for (size_t off = 0; off < (size_t)st.st_size; off += 4096) {
+                    c = ((char*)mapped)[off];
+                }
+                (void)c;
+#endif
+                munmap(mapped, (size_t)st.st_size);
+            }
+        }
+        close(fd);
+    }
+    free(path);
+    return NULL;
+}
 
 void spl_prefetch_start(const char* path) {
     if (!path || !path[0]) return;
-    g_prefetch_pid = fork();
-    if (g_prefetch_pid == 0) {
-        /* Child: mmap file + MADV_POPULATE_READ to warm page cache */
-        int fd = open(path, O_RDONLY);
-        if (fd >= 0) {
-            struct stat st;
-            if (fstat(fd, &st) == 0 && st.st_size > 0) {
-                void* mapped = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-                if (mapped != MAP_FAILED) {
-#ifdef MADV_POPULATE_READ
-                    madvise(mapped, (size_t)st.st_size, MADV_POPULATE_READ);
-#else
-                    madvise(mapped, (size_t)st.st_size, MADV_SEQUENTIAL);
-                    /* Touch first byte of each page to force read */
-                    volatile char c;
-                    for (size_t off = 0; off < (size_t)st.st_size; off += 4096) {
-                        c = ((char*)mapped)[off];
-                    }
-                    (void)c;
-#endif
-                    munmap(mapped, (size_t)st.st_size);
-                }
-            }
-            close(fd);
-        }
-        _exit(0);
+    /* ponytail: thread, not fork. A forked warmer that the caller never
+     * spl_prefetch_wait()s (e.g. a long-lived `simple run` MCP server loop)
+     * leaks a permanent zombie; a finished-but-unjoined thread does not. */
+    if (g_prefetch_active) {
+        /* start() with no intervening wait(): don't leak the old worker */
+        pthread_detach(g_prefetch_thread);
+        g_prefetch_active = 0;
     }
+    char* path_copy = strdup(path);
+    if (!path_copy) return;
+    /* small stack: warmer uses only a few locals, and an unjoined thread
+     * keeps its stack reserved until process exit. */
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 128 * 1024);
+    if (pthread_create(&g_prefetch_thread, &attr, spl_prefetch_thread_func, path_copy) == 0) {
+        g_prefetch_active = 1;
+    } else {
+        free(path_copy);
+    }
+    pthread_attr_destroy(&attr);
 }
 
 void spl_prefetch_wait(void) {
-    if (g_prefetch_pid > 0) {
-        int status;
-        waitpid(g_prefetch_pid, &status, 0);
-        g_prefetch_pid = 0;
+    if (g_prefetch_active) {
+        pthread_join(g_prefetch_thread, NULL);
+        g_prefetch_active = 0;
     }
 }
 

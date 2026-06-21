@@ -466,8 +466,8 @@ SplArray*   rt_get_args(void);
 
 /* ===== File Prefetch (CLI keyword support) ===== */
 
-void        spl_prefetch_start(const char* path);  /* warm page cache via fork+madvise */
-void        spl_prefetch_wait(void);               /* reap prefetch child */
+void        spl_prefetch_start(const char* path);  /* warm page cache via thread+madvise (POSIX/Windows) */
+void        spl_prefetch_wait(void);               /* join prefetch worker thread */
 void        rt_prefetch_start(const char* path);   /* FFI alias */
 void        rt_prefetch_wait(void);                /* FFI alias */
 
