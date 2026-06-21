@@ -1464,6 +1464,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_host_gpu_queue_last_status",
     "rt_host_gpu_queue_last_backend_handle",
     "rt_host_gpu_queue_last_device_time_us",
+    "rt_host_gpu_queue_emit_payload_text",
     "rt_host_gpu_queue_last_payload_size",
     "rt_host_gpu_queue_last_payload_hash",
     "rt_host_gpu_queue_last_payload_text",

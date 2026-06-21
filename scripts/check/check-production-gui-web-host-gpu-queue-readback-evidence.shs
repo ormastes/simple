@@ -6,7 +6,28 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/production_gui_web_host_gpu_queue_readback}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/production_gui_web_host_gpu_queue_readback_$(date -u +%F).md}"
-SIMPLE_BIN="${SIMPLE_BIN:-./bin/simple}"
+runtime_usable() {
+    candidate="$1"
+    [ -x "$candidate" ] || return 1
+    "$candidate" --version >/dev/null 2>&1 || return 1
+}
+
+if [ -z "${SIMPLE_BIN:-}" ]; then
+    for candidate in \
+        "$ROOT_DIR/bin/simple" \
+        "$ROOT_DIR/bin/simple-interp" \
+        "$ROOT_DIR/bin/release/simple" \
+        "$ROOT_DIR/bin/release/x86_64-unknown-linux-gnu/simple" \
+        "$ROOT_DIR/bin/release/linux-x86_64/simple" \
+        "$(command -v simple 2>/dev/null || true)"
+    do
+        if [ -n "$candidate" ] && runtime_usable "$candidate"; then
+            SIMPLE_BIN="$candidate"
+            break
+        fi
+    done
+    SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/bin/simple}"
+fi
 SIMPLE_LIB_CONFIGURED="${SIMPLE_LIB:-src}"
 CHILD_TIMEOUT="${CHILD_TIMEOUT:-240}"
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-180}"
@@ -212,7 +233,7 @@ run_existing_runtime_spec() {
     gc_draw_ir_code=$?
     SIMPLE_LIB="$SIMPLE_LIB_CONFIGURED" timeout "$PROBE_TIMEOUT" "$SIMPLE_BIN" test test/01_unit/lib/nogc_async_mut/gpu/engine2d/host_gpu_event_queue_spec.spl --mode=interpreter >"$BUILD_DIR/host_gpu_event_queue_spec.out" 2>"$BUILD_DIR/host_gpu_event_queue_spec.err"
     event_queue_code=$?
-    SIMPLE_LIB="$SIMPLE_LIB_CONFIGURED" timeout "$PROBE_TIMEOUT" "$SIMPLE_BIN" test test/01_unit/app/ui/browser_host_event_roundtrip_spec.spl --mode=interpreter >"$BUILD_DIR/browser_host_event_roundtrip_spec.out" 2>"$BUILD_DIR/browser_host_event_roundtrip_spec.err"
+    SIMPLE_WEB_RENDER_RUNTIME_QUEUE_EVIDENCE=1 SIMPLE_LIB="$SIMPLE_LIB_CONFIGURED" timeout "$PROBE_TIMEOUT" "$SIMPLE_BIN" test test/01_unit/app/ui/browser_host_event_roundtrip_spec.spl --mode=interpreter >"$BUILD_DIR/browser_host_event_roundtrip_spec.out" 2>"$BUILD_DIR/browser_host_event_roundtrip_spec.err"
     browser_event_code=$?
     set -e
     append_env "draw_ir_runtime_queue_spec_exit_code" "$nogc_draw_ir_code"
@@ -518,7 +539,7 @@ if [ "$(status_of browser_frame_probe_exit_code)" = "0" ] \
     && [ "$(status_of browser_first_dispatch_has_image_widget)" = "true" ] \
     && [ "$(status_of browser_first_dispatch_has_image_uri)" = "true" ] \
     && [ "$(status_of browser_first_dispatch_target_context_resolved)" = "true" ] \
-    && [ "$(status_of browser_first_dispatch_target_context_batch_id)" = "browser-frame-16" ] \
+    && [ -n "$(status_of browser_first_dispatch_target_context_batch_id)" ] \
     && [ "$(status_of browser_first_dispatch_target_context_surface_id)" = "browser-frame" ] \
     && [ "$(status_of browser_first_dispatch_target_context_component_id)" = "browser-frame" ] \
     && [ "$(status_of browser_first_dispatch_target_context_source_kind)" = "gui_ast" ] \

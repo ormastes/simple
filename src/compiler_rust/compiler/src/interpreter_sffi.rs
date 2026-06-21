@@ -682,6 +682,9 @@ unsafe extern "C" fn interp_call_handler(
                 "rt_host_gpu_queue_last_device_time_us" => {
                     crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_last_device_time_us(&args)
                 }
+                "rt_host_gpu_queue_emit_payload_text" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_emit_payload_text(&args)
+                }
                 "rt_host_gpu_queue_last_payload_size" => {
                     crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_last_payload_size(&args)
                 }

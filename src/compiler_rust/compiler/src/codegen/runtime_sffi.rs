@@ -841,6 +841,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_status", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_backend_handle", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_device_time_us", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_emit_payload_text", &[I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_payload_size", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_payload_hash", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_payload_text", &[], &[I64]),

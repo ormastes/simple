@@ -360,6 +360,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         host_gpu_lane::rt_host_gpu_queue_last_device_time_us
     );
     insert_simple!(
+        "rt_host_gpu_queue_emit_payload_text",
+        host_gpu_lane::rt_host_gpu_queue_emit_payload_text
+    );
+    insert_simple!(
         "rt_host_gpu_queue_last_payload_size",
         host_gpu_lane::rt_host_gpu_queue_last_payload_size
     );
@@ -2139,6 +2143,7 @@ pub(crate) fn call_extern_function_with_values(
             "rt_host_gpu_queue_last_status" => host_gpu_lane::rt_host_gpu_queue_last_status(evaluated),
             "rt_host_gpu_queue_last_backend_handle" => host_gpu_lane::rt_host_gpu_queue_last_backend_handle(evaluated),
             "rt_host_gpu_queue_last_device_time_us" => host_gpu_lane::rt_host_gpu_queue_last_device_time_us(evaluated),
+            "rt_host_gpu_queue_emit_payload_text" => host_gpu_lane::rt_host_gpu_queue_emit_payload_text(evaluated),
             "rt_host_gpu_queue_last_payload_size" => host_gpu_lane::rt_host_gpu_queue_last_payload_size(evaluated),
             "rt_host_gpu_queue_last_payload_hash" => host_gpu_lane::rt_host_gpu_queue_last_payload_hash(evaluated),
             "rt_host_gpu_queue_last_payload_text" => host_gpu_lane::rt_host_gpu_queue_last_payload_text(evaluated),
