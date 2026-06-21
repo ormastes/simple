@@ -247,7 +247,7 @@ Features specified but not yet implemented
 
 | ID | Feature | Description | Spec |
 |----|---------|-------------|------|
-| ENGINE2D_TRAIT_FACADE_BACKEND_EXECUTION_2026_06_02 | Engine2D Facade Must Preserve Backend Pixel Mutations | Date: 2026-06-02 Status: open Area: Engine2D, render backends, web renderer parity ## Problem Backend-executed parity evidence found that direct concrete backends preserve drawn pixels, but the generic `Engine2D` facade path can lose pixel  | - |
+| ENGINE2D_TRAIT_FACADE_BACKEND_EXECUTION_2026_06_02 | Engine2D Facade Must Preserve Backend Pixel Mutations | Date: 2026-06-02 Status: current Area: Engine2D, render backends, web renderer parity. Software and cpu_simd facade pixel mutation evidence is covered; macOS Metal and direct web renderer harness use remain open. | doc/06_spec/test/01_unit/gpu/engine2d_trait_facade_backend_spec.md |
 
 ### hkdf (1)
 

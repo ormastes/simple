@@ -1,7 +1,7 @@
 # Feature Request: Engine2D Facade Must Preserve Backend Pixel Mutations
 
 Date: 2026-06-02
-Status: open
+Status: current
 Area: Engine2D, render backends, web renderer parity
 
 ## Problem
@@ -42,14 +42,29 @@ dispatch. Acceptable approaches:
 
 ## Acceptance Criteria
 
-- A spec proves `Engine2D.create_with_backend(16, 16, "software")` preserves
+- [x] A spec proves `Engine2D.create_with_backend(16, 16, "software")` preserves
   clear and filled-rect colors.
-- A spec proves `Engine2D.create_with_backend(16, 16, "cpu_simd")` preserves
+- [x] A spec proves `Engine2D.create_with_backend(16, 16, "cpu_simd")` preserves
   the same colors and records SIMD hits.
-- On macOS, a spec proves `Engine2D.create_with_backend(16, 16, "metal")`
+- [ ] On macOS, a spec proves `Engine2D.create_with_backend(16, 16, "metal")`
   returns exact pixels from GPU readback for the reduced scene.
-- The web renderer backend parity harness can use `Engine2D` directly without
+- [ ] The web renderer backend parity harness can use `Engine2D` directly without
   falling back to direct concrete backend calls.
+
+## Evidence
+
+- `test/01_unit/gpu/engine2d_trait_facade_backend_spec.spl`
+- `doc/06_spec/test/01_unit/gpu/engine2d_trait_facade_backend_spec.md`
+- 2026-06-21 focused run:
+  `SIMPLE_LIB=src bin/simple test test/01_unit/gpu/engine2d_trait_facade_backend_spec.spl`
+  passed 2 scenarios for `software` and `cpu_simd`.
+
+## Remaining Work
+
+- Run or add the macOS Metal reduced-scene check on a host with native Metal
+  readback.
+- Wire the web renderer parity harness through `Engine2D` directly after the
+  Metal evidence exists, then update the feature DB row to `done`.
 
 ## Notes
 
