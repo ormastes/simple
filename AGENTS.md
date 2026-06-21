@@ -248,6 +248,8 @@ SPipe belongs to verify as a release-blocking evidence gate. Implementation or
 design creates/updates SPipe specs; verify checks that they exist, are current,
 use real assertions, cover REQ-NNN requirements, and contain no placeholder
 passes. Release must not create or update SPipe after verify.
+Generated-manual quality and lower-model sidecar review must already be covered
+by verify PASS; release must not repair or accept those gaps afterward.
 
 Additional required checks for compiler/core/lib or MCP/LSP changes:
 - `<runtime> check src/compiler`
