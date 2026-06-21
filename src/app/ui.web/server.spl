@@ -30,12 +30,8 @@ use app.ui.web.taskbar_runtime.{host_taskbar_runtime_enable, host_taskbar_runtim
 use app.ui.web.json.{state_to_json, widgets_to_json}
 use os.compositor.host_compositor_entry.{HostBackendKind}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderRequest, web_render_body_html}
+use std.io_runtime.{env_get, file_exists, get_args, read_file, write_file}
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_cli_get_args() -> [text]
-extern fn rt_env_get(key: text) -> text
 extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_bytes_to_text(data: [u8]) -> text
 extern fn rt_time_ms() -> u64
@@ -197,8 +193,8 @@ class WebServer:
                 val state = WebServer.build_state(tree)
                 var session = UISession.new(tree)
                 session.set_active_backend("web")
-                val content = if rt_file_exists(file_path):
-                    rt_file_read_text(file_path)
+                val content = if file_exists(file_path):
+                    read_file(file_path)
                 else:
                     ""
                 val secret = load_secret(false)
@@ -412,7 +408,7 @@ class WebServer:
 
                 match path:
                     "/wm.js":
-                        val wm_js = rt_file_read_text("src/app/ui.web/wm.js")
+                        val wm_js = read_file("src/app/ui.web/wm.js")
                         var js_headers = "HTTP/1.1 200 OK\r\n"
                         js_headers = js_headers + "Content-Type: application/javascript\r\n"
                         js_headers = js_headers + "Content-Length: " + str(wm_js.len()) + "\r\n"
@@ -425,7 +421,7 @@ class WebServer:
                             Ok(()):
                                 pass_dn
                     "/retained_renderer.js":
-                        val renderer_js = rt_file_read_text("src/app/ui.web/retained_renderer.js")
+                        val renderer_js = read_file("src/app/ui.web/retained_renderer.js")
                         var renderer_headers = "HTTP/1.1 200 OK\r\n"
                         renderer_headers = renderer_headers + "Content-Type: application/javascript\r\n"
                         renderer_headers = renderer_headers + "Content-Length: " + str(renderer_js.len()) + "\r\n"
@@ -630,10 +626,10 @@ class WebServer:
 
     fn check_file_changes():
         """Check if the .ui.sdn file has changed."""
-        if not rt_file_exists(self.file_path):
+        if not file_exists(self.file_path):
             return
 
-        val current_content = rt_file_read_text(self.file_path)
+        val current_content = read_file(self.file_path)
         if current_content != self.last_file_content:
             self.last_file_content = current_content
             val tree_result = parse_ui_to_tree(self.file_path)
@@ -692,14 +688,14 @@ fn shared_wm_backend_kind_web() -> HostBackendKind:
     HostBackendKind.WebCanvas
 
 fn _shared_wm_requested(args: [text]) -> bool:
-    val env_val = rt_env_get("SIMPLE_UI_WEB_SHARED_WM") ?? ""
+    val env_val = env_get("SIMPLE_UI_WEB_SHARED_WM") ?? ""
     shared_wm_requested_web(args, env_val)
 
 fn run_shared_wm_web(title: text) -> i64:
     """Start the shared WM web server.
     Constructs a UISession backed by an empty tree, wires WmBridge and
     OriginGuard, then runs the AsyncWebServer with /ui/* dispatch enabled."""
-    val port_str = rt_env_get("SIMPLE_UI_WEB_PORT") ?? "8080"
+    val port_str = env_get("SIMPLE_UI_WEB_PORT") ?? "8080"
     val port = port_str.to_int()
 
     val guard = OriginGuard.from_env()
@@ -707,9 +703,9 @@ fn run_shared_wm_web(title: text) -> i64:
     if secret == "":
         print "Error: SIMPLE_UI_WEB_TOKEN_SECRET is required unless SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1 is set for local development"
         return 1
-    val mode_name = rt_env_get("SIMPLE_UI_WEB_SHELL_MODE") ?? "embedded"
-    val backend_name = rt_env_get("SIMPLE_UI_BACKEND") ?? ""
-    val electron_env = rt_env_get("SIMPLE_HOST_ELECTRON_AVAILABLE") ?? ""
+    val mode_name = env_get("SIMPLE_UI_WEB_SHELL_MODE") ?? "embedded"
+    val backend_name = env_get("SIMPLE_UI_BACKEND") ?? ""
+    val electron_env = env_get("SIMPLE_HOST_ELECTRON_AVAILABLE") ?? ""
     val electron_available = backend_name == "electron" or electron_env == "1"
     host_taskbar_runtime_enable(mode_name, electron_available)
 
@@ -739,8 +735,8 @@ fn run_shared_wm_web(title: text) -> i64:
 fn _make_wm_session() -> Result<UISession, text>:
     """Create a UISession for the shared WM mode.
     Uses an in-memory empty tree if no default file is found."""
-    val default_path = rt_env_get("SIMPLE_UI_WEB_DEFAULT_UI") ?? ""
-    if default_path != "" and rt_file_exists(default_path):
+    val default_path = env_get("SIMPLE_UI_WEB_DEFAULT_UI") ?? ""
+    if default_path != "" and file_exists(default_path):
         val tree_result = parse_ui_to_tree(default_path)
         match tree_result:
             Err(e): return Err(e)
@@ -753,7 +749,7 @@ fn _make_wm_session() -> Result<UISession, text>:
     val tmp_path = "/tmp/simple_wm_default.sdn"
     # Write a minimal file for the parser (runtime file write)
     _write_temp_ui(tmp_path)
-    if rt_file_exists(tmp_path):
+    if file_exists(tmp_path):
         val tree_result = parse_ui_to_tree(tmp_path)
         match tree_result:
             Err(_): pass_do_nothing
@@ -772,7 +768,7 @@ fn _write_temp_ui(path: text):
         "    text banner \"Shared host taskbar runtime\"\n" +
         "  }\n" +
         "}\n"
-    val _ = rt_file_write_text(path, content)
+    val _ = write_file(path, content)
 
 fn _wm_serve_loop(listener: TcpListener, session: UISession, guard: OriginGuard, secret: text):
     """Accept and dispatch connections for the shared WM server."""
@@ -812,7 +808,7 @@ fn _wm_handle_connection(stream: TcpStream, session: UISession, guard: OriginGua
                 return
 
             if path == "/wm.js":
-                val wm_js = rt_file_read_text("src/app/ui.web/wm.js")
+                val wm_js = read_file("src/app/ui.web/wm.js")
                 val response = _simple_response(200, "application/javascript", wm_js)
                 stream.write_text(response)
                 return
@@ -1020,17 +1016,17 @@ fn run_web_with_access_store(file_path: text, port: i32, access_db_path: text) -
     """Start web server mode for a .ui.sdn file.
     If --tls/--https is present, constructs a TLS listener using
     SIMPLE_UI_WEB_TLS_CERT and SIMPLE_UI_WEB_TLS_KEY env vars."""
-    val args = rt_cli_get_args()
+    val args = get_args()
     if _shared_wm_requested(args):
         return run_shared_wm_web("simple ui web")
-    if not rt_file_exists(file_path):
+    if not file_exists(file_path):
         print "Error: File not found: " + file_path
         return 1
 
     val use_tls = _tls_requested(args)
     if use_tls:
-        val cert_path = rt_env_get("SIMPLE_UI_WEB_TLS_CERT") ?? ""
-        val key_path = rt_env_get("SIMPLE_UI_WEB_TLS_KEY") ?? ""
+        val cert_path = env_get("SIMPLE_UI_WEB_TLS_CERT") ?? ""
+        val key_path = env_get("SIMPLE_UI_WEB_TLS_KEY") ?? ""
         if cert_path == "":
             print "Error: SIMPLE_UI_WEB_TLS_CERT env var is required for TLS mode"
             return 1
@@ -1062,7 +1058,7 @@ fn run_web_with_access_store(file_path: text, port: i32, access_db_path: text) -
 fn run_web_wm(file_path: text, port: i32) -> i64:
     """Start web server in window manager mode.
     Serves a WM desktop with floating, draggable windows."""
-    if not rt_file_exists(file_path):
+    if not file_exists(file_path):
         print "Error: File not found: " + file_path
         return 1
 
