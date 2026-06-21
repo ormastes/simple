@@ -86,7 +86,9 @@ Host input
   Draw IR through Engine2D with CPU fallback metadata and pixel readback.
   URI-only image commands fail closed until resolved-image input is supplied;
   the advanced path renders caller-provided resolved ARGB buffers but does not
-  decode PNG, JPEG, or WebP bytes.
+  decode PNG, JPEG, WebP, TIFF, or JPEG XL bytes; current 8K evidence covers
+  TIFF raster paths and JPEG XL metadata/sparse planning, not full JPEG XL
+  pixel decode.
 - Engine2D split contract: `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl`.
 - No-GC Draw IR runtime queue owner:
   `src/lib/nogc_async_mut/gpu/engine2d/draw_ir_runtime_queue.spl`.

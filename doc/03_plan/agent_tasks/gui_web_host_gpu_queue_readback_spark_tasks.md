@@ -107,7 +107,9 @@ backend readback fixtures. Synthetic handles remain isolated probe evidence.
    - AC: no hot-path HTML -> Draw IR generation is added without bounded
      performance evidence.
    - AC: image URI Draw IR commands remain command-level evidence only until an
-     asset resolver plus PNG/JPEG/WebP decode pipeline feeds Engine2D pixels.
+     asset resolver plus PNG/JPEG/WebP/TIFF/JPEG XL decode pipeline feeds
+     Engine2D pixels; the current 8K report covers TIFF raster paths and JPEG XL
+     metadata/sparse planning, not full JPEG XL pixel decode.
    - AC: unsupported Draw IR render commands, including image URI commands
      before decode support, surface `unsupported Draw IR commands skipped` in
      `Engine2dDrawIrAdvResult.fallback_reason` and increment skipped count.
