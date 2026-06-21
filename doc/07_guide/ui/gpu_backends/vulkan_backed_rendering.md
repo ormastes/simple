@@ -13,7 +13,7 @@ single backend, or a CPU fallback. Relevant backend keys:
 
 | key | renders via | notes |
 |-----|-------------|-------|
-| `vulkan` | `VulkanBackend` (`backend_vulkan.spl`), real `rt_vulkan_*` compute | 9/10 primitives wired (blit pending) |
+| `vulkan` | `VulkanBackend` (`backend_vulkan.spl`) through the Vulkan SFFI facades | 9/10 primitives wired (blit pending) |
 | `metal` | native `MetalBackend` (macOS); else **Vulkan emulation** → name `metal-on-vulkan` | non-macOS hosts serve the Metal API request through Vulkan |
 | `directx-on-vulkan` | `VulkanBackend` (vkd3d/DXVK concept) | additive alias; the legacy `directx` key stays CPU-raster gated by a real vkd3d/Vulkan ICD probe |
 | `software` / `cpu` | `SoftwareBackend` | the bit-exact reference oracle |
@@ -23,9 +23,9 @@ The emulation backends disclose themselves in `backend_name()`
 
 ## Real Vulkan only runs under the classic interpreter
 
-`rt_vulkan_*` are implemented in the interpreter (`interpreter_extern/gpu.rs`,
-`vulkan_dlopen`), which `dlopen`s `libvulkan` and issues real
-`vkCreateInstance`/`vkCmdDispatch`. Therefore:
+The Vulkan SFFI facade path ultimately reaches interpreter/runtime Vulkan
+externs (`interpreter_extern/gpu.rs`, `vulkan_dlopen`), which `dlopen`
+`libvulkan` and issue real `vkCreateInstance`/`vkCmdDispatch`. Therefore:
 
 - `bin/simple test` runs specs in the **classic interpreter**, so real Vulkan
   executes there.
@@ -66,22 +66,22 @@ descriptor layout; the `line` blob ignores thickness (1px only).
 - `test/01_unit/lib/gc_async_mut/ui/web_render_engine2d_surface_spec.spl`
   — the web-render API surface through the same three backends. NOTE: to make
   the SSpec runner exercise real GPU, the spec creates `VulkanBackend` directly
-  in a prior `it` (priming `rt_vulkan_*`), then uses **one** Engine2D-GPU backend
+  in a prior `it` (priming the Vulkan SFFI facade), then uses **one** Engine2D-GPU backend
   per `it`, created+drawn **inline** (routing through a helper fn or imported
   module makes the runner fall back to CPU), with a direct `SoftwareBackend`
   reference.
 
 ### RenderDoc capture (`scripts/check/check-renderdoc-vulkan-capture.shs`)
 A headless compute workload never presents a swapchain frame, so RenderDoc needs
-in-application frame markers. The interpreter exposes
-`rt_renderdoc_start_capture` / `rt_renderdoc_end_capture` /
-`rt_renderdoc_available` / `rt_renderdoc_num_captures`
-(`interpreter_extern/gpu.rs`), which fetch the RenderDoc API from the injected
-`librenderdoc` and call `StartFrameCapture`/`EndFrameCapture`. Run under
-`renderdoccmd capture` (`build/tools/renderdoc`), the harness produces a valid
-`.rdc` (validated by its `RDOC` magic). Requires the interpreter binary built
-WITH these externs (`src/compiler_rust/target/release/simple`); it does not
-replace the self-hosted `bin/release/<triple>/simple`.
+in-application frame markers. The harness calls
+`app.test.renderdoc_runtime_ops`, whose owner module wraps the RenderDoc
+runtime hooks exposed by `interpreter_extern/gpu.rs`. Those hooks fetch the
+RenderDoc API from the injected `librenderdoc` and call
+`StartFrameCapture`/`EndFrameCapture`. Run under `renderdoccmd capture`
+(`build/tools/renderdoc`), the harness produces a valid `.rdc` (validated by
+its `RDOC` magic). Requires the interpreter binary built WITH these externs
+(`src/compiler_rust/target/release/simple`); it does not replace the
+self-hosted `bin/release/<triple>/simple`.
 
 ### macOS-only GUI/web/2D Vulkan comparison
 The top-level GUI/web/2D Vulkan comparison wrapper is macOS-only for now:
