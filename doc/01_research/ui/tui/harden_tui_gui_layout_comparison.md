@@ -127,7 +127,7 @@ Research for hardening TUI and GUI layout comparison, fixing reachable compariso
 - `src/app/wm_compare/emulated_capture.spl` now rejects invalid viewport dimensions before invoking either renderer. This prevents zero-size or negative-size requests from producing empty successful captures.
 - `compare_emulated_screenshots_exact` now returns a non-exact failure result when either capture fails, preventing two empty failed buffers from being reported as an exact match.
 - `test/03_system/wm_compare/emulated_capture_spec.spl` now covers both invalid capture rejection and failed-capture comparison triage. The matcher mirror was updated with the same scenarios.
-- `doc/06_spec/system/wm_compare/emulated_capture_spec.md` was updated manually with the new scenarios. Automatic docgen was attempted by the test runner but is currently blocked by unrelated dirty-worktree compiler parse state: `src/compiler/10.frontend/flat_ast_bridge_part2.spl` reports `Unexpected token: expected expression, found Else`.
+- `doc/06_spec/03_system/gui/wm_compare/emulated_capture_spec.md` was updated manually with the new scenarios. Automatic docgen was attempted by the test runner but is currently blocked by unrelated dirty-worktree compiler parse state: `src/compiler/10.frontend/flat_ast_bridge_part2.spl` reports `Unexpected token: expected expression, found Else`.
 - Focused verification:
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/03_system/wm_compare/emulated_capture_spec.spl --mode=interpreter`: 1 file, 5 tests, 0 failures; runner duration 7346ms.
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/02_integration/rendering/backend_screenshot_compare_spec.spl --mode=interpreter`: 1 file, 6 tests, 0 failures; cached unchanged result.
