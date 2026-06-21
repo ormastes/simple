@@ -23,6 +23,18 @@ description: "Codex design skill (Step 4 in cooperative pipeline). Architecture 
 | NFR | `doc/02_requirements/nfr/<feature>.md` | Run research first |
 | UI Design (optional) | `doc/05_design/<feature>_tui.md` | Do inline (Gemini Step 3 skipped) |
 
+## Phase 0: Cooperative Review Setup
+
+- For broad plans, split independent architecture, UI, test, and risk checks
+  across lower-model parallel agents when available (for example Codex Spark,
+  Claude Haiku, or Claude Sonnet).
+- A normal/highest-capability LLM must review and accept the merged result
+  before final requirements, done marks, exclusions, or broad architecture
+  claims are treated as complete.
+- The first/highest-capability pass defines shared interface names,
+  manual-facing setup/checker helper names, and temporary helper placeholders.
+  Placeholder helpers must fail explicitly (`assert(false)` or equivalent).
+
 ## Phase 1: UI Design (if applicable and Gemini Step 3 skipped)
 
 - TUI layout: `doc/05_design/<feature>_tui.md`

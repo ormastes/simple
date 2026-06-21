@@ -1,6 +1,6 @@
 ---
 name: design
-description: Create architecture, UI design, system tests, and detail design for a feature. Self-sufficient — if research/requirements missing, does them first. Does not depend on any other LLM.
+description: Create architecture, UI design, system tests, and detail design for a feature. Self-sufficient if prerequisites are missing; uses lower-model sidecars and highest-review when available.
 ---
 
 # Design — Self-Sufficient
