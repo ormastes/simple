@@ -86,9 +86,10 @@ not create, rewrite, or weaken SPipe after verification.
   `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` and confirm CLI
   argument scripts still avoid unnecessary compile/JIT startup unless
   `SIMPLE_EXECUTION_MODE` is explicitly set.
-- Runtime facade boundary: new env reads in app leaf code or
-  `src/lib/gc_async_mut` outside owner modules such as `app/io/env_ops.spl` must
-  use the stdlib/app/gc env facade, not local `rt_env_get` declarations.
+- Runtime facade boundary: new env reads or process-run calls in app leaf code
+  or `src/lib/gc_async_mut` outside owner modules such as `app/io/*.spl` must
+  use the stdlib/app/gc env/process facades, not local `rt_env_get`,
+  `rt_process_run`, or `rt_process_run_timeout` declarations.
   Check with `sh scripts/audit/direct-env-runtime-guard.shs --working` and
   `sh scripts/audit/direct-env-runtime-guard.shs --staged`.
 - Security: input validation, no secrets

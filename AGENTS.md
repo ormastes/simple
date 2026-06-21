@@ -232,8 +232,9 @@ Run `/verify` — production readiness check:
 
 Run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
 `sh scripts/audit/direct-env-runtime-guard.shs --staged`; new app leaf or
-`src/lib/gc_async_mut` env reads outside owner modules must use env facades, not
-local `rt_env_get`.
+`src/lib/gc_async_mut` env reads/process-run calls outside owner modules must
+use env/process facades, not local `rt_env_get`, `rt_process_run`, or
+`rt_process_run_timeout`.
 
 SPipe belongs to verify as a release-blocking evidence gate. Implementation or
 design creates/updates SPipe specs; verify checks that they exist, are current,

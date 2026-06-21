@@ -166,11 +166,12 @@ For each source file in scope:
      `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
      process docs before final verification
 
-5. **Runtime env facade boundary:**
+5. **Runtime facade boundary:**
    - Run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
      `sh scripts/audit/direct-env-runtime-guard.shs --staged`
-   - App leaf and `src/lib/gc_async_mut` env reads outside owner modules must
-     use env facades, not local `rt_env_get`
+   - App leaf and `src/lib/gc_async_mut` env reads or process-run calls outside
+     owner modules must use env/process facades, not local `rt_env_get`,
+     `rt_process_run`, or `rt_process_run_timeout`
 
 ---
 

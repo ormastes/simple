@@ -193,8 +193,9 @@ Run:
 sh scripts/audit/direct-env-runtime-guard.shs --working
 sh scripts/audit/direct-env-runtime-guard.shs --staged
 ```
-New app leaf or `src/lib/gc_async_mut` env reads outside owner modules must use
-env facades, not local `rt_env_get`.
+New app leaf or `src/lib/gc_async_mut` env reads/process-run calls outside owner
+modules must use env/process facades, not local `rt_env_get`, `rt_process_run`,
+or `rt_process_run_timeout`.
 
 ---
 

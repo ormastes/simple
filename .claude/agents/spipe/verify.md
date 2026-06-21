@@ -56,8 +56,9 @@
     coverage claims, generated-manual quality, and done marks.
 12. Run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
     `sh scripts/audit/direct-env-runtime-guard.shs --staged`; app leaf and
-    `src/lib/gc_async_mut` env reads outside owner modules must use env facades,
-    not local `rt_env_get`.
+    `src/lib/gc_async_mut` env reads or process-run calls outside owner modules
+    must use env/process facades, not local `rt_env_get`, `rt_process_run`, or
+    `rt_process_run_timeout`.
 13. For Mac GUI/web/2D RenderDoc+Vulkan evidence, keep top-level proof scope
     macOS-only until Windows and Linux runbooks exist. Start from
     `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc`

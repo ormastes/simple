@@ -1,5 +1,5 @@
 #!/bin/sh
-# Guard against local rt_env_get use outside env owner modules.
+# Guard against local env/process runtime calls outside owner modules.
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -11,9 +11,9 @@ usage() {
     cat <<'EOF'
 Usage: sh scripts/audit/direct-env-runtime-guard.shs [--all|--working|--staged]
 
-Blocks direct rt_env_get declarations/calls in production app leaf code and
-gc_async_mut lib code outside env owner modules. Use app/std/gc env facades
-instead.
+Blocks direct rt_env_get and rt_process_run(_timeout) declarations/calls in
+production app leaf code and gc_async_mut lib code outside runtime owner
+modules. Use app/std/gc env and process facades instead.
 
 Scope is intentionally src/app plus src/lib/gc_async_mut. Examples, tests,
 compiler/bootstrap modules, and lower runtime owner layers are audited/fixed in
@@ -57,7 +57,7 @@ failures=""
 for path in $(paths_for_mode | sort -u); do
     [ -f "$path" ] || continue
     is_allowed_owner "$path" && continue
-    if grep -nE 'extern fn rt_env_get|rt_env_get[[:space:]]*\(' "$path" >/tmp/direct-env-runtime-guard.$$ 2>/dev/null; then
+    if grep -nE 'extern fn rt_env_get|rt_env_get[[:space:]]*\(|extern fn rt_process_run(_timeout)?|rt_process_run(_timeout)?[[:space:]]*\(' "$path" >/tmp/direct-env-runtime-guard.$$ 2>/dev/null; then
         while IFS= read -r line; do
             failures="${failures}${path}:${line}
 "
@@ -68,7 +68,7 @@ rm -f /tmp/direct-env-runtime-guard.$$
 
 if [ -n "$failures" ]; then
     printf '%s' "$failures" >&2
-    echo "STATUS: FAIL direct rt_env_get outside env owners" >&2
+    echo "STATUS: FAIL direct env/process runtime call outside owners" >&2
     exit 1
 fi
 
