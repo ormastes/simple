@@ -22,7 +22,8 @@ Spawn lower-model parallel agents for plan/research lanes when available:
 - **Agent 2:** Doc exploration via Obsidian CLI (search `doc/`)
 - Prefer bounded sidecars such as Codex Spark, Claude Haiku, or Claude Sonnet.
 - Merge results into research summary, then require normal/highest-capability
-  LLM review before accepting final findings or broad exclusions.
+  LLM review before accepting final findings, requirements, done marks, or
+  broad exclusions.
 
 ### Output
 - `doc/01_research/<domain>/<topic>/<feature>.md`
