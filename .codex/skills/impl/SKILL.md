@@ -49,7 +49,7 @@ Skip if exist. See `design` skill for details.
   primary flow is manual-quality.
 - If design introduced shared interface or manual setup/checker helper
   placeholders, implement them or keep them failing explicitly with
-  `assert(false)` or equivalent. Silent no-op helpers are not valid coverage.
+  `assert(false)` or `fail(...)`. Silent no-op helpers are not valid coverage.
 - Do not leave primary manual output dominated by raw test code. Executable
   SPipe should be folded detail; visible content should be scenario steps and
   typed evidence.

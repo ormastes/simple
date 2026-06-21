@@ -22,7 +22,7 @@ when available (Codex Spark, Claude Haiku, or Claude Sonnet), then require a
 normal/highest-capability review before accepting done marks, broad exclusions,
 or release-blocking verification. The first architecture pass defines shared
 interface names and manual-facing setup/checker helper names; placeholder
-helpers must fail explicitly (`assert(false)` or equivalent).
+helpers must fail explicitly (`assert(false)` or `fail(...)`).
 
 Check or install that wiring with:
 

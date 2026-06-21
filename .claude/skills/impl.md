@@ -78,7 +78,7 @@ review-team:    explore -> docs          (sequential)
 2. Cross-ref: bidirectional links, consistent terminology, REQ-ID tracing
 3. If design introduced shared interface or manual setup/checker helper
    placeholders, implement them or keep them failing explicitly with
-   `assert(false)` or equivalent. Silent no-op helpers are not valid coverage.
+   `assert(false)` or `fail(...)`. Silent no-op helpers are not valid coverage.
 
 ### Phase 8: Implementation
 1. Implement in `src/**/<feature>.spl`, follow `/coding` rules
