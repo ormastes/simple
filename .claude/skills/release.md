@@ -93,7 +93,8 @@ Do NOT push without explicit user approval.
 ## Pre-Release Checklist
 
 - [ ] `/verify` or `$verify` shows STATUS: PASS
-- [ ] SPipe, generated docs, guides, skills, and SPipe process docs were
+- [ ] SPipe, generated docs, guides, `.codex/skills/`, `.agents/skills/`,
+      `.claude/skills/`, and `.claude/agents/spipe/` process docs were
       finalized before verify; release does not create or repair them
 - [ ] `bin/simple test` passing
 - [ ] `bin/simple build lint` clean
