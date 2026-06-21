@@ -1091,8 +1091,8 @@ Smallest next implementation step:
     `src/app/wm_compare/html_compat_geometry_probe_native_full_smoke.spl`
     now builds with `0 failed` and runs with
     `fixture=24_flex_wrap_reverse_basic count=4`, `status=pass`
-  - the core-C native runtime now exports `rt_file_read_text_rv`, and the
-    diagnostic native file-read smoke passes, so the earlier file-read ABI
+  - the core-C native runtime now exposes the file-read result-value ABI, and
+    the diagnostic native file-read smoke passes, so the earlier file-read ABI
     blocker is closed.
   - native file-backed full-spec proof remains incomplete: the latest
     reduction fixed the native zero-command path for `04_button` and
