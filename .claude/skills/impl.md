@@ -76,6 +76,9 @@ review-team:    explore -> docs          (sequential)
 1. Create `test/03_system/<feature>_spec.spl` (SPipe BDD, fail-first). See `/spipe`
    - **REQUIRED:** Add `# @cover src/path/to/impl.spl <pct>%` pointing to last-layer component
 2. Cross-ref: bidirectional links, consistent terminology, REQ-ID tracing
+3. If design introduced shared interface or manual setup/checker helper
+   placeholders, implement them or keep them failing explicitly with
+   `assert(false)` or equivalent. Silent no-op helpers are not valid coverage.
 
 ### Phase 8: Implementation
 1. Implement in `src/**/<feature>.spl`, follow `/coding` rules
