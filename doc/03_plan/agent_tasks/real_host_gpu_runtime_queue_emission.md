@@ -19,11 +19,11 @@ compatibility fixtures that must be replaced or cross-checked by runtime data.
 ## Already Proven
 
 - `src/compiler_rust/runtime/src/host_gpu_lane.rs` has lane marker counters and
-  a runtime queue surface: `rt_host_gpu_queue_reset`,
-  `rt_host_gpu_queue_emit`, `rt_host_gpu_queue_drain`,
-  `rt_host_gpu_queue_packet_count`, `rt_host_gpu_queue_submitted_count`,
-  `rt_host_gpu_queue_completed_count`, and
-  `rt_host_gpu_queue_last_status`.
+  a runtime queue facade: `host_gpu_queue_reset`,
+  `host_gpu_queue_emit`, `host_gpu_queue_drain`,
+  `host_gpu_queue_packet_count`, `host_gpu_queue_submitted_count`,
+  `host_gpu_queue_completed_count`, and
+  `host_gpu_queue_last_status`.
 - `runtime_symbols.rs`, `runtime_sffi.rs`, `elf_utils.rs`, and
   `interpreter_extern/host_gpu_lane.rs` expose the counter and queue symbols to
   native and interpreter paths. `src/runtime/runtime_native.c` mirrors the queue
@@ -86,7 +86,7 @@ compatibility fixtures that must be replaced or cross-checked by runtime data.
 - Interpreter and statement-lowered native GPU queue packets currently emit
   `backend_code=0` and drain as `UNAVAILABLE`; they do not yet carry a real
   backend handle.
-- The runtime now exposes `rt_host_gpu_queue_last_backend_handle()` through the
+- The runtime now exposes `host_gpu_queue_last_backend_handle()` through the
   Rust/C/interpreter/SFFI symbol path and can round-trip a synthetic submitted
   packet handle. Production still requires GUI/web backend code to supply a real
   Vulkan/CUDA/WebGPU/Metal/ROCm submit/readback handle.
@@ -111,11 +111,11 @@ compatibility fixtures that must be replaced or cross-checked by runtime data.
 1. Done: Add queue data structures and APIs in
    `src/compiler_rust/runtime/src/host_gpu_lane.rs`:
    `HostGpuQueuePacket`, `HostGpuQueueReceipt`, `HostGpuQueueDrain`,
-   `rt_host_gpu_queue_reset`, `rt_host_gpu_queue_emit`,
-   `rt_host_gpu_queue_drain`, `rt_host_gpu_queue_packet_count`,
-   `rt_host_gpu_queue_submitted_count`, `rt_host_gpu_queue_completed_count`,
-   and `rt_host_gpu_queue_last_status`.
-2. Keep existing counter APIs stable. `rt_host_gpu_lane_event` should still
+   `host_gpu_queue_reset`, `host_gpu_queue_emit`,
+   `host_gpu_queue_drain`, `host_gpu_queue_packet_count`,
+   `host_gpu_queue_submitted_count`, `host_gpu_queue_completed_count`,
+   and `host_gpu_queue_last_status`.
+2. Keep existing counter APIs stable. `host_gpu_lane_event` should still
    record begin/end counters, then optionally associate the active lane scope
    with queue emission metadata.
 3. Done: Wire every new extern through
@@ -171,7 +171,7 @@ compatibility fixtures that must be replaced or cross-checked by runtime data.
 - Done: Extend `test/03_system/feature/language/host_gpu_event_path_spec.spl`
   with runtime-backed cases.
 - Done: Add focused native/interpreter checks that call
-  `rt_host_gpu_queue_reset`, emit one GPU Draw IR packet, drain it, and assert
+  `host_gpu_queue_reset`, emit one GPU Draw IR packet, drain it, and assert
   packet count, submitted count, completed or unavailable status, and stable
   ordering.
 - Add a regression case proving stale target-cache or unresolved Draw IR stays
