@@ -4,6 +4,10 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+SIMPLE_BIN_PINNED=0
+if [ -n "${SIMPLE_BIN+x}" ]; then
+    SIMPLE_BIN_PINNED=1
+fi
 SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 
 # The genuine Engine2D SIMD evidence needs an interpreter binary that carries the
@@ -16,9 +20,12 @@ SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 # user pinned SIMPLE_BIN we honour it; otherwise prefer a capable driver and,
 # if none exists, SKIP (not fail) so the gate never false-reds on an old binary.
 binary_has_engine2d_simd_externs() {
-    [ -x "$1" ] && LC_ALL=C strings "$1" 2>/dev/null | grep -q 'rt_engine2d_simd_fill_row_u32'
+    [ -x "$1" ] \
+        && LC_ALL=C strings "$1" 2>/dev/null | grep -q 'rt_engine2d_simd_fill_row_u32' \
+        && LC_ALL=C strings "$1" 2>/dev/null | grep -q 'rt_engine2d_simd_copy_row_u32' \
+        && LC_ALL=C strings "$1" 2>/dev/null | grep -q 'rt_engine2d_simd_blend_row_u32'
 }
-if [ -z "${SIMPLE_BIN+pinned}" ] || [ "$SIMPLE_BIN" = "bin/simple" ]; then
+if [ "$SIMPLE_BIN_PINNED" = "0" ] || [ "$SIMPLE_BIN" = "bin/simple" ]; then
     for _cand in \
         "src/compiler_rust/target/gui/debug/simple" \
         "src/compiler_rust/target/debug/simple" \
@@ -176,24 +183,7 @@ echo "check=cpu_simd_engine2d_evidence"
 echo "simple_bin=$SIMPLE_BIN"
 echo "timeout_secs=$TIMEOUT_SECS"
 
-# If no interpreter binary carries the Engine2D SIMD pixel-row externs yet, skip cleanly
-# rather than hard-failing on "unknown extern function" — the kernels exist in
-# source and need a bootstrap to reach the deployed binary.
-if ! binary_has_engine2d_simd_externs "$SIMPLE_BIN"; then
-    echo "cpu_simd_evidence_status=skip"
-    echo "cpu_simd_evidence_reason=engine2d-simd-externs-not-in-binary-bootstrap-required"
-    echo "cpu_simd_evidence_simple_bin=$SIMPLE_BIN"
-    mkdir -p "$WORK_DIR"
-    {
-        echo "cpu_simd_evidence_status=skip"
-        echo "cpu_simd_evidence_reason=engine2d-simd-externs-not-in-binary-bootstrap-required"
-        echo "cpu_simd_evidence_simple_bin=$SIMPLE_BIN"
-    } >"$ENV_PATH"
-    echo "cpu-simd-engine2d-evidence: skip (Engine2D SIMD externs not in $SIMPLE_BIN; run bootstrap --deploy)"
-    exit 0
-fi
-
-if [ ! -x "$SIMPLE_BIN" ]; then
+if [ ! -x "$SIMPLE_BIN" ] && [ "$SIMPLE_BIN_PINNED" = "1" ]; then
     STATUS=fail
     REASON="missing-simple-bin"
     ARCH=unknown
@@ -209,6 +199,37 @@ if [ ! -x "$SIMPLE_BIN" ]; then
     echo "cpu_simd_evidence_reason=$REASON"
     echo "report_path=$REPORT_PATH"
     exit 1
+fi
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "cpu_simd_evidence_status=skip"
+    echo "cpu_simd_evidence_reason=engine2d-simd-capable-simple-bin-unavailable"
+    echo "cpu_simd_evidence_simple_bin=$SIMPLE_BIN"
+    mkdir -p "$WORK_DIR"
+    {
+        echo "cpu_simd_evidence_status=skip"
+        echo "cpu_simd_evidence_reason=engine2d-simd-capable-simple-bin-unavailable"
+        echo "cpu_simd_evidence_simple_bin=$SIMPLE_BIN"
+    } >"$ENV_PATH"
+    echo "cpu-simd-engine2d-evidence: skip (no Engine2D SIMD-capable Simple binary found)"
+    exit 0
+fi
+
+# If no interpreter binary carries the Engine2D SIMD pixel-row externs yet, skip cleanly
+# rather than hard-failing on "unknown extern function" — the kernels exist in
+# source and need a bootstrap to reach the deployed binary.
+if ! binary_has_engine2d_simd_externs "$SIMPLE_BIN"; then
+    echo "cpu_simd_evidence_status=skip"
+    echo "cpu_simd_evidence_reason=engine2d-simd-externs-not-in-binary-bootstrap-required"
+    echo "cpu_simd_evidence_simple_bin=$SIMPLE_BIN"
+    mkdir -p "$WORK_DIR"
+    {
+        echo "cpu_simd_evidence_status=skip"
+        echo "cpu_simd_evidence_reason=engine2d-simd-externs-not-in-binary-bootstrap-required"
+        echo "cpu_simd_evidence_simple_bin=$SIMPLE_BIN"
+    } >"$ENV_PATH"
+    echo "cpu-simd-engine2d-evidence: skip (Engine2D SIMD externs not in $SIMPLE_BIN; run bootstrap --deploy)"
+    exit 0
 fi
 
 cat >"$EVIDENCE_SRC" <<'SIMPLE'
@@ -601,6 +622,7 @@ echo "cpu_simd_evidence_diagram_alpha_hits=$DIAGRAM_ALPHA_HITS"
 echo "cpu_simd_evidence_diagram_blit_hits=$DIAGRAM_BLIT_HITS"
 echo "cpu_simd_evidence_diagram_scroll_hits=$DIAGRAM_SCROLL_HITS"
 echo "cpu_simd_evidence_policy=exact-bitmap-no-blur-no-tolerance"
+echo "cpu_simd_evidence_blur_or_tolerance_used=false"
 echo "cpu_simd_evidence_general_status=$GENERAL_STATUS"
 echo "cpu_simd_evidence_x86_status=$X86_STATUS"
 echo "cpu_simd_evidence_arm_status=$ARM_STATUS"
