@@ -47,16 +47,10 @@ use app.editor.editor_controller.*
 use app.editor.mcp_tools.*
 use app.editor.mcp_tools_helpers.*
 use app.editor.tui_shell.*
-
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_env_set(key: text, value: text) -> bool
+use app.io.mod.{dir_create_all, env_set, file_delete, file_exists, file_read_text, file_write}
 
 fn read_text(path: text) -> text:
-    rt_file_read_text(path) ?? ""
+    file_read_text(path) ?? ""
 
 fn read_editor_controller_source() -> text:
     read_text("src/app/editor/editor_controller.spl")
@@ -289,16 +283,16 @@ describe "editor controller — IDE commands":
 
     it "routes daily note template and attachment commands through the controller":
         val daily_root = "/tmp/simple_editor_controller_daily"
-        expect(rt_dir_create_all(daily_root)).to_equal(true)
+        expect(dir_create_all(daily_root)).to_equal(true)
         var session = EditSession.new()
         var ctrl: EditorController = EditorController.new(session)
 
         val daily = ctrl._execute_palette_command("daily-note-create", "2026-05-16|" + daily_root + "|# {{title}}\n")
         expect(daily.status_msg).to_equal("created daily note: " + daily_root + "/2026-05-16.md")
-        expect(rt_file_read_text(daily_root + "/2026-05-16.md")).to_equal("# 2026-05-16\n")
+        expect(file_read_text(daily_root + "/2026-05-16.md")).to_equal("# 2026-05-16\n")
         val configured_daily = ctrl._execute_palette_command("daily-note-create", "2026-05-17|" + daily_root + "|# {{title}}\nDate: {{date}}\n|{{date}}-daily|markdown")
         expect(configured_daily.status_msg).to_equal("created daily note: " + daily_root + "/2026-05-17-daily.markdown")
-        expect(rt_file_read_text(daily_root + "/2026-05-17-daily.markdown")).to_equal("# 2026-05-17-daily\nDate: 2026-05-17\n")
+        expect(file_read_text(daily_root + "/2026-05-17-daily.markdown")).to_equal("# 2026-05-17-daily\nDate: 2026-05-17\n")
         val daily_picker = ctrl._execute_palette_command("daily-note-picker", "2026-05-18|" + daily_root + "|# {{title}}\n|{{date}}-journal|md")
         expect(daily_picker.status_msg).to_equal("daily notes")
         expect(ctrl.wiki_panel.title).to_equal("Daily Notes")
@@ -306,23 +300,23 @@ describe "editor controller — IDE commands":
         expect(ctrl.wiki_panel.rows[0].path).to_equal(daily_root + "/2026-05-18-journal.md")
         val picked_daily = ctrl._dispatch_wiki_panel_key("\n")
         expect(picked_daily.status_msg).to_equal("created daily note: " + daily_root + "/2026-05-18-journal.md")
-        expect(rt_file_read_text(daily_root + "/2026-05-18-journal.md")).to_equal("# 2026-05-18-journal\n")
+        expect(file_read_text(daily_root + "/2026-05-18-journal.md")).to_equal("# 2026-05-18-journal\n")
 
         val tpl_path = "/tmp/simple_editor_controller_template.md"
         val target_path = "/tmp/simple_editor_controller_target.md"
-        expect(rt_file_write_text(tpl_path, "## {{title}}\nDate: {{date}}\n")).to_equal(true)
-        expect(rt_file_write_text(target_path, "# Target\n")).to_equal(true)
+        expect(file_write(tpl_path, "## {{title}}\nDate: {{date}}\n")).to_equal(true)
+        expect(file_write(target_path, "# Target\n")).to_equal(true)
         val inserted = ctrl._execute_palette_command("template-insert", tpl_path + "|" + target_path + "|Planning|2026-05-16")
         expect(inserted.status_msg).to_equal("inserted template: " + tpl_path)
-        expect(rt_file_read_text(target_path)).to_equal("# Target\n## Planning\nDate: 2026-05-16\n")
+        expect(file_read_text(target_path)).to_equal("# Target\n## Planning\nDate: 2026-05-16\n")
 
         val tpl_root = "/tmp/simple_editor_controller_templates"
         val picker_target = "/tmp/simple_editor_controller_template_picker_target.md"
-        expect(rt_dir_create_all(tpl_root + "/nested")).to_equal(true)
-        expect(rt_file_write_text(tpl_root + "/Meeting.md", "## {{title}}\nDate: {{date}}\n")).to_equal(true)
-        expect(rt_file_write_text(tpl_root + "/nested/Note.markdown", "# {{title}}\n")).to_equal(true)
-        expect(rt_file_write_text(tpl_root + "/ignore.txt", "ignore")).to_equal(true)
-        expect(rt_file_write_text(picker_target, "# Picked\n")).to_equal(true)
+        expect(dir_create_all(tpl_root + "/nested")).to_equal(true)
+        expect(file_write(tpl_root + "/Meeting.md", "## {{title}}\nDate: {{date}}\n")).to_equal(true)
+        expect(file_write(tpl_root + "/nested/Note.markdown", "# {{title}}\n")).to_equal(true)
+        expect(file_write(tpl_root + "/ignore.txt", "ignore")).to_equal(true)
+        expect(file_write(picker_target, "# Picked\n")).to_equal(true)
         val templates = ctrl._execute_palette_command("template-picker", tpl_root + "|" + picker_target + "|Agenda|2026-05-16")
         expect(templates.status_msg).to_equal("templates: 2")
         expect(ctrl.session.dock_layout.active_right).to_equal("wiki-panel")
@@ -332,7 +326,7 @@ describe "editor controller — IDE commands":
         expect(ctrl.wiki_panel.rows[0].detail.contains("|" + picker_target + "|Agenda|2026-05-16")).to_equal(true)
         val picked_template = ctrl._dispatch_wiki_panel_key("\n")
         expect(picked_template.status_msg.contains("inserted template: ")).to_equal(true)
-        expect(rt_file_read_text(picker_target).contains("Agenda")).to_equal(true)
+        expect(file_read_text(picker_target).contains("Agenda")).to_equal(true)
         val filtered_templates = ctrl._execute_palette_command("template-picker", tpl_root + "|" + picker_target + "|Review|2026-05-17|meeting")
         expect(filtered_templates.status_msg).to_equal("templates: 1")
         expect(ctrl.wiki_template_query).to_equal("meeting")
@@ -340,8 +334,8 @@ describe "editor controller — IDE commands":
 
         val embed_target = "/tmp/simple_editor_controller_embed_target.md"
         val embed_note = "/tmp/simple_editor_controller_embed_note.md"
-        expect(rt_file_write_text(embed_target, "# Embed Target\n\n")).to_equal(true)
-        expect(rt_file_write_text(embed_note, "# Embed Note\n")).to_equal(true)
+        expect(file_write(embed_target, "# Embed Target\n\n")).to_equal(true)
+        expect(file_write(embed_note, "# Embed Note\n")).to_equal(true)
         session.open_file(embed_target)
         var embed_buffer = session.active_buffer()
         embed_buffer.move_cursor(1, 0)
@@ -352,35 +346,35 @@ describe "editor controller — IDE commands":
         expect(ctrl.session.active_buffer().to_text()).to_equal("# Embed Target\n![[simple_editor_controller_embed_note|Embedded]]\n\n")
 
         val attachment_target = "/tmp/simple_editor_controller_attachment.md"
-        expect(rt_file_write_text(attachment_target, "# Attach\n")).to_equal(true)
+        expect(file_write(attachment_target, "# Attach\n")).to_equal(true)
         val attached = ctrl._execute_palette_command("attachment-insert", attachment_target + "|assets/screenshot.png|Screenshot")
         expect(attached.status_msg).to_equal("inserted attachment: assets/screenshot.png")
-        expect(rt_file_read_text(attachment_target)).to_equal("# Attach\n![Screenshot](assets/screenshot.png)\n")
+        expect(file_read_text(attachment_target)).to_equal("# Attach\n![Screenshot](assets/screenshot.png)\n")
 
         val stored_root = "/tmp/simple_editor_controller_attachment_store"
-        expect(rt_dir_create_all(stored_root + "/inbox")).to_equal(true)
-        rt_file_delete(stored_root + "/assets/photo.png")
-        rt_file_delete(stored_root + "/assets/photo-1.png")
-        rt_file_delete(stored_root + "/assets/photo-copy.png")
+        expect(dir_create_all(stored_root + "/inbox")).to_equal(true)
+        file_delete(stored_root + "/assets/photo.png")
+        file_delete(stored_root + "/assets/photo-1.png")
+        file_delete(stored_root + "/assets/photo-copy.png")
         val stored_target = stored_root + "/Note.md"
         val stored_source = stored_root + "/inbox/photo.png"
-        expect(rt_file_write_text(stored_target, "# Stored\n")).to_equal(true)
-        expect(rt_file_write_text(stored_source, "png-bytes")).to_equal(true)
+        expect(file_write(stored_target, "# Stored\n")).to_equal(true)
+        expect(file_write(stored_source, "png-bytes")).to_equal(true)
         val stored = ctrl._execute_palette_command("attachment-insert", stored_target + "|" + stored_source + "|Photo|assets")
         expect(stored.status_msg.contains("inserted attachment: assets/photo")).to_equal(true)
-        expect(rt_file_read_text(stored_target).contains("# Stored\n![Photo](assets/photo")).to_equal(true)
-        expect(rt_file_write_text(stored_root + "/inbox/photo-copy.png", "png-copy")).to_equal(true)
+        expect(file_read_text(stored_target).contains("# Stored\n![Photo](assets/photo")).to_equal(true)
+        expect(file_write(stored_root + "/inbox/photo-copy.png", "png-copy")).to_equal(true)
         val stored_conflict = ctrl._execute_palette_command("attachment-insert", stored_target + "|" + stored_root + "/inbox/photo-copy.png|Copy|assets")
         expect(stored_conflict.status_msg).to_equal("inserted attachment: assets/photo-copy.png")
-        expect(rt_file_exists(stored_root + "/assets/photo-copy.png")).to_equal(true)
-        expect(rt_file_write_text(stored_root + "/inbox/photo.png", "png-new")).to_equal(true)
+        expect(file_exists(stored_root + "/assets/photo-copy.png")).to_equal(true)
+        expect(file_write(stored_root + "/inbox/photo.png", "png-new")).to_equal(true)
         val stored_renamed = ctrl._execute_palette_command("attachment-insert", stored_target + "|" + stored_root + "/inbox/photo.png|Photo 2|assets")
         expect(stored_renamed.status_msg.contains("inserted attachment: assets/photo-")).to_equal(true)
 
         val attachment_root = "/tmp/simple_editor_controller_attachments"
-        expect(rt_dir_create_all(attachment_root + "/assets")).to_equal(true)
-        expect(rt_file_write_text(attachment_root + "/assets/screenshot.png", "png")).to_equal(true)
-        expect(rt_file_write_text(attachment_root + "/assets/readme.txt", "txt")).to_equal(true)
+        expect(dir_create_all(attachment_root + "/assets")).to_equal(true)
+        expect(file_write(attachment_root + "/assets/screenshot.png", "png")).to_equal(true)
+        expect(file_write(attachment_root + "/assets/readme.txt", "txt")).to_equal(true)
         val picked = ctrl._execute_palette_command("attachment-picker", attachment_root + "|screen")
         expect(picked.status_msg).to_equal("attachments: 1")
         expect(ctrl.wiki_attachment_query).to_equal("screen")
@@ -392,17 +386,17 @@ describe "editor controller — IDE commands":
         expect(ctrl.wiki_panel.rows[0].path).to_equal(attachment_root + "/assets/screenshot.png")
 
         val picker_insert_target = "/tmp/simple_editor_controller_attachment_picker_insert.md"
-        expect(rt_file_write_text(picker_insert_target, "# Picker Insert\n")).to_equal(true)
+        expect(file_write(picker_insert_target, "# Picker Insert\n")).to_equal(true)
         val picker_insert = ctrl._execute_palette_command("attachment-picker", attachment_root + "|screen|" + picker_insert_target)
         expect(picker_insert.status_msg).to_equal("attachments: 1")
         expect(ctrl.wiki_panel.rows[0].detail).to_equal(picker_insert_target + "|" + attachment_root + "/assets/screenshot.png|screenshot.png|")
         val inserted_attachment = ctrl._dispatch_wiki_panel_key("\n")
         expect(inserted_attachment.status_msg).to_equal("inserted attachment: " + attachment_root + "/assets/screenshot.png")
-        expect(rt_file_read_text(picker_insert_target)).to_equal("# Picker Insert\n![screenshot.png](" + attachment_root + "/assets/screenshot.png)\n")
+        expect(file_read_text(picker_insert_target)).to_equal("# Picker Insert\n![screenshot.png](" + attachment_root + "/assets/screenshot.png)\n")
 
     it "navigates markdown table cells from controller commands":
         val table_path = "/tmp/simple_editor_controller_table_nav.md"
-        expect(rt_file_write_text(table_path, "| A | B |\n| --- | --- |\n| 1 | 2 |\n")).to_equal(true)
+        expect(file_write(table_path, "| A | B |\n| --- | --- |\n| 1 | 2 |\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(table_path)
         var buffer = session.active_buffer()
@@ -442,8 +436,8 @@ describe "editor controller — IDE commands":
     it "opens renderable wiki panels from loaded markdown notes":
         val home_path = "/tmp/simple_editor_controller_wiki_home.md"
         val alpha_path = "/tmp/simple_editor_controller_wiki_alpha.md"
-        expect(rt_file_write_text(home_path, "---\nstatus: active\nowner: ui\n---\nSee [[simple_editor_controller_wiki_alpha|Alpha]].\n- [ ] Review #project\n")).to_equal(true)
-        expect(rt_file_write_text(alpha_path, "# Alpha\n[[simple_editor_controller_wiki_home|Home]]\n- [ ] Finish #project\n")).to_equal(true)
+        expect(file_write(home_path, "---\nstatus: active\nowner: ui\n---\nSee [[simple_editor_controller_wiki_alpha|Alpha]].\n- [ ] Review #project\n")).to_equal(true)
+        expect(file_write(alpha_path, "# Alpha\n[[simple_editor_controller_wiki_home|Home]]\n- [ ] Finish #project\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(home_path)
         session.open_file(alpha_path)
@@ -477,16 +471,16 @@ describe "editor controller — IDE commands":
         expect(batch_done_text.contains("- [x] Finish")).to_equal(true)
 
         val vault_root = "/tmp/simple_editor_controller_task_vault"
-        expect(rt_dir_create_all(vault_root + "/Projects")).to_equal(true)
+        expect(dir_create_all(vault_root + "/Projects")).to_equal(true)
         val vault_home = vault_root + "/Home.md"
         val vault_alpha = vault_root + "/Projects/Alpha.md"
-        expect(rt_file_write_text(vault_home, "# Home\n- [ ] Inbox\n")).to_equal(true)
-        expect(rt_file_write_text(vault_alpha, "# Alpha\n- [ ] Ship\n")).to_equal(true)
+        expect(file_write(vault_home, "# Home\n- [ ] Inbox\n")).to_equal(true)
+        expect(file_write(vault_alpha, "# Alpha\n- [ ] Ship\n")).to_equal(true)
         ctrl.session.open_file(vault_home)
         val vault_done = ctrl._execute_palette_command("wiki-vault-task-batch", vault_root + "|done")
         expect(vault_done.status_msg).to_equal("vault tasks changed: 2")
-        expect(rt_file_read_text(vault_home).contains("- [x] Inbox")).to_equal(true)
-        expect(rt_file_read_text(vault_alpha).contains("- [x] Ship")).to_equal(true)
+        expect(file_read_text(vault_home).contains("- [x] Inbox")).to_equal(true)
+        expect(file_read_text(vault_alpha).contains("- [x] Ship")).to_equal(true)
         val vault_done_text = ctrl.session.active_buffer().to_text()
         expect(vault_done_text.contains("- [x] Inbox")).to_equal(true)
         expect(ctrl.wiki_panel.title).to_equal("Tasks")
@@ -517,11 +511,11 @@ describe "editor controller — IDE commands":
         expect(ctrl.diagnostics_panel.rows[0].label).to_equal("Invalid frontmatter value for status: review")
 
         val prop_root = "/tmp/simple_editor_controller_property_vault"
-        expect(rt_dir_create_all(prop_root + "/Projects")).to_equal(true)
+        expect(dir_create_all(prop_root + "/Projects")).to_equal(true)
         val prop_home = prop_root + "/Home.md"
         val prop_alpha = prop_root + "/Projects/Alpha.md"
-        expect(rt_file_write_text(prop_home, "---\nstatus: draft\n---\n# Home\n")).to_equal(true)
-        expect(rt_file_write_text(prop_alpha, "# Alpha\n")).to_equal(true)
+        expect(file_write(prop_home, "---\nstatus: draft\n---\n# Home\n")).to_equal(true)
+        expect(file_write(prop_alpha, "# Alpha\n")).to_equal(true)
         ctrl.session.open_file(prop_home)
         val reviewed_prop = ctrl._execute_palette_command("wiki-vault-property-review", prop_root + "|status|active")
         expect(reviewed_prop.status_msg).to_equal("vault property review: 2")
@@ -529,16 +523,16 @@ describe "editor controller — IDE commands":
         expect(ctrl.wiki_panel.rows[0].icon).to_equal("review")
         val vault_prop = ctrl._execute_palette_command("wiki-vault-property-set", prop_root + "|status|active")
         expect(vault_prop.status_msg).to_equal("vault property set: 2")
-        expect(rt_file_read_text(prop_home).contains("status: active")).to_equal(true)
-        expect(rt_file_read_text(prop_alpha).contains("status: active")).to_equal(true)
+        expect(file_read_text(prop_home).contains("status: active")).to_equal(true)
+        expect(file_read_text(prop_alpha).contains("status: active")).to_equal(true)
         val vault_prop_text = ctrl.session.active_buffer().to_text()
         expect(vault_prop_text.contains("status: active")).to_equal(true)
         expect(ctrl.wiki_panel.title).to_equal("Properties")
         expect(ctrl.wiki_panel.rows.len()).to_equal(2)
         val selective_prop = ctrl._execute_palette_command("wiki-vault-property-set", prop_root + "|owner|team|Home.md")
         expect(selective_prop.status_msg).to_equal("vault property set: 1")
-        expect(rt_file_read_text(prop_home).contains("owner: team")).to_equal(true)
-        expect(rt_file_read_text(prop_alpha).contains("owner: team")).to_equal(false)
+        expect(file_read_text(prop_home).contains("owner: team")).to_equal(true)
+        expect(file_read_text(prop_alpha).contains("owner: team")).to_equal(false)
 
         ctrl.session.open_file(home_path)
         val tags = ctrl._execute_palette_command("wiki-tags", "project")
@@ -580,11 +574,11 @@ describe "editor controller — IDE commands":
 
     it "opens a vault-wide Markdown search panel":
         val root = "/tmp/simple_editor_controller_vault_search"
-        expect(rt_dir_create_all(root + "/Projects")).to_equal(true)
+        expect(dir_create_all(root + "/Projects")).to_equal(true)
         val alpha_path = root + "/Projects/Alpha.md"
         val beta_path = root + "/Beta.md"
-        expect(rt_file_write_text(alpha_path, "# Alpha\nShip the vault search panel\n")).to_equal(true)
-        expect(rt_file_write_text(beta_path, "# Beta\nNo matching term\n")).to_equal(true)
+        expect(file_write(alpha_path, "# Alpha\nShip the vault search panel\n")).to_equal(true)
+        expect(file_write(beta_path, "# Beta\nNo matching term\n")).to_equal(true)
         var session = EditSession.new()
         var ctrl: EditorController = EditorController.new(session)
 
@@ -598,9 +592,9 @@ describe "editor controller — IDE commands":
         expect(ctrl.wiki_panel.rows[0].line).to_equal(1)
         expect(ctrl.wiki_panel.rows[0].label).to_equal("Ship the vault search panel")
         expect(ctrl.wiki_panel.rows[0].detail.contains("score=")).to_equal(true)
-        expect(rt_file_read_text(root + "/.simple-vault-search.cache").contains("SIMPLE_MD_SEARCH_INDEX")).to_equal(true)
+        expect(file_read_text(root + "/.simple-vault-search.cache").contains("SIMPLE_MD_SEARCH_INDEX")).to_equal(true)
 
-        expect(rt_file_write_text(alpha_path, "# Alpha\nUpdated cache phrase\n")).to_equal(true)
+        expect(file_write(alpha_path, "# Alpha\nUpdated cache phrase\n")).to_equal(true)
         val changed = ctrl._notify_lsp_file_changed(alpha_path, 2)
         expect(changed.status_msg).to_equal("no active language server")
         expect(ctrl.vault_search_index.version).to_equal(2)
@@ -608,12 +602,12 @@ describe "editor controller — IDE commands":
 
     it "uses watched vault index changes for wiki backlinks tags and quick switch":
         val root = "/tmp/simple_editor_controller_vault_wiki_refresh"
-        expect(rt_dir_create_all(root)).to_equal(true)
+        expect(dir_create_all(root)).to_equal(true)
         val alpha_path = root + "/Alpha.md"
         val home_path = root + "/Home.md"
         val gamma_path = root + "/Gamma.md"
-        expect(rt_file_write_text(alpha_path, "# Alpha\n")).to_equal(true)
-        expect(rt_file_write_text(home_path, "# Home\nNo wiki fields yet\n")).to_equal(true)
+        expect(file_write(alpha_path, "# Alpha\n")).to_equal(true)
+        expect(file_write(home_path, "# Home\nNo wiki fields yet\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(alpha_path)
         var ctrl: EditorController = EditorController.new(session)
@@ -622,7 +616,7 @@ describe "editor controller — IDE commands":
         expect(seeded.status_msg).to_equal("wiki vault search: 0")
         expect(ctrl.vault_search_index.root).to_equal(root)
 
-        expect(rt_file_write_text(home_path, "# Home\nSee [[Alpha]] #project\n")).to_equal(true)
+        expect(file_write(home_path, "# Home\nSee [[Alpha]] #project\n")).to_equal(true)
         val changed = ctrl._notify_lsp_file_changed(home_path, 2)
         expect(changed.status_msg).to_equal("no active language server")
 
@@ -636,7 +630,7 @@ describe "editor controller — IDE commands":
         expect(ctrl.wiki_panel.rows.len()).to_equal(1)
         expect(ctrl.wiki_panel.rows[0].path).to_equal(home_path)
 
-        expect(rt_file_write_text(gamma_path, "# Gamma\n")).to_equal(true)
+        expect(file_write(gamma_path, "# Gamma\n")).to_equal(true)
         val created = ctrl._notify_lsp_file_changed(gamma_path, 1)
         expect(created.status_msg).to_equal("no active language server")
         val quick = ctrl._execute_palette_command("wiki-quick-switch", "gamma")
@@ -646,7 +640,7 @@ describe "editor controller — IDE commands":
 
     it "applies markdown heading spacing quick fix to the active buffer":
         val path = "/tmp/simple_editor_quickfix_heading.md"
-        expect(rt_file_write_text(path, "#Title\n")).to_equal(true)
+        expect(file_write(path, "#Title\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -662,7 +656,7 @@ describe "editor controller — IDE commands":
 
     it "applies markdown empty-link quick fix to the active buffer":
         val path = "/tmp/simple_editor_quickfix_link.md"
-        expect(rt_file_write_text(path, "See []() now\n")).to_equal(true)
+        expect(file_write(path, "See []() now\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -675,7 +669,7 @@ describe "editor controller — IDE commands":
 
     it "applies markdown trailing-whitespace quick fix to the active buffer":
         val path = "/tmp/simple_editor_quickfix_trailing.md"
-        expect(rt_file_write_text(path, "Trim me   \n")).to_equal(true)
+        expect(file_write(path, "Trim me   \n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -688,7 +682,7 @@ describe "editor controller — IDE commands":
 
     it "applies single-document LSP WorkspaceEdit quick fixes to the active buffer":
         val path = "/tmp/simple_editor_workspace_edit.md"
-        expect(rt_file_write_text(path, "Rename old now\n")).to_equal(true)
+        expect(file_write(path, "Rename old now\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -703,8 +697,8 @@ describe "editor controller — IDE commands":
     it "applies multi-file LSP WorkspaceEdit quick fixes to disk files":
         val active_path = "/tmp/simple_editor_workspace_edit_active.md"
         val other_path = "/tmp/simple_editor_workspace_edit_other.md"
-        expect(rt_file_write_text(active_path, "Rename old here\n")).to_equal(true)
-        expect(rt_file_write_text(other_path, "Rename old there\n")).to_equal(true)
+        expect(file_write(active_path, "Rename old here\n")).to_equal(true)
+        expect(file_write(other_path, "Rename old there\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(active_path)
         var ctrl: EditorController = EditorController.new(session)
@@ -715,13 +709,13 @@ describe "editor controller — IDE commands":
 
         expect(applied.status_msg).to_equal("applied: Apply LSP multi edit (1 file edits)")
         expect(ctrl.session.active_buffer().line_at(0)).to_equal("Rename new here")
-        expect(rt_file_read_text(other_path)).to_equal("Rename new there\n")
+        expect(file_read_text(other_path)).to_equal("Rename new there\n")
 
     it "syncs multi-file LSP WorkspaceEdit quick fixes into open sibling buffers":
         val active_path = "/tmp/simple_editor_workspace_edit_open_active.md"
         val other_path = "/tmp/simple_editor_workspace_edit_open_other.md"
-        expect(rt_file_write_text(active_path, "Rename old here\n")).to_equal(true)
-        expect(rt_file_write_text(other_path, "Rename old there\n")).to_equal(true)
+        expect(file_write(active_path, "Rename old here\n")).to_equal(true)
+        expect(file_write(other_path, "Rename old there\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(active_path)
         session.open_file(other_path)
@@ -743,11 +737,11 @@ describe "editor controller — IDE commands":
         expect(ctrl.session.active_buffer().line_at(0)).to_equal("Rename new here")
         expect(open_other_text).to_equal("Rename new there")
         expect(open_other_dirty).to_equal(true)
-        expect(rt_file_read_text(other_path)).to_equal("Rename old there\n")
+        expect(file_read_text(other_path)).to_equal("Rename old there\n")
 
     it "executes command-only LSP code actions through workspace executeCommand":
         val path = "/tmp/simple_editor_code_action_command.spl"
-        expect(rt_file_write_text(path, "fn main():\n    return\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -766,7 +760,7 @@ describe "editor controller — IDE commands":
 
     it "applies edit-and-command LSP code actions before executeCommand":
         val path = "/tmp/simple_editor_code_action_edit_command.spl"
-        expect(rt_file_write_text(path, "Rename old now\n")).to_equal(true)
+        expect(file_write(path, "Rename old now\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -785,7 +779,7 @@ describe "editor controller — IDE commands":
 
     it "hydrates async LSP code actions into a selectable apply panel":
         val path = "/tmp/simple_editor_code_action_picker.spl"
-        expect(rt_file_write_text(path, "Rename old now\n")).to_equal(true)
+        expect(file_write(path, "Rename old now\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -824,7 +818,7 @@ describe "editor controller — IDE commands":
 
     it "filters and groups LSP code action rows while preserving apply indices":
         val path = "/tmp/simple_editor_code_action_filter.spl"
-        expect(rt_file_write_text(path, "Rename old now\n")).to_equal(true)
+        expect(file_write(path, "Rename old now\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -855,7 +849,7 @@ describe "editor controller — IDE commands":
 
     it "starts Markdown LSP and sends didOpen for markdown documents":
         val path = "/tmp/simple_editor_lsp_lifecycle.md"
-        expect(rt_file_write_text(path, "# Title\n")).to_equal(true)
+        expect(file_write(path, "# Title\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -868,7 +862,7 @@ describe "editor controller — IDE commands":
 
     it "starts Simple LSP and sends didOpen for Simple documents":
         val path = "/tmp/simple_editor_lsp_lifecycle.spl"
-        expect(rt_file_write_text(path, "fn main():\n    return\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -881,7 +875,7 @@ describe "editor controller — IDE commands":
 
     it "requests Markdown completion hover definition and code action through active LSP":
         val path = "/tmp/simple_editor_lsp_requests.md"
-        expect(rt_file_write_text(path, "# Title\nSee [Title](#title)\n")).to_equal(true)
+        expect(file_write(path, "# Title\nSee [Title](#title)\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -900,7 +894,7 @@ describe "editor controller — IDE commands":
 
     it "requests Simple completion hover definition and code action through active LSP":
         val path = "/tmp/simple_editor_lsp_requests.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -919,7 +913,7 @@ describe "editor controller — IDE commands":
 
     it "routes VSCode-style normal-mode shortcuts to IDE actions":
         val path = "/tmp/simple_editor_vscode_shortcuts.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -961,7 +955,7 @@ describe "editor controller — IDE commands":
 
     it "opens selects and jumps from the markdown outline panel":
         val path = "/tmp/simple_editor_outline_navigation.md"
-        expect(rt_file_write_text(path, "# One\nbody\n## Child\nchild body\n# Two\nnext\n")).to_equal(true)
+        expect(file_write(path, "# One\nbody\n## Child\nchild body\n# Two\nnext\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -987,7 +981,7 @@ describe "editor controller — IDE commands":
 
     it "opens LSP result panels for navigation commands":
         val path = "/tmp/simple_editor_lsp_results.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1013,9 +1007,9 @@ describe "editor controller — IDE commands":
         val root = "/tmp/simple_editor_workspace_symbol_index"
         val active_path = root + "/active.spl"
         val sibling_path = root + "/sibling.spl"
-        expect(rt_dir_create_all(root)).to_equal(true)
-        expect(rt_file_write_text(active_path, "fn active_entry():\n    return\n")).to_equal(true)
-        expect(rt_file_write_text(sibling_path, "fn indexed_target():\n    return\n")).to_equal(true)
+        expect(dir_create_all(root)).to_equal(true)
+        expect(file_write(active_path, "fn active_entry():\n    return\n")).to_equal(true)
+        expect(file_write(sibling_path, "fn indexed_target():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(active_path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1037,8 +1031,8 @@ describe "editor controller — IDE commands":
     it "hydrates pending LSP result panels from async server responses":
         val path = "/tmp/simple_editor_lsp_hydrate.spl"
         val target_path = "/tmp/simple_editor_lsp_hydrate_target.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
-        expect(rt_file_write_text(target_path, "fn target():\n    return\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
+        expect(file_write(target_path, "fn target():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1065,7 +1059,7 @@ describe "editor controller — IDE commands":
 
     it "applies LSP document symbols to the active markdown outline":
         val path = "/tmp/simple_editor_lsp_outline.md"
-        expect(rt_file_write_text(path, "# Local\n")).to_equal(true)
+        expect(file_write(path, "# Local\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1087,7 +1081,7 @@ describe "editor controller — IDE commands":
 
     it "applies LSP document symbols to non-Markdown outline UI":
         val path = "/tmp/simple_editor_lsp_simple_outline.spl"
-        expect(rt_file_write_text(path, "fn main():\n    return\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1133,8 +1127,8 @@ describe "editor controller — IDE commands":
     it "jumps to the selected LSP result target":
         val source_path = "/tmp/simple_editor_lsp_source.spl"
         val target_path = "/tmp/simple_editor_lsp_jump.spl"
-        expect(rt_file_write_text(source_path, "fn caller():\n    main()\n")).to_equal(true)
-        expect(rt_file_write_text(target_path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
+        expect(file_write(source_path, "fn caller():\n    main()\n")).to_equal(true)
+        expect(file_write(target_path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
         val loc_json = "[{\"uri\":\"file://" + target_path + "\",\"range\":{\"start\":{\"line\":2,\"character\":4},\"end\":{\"line\":2,\"character\":10}}}]"
         var session = EditSession.new()
         session.open_file(source_path)
@@ -1161,8 +1155,8 @@ describe "editor controller — IDE commands":
     it "selects LSP panel rows from normal-mode keys":
         val first_path = "/tmp/simple_editor_lsp_panel_first.spl"
         val second_path = "/tmp/simple_editor_lsp_panel_second.spl"
-        expect(rt_file_write_text(first_path, "fn first():\n    return\n")).to_equal(true)
-        expect(rt_file_write_text(second_path, "fn second():\n    val x = 1\n    x\n")).to_equal(true)
+        expect(file_write(first_path, "fn first():\n    return\n")).to_equal(true)
+        expect(file_write(second_path, "fn second():\n    val x = 1\n    x\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(first_path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1189,8 +1183,8 @@ describe "editor controller — IDE commands":
     it "opens selects and jumps from the diagnostics problems panel":
         val first_path = "/tmp/simple_editor_problem_first.spl"
         val second_path = "/tmp/simple_editor_problem_second.spl"
-        expect(rt_file_write_text(first_path, "fn first():\n    return\n")).to_equal(true)
-        expect(rt_file_write_text(second_path, "fn second():\n    val bad = 1\n    bad\n")).to_equal(true)
+        expect(file_write(first_path, "fn first():\n    return\n")).to_equal(true)
+        expect(file_write(second_path, "fn second():\n    val bad = 1\n    bad\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(first_path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1217,8 +1211,8 @@ describe "editor controller — IDE commands":
     it "filters diagnostics problems by severity and source":
         val first_path = "/tmp/simple_editor_problem_filter_first.spl"
         val second_path = "/tmp/simple_editor_problem_filter_second.spl"
-        expect(rt_file_write_text(first_path, "fn first():\n    return\n")).to_equal(true)
-        expect(rt_file_write_text(second_path, "fn second():\n    return\n")).to_equal(true)
+        expect(file_write(first_path, "fn first():\n    return\n")).to_equal(true)
+        expect(file_write(second_path, "fn second():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(first_path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1255,8 +1249,8 @@ describe "editor controller — IDE commands":
     it "groups diagnostics problems by severity and source":
         val first_path = "/tmp/simple_editor_problem_group_first.spl"
         val second_path = "/tmp/simple_editor_problem_group_second.spl"
-        expect(rt_file_write_text(first_path, "fn first():\n    return\n")).to_equal(true)
-        expect(rt_file_write_text(second_path, "fn second():\n    return\n")).to_equal(true)
+        expect(file_write(first_path, "fn first():\n    return\n")).to_equal(true)
+        expect(file_write(second_path, "fn second():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(first_path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1294,8 +1288,8 @@ describe "editor controller — IDE commands":
     it "sorts diagnostics problems by severity and path":
         val first_path = "/tmp/simple_editor_problem_sort_a.spl"
         val second_path = "/tmp/simple_editor_problem_sort_b.spl"
-        expect(rt_file_write_text(first_path, "fn first():\n    return\n")).to_equal(true)
-        expect(rt_file_write_text(second_path, "fn second():\n    return\n")).to_equal(true)
+        expect(file_write(first_path, "fn first():\n    return\n")).to_equal(true)
+        expect(file_write(second_path, "fn second():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(first_path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1356,7 +1350,7 @@ describe "editor controller — IDE commands":
 
     it "tracks VSCode-style debug breakpoints watches and termination in controller state":
         val path = "/tmp/simple_editor_debug_state.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1463,7 +1457,7 @@ describe "editor controller — IDE commands":
 
     it "hydrates DAP lifecycle events into active debug status":
         val path = "/tmp/simple_editor_debug_dap_events.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 42\n    answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 42\n    answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1488,8 +1482,8 @@ describe "editor controller — IDE commands":
     it "shows and switches multiple debug sessions from the debug sessions panel":
         val first_path = "/tmp/simple_editor_debug_session_one.spl"
         val second_path = "/tmp/simple_editor_debug_session_two.spl"
-        expect(rt_file_write_text(first_path, "fn main():\n    1\n")).to_equal(true)
-        expect(rt_file_write_text(second_path, "fn main():\n    2\n")).to_equal(true)
+        expect(file_write(first_path, "fn main():\n    1\n")).to_equal(true)
+        expect(file_write(second_path, "fn main():\n    2\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(first_path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1523,7 +1517,7 @@ describe "editor controller — IDE commands":
 
     it "hydrates DAP stack scope and variable responses into the debug panel":
         val path = "/tmp/simple_editor_debug_dap_response.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 42\n    answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 42\n    answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1563,7 +1557,7 @@ describe "editor controller — IDE commands":
 
     it "queues editor debug controls through the DAP client and polls responses":
         val path = "/tmp/simple_editor_debug_dap_client.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 42\n    answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 42\n    answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1617,12 +1611,12 @@ describe "editor controller — IDE commands":
 
     it "starts debugging from the nearest VSCode launch.json configuration":
         val root = "/tmp/simple_editor_debug_launch"
-        expect(rt_dir_create_all(root + "/.vscode")).to_equal(true)
-        expect(rt_dir_create_all(root + "/src")).to_equal(true)
+        expect(dir_create_all(root + "/.vscode")).to_equal(true)
+        expect(dir_create_all(root + "/src")).to_equal(true)
         val path = root + "/src/main.spl"
-        expect(rt_file_write_text(path, "fn main():\n    print(\"launch\")\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    print(\"launch\")\n")).to_equal(true)
         val launch_json = "{\"version\":\"0.2.0\",\"configurations\":[{\"name\":\"Configured Simple\",\"type\":\"simple\",\"request\":\"launch\",\"program\":\"" + path + "\",\"cwd\":\"" + root + "\",\"args\":[\"--mode\",\"interpreter\"]}]}"
-        expect(rt_file_write_text(root + "/.vscode/launch.json", launch_json)).to_equal(true)
+        expect(file_write(root + "/.vscode/launch.json", launch_json)).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1637,12 +1631,12 @@ describe "editor controller — IDE commands":
 
     it "resolves VSCode launch.json variables before starting debugging":
         val root = "/tmp/simple_editor_debug_launch_vars"
-        expect(rt_dir_create_all(root + "/.vscode")).to_equal(true)
-        expect(rt_dir_create_all(root + "/src")).to_equal(true)
+        expect(dir_create_all(root + "/.vscode")).to_equal(true)
+        expect(dir_create_all(root + "/src")).to_equal(true)
         val path = root + "/src/main.spl"
-        expect(rt_file_write_text(path, "fn main():\n    print(\"vars\")\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    print(\"vars\")\n")).to_equal(true)
         val launch_json = "{\"version\":\"0.2.0\",\"configurations\":[{\"name\":\"Variable Simple\",\"type\":\"simple\",\"request\":\"launch\",\"program\":\"" + r"${file}" + "\",\"cwd\":\"" + r"${workspaceFolder}" + "\",\"args\":[\"" + r"${fileDirname}" + "\",\"" + r"${fileBasename}" + "\"],\"preLaunchTask\":\"build " + r"${fileBasename}" + "\",\"env\":{\"SIMPLE_LIB\":\"" + r"${workspaceFolder}" + "/src\"}}]}"
-        expect(rt_file_write_text(root + "/.vscode/launch.json", launch_json)).to_equal(true)
+        expect(file_write(root + "/.vscode/launch.json", launch_json)).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1664,14 +1658,14 @@ describe "editor controller — IDE commands":
 
     it "opens a selectable VSCode launch configuration picker":
         val root = "/tmp/simple_editor_debug_launch_picker"
-        expect(rt_dir_create_all(root + "/.vscode")).to_equal(true)
-        expect(rt_dir_create_all(root + "/src")).to_equal(true)
+        expect(dir_create_all(root + "/.vscode")).to_equal(true)
+        expect(dir_create_all(root + "/src")).to_equal(true)
         val path = root + "/src/main.spl"
         val alt_path = root + "/src/alt.spl"
-        expect(rt_file_write_text(path, "fn main():\n    print(\"main\")\n")).to_equal(true)
-        expect(rt_file_write_text(alt_path, "fn main():\n    print(\"alt\")\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    print(\"main\")\n")).to_equal(true)
+        expect(file_write(alt_path, "fn main():\n    print(\"alt\")\n")).to_equal(true)
         val launch_json = "{\"version\":\"0.2.0\",\"configurations\":[{\"name\":\"Main\",\"type\":\"simple\",\"request\":\"launch\",\"program\":\"" + path + "\",\"cwd\":\"" + root + "\"},{\"name\":\"Alt\",\"type\":\"simple\",\"request\":\"launch\",\"program\":\"" + alt_path + "\",\"cwd\":\"" + root + "\"}]}"
-        expect(rt_file_write_text(root + "/.vscode/launch.json", launch_json)).to_equal(true)
+        expect(file_write(root + "/.vscode/launch.json", launch_json)).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1693,14 +1687,14 @@ describe "editor controller — IDE commands":
 
     it "starts VSCode compound launch configurations from the picker":
         val root = "/tmp/simple_editor_debug_launch_compound"
-        expect(rt_dir_create_all(root + "/.vscode")).to_equal(true)
-        expect(rt_dir_create_all(root + "/src")).to_equal(true)
+        expect(dir_create_all(root + "/.vscode")).to_equal(true)
+        expect(dir_create_all(root + "/src")).to_equal(true)
         val api_path = root + "/src/api.spl"
         val worker_path = root + "/src/worker.spl"
-        expect(rt_file_write_text(api_path, "fn main():\n    print(\"api\")\n")).to_equal(true)
-        expect(rt_file_write_text(worker_path, "fn main():\n    print(\"worker\")\n")).to_equal(true)
+        expect(file_write(api_path, "fn main():\n    print(\"api\")\n")).to_equal(true)
+        expect(file_write(worker_path, "fn main():\n    print(\"worker\")\n")).to_equal(true)
         val launch_json = "{\"version\":\"0.2.0\",\"configurations\":[{\"name\":\"API\",\"type\":\"simple\",\"request\":\"launch\",\"program\":\"" + api_path + "\",\"cwd\":\"" + root + "\"},{\"name\":\"Worker\",\"type\":\"simple\",\"request\":\"launch\",\"program\":\"" + worker_path + "\",\"cwd\":\"" + root + "\"}],\"compounds\":[{\"name\":\"All\",\"configurations\":[\"API\",\"Worker\"],\"preLaunchTask\":\"build all\"}]}"
-        expect(rt_file_write_text(root + "/.vscode/launch.json", launch_json)).to_equal(true)
+        expect(file_write(root + "/.vscode/launch.json", launch_json)).to_equal(true)
         var session = EditSession.new()
         session.open_file(api_path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1725,7 +1719,7 @@ describe "editor controller — IDE commands":
 
     it "routes extended LSP parity requests through the active Simple server":
         val path = "/tmp/simple_editor_lsp_extended.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1751,9 +1745,9 @@ describe "editor controller — IDE commands":
 
     it "notifies active LSP clients about watched files and workspace folders":
         val root = "/tmp/simple_editor_lsp_watch_dir"
-        expect(rt_dir_create_all(root)).to_equal(true)
+        expect(dir_create_all(root)).to_equal(true)
         val path = root + "/main.spl"
-        expect(rt_file_write_text(path, "fn main():\n    return\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1769,23 +1763,23 @@ describe "editor controller — IDE commands":
         expect(folder.status_msg).to_equal("lsp workspace folder notified")
         expect(stdio_transport_pending_count(ctrl.simple_lsp_state.client.transport)).to_equal(5)
 
-        expect(rt_file_write_text(path, "fn main():\n    val changed = true\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val changed = true\n")).to_equal(true)
         val polled = ctrl._poll_file_watcher()
         expect(polled.status_msg).to_equal("file changes notified: 1")
         expect(stdio_transport_pending_count(ctrl.simple_lsp_state.client.transport)).to_equal(6)
         val active_buffer = ctrl.session.active_buffer()
         expect(md_buffer_content(active_buffer).contains("changed = true")).to_equal(true)
         val created_path = root + "/created.spl"
-        expect(rt_file_write_text(created_path, "fn created():\n    return\n")).to_equal(true)
+        expect(file_write(created_path, "fn created():\n    return\n")).to_equal(true)
         val created = ctrl._poll_file_watcher()
         expect(created.status_msg).to_equal("file changes notified: 1")
         expect(stdio_transport_pending_count(ctrl.simple_lsp_state.client.transport)).to_equal(7)
-        expect(rt_file_delete(created_path)).to_equal(true)
+        expect(file_delete(created_path)).to_equal(true)
         val deleted = ctrl._poll_file_watcher()
         expect(deleted.status_msg).to_equal("file changes notified: 1")
         expect(stdio_transport_pending_count(ctrl.simple_lsp_state.client.transport)).to_equal(8)
-        expect(rt_dir_create_all(root + "/node_modules/pkg")).to_equal(true)
-        expect(rt_file_write_text(root + "/node_modules/pkg/ignored.spl", "fn ignored():\n    return\n")).to_equal(true)
+        expect(dir_create_all(root + "/node_modules/pkg")).to_equal(true)
+        expect(file_write(root + "/node_modules/pkg/ignored.spl", "fn ignored():\n    return\n")).to_equal(true)
         val ignored = ctrl._poll_file_watcher()
         expect(ignored.status_msg).to_equal("file changes notified: 1")
         expect(stdio_transport_pending_count(ctrl.simple_lsp_state.client.transport)).to_equal(8)
@@ -1793,14 +1787,14 @@ describe "editor controller — IDE commands":
         val policy = ctrl._configure_file_watcher_policy(500, ["*.tmp", "ignored_dir"])
         expect(policy.status_msg).to_equal("file watcher policy updated")
         expect(ctrl.file_watcher.poll_interval_ms).to_equal(500)
-        expect(rt_file_write_text(root + "/ignored.tmp", "ignored")).to_equal(true)
-        expect(rt_dir_create_all(root + "/ignored_dir")).to_equal(true)
-        expect(rt_file_write_text(root + "/ignored_dir/ignored.spl", "fn ignored_dir():\n    return\n")).to_equal(true)
+        expect(file_write(root + "/ignored.tmp", "ignored")).to_equal(true)
+        expect(dir_create_all(root + "/ignored_dir")).to_equal(true)
+        expect(file_write(root + "/ignored_dir/ignored.spl", "fn ignored_dir():\n    return\n")).to_equal(true)
         val ignored_custom = ctrl._poll_file_watcher()
         expect(ignored_custom.redraw).to_equal(false)
         expect(stdio_transport_pending_count(ctrl.simple_lsp_state.client.transport)).to_equal(8)
 
-        expect(rt_file_write_text(path, "fn main():\n    val debounced = true\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val debounced = true\n")).to_equal(true)
         val debounced = ctrl._poll_file_watcher_after(100)
         expect(debounced.redraw).to_equal(false)
         expect(stdio_transport_pending_count(ctrl.simple_lsp_state.client.transport)).to_equal(8)
@@ -1810,7 +1804,7 @@ describe "editor controller — IDE commands":
 
     it "requests rename from command UI and applies async WorkspaceEdit responses":
         val path = "/tmp/simple_editor_rename_ui.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1839,7 +1833,7 @@ describe "editor controller — IDE commands":
 
     it "previews async rename WorkspaceEdit responses before confirmation":
         val path = "/tmp/simple_editor_rename_preview_ui.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1881,7 +1875,7 @@ describe "editor controller — IDE commands":
     it "marks rename preview edits targeting missing files as conflicts":
         val path = "/tmp/simple_editor_rename_conflict_ui.spl"
         val missing_path = "/tmp/simple_editor_rename_conflict_missing/target.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 1\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1898,7 +1892,7 @@ describe "editor controller — IDE commands":
 
     it "cancels pending WorkspaceEdit previews without mutating the buffer":
         val path = "/tmp/simple_editor_workspace_edit_cancel.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1918,7 +1912,7 @@ describe "editor controller — IDE commands":
 
     it "applies async LSP formatting TextEdit responses to the active buffer":
         val path = "/tmp/simple_editor_formatting_ui.spl"
-        expect(rt_file_write_text(path, "fn main():\n  return\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n  return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1944,7 +1938,7 @@ describe "editor controller — IDE commands":
 
     it "applies async LSP formatting TextEdit responses and saves the active file":
         val path = "/tmp/simple_editor_formatting_save_ui.spl"
-        expect(rt_file_write_text(path, "fn main():\n  return\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n  return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -1967,11 +1961,11 @@ describe "editor controller — IDE commands":
 
         expect(ctrl.session.active_buffer().line_at(1)).to_equal("    return")
         expect(ctrl.status_msg).to_equal("applied and saved: formatting")
-        expect(rt_file_read_text(path)).to_equal("fn main():\n    return\n")
+        expect(file_read_text(path)).to_equal("fn main():\n    return\n")
 
     it "previews async LSP formatting TextEdit responses before confirmation":
         val path = "/tmp/simple_editor_formatting_preview_ui.spl"
-        expect(rt_file_write_text(path, "fn main():\n  return\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n  return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2010,7 +2004,7 @@ describe "editor controller — IDE commands":
 
     it "applies async LSP range formatting TextEdit responses to the active buffer":
         val path = "/tmp/simple_editor_range_formatting_ui.spl"
-        expect(rt_file_write_text(path, "fn main():\n  val answer = 1\n  answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n  val answer = 1\n  answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2039,7 +2033,7 @@ describe "editor controller — IDE commands":
 
     it "previews async LSP range formatting TextEdit responses before confirmation":
         val path = "/tmp/simple_editor_range_formatting_preview_ui.spl"
-        expect(rt_file_write_text(path, "fn main():\n  val answer = 1\n  answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n  val answer = 1\n  answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2077,7 +2071,7 @@ describe "editor controller — IDE commands":
 
     it "hydrates async LSP signature help into the result panel":
         val path = "/tmp/simple_editor_signature_help_ui.spl"
-        expect(rt_file_write_text(path, "fn add(value: i64) -> i64:\n    value\nfn main():\n    add(1)\n")).to_equal(true)
+        expect(file_write(path, "fn add(value: i64) -> i64:\n    value\nfn main():\n    add(1)\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2148,7 +2142,7 @@ describe "editor controller — IDE commands":
 
     it "triggers signature help from insert-mode call characters":
         val path = "/tmp/simple_editor_signature_help_trigger.spl"
-        expect(rt_file_write_text(path, "fn add(value: i64) -> i64:\n    value\nfn main():\n    ad\n")).to_equal(true)
+        expect(file_write(path, "fn add(value: i64) -> i64:\n    value\nfn main():\n    ad\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         session.mode = EditorMode.Insert
@@ -2167,7 +2161,7 @@ describe "editor controller — IDE commands":
 
     it "hydrates async LSP selection ranges into the result panel":
         val path = "/tmp/simple_editor_selection_ranges_ui.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2250,7 +2244,7 @@ describe "editor controller — IDE commands":
 
     it "hydrates async LSP folding ranges into the result panel":
         val path = "/tmp/simple_editor_folding_ranges_ui.spl"
-        expect(rt_file_write_text(path, "fn main():\n    if true:\n        return\nval after = 1\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    if true:\n        return\nval after = 1\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2290,7 +2284,7 @@ describe "editor controller — IDE commands":
 
     it "folds and unfolds active Markdown sections from editor commands":
         val path = "/tmp/simple_editor_fold_controls.md"
-        expect(rt_file_write_text(path, "# One\nbody\n## Child\nchild body\n# Two\nnext\n")).to_equal(true)
+        expect(file_write(path, "# One\nbody\n## Child\nchild body\n# Two\nnext\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2339,7 +2333,7 @@ describe "editor controller — IDE commands":
 
     it "toggles active Obsidian callout fold markers from editor commands":
         val path = "/tmp/simple_editor_callout_fold_controls.md"
-        expect(rt_file_write_text(path, "> [!TIP] Tip\n> Body\n")).to_equal(true)
+        expect(file_write(path, "> [!TIP] Tip\n> Body\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var buffer = session.active_buffer()
@@ -2361,19 +2355,19 @@ describe "editor controller — IDE commands":
         var missing_idx = 0
         var missing_title = "SimpleEditorCreatedNotePropertiesPanel20260513"
         var missing_path = "/tmp/" + missing_title + ".md"
-        while rt_file_exists(missing_path):
+        while file_exists(missing_path):
             missing_idx = missing_idx + 1
             missing_title = "SimpleEditorCreatedNote" + missing_idx.to_text()
             missing_path = "/tmp/" + missing_title + ".md"
-        expect(rt_file_write_text(home_path, "See [[simple editor open link target]] and [Relative](simple_editor_open_link_relative.md) and [[" + missing_title + "]]\n")).to_equal(true)
-        expect(rt_file_write_text(target_path, "# Target\n")).to_equal(true)
-        expect(rt_file_write_text(relative_path, "# Relative\n")).to_equal(true)
+        expect(file_write(home_path, "See [[simple editor open link target]] and [Relative](simple_editor_open_link_relative.md) and [[" + missing_title + "]]\n")).to_equal(true)
+        expect(file_write(target_path, "# Target\n")).to_equal(true)
+        expect(file_write(relative_path, "# Relative\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(home_path)
         session.open_file(target_path)
         session.open_file(home_path)
         var ctrl: EditorController = EditorController.new(session)
-        ctrl.vault_search_index = md_vault_search_index_new("/tmp", [md_wiki_document(home_path, rt_file_read_text(home_path) ?? ""), md_wiki_document(target_path, rt_file_read_text(target_path) ?? "")])
+        ctrl.vault_search_index = md_vault_search_index_new("/tmp", [md_wiki_document(home_path, file_read_text(home_path) ?? ""), md_wiki_document(target_path, file_read_text(target_path) ?? "")])
         var buffer = ctrl.session.active_buffer()
         buffer.move_cursor(0, 8)
         ctrl.session.update_active_buffer(buffer)
@@ -2405,14 +2399,14 @@ describe "editor controller — IDE commands":
         val created = ctrl._execute_palette_command("open-link", "")
         val missing_note_opened = created.status_msg == "created note: " + missing_path or created.status_msg == "opened link: " + missing_path
         expect(missing_note_opened).to_equal(true)
-        expect(rt_file_read_text(missing_path)).to_equal("# " + missing_title + "\n\n")
+        expect(file_read_text(missing_path)).to_equal("# " + missing_title + "\n\n")
         expect(ctrl.session.active_document().path()).to_equal(missing_path)
         expect(md_vault_search_index_search(ctrl.vault_search_index, missing_title).len()).to_equal(1)
 
     it "hands external Markdown links to a configured browser command":
-        expect(rt_env_set("SIMPLE_EDITOR_BROWSER_COMMAND", "true")).to_equal(true)
+        expect(env_set("SIMPLE_EDITOR_BROWSER_COMMAND", "true")).to_equal(true)
         val path = "/tmp/simple_editor_external_link.md"
-        expect(rt_file_write_text(path, "[Docs](https://example.com/docs)\n")).to_equal(true)
+        expect(file_write(path, "[Docs](https://example.com/docs)\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2422,12 +2416,12 @@ describe "editor controller — IDE commands":
 
         val opened = ctrl._execute_palette_command("open-link", "")
         expect(opened.status_msg).to_equal("opened external link: https://example.com/docs")
-        expect(rt_env_set("SIMPLE_EDITOR_BROWSER_COMMAND", "")).to_equal(true)
+        expect(env_set("SIMPLE_EDITOR_BROWSER_COMMAND", "")).to_equal(true)
 
     it "reports external Markdown link opener failures with command evidence":
-        expect(rt_env_set("SIMPLE_EDITOR_BROWSER_COMMAND", "false")).to_equal(true)
+        expect(env_set("SIMPLE_EDITOR_BROWSER_COMMAND", "false")).to_equal(true)
         val path = "/tmp/simple_editor_external_link_failure.md"
-        expect(rt_file_write_text(path, "[Docs](https://example.com/fail)\n")).to_equal(true)
+        expect(file_write(path, "[Docs](https://example.com/fail)\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2437,13 +2431,13 @@ describe "editor controller — IDE commands":
 
         val opened = ctrl._execute_palette_command("open-link", "")
         expect(opened.status_msg).to_equal("failed external link: https://example.com/fail via false (exit 1)")
-        expect(rt_env_set("SIMPLE_EDITOR_BROWSER_COMMAND", "")).to_equal(true)
+        expect(env_set("SIMPLE_EDITOR_BROWSER_COMMAND", "")).to_equal(true)
 
     it "hydrates async LSP document links into the result panel":
         val path = "/tmp/simple_editor_document_links_ui.md"
         val target_path = "/tmp/simple_editor_document_links_target.md"
-        expect(rt_file_write_text(path, "[Target](file://" + target_path + ")\n")).to_equal(true)
-        expect(rt_file_write_text(target_path, "# Target\n")).to_equal(true)
+        expect(file_write(path, "[Target](file://" + target_path + ")\n")).to_equal(true)
+        expect(file_write(target_path, "# Target\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2474,7 +2468,7 @@ describe "editor controller — IDE commands":
 
     it "hydrates async LSP call hierarchy roots into the result panel":
         val path = "/tmp/simple_editor_call_hierarchy_ui.spl"
-        expect(rt_file_write_text(path, "fn target():\n    return\nfn main():\n    target()\n")).to_equal(true)
+        expect(file_write(path, "fn target():\n    return\nfn main():\n    target()\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2511,7 +2505,7 @@ describe "editor controller — IDE commands":
 
     it "hydrates async LSP call hierarchy incoming and outgoing calls into result panels":
         val path = "/tmp/simple_editor_call_hierarchy_expand_ui.spl"
-        expect(rt_file_write_text(path, "fn target():\n    return\nfn caller():\n    target()\n")).to_equal(true)
+        expect(file_write(path, "fn target():\n    return\nfn caller():\n    target()\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2662,7 +2656,7 @@ describe "editor controller — IDE commands":
 
     it "hydrates async LSP semantic tokens into the result panel":
         val path = "/tmp/simple_editor_semantic_tokens_ui.spl"
-        expect(rt_file_write_text(path, "fn main():\n    return\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2710,7 +2704,7 @@ describe "editor controller — IDE commands":
 
     it "hydrates async LSP inlay hints into the result panel":
         val path = "/tmp/simple_editor_inlay_hints_ui.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 1\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2763,7 +2757,7 @@ describe "editor controller — IDE commands":
 
     it "hydrates async LSP code lens entries into the result panel":
         val path = "/tmp/simple_editor_code_lens_ui.spl"
-        expect(rt_file_write_text(path, "fn main():\n    return\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2820,7 +2814,7 @@ describe "editor controller — IDE commands":
 
     it "hydrates async LSP resolved code lens entries into the result panel":
         val path = "/tmp/simple_editor_code_lens_resolve_ui.spl"
-        expect(rt_file_write_text(path, "fn main():\n    return\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2852,7 +2846,7 @@ describe "editor controller — IDE commands":
 
     it "hydrates async LSP hover content into the result panel":
         val path = "/tmp/simple_editor_hover_ui.spl"
-        expect(rt_file_write_text(path, "fn main():\n    return\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2905,8 +2899,8 @@ describe "editor controller — IDE commands":
     it "clears stale diagnostics for the active file when text changes":
         val active_path = "/tmp/simple_editor_diagnostics_stale_active.spl"
         val other_path = "/tmp/simple_editor_diagnostics_stale_other.spl"
-        expect(rt_file_write_text(active_path, "fn main():\n    return\n")).to_equal(true)
-        expect(rt_file_write_text(other_path, "fn other():\n    return\n")).to_equal(true)
+        expect(file_write(active_path, "fn main():\n    return\n")).to_equal(true)
+        expect(file_write(other_path, "fn other():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(active_path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2929,8 +2923,8 @@ describe "editor controller — IDE commands":
     it "replaces diagnostics from LSP publish notifications and clears empty publishes":
         val active_path = "/tmp/simple_editor_diagnostics_publish_active.spl"
         val other_path = "/tmp/simple_editor_diagnostics_publish_other.spl"
-        expect(rt_file_write_text(active_path, "fn main():\n    return\n")).to_equal(true)
-        expect(rt_file_write_text(other_path, "fn other():\n    return\n")).to_equal(true)
+        expect(file_write(active_path, "fn main():\n    return\n")).to_equal(true)
+        expect(file_write(other_path, "fn other():\n    return\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(active_path)
         var ctrl: EditorController = EditorController.new(session)
@@ -2984,7 +2978,7 @@ describe "editor controller — IDE commands":
 
     it "exposes extended LSP parity requests through editor MCP tools":
         val path = "/tmp/simple_editor_lsp_mcp_extended.spl"
-        expect(rt_file_write_text(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
+        expect(file_write(path, "fn main():\n    val answer = 1\n    answer\n")).to_equal(true)
         var session = EditSession.new()
         session.open_file(path)
 
