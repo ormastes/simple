@@ -4,6 +4,7 @@
 
 - Normal model artifact audit: inspect SPipe state, requirements, design, spec docs, reports, and tracking rows for Simple Web/browser hardening lanes. Output canonical lane names and missing artifacts only.
 - Spark model implementation reconnaissance: inspect `src/app/ui.web`, `src/app/ui.browser`, browser/Web tests, and evidence wrappers. Output concrete hardening risks and one disjoint implementation slice only.
+- Final normal/highest-capability review owns shared interface names, manual `step("...")` helper names, setup/checker helper names, fail-fast placeholders (`assert(false)` or `fail(...)`), generated-manual quality, broad exclusions, and done marks.
 
 ## Current Slice
 
@@ -16,7 +17,7 @@ Owns these files:
 - `src/app/ui.web/auth_params.spl`
 - `test/01_unit/app/ui/web_auth_hardening_spec.spl`
 - `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`
-- `doc/06_spec/test/03_system/gui/simple_web_browser_production_hardening_spec.md`
+- `doc/06_spec/03_system/gui/simple_web_browser_production_hardening_spec.md`
 
 Do not absorb unrelated GPU, crypto, compiler, or renderer-parity dirty files in this checkout.
 
