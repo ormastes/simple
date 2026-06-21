@@ -209,7 +209,8 @@ If missing, do all:
 ### Detail Design
 - Data structures, algorithms, module interactions, error handling
 - Output: `doc/05_design/<feature>.md`
-- Agent task breakdown: `doc/03_plan/agent_tasks/<feature>.md`
+- Agent task breakdown: `doc/03_plan/agent_tasks/<feature>.md` with sidecar
+  lanes/`N/A`, merge owner, and final reviewer
 
 ---
 
@@ -329,7 +330,7 @@ MCP server available via npm: `@simple-lang/mcp-server`
 | 2 | System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` |
 | 2 | Generated spec docs | `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md` |
 | 2 | Test plan | `doc/03_plan/sys_test/<feature>.md` |
-| 2 | Agent tasks | `doc/03_plan/agent_tasks/<feature>.md` |
+| 2 | Agent tasks | `doc/03_plan/agent_tasks/<feature>.md` with sidecar lanes/`N/A`, merge owner, and final reviewer |
 | 3 | Source code | `src/**/<feature>.spl` |
 | 4 | Verify report | Terminal output (PASS/FAIL/WARN) |
 
