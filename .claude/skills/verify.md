@@ -42,6 +42,10 @@ For each `*_spec.spl` in scope:
    - Each `it` block must have at least one `expect(...).to_*()` call
    - Assertions must test actual computed values, not hardcoded constants
    - Edge cases and error paths must be tested, not just happy path
+   - Placeholder helpers must fail explicitly with `assert(false)` or
+     `fail(...)`, never silently pass or no-op
+   - Shared interface/manual helper names must match design, spec, manual, and
+     tooling references
 3. **Check test coverage of requirements:**
    - Read the docstring header — extract `**Requirements:**` link
    - Read the requirement doc → list all REQ-NNN statements
@@ -135,6 +139,11 @@ For each source file in scope:
 [WARN] doc/04_architecture/infra/architecture_docs/overview/overview.md — not updated for new module "optimizer_v2"
 ```
 
+4. **Process documentation freshness:**
+   - Workflow, tool-contract, evidence-wrapper, or verification-contract changes
+     must update the matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
+     `.claude/skills/`, and SPipe process docs before final verification
+
 ---
 
 ## Final Summary
@@ -170,6 +179,8 @@ STATUS: FAIL (5 failures must be fixed before release)
 - NEVER skip NFR checks — even if no NFR doc exists, note it as WARN
 - If no requirement doc exists for a feature, flag as WARN (not FAIL)
 - If design doc exists but is outdated (references deleted files/functions), flag as FAIL
+- If workflow/tooling changes left stale guide, SPipe, or skill instructions
+  behind, do not mark verification PASS
 - Read actual source code — do not trust file names or comments alone
 - Fail wrapper verification if a production MCP or LSP launcher executes raw source instead of a cached compiled artifact
 - Audit request handlers for repeated scans, repeated rereads, and per-request subprocesses in hot paths

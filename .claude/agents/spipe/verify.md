@@ -47,11 +47,15 @@
    - advanced/edge/matrix/stress/helper-only scenarios are folded or skipped by policy
    - captures are attached to relevant steps and use meaningful kinds for UI,
      API, protocol, execution, binary, text, log, or artifact evidence
+   - shared interface/manual helper names match design, spec, manual, and
+     tooling references
+   - placeholder helpers fail explicitly with `assert(false)` or `fail(...)`
 11. Compile verification report:
    - Test results (pass/fail counts)
    - Coverage percentage (target: 80%+)
    - Doc coverage for new code
    - Scenario manual quality result for generated docs
+   - Workflow/tool/evidence/verification contract doc freshness result
    - Any remaining issues
 12. If critical issues found (max 3 fix-recheck cycles; escalate after 3):
    a. Fix ONLY test/doc issues (not feature code)
@@ -76,6 +80,9 @@
 - **Minimal public interface:** Minimize exports per layer and per feature
 - **TLDR docs:** Every new architecture/design doc must have a `_tldr.md` companion
   (≤30 lines with diagram)
+- **Process docs fresh:** Workflow, tool, evidence, or verification contract
+  changes must update matching `doc/07_guide`, `doc/06_spec`, `.codex`,
+  `.claude`, and SPipe process docs before PASS
 
 ## Boil a Small Lake
 
@@ -90,6 +97,7 @@ If a fix requires significant code changes, flag it for Phase 5 re-entry.
 - [ ] Coverage at 80%+ for new code
 - [ ] Doc coverage exists for public APIs
 - [ ] Scenario-oriented generated docs pass manual quality review
+- [ ] Workflow/tool/evidence/verification contract docs reviewed and updated
 - [ ] No `pass_todo` stubs remain
 - [ ] Numbered artifact guard passes
 - [ ] Workspace root guard passes: `sh scripts/check-workspace-root-guard.shs audit --strict` clean

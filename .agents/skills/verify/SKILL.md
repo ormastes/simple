@@ -36,6 +36,9 @@ not create, rewrite, or weaken SPipe after verification.
   artifacts attached to the relevant scenario step.
 - Every BDD scenario has an executable or intentionally skipped SPipe `it` block with a concrete reason
 - Stale, missing, placeholder, or requirement-disconnected SPipe is a FAIL
+- Shared interface/manual helper names match the design/spec/manual references
+- Placeholder helper definitions fail explicitly with `assert(false)` or
+  `fail(...)`; silent no-op helpers are a FAIL
 
 ### 2. Implementation
 - No stub functions (`pass_todo`, weak `pass_do_nothing(...)`, weak `pass_dn(...)`, weak `todo(...)`)
@@ -80,6 +83,9 @@ not create, rewrite, or weaken SPipe after verification.
 - `doc/06_spec/` manual output reviewed for scenario quality when applicable
 - `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`; executable specs
   under `doc/06_spec` are a hard layout failure
+- Workflow, tool-contract, evidence-wrapper, or verification-contract changes
+  updated the matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
+  `.claude/skills/`, and SPipe process docs before final verification
 - Cross-references intact
 
 ## Report Format
@@ -96,4 +102,6 @@ not create, rewrite, or weaken SPipe after verification.
 - WARN items reviewed
 - STATUS: PASS before release
 - Do not defer SPipe fixes or coverage updates to release
+- Do not mark PASS when workflow/tooling changes left stale guide, SPipe, or
+  skill instructions behind
 - Do not mark PASS for compiler/core/lib or MCP/LSP work unless the matching smoke checks passed
