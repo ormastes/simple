@@ -1,0 +1,70 @@
+#!/bin/sh
+# Guard against local rt_env_get use outside env owner modules.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+MODE="${1:---all}"
+
+usage() {
+    cat <<'EOF'
+Usage: sh scripts/audit/direct-env-runtime-guard.shs [--all|--working|--staged]
+
+Blocks direct rt_env_get declarations/calls in production app leaf code and
+gc_async_mut lib code outside env owner modules. Use app/std/gc env facades
+instead.
+EOF
+}
+
+case "$MODE" in
+    --all|--working|--staged) ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+esac
+
+is_allowed_owner() {
+    case "$1" in
+        src/app/io/*) return 0 ;;
+        src/lib/nogc_sync_mut/io/env_ops.spl) return 0 ;;
+    esac
+    return 1
+}
+
+paths_for_mode() {
+    case "$MODE" in
+        --all)
+            git ls-files src/app src/lib/gc_async_mut | grep '\.spl$' || true
+            ;;
+        --working)
+            {
+                git diff --name-only -- src/app src/lib/gc_async_mut
+                git ls-files --others --exclude-standard -- src/app src/lib/gc_async_mut
+            } | grep '\.spl$' || true
+            ;;
+        --staged)
+            git diff --cached --name-only -- src/app src/lib/gc_async_mut | grep '\.spl$' || true
+            ;;
+    esac
+}
+
+failures=""
+for path in $(paths_for_mode | sort -u); do
+    [ -f "$path" ] || continue
+    is_allowed_owner "$path" && continue
+    if grep -nE 'extern fn rt_env_get|rt_env_get[[:space:]]*\(' "$path" >/tmp/direct-env-runtime-guard.$$ 2>/dev/null; then
+        while IFS= read -r line; do
+            failures="${failures}${path}:${line}
+"
+        done < /tmp/direct-env-runtime-guard.$$
+    fi
+done
+rm -f /tmp/direct-env-runtime-guard.$$
+
+if [ -n "$failures" ]; then
+    printf '%s' "$failures" >&2
+    echo "STATUS: FAIL direct rt_env_get outside env owners" >&2
+    exit 1
+fi
+
+echo "STATUS: PASS direct-env-runtime-guard"

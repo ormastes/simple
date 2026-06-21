@@ -105,9 +105,11 @@ Scan for stub patterns — any match is a **FAIL**:
 - **Security:** input validation present, no hardcoded secrets
 - **Reliability:** error handling complete, `Result<T, E>` + `?` used consistently
 - **Maintainability:** files under 800 lines, no duplication
-- **Runtime facade boundary:** new env reads outside owner modules such as
-  `app/io/env_ops.spl` or `std.nogc_sync_mut.io.env_ops` must use the stdlib/app
-  env facade, not local `rt_env_get` declarations.
+- **Runtime facade boundary:** new env reads in app leaf code or
+  `src/lib/gc_async_mut` outside owner modules such as `app/io/env_ops.spl` must
+  use the stdlib/app/gc env facade, not local `rt_env_get` declarations.
+  Check with `sh scripts/audit/direct-env-runtime-guard.shs --working` and
+  `sh scripts/audit/direct-env-runtime-guard.shs --staged`.
 - **Artifact naming:** no newly added/renamed numbered copy/version/part files
 - **GUI/MDI evidence gates:** wrappers that claim live visual/event proof must
   fail when requested evidence is unavailable, times out, or only proves file
