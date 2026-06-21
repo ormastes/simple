@@ -20,7 +20,7 @@ raster parity, or glyph antialiasing parity.
 - Helper:
   `src/app/wm_compare/site_corpus_layout_report.spl`
 - Generated manual:
-  `doc/06_spec/test/03_system/gui/wm_compare/structural_layout_report_spec.md`
+  `doc/06_spec/03_system/gui/wm_compare/structural_layout_report_spec.md`
 - Full-corpus wrapper:
   `scripts/check/check-famous-site-corpus-div-geometry-chunks.shs`
 - Full-corpus generated report:
