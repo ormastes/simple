@@ -1,12 +1,14 @@
 ---
 name: ide-office
-description: "Work on the Simple IDE Office plugin suite: markdown, slides, sheets, dashboard, DB admin, plugin manifests, and feature-check verification."
+description: "Work on the Simple IDE Office plugin suite: Markdown/Writer, Impress/PPT, Calc, Draw/SDD, Designer, Base, Math, Mail, Planner, dashboard, DB admin, plugin manifests, and feature-check verification."
 ---
 
 # IDE Office
 
 Use this skill when a task changes `src/app/ide/` Office integration or the
-Office apps under `src/app/office/` as they appear in the IDE.
+Office apps under `src/app/office/` as they appear in the IDE. Keep the guide
+`doc/07_guide/app/ide_office_plugin_suite.md` current with user-visible Office
+capsules, feature-check behavior, and plugin architecture rules.
 
 ## Scope
 
@@ -15,8 +17,8 @@ Office apps under `src/app/office/` as they appear in the IDE.
   `src/app/ide/gui_sanity.spl`
 - IDE plugin metadata: `src/app/ide/plugin_manifest.spl`
 - Markdown decoration: `src/app/ide/markdown_render.spl`
-- Office apps: `src/app/office/slides/`, `src/app/office/sheets/`,
-  `src/app/office/launcher.spl`
+- Office apps: Markdown/Writer, Impress/PPT, Calc, Draw/SDD, Designer, Base,
+  Math, Mail, Planner, dashboard, DB admin, and `src/app/office/launcher.spl`
 - System coverage:
   `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl`
 
