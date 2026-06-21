@@ -34,6 +34,10 @@ Generate executable SSpec `.spl` scenarios using the canonical matcher set.
 SPipe runs those scenarios and generates mirrored manual docs.
 Executable specs belong under `test/...`; `doc/06_spec/...` is reserved for
 generated/manual scenario documentation derived from those specs.
+For broad lanes, the first normal/highest-capability pass defines shared
+interface names and manual-facing setup/checker helper names before sidecars or
+implementation proceed. Temporary helper placeholders must fail explicitly with
+`assert(false)` or equivalent until implemented.
 
 ### Canonical Matchers
 
