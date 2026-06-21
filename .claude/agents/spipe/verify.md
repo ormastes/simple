@@ -54,7 +54,11 @@
     lower-model sidecar lanes are either reviewed/merged or explicitly `N/A`,
     and the normal/highest-capability review accepted broad findings,
     coverage claims, generated-manual quality, and done marks.
-12. For Mac GUI/web/2D RenderDoc+Vulkan evidence, keep proof scope macOS-only
+12. Run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
+    `sh scripts/audit/direct-env-runtime-guard.shs --staged`; app leaf and
+    `src/lib/gc_async_mut` env reads outside owner modules must use env facades,
+    not local `rt_env_get`.
+13. For Mac GUI/web/2D RenderDoc+Vulkan evidence, keep proof scope macOS-only
     until Windows and Linux runbooks exist. Start from
     `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc`
     on POSIX hosts or `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check`
@@ -63,12 +67,12 @@
     Electron RenderDoc proof, and production GUI/web parity evidence. If Chrome
     or Electron logs show `angle=vulkan` unavailable, report
     `vulkan-angle-unavailable` and fail the Vulkan proof even when pixels render.
-13. For GUI/web queue proof, reject runtime-only evidence. Runtime queue/drain
+14. For GUI/web queue proof, reject runtime-only evidence. Runtime queue/drain
     receipts are necessary but not sufficient; production proof requires
     same-frame backend `device_readback`, a positive backend handle, and
     matching checksum. Synthetic handles, upload-only provenance, and CPU
     mirrors fail.
-14. Compile verification report:
+15. Compile verification report:
    - Test results (pass/fail counts)
    - Coverage percentage (target: 80%+)
    - Doc coverage for new code
@@ -76,10 +80,10 @@
    - Cooperative review completion result
    - Workflow/tool/evidence/verification contract doc freshness result
    - Any remaining issues
-15. If critical issues found (max 3 fix-recheck cycles; escalate after 3):
+16. If critical issues found (max 3 fix-recheck cycles; escalate after 3):
    a. Fix ONLY test/doc issues (not feature code)
    b. Re-run affected checks with `set -o pipefail; ... 2>&1 | tail -40` output cap
-16. Update state file with verification report
+17. Update state file with verification report
 
 ## Rules
 
@@ -121,6 +125,7 @@ If a fix requires significant code changes, flag it for Phase 5 re-entry.
 - [ ] Doc coverage exists for public APIs
 - [ ] Scenario-oriented generated docs pass manual quality review
 - [ ] Cooperative review plan complete or explicitly `N/A`
+- [ ] Direct env runtime guard passes
 - [ ] Workflow/tool/evidence/verification contract docs reviewed and updated
 - [ ] No `pass_todo` stubs remain
 - [ ] Numbered artifact guard passes

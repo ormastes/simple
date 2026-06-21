@@ -157,6 +157,12 @@ For each source file in scope:
      `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
      process docs before final verification
 
+5. **Runtime env facade boundary:**
+   - Run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
+     `sh scripts/audit/direct-env-runtime-guard.shs --staged`
+   - App leaf and `src/lib/gc_async_mut` env reads outside owner modules must
+     use env facades, not local `rt_env_get`
+
 ---
 
 ## Final Summary
@@ -195,6 +201,8 @@ STATUS: FAIL (5 failures must be fixed before release)
 - If workflow/tooling changes left stale `doc/07_guide`, `doc/06_spec`,
   `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, or
   `.claude/agents/spipe/` instructions behind, do not mark verification PASS
+- Do not mark PASS if `direct-env-runtime-guard.shs --working` or `--staged`
+  fails
 - Read actual source code — do not trust file names or comments alone
 - Fail wrapper verification if a production MCP or LSP launcher executes raw source instead of a cached compiled artifact
 - Audit request handlers for repeated scans, repeated rereads, and per-request subprocesses in hot paths
