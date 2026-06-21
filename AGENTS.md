@@ -230,6 +230,11 @@ Run `/verify` — production readiness check:
 | Architecture | `doc/04_architecture/` missing or outdated |
 | Design | `doc/05_design/` missing or outdated |
 
+Run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
+`sh scripts/audit/direct-env-runtime-guard.shs --staged`; new app leaf or
+`src/lib/gc_async_mut` env reads outside owner modules must use env facades, not
+local `rt_env_get`.
+
 SPipe belongs to verify as a release-blocking evidence gate. Implementation or
 design creates/updates SPipe specs; verify checks that they exist, are current,
 use real assertions, cover REQ-NNN requirements, and contain no placeholder

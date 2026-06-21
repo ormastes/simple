@@ -272,6 +272,9 @@ find doc/06_spec -name '*_spec.spl' | wc -l
 
 The result must be `0`; executable SSpec belongs under `test/`, while
 `doc/06_spec` contains generated/manual Markdown and evidence assets only.
+Also run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
+`sh scripts/audit/direct-env-runtime-guard.shs --staged` before final verify so
+new app/gc env reads use env facades instead of local `rt_env_get`.
 
 ## LLM Fine-Tune Handoff
 
