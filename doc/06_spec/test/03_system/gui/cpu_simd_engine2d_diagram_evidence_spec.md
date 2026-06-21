@@ -11,6 +11,7 @@
 @direction LR
 
 cpu_simd_engine2d_diagram_evidence_spec -> std
+cpu_simd_engine2d_diagram_evidence_spec -> app
 ```
 
 </details>
@@ -54,9 +55,6 @@ matching the scalar reference bitmap with no blur or tolerance.
 
 ### CPU SIMD Engine2D diagram evidence
 
-<details>
-<summary>Advanced: renders the SIMD-backed diagram exactly like the scalar reference</summary>
-
 #### renders the SIMD-backed diagram exactly like the scalar reference _(slow)_
 
 <details>
@@ -94,7 +92,7 @@ expect(stdout).to_contain("cpu_simd_evidence_general_status=Initialized")
 expect(stdout).to_contain("cpu_simd_evidence_log_bytes=")
 expect(stdout).to_contain("cpu_simd_evidence_log_cksum=")
 
-val report = rt_file_read_text(_report_path(run_id))
+val report = file_read_text(_report_path(run_id))
 expect(report).to_contain("# CPU SIMD Engine2D Evidence")
 expect(report).to_contain("- status: pass")
 expect(report).to_contain("- diagram pixel count: 192")
@@ -103,9 +101,6 @@ expect(report).to_contain("- policy: exact bitmap, no blur, no tolerance")
 expect(report).to_contain("- evidence_log_bytes: ")
 expect(report).to_contain("- evidence_log_cksum: ")
 ```
-
-</details>
-
 
 </details>
 
