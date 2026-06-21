@@ -8809,7 +8809,7 @@ BrowserSession fetched invalid arrayBuffer instantiate catch continuation:
  - Verify the instantiated result exposes an instance exports object for the
    valid empty module payload.
  - Regenerate the mirrored scenario manual for the changed SPipe spec under the
-   current `doc/06_spec/test/01_unit/...` layout.
+   current `doc/06_spec/unit/...` layout.
  - Remove the stale old-path generated manual for the same moved SPipe spec.
  - Restore generated index/manual noise from docgen and adjacent specs.
  - Record command evidence, pass counts, warning count, and remaining open scope.
