@@ -113,7 +113,12 @@ Simple runtime fields. The requested browser Vulkan contract is explicit in
 `gui_web_2d_vulkan_chrome_requested_angle`, and
 `gui_web_2d_vulkan_chrome_launch_flags`; compare those request keys with the
 observed `*_vulkan_status` and `*_vulkan_reason` fields before claiming a
-browser lane is Vulkan-backed.
+browser lane is Vulkan-backed. The same aggregate evidence exposes the
+comparison fixture and viewport through `gui_web_2d_vulkan_html_path`,
+`gui_web_2d_vulkan_width`, and `gui_web_2d_vulkan_height`, plus the runtime
+artifacts `gui_web_2d_vulkan_electron_argb_path`,
+`gui_web_2d_vulkan_chrome_screenshot`, and
+`gui_web_2d_vulkan_simple_evidence_env`.
 
 On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
 `src/compiler_rust/target/debug/simple` when that binary advertises the macOS
