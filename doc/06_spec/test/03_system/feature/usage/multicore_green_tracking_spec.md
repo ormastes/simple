@@ -821,7 +821,7 @@ val agent_plan = rt_file_read_text("doc/03_plan/agent_tasks/multicore_green.md")
 val perf_readme = rt_file_read_text("test/05_perf/README.md") ?? ""
 val fanout_runner_bug = rt_file_read_text("doc/08_tracking/bug/multicore_green_fanout_spec_runner_mismatch_2026-06-11.md") ?? ""
 val fanout_spec = rt_file_read_text("test/05_perf/stress/multicore_green_fanout_spec.spl") ?? ""
-val fanout_manual = rt_file_read_text("doc/06_spec/test/05_perf/stress/multicore_green_fanout_spec.md") ?? ""
+val fanout_manual = rt_file_read_text("doc/06_spec/05_perf/stress/multicore_green_fanout_spec.md") ?? ""
 
 step("Verify cooperative green remains documented as single-carrier work")
 expect(stdlib).to_contain("no preemption or CPU parallelism")
