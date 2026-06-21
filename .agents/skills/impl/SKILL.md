@@ -37,9 +37,11 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
 - Stub Prevention: no `pass_todo` in final code, STUB001 = hard fail
 - 80%+ branch coverage target
 - For scenario-oriented specs, run the generated-manual review loop before
-  claiming completion: `bin/simple spipe-docgen <spec> --output doc/06_spec`,
-  read the output like a manual, then revise steps/captures/visibility until
-  primary flows are manual-quality and noisy details are folded or skipped.
+  claiming completion:
+  `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`, read the
+  output like a manual, then revise steps/captures/visibility until primary
+  flows are manual-quality, noisy details are folded or skipped, and the
+  generator reports `0 stubs`.
 - If design introduced shared interface or manual setup/checker helper
   placeholders, implement them or keep them failing explicitly with
   `assert(false)` or `fail(...)`. Silent no-op helpers are not valid coverage.

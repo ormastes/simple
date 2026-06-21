@@ -122,11 +122,11 @@ For user-facing, MCP/tooling, system, protocol, UI, hardware, and environmental
 specs:
 
 1. Write executable scenarios and step/checker helpers.
-2. Generate the mirrored doc with `bin/simple spipe-docgen <spec> --output doc/06_spec`.
+2. Generate the mirrored doc with `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`.
 3. Read the result as a manual, not as a test report.
 4. Update `@step`, `@capture`, `@inline`, `@prev`, helper/checker names, and
    manual visibility until the primary flow is understandable without opening
-   the source test.
+   the source test and the generator reports `0 stubs`.
 
 Reference: `doc/07_guide/infra/sspec_scenario_manual.md`.
 

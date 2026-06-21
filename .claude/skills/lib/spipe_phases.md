@@ -211,9 +211,10 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 2. Run the full test suite to check for regressions: `bin/simple test`
 3. Verify each AC from the state file against actual implementation
 4. Check that all spec `it` blocks have corresponding implementation
-5. **Run docgen** on each spec: `bin/simple spipe-docgen <spec> --output doc/06_spec`
+5. **Run docgen** on each spec: `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`
 6. **Read generated docs** as scenario manuals — if they read like test plumbing,
-   note which step helpers or visibility annotations need improvement
+   note which step helpers or visibility annotations need improvement and
+   require the generator to report `0 stubs`
 7. Mark ACs as checked in the state file
 8. If any test fails, document the failure and note whether it needs Phase 5 re-run
 
@@ -221,8 +222,9 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - All spec tests pass (or documented reason for interpreter-mode limitation)
 - No regressions in existing tests
 - Every AC is marked as verified with evidence
-- **Generated docs reviewed:** run `bin/simple spipe-docgen <spec> --output doc/06_spec`
-  and verify output reads like a hand-written manual (not test plumbing)
+- **Generated docs reviewed:** run `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`
+  and verify output reads like a hand-written manual (not test plumbing) with
+  `0 stubs`
 - **Diagram presence:** each phase doc (research, arch, refactor) has ≥1 SDN diagram
 - **Prose concision:** each phase doc ≤30 lines of prose (tables/diagrams excluded)
 - If any AC cannot be verified, it is documented with a clear reason

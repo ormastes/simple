@@ -57,8 +57,9 @@ UI, protocol, hardware, system, and environmental tests, generated
 - advanced/edge/matrix/stress details folded or skipped by policy;
 - executable SSpec folded below the manual.
 
-Run `bin/simple spipe-docgen <spec> --output doc/06_spec` and revise the spec
-until the generated manual is usable without opening the source.
+Run `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index` and
+revise the spec until the generated manual is usable without opening the source
+and reports `0 stubs`.
 
 ## Test API Imports
 
@@ -248,7 +249,8 @@ Option C and NFR Option C contract current:
   `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`, and
   `test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl`;
 - regenerate mirrored manuals with `bin/simple spipe-docgen ... --output
-  doc/06_spec` and keep `find doc/06_spec -name '*_spec.spl' | wc -l` at `0`;
+  doc/06_spec --no-index`, require `0 stubs`, and keep
+  `find doc/06_spec -name '*_spec.spl' | wc -l` at `0`;
 - canonical `/ui/ws` requires an origin-bound bearer token, legacy `/ws` returns
   `404`, and query-string bearer transport is non-authorizing even if
   `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` is present;
