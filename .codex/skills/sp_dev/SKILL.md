@@ -81,7 +81,10 @@ Electron/Chrome/Simple, and the zero-mismatch pairwise diff statuses
 `gui_web_2d_vulkan_electron_simple_pairwise_diff_status`, and
 `gui_web_2d_vulkan_chrome_simple_pairwise_diff_status` before claiming the
 Electron baseline, Chrome Vulkan-backed render, and Simple GUI/web/2D Vulkan
-render match pixels.
+render match pixels. If the aggregate reports
+`gui_web_2d_vulkan_pixel_comparison_status=fail` with
+`gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff-mismatch`, treat it
+as a real pixel mismatch to fix, not as missing evidence.
 Browser Vulkan proof must be read
 from `gui_web_2d_vulkan_browser_backing_status`,
 `gui_web_2d_vulkan_browser_backing_reason`, and

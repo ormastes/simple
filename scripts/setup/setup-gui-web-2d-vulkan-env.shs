@@ -87,8 +87,13 @@ try {
   const payload = JSON.parse(fs.readFileSync(argbPath, "utf8"));
   const pixels = Array.isArray(payload.pixels) ? payload.pixels : [];
   let nonblank = 0;
-  for (const value of pixels) {
+  let checksum = 0n;
+  let weighted = 0n;
+  for (let i = 0; i < pixels.length; i += 1) {
+    const value = pixels[i];
     const pixel = Number(value) >>> 0;
+    checksum += BigInt(pixel);
+    weighted += BigInt(pixel) * BigInt(i + 1);
     const alpha = (pixel >>> 24) & 255;
     if (alpha !== 0 && pixel !== 0xffffffff) nonblank++;
   }
@@ -100,12 +105,55 @@ try {
   emit("producer", String(payload.producer || ""));
   emit("pixel_count", pixels.length);
   emit("nonblank_pixel_count", nonblank);
+  emit("checksum", checksum.toString());
+  emit("weighted_checksum", weighted.toString());
 } catch (error) {
   emit("status", "invalid");
   emit("reason", "invalid-json");
   emit("path", argbPath);
 }
 NODE
+}
+
+run_argb_diff() {
+    ref_path="$1"
+    test_path="$2"
+    prefix="$3"
+    diff_path="$4"
+    diff_out="$5"
+    append_kv "${prefix}_diff_path" "$diff_path"
+    if ! have node; then
+        append_kv "${prefix}_diff_status" "unavailable"
+        append_kv "${prefix}_diff_reason" "missing-node"
+        append_kv "${prefix}_mismatch_count" ""
+        return 0
+    fi
+    if [ ! -s "$ref_path" ] || [ ! -s "$test_path" ]; then
+        append_kv "${prefix}_diff_status" "unavailable"
+        append_kv "${prefix}_diff_reason" "missing-argb-input"
+        append_kv "${prefix}_mismatch_count" ""
+        return 0
+    fi
+    if node "$ROOT_DIR/tools/pixel_compare/diff_argb.js" "$ref_path" "$test_path" "$diff_path" >"$diff_out" 2>&1; then
+        mismatch_count="$(sed -n 's/^differing=\([0-9][0-9]*\).*/\1/p' "$diff_out" | tail -n 1)"
+        if [ "$mismatch_count" = "" ]; then
+            append_kv "${prefix}_diff_status" "fail"
+            append_kv "${prefix}_diff_reason" "missing-differing-count"
+            append_kv "${prefix}_mismatch_count" ""
+        elif [ "$mismatch_count" = "0" ]; then
+            append_kv "${prefix}_diff_status" "pass"
+            append_kv "${prefix}_diff_reason" "pass"
+            append_kv "${prefix}_mismatch_count" "$mismatch_count"
+        else
+            append_kv "${prefix}_diff_status" "fail"
+            append_kv "${prefix}_diff_reason" "pixel-mismatch"
+            append_kv "${prefix}_mismatch_count" "$mismatch_count"
+        fi
+    else
+        append_kv "${prefix}_diff_status" "fail"
+        append_kv "${prefix}_diff_reason" "diff-argb-failed"
+        append_kv "${prefix}_mismatch_count" ""
+    fi
 }
 
 print_install() {
@@ -295,11 +343,17 @@ if [ "$MODE" = "--run" ] || [ "$MODE" = "--renderdoc-simple" ] || [ "$MODE" = "-
     CHROME_OUT="$BUILD_DIR/chrome.out"
     CHROME_LOG="$BUILD_DIR/chrome.log"
     CHROME_SCREENSHOT="$BUILD_DIR/chrome.png"
+    CHROME_ARGB="$BUILD_DIR/chrome_argb.json"
+    CHROME_ARGB_OUT="$BUILD_DIR/chrome_argb.out"
+    CHROME_ARGB_PROOF="$BUILD_DIR/chrome_argb_proof.json"
     CHROME_USER_DATA="$BUILD_DIR/chrome-user-data"
     if [ "$MODE" = "--renderdoc-simple" ]; then
         append_kv "gui_web_2d_vulkan_chrome_exit_code" ""
         append_kv "gui_web_2d_vulkan_chrome_vulkan_status" "not-run"
         append_kv "gui_web_2d_vulkan_chrome_vulkan_reason" "simple-renderdoc-only"
+        append_kv "gui_web_2d_vulkan_chrome_argb_status" "not-run"
+        append_kv "gui_web_2d_vulkan_chrome_argb_reason" "simple-renderdoc-only"
+        append_kv "gui_web_2d_vulkan_chrome_argb_path" "$CHROME_ARGB"
     elif [ "$chrome_bin" != "" ] && [ -x "$chrome_bin" ]; then
         rm -rf "$CHROME_USER_DATA"
         mkdir -p "$CHROME_USER_DATA"
@@ -327,14 +381,36 @@ if [ "$MODE" = "--run" ] || [ "$MODE" = "--renderdoc-simple" ] || [ "$MODE" = "-
             append_kv "gui_web_2d_vulkan_chrome_vulkan_status" "not-rejected-by-log"
             append_kv "gui_web_2d_vulkan_chrome_vulkan_reason" "no-angle-vulkan-unavailable-log"
         fi
+
+        CHROME_CAPTURE_HTML="$HTML_PATH" \
+        CHROME_CAPTURE_WIDTH="$WIDTH" \
+        CHROME_CAPTURE_HEIGHT="$HEIGHT" \
+        CHROME_CAPTURE_OUTPUT="$CHROME_ARGB" \
+        CHROME_CAPTURE_PROOF_PATH="$CHROME_ARGB_PROOF" \
+        CHROME_CAPTURE_BIN="$chrome_bin" \
+        CHROME_CAPTURE_DISABLE_GPU=false \
+        CHROME_CAPTURE_EXTRA_ARGS="$(rdoc_chrome_vulkan_flags)" \
+        CHROME_CAPTURE_TIMEOUT_MS="$((TIMEOUT_SECS * 1000))" \
+            run_bound node "$ROOT_DIR/tools/chrome-live-bitmap/capture_html_argb.js" >"$CHROME_ARGB_OUT" 2>&1
+        chrome_argb_code=$?
+        append_kv "gui_web_2d_vulkan_chrome_argb_exit_code" "$chrome_argb_code"
+        append_kv "gui_web_2d_vulkan_chrome_argb_stdout" "$CHROME_ARGB_OUT"
+        append_kv "gui_web_2d_vulkan_chrome_argb_proof" "$CHROME_ARGB_PROOF"
+        parse_argb "$CHROME_ARGB" "gui_web_2d_vulkan_chrome"
     else
         append_kv "gui_web_2d_vulkan_chrome_exit_code" ""
         append_kv "gui_web_2d_vulkan_chrome_vulkan_status" "unavailable"
         append_kv "gui_web_2d_vulkan_chrome_vulkan_reason" "missing-chrome"
+        append_kv "gui_web_2d_vulkan_chrome_argb_status" "unavailable"
+        append_kv "gui_web_2d_vulkan_chrome_argb_reason" "missing-chrome"
+        append_kv "gui_web_2d_vulkan_chrome_argb_path" "$CHROME_ARGB"
     fi
 
     SIMPLE_OUT="$BUILD_DIR/simple-vulkan-readback.out"
     SIMPLE_WORK_DIR="$BUILD_DIR/simple-vulkan-readback"
+    SIMPLE_ARGB="$BUILD_DIR/simple_argb.json"
+    SIMPLE_ARGB_OUT="$BUILD_DIR/simple_argb.out"
+    SIMPLE_PIXEL_BACKEND="${GUI_WEB_2D_VULKAN_SIMPLE_PIXEL_BACKEND:-vulkan}"
     SIMPLE_VULKAN_READBACK_WORK_DIR="$SIMPLE_WORK_DIR" \
     REPORT_PATH="$SIMPLE_WORK_DIR/report.md" \
     SIMPLE_BIN="$simple_bin" \
@@ -354,6 +430,23 @@ if [ "$MODE" = "--run" ] || [ "$MODE" = "--renderdoc-simple" ] || [ "$MODE" = "-
         append_kv "gui_web_2d_vulkan_simple_status" "missing-evidence"
         append_kv "gui_web_2d_vulkan_simple_reason" "missing-evidence-env"
     fi
+
+    PIXEL_HTML="$HTML_PATH" \
+    PIXEL_W="$WIDTH" \
+    PIXEL_H="$HEIGHT" \
+    PIXEL_BACKEND="$SIMPLE_PIXEL_BACKEND" \
+    PIXEL_OUT="$SIMPLE_ARGB" \
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" \
+        run_bound "$simple_bin" run "$ROOT_DIR/tools/pixel_compare/render_simple_html.spl" --mode=interpreter --clean >"$SIMPLE_ARGB_OUT" 2>&1
+    simple_argb_code=$?
+    append_kv "gui_web_2d_vulkan_simple_argb_exit_code" "$simple_argb_code"
+    append_kv "gui_web_2d_vulkan_simple_argb_stdout" "$SIMPLE_ARGB_OUT"
+    append_kv "gui_web_2d_vulkan_simple_argb_backend" "$SIMPLE_PIXEL_BACKEND"
+    parse_argb "$SIMPLE_ARGB" "gui_web_2d_vulkan_simple"
+
+    run_argb_diff "$ELECTRON_ARGB" "$CHROME_ARGB" "gui_web_2d_vulkan_electron_chrome" "$BUILD_DIR/electron_chrome_diff.ppm" "$BUILD_DIR/electron_chrome_diff.out"
+    run_argb_diff "$ELECTRON_ARGB" "$SIMPLE_ARGB" "gui_web_2d_vulkan_electron_simple" "$BUILD_DIR/electron_simple_diff.ppm" "$BUILD_DIR/electron_simple_diff.out"
+    run_argb_diff "$CHROME_ARGB" "$SIMPLE_ARGB" "gui_web_2d_vulkan_chrome_simple" "$BUILD_DIR/chrome_simple_diff.ppm" "$BUILD_DIR/chrome_simple_diff.out"
 fi
 
 if [ "$MODE" = "--renderdoc-simple" ]; then

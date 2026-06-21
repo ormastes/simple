@@ -146,7 +146,9 @@ three surfaces (`gui_web_2d_vulkan_electron_argb_*`,
 `gui_web_2d_vulkan_chrome_simple_pairwise_diff_status`. A status of
 `incomplete` with mode `artifact-only-no-pairwise-diff` means the run captured
 useful artifacts but did not prove Electron, Chrome, and Simple rendered the
-same GUI/web/2D pixels.
+same GUI/web/2D pixels. A status of `fail` with mode
+`pairwise-argb-diff-mismatch` means the pairwise comparisons ran and found
+pixel differences that must be fixed before claiming parity.
 The browser Vulkan-backed proof is a separate rollup:
 `gui_web_2d_vulkan_browser_backing_status`,
 `gui_web_2d_vulkan_browser_backing_reason`, and
@@ -279,7 +281,9 @@ their `.rdc` files pass the same RDOC gates.
 For GUI/web/2D comparison work, collect both the browser-hosted surface and the
 Simple renderer surface from the same fixture. The browser bitmap lanes are
 comparison evidence only until their logs prove Vulkan and their `.rdc` files
-pass the RDOC gates:
+pass the RDOC gates. The `--run` helper writes Electron, Chrome, and Simple
+ARGB captures plus three pairwise diff lanes into the
+`gui_web_2d_vulkan_*` evidence namespace:
 
 ```sh
 SIMPLE_BIN=src/compiler_rust/target/release/simple \
@@ -308,7 +312,9 @@ Completion requires typed evidence, not screenshots alone:
 - The aggregate audit reports `gui_web_2d_vulkan_pixel_comparison_status=pass`
   with `gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff`, proving
   Electron, Chrome, and Simple ARGB outputs were pairwise compared with zero
-  mismatches.
+  mismatches. If it reports `fail` with
+  `pairwise-argb-diff-mismatch`, the comparison ran and exposed real pixel
+  differences; do not downgrade that to missing evidence.
 - The aggregate audit reports `gui_web_2d_vulkan_browser_backing_status=pass`
   and `gui_web_2d_vulkan_renderdoc_blocker_status=pass`; otherwise these fields
   are completion blockers, not warnings.

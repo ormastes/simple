@@ -92,6 +92,8 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
   selected, including whether it found a fresh macOS-capable driver.
 - The top-level GUI/web/2D Vulkan RenderDoc workflow is macOS-only until
   Windows and Linux add independent runbooks with the same evidence keys.
+- The setup `--run` lane can emit Electron, Chrome, and Simple ARGB evidence
+  plus pairwise pixel diff status for the shared GUI/web/2D Vulkan fixture.
 - The audit reports the current GUI/web/2D Vulkan RenderDoc blocker lanes as
   machine-readable status, reason, count, and gate-list keys.
 - The aggregate audit treats comparison artifacts, pairwise pixel comparison,
@@ -185,6 +187,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: electron_simple_pairwise_diff_status equals `pass`
    - Expected: chrome_simple_pairwise_diff_status equals `pass`
    - Expected: pixel_comparison_status equals `incomplete`
+   - Expected: pixel_comparison_mode equals `pairwise-argb-diff-mismatch`
    - Expected: pixel_comparison_mode equals `artifact-only-no-pairwise-diff`
    - Expected: browser_backing_reason equals `pass`
    - Expected: browser_backing_mode equals `vulkan-backed-renderdoc`
@@ -210,7 +213,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 602 lines folded for reproduction.
+Runnable source: 606 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -733,9 +736,13 @@ if pixel_comparison_status == "pass":
     expect(electron_simple_pairwise_diff_status).to_equal("pass")
     expect(chrome_simple_pairwise_diff_status).to_equal("pass")
 else:
-    expect(pixel_comparison_status).to_equal("incomplete")
+    if pixel_comparison_status != "fail":
+        expect(pixel_comparison_status).to_equal("incomplete")
     expect(pixel_comparison_reason.len()).to_be_greater_than(0)
-    expect(pixel_comparison_mode).to_equal("artifact-only-no-pairwise-diff")
+    if pixel_comparison_status == "fail":
+        expect(pixel_comparison_mode).to_equal("pairwise-argb-diff-mismatch")
+    else:
+        expect(pixel_comparison_mode).to_equal("artifact-only-no-pairwise-diff")
 if browser_backing_status == "pass":
     expect(browser_backing_reason).to_equal("pass")
     expect(browser_backing_mode).to_equal("vulkan-backed-renderdoc")
