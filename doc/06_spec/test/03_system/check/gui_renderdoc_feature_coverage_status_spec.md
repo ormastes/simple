@@ -164,7 +164,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 402 lines folded for reproduction.
+Runnable source: 407 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -282,6 +282,11 @@ expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_macos_homebrew_package_
 expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_macos_upstream_support_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_setup_macos_homebrew_package_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_setup_macos_upstream_support_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_simple_bin=")
+expect(evidence).to_contain("gui_web_2d_vulkan_simple_bin_selection_reason=")
+expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_evidence_env=")
+expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_source=")
+expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_mode=")
 expect(evidence).to_contain("simple_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple")
 expect(evidence).to_contain("simple_renderdoc_evidence_env=")
 expect(evidence).to_contain("simple_renderdoc_capture_status=")

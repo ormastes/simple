@@ -98,6 +98,11 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 
 Do not report Windows or Linux status from this top-level workflow; those
 runbooks are intentionally deferred until they have their own host evidence.
+The aggregate audit reads setup/readiness evidence from `GUI_WEB_2D_VULKAN_ENV`
+and direct runtime comparison evidence from `GUI_WEB_2D_VULKAN_RUN_EVIDENCE_ENV`
+when set, otherwise from existing `build/gui-web-2d-vulkan-env-run-*` evidence.
+This prevents a readiness-only `--check` env from hiding the latest direct
+Electron, Chrome, and Simple comparison result.
 
 On macOS, `vulkaninfo --summary` reporting `driverName = MoltenVK` proves only
 the host Vulkan loader path. It does not prove that Electron or Chrome accepted

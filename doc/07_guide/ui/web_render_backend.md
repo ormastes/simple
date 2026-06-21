@@ -107,6 +107,9 @@ wrapper records whether the Simple lane used a macOS Vulkan-capable fresh driver
 in `gui_web_2d_vulkan_simple_bin_selection_reason`. RenderDoc proof requires
 `.rdc` files with `RDOC` magic for the Electron, original Chrome, and Simple
 capture lanes; browser bitmaps alone are not Vulkan proof.
+The aggregate audit emits `gui_web_2d_vulkan_direct_run_source` and
+`gui_web_2d_vulkan_direct_run_evidence_env` so direct runtime comparison fields
+can come from a real `--run` env even when the setup env is readiness-only.
 
 For host/GPU lane event-flow and less-ms evidence around
 `target.later(...) gpu \:`, use

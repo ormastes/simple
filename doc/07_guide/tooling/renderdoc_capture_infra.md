@@ -97,6 +97,16 @@ Run direct launch probes for Electron, Chrome, and Simple Engine2D:
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 ```
 
+The aggregate status audit keeps readiness and direct launch evidence separate.
+`GUI_WEB_2D_VULKAN_ENV` points at the readiness/setup env, while
+`GUI_WEB_2D_VULKAN_RUN_EVIDENCE_ENV` can point at a previous `--run`,
+`--renderdoc`, or `--renderdoc-simple` env. If unset, the audit looks for
+`build/gui-web-2d-vulkan-env-run-auto/evidence.env` and related run dirs. It
+emits `gui_web_2d_vulkan_direct_run_source`,
+`gui_web_2d_vulkan_direct_run_evidence_env`, and
+`gui_web_2d_vulkan_direct_run_mode` before reporting Electron, Chrome, and
+Simple runtime fields.
+
 On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
 `src/compiler_rust/target/debug/simple` when that binary advertises the macOS
 Vulkan loader paths (`libvulkan.1.dylib`). The selected executable is recorded
