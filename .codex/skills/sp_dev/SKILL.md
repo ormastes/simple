@@ -41,7 +41,8 @@ is understandable without opening the source spec.
 
 For recent unfinished-plan cleanup lanes, use
 `doc/07_guide/infra/recent_plan_cleanup.md`. Keep the cleanup matrix under
-`doc/03_plan/agent_tasks/`, keep SPipe state under `.spipe/<cleanup-name>/`,
+`doc/03_plan/agent_tasks/` with sidecar lanes/`N/A`, merge owner, and final
+reviewer, keep SPipe state under `.spipe/<cleanup-name>/`,
 classify every candidate as `mark-done`, `needs-evidence`,
 `needs-requirement-selection`, `needs-implementation`, or `superseded/merge`,
 and run normal LLM review before accepting done marks or broad exclusions.
