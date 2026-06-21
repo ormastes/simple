@@ -25,6 +25,7 @@ web_render_backend:
   8k: retain a doc/09_report or doc/10_metrics row with viewport, backend,
       binary/source revision, readback, p50/p95, RSS/memory, fallback state,
       checksum proof; otherwise record an explicit 8K blocker.
+  metal: macOS raw Metal readback only; non-macOS records metal-requires-macos.
 ```
 
 Full guide: [web_render_backend.md](web_render_backend.md)

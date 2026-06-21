@@ -126,6 +126,11 @@ and checksum/readback proof. If the host cannot produce the row, record an
 explicit blocker such as `8k-host-unavailable`; do not convert a small viewport,
 software fallback, or cached replay into an 8K pass.
 
+For Metal claims, only macOS native raw Metal readback is proof. Linux and other
+non-macOS hosts must report `metal-requires-macos`, not a Metal pass. A Metal
+claim without raw readback, backend handle, and checksum/readback provenance is
+only a host capability note, not GUI/web/2D production evidence.
+
 See also: [`web_render_backend_tldr.md`](web_render_backend_tldr.md).
 
 ## Production Browser Hardening
