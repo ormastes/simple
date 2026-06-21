@@ -101,6 +101,13 @@ IDs and continue only the requested lane. Treat all unrelated dirty files as
 other-agent work: preserve them, avoid reverting them, and mention them
 separately in the final status.
 
+For broad lanes, use lower-model sidecars when useful (Codex Spark, Claude
+Haiku, Claude Sonnet), then require normal/highest-capability review before
+accepting broad findings, generated-manual quality, exclusions, or done marks.
+Before sidecars start, the best model defines shared interface names, manual
+`step("...")` helper names, setup/checker helper names, and fail-fast
+placeholders (`assert(false)` or `fail(...)`) for SSpec work.
+
 ---
 
 ## Available Tools
