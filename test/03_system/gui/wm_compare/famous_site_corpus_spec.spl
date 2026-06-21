@@ -17,11 +17,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_corpus_fixture_renderer.{simp
 use std.gc_async_mut.gpu.browser_engine.text_painter.{
     br_famous_site_corpus_layout_lines, br_famous_site_corpus_layout_line_widths_sdn,
     br_famous_site_corpus_layout_lines_sdn}
-
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_read_bytes(path: text) -> [u8]?
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+use app.io.mod.{file_exists, file_read_bytes, file_read_text, process_run_timeout}
 
 struct SiteCorpusCompatOpts:
     only: text
@@ -132,7 +128,7 @@ fn _pixels_equal(a: [u32], b: [u32]) -> bool:
     true
 
 fn _load_p6_ppm_pixels(path: text, width: i32, height: i32) -> [u32]:
-    val data = rt_file_read_bytes(path) ?? []
+    val data = file_read_bytes(path) ?? []
     val header_len = 15
     val expected_len = header_len + width * height * 3
     if data.len() < expected_len:
@@ -168,34 +164,34 @@ fn _has_category(samples, category: text) -> bool:
 
 fn _all_fixture_files_exist(samples) -> bool:
     for sample in samples:
-        if not rt_file_exists(famous_site_sample_html_path(sample.id)):
+        if not file_exists(famous_site_sample_html_path(sample.id)):
             return false
     true
 
 fn _all_fixture_html_matches(samples) -> bool:
     for sample in samples:
-        if rt_file_read_text(famous_site_sample_html_path(sample.id)) != sample.html:
+        if file_read_text(famous_site_sample_html_path(sample.id)) != sample.html:
             return false
     true
 
 fn _all_baseline_artifacts_exist(samples) -> bool:
     for sample in samples:
-        if not rt_file_exists(famous_site_sample_chrome_ppm_path(sample.id)):
+        if not file_exists(famous_site_sample_chrome_ppm_path(sample.id)):
             return false
         if not _ppm_file_has_header_and_payload(famous_site_sample_chrome_ppm_path(sample.id)):
             return false
-        if not rt_file_exists(famous_site_sample_chrome_metrics_path(sample.id)):
+        if not file_exists(famous_site_sample_chrome_metrics_path(sample.id)):
             return false
-        if not rt_file_exists(famous_site_sample_simple_ppm_path(sample.id)):
+        if not file_exists(famous_site_sample_simple_ppm_path(sample.id)):
             return false
         if not _ppm_file_has_header_and_payload(famous_site_sample_simple_ppm_path(sample.id)):
             return false
-        if not rt_file_exists(famous_site_sample_report_sdn_path(sample.id)):
+        if not file_exists(famous_site_sample_report_sdn_path(sample.id)):
             return false
     true
 
 fn _ppm_file_has_header_and_payload(path: text) -> bool:
-    val bytes = rt_file_read_bytes(path) ?? []
+    val bytes = file_read_bytes(path) ?? []
     if bytes.len() < 16:
         return false
     val is_p6 = bytes[0] == 80u8 and bytes[1] == 54u8
@@ -213,9 +209,9 @@ fn _ppm_file_has_header_and_payload(path: text) -> bool:
 fn _all_chrome_metrics_valid(samples) -> bool:
     for sample in samples:
         val path = famous_site_sample_chrome_metrics_path(sample.id)
-        if not rt_file_exists(path):
+        if not file_exists(path):
             return false
-        val metrics = rt_file_read_text(path)
+        val metrics = file_read_text(path)
         if not metrics.contains("\"sample\": \"" + sample.id + "\""):
             return false
         if not metrics.contains("\"width\": 160"):
@@ -261,9 +257,9 @@ fn _all_samples_render_non_empty(samples) -> bool:
 fn _first_simple_layout_line_missing_from_chrome_metrics(samples, layout_width: i32) -> text:
     for sample in samples:
         val metrics_path = famous_site_sample_chrome_metrics_path(sample.id)
-        if not rt_file_exists(metrics_path):
+        if not file_exists(metrics_path):
             return sample.id + ": missing metrics"
-        val metrics = rt_file_read_text(metrics_path)
+        val metrics = file_read_text(metrics_path)
         val simple_lines = br_famous_site_corpus_layout_lines(sample.html, 16, layout_width)
         if simple_lines.len() == 0:
             return sample.id + ": no Simple lines"
@@ -292,14 +288,14 @@ fn _stale_report_count(samples, threshold: i64) -> i32:
     var count = 0
     for sample in samples:
         val path = famous_site_sample_report_sdn_path(sample.id)
-        if not rt_file_exists(path):
+        if not file_exists(path):
             count = count + 1
-        elif _report_different_pixels(rt_file_read_text(path) ?? "") > threshold:
+        elif _report_different_pixels(file_read_text(path) ?? "") > threshold:
             count = count + 1
     count
 
 fn _report_contains_exact_fixture_acceptance(sample_id: text) -> bool:
-    val report = rt_file_read_text(famous_site_sample_report_sdn_path(sample_id)) ?? ""
+    val report = file_read_text(famous_site_sample_report_sdn_path(sample_id)) ?? ""
     report.contains("simple_ppm: \"" + famous_site_sample_simple_ppm_path(sample_id) + "\"") and
         not report.contains("renderer_mode: \"production\"") and
         not report.contains("simple.production.ppm") and
@@ -308,7 +304,7 @@ fn _report_contains_exact_fixture_acceptance(sample_id: text) -> bool:
         report.contains("different_pixels: 0")
 
 fn _report_contains_bounded_production_miss(sample_id: text) -> bool:
-    val report = rt_file_read_text(famous_site_sample_production_report_sdn_path(sample_id)) ?? ""
+    val report = file_read_text(famous_site_sample_production_report_sdn_path(sample_id)) ?? ""
     report.contains("renderer_mode: \"production\"") and
         report.contains("production_render_strategy: \"famous_site_block_only_pending_glyph_compositing\"") and
         report.contains("simple_ppm: \"" + famous_site_sample_production_simple_ppm_path(sample_id) + "\"") and
@@ -398,10 +394,10 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "has every exported HTML fixture and manifest on disk":
             val samples = build_famous_site_sample_corpus()
-            expect(rt_file_exists("test/fixtures/famous_site_corpus/manifest.sdn")).to_equal(true)
+            expect(file_exists("test/fixtures/famous_site_corpus/manifest.sdn")).to_equal(true)
             expect(_all_fixture_files_exist(samples)).to_equal(true)
             expect(_all_fixture_html_matches(samples)).to_equal(true)
-            expect(rt_file_read_text("test/fixtures/famous_site_corpus/manifest.sdn")).to_equal(build_famous_site_sample_manifest_sdn())
+            expect(file_read_text("test/fixtures/famous_site_corpus/manifest.sdn")).to_equal(build_famous_site_sample_manifest_sdn())
 
         slow_it "has every Chrome baseline, Simple capture, and comparison report on disk":
             val samples = build_famous_site_sample_corpus()
@@ -413,8 +409,8 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "has focused Chrome DOM metrics for the first failing oracle sample":
             val metrics_path = famous_site_sample_chrome_metrics_path("site_0_google")
-            expect(rt_file_exists(metrics_path)).to_equal(true)
-            val metrics = rt_file_read_text(metrics_path)
+            expect(file_exists(metrics_path)).to_equal(true)
+            val metrics = file_read_text(metrics_path)
             expect(metrics).to_contain("\"fontFamily\": \"\\\"Times New Roman\\\"\"")
             expect(metrics).to_contain("\"marginTop\": \"8px\"")
             expect(metrics).to_contain("\"textClientRects\"")
@@ -429,7 +425,7 @@ describe "famous-site renderer compatibility corpus":
             expect(metrics).to_contain("\"fontBoundingBoxAscent\": 14")
 
         slow_it "renders the first corpus page through the bounded child worker":
-            val result = rt_process_run_timeout("bin/simple", [
+            val result = process_run_timeout("bin/simple", [
                 "run",
                 "src/app/wm_compare/simple_html_capture_worker.spl",
                 "--html=test/fixtures/famous_site_corpus/site_0_google.html",
@@ -439,12 +435,12 @@ describe "famous-site renderer compatibility corpus":
             ], 20000)
             expect(result.2).to_equal(0)
             expect(result.0).to_contain("wrote /tmp/famous_site_worker_google.ppm pixels=19200")
-            expect(rt_file_exists("/tmp/famous_site_worker_google.ppm")).to_equal(true)
+            expect(file_exists("/tmp/famous_site_worker_google.ppm")).to_equal(true)
 
         slow_it "has a PPM delta diagnostic tool for the first failing oracle sample":
             val tool_path = "tools/electron-shell/analyze_ppm_delta.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            val result = rt_process_run_timeout("node", [
+            expect(file_exists(tool_path)).to_equal(true)
+            val result = process_run_timeout("node", [
                 tool_path,
                 "test/09_baselines/famous_site_corpus/site_0_google/chrome.ppm",
                 "test/09_baselines/famous_site_corpus/site_0_google/simple.ppm",
@@ -477,8 +473,8 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "has PPM delta diagnostics for the focused production renderer miss":
             val tool_path = "tools/electron-shell/analyze_ppm_delta.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            val result = rt_process_run_timeout("node", [
+            expect(file_exists(tool_path)).to_equal(true)
+            val result = process_run_timeout("node", [
                 tool_path,
                 "test/09_baselines/famous_site_corpus/site_0_google/chrome.ppm",
                 "test/09_baselines/famous_site_corpus/site_0_google/simple.production.ppm",
@@ -509,8 +505,8 @@ describe "famous-site renderer compatibility corpus":
             val samples = build_famous_site_sample_corpus()
             val expected_stale = _stale_report_count(samples, 10000)
             val tool_path = "tools/electron-shell/summarize_famous_site_corpus_reports.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--limit=3"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--limit=3"], 10000)
             expect(result.2).to_equal(0)
             expect(result.0).to_contain("\"reportCount\": 132")
             expect(result.0).to_contain("\"exact\": 132")
@@ -534,8 +530,8 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "passes the corpus completion gate when every report is exact":
             val tool_path = "tools/electron-shell/verify_famous_site_corpus_completion.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            val result = process_run_timeout("node", [tool_path], 10000)
             expect(result.2).to_equal(0)
             expect(result.0).to_contain("\"status\": \"PASS\"")
             expect(result.0).to_contain("\"reportCount\": 132")
@@ -553,8 +549,8 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "fails the production probe gate when no generated production report exists":
             val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--sample=site_missing_never"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--sample=site_missing_never"], 10000)
             expect(result.2).to_equal(1)
             expect(result.0).to_contain("\"status\": \"FAIL\"")
             expect(result.0).to_contain("\"sample\": \"site_missing_never\"")
@@ -562,9 +558,9 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "fails the production probe gate without exact-pixel acceptance flags":
             val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--drop-acceptance-policy-flags-for-test"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            expect(file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--sample=site_0_google", "--drop-acceptance-policy-flags-for-test"], 10000)
             expect(result.2).to_equal(1)
             expect(result.0).to_contain("\"status\": \"FAIL\"")
             expect(result.0).to_contain("\"hasExactAcceptancePolicyFlags\": false")
@@ -572,9 +568,9 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "fails the production probe gate without exact and accepted result fields":
             val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--drop-exact-accepted-fields-for-test"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            expect(file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--sample=site_0_google", "--drop-exact-accepted-fields-for-test"], 10000)
             expect(result.2).to_equal(1)
             expect(result.0).to_contain("\"status\": \"FAIL\"")
             expect(result.0).to_contain("\"hasExactField\": false")
@@ -584,9 +580,9 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "fails the production probe gate when per-line ink text drifts from layout":
             val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--corrupt-text-line-ink-for-test"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            expect(file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--sample=site_0_google", "--corrupt-text-line-ink-for-test"], 10000)
             expect(result.2).to_equal(1)
             expect(result.0).to_contain("\"status\": \"FAIL\"")
             expect(result.0).to_contain("\"textMatchesLayout\": false")
@@ -594,9 +590,9 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "fails the production probe gate when per-line ink position drifts from pixels":
             val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--corrupt-text-line-ink-position-for-test"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            expect(file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--sample=site_0_google", "--corrupt-text-line-ink-position-for-test"], 10000)
             expect(result.2).to_equal(1)
             expect(result.0).to_contain("\"status\": \"FAIL\"")
             expect(result.0).to_contain("\"allRegionCountsMatch\": false")
@@ -606,9 +602,9 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "fails the production probe gate when per-line ink no longer covers divergence":
             val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--drop-text-line-ink-difference-for-test"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            expect(file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--sample=site_0_google", "--drop-text-line-ink-difference-for-test"], 10000)
             expect(result.2).to_equal(1)
             expect(result.0).to_contain("\"status\": \"FAIL\"")
             expect(result.0).to_contain("\"differentPixelsTotal\": 1908")
@@ -617,9 +613,9 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "fails the production probe gate without the glyph compositing signature":
             val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--drop-glyph-compositing-signature-for-test"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            expect(file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--sample=site_0_google", "--drop-glyph-compositing-signature-for-test"], 10000)
             expect(result.2).to_equal(1)
             expect(result.0).to_contain("\"status\": \"FAIL\"")
             expect(result.0).to_contain("\"hasGlyphCompositingSignature\": false")
@@ -627,9 +623,9 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "fails the production probe gate when the glyph compositing signature is stale":
             val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--corrupt-glyph-compositing-signature-for-test"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            expect(file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--sample=site_0_google", "--corrupt-glyph-compositing-signature-for-test"], 10000)
             expect(result.2).to_equal(1)
             expect(result.0).to_contain("\"status\": \"FAIL\"")
             expect(result.0).to_contain("\"glyphCompositingSignatureMatches\": false")
@@ -637,9 +633,9 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "fails the production probe gate when residual pixel diagnostics are hidden":
             val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google", "--hide-residual-difference-for-test"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            expect(file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--sample=site_0_google", "--hide-residual-difference-for-test"], 10000)
             expect(result.2).to_equal(1)
             expect(result.0).to_contain("\"status\": \"FAIL\"")
             expect(result.0).to_contain("\"unexplainedDifferentPixels\": 1")
@@ -648,10 +644,10 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "passes the production probe gate for the focused production artifact":
             val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            expect(rt_file_exists(famous_site_sample_production_simple_ppm_path("site_0_google"))).to_equal(true)
-            expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            expect(file_exists(famous_site_sample_production_simple_ppm_path("site_0_google"))).to_equal(true)
+            expect(file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--sample=site_0_google"], 10000)
             expect(result.2).to_equal(0)
             expect(result.0).to_contain("\"status\": \"PASS\"")
             expect(result.0).to_contain("\"rendererMode\": \"production\"")
@@ -706,8 +702,8 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "summarizes corpus text coverage deficits for compositing targets":
             val tool_path = "tools/electron-shell/summarize_famous_site_corpus_coverage.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--limit=5"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--limit=5"], 10000)
             expect(result.2).to_equal(0)
             expect(result.0).to_contain("\"reportCount\": 132")
             expect(result.0).to_contain("\"analyzedCount\": 132")
@@ -728,8 +724,8 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "summarizes colored-background text compositing deficits":
             val tool_path = "tools/electron-shell/summarize_famous_site_text_compositing.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--limit=5"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--limit=5"], 10000)
             expect(result.2).to_equal(0)
             expect(result.0).to_contain("\"reportCount\": 132")
             expect(result.0).to_contain("\"productionArtifactCount\": 1")
@@ -753,8 +749,8 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "summarizes colored-background text mask overlap deficits":
             val tool_path = "tools/electron-shell/summarize_famous_site_text_mask_overlap.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--limit=5"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--limit=5"], 10000)
             expect(result.2).to_equal(0)
             expect(result.0).to_contain("\"reportCount\": 132")
             expect(result.0).to_contain("\"productionArtifactCount\": 1")
@@ -774,8 +770,8 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "summarizes colored-background text ink color histograms":
             val tool_path = "tools/electron-shell/summarize_famous_site_text_color_histogram.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--limit=3", "--top=5"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--limit=3", "--top=5"], 10000)
             expect(result.2).to_equal(0)
             expect(result.0).to_contain("\"reportCount\": 3")
             expect(result.0).to_contain("\"analyzedCount\": 3")
@@ -797,8 +793,8 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "calibrates corpus ink candidates for renderer tuning":
             val tool_path = "tools/electron-shell/calibrate_famous_site_corpus_ink.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--limit=3"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--limit=3"], 10000)
             expect(result.2).to_equal(0)
             expect(result.0).to_contain("\"samples\"")
             expect(result.0).to_contain("\"site_0_google\"")
@@ -822,8 +818,8 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "sweeps renderer-positioned text postprocess candidates":
             val tool_path = "tools/electron-shell/sweep_famous_site_text_postprocess.js"
-            expect(rt_file_exists(tool_path)).to_equal(true)
-            val result = rt_process_run_timeout("node", [tool_path, "--limit=3"], 10000)
+            expect(file_exists(tool_path)).to_equal(true)
+            val result = process_run_timeout("node", [tool_path, "--limit=3"], 10000)
             expect(result.2).to_equal(0)
             expect(result.0).to_contain("\"samples\"")
             expect(result.0).to_contain("\"site_0_google\"")
@@ -860,7 +856,7 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "reports mixed-font corpus wrapped-line mismatches with Simple line widths":
             val report_app = "src/app/wm_compare/site_corpus_layout_report.spl"
-            expect(rt_file_exists(report_app)).to_equal(true)
+            expect(file_exists(report_app)).to_equal(true)
             val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts(["--limit=4"]))
             expect(report).to_contain("(famous_site_corpus_layout_report")
             expect(report).to_contain("selected: 4")
@@ -874,7 +870,7 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "documents the 120px mixed-font corpus wrapped-line boundary":
             val report_app = "src/app/wm_compare/site_corpus_layout_report.spl"
-            expect(rt_file_exists(report_app)).to_equal(true)
+            expect(file_exists(report_app)).to_equal(true)
             val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts(["--limit=4", "--layout-width=120"]))
             expect(report).to_contain("selected: 4")
             expect(report).to_contain("mismatched: 0")
@@ -883,7 +879,7 @@ describe "famous-site renderer compatibility corpus":
 
         slow_it "documents the 132px mixed-font corpus wrapped-line over-merge boundary":
             val report_app = "src/app/wm_compare/site_corpus_layout_report.spl"
-            expect(rt_file_exists(report_app)).to_equal(true)
+            expect(file_exists(report_app)).to_equal(true)
             val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts(["--limit=4", "--layout-width=132"]))
             expect(report).to_contain("selected: 4")
             expect(report).to_contain("layout_width: 132")
