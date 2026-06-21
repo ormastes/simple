@@ -72,6 +72,14 @@ is fixed — the byte-dependent tests in
 `test/03_system/tools/svllm_fs_loader_system_spec.spl` are gated/skipped with a
 reference to this doc. Text-read + error-path assertions still run natively.
 
+> **Round 9 (2026-06-21):** the rt_file byte primitives are fixed+proven
+> (`native_byte_io_spec.spl`, 3/3 under `--compile`). What still blocks the
+> svllm byte tests is a distinct, now precisely-diagnosed codegen bug —
+> cross-module generic `Result<[u8], E>` payloads lose their static element
+> type under native AOT. Full mechanism, reproducers, and the landed transport
+> hardening are tracked in
+> `native_codegen_crossmodule_generic_result_u8_erasure_2026-06-21.md`.
+
 ## Root Cause (diagnosed 2026-06-21, Round 8)
 
 The native runtime byte functions are **Rust**, not C. `bin/simple test
