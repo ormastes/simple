@@ -328,6 +328,10 @@ traceability gate as
 `html_css_rendering_manifest_traceability_total_css_property_count` and the
 remaining non-rendered inventory count as
 `html_css_rendering_manifest_traceability_unrendered_spec_css_property_count`.
+The covered render-fixture provenance is inspectable through
+`html_css_rendering_manifest_traceability_html_tag_covered` and
+`html_css_rendering_manifest_traceability_css_property_covered`, not just the
+covered/total counts.
 The matching implementation backlog names are emitted as
 `html_css_traceability_unsupported_css_properties` and
 `html_css_rendering_manifest_traceability_unrendered_spec_css_properties`.

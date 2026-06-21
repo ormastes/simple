@@ -139,9 +139,15 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: rendering_manifest_reason equals `pass`
    - Expected: rendering_manifest_tag_count equals `105`
    - Expected: rendering_manifest_tag_covered equals `105`
+   - Expected: rendering_manifest_tag_covered_names contains `article`
+   - Expected: rendering_manifest_tag_covered_names contains `video`
+   - Expected: rendering_manifest_tag_covered_names.split(",").len() equals `105`
    - Expected: rendering_manifest_tag_missing equals ``
    - Expected: rendering_manifest_css_count equals `62`
    - Expected: rendering_manifest_css_covered equals `62`
+   - Expected: rendering_manifest_css_covered_names contains `display`
+   - Expected: rendering_manifest_css_covered_names contains `justify-content`
+   - Expected: rendering_manifest_css_covered_names.split(",").len() equals `62`
    - Expected: rendering_manifest_css_missing equals ``
    - Expected: rendering_manifest_css_scope equals `implemented-simple-web-css`
    - Expected: rendering_manifest_total_css_count equals `traceability_css_count`
@@ -169,7 +175,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 438 lines folded for reproduction.
+Runnable source: 448 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -191,8 +197,10 @@ expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest=t
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_fixture=scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_count=105")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_covered_count=105")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_covered=")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_count=62")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_covered_count=62")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_covered=")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_scope=implemented-simple-web-css")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_total_css_property_count=")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_unrendered_spec_css_property_count=")
@@ -449,9 +457,11 @@ val rendering_manifest_status = _value_of(evidence, "html_css_rendering_manifest
 val rendering_manifest_reason = _value_of(evidence, "html_css_rendering_manifest_traceability_reason")
 val rendering_manifest_tag_count = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_count")
 val rendering_manifest_tag_covered = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_covered_count")
+val rendering_manifest_tag_covered_names = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_covered")
 val rendering_manifest_tag_missing = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_missing")
 val rendering_manifest_css_count = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_count")
 val rendering_manifest_css_covered = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_covered_count")
+val rendering_manifest_css_covered_names = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_covered")
 val rendering_manifest_css_missing = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_missing")
 val rendering_manifest_css_scope = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_scope")
 val rendering_manifest_total_css_count = _value_of(evidence, "html_css_rendering_manifest_traceability_total_css_property_count")
@@ -532,9 +542,15 @@ expect(rendering_manifest_status).to_equal("pass")
 expect(rendering_manifest_reason).to_equal("pass")
 expect(rendering_manifest_tag_count).to_equal("105")
 expect(rendering_manifest_tag_covered).to_equal("105")
+expect(rendering_manifest_tag_covered_names).to_contain("article")
+expect(rendering_manifest_tag_covered_names).to_contain("video")
+expect(rendering_manifest_tag_covered_names.split(",").len()).to_equal(105)
 expect(rendering_manifest_tag_missing).to_equal("")
 expect(rendering_manifest_css_count).to_equal("62")
 expect(rendering_manifest_css_covered).to_equal("62")
+expect(rendering_manifest_css_covered_names).to_contain("display")
+expect(rendering_manifest_css_covered_names).to_contain("justify-content")
+expect(rendering_manifest_css_covered_names.split(",").len()).to_equal(62)
 expect(rendering_manifest_css_missing).to_equal("")
 expect(rendering_manifest_css_scope).to_equal("implemented-simple-web-css")
 expect(rendering_manifest_total_css_count).to_equal(traceability_css_count)
