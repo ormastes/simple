@@ -68,6 +68,92 @@ existing app modules.
 Run the IDE feature check in TUI and GUI modes, then verify the generated
 plugin manifest exposes all IDE-visible Office capsules.
 
+## Operator Manual
+
+Use this scenario when changing the IDE product surface, Office plugin
+manifests, feature-check output, or the generated manual that release
+verification reads.
+
+The operator should confirm these surfaces in order:
+
+1. Capability registry
+2. Implementation owner mapping
+3. TUI and GUI feature-check text
+4. Ordered manual surface
+5. TUI capture artifact
+6. TUI and GUI parity
+7. Existing Office slide modules
+8. Existing Office sheet modules
+9. Shared Office numeric helpers
+10. DB admin ownership
+11. Agent dashboard registry
+12. Markdown/Writer render path
+13. Launch-mode sanity
+14. TUI preview and outline panels
+15. GUI render sanity
+16. Plugin manifest roundtrip
+
+## Capability Table
+
+| Capability | Expected owner | Evidence |
+|------------|----------------|----------|
+| Markdown/Writer | `std.editor.render.md_renderer` | markdown preview and generated HTML render text |
+| Impress/PPT | `app.office.slides` | slide probe, thumbnail, outline, design, and transform |
+| Calc | `app.office.sheets` | range, formats, formula evaluator, and shared number helpers |
+| Draw/SDD | `std.editor.services.sdn_graph` | plugin manifest ownership |
+| Designer | `std.common.markdown_visual_editor` | plugin manifest ownership |
+| Base | `std.editor.core.session_db` | DB admin surface and plugin manifest ownership |
+| Math | `std.common.math_repr` | plugin manifest ownership |
+| Mail | `std.hardware.soc_rtl.mailbox` | plugin manifest ownership |
+| Planner | `std.nogc_sync_mut.db.query_planner` | plugin manifest ownership |
+| Agent dashboard | `app.editor.mcp_tools` | MCP/LSP/wiki dashboard registry |
+| DB admin | `std.editor.core.session_db` | editor/session DB and portal DB ownership |
+
+## Expected Feature-Check Shape
+
+The TUI feature-check capture starts with:
+
+1. `Simple IDE feature check`
+2. `mode: tui`
+3. `capabilities: 11`
+4. Markdown/Writer capability row
+5. Markdown render check row
+6. Markdown edit-command stale-reject row
+
+Then it lists Impress/PPT, Calc, Draw/SDD, Designer, Base, Math, Mail,
+Planner, Agent Dashboard, and DB Admin in that order. The final lines must
+include TUI panel evidence, launch-mode evidence, and plugin-manifest evidence.
+
+## Verification Reading Guide
+
+The generated manual is acceptable only when:
+
+- the At a Glance table points to this executable spec;
+- the TUI capture embeds the complete feature-check text;
+- the scenario names describe product behavior, not test plumbing;
+- the executable SSpec blocks stay folded below the manual text;
+- the plugin manifest scenario proves `entries=11`, `roundtrip=11`, and
+  `names=11`;
+- no scenario uses `pass_todo` or a placeholder pass;
+- the docgen summary reports `0 stubs`;
+- `doc/06_spec` contains no misplaced executable `.spl` specs.
+
+## Failure Triage
+
+If the capability count changes, update the capability registry, feature-check
+report, plugin manifest assertions, system-test plan, IDE Office guide, and
+generated manual together.
+
+If a plugin owner changes, update the registry first, then adjust the matching
+owner assertion and feature-check row. Do not hide the mismatch by weakening the
+test.
+
+If a capture file is missing, check the app.io file helpers and capture path
+before changing feature-check semantics.
+
+If docgen reports a stub, improve this manual text or the scenario metadata
+before claiming verification passed.
+
 **TUI Captures:** build/test-artifacts/03_system/app/ide/feature/ide_office_plugin_suite/feature_check_tui.txt
 
 ## Evidence
