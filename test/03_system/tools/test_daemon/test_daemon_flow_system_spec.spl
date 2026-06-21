@@ -9,14 +9,8 @@
 # **Feature IDs:** #TDMN-SYS-031 to #TDMN-SYS-040
 # **Category:** Infrastructure / System Test
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_dir_list(path: text) -> [text]
-extern fn rt_getpid() -> i64
-extern fn rt_time_now_unix_micros() -> i64
+use app.io.mod.{file_read_text, file_write, file_exists, file_delete}
+use app.io.mod.{dir_create_all, dir_list, getpid, time_now_unix_micros}
 
 fn simple_hash(s: text) -> i64:
     val bs = s.bytes()
@@ -30,7 +24,7 @@ fn simple_hash(s: text) -> i64:
     h
 
 fn list_dir_files(dir: text) -> [text]:
-    val names = rt_dir_list(dir) ?? []
+    val names = dir_list(dir) ?? []
     var full: [text] = []
     var i = 0
     while i < names.len():
@@ -48,41 +42,41 @@ var flow_resp_dir: text = ""
 var flow_lock_path: text = ""
 
 fn flow_setup():
-    val pid = rt_getpid()
-    val ts = rt_time_now_unix_micros()
+    val pid = getpid()
+    val ts = time_now_unix_micros()
     flow_dir = "/tmp/td_flow_{pid}_{ts}"
     flow_req_dir = "{flow_dir}/requests"
     flow_resp_dir = "{flow_dir}/responses"
     flow_lock_path = "{flow_dir}/daemon.lock"
-    rt_dir_create_all(flow_dir)
-    rt_dir_create_all(flow_req_dir)
-    rt_dir_create_all(flow_resp_dir)
+    dir_create_all(flow_dir)
+    dir_create_all(flow_req_dir)
+    dir_create_all(flow_resp_dir)
 
 fn flow_cleanup():
     flow_cleanup_dir(flow_req_dir)
     flow_cleanup_dir(flow_resp_dir)
-    rt_file_delete(flow_lock_path)
-    rt_file_delete(flow_dir)
+    file_delete(flow_lock_path)
+    file_delete(flow_dir)
 
 fn flow_cleanup_dir(dir: text):
-    if not rt_file_exists(dir):
+    if not file_exists(dir):
         return
     val files = list_dir_files(dir)
     var i = 0
     while i < files.len():
-        rt_file_delete(files[i])
+        file_delete(files[i])
         i = i + 1
 
 # --- Client side ---
 
 fn client_write_lock():
-    val pid = rt_getpid()
-    val ts = rt_time_now_unix_micros()
-    rt_file_write_text(flow_lock_path, "{pid}\n{ts}")
+    val pid = getpid()
+    val ts = time_now_unix_micros()
+    file_write(flow_lock_path, "{pid}\n{ts}")
 
 fn client_submit_request(kind: i64, test_path: text) -> text:
-    val pid = rt_getpid()
-    val ts = rt_time_now_unix_micros()
+    val pid = getpid()
+    val ts = time_now_unix_micros()
     val req_id = "{pid}_{ts}"
     var parts: [text] = []
     parts.push("id={req_id}")
@@ -92,18 +86,18 @@ fn client_submit_request(kind: i64, test_path: text) -> text:
     val content = parts.join("\n") + "\n"
     val hash = simple_hash(req_id)
     val path = "{flow_req_dir}/{hash}_{req_id}.req"
-    rt_file_write_text(path, content)
+    file_write(path, content)
     req_id
 
 fn client_check_response(req_id: text) -> bool:
     val path = "{flow_resp_dir}/{req_id}.resp"
-    rt_file_exists(path)
+    file_exists(path)
 
 fn client_read_response(req_id: text) -> (i64, text, text):
     val path = "{flow_resp_dir}/{req_id}.resp"
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return (-1, "", "")
-    val content = rt_file_read_text(path) ?? ""
+    val content = file_read_text(path) ?? ""
     val status = (flow_extract(content, "status=")).to_i64() ?? -1
     val test_path = flow_extract(content, "field.test_path=")
     val output = flow_extract(content, "field.output=")
@@ -118,7 +112,7 @@ fn daemon_read_requests() -> [(text, i64, text)]:
     while i < files.len():
         val path = files[i]
         if path.ends_with(".req"):
-            val content = rt_file_read_text(path) ?? ""
+            val content = file_read_text(path) ?? ""
             val id = flow_extract(content, "id=")
             val kind = (flow_extract(content, "kind=")).to_i64() ?? 0
             val test_path = flow_extract(content, "field.test_path=")
@@ -130,21 +124,21 @@ fn daemon_process_and_respond(req_id: text, test_path: text, passed: i64, failed
     var parts: [text] = []
     parts.push("request_id={req_id}")
     parts.push("status=2")
-    parts.push("timestamp={rt_time_now_unix_micros()}")
+    parts.push("timestamp={time_now_unix_micros()}")
     parts.push("field.test_path={test_path}")
     parts.push("field.passed={passed}")
     parts.push("field.failed={failed}")
     parts.push("field.output=Tests completed")
     val content = parts.join("\n") + "\n"
     val path = "{flow_resp_dir}/{req_id}.resp"
-    rt_file_write_text(path, content)
+    file_write(path, content)
 
 fn daemon_cleanup_requests():
     val files = list_dir_files(flow_req_dir)
     var i = 0
     while i < files.len():
         if files[i].ends_with(".req"):
-            rt_file_delete(files[i])
+            file_delete(files[i])
         i = i + 1
 
 fn flow_extract(content: text, prefix: text) -> text:
