@@ -90,8 +90,10 @@ Host requirements:
 - Working `bin/simple` or `SIMPLE_BIN`.
 
 Acceptance:
-- Metal direct readback report is `pass`.
-- Production wrapper records Metal as `pass` on macOS, not Linux unavailable.
+- Metal direct readback report is `pass` with native Darwin device-readback
+  evidence, not CPU mirror output.
+- Production wrapper records Metal as `pass` on macOS with submit/readback
+  evidence, not Linux unavailable.
 
 ### ROCm/HIP Agent
 
@@ -112,9 +114,10 @@ Host requirements:
 - Verified HSACO for the selected `HIP_ARCH`.
 
 Acceptance:
-- ROCm generated 2D readback has a real pass path instead of
+- ROCm generated 2D readback has a real submit/readback pass path instead of
   `missing-rocm-submit-readback-harness`.
-- Production wrapper records ROCm/HIP as `pass` on a ROCm host.
+- Production wrapper records ROCm/HIP as `pass` on a ROCm host with
+  submit/readback evidence.
 
 ### Windows/DirectX Agent
 
