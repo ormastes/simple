@@ -110,8 +110,8 @@
   (≤30 lines with diagram)
 - **Process docs fresh:** Workflow, tool, evidence, or verification contract
   changes must update matching `doc/07_guide`, `doc/06_spec`,
-  `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, and
-  `.claude/agents/spipe/` process docs before PASS
+  `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
+  `.claude/agents/spipe/`, and `.gemini/commands/` process docs before PASS
 - **Cooperative review complete:** Broad lanes must finish the recorded
   lower-model sidecars or mark them `N/A`, then pass normal/highest-capability
   review before PASS

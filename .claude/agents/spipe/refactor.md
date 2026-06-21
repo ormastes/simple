@@ -33,9 +33,9 @@
 6. Run `.claude/skills/spipe_doc_wiki_refactor.md` for any docs, wiki-style process knowledge, feature/layer expert links, stale command names, or stale file paths affected by the implementation
 7. If workflow/tooling, evidence wrappers, generated spec shape, or
    verification contracts changed, confirm matching `doc/07_guide`,
-   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, and
-   `.claude/agents/spipe/` instructions were refreshed or record `N/A` in the
-   state file.
+   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
+   `.claude/agents/spipe/`, and `.gemini/commands/` instructions were refreshed
+   or record `N/A` in the state file.
 8. Run numbered artifact guard:
    `sh scripts/audit/numbered-artifact-guard.shs --working`
    `sh scripts/audit/numbered-artifact-guard.shs --staged`

@@ -121,7 +121,7 @@ not create, rewrite, or weaken SPipe after verification.
   under `doc/06_spec` are a hard layout failure
 - Workflow, tool-contract, evidence-wrapper, or verification-contract changes
   updated the matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
-  `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
+  `.agents/skills/`, `.claude/skills/`, `.claude/agents/spipe/`, and `.gemini/commands/`
   process docs before final verification
 - Cooperative lower-model sidecar review, if required by the SPipe state or
   plan, is complete before final verification; otherwise the verifier records
@@ -144,5 +144,5 @@ not create, rewrite, or weaken SPipe after verification.
 - Do not defer SPipe fixes or coverage updates to release
 - Do not mark PASS when workflow/tooling changes left stale `doc/07_guide`,
   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
-  or `.claude/agents/spipe/` instructions behind
+  `.claude/agents/spipe/`, or `.gemini/commands/` instructions behind
 - Do not mark PASS for compiler/core/lib or MCP/LSP work unless the matching smoke checks passed

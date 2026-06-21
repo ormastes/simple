@@ -175,7 +175,7 @@ Scan for stub patterns — any match is a **FAIL**:
   return to design/implementation to improve the SPipe source and regenerate.
 - Workflow, tool-contract, evidence-wrapper, or verification-contract changes
   updated the matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
-  `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
+  `.agents/skills/`, `.claude/skills/`, `.claude/agents/spipe/`, and `.gemini/commands/`
   process docs before final verification.
 - Cooperative lower-model sidecar review, if required by the SPipe state or
   plan, is complete before final verification; otherwise the verifier records
@@ -215,7 +215,7 @@ STATUS: FAIL (2 failures, 1 warning)
 - NEVER defer SPipe creation, cleanup, or requirement coverage updates to release
 - NEVER mark final verification PASS when workflow/tooling changes left stale
   `doc/07_guide`, `doc/06_spec`, `.codex/skills/`, `.agents/skills/`,
-  `.claude/skills/`, or `.claude/agents/spipe/` instructions behind
+  `.claude/skills/`, `.claude/agents/spipe/`, or `.gemini/commands/` instructions behind
 - NEVER skip stub detection — STUB001 is non-negotiable
 - NEVER mark STATUS: PASS with outstanding FAILs
 - If verification finds issues, report them — do not auto-fix without user approval

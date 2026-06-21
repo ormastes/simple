@@ -168,7 +168,7 @@ For each source file in scope:
 4. **Process documentation freshness:**
    - Workflow, tool-contract, evidence-wrapper, or verification-contract changes
      must update the matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
-     `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/`
+     `.agents/skills/`, `.claude/skills/`, `.claude/agents/spipe/`, and `.gemini/commands/`
      process docs before final verification
 
 5. **Runtime facade boundary:**
@@ -216,8 +216,8 @@ STATUS: FAIL (5 failures must be fixed before release)
 - If no requirement doc exists for a feature, flag as WARN (not FAIL)
 - If design doc exists but is outdated (references deleted files/functions), flag as FAIL
 - If workflow/tooling changes left stale `doc/07_guide`, `doc/06_spec`,
-  `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, or
-  `.claude/agents/spipe/` instructions behind, do not mark verification PASS
+  `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
+  `.claude/agents/spipe/`, or `.gemini/commands/` instructions behind, do not mark verification PASS
 - Do not mark PASS for scenario-oriented specs whose mirrored `doc/06_spec`
   output reads like raw test mechanics instead of an operator/user manual
 - Do not mark PASS if `direct-env-runtime-guard.shs --working` or `--staged`

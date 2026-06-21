@@ -52,8 +52,8 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   marks before implementation handoff.
 - When implementation changes workflow/tooling, evidence wrappers, generated
   specs, or verification contracts, update the matching `doc/07_guide`,
-  `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, and
-  `.claude/agents/spipe/` instructions before `$verify`; stale process docs are
+  `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
+  `.claude/agents/spipe/`, and `.gemini/commands/` instructions before `$verify`; stale process docs are
   implementation work, not release cleanup.
 - Executable specs must stay under `test/`; generated/manual docs under
   `doc/06_spec` must be `.md` only. Require

@@ -32,8 +32,8 @@ fail-fast helpers (`assert(false)` or `fail(...)`) that sidecars must target.
 If design changes workflow/tooling,
 evidence wrappers, generated spec shape, or verification contracts, update the
 matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`, `.agents/skills/`,
-`.claude/skills/`, and `.claude/agents/spipe/` instructions before
-implementation handoff.
+`.claude/skills/`, `.claude/agents/spipe/`, and `.gemini/commands/`
+instructions before implementation handoff.
 
 ## Critical Rules
 

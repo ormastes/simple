@@ -33,7 +33,7 @@ cleaned before completion.
 Before final verification or ship handoff, update every process artifact that
 the lane changed: generated/manual SPipe docs under `doc/06_spec`, matching
 `doc/07_guide` pages, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
-and `.claude/agents/spipe/` instructions. Treat stale workflow/tooling docs as
+`.claude/agents/spipe/`, and `.gemini/commands/` instructions. Treat stale workflow/tooling docs as
 verify failures, not release cleanup. For scenario-oriented SSpec, generate the
 mirrored manual doc, read it as an operator manual, and fix step names,
 captures, `@inline`/`@prev` visibility, and helper names until the primary flow
@@ -288,8 +288,8 @@ Before marking a feature tracking row `status=done`, fill `requirement`,
 `<runtime> lint doc/08_tracking/feature/feature_db.sdn`.
 
 When a workflow or tool contract changes, update the matching `doc/07_guide`,
-`doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, and
-`.claude/agents/spipe/` instructions before handoff. Treat stale process docs
+`doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
+`.claude/agents/spipe/`, and `.gemini/commands/` instructions before handoff. Treat stale process docs
 as unfinished work, not release cleanup.
 
 For broad SPipe planning lanes, split independent research or implementation

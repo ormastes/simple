@@ -68,8 +68,8 @@ description: Create architecture, UI design, system tests, and detail design for
   the source test.
 - If design changes workflow/tooling, evidence wrappers, generated spec shape,
   or verification contracts, update matching `doc/07_guide`, `doc/06_spec`,
-  `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, and
-  `.claude/agents/spipe/` instructions before implementation handoff.
+  `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
+  `.claude/agents/spipe/`, and `.gemini/commands/` instructions before implementation handoff.
 - Ask user if architecture/design needs changes
 
 ## Rules

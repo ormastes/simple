@@ -19,8 +19,9 @@ This agent CREATES the initial state file. All subsequent agents read and append
    - If the request changes workflow, tooling, evidence wrappers, verification
      contracts, or SPipe behavior, include an AC that final verification checks
      matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
-     `.agents/skills/`, `.claude/skills/`, and `.claude/agents/spipe/` docs are
-     updated and generated SSpec docs read as operator manuals.
+     `.agents/skills/`, `.claude/skills/`, `.claude/agents/spipe/`, and
+     `.gemini/commands/` docs are updated and generated SSpec docs read as
+     operator manuals.
 6. Add `## Cooperative Review`: for broad lanes, list lower-model sidecars
    (Codex Spark, Claude Haiku, or Claude Sonnet), merge owner, final
    normal/highest-capability reviewer, shared interface names, manual

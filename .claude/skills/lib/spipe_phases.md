@@ -272,8 +272,9 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - State file phase checklist is fully checked
 - Doc/wiki refactor pass is recorded in the state file
 - Workflow/tooling changes refreshed matching `doc/07_guide`, `doc/06_spec`,
-  `.codex/skills/`, `.agents/skills/`, `.claude/skills/`, and
-  `.claude/agents/spipe/` instructions, or the state file records `N/A`
+  `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
+  `.claude/agents/spipe/`, and `.gemini/commands/` instructions, or the state
+  file records `N/A`
 - Numbered artifact guard passes for staged added/renamed paths
 - Final summary written under `### 8-ship`
 - No uncommitted changes remain
