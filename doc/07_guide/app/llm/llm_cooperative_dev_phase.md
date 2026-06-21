@@ -211,6 +211,9 @@ If multiple LLMs participate in research:
 Broad implementation lanes must complete the recorded lower-model sidecar plan
 or mark it `N/A`, then pass normal/highest-capability review before claiming
 coverage, generated-manual quality, done marks, or broad exclusions.
+Before sidecars fan out, the first normal/highest-capability pass defines the
+shared interface names, manual `step("...")` flow helper names, setup/checker
+helper names, and fail-fast placeholders that sidecars must target.
 
 ### Skills / Commands
 
