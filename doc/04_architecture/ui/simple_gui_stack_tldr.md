@@ -119,7 +119,7 @@ Host input
   preserves `surface_upload` handles for upload provenance, not device-readback
   proof; DirectX preserves `swapchain_present` handles for presentation
   provenance, not device-readback proof; CPU, cache, and not-requested fallbacks
-  stay handle `0`. Synthetic Vulkan handle `7` remains isolated runtime queue
+  stay handle `0`. Synthetic handle `7` remains isolated runtime queue
   roundtrip evidence.
 - Current standalone backend readback reports: CUDA generated 2D and OpenCL
   generated 2D pass with `submit_attempted=true` and

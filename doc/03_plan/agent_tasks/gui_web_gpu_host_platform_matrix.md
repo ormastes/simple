@@ -41,7 +41,7 @@ Acceptance:
 - `browser_first_readback_pixel_count`, `browser_first_readback_checksum`, and
   `browser_first_readback_reason` are propagated from the typed
   `Engine2DReadback` receipt.
-- Synthetic Vulkan handle `7` stays limited to isolated runtime queue roundtrip
+- Synthetic handle `7` stays limited to isolated runtime queue roundtrip
   tests.
 - `browser_first_gpu_readback_source=device_readback`.
 - `browser_first_payload_size`, `browser_first_payload_hash`, and
