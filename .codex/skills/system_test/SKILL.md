@@ -95,6 +95,11 @@ describe "<Feature Name>":
   primary scenarios visible, reusable setup hidden with `@inline` and expanded
   by `@prev`/`@include`, advanced/edge/matrix/stress details folded or skipped
   by policy, and executable SSpec folded below the manual flow.
+- For broad lanes with shared interfaces, the primary/best model must define
+  shared interface names and manual setup/checker helper names before sidecar
+  implementation starts. Placeholder helpers must fail explicitly with
+  `assert(false)` or equivalent until implemented; silent no-op helpers are not
+  valid SSpec coverage.
 - Use `step("...")` as the current manual-step helper. `Given_*`, `When_*`, and
   `Then_*` helpers are legacy and should not be introduced in new specs.
 - Use `@step` metadata only when labeling an existing helper/checker call that
