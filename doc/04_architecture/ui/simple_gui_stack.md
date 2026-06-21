@@ -561,7 +561,9 @@ Every implementation of this architecture needs evidence for:
 - WM dispatch command parity: `wm_runtime_dispatch_command` output must match
   across web bridge, SimpleOS WM, and standalone hosts;
 - `doc/06_spec` layout safety: executable specs stay under `test/**`, not
-  under generated/manual spec docs.
+  under generated/manual spec docs; mirrored SPipe manuals must remain
+  reviewer-readable generated manuals for the touched SSpec source, not empty
+  placeholders or hand-edited evidence.
 
 ## UI Test Architecture
 
