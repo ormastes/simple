@@ -141,6 +141,16 @@ The browser Vulkan-backed proof is a separate rollup:
 `gui_web_2d_vulkan_browser_backing_mode=fallback-bitmap-comparison` is useful
 comparison evidence, but it is not Electron/Chrome Vulkan-backed RenderDoc
 proof.
+The current blockers are machine-readable in
+`gui_web_2d_vulkan_renderdoc_blocker_status`,
+`gui_web_2d_vulkan_renderdoc_blocker_reason`,
+`gui_web_2d_vulkan_renderdoc_blocker_gate_count`, and
+`gui_web_2d_vulkan_renderdoc_blocker_gates`. These fields distinguish host
+Vulkan readiness, RenderDoc command availability, Simple RenderDoc gate status,
+Electron ANGLE Vulkan acceptance, Electron RenderDoc gate status, Chrome ANGLE
+Vulkan acceptance, and Chrome RenderDoc gate status. A blocker status of
+`blocked` means the GUI/web/2D comparison can still be useful, but at least one
+required Vulkan-backed `.rdc` proof lane is missing.
 
 On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
 `src/compiler_rust/target/debug/simple` when that binary advertises the macOS

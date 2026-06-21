@@ -92,6 +92,8 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
   selected, including whether it found a fresh macOS-capable driver.
 - The top-level GUI/web/2D Vulkan RenderDoc workflow is macOS-only until
   Windows and Linux add independent runbooks with the same evidence keys.
+- The audit reports the current GUI/web/2D Vulkan RenderDoc blocker lanes as
+  machine-readable status, reason, count, and gate-list keys.
 - Simple `.rdc` evidence must carry Vulkan runtime backend, RenderDoc API, and
   rendered-pixel proof through the aggregate audit.
 - Electron Chromium/Vulkan `.rdc` evidence is fail-closed and required before
@@ -179,6 +181,10 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: browser_backing_mode equals `vulkan-backed-renderdoc`
    - Expected: browser_backing_status equals `fail`
    - Expected: browser_backing_mode equals `fallback-bitmap-comparison`
+   - Expected: renderdoc_blocker_reason equals `pass`
+   - Expected: renderdoc_blocker_gate_count equals `0`
+   - Expected: renderdoc_blocker_gates equals ``
+   - Expected: renderdoc_blocker_status equals `blocked`
    - Expected: renderdoc_blocked_gate equals ``
    - Expected: renderdoc_blocked_gate_count equals `0`
    - Expected: renderdoc_blocked_gates equals ``
@@ -195,7 +201,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 537 lines folded for reproduction.
+Runnable source: 560 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -342,6 +348,10 @@ expect(evidence).to_contain("gui_web_2d_vulkan_comparison_artifact_reason=")
 expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_reason=")
 expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_mode=")
+expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_reason=")
+expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_gate_count=")
+expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_gates=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_requested_api=vulkan")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_requested_angle=vulkan")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_requested_features=Vulkan")
@@ -549,6 +559,10 @@ val comparison_artifact_reason = _value_of(evidence, "gui_web_2d_vulkan_comparis
 val browser_backing_status = _value_of(evidence, "gui_web_2d_vulkan_browser_backing_status")
 val browser_backing_reason = _value_of(evidence, "gui_web_2d_vulkan_browser_backing_reason")
 val browser_backing_mode = _value_of(evidence, "gui_web_2d_vulkan_browser_backing_mode")
+val renderdoc_blocker_status = _value_of(evidence, "gui_web_2d_vulkan_renderdoc_blocker_status")
+val renderdoc_blocker_reason = _value_of(evidence, "gui_web_2d_vulkan_renderdoc_blocker_reason")
+val renderdoc_blocker_gate_count = _value_of(evidence, "gui_web_2d_vulkan_renderdoc_blocker_gate_count")
+val renderdoc_blocker_gates = _value_of(evidence, "gui_web_2d_vulkan_renderdoc_blocker_gates")
 val electron_argb_file_status = _value_of(evidence, "gui_web_2d_vulkan_electron_argb_file_status")
 val electron_argb_nonblank_status = _value_of(evidence, "gui_web_2d_vulkan_electron_argb_nonblank_status")
 val chrome_screenshot_png_status = _value_of(evidence, "gui_web_2d_vulkan_chrome_screenshot_png_status")
@@ -679,6 +693,20 @@ else:
     expect(browser_backing_reason.len()).to_be_greater_than(0)
     expect(browser_backing_mode).to_equal("fallback-bitmap-comparison")
 expect(production_gate_status.len()).to_be_greater_than(0)
+if renderdoc_blocker_status == "pass":
+    expect(renderdoc_blocker_reason).to_equal("pass")
+    expect(renderdoc_blocker_gate_count).to_equal("0")
+    expect(renderdoc_blocker_gates).to_equal("")
+else:
+    expect(renderdoc_blocker_status).to_equal("blocked")
+    expect(renderdoc_blocker_reason.len()).to_be_greater_than(0)
+    expect(renderdoc_blocker_gate_count.to_i64()).to_be_greater_than(0)
+    expect(renderdoc_blocker_gates.len()).to_be_greater_than(0)
+    if browser_backing_status == "fail":
+        expect(renderdoc_blocker_reason).to_contain("angle-vulkan")
+    if macos_host == "Darwin":
+        if macos_renderdoc_status != "pass":
+            expect(renderdoc_blocker_reason).to_contain("macos-renderdoc")
 expect(production_gate_reason.len()).to_be_greater_than(0)
 expect(renderdoc_status.len()).to_be_greater_than(0)
 if renderdoc_status == "pass":
@@ -731,6 +759,7 @@ expect(report).to_contain("- Electron Chromium/Vulkan gate:")
 expect(report).to_contain("- macOS Vulkan:")
 expect(report).to_contain("- macOS RenderDoc:")
 expect(report).to_contain("- GUI/web/2D browser Vulkan backing:")
+expect(report).to_contain("- GUI/web/2D Vulkan RenderDoc blockers:")
 expect(report).to_contain("- Production GUI/web parity gate:")
 expect(report).to_contain("- Production surface host:")
 expect(report).to_contain("- Production Tauri surface capture:")
