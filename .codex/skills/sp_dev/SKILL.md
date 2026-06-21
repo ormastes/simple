@@ -212,6 +212,16 @@ Before marking a feature tracking row `status=done`, fill `requirement`,
 `implementation`, `unit_tests`, `integration_tests`, and `guide`, then run
 `<runtime> lint doc/08_tracking/feature/feature_db.sdn`.
 
+When a workflow or tool contract changes, update the matching `doc/07_guide`,
+`doc/06_spec`, and `.codex/skills/` or `.claude/skills/` instructions before
+handoff. Treat stale process docs as unfinished work, not release cleanup.
+
+For broad SPipe planning lanes, split independent research or implementation
+checks across lower-model parallel agents when available (for example Codex
+Spark, Claude Haiku, or Claude Sonnet). A normal/highest-capability LLM must
+review and accept the merged result before requirements, done marks, broad
+exclusions, or release-blocking verification are trusted.
+
 If other Codex, Claude, or Gemini sessions are active, identify the lane this
 `/sp_dev` invocation owns before editing or syncing. Do not absorb unrelated
 dirty files into the feature just because they are present in the shared
