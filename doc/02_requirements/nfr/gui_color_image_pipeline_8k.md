@@ -13,6 +13,7 @@ Selected option: Option A, 8K packed hot path with lazy wide-color work.
 - NFR-GCI8K-005: Native codec or color libraries may be used only as diagnostic or performance references; accepted functionality must have a pure Simple implementation path.
 - NFR-GCI8K-006: Exact-pixel and checksum evidence must remain deterministic across reruns and must explicitly record that blur/tolerance matching was not used.
 - NFR-GCI8K-007: Unsupported high-bit-depth, compressed raster, ICC, or JPEG XL subsets must fail closed within bounded time and memory rather than falling back to placeholder success.
+- NFR-GCI8K-008: Full JPEG XL pixel decode must not be inferred from metadata, sparse-allocation, or tiling evidence; it requires separate exact-pixel SPipe evidence before image URI rendering can count as decoded-image output.
 
 ## Deleted Options
 
