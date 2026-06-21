@@ -24,6 +24,11 @@
 3. Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 4. Verify every REQ-NNN has at least one test
 5. Test plan: `doc/03_plan/<domain>/<topic>/<feature>.md`
+   - For broad lanes, list lower-model sidecar lanes or `N/A`, such as Codex
+     Spark, Claude Haiku, or Claude Sonnet, plus merge owner and final
+     normal/highest-capability reviewer. Before sidecars start, the primary/best
+     model defines shared interface names, manual setup/checker helper names,
+     and fail-fast placeholders (`assert(false)` or equivalent).
 
 ## Quality Check
 
