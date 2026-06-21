@@ -61,6 +61,10 @@ not create, rewrite, or weaken SPipe after verification.
   event routing plus semantic screenshot/pixel checks for rendered windows and
   taskbar/dock icon or label regions. Explicit skips may pass only when reported
   as skipped, not as live proof.
+- GUI/web queue proof requires same-frame backend `device_readback`, a positive
+  backend handle, and matching checksum. Runtime queue/drain receipts are
+  necessary but not sufficient; runtime-only, synthetic-handle, upload-only, or
+  CPU-mirror evidence is a FAIL.
 - GUI/web/2D RenderDoc+Vulkan evidence must start from
   `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc`
   on POSIX hosts or `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check` on

@@ -63,7 +63,12 @@
     Electron RenderDoc proof, and production GUI/web parity evidence. If Chrome
     or Electron logs show `angle=vulkan` unavailable, report
     `vulkan-angle-unavailable` and fail the Vulkan proof even when pixels render.
-13. Compile verification report:
+13. For GUI/web queue proof, reject runtime-only evidence. Runtime queue/drain
+    receipts are necessary but not sufficient; production proof requires
+    same-frame backend `device_readback`, a positive backend handle, and
+    matching checksum. Synthetic handles, upload-only provenance, and CPU
+    mirrors fail.
+14. Compile verification report:
    - Test results (pass/fail counts)
    - Coverage percentage (target: 80%+)
    - Doc coverage for new code
@@ -71,10 +76,10 @@
    - Cooperative review completion result
    - Workflow/tool/evidence/verification contract doc freshness result
    - Any remaining issues
-14. If critical issues found (max 3 fix-recheck cycles; escalate after 3):
+15. If critical issues found (max 3 fix-recheck cycles; escalate after 3):
    a. Fix ONLY test/doc issues (not feature code)
    b. Re-run affected checks with `set -o pipefail; ... 2>&1 | tail -40` output cap
-15. Update state file with verification report
+16. Update state file with verification report
 
 ## Rules
 

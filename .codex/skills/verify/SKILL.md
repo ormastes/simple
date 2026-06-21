@@ -113,6 +113,10 @@ Scan for stub patterns — any match is a **FAIL**:
   checks for rendered windows and taskbar/dock icon or label regions. Explicit
   environment-based skips may pass only when the report says `skipped`, not when
   it claims live proof.
+- **GUI/web queue proof:** runtime queue/drain receipts are necessary evidence,
+  not sufficient production proof. A GUI/web production pass requires same-frame
+  backend `device_readback`, a positive backend handle, and matching checksum;
+  runtime-only, synthetic-handle, upload-only, or CPU-mirror evidence is a FAIL.
 - **GUI/web/2D RenderDoc+Vulkan gates:** start from
   `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc`
   on POSIX hosts or `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check` on
