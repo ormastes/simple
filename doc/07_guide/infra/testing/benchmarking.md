@@ -244,11 +244,12 @@ sh scripts/check/check-httpserver-live-static.shs
 sh scripts/check/check-httpserver-static-profile-counters.shs --broad --require-retained
 ```
 
-The same aggregate status also records the DB B+ gate and Vulkan offscreen 8K
-rendering gate. The latest retained offscreen 8K Vulkan row is `3527` FPS; live
-onscreen 8K remains host-blocked unless the host provides a suitable display.
-Do not replace retained rows with shorter or noisier runs unless the strict
-wrappers still pass.
+The same aggregate status also records the DB B+ gate. For Vulkan offscreen 8K,
+`doc/09_report/gpu_db_vulkan_gui_8k_feasibility_2026-06-19.md` records a
+host-local RTX A6000 feasibility row of `3527` FPS. Treat that as feasibility
+evidence, not a retained release row. Live onscreen 8K remains host-blocked
+unless the host provides a suitable display. Do not replace retained rows with
+shorter or noisier runs unless the strict wrappers still pass.
 
 ---
 
