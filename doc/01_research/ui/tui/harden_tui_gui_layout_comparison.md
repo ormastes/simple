@@ -429,7 +429,7 @@ The repo already has enough capture, comparison, backend, and system-test scaffo
 - Added `src/app/wm_compare/comparison_failure_report.spl` with `ComparisonFailureReport`, `comparison_failure_report(...)`, and `comparison_failure_report_sdn(...)`.
 - The report exposes independent capture, metadata, structural layout, exact pixel, and backend status fields plus a derived primary status.
 - Added `test/03_system/wm_compare/comparison_failure_report_spec.spl` with 5 scenarios covering capture failure, metadata mismatch, structural geometry mismatch, exact pixel mismatch, and backend unavailability as separate statuses.
-- Added `doc/06_spec/system/wm_compare/comparison_failure_report_spec.md` with manual-purpose text for the failure-triage contract.
+- Added `doc/06_spec/03_system/gui/wm_compare/comparison_failure_report_spec.md` with manual-purpose text for the failure-triage contract.
 - Focused verification:
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple check src/app/wm_compare/comparison_failure_report.spl test/03_system/wm_compare/comparison_failure_report_spec.spl`: passed.
   - `SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/03_system/wm_compare/comparison_failure_report_spec.spl --mode=interpreter --clean`: 1 file, 5 tests, 0 failures; runner duration 561ms.
