@@ -1,6 +1,6 @@
-# Generated Kernel Dispatch Specification
+# Engine2D Generated Kernel Dispatch Specification
 
-> <details>
+> Verifies the generated 2D kernel dispatch metadata, launch plans, execution requests, runtime provenance, artifact loading evidence, and submit evidence used by accelerated Engine2D backends.
 
 <!-- sdn-diagram:id=generated_kernel_dispatch_spec.arch -->
 <details class="sdn-source">
@@ -27,12 +27,54 @@ generated_kernel_dispatch_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Generated Kernel Dispatch Specification
+# Engine2D Generated Kernel Dispatch Specification
+
+Verifies the generated 2D kernel dispatch metadata, launch plans, execution requests, runtime provenance, artifact loading evidence, and submit evidence used by accelerated Engine2D backends.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Reference | `src/lib/gc_async_mut/gpu/engine2d/generated_kernel_dispatch.spl` |
+| Requirements | N/A |
+| Plan | doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md |
+| Design | doc/05_design/ui/renderer_unification_2026-06-15.md |
+| Research | doc/01_research/ui/render_path/gui_web_2d_render_optimization_2026-06-16.md |
+| Source | `test/01_unit/lib/gpu/engine2d/generated_kernel_dispatch_spec.spl` |
+| Updated | 2026-06-21 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies the generated 2D kernel dispatch metadata, launch plans, execution
+requests, runtime provenance, artifact loading evidence, and submit evidence
+used by accelerated Engine2D backends.
+
+**Source:** `src/lib/gc_async_mut/gpu/engine2d/generated_kernel_dispatch.spl`
+**Requirements:** N/A
+**Research:** doc/01_research/ui/render_path/gui_web_2d_render_optimization_2026-06-16.md
+**Plan:** doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md
+**Design:** doc/05_design/ui/renderer_unification_2026-06-15.md
+
+## Syntax
+
+Use `generated_2d_dispatch_for_backend()` to inspect backend metadata,
+`generated_2d_launch_plan()` to validate operation plans, and
+`generated_2d_execution_request()` with artifact evidence helpers to verify
+runtime submission readiness.
+
+## Examples
+
+The scenarios cover CUDA, ROCm, OpenCL, and Metal metadata; unsupported backend
+failure; backend-specific launch APIs; session/runtime provenance; artifact
+load evidence; and submit evidence.
 
 ## Scenarios
 
@@ -41,7 +83,7 @@ generated_kernel_dispatch_spec -> std
 #### maps CUDA to PTX generated 2D kernels
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -64,7 +106,7 @@ expect(dispatch.module_artifact_name()).to_equal("simple_2d_optimization.ptx")
 #### maps ROCm through the HIP/HSACO generated kernel path
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -87,7 +129,7 @@ expect(dispatch.required_entries()).to_contain("simple_2d_scroll_u32")
 #### maps OpenCL and Metal to their binary artifact formats
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -109,7 +151,7 @@ expect(metal.kernel_entry(GENERATED_2D_SCROLL)).to_equal("simple_2d_scroll_u32")
 #### rejects unsupported dispatch backends without fallback
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -129,7 +171,7 @@ expect(dispatch.module_artifact_name()).to_equal("")
 #### exposes generated dispatch as Engine2D optimization provider metadata
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -151,7 +193,7 @@ expect(provider.active).to_equal(true)
 #### builds CUDA runtime launch plans for generated 2D kernels
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -174,7 +216,7 @@ expect(plan.args_layout).to_equal("dst,width,height,color_u32")
 #### uses backend-specific launch APIs for HIP, OpenCL, and Metal
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -198,20 +240,24 @@ expect(metal.args_layout).to_equal("src,dst,width,height,delta_y")
 #### fails generated launch plans closed for unsupported backends and dimensions
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val unsupported = generated_2d_launch_plan("cpu", GENERATED_2D_FILL, 64, 64)
 val invalid = generated_2d_launch_plan("cuda", GENERATED_2D_COPY, 0, 64)
+val rect = generated_2d_launch_plan("opencl", "rect_filled", 64, 64)
 
 expect(unsupported.dispatch_ready).to_equal(false)
 expect(unsupported.reason).to_equal("backend-inactive")
 expect(unsupported.launch_api).to_equal("none")
 expect(invalid.dispatch_ready).to_equal(false)
 expect(invalid.reason).to_equal("invalid-dimensions")
+expect(rect.dispatch_ready).to_equal(false)
+expect(rect.reason).to_equal("unsupported-operation")
+expect(rect.launch_api).to_equal("none")
 ```
 
 </details>
@@ -219,7 +265,7 @@ expect(invalid.reason).to_equal("invalid-dimensions")
 #### binds CUDA and ROCm launch plans to prepared runtime execution calls
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -230,10 +276,10 @@ val rocm = generated_2d_execution_request("rocm", GENERATED_2D_ALPHA, 32, 32, 0,
 
 expect(cuda.can_submit).to_equal(true)
 expect(cuda.handle_kind).to_equal("cuda-kernel-args")
-expect(cuda.call_shape()).to_equal("rt_cuda_launch_kernel(kernel,gx,gy,gz,bx,by,bz,shared_mem,args_ptr)")
+expect(cuda.call_shape()).to_equal("cuda_launch_api")
 expect(rocm.can_submit).to_equal(true)
 expect(rocm.handle_kind).to_equal("rocm-kernel-args")
-expect(rocm.call_shape()).to_equal("rt_rocm_launch_kernel(kernel,gx,gy,gz,bx,by,bz,shared_mem,args_ptr)")
+expect(rocm.call_shape()).to_equal("hip_launch_api")
 ```
 
 </details>
@@ -241,7 +287,7 @@ expect(rocm.call_shape()).to_equal("rt_rocm_launch_kernel(kernel,gx,gy,gz,bx,by,
 #### binds OpenCL and Metal launch plans to queue or encoder execution calls
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -252,10 +298,10 @@ val metal = generated_2d_execution_request("metal", GENERATED_2D_SCROLL, 16, 16,
 
 expect(opencl.can_submit).to_equal(true)
 expect(opencl.handle_kind).to_equal("opencl-queue-kernel")
-expect(opencl.call_shape()).to_equal("clEnqueueNDRangeKernel(queue,kernel,global_range,local_range)")
+expect(opencl.call_shape()).to_equal("opencl_ndrange_api")
 expect(metal.can_submit).to_equal(true)
 expect(metal.handle_kind).to_equal("metal-encoder-pipeline")
-expect(metal.call_shape()).to_equal("metal_sffi_dispatch_compute(encoder,pipeline,gx,gy,gz,bx,by,bz)")
+expect(metal.call_shape()).to_equal("metal_compute_api")
 ```
 
 </details>
@@ -263,7 +309,7 @@ expect(metal.call_shape()).to_equal("metal_sffi_dispatch_compute(encoder,pipelin
 #### builds OpenCL launch evidence shapes for every generated 2D operation
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -280,7 +326,7 @@ expect(fill.plan.launch_api).to_equal("clEnqueueNDRangeKernel")
 expect(copy.plan.entry_name).to_equal("simple_2d_copy_u32")
 expect(alpha.plan.entry_name).to_equal("simple_2d_alpha_u32")
 expect(scroll.plan.entry_name).to_equal("simple_2d_scroll_u32")
-expect(scroll.call_shape()).to_equal("clEnqueueNDRangeKernel(queue,kernel,global_range,local_range)")
+expect(scroll.call_shape()).to_equal("opencl_ndrange_api")
 ```
 
 </details>
@@ -288,7 +334,7 @@ expect(scroll.call_shape()).to_equal("clEnqueueNDRangeKernel(queue,kernel,global
 #### rejects generated execution requests with missing runtime handles
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -308,10 +354,151 @@ expect(bad_plan.reason).to_equal("backend-inactive")
 
 </details>
 
+#### shares generated session launch preflight for CUDA HIP and OpenCL sessions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val cuda_ready = generated_2d_session_launch_gate("cuda", GENERATED_2D_FILL, 16, 16, true, true, 2048)
+val hip_missing_module = generated_2d_session_launch_gate("rocm", GENERATED_2D_ALPHA, 16, 16, true, false, 2048)
+val opencl_missing_args = generated_2d_session_launch_gate("opencl", GENERATED_2D_COPY, 16, 16, true, true, 0)
+val cuda_bad_dims = generated_2d_session_launch_gate("cuda", GENERATED_2D_FILL, 0, 16, true, true, 2048)
+
+expect(cuda_ready.ready).to_equal(true)
+expect(cuda_ready.reason).to_equal("ready")
+expect(cuda_ready.plan.launch_api).to_equal("rt_cuda_launch_kernel")
+expect(hip_missing_module.ready).to_equal(false)
+expect(hip_missing_module.reason).to_equal("module-not-loaded")
+expect(hip_missing_module.plan.launch_api).to_equal("rt_rocm_launch_kernel")
+expect(opencl_missing_args.ready).to_equal(false)
+expect(opencl_missing_args.reason).to_equal("missing-args-pointer")
+expect(opencl_missing_args.plan.launch_api).to_equal("clEnqueueNDRangeKernel")
+expect(cuda_bad_dims.ready).to_equal(false)
+expect(cuda_bad_dims.reason).to_equal("invalid-dimensions")
+```
+
+</details>
+
+#### records shared generated session runtime provenance for CUDA HIP and OpenCL
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val cuda_ready = generated_2d_session_runtime_provenance("cuda", GENERATED_2D_FILL, 16, 16, true, true, 2048)
+val hip_missing_module = generated_2d_session_runtime_provenance("rocm", GENERATED_2D_ALPHA, 16, 16, true, false, 2048)
+val opencl_unavailable = generated_2d_session_runtime_provenance("opencl", GENERATED_2D_COPY, 16, 16, false, false, 2048)
+val opencl_missing_args = generated_2d_session_runtime_provenance("opencl", GENERATED_2D_COPY, 16, 16, true, true, 0)
+val unsupported = generated_2d_session_runtime_provenance("opencl", "rect_filled", 16, 16, true, true, 2048)
+
+expect(cuda_ready.ready).to_equal(true)
+expect(cuda_ready.typed_status).to_equal("ready")
+expect(cuda_ready.launch_api).to_equal("rt_cuda_launch_kernel")
+expect(hip_missing_module.ready).to_equal(false)
+expect(hip_missing_module.typed_status).to_equal("hip-module-unavailable")
+expect(hip_missing_module.launch_api).to_equal("rt_rocm_launch_kernel")
+expect(opencl_unavailable.ready).to_equal(false)
+expect(opencl_unavailable.typed_status).to_equal("opencl-runtime-or-queue-unavailable")
+expect(opencl_unavailable.launch_api).to_equal("clEnqueueNDRangeKernel")
+expect(opencl_missing_args.typed_status).to_equal("args-unavailable")
+expect(unsupported.typed_status).to_equal("plan-not-ready:unsupported-operation")
+expect(opencl_unavailable.diagnostic_text()).to_contain("backend=opencl")
+expect(opencl_unavailable.diagnostic_text()).to_contain("artifact=simple_2d_optimization.spirv")
+```
+
+</details>
+
+#### compares CPU SIMD CUDA and OpenCL provenance for bitmap font vector font and image blit operations
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 46 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val cpu_vector = generated_2d_operation_provenance("cpu_simd_x86", "vector", 64, 32, false, false, 0)
+val cpu_bitmap_font = generated_2d_operation_provenance("cpu_simd_x86", "bitmap_font", 64, 32, false, false, 0)
+val cpu_vector_font = generated_2d_operation_provenance("cpu_simd_x86", "vector_font", 64, 32, false, false, 0)
+val cuda_text = generated_2d_operation_provenance("cuda", "text_blit", 64, 32, true, true, 2048)
+val cuda_bitmap_font = generated_2d_operation_provenance("cuda", "bitmap_glyph", 64, 32, true, true, 2048)
+val cuda_vector_font = generated_2d_operation_provenance("cuda", "vector_font", 64, 32, true, true, 2048)
+val opencl_image = generated_2d_operation_provenance("opencl", "image_blit", 64, 32, false, false, 2048)
+val opencl_glyph = generated_2d_operation_provenance("opencl", "glyph_raster", 64, 32, true, true, 2048)
+val scalar_alpha = generated_2d_operation_provenance("cpu", "alpha_blend", 64, 32, false, false, 0)
+
+expect(cpu_vector.ready).to_equal(true)
+expect(cpu_vector.compute_target).to_equal("cpu_simd")
+expect(cpu_vector.generated_artifact_required).to_equal(false)
+expect(cpu_vector.generated_operation).to_equal(GENERATED_2D_FILL)
+expect(cpu_vector.typed_status).to_equal("cpu-simd-baseline-ready")
+expect(cpu_bitmap_font.ready).to_equal(true)
+expect(cpu_bitmap_font.generated_operation).to_equal(GENERATED_2D_COPY)
+expect(cpu_bitmap_font.cpu_preprocess_required).to_equal(true)
+expect(cpu_bitmap_font.entry_name).to_equal("RenderBackend.draw_text_or_text_blit")
+expect(cpu_vector_font.ready).to_equal(true)
+expect(cpu_vector_font.generated_operation).to_equal(GENERATED_2D_COPY)
+expect(cpu_vector_font.cpu_preprocess_required).to_equal(true)
+expect(cpu_vector_font.entry_name).to_equal("FontRasterizer.rasterize_vector_accelerated")
+expect(cuda_text.ready).to_equal(true)
+expect(cuda_text.generated_operation).to_equal(GENERATED_2D_COPY)
+expect(cuda_text.cpu_preprocess_required).to_equal(true)
+expect(cuda_text.artifact_name).to_equal("simple_2d_optimization.ptx")
+expect(cuda_bitmap_font.ready).to_equal(true)
+expect(cuda_bitmap_font.generated_operation).to_equal(GENERATED_2D_COPY)
+expect(cuda_bitmap_font.cpu_preprocess_required).to_equal(true)
+expect(cuda_bitmap_font.diagnostic_text()).to_contain("family=bitmap_glyph")
+expect(cuda_vector_font.ready).to_equal(true)
+expect(cuda_vector_font.generated_operation).to_equal(GENERATED_2D_COPY)
+expect(cuda_vector_font.cpu_preprocess_required).to_equal(true)
+expect(cuda_vector_font.diagnostic_text()).to_contain("family=vector_font")
+expect(opencl_image.ready).to_equal(false)
+expect(opencl_image.generated_operation).to_equal(GENERATED_2D_COPY)
+expect(opencl_image.launch_api).to_equal("clEnqueueNDRangeKernel")
+expect(opencl_image.typed_status).to_equal("opencl-runtime-or-queue-unavailable")
+expect(opencl_image.artifact_name).to_equal("simple_2d_optimization.spirv")
+expect(opencl_glyph.ready).to_equal(true)
+expect(opencl_glyph.generated_operation).to_equal(GENERATED_2D_COPY)
+expect(opencl_glyph.cpu_preprocess_required).to_equal(true)
+expect(opencl_glyph.entry_name).to_equal("simple_2d_copy_u32")
+expect(scalar_alpha.compute_target).to_equal("cpu_scalar")
+expect(scalar_alpha.generated_operation).to_equal(GENERATED_2D_ALPHA)
+```
+
+</details>
+
+#### fails operation provenance closed for unsupported families and invalid dimensions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val unsupported = generated_2d_operation_provenance("opencl", "bezier_path", 64, 32, true, true, 2048)
+val invalid = generated_2d_operation_provenance("cuda", "image_blit", 0, 32, true, true, 2048)
+
+expect(unsupported.ready).to_equal(false)
+expect(unsupported.compute_target).to_equal("unsupported")
+expect(unsupported.typed_status).to_equal("plan-not-ready:unsupported-operation-family")
+expect(invalid.ready).to_equal(false)
+expect(invalid.reason).to_equal("invalid-dimensions")
+```
+
+</details>
+
 #### requires generated artifacts to load before building runtime execution requests
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -325,10 +512,10 @@ val metal_request = generated_2d_execution_request_from_load(metal_load, 0)
 expect(cuda_load.loaded).to_equal(true)
 expect(cuda_load.reason).to_equal("loaded")
 expect(cuda_request.can_submit).to_equal(true)
-expect(cuda_request.call_shape()).to_contain("rt_cuda_launch_kernel")
+expect(cuda_request.call_shape()).to_equal("cuda_launch_api")
 expect(metal_load.loaded).to_equal(true)
 expect(metal_request.can_submit).to_equal(true)
-expect(metal_request.call_shape()).to_contain("metal_sffi_dispatch_compute")
+expect(metal_request.call_shape()).to_equal("metal_compute_api")
 ```
 
 </details>
@@ -336,7 +523,7 @@ expect(metal_request.call_shape()).to_contain("metal_sffi_dispatch_compute")
 #### validates shared generated 2D module artifacts before loading
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -362,7 +549,7 @@ expect(blocked.reason).to_equal("artifact-not-verified")
 #### keeps OpenCL generated modules fail-closed without runtime and readback evidence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -389,7 +576,7 @@ expect(evidence.status_code).to_equal("not-submitted")
 #### fails generated artifact loads closed for bad artifacts runtime or handles
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -418,7 +605,7 @@ expect(request.reason).to_equal("artifact-not-verified")
 #### records generated kernel submit status without pretending runtime availability
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -450,7 +637,7 @@ expect(not_ready.reason).to_equal("missing-args-pointer")
 #### requires readback checksum evidence before claiming device execution
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -476,7 +663,7 @@ expect(verified.summary()).to_contain("executed=true")
 #### does not claim execution when submit failed or expected checksum is invalid
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -496,30 +683,22 @@ expect(invalid_checksum.status_code).to_equal("invalid-expected-checksum")
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/gpu/engine2d/generated_kernel_dispatch_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Engine2D generated 2D kernel dispatch metadata
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md](doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md)
+- **Design:** [doc/05_design/ui/renderer_unification_2026-06-15.md](doc/05_design/ui/renderer_unification_2026-06-15.md)
+- **Research:** [doc/01_research/ui/render_path/gui_web_2d_render_optimization_2026-06-16.md](doc/01_research/ui/render_path/gui_web_2d_render_optimization_2026-06-16.md)
 
 
 </details>
