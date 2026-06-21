@@ -9,8 +9,8 @@ Status: implementation in progress.
 - `src/lib/nogc_sync_mut/web_db_offload/__init__.spl`
 - `test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl`
 - `test/03_system/lib/web_db_offload/feature/gpu_web_db_offload_spec.spl`
-- `doc/06_spec/test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.md`
-- `doc/06_spec/test/03_system/lib/web_db_offload/feature/gpu_web_db_offload_spec.md`
+- `doc/06_spec/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.md`
+- `doc/06_spec/03_system/lib/web_db_offload/feature/gpu_web_db_offload_spec.md`
 
 This slice implements the reliability-first offload decision contract:
 
