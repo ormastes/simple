@@ -83,6 +83,30 @@ in-application frame markers. The interpreter exposes
 WITH these externs (`src/compiler_rust/target/release/simple`); it does not
 replace the self-hosted `bin/release/<triple>/simple`.
 
+### macOS GUI/web/2D Vulkan comparison
+The top-level macOS comparison wrapper is
+`scripts/setup/setup-gui-web-2d-vulkan-env.shs`. It records host MoltenVK
+readiness, direct Electron/Chrome launch evidence, Simple Engine2D Vulkan
+readback, and optional RenderDoc captures in
+`build/gui-web-2d-vulkan-env/evidence.env`:
+
+```sh
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+SIMPLE_BIN=src/compiler_rust/target/release/simple \
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
+sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
+```
+
+On macOS, `vulkaninfo --summary` reporting `driverName = MoltenVK` proves only
+the host Vulkan loader path. It does not prove that Electron or Chrome accepted
+ANGLE Vulkan, and it does not install RenderDoc. If Chromium logs reject
+`angle=vulkan`, record `vulkan-angle-unavailable` and keep the browser Vulkan
+gate failed. If `renderdoccmd` is missing, the setup evidence records
+`gui_web_2d_vulkan_renderdoc_reason` and the searched RenderDoc paths; install
+`RenderDoc.app` manually or set `RDOC_HOME` before claiming `.rdc` evidence.
+Windows and Linux should reuse these same evidence keys when their capture
+runbooks are added.
+
 ### Electron / Chromium parity (`scripts/check/check-electron-vulkan-web-parity.shs`)
 Renders a page through real Chromium (Electron + `xvfb`, via
 `tools/electron-live-bitmap/capture_html_argb.js`) and through the Vulkan-backed

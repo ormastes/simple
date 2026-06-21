@@ -87,6 +87,28 @@ context "with setup":
 | Skipped | `skip_it "..."` | Skipped in interpreter, runs compiled |
 | Pending | `pending "reason"` | Marked pending |
 
+## GUI/Web/2D Rendering Evidence
+
+For GUI/web/2D work, SPipe specs must assert behavior and link to renderer
+evidence. When the claim is Vulkan-backed rendering, use the macOS-first
+RenderDoc workflow before writing a pass claim:
+
+```bash
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+SIMPLE_BIN=src/compiler_rust/target/release/simple \
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
+sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
+```
+
+Required evidence is Electron Chromium, original Chrome, and pure-Simple
+Engine2D rendered from the same fixture, with RenderDoc `.rdc` files starting
+with `RDOC` for completion. On macOS, `vulkaninfo --summary` with MoltenVK only
+proves host readiness. If Chrome or Electron records
+`vulkan-angle-unavailable`, the browser Vulkan lane remains failed even when it
+renders a bitmap. If RenderDoc is missing, keep the gate unavailable and use the
+emitted `rdoc_status_reason` / `gui_web_2d_vulkan_renderdoc_reason` fields to
+state the blocker.
+
 ## Doc Generation
 
 ```bash

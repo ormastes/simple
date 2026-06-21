@@ -14,10 +14,42 @@ Maintain feature-specific process knowledge for UI and GUI. Use this skill when 
 
 ## Feature Links
 
-- [GUI architecture](../../04_architecture/gui_layer_contract.md)
-- [Drawing stack](../../04_architecture/drawing_stack.md)
-- [Graphical icon system](../../04_architecture/graphical_icon_system.md)
+- [GUI architecture](../../../04_architecture/compiler/graphics/gui_layer_contract.md)
+- [Drawing stack](../../../04_architecture/ui/drawing_stack.md)
+- [Graphical icon system](../../../04_architecture/ui/graphics/graphical_icon_system.md)
+- [GUI/web/2D Vulkan RenderDoc capture guide](../../../07_guide/tooling/renderdoc_capture_infra.md)
+- [Vulkan-backed 2D rendering guide](../../../07_guide/ui/gpu_backends/vulkan_backed_rendering.md)
+- [Web render backend guide](../../../07_guide/ui/web_render_backend.md)
 - [App source](../../../src/app/)
+
+## GUI/Web/2D Vulkan RenderDoc Verification
+
+Current canonical setup is macOS-first. Before claiming GUI/web/2D Vulkan
+parity, run the macOS host probe and compare all three lanes from the same
+fixture:
+
+```sh
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+SIMPLE_BIN=src/compiler_rust/target/release/simple \
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
+sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
+```
+
+Required lanes:
+
+- Electron Chromium with requested `--enable-features=Vulkan --use-angle=vulkan`.
+- Original Chrome with the same Vulkan/ANGLE request.
+- Pure-Simple GUI/web/2D through Engine2D Vulkan readback.
+- RenderDoc `.rdc` evidence with `RDOC` magic for each capture lane.
+
+On macOS, Vulkan readiness means `vulkaninfo --summary` reports MoltenVK, not
+that Chrome/Electron accepted ANGLE Vulkan. If Electron or Chrome renders pixels
+but records `vulkan-angle-unavailable`, keep the browser Vulkan gate failed and
+compare only as fallback bitmap evidence. If `renderdoccmd` is unavailable, the
+setup scripts expose `rdoc_status_reason`,
+`gui_web_2d_vulkan_renderdoc_reason`, and install hints; do not treat missing
+RenderDoc as a skipped pass. Windows and Linux capture gates should be added
+later with the same evidence keys.
 
 ## Update Rule
 

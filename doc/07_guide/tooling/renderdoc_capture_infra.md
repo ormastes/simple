@@ -81,6 +81,10 @@ keeps these states separate:
 - Simple Engine2D Vulkan readback availability;
 - optional RenderDoc `.rdc` capture availability and gate status.
 
+Current scope is macOS-first. Use this section to prove and debug the macOS
+path now; add Windows and Linux parity capture runbooks later using the same
+evidence keys rather than inventing platform-specific status names.
+
 Run a readiness-only probe first:
 
 ```sh
@@ -127,6 +131,23 @@ vulkaninfo --summary
 The host is Vulkan-ready only when `vulkaninfo --summary` reports the Apple GPU
 through MoltenVK, for example `driverName = MoltenVK`. This proves the Vulkan
 loader/ICD path, not that Chrome, Electron, Simple, or RenderDoc used Vulkan.
+
+RenderDoc is a separate prerequisite on macOS. Homebrew may provide the Vulkan
+and MoltenVK stack without a RenderDoc package. Install `RenderDoc.app`
+manually or unpack an official RenderDoc tree, then point the scripts at it:
+
+```sh
+export RDOC_HOME=/Applications/RenderDoc.app
+scripts/setup/setup-renderdoc-env.shs --check
+scripts/setup/setup-renderdoc-env.shs --register-vulkan-layer
+```
+
+If `RDOC_HOME` is unset or invalid, the setup scripts now emit stable blocker
+keys such as `rdoc_status_reason`,
+`gui_web_2d_vulkan_renderdoc_reason`,
+`gui_web_2d_vulkan_renderdoc_search_paths`, and
+`gui_web_2d_vulkan_renderdoc_install_hint`. A missing `renderdoccmd` is an
+explicit unavailable state, not a skipped pass.
 
 Run the Mac availability probe before any capture claim. The legacy portability
 probe remains useful for the macOS report artifact:
@@ -271,6 +292,13 @@ Important keys:
 
 - `rdoc_backend`: `simple` or `original`.
 - `rdoc_scene`: capture scenario name.
+- `rdoc_status_reason`: readiness reason from
+  `scripts/setup/setup-renderdoc-env.shs --check`; for macOS missing RenderDoc
+  this is usually `missing-renderdoccmd-in-search-paths` or
+  `rdoc-home-missing-renderdoccmd`.
+- `rdoc_search_paths`: RenderDoc roots checked for `renderdoccmd`.
+- `rdoc_install_hint`: platform-specific install or `RDOC_HOME` hint when
+  `renderdoccmd` is missing.
 - `rdoc_log`: capture log path.
 - `rdoc_capture_status`: `pass`, `fail`, or `unavailable`.
 - `rdoc_capture_reason`: concrete pass/fail/unavailable reason.

@@ -87,6 +87,25 @@ Use two **independently produced** artifacts + an absolute oracle, never hard-co
 captured pixels. Gate: `scripts/check/check-electron-simple-web-engine2d-bitmap-evidence.shs`
 (pure-Simple Engine2D vs real Chromium OSR → `mismatch_count=0`).
 
+For GUI/web/2D Vulkan verification on macOS, run the stronger comparison through
+the RenderDoc setup wrapper. It exercises the same fixture across Electron
+Chromium, original Chrome, and pure-Simple Engine2D Vulkan, then records whether
+each lane produced Vulkan-backed evidence or fell back:
+
+```bash
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+SIMPLE_BIN=src/compiler_rust/target/release/simple \
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
+sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
+```
+
+On macOS, `vulkaninfo --summary` with `driverName = MoltenVK` only proves the
+host loader/ICD. Electron or Chrome can still render a bitmap while rejecting
+`--use-angle=vulkan`; in that case evidence records
+`vulkan-angle-unavailable` and the browser Vulkan lane remains failed. RenderDoc
+proof requires `.rdc` files with `RDOC` magic for the Electron, original Chrome,
+and Simple capture lanes.
+
 For host/GPU lane event-flow and less-ms evidence around
 `target.later(...) gpu \:`, use
 `doc/09_report/perf/host_gpu_lane_event_flow_perf_evidence_2026-06-14.md`.
