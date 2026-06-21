@@ -97,12 +97,13 @@ native entry-closure builds, SGTTI should be elided when not imported. Any spec
 that introduces SGTTI evidence must include an import-boundary check proving the
 normal path does not construct or poll the SGTTI surface.
 
-For file/process/env I/O inside specs, import the `std.io_runtime` wrappers
-(`file_read`, `file_write`, `file_exists`, `process_run`, `env_get`, …) — do NOT
-declare raw `extern fn rt_*` intrinsics in a spec. Spec/test files live outside
-the privileged runtime tiers (`src/lib`, `src/runtime`, `src/compiler`), so a raw
-`rt_*` extern now trips the `raw_rt_access` lint (warning). Route through the
-wrapper, e.g. `use std.io_runtime.{file_read, file_write}`.
+For file/process/env I/O inside specs, import the existing facades from
+`std.io_runtime` or `app.io.mod` (`file_read`, `file_write`, `file_exists`,
+`process_run`, `env_get`, …) — do NOT declare raw `extern fn rt_*` intrinsics
+in a spec. Spec/test files live outside the privileged runtime tiers
+(`src/lib`, `src/runtime`, `src/compiler`), so a raw `rt_*` extern now trips the
+`raw_rt_access` lint (warning). Route through a facade, e.g.
+`use app.io.mod.{file_read_text, file_write}`.
 
 For UI layout, border, color, style, or text-bound parity, prefer structured
 Protocol-v2 Draw IR evidence with
