@@ -50,14 +50,19 @@ RenderDoc+Chrome HTML/CSS capture, plus
 `scripts/tool/renderdoc-evidence.shs capture-electron-html` for bundled
 Electron Chromium HTML/CSS capture. Tests should route through
 `test/helpers/renderdoc_capture_helper.shs` or the compatibility wrappers.
-For Mac GUI/web/2D RenderDoc+Vulkan work, keep the lane Mac-only until separate
-Windows/Linux runbooks exist: install/refresh `vulkan-tools`,
-`vulkan-loader`, `vulkan-headers`, `molten-vk`, `spirv-tools`, and `glslang`;
-prove MoltenVK with `vulkaninfo --summary`; then require Simple
-Vulkan/Engine2D evidence, original Chrome evidence, Electron Chromium evidence,
-and production GUI/web parity evidence. A Chrome/Electron bitmap with a log
-containing Chromium's `angle=vulkan` unavailable failure is a fallback render,
-not Vulkan proof; record `vulkan-angle-unavailable` and leave the gate failed.
+For Mac GUI/web/2D RenderDoc+Vulkan work, use
+`scripts/setup/setup-gui-web-2d-vulkan-env.shs --check` for readiness,
+`--run` for direct Electron/Chrome/Simple probes, and `--renderdoc` only on a
+prepared RenderDoc host. Install/refresh `vulkan-tools`, `vulkan-loader`,
+`vulkan-headers`, `molten-vk`, `spirv-tools`, and `glslang`; prove MoltenVK
+with `vulkaninfo --summary`; then require Simple Vulkan/Engine2D evidence,
+original Chrome evidence, Electron Chromium evidence, and production GUI/web
+parity evidence. A Chrome/Electron bitmap with a log containing Chromium's
+`angle=vulkan` unavailable failure is a fallback render, not Vulkan proof;
+record `vulkan-angle-unavailable` and leave the gate failed. Windows setup
+starts with `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check`; Linux setup
+uses the same POSIX wrapper after installing a real GPU Vulkan ICD, Vulkan
+tools, shader tools, Chrome/Chromium, Electron dependencies, and RenderDoc.
 
 For runtime concurrency work, keep the public API map current in
 `doc/07_guide/lib/misc/stdlib.md`, `doc/07_guide/compiler/check_perf.md`, and

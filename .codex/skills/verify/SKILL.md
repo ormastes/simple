@@ -113,11 +113,13 @@ Scan for stub patterns — any match is a **FAIL**:
   checks for rendered windows and taskbar/dock icon or label regions. Explicit
   environment-based skips may pass only when the report says `skipped`, not when
   it claims live proof.
-- **Mac GUI/web/2D RenderDoc+Vulkan gates:** until Windows and Linux runbooks
-  exist, treat this as macOS-only. Require MoltenVK host readiness, Simple
-  Vulkan/Engine2D readback or RenderDoc proof, original Chrome RenderDoc proof,
-  Electron RenderDoc proof, and production GUI/web parity evidence. If Chrome or
-  Electron logs show `angle=vulkan` unavailable, report
+- **GUI/web/2D RenderDoc+Vulkan gates:** start from
+  `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc`
+  on POSIX hosts or `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check` on
+  Windows. Require host Vulkan readiness, Simple Vulkan/Engine2D readback or
+  RenderDoc proof, original Chrome RenderDoc proof, Electron RenderDoc proof,
+  and production GUI/web parity evidence. If Chrome or Electron logs show
+  `angle=vulkan` unavailable, report
   `vulkan-angle-unavailable` and fail the Vulkan proof even when pixels render.
 - **Core/MCP regression gate:** when compiler/core/lib or MCP/LSP files changed, require passing:
   - `<runtime> check src/compiler`

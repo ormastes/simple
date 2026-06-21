@@ -292,6 +292,11 @@ Canonical infrastructure for the follow-up:
   interface.
 - `scripts/setup/setup-renderdoc-env.shs`: shared path discovery and Vulkan
   layer registration.
+- `scripts/setup/setup-gui-web-2d-vulkan-env.shs`: top-level host readiness
+  and direct-run wrapper for Electron Chromium, original Chrome, Simple
+  Engine2D Vulkan readback, and optional RenderDoc captures.
+- `scripts/setup/setup-gui-web-2d-vulkan-env.ps1`: Windows readiness companion
+  for Vulkan SDK, Chrome, Electron, and RenderDoc path checks.
 
 Do not add new ad hoc `renderdoccmd`/Chrome command variants to specs. Extend
 the shared helper interface first, then rerun the canonical command.
@@ -338,7 +343,58 @@ RenderDoc fixture, the `tools/electron-live-bitmap/capture_html_argb.js`
 capture script, Vulkan requested API/ANGLE fields, Vulkan launch flags, and a
 real `.rdc` file.
 
-## macOS Portability Probe
+## GUI/Web/2D Vulkan Setup Plan
+
+Use the setup wrapper as the current plan entrypoint for Electron Chromium,
+original Chrome, and pure-Simple GUI/web/2D Vulkan comparison:
+
+```sh
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
+```
+
+When validating runtime changes not present in `bin/simple`, first build the
+Rust executable and pin the Simple lane:
+
+```sh
+(cd src/compiler_rust && cargo build --release --bin simple)
+SIMPLE_BIN=src/compiler_rust/target/release/simple \
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
+```
+
+The wrapper records a single evidence env under
+`build/gui-web-2d-vulkan-env/evidence.env`. A valid completion claim must still
+be lane-specific:
+
+- host Vulkan loader/ICD present through `vulkaninfo --summary`;
+- Electron Chromium and original Chrome launched with
+  `--enable-features=Vulkan --use-angle=vulkan`;
+- Chromium logs do not contain the `angle=vulkan` unavailable failure;
+- Simple Engine2D Vulkan readback passes without blur/tolerance;
+- RenderDoc `.rdc` files exist, begin with `RDOC`, and pass the Simple,
+  original Chrome, and Electron gates;
+- production GUI/web renderer parity remains `mismatch_count=0`.
+
+Current local macOS evidence from 2026-06-21:
+
+- Host Vulkan readiness passes: Apple M4 through `driverName = MoltenVK`.
+- With `SIMPLE_BIN=src/compiler_rust/target/release/simple`, the Simple
+  Engine2D Vulkan readback passes:
+  `gui_web_2d_vulkan_simple_status=pass`,
+  `gui_web_2d_vulkan_simple_probe_status=Initialized`,
+  `gui_web_2d_vulkan_simple_backend_name=vulkan`, clear/rect mismatches `0`,
+  `vulkan_strict_exit_code=0`, and CPU/Vulkan parity exit code `0`.
+- Electron Chromium renders a nonblank ARGB bitmap, but the Vulkan browser lane
+  fails with `gui_web_2d_vulkan_electron_vulkan_reason=vulkan-angle-unavailable`.
+- Chrome renders a screenshot, but the Vulkan browser lane fails with
+  `gui_web_2d_vulkan_chrome_vulkan_reason=vulkan-angle-unavailable`.
+- RenderDoc `.rdc` capture remains unavailable on this host:
+  Simple/Chrome/Electron capture helpers write
+  `rdoc_capture_status=unavailable` and
+  `rdoc_capture_reason=missing-renderdoc`.
+
+### macOS Portability Probe
 
 macOS is a separate portability investigation lane, not a replacement for the
 Linux original Chrome/Vulkan RenderDoc gate. Apple platforms do not provide a
@@ -347,8 +403,12 @@ MoltenVK, which maps Vulkan calls to Metal. That makes macOS useful for checking
 whether the Simple Vulkan path can run through MoltenVK, but it does not prove
 native Linux/NVIDIA Vulkan IO-level behavior.
 
-Planned macOS checks:
+Mac-first checks:
 
+- Run `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check` before launching
+  GUI processes.
+- Run `scripts/setup/setup-gui-web-2d-vulkan-env.shs --run` to compare the
+  direct Electron, Chrome, and Simple 2D Vulkan lanes on the local Mac.
 - Run `sh scripts/check/check-renderdoc-macos-portability-probe.shs` to record
   host, GPU, Vulkan, RenderDoc, and evidence status into
   `build/renderdoc/macos-portability-probe/evidence.env` and
@@ -377,3 +437,29 @@ Any macOS result must write a report under `doc/09_report/` with:
 - whether RenderDoc CLI was present and whether it produced an `.rdc`;
 - whether the browser path was Vulkan-over-Metal, direct Metal, or unavailable;
 - the exact evidence file or concrete blocker.
+
+### Windows/Linux Preparation
+
+Windows is prepared through:
+
+```powershell
+winget install KhronosGroup.VulkanSDK
+winget install Google.Chrome
+winget install BaldurKarlsson.RenderDoc
+.\scripts\setup\setup-gui-web-2d-vulkan-env.ps1 -Check
+```
+
+Linux is prepared through the POSIX wrapper after installing a GPU Vulkan ICD,
+Vulkan tools, Chrome/Chromium, Electron dependencies, shader tools, and
+RenderDoc:
+
+```sh
+vulkaninfo --summary
+scripts/setup/setup-renderdoc-env.shs --register-vulkan-layer
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
+```
+
+Do not mark Windows or Linux complete from the setup scripts alone. Promote a
+platform only after its `.rdc` magic, Chromium Vulkan logs, Simple Vulkan
+readback, and GUI/web parity evidence use the same keys as the canonical
+POSIX/macOS wrapper.

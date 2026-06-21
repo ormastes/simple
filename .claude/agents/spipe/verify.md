@@ -54,8 +54,11 @@
     lower-model sidecar lanes are either reviewed/merged or explicitly `N/A`,
     and the normal/highest-capability review accepted broad findings,
     coverage claims, generated-manual quality, and done marks.
-12. For Mac GUI/web/2D RenderDoc+Vulkan evidence, keep scope macOS-only until
-    Windows and Linux runbooks exist. Verify MoltenVK host readiness, Simple
+12. For Mac GUI/web/2D RenderDoc+Vulkan evidence, keep proof scope macOS-only
+    until Windows and Linux runbooks exist. Start from
+    `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc`
+    on POSIX hosts or `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check`
+    only as readiness preparation. Verify MoltenVK host readiness, Simple
     Vulkan/Engine2D readback or RenderDoc proof, original Chrome RenderDoc proof,
     Electron RenderDoc proof, and production GUI/web parity evidence. If Chrome
     or Electron logs show `angle=vulkan` unavailable, report

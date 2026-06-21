@@ -136,15 +136,22 @@ host-unavailable reason as artifact captures. Screenshot-only evidence is not
 Vulkan IO-level RenderDoc evidence.
 
 For Mac GUI/web/2D Vulkan comparison, keep the scope explicitly macOS until
-Windows and Linux runbooks are added. The Mac setup starts with Homebrew Vulkan
-tooling (`vulkan-tools`, `vulkan-loader`, `vulkan-headers`, `molten-vk`,
+Windows and Linux evidence is added. Use
+`scripts/setup/setup-gui-web-2d-vulkan-env.shs --check` for readiness,
+`--run` for direct Electron/Chrome/Simple launch probes, and `--renderdoc` only
+on a prepared RenderDoc host. The Mac setup starts with Homebrew Vulkan tooling
+(`vulkan-tools`, `vulkan-loader`, `vulkan-headers`, `molten-vk`,
 `spirv-tools`, `glslang`) and `vulkaninfo --summary` showing the Apple GPU
 through MoltenVK. That only proves host readiness. Completion evidence still
 needs Simple Vulkan/Engine2D readback or RenderDoc proof, original
 Chrome+RenderDoc proof, Electron+RenderDoc proof, and production GUI/web parity
 proof. If Chrome or Electron renders pixels but its log says `angle=vulkan` was
 not in the allowed implementations, classify the browser lane as
-`vulkan-angle-unavailable`; do not treat the bitmap as Vulkan-backed proof.
+`vulkan-angle-unavailable`; do not treat the bitmap as Vulkan-backed proof. For
+Windows, begin with `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check`;
+for Linux, use the POSIX wrapper after installing a real GPU Vulkan ICD,
+Vulkan tools, shader tools, Chrome/Chromium, Electron dependencies, and
+RenderDoc.
 
 Prefer the strongest available oracle for the surface:
 

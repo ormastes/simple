@@ -5,6 +5,8 @@ Use the shared RenderDoc interface for both capture styles:
 ```sh
 scripts/setup/setup-renderdoc-env.shs --check
 scripts/setup/setup-renderdoc-env.shs --register-vulkan-layer
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 scripts/tool/renderdoc-evidence.shs capture-simple
 scripts/tool/renderdoc-evidence.shs capture-html
 scripts/tool/renderdoc-evidence.shs capture-electron-html
@@ -29,6 +31,13 @@ PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_
   fixture.
 - `test/helpers/renderdoc_capture_helper.shs` exposes the same interface for
   test scripts.
+- `scripts/setup/setup-gui-web-2d-vulkan-env.shs` records host readiness and,
+  when requested, launches the direct Electron Chromium, Chrome, and Simple
+  Engine2D Vulkan probes before optional RenderDoc captures.
+- `scripts/setup/setup-gui-web-2d-vulkan-env.ps1` is the Windows readiness
+  companion. It records installed tool paths and the requested Chromium Vulkan
+  flags; use it as the Windows host setup entrypoint before adding Windows
+  RenderDoc gates.
 
 Compatibility wrappers remain:
 
@@ -59,11 +68,53 @@ The helper validates `.rdc` files by checking the `RDOC` magic header. If a host
 cannot provide Chrome Vulkan or a non-CPU Vulkan device, record the concrete
 reason in `doc/09_report/` instead of duplicating ad hoc capture commands.
 
-## macOS GUI/Web/2D Vulkan Checklist
+## GUI/Web/2D Vulkan Setup Probe
 
-This lane is Mac-first. Do not generalize the result to Windows or Linux yet;
-add those platforms only after they have their own host runbook, evidence keys,
-and failure vocabulary.
+The setup probe is the top-level entrypoint for comparing Electron Chromium,
+original Chrome, and pure-Simple GUI/web/2D rendering under requested Vulkan.
+It writes typed evidence to `build/gui-web-2d-vulkan-env/evidence.env` and
+keeps these states separate:
+
+- host Vulkan loader/ICD readiness;
+- pixels rendered by Electron or Chrome;
+- Chromium logs proving or rejecting ANGLE Vulkan;
+- Simple Engine2D Vulkan readback availability;
+- optional RenderDoc `.rdc` capture availability and gate status.
+
+Run a readiness-only probe first:
+
+```sh
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
+```
+
+Run direct launch probes for Electron, Chrome, and Simple Engine2D:
+
+```sh
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+```
+
+If `bin/simple` is older than the Rust runtime changes under test, build and
+pin the fresh executable for the Simple lane:
+
+```sh
+(cd src/compiler_rust && cargo build --release --bin simple)
+SIMPLE_BIN=src/compiler_rust/target/release/simple \
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+```
+
+On a prepared RenderDoc host, include RenderDoc captures:
+
+```sh
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
+```
+
+For platform package commands without changing the host, print the runbook:
+
+```sh
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --print-install
+```
+
+### macOS Checklist
 
 Install or refresh the macOS Vulkan portability stack with Homebrew:
 
@@ -77,7 +128,8 @@ The host is Vulkan-ready only when `vulkaninfo --summary` reports the Apple GPU
 through MoltenVK, for example `driverName = MoltenVK`. This proves the Vulkan
 loader/ICD path, not that Chrome, Electron, Simple, or RenderDoc used Vulkan.
 
-Run the Mac availability probe before any capture claim:
+Run the Mac availability probe before any capture claim. The legacy portability
+probe remains useful for the macOS report artifact:
 
 ```sh
 BUILD_DIR=build/renderdoc/macos-portability-current \
@@ -137,6 +189,80 @@ If Chrome or Electron on macOS renders pixels but logs that
 `vulkan-angle-unavailable` in the report and keep the Vulkan browser gate
 failed. Current macOS Chromium builds may expose Metal/OpenGL/SwiftShader
 without exposing ANGLE Vulkan even when MoltenVK is installed.
+
+Current local macOS result on 2026-06-21:
+
+- `vulkaninfo --summary` reports Apple M4 through `driverName = MoltenVK`.
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple
+  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc` proves the Simple
+  Engine2D Vulkan lane with `gui_web_2d_vulkan_simple_status=pass`,
+  `gui_web_2d_vulkan_simple_probe_status=Initialized`, and
+  `gui_web_2d_vulkan_simple_backend_name=vulkan`.
+- Electron Chromium writes a nonblank ARGB bitmap but records
+  `gui_web_2d_vulkan_electron_vulkan_reason=vulkan-angle-unavailable`.
+- Chrome writes a screenshot but records
+  `gui_web_2d_vulkan_chrome_vulkan_reason=vulkan-angle-unavailable`.
+- RenderDoc capture evidence for Simple, Chrome, and Electron records
+  `rdoc_capture_status=unavailable` and
+  `rdoc_capture_reason=missing-renderdoc` because `renderdoccmd` is not
+  installed or discoverable on this host.
+
+### Windows Preparation
+
+Windows evidence is prepared but not yet a replacement for the Linux
+Chrome/Vulkan RenderDoc gate. Start with the PowerShell readiness script:
+
+```powershell
+winget install KhronosGroup.VulkanSDK
+winget install Google.Chrome
+winget install BaldurKarlsson.RenderDoc
+npm --prefix tools/electron-shell install
+.\scripts\setup\setup-gui-web-2d-vulkan-env.ps1 -Check
+```
+
+Then register the RenderDoc Vulkan layer and record the direct-run intent:
+
+```powershell
+renderdoccmd.exe vulkanlayer --register --user
+renderdoccmd.exe vulkanlayer --explain
+.\scripts\setup\setup-gui-web-2d-vulkan-env.ps1 -Run
+```
+
+Before a Windows capture can satisfy completion evidence, add a Windows gate
+that validates `.rdc` magic, Chrome/Electron Vulkan logs, and Simple Engine2D
+Vulkan readback with the same evidence keys as the POSIX wrapper.
+
+### Linux Preparation
+
+Linux is the primary native Vulkan completion target. Install the Vulkan loader,
+tools, shader tools, a non-CPU GPU driver/ICD, Chrome or Chromium, Electron,
+and RenderDoc:
+
+```sh
+# Ubuntu/Debian
+sudo apt-get update
+sudo apt-get install vulkan-tools mesa-vulkan-drivers glslang-tools spirv-tools
+
+# Fedora
+sudo dnf install vulkan-tools mesa-vulkan-drivers glslang spirv-tools renderdoc
+
+# Arch
+sudo pacman -S vulkan-tools vulkan-icd-loader glslang spirv-tools renderdoc
+```
+
+Some distributions do not ship a current RenderDoc or vendor GPU driver in the
+default repositories. In that case, install the GPU vendor driver and official
+RenderDoc package/appimage, then run:
+
+```sh
+vulkaninfo --summary
+scripts/setup/setup-renderdoc-env.shs --register-vulkan-layer
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
+```
+
+Linux completion requires original Chrome and Electron Chromium to produce
+RenderDoc `.rdc` files with `RDOC` magic, no `vulkan-angle-unavailable` log
+failure, and Simple Engine2D Vulkan readback parity.
 
 ## Evidence Artifacts
 

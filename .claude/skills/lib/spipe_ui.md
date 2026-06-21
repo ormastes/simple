@@ -159,19 +159,23 @@ SIMPLE_BIN="$PWD/src/compiler_rust/target/gui/debug/simple" SIMPLE_LIB="$PWD/src
 
 ## Mac RenderDoc + Vulkan GUI/Web/2D Gate
 
-This is currently a macOS-only workflow. Do not promote Windows or Linux from
-these commands until those platforms have separate runbooks and evidence keys.
+Use the setup wrapper as the canonical entrypoint. macOS is the current local
+actual-run workflow; Windows and Linux have prepared setup entrypoints but must
+not be promoted until they produce matching evidence keys and gates.
 
 First prove the host Vulkan stack:
 
 ```bash
 brew install vulkan-tools vulkan-loader vulkan-headers molten-vk spirv-tools glslang
 vulkaninfo --summary  # must show the Apple GPU through MoltenVK
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
 ```
 
 Then collect the three RenderDoc/Vulkan lanes and the production parity lane:
 
 ```bash
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+
 RDOC_MACOS_RUN_CAPTURES=1 \
 BUILD_DIR=build/renderdoc/macos-portability-capture-current \
 REPORT_PATH=build/renderdoc/macos-portability-capture-current/report.md \
@@ -187,6 +191,13 @@ SIMPLE_LIB=src \
 sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 ```
+
+On a prepared RenderDoc host, `scripts/setup/setup-gui-web-2d-vulkan-env.shs
+--renderdoc` runs the direct probes plus the shared RenderDoc capture helpers.
+For Windows readiness, use
+`scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check`. For Linux readiness,
+install a real GPU Vulkan ICD, Vulkan tools, shader tools, Chrome/Chromium,
+Electron dependencies, and RenderDoc, then run the POSIX wrapper.
 
 Vulkan browser proof requires more than `--use-angle=vulkan`. If Chrome or
 Electron writes a bitmap but logs `angle=vulkan` as unavailable, record

@@ -118,11 +118,13 @@ For each source file in scope:
    - **Observability:** Check logging, metrics, tracing
    - **Compatibility:** Check platform-specific code paths
 3. Flag NFR targets with no verification mechanism
-4. For Mac GUI/web/2D RenderDoc+Vulkan evidence, keep the scope macOS-only until
-   Windows and Linux runbooks exist. Require MoltenVK host readiness, Simple
-   Vulkan/Engine2D readback or RenderDoc proof, original Chrome RenderDoc proof,
-   Electron RenderDoc proof, and production GUI/web parity evidence. If Chrome
-   or Electron logs show `angle=vulkan` unavailable, report
+4. For GUI/web/2D RenderDoc+Vulkan evidence, start from
+   `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc`
+   on POSIX hosts or `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check` on
+   Windows. Require host Vulkan readiness, Simple Vulkan/Engine2D readback or
+   RenderDoc proof, original Chrome RenderDoc proof, Electron RenderDoc proof,
+   and production GUI/web parity evidence. If Chrome or Electron logs show
+   `angle=vulkan` unavailable, report
    `vulkan-angle-unavailable` and fail the Vulkan proof even when pixels render.
 
 ### Phase 6 — Architecture & Design Doc Verification
