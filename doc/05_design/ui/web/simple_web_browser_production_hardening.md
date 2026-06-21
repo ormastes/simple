@@ -60,7 +60,7 @@ Primary executable evidence:
 
 Manual/spec evidence:
 
-- `doc/06_spec/test/03_system/gui/simple_web_browser_production_hardening_spec.md`
+- `doc/06_spec/03_system/gui/simple_web_browser_production_hardening_spec.md`
 - `doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-16.md`
 - `doc/09_report/simple_web_browser_production_hardening.md`
 
