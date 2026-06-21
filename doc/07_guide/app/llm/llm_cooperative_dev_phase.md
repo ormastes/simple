@@ -105,7 +105,7 @@ If multiple LLMs participate in research:
 | SPipe tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` |
 | Generated SPipe docs | `doc/06_spec/system/app/<app_name>/feature/<feature>_spec.md` |
 | Detail design | `doc/05_design/<feature>.md` |
-| Agent task breakdown | `doc/03_plan/agent_tasks/<feature>.md` |
+| Agent task breakdown | `doc/03_plan/agent_tasks/<feature>.md` with sidecar lanes/`N/A`, merge owner, and final reviewer |
 
 ### Sub-Phases
 
@@ -472,7 +472,7 @@ doc/
     nfr/<feature>_options.md      # Phase 1: NFR options (deleted after selection)
   03_plan/
     sys_test/<feature>.md         # Phase 2: system test plan
-    agent_tasks/<feature>.md      # Phase 2: implementation task breakdown
+    agent_tasks/<feature>.md      # Phase 2: task breakdown with sidecar/reviewer fields
   04_architecture/
     <feature>.md                  # Phase 2: architecture design
     adr/ADR-NNN-title.md          # Phase 2: architecture decision records
