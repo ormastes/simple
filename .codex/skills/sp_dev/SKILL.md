@@ -232,6 +232,8 @@ checks across lower-model parallel agents when available (for example Codex
 Spark, Claude Haiku, or Claude Sonnet). A normal/highest-capability LLM must
 review and accept the merged result before requirements, done marks, broad
 exclusions, or release-blocking verification are trusted.
+Final verification must prove the recorded cooperative review plan is complete
+or explicitly `N/A`, including generated-manual quality and done-mark review.
 
 If other Codex, Claude, or Gemini sessions are active, identify the lane this
 `/sp_dev` invocation owns before editing or syncing. Do not absorb unrelated
