@@ -33,8 +33,8 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 - The Electron Simple Web layout manifest remains visible with its 50 cases.
 - The HTML/CSS rendering manifest traceability gate is included and passing.
 - The audit includes current production parity evidence status when present.
-- The audit requires the production GUI/web parity evidence gate before the
-  aggregate GUI audit can report `pass`.
+- The audit requires production GUI/web renderer-core parity evidence before
+  the aggregate GUI audit can report `pass`.
 - The audit reports the active RenderDoc goal, Simple `.rdc`, and external
   Chrome/Vulkan `.rdc` gates without treating missing host captures as pass.
 - The audit reports macOS RenderDoc package/support status separately from the
@@ -486,6 +486,24 @@ describe "GUI RenderDoc feature coverage status gate":
             expect(status).to_equal("incomplete")
             expect(reason.len()).to_be_greater_than(0)
             expect(stdout).to_contain("strict_exit=1")
+
+    it "does not treat font-offload-only parity failure as missing live renderer parity":
+        step("Create production evidence whose renderer core passes while font offload is unavailable")
+        val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-font-only && mkdir -p build/test-gui-renderdoc-feature-coverage-status-font-only/source && printf 'production_gui_web_renderer_parity_status=fail\\nproduction_gui_web_renderer_parity_reason=font-offload-evidence-failed\\nproduction_gui_web_renderer_parity_matrix_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_case_count=50\\nproduction_gui_web_renderer_parity_layout_manifest_pass_count=36\\nproduction_gui_web_renderer_parity_layout_manifest_tracked_count=14\\nproduction_gui_web_renderer_parity_layout_manifest_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_electron_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_blur_or_tolerance_used=false\\nproduction_gui_web_renderer_parity_backend_status=pass\\nproduction_gui_web_renderer_parity_font_offload_status=unavailable\\nproduction_gui_web_renderer_parity_font_offload_reason=vector-font-gpu-glyph-return-missing;runtime-unavailable\\nproduction_gui_web_renderer_parity_metal_readback_status=pass\\n' > build/test-gui-renderdoc-feature-coverage-status-font-only/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-renderdoc-feature-coverage-status-font-only/source/evidence.env BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-font-only/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-font-only/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        step("Assert blocked completion gates reflect RenderDoc gaps, not live renderer parity")
+        val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-font-only/out/evidence.env")
+        val blocked_gates = _value_of(evidence, "blocked_completion_gates")
+        expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
+        expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=font-offload-evidence-failed")
+        expect(evidence).to_contain("production_gui_web_renderer_parity_gate_font_offload_status=unavailable")
+        expect(evidence).to_contain("production_gui_web_renderer_parity_core_status=pass")
+        expect(evidence).to_contain("production_gui_web_renderer_parity_core_reason=pass")
+        expect(evidence).to_contain("gui_renderdoc_feature_coverage_status=incomplete")
+        expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-renderdoc")
+        expect(blocked_gates.contains("production GUI/web parity evidence with live Tauri and Chrome captures")).to_equal(false)
 
     it "requires Electron Vulkan RenderDoc evidence after Simple and external gates pass":
         step("Create controlled Simple and original external RenderDoc evidence but no Electron evidence")
