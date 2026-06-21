@@ -55,8 +55,9 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
   `.claude/agents/spipe/`, and `.gemini/commands/` instructions before `$verify`; stale process docs are
   implementation work, not release cleanup.
-- Executable specs must stay under `test/`; generated/manual docs under
-  `doc/06_spec` must be `.md` only. Require
+- Executable specs must stay under `test/`; generated/manual docs mirror that
+  path under `doc/06_spec` after stripping the leading `test/` segment and must
+  be `.md` only. Require
   `find doc/06_spec -name '*_spec.spl' | wc -l` to print `0` before sync.
 - For `simple run` script-startup work, preserve the driver fast path for `.shs`,
   `get_cli_args`, and `std.cli` scripts; verify
