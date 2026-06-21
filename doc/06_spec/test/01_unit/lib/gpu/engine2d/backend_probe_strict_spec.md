@@ -1,4 +1,71 @@
-# Backend Probe Strict Specification
+# Engine2D Strict Backend Probe Specification
+
+> Verifies that strict Engine2D backend diagnostics stay on the requested backend and do not silently select CPU fallback.
+
+<!-- sdn-diagram:id=backend_probe_strict_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=backend_probe_strict_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+backend_probe_strict_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=backend_probe_strict_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 8 | 8 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Engine2D Strict Backend Probe Specification
+
+Verifies that strict Engine2D backend diagnostics stay on the requested backend and do not silently select CPU fallback.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Requirements | doc/02_requirements/ui/misc/production_gui_web_renderer_parity_hardening.md |
+| Plan | doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md |
+| Design | doc/04_architecture/ui/production_gui_web_renderer_parity_hardening.md |
+| Research | doc/09_report/vulkan_engine2d_readback_2026-06-17.md |
+| Source | `test/01_unit/lib/gpu/engine2d/backend_probe_strict_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies that strict Engine2D backend diagnostics stay on the requested backend
+and do not silently select CPU fallback.
+
+**Requirements:** doc/02_requirements/ui/misc/production_gui_web_renderer_parity_hardening.md
+**Research:** doc/09_report/vulkan_engine2d_readback_2026-06-17.md
+**Plan:** doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md
+**Architecture:** doc/04_architecture/ui/production_gui_web_renderer_parity_hardening.md
+**Design:** doc/04_architecture/ui/production_gui_web_renderer_parity_hardening.md
+
+## Syntax
+
+Use `StrictBackendFactory.strict().create_backend(name)` to require a typed
+result for exactly `name`; use `BackendProber.create().probe_all_summary()` for
+release-gate summary tokens.
 
 ## Scenarios
 
@@ -7,7 +74,7 @@
 #### reports typed ROCm diagnostics without CPU fallback
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -31,7 +98,7 @@ expect(probe.strict_failure_without_fallback()).to_equal(true)
 #### reports CPU SIMD as a capability-gated non-hardware path
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -54,7 +121,7 @@ expect(probe.strict_failure_without_fallback()).to_equal(true)
 #### reports CUDA selectable when runtime and device are available
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -81,7 +148,7 @@ else:
 #### reports architecture-specific CPU SIMD probes without fallback
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -121,7 +188,7 @@ expect(riscv.memory_mb).to_be_greater_than(0)
 #### reports OptiX as unsupported for Engine2D raster instead of falling back
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -146,7 +213,7 @@ expect(probe.strict_failure_without_fallback()).to_equal(true)
 #### requires OpenCL session proof beyond ICD platform evidence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -178,7 +245,7 @@ else:
 #### keeps strict Vulkan Metal CUDA WebGPU failures on the requested backend
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -209,7 +276,7 @@ expect(webgpu.strict_failure_without_fallback()).to_equal(true)
 #### probe summary includes all hardened backend names
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -244,21 +311,6 @@ expect(summary).to_contain("compute=true")
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/gpu/engine2d/backend_probe_strict_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Engine2D strict backend probe diagnostics
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -269,3 +321,13 @@ Tests covering:
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
+
+## Related Documentation
+
+- **Requirements:** [doc/02_requirements/ui/misc/production_gui_web_renderer_parity_hardening.md](doc/02_requirements/ui/misc/production_gui_web_renderer_parity_hardening.md)
+- **Plan:** [doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md](doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md)
+- **Design:** [doc/04_architecture/ui/production_gui_web_renderer_parity_hardening.md](doc/04_architecture/ui/production_gui_web_renderer_parity_hardening.md)
+- **Research:** [doc/09_report/vulkan_engine2d_readback_2026-06-17.md](doc/09_report/vulkan_engine2d_readback_2026-06-17.md)
+
+
+</details>
