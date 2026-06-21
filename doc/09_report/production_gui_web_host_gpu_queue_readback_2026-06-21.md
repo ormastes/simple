@@ -16,6 +16,7 @@ Date: 2026-06-21
 - nonzero backend-code drain result: pass
 - nonzero backend-code payload receipt: pass
 - nonzero backend-code payload text receipt: pass
+- native/JIT no-fallback payload text receipt: pass
 - DirectX/WebGPU provenance guard: pass
 - DirectX native gate: unavailable
 - native readback wrapper SSpec coverage: pass
@@ -117,11 +118,12 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 - Rust/C capacity parity: pass (C capacity 1024, Rust 1024).
 - Runtime queue overflow evidence: pass (accepted 1024/1024, overflow packet 0, drained 1024).
 - SUBMITTED status usage: used (5 assignments observed outside constants).
-- Runtime backend-handle field roundtrip: pass (synthetic probe handle 7; 51 matching runtime queue handle accessors/fields observed).
+- Runtime backend-handle field roundtrip: pass (synthetic probe handle 7; 53 matching runtime queue handle accessors/fields observed).
 - Runtime payload metadata roundtrip: pass (payload_size 512, payload_hash 98765).
 - Runtime payload text roundtrip: pass (queue probe payload command=draw_ir_rect id=runtime-backend).
+- Native/JIT no-fallback payload text roundtrip: pass (queue probe payload command=draw_ir_rect id=runtime-backend; fallback pass).
 - BrowserBackend host event roundtrip: pass (source browser_backend_event_queue, exit 0, reason browser-backend-event-ingress-contract-pass).
-- BrowserBackend runtime queue handle/payload/perf: pass (backend vulkan, first_render_us 638154, first_under_budget true, second_render_us 653, second_under_budget true, pixels 3072, checksum 772887022, nonuniform 2884, handle 7, packet 1, payload_size 12288, payload_hash 782290402, payload_text web-render-frame;backend=vulkan;pixels=3072;checksum=782290402, dispatch dispatched, dispatch_payload_size 512, dispatch_layout_commands 8, dispatch_payload_hash 941781836, dispatch_payload_text draw_ir schema=simple-draw-ir-v2, semantic rect/text/image 4/3/1, gui_ast true, widgets root/copy/action/image true/true/true/true, image_uri true, event_context true/browser-frame-20/gui_ast, cache reset not_requested/0).
+- BrowserBackend runtime queue handle/payload/perf: pass (backend vulkan, first_render_us 663999, first_under_budget true, second_render_us 838, second_under_budget true, pixels 3072, checksum 772887022, nonuniform 2884, handle 7, packet 1, payload_size 12288, payload_hash 782290402, payload_text web-render-frame;backend=vulkan;pixels=3072;checksum=782290402, dispatch dispatched, dispatch_payload_size 512, dispatch_layout_commands 8, dispatch_payload_hash 941781836, dispatch_payload_text draw_ir schema=simple-draw-ir-v2, semantic rect/text/image 4/3/1, gui_ast true, widgets root/copy/action/image true/true/true/true, image_uri true, event_context true/browser-frame-20/gui_ast, cache reset not_requested/0).
 - Same-frame GUI/web Engine2D pixel readback receipt: pass (backend vulkan, pixels 3072, checksum 782290402, reason same-frame Engine2D read_pixels, cache reset not_requested).
 - Same-frame Vulkan/BrowserBackend device readback receipt: pass (source device_readback; only device_readback is accepted as device proof. BrowserBackend backend handle 7, same-frame checksum 782290402, Vulkan Engine2D child readback pass).
 - Browser input event to queued frame/readback correlation: pass (status event_frame_readback_correlated, event browser-input-1, summary event=browser-input-1;frame_packet=1;readback_source=device_readback;checksum=782290402, cache reset not_requested).
@@ -177,6 +179,14 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 - queue_overflow_packet_id=0
 - queue_overflow_packet_count=1024
 - queue_overflow_drained=1024
+- queue_native_probe_exit_code=0
+- queue_native_probe_timeout_seconds=180
+- queue_native_probe_timed_out=false
+- queue_native_probe_fallback_status=pass
+- native_queue_nonzero_backend_last_backend_handle=7
+- native_queue_nonzero_backend_last_payload_size=512
+- native_queue_nonzero_backend_last_payload_hash=98765
+- native_queue_nonzero_backend_last_payload_text=queue probe payload command=draw_ir_rect id=runtime-backend
 - draw_ir_runtime_queue_spec_exit_code=0
 - draw_ir_runtime_queue_spec_timeout_seconds=180
 - draw_ir_runtime_queue_spec_timed_out=false
@@ -234,14 +244,14 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 - browser_frame_probe_timeout_seconds=180
 - browser_frame_probe_timed_out=false
 - browser_backend=vulkan
-- browser_first_render_us=638154
+- browser_first_render_us=663999
 - browser_first_render_under_budget=true
-- browser_first_render_dom_layout_us=11240
-- browser_first_render_html_us=324
-- browser_first_render_pixel_artifact_us=195233
-- browser_first_render_draw_ir_dispatch_us=17553
-- browser_first_render_framebuffer_copy_us=41901
-- browser_first_render_state_store_us=280
+- browser_first_render_dom_layout_us=12387
+- browser_first_render_html_us=431
+- browser_first_render_pixel_artifact_us=198979
+- browser_first_render_draw_ir_dispatch_us=17389
+- browser_first_render_framebuffer_copy_us=41176
+- browser_first_render_state_store_us=287
 - browser_first_pixel_count=3072
 - browser_first_checksum=772887022
 - browser_first_nonuniform_count=2884
@@ -294,7 +304,7 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 - browser_event_host_gpu_forwarded=true
 - browser_event_host_gpu_backward_completed=true
 - browser_event_host_gpu_summary=event=browser-input-1;requested=gpu;decision=gpu;queued=true;gpu_batched=true;reason=
-- browser_second_render_us=653
+- browser_second_render_us=838
 - browser_second_render_under_budget=true
 - browser_second_fast_hits=1
 - browser_second_submit=not_requested
@@ -416,7 +426,7 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 - queue_capacity_parity_status=pass
 - queue_submitted_status_assignment_count=5
 - queue_submitted_status_usage=used
-- queue_concrete_backend_handle_field_count=51
+- queue_concrete_backend_handle_field_count=53
 - queue_backend_handle_roundtrip_status=pass
 - queue_concrete_backend_handle_status=pass
 - queue_emit_status=pass
@@ -424,6 +434,7 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 - queue_nonzero_backend_drain_status=pass
 - queue_nonzero_backend_payload_status=pass
 - queue_nonzero_backend_payload_text_status=pass
+- queue_native_payload_text_status=pass
 - presentation_provenance_guard_status=pass
 - queue_overflow_status=pass
 - browser_frame_queue_status=pass

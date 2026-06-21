@@ -50,3 +50,16 @@ Result:
 - `queue_nonzero_backend_last_backend_handle=7`
 - `queue_nonzero_backend_last_payload_hash=98765`
 - `queue_nonzero_backend_last_payload_text=queue probe payload command=draw_ir_rect id=runtime-backend`
+
+Canonical wrapper:
+
+```bash
+SIMPLE_BIN=src/compiler_rust/target/debug/simple \
+  sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
+```
+
+Result:
+
+- `queue_native_probe_fallback_status=pass`
+- `native_queue_nonzero_backend_last_payload_text=queue probe payload command=draw_ir_rect id=runtime-backend`
+- `queue_native_payload_text_status=pass`
