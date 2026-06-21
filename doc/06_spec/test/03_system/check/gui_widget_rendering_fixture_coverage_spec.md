@@ -79,6 +79,9 @@ sh scripts/check/check-gui-widget-rendering-fixture-coverage.shs
 - All 43 widget wire kinds have executable render fixture witness coverage:
   a spec source references the widget wire, calls `render_html_widget` or
   `render_html_tree`, and asserts the expected renderer class.
+- All 43 widget wire kinds have canonical RenderDoc HTML fixture coverage:
+  `generated_gui_vulkan_renderdoc_fixture.html` contains the expected renderer
+  class and widget wire marker for each widget.
 
 ## Scenarios
 
@@ -95,18 +98,21 @@ sh scripts/check/check-gui-widget-rendering-fixture-coverage.shs
    - Expected: class_count equals `43`
    - Expected: spec_count equals `43`
    - Expected: render_fixture_count equals `43`
+   - Expected: renderdoc_fixture_count equals `43`
    - Expected: missing_dispatch equals ``
    - Expected: missing_classes equals ``
    - Expected: missing_specs equals ``
    - Expected: missing_render_fixtures equals ``
+   - Expected: missing_renderdoc_fixtures equals ``
    - Expected: render_fixture_widgets.split(",").len() equals `43`
+   - Expected: renderdoc_fixture_widgets.split(",").len() equals `43`
 - Verify representative newly covered widget classes are in the contract
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 49 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -121,17 +127,21 @@ expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_status=pass")
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_reason=pass")
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_widget_kind_source=src/lib/common/ui/widget_kind.spl")
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_renderer_source=src/app/ui.render/html_widgets.spl")
+expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_renderdoc_fixture_source=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 
 val widget_count = _value_of(evidence, "gui_widget_rendering_fixture_coverage_widget_kind_count")
 val dispatch_count = _value_of(evidence, "gui_widget_rendering_fixture_coverage_dispatch_covered_count")
 val class_count = _value_of(evidence, "gui_widget_rendering_fixture_coverage_renderer_class_covered_count")
 val spec_count = _value_of(evidence, "gui_widget_rendering_fixture_coverage_spec_covered_count")
 val render_fixture_count = _value_of(evidence, "gui_widget_rendering_fixture_coverage_render_fixture_covered_count")
+val renderdoc_fixture_count = _value_of(evidence, "gui_widget_rendering_fixture_coverage_renderdoc_fixture_covered_count")
 val missing_dispatch = _value_of(evidence, "gui_widget_rendering_fixture_coverage_missing_dispatch_widgets")
 val missing_classes = _value_of(evidence, "gui_widget_rendering_fixture_coverage_missing_renderer_classes")
 val missing_specs = _value_of(evidence, "gui_widget_rendering_fixture_coverage_missing_spec_widgets")
 val missing_render_fixtures = _value_of(evidence, "gui_widget_rendering_fixture_coverage_missing_render_fixture_widgets")
+val missing_renderdoc_fixtures = _value_of(evidence, "gui_widget_rendering_fixture_coverage_missing_renderdoc_fixture_widgets")
 val render_fixture_widgets = _value_of(evidence, "gui_widget_rendering_fixture_coverage_render_fixture_widgets")
+val renderdoc_fixture_widgets = _value_of(evidence, "gui_widget_rendering_fixture_coverage_renderdoc_fixture_widgets")
 
 step("Assert fail-closed 43/43 widget coverage")
 expect(widget_count).to_equal("43")
@@ -139,11 +149,14 @@ expect(dispatch_count).to_equal("43")
 expect(class_count).to_equal("43")
 expect(spec_count).to_equal("43")
 expect(render_fixture_count).to_equal("43")
+expect(renderdoc_fixture_count).to_equal("43")
 expect(missing_dispatch).to_equal("")
 expect(missing_classes).to_equal("")
 expect(missing_specs).to_equal("")
 expect(missing_render_fixtures).to_equal("")
+expect(missing_renderdoc_fixtures).to_equal("")
 expect(render_fixture_widgets.split(",").len()).to_equal(43)
+expect(renderdoc_fixture_widgets.split(",").len()).to_equal(43)
 
 step("Verify representative newly covered widget classes are in the contract")
 expect(evidence).to_contain("radio:widget-radio")
@@ -154,11 +167,15 @@ expect(evidence).to_contain("card:widget-card")
 expect(evidence).to_contain("switch:widget-switch")
 expect(evidence).to_contain("segmented_control:widget-segmented-control")
 expect(evidence).to_contain("search_bar:widget-search-bar")
+expect(renderdoc_fixture_widgets).to_contain("glass_title_bar")
+expect(renderdoc_fixture_widgets).to_contain("command_palette")
+expect(renderdoc_fixture_widgets).to_contain("empty_state")
 
 val report = file_read("build/test-gui-widget-rendering-fixture-coverage/report.md")
 expect(report).to_contain("# GUI Widget Rendering Fixture Coverage")
 expect(report).to_contain("- spec markers covered: 43")
 expect(report).to_contain("- render fixture witnesses covered: 43")
+expect(report).to_contain("- RenderDoc HTML fixture widgets covered: 43")
 ```
 
 </details>
