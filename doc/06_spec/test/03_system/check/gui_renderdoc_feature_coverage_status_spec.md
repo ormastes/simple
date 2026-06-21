@@ -178,7 +178,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 460 lines folded for reproduction.
+Runnable source: 468 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -313,6 +313,14 @@ expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_setup_macos_homebrew_pa
 expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_setup_macos_upstream_support_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_bin=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_bin_selection_reason=")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_requested_api=vulkan")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_requested_angle=vulkan")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_requested_features=Vulkan")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_requested_api=vulkan")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_requested_angle=vulkan")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_requested_features=Vulkan")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan")
 expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_evidence_env=")
 expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_source=")
 expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_mode=")

@@ -105,7 +105,15 @@ The aggregate status audit keeps readiness and direct launch evidence separate.
 emits `gui_web_2d_vulkan_direct_run_source`,
 `gui_web_2d_vulkan_direct_run_evidence_env`, and
 `gui_web_2d_vulkan_direct_run_mode` before reporting Electron, Chrome, and
-Simple runtime fields.
+Simple runtime fields. The requested browser Vulkan contract is explicit in
+`gui_web_2d_vulkan_electron_requested_api`,
+`gui_web_2d_vulkan_electron_requested_angle`,
+`gui_web_2d_vulkan_electron_launch_flags`,
+`gui_web_2d_vulkan_chrome_requested_api`,
+`gui_web_2d_vulkan_chrome_requested_angle`, and
+`gui_web_2d_vulkan_chrome_launch_flags`; compare those request keys with the
+observed `*_vulkan_status` and `*_vulkan_reason` fields before claiming a
+browser lane is Vulkan-backed.
 
 On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
 `src/compiler_rust/target/debug/simple` when that binary advertises the macOS
