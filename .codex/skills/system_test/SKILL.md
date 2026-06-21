@@ -75,7 +75,7 @@ describe "<Feature Name>":
         it "should reject invalid input":
             step("Submit invalid input")
             val result = <invoke with invalid>
-            expect(result.error?).to_equal(true)
+            expect(result.error_code).to_equal("invalid-input")
 
     describe "REQ-002: <next requirement>":
         it "should <behavior>":
