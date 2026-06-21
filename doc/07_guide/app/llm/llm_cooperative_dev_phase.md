@@ -124,7 +124,8 @@ If multiple LLMs participate in research:
 - Every REQ-NNN must have at least one test
 - Define shared interface names and manual-facing setup/checker helper names
   before implementation. Temporary helper placeholders must fail explicitly
-  with `assert(false)` or equivalent.
+  with `assert(false)` or `fail(...)`; silent no-op helpers are not valid
+  coverage.
 - Generate mirrored `doc/06_spec/...` manuals from SSpec and read them as
   manuals; revise steps, captures, inline/previous expansion, and visibility
   until primary flows are understandable without opening the source test.
