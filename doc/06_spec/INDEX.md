@@ -4,10 +4,10 @@
 
 ## Quick Stats
 
-- **Total Features:** 27
-- **Complete Documentation:** 27 (100%)
+- **Total Features:** 28
+- **Complete Documentation:** 28 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 270
+- **Total Lines:** 280
 
 ---
 
@@ -41,10 +41,11 @@
 
 ---
 
-## Standard Library (4 features)
+## Standard Library (5 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
+| [Connection Heartbeat Numeric Guard Specification](test/01_unit/lib/nogc_sync_mut/stomp/connection_heartbeat_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Lsp Query Numeric Guard Specification](test/01_unit/lib/nogc_sync_mut/lsp/lsp_query_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Range Numeric Guard Specification](test/01_unit/lib/http_server/range_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Range Numeric Guard Specification](test/01_unit/lib/nogc_async_mut/http_server/range_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
