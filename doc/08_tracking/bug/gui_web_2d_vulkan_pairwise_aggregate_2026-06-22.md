@@ -81,3 +81,15 @@ mismatches. Browser backing remains a separate blocker:
 Electron reports `vulkan=disabled_off` and `hardwareSupportsVulkan=false`, while
 the current Chrome proof does not include GPU info. The backing claim remains
 fail-closed.
+
+## 2026-06-22 Native Probe Crash Cause
+
+The native Simple ARGB probe crashed or logged
+`function not found: Engine2D.is_err` when the browser presenter routed
+`cpu_simd` through `Engine2D.create_requested_backend()` and then called
+`Result.is_err()`. In the native compiled path that Result can dispatch as the
+wrapped `Engine2D`, so the method lookup is invalid. The session plan is to keep
+software, `cpu`, and `cpu_simd` aliases on the direct `cpu_mirror` path, leaving
+real GPU backend requests on the existing Engine2D path. Verification evidence:
+native probe exit `0`, `Engine2D.is_err` stderr count `0`, JSON pixels `768`,
+and GUI/Web/2D Vulkan pairwise mismatches all `0`.
