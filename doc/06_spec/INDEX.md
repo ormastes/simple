@@ -4,14 +4,14 @@
 
 ## Quick Stats
 
-- **Total Features:** 13
-- **Complete Documentation:** 13 (100%)
+- **Total Features:** 14
+- **Complete Documentation:** 14 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 130
+- **Total Lines:** 140
 
 ---
 
-## Application (13 features)
+## Application (14 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
@@ -23,6 +23,7 @@
 | [Query Rich Numeric Guard Specification](test/01_unit/app/cli/query_rich_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Query Tokens Numeric Guard Specification](test/01_unit/app/cli/query_tokens_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Query Numeric Guard Specification](test/01_unit/app/cli/query_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
+| [Render Parser Dimension Guard Specification](test/01_unit/app/ui/render_parser_dimension_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Test Config Numeric Guard Specification](test/01_unit/app/test_runner_new/test_config_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Terminal Size Numeric Guard Specification](test/01_unit/app/ui/terminal_size_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Tree Depth Numeric Guard Specification](test/01_unit/app/tree/tree_depth_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
