@@ -2279,9 +2279,27 @@ int rt_file_delete(const char* path) {
     return remove(path) == 0 ? 1 : 0;
 }
 
+int rt_file_remove(int64_t path_value, int64_t path_len_unused) {
+    (void)path_len_unused;
+    char* path = rt_core_string_to_cpath(path_value);
+    if (!path) return 0;
+    int ok = remove(path) == 0 ? 1 : 0;
+    free(path);
+    return ok;
+}
+
+int64_t rt_file_size(const char* path) {
+    if (!path) return -1;
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    return (int64_t)st.st_size;
+}
+
 __attribute__((weak))
 const char* rt_env_get(const char* key) {
-    return spl_env_get(key);
+    const char* value = spl_env_get(key);
+    if (!value) value = "";
+    return (const char*)(intptr_t)rt_string_new((const uint8_t*)value, (uint64_t)strlen(value));
 }
 
 /* rt_file_write, rt_file_copy, rt_file_size, rt_file_stat, rt_file_append
