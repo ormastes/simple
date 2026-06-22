@@ -185,29 +185,54 @@ pub enum RefCapability:
             case Mut: "Exclusive"
             case Iso: "Isolated"
 
+fn _ref_capability_kind(cap: RefCapability) -> text:
+    match cap:
+        case RefCapability.Mut: "Mut"
+        case RefCapability.Iso: "Iso"
+        case RefCapability.Imm: "Imm"
+
+fn _ref_capability_kind_to_cap(kind: text) -> RefCapability:
+    match kind:
+        case "Mut": RefCapability.Mut
+        case "Iso": RefCapability.Iso
+        case _: RefCapability.Imm
+
+fn _ref_capability_kind_to_string(kind: text) -> text:
+    match kind:
+        case "Mut": "mut"
+        case "Iso": "iso"
+        case _: "imm"
+
+fn _ref_capability_kind_to_lean_name(kind: text) -> text:
+    match kind:
+        case "Mut": "Exclusive"
+        case "Iso": "Isolated"
+        case _: "Shared"
+
 # Capability type - combines a capability with a type name
 # Matches Lean: structure CapType
 pub class CapType:
     cap: RefCapability
+    cap_kind: text
     type_name: text
 
     fn new(cap: RefCapability, type_name: text) -> CapType:
-        CapType(cap: cap, type_name: type_name)
+        CapType(cap: cap, cap_kind: _ref_capability_kind(cap), type_name: type_name)
 
     fn mut_type(type_name: text) -> CapType:
-        CapType(cap: RefCapability.Mut, type_name: type_name)
+        CapType(cap: RefCapability.Mut, cap_kind: "Mut", type_name: type_name)
 
     fn iso_type(type_name: text) -> CapType:
-        CapType(cap: RefCapability.Iso, type_name: type_name)
+        CapType(cap: RefCapability.Iso, cap_kind: "Iso", type_name: type_name)
 
     fn imm_type(type_name: text) -> CapType:
-        CapType(cap: RefCapability.Imm, type_name: type_name)
+        CapType(cap: RefCapability.Imm, cap_kind: "Imm", type_name: type_name)
 
     fn to_string() -> text:
-        if self.cap == RefCapability.Imm:
+        if self.cap_kind == "Imm":
             self.type_name
         else:
-            "{self.cap.to_string()} {self.type_name}"
+            "{_ref_capability_kind_to_string(self.cap_kind)} {self.type_name}"
 
     fn to_lean() -> text:
         """Convert capability type to Lean syntax.
@@ -219,7 +244,7 @@ pub class CapType:
             CapType.imm_type("Int").to_lean()
             # → "CapType.mk \"Int\" RefCapability.Shared"
         """
-        val cap_lean = self.cap.to_lean_name()
+        val cap_lean = _ref_capability_kind_to_lean_name(self.cap_kind)
         "CapType.mk \"{self.type_name}\" RefCapability.{cap_lean}"
 
 # Reference in the environment
@@ -309,6 +334,9 @@ fn can_create_ref(source: RefCapability, target: RefCapability) -> bool:
         case (RefCapability.Imm, RefCapability.Mut): false
         case (RefCapability.Imm, RefCapability.Iso): false
         case (RefCapability.Imm, RefCapability.Imm): true
+
+fn can_create_ref_kind(source: text, target: RefCapability) -> bool:
+    can_create_ref(_ref_capability_kind_to_cap(source), target)
 
 # Check if capability conversion is allowed
 # Matches Lean: def canConvert
@@ -584,8 +612,8 @@ fn allows_access(ref: Reference, access_type: text) -> bool:
         case "read":
             true
         case "write":
-            ref.cap_type.cap == RefCapability.Mut or
-            ref.cap_type.cap == RefCapability.Iso
+            ref.cap_type.cap_kind == "Mut" or
+            ref.cap_type.cap_kind == "Iso"
         case _:
             false
 
@@ -615,9 +643,9 @@ fn check_capability_usage(env: RefEnv, name: text, required: RefCapability) -> C
         case Some(ref):
             if not ref.is_available():
                 result.add_error("Reference '{name}' has been consumed")
-            else if not can_create_ref(ref.cap_type.cap, required):
+            else if not can_create_ref_kind(ref.cap_type.cap_kind, required):
                 result.add_error(
-                    "Cannot use '{name}' with capability {ref.cap_type.cap.to_string()} " +
+                    "Cannot use '{name}' with capability {_ref_capability_kind_to_string(ref.cap_type.cap_kind)} " +
                     "where {required.to_string()} is required"
                 )
 

@@ -95,8 +95,8 @@ expect(caps.CapType.iso_type("Int").to_lean()).to_equal("CapType.mk \"Int\" RefC
 
 #### stores and consumes references
 
-1. var env = caps RefEnv new
-2. env add
+- var env = caps RefEnv new
+- env add
    - Expected: env.is_available("x") is true
    - Expected: env.is_available("x") is false
 
@@ -120,8 +120,8 @@ expect(env.is_available("x")).to_equal(false)
 
 #### returns the stored reference
 
-1. var env = caps RefEnv new
-2. env add
+- var env = caps RefEnv new
+- env add
    - Expected: env.get("y").? is true
 
 

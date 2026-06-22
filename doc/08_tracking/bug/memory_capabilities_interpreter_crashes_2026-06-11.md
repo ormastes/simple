@@ -1,12 +1,12 @@
 # BUG: memory_capabilities_spec failures — enum-field method call crash + match-on-dict.get SIGSEGV + RefEnv.consume copy loss
 
-Status: PARTIAL-FIXED (Bug A fixed 2026-06-11; Bug C fixed 2026-06-22; Bug B open)
+Status: FIXED (Bug A fixed 2026-06-11; Bugs B and C fixed 2026-06-22)
 
 **Date:** 2026-06-11
-**Status:** PARTIAL-FIXED
+**Status:** FIXED
 **Severity:** High (two interpreter crashes + one silent wrong-result)
 **Found by:** memory_audit_gc_nogc spec triage (.spipe/memory_audit_gc_nogc/t2_memory_capabilities_triage.md)
-**Spec:** test/00_formal_verification/compiler/memory_capabilities_spec.spl (4/6 pass; the 2 failures are product bugs, intentionally left failing — no cover-up)
+**Spec:** test/00_formal_verification/compiler/memory_capabilities_spec.spl (6/6 pass as of 2026-06-22)
 
 ## Bug A — method call on enum stored as struct field crashes interpreter
 
@@ -33,8 +33,14 @@ round-trip of all three variants). `cargo check -p simple-compiler` clean.
 
 ## Bug B — `match dict.get(key)` SIGSEGV when value type is a class
 
+**Status: FIXED 2026-06-22**
+
 `match d.get(key)` where the dict value type is a class → interpreter exits 139.
 Blocks the whole test body.
+
+Fix: `RefEnv` no longer uses `match self.refs.get(name)` for class-valued
+references. It uses its own `ref_names` / `ref_values` arrays for lookup and
+mutation, with `refs` kept as a compatibility mirror.
 
 ## Bug C — RefEnv.consume mutates a Dict.get copy (silent wrong result)
 
@@ -52,7 +58,6 @@ storage and mirrors writes to `refs` only for compatibility. `consume()` updates
 the array slot after mutating the copied `Reference`, avoiding the crashing
 `match self.refs.get(name)` class-value path and preserving the consumed state.
 
-Evidence: isolated interpreter probe changed from `before=false` / crash-prone
-dict behavior to `before=true` and `after=false`; the full
-`memory_capabilities_spec.spl` improved from 4 pass / 2 fail to 5 pass / 1 fail.
-The remaining failure is Bug B.
+Evidence: isolated interpreter probes changed from `before=false` /
+crash-prone dict behavior to all expected checks passing; the full
+`memory_capabilities_spec.spl` now passes 6/6 in interpreter mode.
