@@ -32,6 +32,8 @@ pub fn pread_with_staging(
         if state.status == StagingStatus.Staged:
             match state.mode:
                 case StageMode.Mmap | StageMode.MmapShared:
+                    if offset >= state.mmap_size:
+                        return Ok(0)
                     val to_read = buf.len().min(state.mmap_size - offset)
                     if to_read > 0:
                         native_mmap_read(state.mmap_ptr, offset, buf, to_read)
@@ -39,12 +41,16 @@ pub fn pread_with_staging(
                 case _:
                     pass
 
+    if handle < 0:
+        return Err(IoError.InvalidData)
     return native_file_pread(handle, buf, offset)
 
 # Write at offset without changing file position (thread-safe)
 # reason: stdlib primitive boundary — i64/u64/bool params are OS-level types; changing signature breaks all callers and native SFFI
 @allow(primitive_api) # reason: stdlib primitive boundary
 pub fn pwrite_impl(handle: i64, data: &Bytes, offset: u64) -> Result<ByteCount, IoError>:
+    if handle < 0:
+        return Err(IoError.InvalidData)
     return native_file_pwrite(handle, data, offset)
 
 # ===============================
@@ -55,6 +61,8 @@ pub fn pwrite_impl(handle: i64, data: &Bytes, offset: u64) -> Result<ByteCount, 
 # reason: stdlib primitive boundary — i64/u64/bool params are OS-level types; changing signature breaks all callers and native SFFI
 @allow(primitive_api) # reason: stdlib primitive boundary
 pub fn file_size_sync(handle: i64) -> Result<ByteCount, IoError>:
+    if handle < 0:
+        return Err(IoError.InvalidData)
     val current = native_file_seek_sync(handle, SeekFrom.Current(0))?
     val end = native_file_seek_sync(handle, SeekFrom.End(0))?
     native_file_seek_sync(handle, SeekFrom.Start(current as u64))?
@@ -191,6 +199,8 @@ pub fn read_from_staged_sync(
 # reason: stdlib primitive boundary — i64/u64/bool params are OS-level types; changing signature breaks all callers and native SFFI
 @allow(primitive_api) # reason: stdlib primitive boundary
 pub fn stage_mmap_sync_impl(handle: i64, size_u64: u64) -> Result<StageState, IoError>:
+    if handle < 0:
+        return Err(IoError.InvalidData)
     if size_u64 == 0:
         return Ok(create_empty_staged_state(StageMode.Mmap, false))
 
@@ -201,6 +211,8 @@ pub fn stage_mmap_sync_impl(handle: i64, size_u64: u64) -> Result<StageState, Io
 # reason: stdlib primitive boundary — i64/u64/bool params are OS-level types; changing signature breaks all callers and native SFFI
 @allow(primitive_api) # reason: stdlib primitive boundary
 pub fn stage_mmap_shared_sync_impl(handle: i64, size_u64: u64) -> Result<StageState, IoError>:
+    if handle < 0:
+        return Err(IoError.InvalidData)
     if size_u64 == 0:
         return Ok(create_empty_staged_state(StageMode.MmapShared, true))
 
@@ -218,6 +230,8 @@ pub fn close_with_staging(handle: i64, stage_state: Option<StageState>) -> Resul
     if val Some(state) = stage_state:
         if state.mode == StageMode.Mmap and state.mmap_ptr != 0:
             native_mmap_unmap(state.mmap_ptr, state.mmap_size)
+    if handle < 0:
+        return Err(IoError.InvalidData)
     return native_file_close(handle)
 
 # ===============================
@@ -245,12 +259,16 @@ pub fn read_sync_with_staging(
     if val Some(state) = stage_state:
         if val Some(result) = read_from_staged_sync(handle, buf, state):
             return result
+    if handle < 0:
+        return Err(IoError.InvalidData)
     return native_file_read_sync(handle, buf)
 
 # Write all bytes to file handle (sync loop)
 # reason: stdlib primitive boundary — i64/u64/bool params are OS-level types; changing signature breaks all callers and native SFFI
 @allow(primitive_api) # reason: stdlib primitive boundary
 pub fn write_all_sync_impl(handle: i64, data: &Bytes) -> Result<(), IoError>:
+    if handle < 0:
+        return Err(IoError.InvalidData)
     var written: u64 = 0
     val total = data.len()
     while written < total:
@@ -270,5 +288,6 @@ pub fn close_sync_with_staging(handle: i64, stage_state: Option<StageState>) -> 
                     native_mmap_unmap(state.mmap_ptr, state.mmap_size)
             case _:
                 pass
+    if handle < 0:
+        return Err(IoError.InvalidData)
     return native_file_close(handle)
-
