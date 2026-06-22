@@ -28,7 +28,7 @@ mcp_sdk_json_builder_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 26 | 26 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -293,6 +293,36 @@ expect(first_n_chars("x", 1)).to_equal("x")
 
 </details>
 
+### _char_at guards invalid indexes
+
+#### returns empty text for negative index
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_char_at("abc", -1)).to_equal("")
+```
+
+</details>
+
+#### returns empty text for past-end index
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_char_at("abc", 3)).to_equal("")
+```
+
+</details>
+
 ### make_tool_result and make_tool_error JSON structure
 
 #### make_tool_result output shape
@@ -461,6 +491,7 @@ Tests covering:
 - jo1-jo5 output structure (main_lazy_json)
 - escape_json round-trips via js/extract_json_string
 - first_n_chars uses native substring
+- _char_at guards invalid indexes
 - make_tool_result and make_tool_error JSON structure
 - JSON-RPC builders (mcp_sdk.core.jsonrpc, rewritten)
 
@@ -468,8 +499,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
