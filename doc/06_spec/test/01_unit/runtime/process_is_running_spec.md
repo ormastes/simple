@@ -27,7 +27,7 @@ process_is_running_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -118,6 +118,21 @@ expect(running).to_equal(false)
 
 </details>
 
+#### returns false for invalid alive pids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(process_is_alive(-1)).to_equal(false)
+expect(process_is_alive(0)).to_equal(false)
+```
+
+</details>
+
 #### refuses to kill invalid or reserved pids
 
 <details>
@@ -156,7 +171,7 @@ expect(process_wait(0, 100)).to_equal(-1)
 | Category | Runtime |
 | Status | Active |
 | Source | `test/01_unit/runtime/process_is_running_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-22 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -168,8 +183,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
