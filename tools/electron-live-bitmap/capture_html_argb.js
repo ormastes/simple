@@ -33,6 +33,9 @@ const touchMinPx = Number(process.env.ELECTRON_CAPTURE_TOUCH_MIN_PX || 44);
 const failOnAudit = /^(1|true|yes)$/i.test(process.env.ELECTRON_CAPTURE_FAIL_ON_AUDIT || "");
 const emulatedMediaFeatures = parseMediaFeatures(process.env.ELECTRON_CAPTURE_MEDIA_FEATURES || "");
 
+app.commandLine.appendSwitch("force-device-scale-factor", "1");
+app.commandLine.appendSwitch("force-color-profile", "srgb");
+
 function parseMediaFeatures(value) {
   return String(value || "")
     .split(",")
