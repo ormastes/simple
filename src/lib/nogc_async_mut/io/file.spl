@@ -108,6 +108,8 @@ class AsyncFile:
         Ok(AsyncFile(fd: result))
 
     fn read(driver: IoDriver, buf_size: i64, offset: i64) -> Result<text, IoError>:
+        if self.fd < 0:
+            return Err(IoError(kind: IoErrorKind.InvalidInput, message: "invalid file handle"))
         val op_id = driver.submit_read(self.fd, buf_size, offset)
         driver.flush()
         val completions = driver.poll(64, 30000)
@@ -124,10 +126,14 @@ class AsyncFile:
         Err(IoError(kind: IoErrorKind.TimedOut, message: "read timed out"))
 
     fn write(driver: IoDriver, data: text, offset: i64) -> Result<i64, IoError>:
+        if self.fd < 0:
+            return Err(IoError(kind: IoErrorKind.InvalidInput, message: "invalid file handle"))
         val op_id = driver.submit_write(self.fd, data, offset)
         complete_one(driver, op_id, 30000)
 
     fn fsync(driver: IoDriver) -> Result<(), IoError>:
+        if self.fd < 0:
+            return Err(IoError(kind: IoErrorKind.InvalidInput, message: "invalid file handle"))
         val op_id = driver.submit_fsync(self.fd)
         complete_one(driver, op_id, 30000)?
         Ok(())
@@ -165,7 +171,7 @@ fn stat(path: text) -> Result<FileStat, IoError>:
     if not file_exists(path):
         return Err(IoError(kind: IoErrorKind.NotFound, message: "stat failed: {path}"))
     val dir_handle = rt_readdir(path)
-    val is_dir = dir_handle != 0
+    val is_dir = dir_handle > 0
     if is_dir:
         rt_readdir_free(dir_handle)
     val s = FileStat(
@@ -183,7 +189,7 @@ fn stat(path: text) -> Result<FileStat, IoError>:
 class AsyncDir:
     static fn readdir(path: text) -> Result<[text], IoError>:
         val handle = rt_readdir(path)
-        if handle == 0:
+        if handle <= 0:
             return Err(IoError(kind: IoErrorKind.NotFound, message: "readdir failed: {path}"))
         val count = rt_readdir_count(handle)
         var entries: [text] = []
