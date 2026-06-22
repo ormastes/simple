@@ -1,11 +1,11 @@
 # Bug: Native Any Parameter Forwarding Corrupts Pointer
 
-Status: Open (workaround applied)
+Status: Open compiler bug; std and nogc_sync_mut thread wrappers hardened.
 
 **Date:** 2026-06-05
 **Severity:** High
 **Component:** compiler/codegen (Cranelift native)
-**Status:** Open (workaround applied)
+**Status:** Open compiler bug; std and nogc_sync_mut thread wrappers hardened.
 
 ## Description
 
@@ -47,6 +47,15 @@ to Any at a call site works correctly.
 Changed `thread_spawn(closure: Any)` to `thread_spawn(closure: () -> i64)`.
 The concrete closure type passes as a single i64, widened to Any only at the
 extern call site — which is the path that works.
+
+2026-06-22 hardening: `src/lib/nogc_sync_mut/concurrent/thread.spl` now matches
+the std concurrency surface by declaring `rt_thread_spawn_isolated` externs with
+`closure_ptr: i64` and casting closures at the direct extern call site. The
+`thread_spawn_with_args` wrapper also takes `fn(Any, Any) -> Any` instead of
+forwarding a closure through a wrapper parameter typed `Any`.
+
+Regression guard:
+`test/01_unit/lib/nogc_sync_mut/concurrent_thread_pointer_spawn_spec.spl`.
 
 ## Related
 
