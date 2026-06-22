@@ -8,9 +8,7 @@
 # Note: Functions are inlined here to avoid import issues (same pattern as
 # test/unit/app/mcp_t32/mcp_t32_run_guard_spec.spl).
 
-extern fn rt_env_get(name: text) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+use std.io_runtime.{env_get, file_exists, process_run}
 
 # ============================================================================
 # Inlined logic from lifecycle_tools.spl — pure/testable functions only
@@ -33,10 +31,10 @@ fn arch_to_binary(arch: text) -> text:
     "t32marm"
 
 fn find_install_dir() -> text:
-    val t32mem = rt_env_get("T32MEM") ?? ""
+    val t32mem = env_get("T32MEM")
     if t32mem != "":
         return t32mem
-    if rt_file_exists("/opt/t32"):
+    if file_exists("/opt/t32"):
         return "/opt/t32"
     ""
 
@@ -44,14 +42,14 @@ fn check_xvfb() -> bool:
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
-    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", "which xvfb-run 2>/dev/null"])
+    (stdout, stderr, rc) = process_run("/bin/sh", ["-c", "which xvfb-run 2>/dev/null"])
     rc == 0
 
 fn ping_port(backend: text, port: i64) -> bool:
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
-    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", backend + " localhost port=" + str(port) + " PING < /dev/null 2>/dev/null"])
+    (stdout, stderr, rc) = process_run("/bin/sh", ["-c", backend + " localhost port=" + str(port) + " PING < /dev/null 2>/dev/null"])
     rc == 0
 
 # ============================================================================
@@ -117,20 +115,28 @@ describe "t32_arch_to_binary":
         expect(arch_to_binary("mips")).to_equal("t32marm")
 
 describe "t32_find_install_dir":
-    it "returns /opt/t32 when it exists (standard install)":
-        # This machine has /opt/t32 installed
+    it "returns configured or standard install dir when present":
         val dir = find_install_dir()
-        expect(dir).to_equal("/opt/t32")
+        val configured = env_get("T32MEM")
+        if configured != "":
+            expect(dir).to_equal(configured)
+        elif file_exists("/opt/t32"):
+            expect(dir).to_equal("/opt/t32")
+        else:
+            expect(dir).to_equal("")
 
-    it "returns non-empty string when T32 is installed":
+    it "returns a stable result across repeated lookup":
         val dir = find_install_dir()
-        expect(dir != "").to_equal(true)
+        expect(find_install_dir()).to_equal(dir)
 
 describe "t32_check_xvfb":
-    it "returns true when xvfb-run is installed":
-        # This machine has xvfb installed
+    it "matches xvfb-run availability on the current host":
         val result = check_xvfb()
-        expect(result).to_equal(true)
+        val (_stdout, _stderr, rc) = process_run("/bin/sh", ["-c", "which xvfb-run 2>/dev/null"])
+        if rc == 0:
+            expect(result).to_equal(true)
+        else:
+            expect(result).to_equal(false)
 
 describe "t32_ping_port":
     it "returns false when no service is listening on an unused port":
