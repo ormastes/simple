@@ -53,6 +53,13 @@ Latest focused native probe:
 - Tiny standalone probes show direct `DbRow`, `DbRow?`, `Result<DbRow?>`, and
   `[DbRow]` class-method returns are safe. The crash remains specific to
   DB-built rows from `PureDatabase`.
+- 2026-06-22 follow-up: a local copy-hardening attempt routed direct fast-path
+  `DbRow(columns: ..., values: typed[...])` returns through `_row_result`, but
+  the bounded native probe still segfaulted and `probe_rows_len` printed a
+  corrupt negative value before `DbRow.values` access. That source change was
+  rejected to avoid adding hot-path copies without fixing the crash. Treat the
+  remaining blocker as native materialization of `Result<[DbRow], DbError>` or
+  DB-built `[DbRow]` query result arrays, not only direct `DbRow.values`.
 - `test/05_perf/bench/db_crud_compare_driver.spl` uses a temporary timing-only
   scalar gate. Do not treat current embedded timings as final correctness
   evidence until full DB row/scalar validation is restored.
