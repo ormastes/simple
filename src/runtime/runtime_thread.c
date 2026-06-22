@@ -1,3 +1,7 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 /*
  * Simple Runtime Threading Library - Implementation
  *
@@ -61,6 +65,9 @@ static HandleEntry g_handles[MAX_HANDLES];
 static int64_t g_freelist[MAX_HANDLES];
 static int64_t g_freelist_top = -1;  /* -1 means empty (not yet initialized) */
 static int g_freelist_initialized = 0;
+
+static void rt_pool_mark_worker_blocked(void);
+static void rt_pool_mark_worker_unblocked(void);
 
 /* Read-write lock: allows concurrent get_handle reads */
 #ifdef SPL_THREAD_PTHREAD
