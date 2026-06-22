@@ -72,6 +72,8 @@ impl File:
                 case StageMode.Mmap:
                     val pos_result = await self.position()?
                     val pos = pos_result as u64
+                    if pos >= state.mmap_size:
+                        return Ok(0)
                     val to_read = buf.len().min(state.mmap_size - pos)
                     if to_read > 0:
                         native_mmap_read(state.mmap_ptr, pos, buf, to_read)
@@ -81,6 +83,8 @@ impl File:
                 case StageMode.MmapShared:
                     val pos_result = await self.position()?
                     val pos = pos_result as u64
+                    if pos >= state.mmap_size:
+                        return Ok(0)
                     val to_read = buf.len().min(state.mmap_size - pos)
                     if to_read > 0:
                         native_mmap_read(state.mmap_ptr, pos, buf, to_read)
@@ -91,6 +95,8 @@ impl File:
                     if val Some(prefetch) = state.prefetch_buf:
                         val pos_result = await self.position()?
                         val pos = pos_result as u64
+                        if pos >= prefetch.len():
+                            return Ok(0)
                         val to_read = buf.len().min(prefetch.len() - pos)
                         if to_read > 0:
                             buf.copy_from(&prefetch.slice(pos, pos + to_read), 0, to_read)
@@ -100,6 +106,8 @@ impl File:
                 case _:
                     pass
 
+        if self.handle < 0:
+            return Err(IoError.InvalidData)
         return native_file_read(self.handle, buf)
 
     # Read exact number of bytes
@@ -118,6 +126,8 @@ impl File:
     # Write bytes
     pub async fn write(self, data: &Bytes) -> Result<ByteCount, IoError>:
         await self.wait_for_staging()
+        if self.handle < 0:
+            return Err(IoError.InvalidData)
         return native_file_write(self.handle, data)
 
     # Write all bytes
@@ -132,11 +142,15 @@ impl File:
 
     # Flush buffers
     pub async fn flush(self) -> Result<(), IoError>:
+        if self.handle < 0:
+            return Err(IoError.InvalidData)
         return native_file_flush(self.handle)
 
     # Seek position
     pub async fn seek(self, pos: SeekFrom) -> Result<ByteCount, IoError>:
         await self.wait_for_staging()
+        if self.handle < 0:
+            return Err(IoError.InvalidData)
         return native_file_seek(self.handle, pos)
 
     # Get current position
@@ -152,6 +166,8 @@ impl File:
 
     # Sync to disk
     pub async fn sync_all(self) -> Result<(), IoError>:
+        if self.handle < 0:
+            return Err(IoError.InvalidData)
         return native_file_sync(self.handle)
 
     # Close file
@@ -162,6 +178,8 @@ impl File:
         if val Some(state) = self.stage_state:
             if state.mode == StageMode.Mmap and state.mmap_ptr != 0:
                 native_mmap_unmap(state.mmap_ptr, state.mmap_size)
+        if self.handle < 0:
+            return Err(IoError.InvalidData)
         return native_file_close(self.handle)
 
     # ===============================
@@ -419,6 +437,8 @@ impl File:
 
     # Write bytes (sync)
     pub fn write_sync(self, data: &Bytes) -> Result<ByteCount, IoError>:
+        if self.handle < 0:
+            return Err(IoError.InvalidData)
         return native_file_write_sync(self.handle, data)
 
     # Write all bytes (sync)
@@ -427,10 +447,14 @@ impl File:
 
     # Flush buffers (sync)
     pub fn flush_sync(self) -> Result<(), IoError>:
+        if self.handle < 0:
+            return Err(IoError.InvalidData)
         return native_file_flush_sync(self.handle)
 
     # Seek position (sync)
     pub fn seek_sync(self, pos: SeekFrom) -> Result<ByteCount, IoError>:
+        if self.handle < 0:
+            return Err(IoError.InvalidData)
         return native_file_seek_sync(self.handle, pos)
 
     # Get current position (sync)
@@ -446,6 +470,8 @@ impl File:
 
     # Sync to disk (sync)
     pub fn sync_all_sync(self) -> Result<(), IoError>:
+        if self.handle < 0:
+            return Err(IoError.InvalidData)
         return native_file_sync_sync(self.handle)
 
     # Close file (sync)
@@ -508,7 +534,8 @@ impl AsyncResource for File:
     async fn close():
         # Stop leak tracking
         self._stop_tracking()
-        val _ = native_file_close(self.handle)
+        if self.handle >= 0:
+            val _ = native_file_close(self.handle)
 
     fn is_open() -> bool:
         self.handle != -1
