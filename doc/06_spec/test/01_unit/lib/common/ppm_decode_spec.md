@@ -42,7 +42,7 @@ Validates that the decoder correctly parses the PPM P6 magic number,
 |-------|-------|
 | Category | Standard Library |
 | Status | Active |
-| Source | `test/unit/lib/common/ppm_decode_spec.spl` |
+| Source | `test/01_unit/lib/common/ppm_decode_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
