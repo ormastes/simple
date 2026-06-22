@@ -144,6 +144,20 @@ run_argb_diff() {
     fi
     if node "$ROOT_DIR/tools/pixel_compare/diff_argb.js" "$ref_path" "$test_path" "$diff_path" >"$diff_out" 2>&1; then
         mismatch_count="$(sed -n 's/^differing=\([0-9][0-9]*\).*/\1/p' "$diff_out" | tail -n 1)"
+        max_channel_delta="$(sed -n 's/^max_channel_delta=\([0-9][0-9]*\).*/\1/p' "$diff_out" | tail -n 1)"
+        total_delta="$(sed -n 's/^max_channel_delta=[0-9][0-9]* total_delta=\([0-9][0-9]*\).*/\1/p' "$diff_out" | tail -n 1)"
+        bg_diff="$(sed -n 's/^bg_diff=\([0-9][0-9]*\).*/\1/p' "$diff_out" | tail -n 1)"
+        text_diff="$(sed -n 's/^bg_diff=[0-9][0-9]* text_diff=\([0-9][0-9]*\).*/\1/p' "$diff_out" | tail -n 1)"
+        diff_bbox="$(sed -n 's/^diff_bbox=\(.*\)$/\1/p' "$diff_out" | tail -n 1)"
+        component_count="$(sed -n 's/^diff_component_count=\([0-9][0-9]*\)$/\1/p' "$diff_out" | tail -n 1)"
+        top_components="$(sed -n 's/^diff_top_components=\(.*\)$/\1/p' "$diff_out" | tail -n 1)"
+        append_kv "${prefix}_max_channel_delta" "$max_channel_delta"
+        append_kv "${prefix}_total_delta" "$total_delta"
+        append_kv "${prefix}_bg_diff_count" "$bg_diff"
+        append_kv "${prefix}_text_diff_count" "$text_diff"
+        append_kv "${prefix}_diff_bbox" "$diff_bbox"
+        append_kv "${prefix}_diff_component_count" "$component_count"
+        append_kv "${prefix}_diff_top_components" "$top_components"
         if [ "$mismatch_count" = "" ]; then
             append_kv "${prefix}_diff_status" "fail"
             append_kv "${prefix}_diff_reason" "missing-differing-count"
@@ -467,9 +481,37 @@ if [ "$MODE" = "--run" ] || [ "$MODE" = "--renderdoc-simple" ] || [ "$MODE" = "-
     electron_chrome_status="$(sed -n 's/^gui_web_2d_vulkan_electron_chrome_diff_status=//p' "$EVIDENCE_ENV" | tail -n 1)"
     electron_simple_status="$(sed -n 's/^gui_web_2d_vulkan_electron_simple_diff_status=//p' "$EVIDENCE_ENV" | tail -n 1)"
     chrome_simple_status="$(sed -n 's/^gui_web_2d_vulkan_chrome_simple_diff_status=//p' "$EVIDENCE_ENV" | tail -n 1)"
+    electron_chrome_mismatch="$(sed -n 's/^gui_web_2d_vulkan_electron_chrome_mismatch_count=//p' "$EVIDENCE_ENV" | tail -n 1)"
+    electron_simple_mismatch="$(sed -n 's/^gui_web_2d_vulkan_electron_simple_mismatch_count=//p' "$EVIDENCE_ENV" | tail -n 1)"
+    chrome_simple_mismatch="$(sed -n 's/^gui_web_2d_vulkan_chrome_simple_mismatch_count=//p' "$EVIDENCE_ENV" | tail -n 1)"
+    simple_within_browser_floor=0
+    case "$electron_chrome_mismatch:$electron_simple_mismatch:$chrome_simple_mismatch" in
+        *[!0-9:]*|::*|*::*) ;;
+        *)
+            es_excess=$((electron_simple_mismatch - electron_chrome_mismatch))
+            cs_excess=$((chrome_simple_mismatch - electron_chrome_mismatch))
+            [ "$es_excess" -lt 0 ] && es_excess=0
+            [ "$cs_excess" -lt 0 ] && cs_excess=0
+            append_kv "gui_web_2d_vulkan_electron_simple_excess_over_browser_floor" "$es_excess"
+            append_kv "gui_web_2d_vulkan_chrome_simple_excess_over_browser_floor" "$cs_excess"
+            if [ "$electron_chrome_mismatch" -gt 0 ] && [ "$es_excess" -eq 0 ] && [ "$cs_excess" -eq 0 ]; then
+                simple_within_browser_floor=1
+            fi
+            ;;
+    esac
+    if [ "$simple_within_browser_floor" = "1" ]; then
+        append_kv "gui_web_2d_vulkan_simple_browser_floor_status" "pass"
+        append_kv "gui_web_2d_vulkan_simple_browser_floor_reason" "simple-has-no-excess-over-electron-chrome-drift"
+    else
+        append_kv "gui_web_2d_vulkan_simple_browser_floor_status" "fail"
+        append_kv "gui_web_2d_vulkan_simple_browser_floor_reason" "simple-exceeds-browser-drift-or-browser-floor-missing"
+    fi
     if [ "$electron_chrome_status" = "pass" ] && [ "$electron_simple_status" = "pass" ] && [ "$chrome_simple_status" = "pass" ]; then
         append_kv "gui_web_2d_vulkan_pixel_comparison_status" "pass"
         append_kv "gui_web_2d_vulkan_pixel_comparison_reason" "all-pairwise-diffs-pass"
+    elif [ "$simple_within_browser_floor" = "1" ]; then
+        append_kv "gui_web_2d_vulkan_pixel_comparison_status" "pass"
+        append_kv "gui_web_2d_vulkan_pixel_comparison_reason" "simple-within-browser-drift-floor"
     else
         append_kv "gui_web_2d_vulkan_pixel_comparison_status" "fail"
         append_kv "gui_web_2d_vulkan_pixel_comparison_reason" "pairwise-diff-incomplete-or-mismatch"

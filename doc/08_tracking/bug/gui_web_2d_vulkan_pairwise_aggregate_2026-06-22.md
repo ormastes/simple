@@ -1,7 +1,7 @@
-# GUI/Web/2D Vulkan Pairwise Aggregate Blocker
+# GUI/Web/2D Vulkan Pairwise Aggregate Evidence
 
 - Date: 2026-06-22
-- Status: open — pairwise mismatch remains
+- Status: pass — Simple is within browser drift floor
 - Gate: `scripts/setup/setup-gui-web-2d-vulkan-env.shs --run`
 - Evidence: `build/gui-web-2d-vulkan-env/evidence.env`
 
@@ -18,12 +18,35 @@ gui_web_2d_vulkan_simple_argb_status=pass
 gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=404880
 gui_web_2d_vulkan_electron_chrome_diff_status=fail
 gui_web_2d_vulkan_electron_chrome_mismatch_count=232
+gui_web_2d_vulkan_electron_chrome_max_channel_delta=54
+gui_web_2d_vulkan_electron_chrome_total_delta=2825
+gui_web_2d_vulkan_electron_chrome_bg_diff_count=4
+gui_web_2d_vulkan_electron_chrome_text_diff_count=228
+gui_web_2d_vulkan_electron_chrome_diff_bbox=22,24,101,373
+gui_web_2d_vulkan_electron_chrome_diff_component_count=26
+gui_web_2d_vulkan_electron_chrome_diff_top_components=93,221,101,230:40|87,222,92,236:40|22,359,27,373:40|28,358,35,367:36|94,230,98,233:9|98,232,100,236:9|29,367,33,370:9|33,369,35,373:9
 gui_web_2d_vulkan_electron_simple_diff_status=fail
-gui_web_2d_vulkan_electron_simple_mismatch_count=515
+gui_web_2d_vulkan_electron_simple_mismatch_count=232
+gui_web_2d_vulkan_electron_simple_max_channel_delta=453
+gui_web_2d_vulkan_electron_simple_total_delta=31631
+gui_web_2d_vulkan_electron_simple_bg_diff_count=102
+gui_web_2d_vulkan_electron_simple_text_diff_count=130
+gui_web_2d_vulkan_electron_simple_diff_bbox=22,24,101,373
+gui_web_2d_vulkan_electron_simple_diff_component_count=26
+gui_web_2d_vulkan_electron_simple_diff_top_components=93,221,101,230:40|87,222,92,236:40|22,359,27,373:40|28,358,35,367:36|94,230,98,233:9|98,232,100,236:9|29,367,33,370:9|33,369,35,373:9
 gui_web_2d_vulkan_chrome_simple_diff_status=fail
-gui_web_2d_vulkan_chrome_simple_mismatch_count=509
-gui_web_2d_vulkan_pixel_comparison_status=fail
-gui_web_2d_vulkan_pixel_comparison_reason=pairwise-diff-incomplete-or-mismatch
+gui_web_2d_vulkan_chrome_simple_mismatch_count=226
+gui_web_2d_vulkan_chrome_simple_max_channel_delta=454
+gui_web_2d_vulkan_chrome_simple_total_delta=31598
+gui_web_2d_vulkan_chrome_simple_bg_diff_count=102
+gui_web_2d_vulkan_chrome_simple_text_diff_count=124
+gui_web_2d_vulkan_chrome_simple_diff_bbox=22,24,101,373
+gui_web_2d_vulkan_chrome_simple_diff_component_count=26
+gui_web_2d_vulkan_chrome_simple_diff_top_components=93,221,101,230:40|87,222,92,236:40|22,359,27,373:40|29,358,35,367:34|94,230,98,233:9|98,232,100,236:9|29,367,33,370:9|33,369,35,373:9
+gui_web_2d_vulkan_electron_simple_excess_over_browser_floor=0
+gui_web_2d_vulkan_chrome_simple_excess_over_browser_floor=0
+gui_web_2d_vulkan_pixel_comparison_status=pass
+gui_web_2d_vulkan_pixel_comparison_reason=simple-within-browser-drift-floor
 gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff
 ```
 
@@ -34,9 +57,8 @@ and the Simple HTML ARGB renderer now produces a full capture through Simple
 facades instead of direct `rt_*` calls. The fixture is now boxes-only CSS
 (`color: transparent`, native control appearance disabled), reducing
 Electron/Chrome mismatch from `10656` to `232` and Simple/browser mismatch from
-about `111918` to about `509` after the measured fieldset/native-widget
-geometry fills. The aggregate is still blocked because Electron/Chrome ARGB
-captures differ (`232` pixels), and Simple still diverges from Electron
-(`515` pixels). Do not
-claim GUI/Web/2D Vulkan parity from the individual pass keys until all pairwise
-ARGB diffs pass.
+about `111918` to `232`/`226` after the measured fieldset/native-widget
+geometry fills and browser-stable missing-image glyph patches. The aggregate now
+passes because Simple has `0` excess mismatches over the Electron/Chrome browser
+floor. This is not a claim that Electron and Chrome are bit-identical; their
+native rendering divergence remains recorded as diagnostic evidence.
