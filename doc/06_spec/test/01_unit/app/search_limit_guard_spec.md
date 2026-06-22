@@ -43,13 +43,15 @@ search_limit_guard_spec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("src/app/search/main.spl") ?? ""
 
 expect(source).to_contain("fn parse_limit_or_default(value: text) -> i64")
+expect(source).to_contain("for ch in trimmed:")
+expect(source).to_contain("if ch < \"0\" or ch > \"9\":")
 expect(source).to_contain("if parsed <= 0:")
 expect(source).to_contain("return 20")
 expect(source).to_contain("limit = parse_limit_or_default(arg[8:])")
