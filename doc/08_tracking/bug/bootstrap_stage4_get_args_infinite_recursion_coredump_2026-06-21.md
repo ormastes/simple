@@ -1,7 +1,7 @@
 # Bootstrap Stage 4 binary SIGSEGVs at startup — `io.cli_ops.get_args` infinite recursion
 
 - **Id:** bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21
-- **Status:** Open
+- **Status:** Open root cause; guarded 2026-06-22
 - **Severity:** P1 — a fresh `bootstrap-from-scratch.sh --pure-simple` produces a
   Stage 4 `build/bootstrap/full/<triple>/simple` that **segfaults on every
   invocation** (even `print(1)`), in both interpret and JIT mode. There is no
@@ -76,6 +76,10 @@ not runnable. That doc's severity downgrade should be revisited.
    the `cli_ops.get_args` definition.
 4. Add a Stage-4 smoke gate to `bootstrap-from-scratch.sh`: run
    `<stage4> -c "print(1+1)"` and fail the build if it does not print `2`.
+   - Done 2026-06-22: `scripts/bootstrap/bootstrap-from-scratch.sh` now smokes
+     `${full_bin}` immediately after Stage 4 and exits before deploy/MCP work if
+     the new binary cannot execute code. Guarded by
+     `test/01_unit/compiler/bootstrap/stage4_smoke_gate_spec.spl`.
 
 ## REFERENCES
 

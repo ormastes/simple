@@ -435,6 +435,12 @@ if [ ! -x "${full_bin}" ]; then
   exit 1
 fi
 
+stage4_smoke="$(setsid timeout 30 "${full_bin}" -c 'print(1+1)' 2>/dev/null)"
+if [ "${stage4_smoke}" != "2" ]; then
+  echo "error: stage4 binary failed smoke test (-c 'print(1+1)' -> '${stage4_smoke}')" >&2
+  exit 1
+fi
+
 echo "Full CLI binary: ${full_bin}"
 
 # ===========================================================================
