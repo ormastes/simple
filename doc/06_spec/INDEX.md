@@ -4,14 +4,14 @@
 
 ## Quick Stats
 
-- **Total Features:** 19
-- **Complete Documentation:** 19 (100%)
+- **Total Features:** 20
+- **Complete Documentation:** 20 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 190
+- **Total Lines:** 200
 
 ---
 
-## Application (19 features)
+## Application (20 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
@@ -34,3 +34,4 @@
 | [Tui Widget Active Index Guard Specification](test/01_unit/app/ui/tui_widget_active_index_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Tui Widget Numeric Guard Specification](test/01_unit/app/ui/tui_widget_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Watch Numeric Guard Specification](test/01_unit/app/watch/watch_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
+| [Web Port Guard Specification](test/01_unit/app/ui/web_port_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
