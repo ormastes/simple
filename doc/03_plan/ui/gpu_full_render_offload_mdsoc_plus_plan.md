@@ -18,6 +18,12 @@ Current completion state (2026-06-22):
   checks while the 2026-06-22 runaway `bin/simple src/app/repl/main.spl`
   process tree is present. Use targeted file/layout guards and existing
   evidence first, then run one focused scenario per acceptance criterion.
+- Windows host setup has Vulkan runtime/driver proof, Chrome, and Electron
+  available, but Vulkan SDK developer tools are not yet installed on `PATH`.
+  The `winget install --id KhronosGroup.VulkanSDK` attempt downloaded and
+  verified the installer, then reached the elevated installer prompt and was
+  canceled by the user. Do not claim SDK readiness until `glslangValidator`,
+  `spirv-as`, and any required shader compiler are visible to the check shell.
 
 ## Goal
 
@@ -93,6 +99,8 @@ External systems are references, not replacement architectures:
 | Artifact | Current path | State |
 | --- | --- | --- |
 | SPipe state | `.spipe/gpu-full-render-offload/state.md` | Active acceptance criteria |
+| Windows setup guide | `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md` | Host setup commands, current Windows evidence, and browser Vulkan proof rules |
+| Setup wrapper | `scripts/setup/setup-gui-web-2d-vulkan-env.shs` | Canonical readiness and focused browser-backing wrapper |
 | Architecture anchor | `doc/04_architecture/ui/simple_gui_stack.md` | Existing stack anchor; needs GPU full-render delta |
 | Drawing architecture | `doc/04_architecture/ui/drawing_stack.md`, `doc/04_architecture/ui/engine_2d.md` | Existing anchors; need DisplayGraphIR ownership alignment |
 | Renderer parity architecture | `doc/04_architecture/ui/production_gui_web_renderer_parity_hardening.md` | Existing parity anchor |
@@ -103,13 +111,35 @@ External systems are references, not replacement architectures:
 | Evidence reports | `doc/09_report/vulkan_engine2d_readback_2026-06-16.md`, `doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-21.md`, `doc/09_report/electron_vulkan_web_parity.md` | Existing reports; must not be interpreted as full offload completion without command-family parity |
 | Process guide | `doc/07_guide/infra/testing/benchmarking.md`, GPU/GUI/Web guide notes as updated by the touched wrapper | Needs review when wrappers change |
 
+## Windows Setup Snapshot
+
+Observed on 2026-06-22:
+
+- `vulkaninfo --summary` passes with Vulkan Instance Version `1.3.301`.
+- Physical devices report Intel UHD Graphics 770 through the Intel proprietary
+  Windows driver, API version `1.3.284`.
+- Chrome is installed at
+  `C:\Program Files\Google\Chrome\Application\chrome.exe`, version
+  `149.0.7827.155`.
+- Global Electron is installed, version `v32.1.2`.
+- DirectX tooling is present through Windows `dxdiag`; DirectX availability is
+  not Vulkan proof and does not prove Electron/Chrome are Vulkan-backed.
+- `glslangValidator`, `spirv-as`, and `dxc` were not found on `PATH`.
+- `winget search --name Vulkan` lists `KhronosGroup.VulkanRT` and
+  `KhronosGroup.VulkanSDK` version `1.4.350.0`.
+- `winget install --id KhronosGroup.VulkanSDK --accept-source-agreements
+  --accept-package-agreements --silent` downloaded and hash-verified the
+  installer, then required an administrator prompt and was canceled. Treat this
+  as `sdk-tools-missing`, not as installed.
+
 ## Crash-Safe Verification Rules
 
 - Run each acceptance criterion check at most once per session.
 - Do not start broad `bin/simple test`, full-tree status, or repeated process
   probes while the runaway REPL process tree remains.
 - Never treat fallback screenshots, CPU mirror readback, or Chromium
-  `angle=vulkan` unavailable logs as Vulkan-backed browser proof.
+  `angle=vulkan` unavailable logs as Vulkan-backed browser proof. DirectX
+  availability is also not browser Vulkan proof.
 - Strict backend requests must fail closed when the requested backend is
   unavailable; silent CPU fallback is a failing result.
 - Generated spec layout guard must report zero executable specs under
@@ -121,6 +151,12 @@ External systems are references, not replacement architectures:
 
 - A dedicated architecture delta for `DisplayGraphIR` ownership under
   `doc/04_architecture/ui/` is still needed.
+- Vulkan runtime is installed and discoverable on the current Windows host, but
+  the Vulkan SDK developer tools still need an elevated install or PATH refresh.
+- Chrome and Electron are installed, but neither has a passing browser-backing
+  Vulkan proof yet; use `scripts/setup/setup-gui-web-2d-vulkan-env.shs
+  --browser-backing` and read
+  `gui_web_2d_vulkan_browser_backing_status`, reason, and mode.
 - A detail design checklist tying `DrawIrComposition -> DisplayGraphIR ->
   backend` to GUI, Web, and Simple 2D is still needed.
 - Existing specs cover related renderer parity and backend probe behavior, but

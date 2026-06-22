@@ -60,11 +60,20 @@ RenderDoc+Chrome HTML/CSS capture, plus
 `scripts/tool/renderdoc-evidence.shs capture-electron-html` for bundled
 Electron Chromium HTML/CSS capture. Tests should route through
 `test/helpers/renderdoc_capture_helper.shs` or the compatibility wrappers.
-For Mac GUI/web/2D RenderDoc+Vulkan work, use
+For GUI/web/2D RenderDoc+Vulkan work, use
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check` for readiness,
-`--run` for direct Electron/Chrome/Simple probes, and `--renderdoc-simple` for
-the supported macOS Simple RenderDoc debug path on a prepared RenderDoc host.
-Use all-lane `--renderdoc` only for cross-surface evidence collection.
+`--browser-backing` for focused direct Electron Chromium backing proof, `--run`
+for direct Electron/Chrome/Simple probes, and `--renderdoc-simple` for the
+supported macOS Simple RenderDoc debug path on a prepared RenderDoc host. Use
+all-lane `--renderdoc` only for cross-surface evidence collection.
+On Windows, first read `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`.
+`vulkaninfo --summary` plus Chrome/Electron installation proves host readiness
+only; it does not prove Chrome or Electron are Vulkan-backed. The Vulkan SDK
+installer may require administrator elevation, and SDK readiness requires a
+fresh shell where `glslangValidator`, `spirv-as`, and any required shader
+compiler such as `dxc` resolve. If `winget install --id
+KhronosGroup.VulkanSDK` reaches an elevation prompt and is canceled, record
+`sdk-tools-missing` and do not claim SDK setup complete.
 Install/refresh `vulkan-tools`, `vulkan-loader`,
 `vulkan-headers`, `molten-vk`, `spirv-tools`, and `glslang`; prove MoltenVK
 with `vulkaninfo --summary`; then require Simple Vulkan/Engine2D evidence,

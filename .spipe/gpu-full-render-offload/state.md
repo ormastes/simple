@@ -16,6 +16,7 @@ Complete the GPU Full Render Offload MDSOC+ plan into an actionable SPipe lane w
 - AC-4: The plan includes crash-safe verification rules that prevent repeated runaway checks, broad dirty-worktree commits, and silent fallback evidence.
 - AC-5: Existing or new SPipe/SSpec evidence for GUI, Web, and Simple 2D GPU boundary behavior is linked from the plan, or missing evidence is explicitly listed as required work.
 - AC-6: Before handoff, targeted guards confirm no executable `*_spec.spl` files live under `doc/06_spec`, and any verification command run in this session is not repeated after a pass.
+- AC-7: Windows Vulkan setup state records runtime, SDK-tool, Chrome, Electron, and DirectX readiness separately, and does not treat browser install or DirectX availability as Vulkan-backed browser proof.
 
 ## Scope Exclusions
 - Completing every Vulkan, Metal, D3D, WebGPU, CUDA, HIP, SYCL, and OpenCL backend implementation is outside this dev-refinement step.
@@ -45,3 +46,7 @@ dev-done
 - dev: Verified the new plan sections with a scoped `Select-String` check.
   Did not rerun the previously passing `doc/06_spec` layout guard in this
   session.
+- dev: Recorded Windows setup evidence: `vulkaninfo --summary` passes,
+  Chrome and Electron are installed, `glslangValidator`, `spirv-as`, and `dxc`
+  are missing from `PATH`, and the Vulkan SDK winget installer was canceled at
+  the administrator prompt.

@@ -163,13 +163,19 @@ Record `.rdc` path, `RDOC` magic validation, capture log path, and any
 host-unavailable reason as artifact captures. Screenshot-only evidence is not
 Vulkan IO-level RenderDoc evidence.
 
-For Mac GUI/web/2D Vulkan comparison, keep the top-level scope explicitly
-macOS until Windows and Linux runbooks are added. Use
+For GUI/web/2D Vulkan comparison, use
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check` for readiness,
-`--run` for direct Electron/Chrome/Simple launch probes, and
+`--browser-backing` for focused direct Electron Chromium backing proof, `--run`
+for direct Electron/Chrome/Simple launch probes, and
 `--renderdoc-simple` for the supported macOS Simple RenderDoc debug path on a
 prepared RenderDoc host. Use all-lane `--renderdoc` only for cross-surface
-evidence collection. The Mac setup starts with Homebrew Vulkan tooling
+evidence collection. For Windows setup, read
+`doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`: `vulkaninfo --summary`,
+DirectX availability, Chrome installation, and Electron installation are host
+readiness only, not browser Vulkan proof. Vulkan SDK readiness requires a fresh
+shell where `glslangValidator`, `spirv-as`, and any required shader compiler
+such as `dxc` resolve; if the SDK installer is canceled at an administrator
+prompt, record `sdk-tools-missing`. The Mac setup starts with Homebrew Vulkan tooling
 (`vulkan-tools`, `vulkan-loader`, `vulkan-headers`, `molten-vk`,
 `spirv-tools`, `glslang`) and `vulkaninfo --summary` showing the Apple GPU
 through MoltenVK. That only proves host readiness. Completion evidence still
@@ -226,8 +232,8 @@ When the claim is that all GUI items are RenderDoc-tested, run
 `gui_widget_renderdoc_goal_blocked_gate_count=0`. Normal non-Mac runs may report
 `incomplete`, but release or completion claims must use `--strict` with real
 Simple Vulkan Engine2D and Electron Chromium/Vulkan `.rdc` evidence.
-Defer Windows and Linux claims until platform-specific runbooks validate the
-same evidence keys and RDOC gate contract.
+Defer Linux claims until platform-specific runbooks validate the same evidence
+keys and RDOC gate contract.
 
 Prefer the strongest available oracle for the surface:
 
