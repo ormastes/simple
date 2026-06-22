@@ -154,14 +154,44 @@ perf script. Do not rewrite Simple features in C/Rust to claim C-level speed; if
 parity is blocked by runtime/compiler behavior, record a measured blocker under
 `doc/08_tracking/bug/`.
 
-Minimize direct `rt_*` use in SPipe lanes. App, GUI, web, 2D, MCP/LSP, and
-benchmark code should use Simple facades or a build-local alias entrypoint
-instead of new raw runtime calls, env/CLI shortcuts, or direct backend field
-poking. If performance or correctness is blocked by generated native code, fix
-the Simple compiler/codegen/runtime owner path with the smallest reproducer and
-gate; only edit `src/runtime/**` when the lane is explicitly runtime-owned or
-the bug is proven there. Do not hide a compiler/runtime bug by normalizing an
-`rt_*` workaround in feature code.
+Minimize runtime coupling first in SPipe lanes. App, GUI, web, 2D, MCP/LSP, and
+benchmark code should use Simple facades instead of new raw runtime calls,
+env/CLI shortcuts, direct backend field poking, or tool-local runtime aliases.
+A build-local alias entrypoint is a last-resort compatibility shim, not the
+default path for new capability. If performance or correctness is blocked by
+generated native code, fix the Simple compiler/codegen/runtime owner path with
+the smallest reproducer and gate; only edit `src/runtime/**` when the lane is
+explicitly runtime-owned or the bug is proven there. Do not hide a
+compiler/runtime bug by normalizing an `rt_*` workaround in feature code.
+
+Before adding any new `rt_*` import, extern, wrapper, alias, runtime-backed
+fixture bypass, or direct backend field access outside `src/runtime/**`, stop
+and record the decision in the lane state:
+
+- `runtime_need`: the exact missing capability or measured bottleneck.
+- `facade_checked`: the existing `std.*`, `app.*`, owner-module, or build-local
+  alias facade checked first.
+- `chosen_path`: `reuse-facade`, `add-smallest-owner-facade`,
+  `fix-codegen-runtime-owner`, or `runtime-owned-change`.
+- `rejected_shortcuts`: raw aliases, fixture-only branches, backend pokes, or
+  generated-code workarounds deliberately not used.
+
+The default chosen path is `reuse-facade`; the default answer to a new `rt_*`
+shortcut is "do not add it". Add the smallest missing facade in the owner module
+or improve codegen/runtime once at the owner boundary. Pixel/rendering evidence
+tools may keep bounded local fixture painters, but must not grow new raw runtime
+shortcuts to paper over renderer, compiler, or backend bugs. Any attempt to
+solve an SPipe failure by adding `rt_*` plumbing must also add or cite a focused
+gate proving the facade/codegen/runtime boundary, not just the feature output.
+
+Before handoff, run `sh scripts/audit/direct-env-runtime-guard.shs --working`
+for runtime-adjacent lanes and treat any new raw env/process/runtime access
+outside owner modules as a fix-before-done issue.
+
+Before touching runtime-adjacent code in an existing lane, read that lane's
+recorded `rejected_shortcuts` first; do not retry a rejected `rt_*`, fixture
+bypass, backend-poke, or generated-code workaround unless new evidence changes
+the decision.
 
 For runtime-vs-pure-Simple algorithm work, use the shared dual-backend mode
 names consistently in specs, docs, and code:

@@ -106,6 +106,31 @@ in a spec. Spec/test files live outside the privileged runtime tiers
 (`src/lib`, `src/runtime`, `src/compiler`), so a raw `rt_*` extern now trips the
 `raw_rt_access` lint (warning). Route through a facade, e.g.
 `use app.io.mod.{file_read_text, file_write}`.
+The same rule applies to evidence tools and fixture helpers: minimize runtime
+coupling first. Prefer an existing facade or add the smallest owner-module
+facade instead of adding tool-local `rt_*` aliases, runtime-backed fixture
+bypasses, direct backend field poking, or env/process shortcuts. A build-local
+alias is a last-resort compatibility shim, not the default path for new
+capability. Only runtime-owned lanes, or lanes with a proven runtime/codegen bug
+and a focused gate, should edit the runtime boundary.
+
+Before adding any new `rt_*` import, extern, wrapper, alias, runtime-backed
+fixture bypass, or direct backend field access outside `src/runtime/**`, record
+the decision in the lane state with `runtime_need`, `facade_checked`,
+`chosen_path`, and `rejected_shortcuts`. The default `chosen_path` is
+`reuse-facade`; if that is not enough, use `add-smallest-owner-facade` or
+`fix-codegen-runtime-owner` before `runtime-owned-change`. Rejected runtime
+shortcuts, especially fixture-only branches that hide real pixel mismatches,
+must stay recorded so later agents do not repeat them.
+
+Before touching runtime-adjacent code in an existing lane, read that lane's
+recorded `rejected_shortcuts` first; do not retry a rejected `rt_*`, fixture
+bypass, backend-poke, or generated-code workaround unless new evidence changes
+the decision.
+
+Before handoff, run `sh scripts/audit/direct-env-runtime-guard.shs --working`
+for runtime-adjacent lanes and treat any new raw env/process/runtime access
+outside owner modules as a fix-before-done issue.
 
 For UI layout, border, color, style, or text-bound parity, prefer structured
 Protocol-v2 Draw IR evidence with
