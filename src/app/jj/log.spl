@@ -3,7 +3,7 @@
 # Wraps `jj log` and parses output into structured data.
 # Usage: use app.jj.log.{jj_log, LogEntry, LogResult}
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+use app.io.process_ops.{process_run}
 
 # A single log entry from jj log
 struct LogEntry:
@@ -39,6 +39,15 @@ struct LogResult:
             lines.push(entry.display())
         lines.join("\n")
 
+fn parse_log_limit_or_default(value: text, default_value: i64) -> i64:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return default_value
+    for ch in trimmed:
+        if ch < "0" or ch > "9":
+            return default_value
+    return trimmed.to_int()
+
 fn jj_log(limit: i64, revsets: text) -> LogResult:
     """Run jj log and return structured result"""
     var jj_args = ["--no-pager", "--color", "never", "log"]
@@ -51,7 +60,7 @@ fn jj_log(limit: i64, revsets: text) -> LogResult:
         jj_args.push("-r")
         jj_args.push(revsets)
 
-    val (stdout, stderr, code) = rt_process_run("jj", jj_args)
+    val (stdout, stderr, code) = process_run("jj", jj_args)
 
     if code != 0:
         return LogResult(
@@ -162,14 +171,14 @@ fn run_log(args: [text]) -> i64:
         val arg = args[i]
         if arg == "-n" and i + 1 < args.len():
             i = i + 1
-            limit = args[i].to_int()
+            limit = parse_log_limit_or_default(args[i], limit)
         elif arg.starts_with("-n"):
-            limit = arg[2:].to_int()
+            limit = parse_log_limit_or_default(arg[2:], limit)
         elif arg == "-r" and i + 1 < args.len():
             i = i + 1
             revsets = args[i]
         elif arg.starts_with("--limit="):
-            limit = arg[8:].to_int()
+            limit = parse_log_limit_or_default(arg[8:], limit)
         elif arg == "--raw":
             # Raw passthrough mode
             val result = jj_log(limit, revsets)
