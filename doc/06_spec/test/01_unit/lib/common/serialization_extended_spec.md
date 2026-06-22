@@ -44,7 +44,7 @@ Extended edge-case and additional branch coverage:
 | Category | Stdlib |
 | Difficulty | 2/5 |
 | Status | Blocked — std.common.serialization has no .spl source (only empty .smf stubs). |
-| Source | `test/unit/lib/common/serialization_extended_spec.spl` |
+| Source | `test/01_unit/lib/common/serialization_extended_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
