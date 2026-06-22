@@ -1,6 +1,6 @@
 # Process Is Running Specification
 
-> 1. process wait
+> <details>
 
 <!-- sdn-diagram:id=process_is_running_spec.arch -->
 <details class="sdn-source">
@@ -27,7 +27,7 @@ process_is_running_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -40,7 +40,7 @@ process_is_running_spec -> std
 
 #### reports async-spawned child as running while alive
 
-1. process wait
+- process wait
 
 
 <details>
@@ -52,11 +52,11 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Spawn a child that sleeps for 5 seconds (long enough to check liveness)
 val pid = process_spawn_async("sleep", ["5"])
-expect(pid > 0).to_be_true()
+expect(pid > 0).to_equal(true)
 
 # Child should be running immediately after spawn
 val running = process_is_running(pid)
-expect(running).to_be_true()
+expect(running).to_equal(true)
 
 # Clean up: kill child and reap it
 process_wait(pid, 100)
@@ -75,15 +75,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Spawn a child that exits immediately
 val pid = process_spawn_async("true", [])
-expect(pid > 0).to_be_true()
+expect(pid > 0).to_equal(true)
 
 # Wait for the child to finish
 val exit_code = process_wait(pid, 2000)
-expect(exit_code >= 0).to_be_true()
+expect(exit_code >= 0).to_equal(true)
 
 # After waitpid, process should not be running
 val running = process_is_running(pid)
-expect(running).to_be_false()
+expect(running).to_equal(false)
 ```
 
 </details>
@@ -98,7 +98,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val running = process_is_running(0)
-expect(running).to_be_false()
+expect(running).to_equal(false)
 ```
 
 </details>
@@ -113,7 +113,53 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val running = process_is_running(-1)
-expect(running).to_be_false()
+expect(running).to_equal(false)
+```
+
+</details>
+
+#### returns false for invalid alive pids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(process_is_alive(-1)).to_equal(false)
+expect(process_is_alive(0)).to_equal(false)
+```
+
+</details>
+
+#### refuses to kill invalid or reserved pids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(process_kill(-1)).to_equal(false)
+expect(process_kill(0)).to_equal(false)
+expect(process_kill(1)).to_equal(false)
+```
+
+</details>
+
+#### returns error for invalid wait pids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(process_wait(-1, 100)).to_equal(-1)
+expect(process_wait(0, 100)).to_equal(-1)
 ```
 
 </details>
@@ -125,7 +171,7 @@ expect(running).to_be_false()
 | Category | Runtime |
 | Status | Active |
 | Source | `test/01_unit/runtime/process_is_running_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-22 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -137,8 +183,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
