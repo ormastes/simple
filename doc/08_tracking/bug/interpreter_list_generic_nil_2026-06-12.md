@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-12
 **Severity:** P2 (blocks interpreter-mode specs for all `core.collections.List`-backed modules)
-**Status:** Open
+**Status:** Open compiler bug; owned src usage hardened 2026-06-22
 
 ## Symptom
 
@@ -44,3 +44,8 @@ or bare local `List` values.
   2026-04-25).
 - Fix belongs in the interpreter generic-class instantiation path; pure-Simple
   first if the constructor lowering lives in `src/compiler`, seed otherwise.
+- 2026-06-22: owned `src/` uses of the crashing direct constructor spelling
+  `List<T>()` were rewritten to the working `List<T>.new()` form, covering the
+  compositor modules called out above. Guarded by
+  `test/01_unit/lib/core/list_constructor_hardening_spec.spl`. Root interpreter
+  constructor lowering remains open.
