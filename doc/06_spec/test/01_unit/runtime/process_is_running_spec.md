@@ -27,7 +27,7 @@ process_is_running_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -134,6 +134,21 @@ expect(process_kill(1)).to_equal(false)
 
 </details>
 
+#### returns error for invalid wait pids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(process_wait(-1, 100)).to_equal(-1)
+expect(process_wait(0, 100)).to_equal(-1)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -153,8 +168,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
