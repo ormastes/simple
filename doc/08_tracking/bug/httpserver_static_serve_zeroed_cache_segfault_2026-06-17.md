@@ -194,7 +194,25 @@ Also note the AOT build is degraded (fails to compile `h2_hpack.spl` /
 - Bare→Option payload loss in `set_static_handler` (no effect; reverted).
 - Threading (fixture `worker_count=1` runs inline, no thread spawn).
 
-## Secondary bug (separate)
-`static_file.spl:716` `_static_text_to_bytes` calls `s.byte_at(i)` on `text`, but
-`byte_at` is not a `text` method (only standalone `byte_at([i64],i64)` in
-`cbor/types.spl`). Reached only via `StaticFileHandler.handle` + `Accept-Encoding`.
+## Secondary bug (separate) - FIXED 2026-06-22
+`static_file.spl` `_static_text_to_bytes` and `compression.spl`
+`_compression_text_to_bytes` called `s.byte_at(i)` on `text`, but `byte_at` is
+not a `text` method. The broken path is reached by `StaticFileHandler.handle`
+when `Accept-Encoding` makes the server try to compress a text response.
+
+The same session also found the compression cache was effectively non-persistent:
+array `push` results in `StaticCompressionCache.put`, `get`, and `evict_oldest`
+were not assigned back, and the free `serve_compressed_or_plain(..., cache)`
+received the cache by value. `StaticFileHandler.handle` now mutates its owned
+cache through `StaticCompressionCache.serve_compressed_or_plain(...)`.
+
+Fix landed in `81a59b953177` (`fix: persist static compression cache hits`):
+- replaced the bad text loops with `std.crypto.types.text_to_bytes`;
+- assigned rebuilt cache arrays back after `push`;
+- added the mutating cache method and routed the handler through it;
+- refreshed static compression and content-encoding specs/docs.
+
+Verified with focused `bin/simple check`, the static compression cache spec, the
+static handler compression spec, the HTTP content-encoding integration spec, the
+optimizer pass on touched files, direct-env runtime guard (`--working` and
+`--staged`), and `doc/06_spec` layout guard (`0` executable specs).
