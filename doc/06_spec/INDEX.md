@@ -4,10 +4,10 @@
 
 ## Quick Stats
 
-- **Total Features:** 26
-- **Complete Documentation:** 26 (100%)
+- **Total Features:** 27
+- **Complete Documentation:** 27 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 260
+- **Total Lines:** 270
 
 ---
 
@@ -41,10 +41,11 @@
 
 ---
 
-## Standard Library (3 features)
+## Standard Library (4 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
+| [Lsp Query Numeric Guard Specification](test/01_unit/lib/nogc_sync_mut/lsp/lsp_query_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Range Numeric Guard Specification](test/01_unit/lib/http_server/range_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Range Numeric Guard Specification](test/01_unit/lib/nogc_async_mut/http_server/range_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Range Numeric Guard Specification](test/01_unit/lib/nogc_sync_mut/http_server/range_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
