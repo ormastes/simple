@@ -487,9 +487,15 @@ async function captureViaDevTools(fileUrl) {
       awaitPromise: true,
     });
     const geometry = geomEval.result ? geomEval.result.value : null;
+    let gpuInfo = null;
+    try {
+      gpuInfo = await cdpSend(conn, id++, "SystemInfo.getInfo");
+    } catch (err) {
+      gpuInfo = { error: err && err.message ? err.message : "system-info-unavailable" };
+    }
     const shot = await cdpSend(conn, id++, "Page.captureScreenshot", { format: "png", fromSurface: true });
     const elapsedUs = Number((process.hrtime.bigint() - start) / 1000n);
-    return { png: Buffer.from(shot.data || "", "base64"), geometry, elapsedUs };
+    return { png: Buffer.from(shot.data || "", "base64"), geometry, gpuInfo, elapsedUs };
   } finally {
     if (conn) conn.socket.destroy();
     child.kill();
@@ -506,11 +512,13 @@ const pngPath = path.join(tmpDir, "capture.png");
 const fileUrl = `file://${path.resolve(htmlPath)}`;
 let pngBuffer = null;
 let geometry = null;
+let gpuInfo = null;
 let elapsedUs = 0;
 if (geometryOutputPath) {
   captureViaDevTools(fileUrl).then(capture => {
     pngBuffer = capture.png;
     geometry = capture.geometry;
+    gpuInfo = capture.gpuInfo;
     elapsedUs = capture.elapsedUs;
     finish();
   }).catch(err => fail(`chrome-devtools-capture-failed:${err.message || "error"}`));
@@ -587,6 +595,7 @@ const proof = {
   geometry_written: Boolean(geometryOutputPath && geometry),
   blur_or_tolerance_used: false,
   chrome_bin: chromeBin,
+  gpu_info: gpuInfo,
 };
 if (proofPath) fs.writeFileSync(proofPath, JSON.stringify(proof));
 console.log(`chrome_capture_status=pass`);

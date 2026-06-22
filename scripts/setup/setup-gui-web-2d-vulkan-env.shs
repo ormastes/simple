@@ -331,6 +331,7 @@ if [ "$MODE" = "--run" ] || [ "$MODE" = "--renderdoc-simple" ] || [ "$MODE" = "-
     ELECTRON_OUT="$BUILD_DIR/electron.out"
     ELECTRON_LOG="$BUILD_DIR/electron.log"
     ELECTRON_ARGB="$BUILD_DIR/electron_argb.json"
+    ELECTRON_ARGB_PROOF="$BUILD_DIR/electron_argb_proof.json"
     if [ "$MODE" = "--renderdoc-simple" ]; then
         append_kv "gui_web_2d_vulkan_electron_exit_code" ""
         append_kv "gui_web_2d_vulkan_electron_vulkan_status" "not-run"
@@ -340,6 +341,7 @@ if [ "$MODE" = "--run" ] || [ "$MODE" = "--renderdoc-simple" ] || [ "$MODE" = "-
         ELECTRON_CAPTURE_WIDTH="$WIDTH" \
         ELECTRON_CAPTURE_HEIGHT="$HEIGHT" \
         ELECTRON_CAPTURE_OUTPUT="$ELECTRON_ARGB" \
+        ELECTRON_CAPTURE_PROOF_PATH="$ELECTRON_ARGB_PROOF" \
         ELECTRON_CAPTURE_SETTLE_MS="${RDOC_ELECTRON_SETTLE_MS:-1000}" \
         ELECTRON_ENABLE_LOGGING=1 \
             run_electron_bound "$electron_bin" $(rdoc_electron_vulkan_flags) "$ROOT_DIR/tools/electron-live-bitmap/capture_html_argb.js" \
@@ -348,6 +350,7 @@ if [ "$MODE" = "--run" ] || [ "$MODE" = "--renderdoc-simple" ] || [ "$MODE" = "-
         append_kv "gui_web_2d_vulkan_electron_exit_code" "$electron_code"
         append_kv "gui_web_2d_vulkan_electron_stdout" "$ELECTRON_OUT"
         append_kv "gui_web_2d_vulkan_electron_log" "$ELECTRON_LOG"
+        append_kv "gui_web_2d_vulkan_electron_argb_proof" "$ELECTRON_ARGB_PROOF"
         parse_argb "$ELECTRON_ARGB" "gui_web_2d_vulkan_electron"
         if grep -E 'Requested GL implementation .*angle=vulkan.* not found|Exiting GPU process due to errors during initialization' "$ELECTRON_LOG" >/dev/null 2>&1; then
             append_kv "gui_web_2d_vulkan_electron_vulkan_status" "fail"
@@ -436,15 +439,40 @@ if [ "$MODE" = "--run" ] || [ "$MODE" = "--renderdoc-simple" ] || [ "$MODE" = "-
         append_kv "gui_web_2d_vulkan_chrome_argb_path" "$CHROME_ARGB"
     fi
 
-    electron_vulkan_status="$(sed -n 's/^gui_web_2d_vulkan_electron_vulkan_status=//p' "$EVIDENCE_ENV" | tail -n 1)"
-    chrome_vulkan_status="$(sed -n 's/^gui_web_2d_vulkan_chrome_vulkan_status=//p' "$EVIDENCE_ENV" | tail -n 1)"
-    append_kv "gui_web_2d_vulkan_browser_backing_mode" "requested-angle-vulkan-log-check"
-    if [ "$electron_vulkan_status" = "pass" ] && [ "$chrome_vulkan_status" = "pass" ]; then
-        append_kv "gui_web_2d_vulkan_browser_backing_status" "pass"
-        append_kv "gui_web_2d_vulkan_browser_backing_reason" "electron-and-chrome-vulkan-backed"
+    if have node; then
+        node - "$ELECTRON_ARGB" "$CHROME_ARGB_PROOF" >>"$EVIDENCE_ENV" <<'NODE'
+const fs = require("fs");
+const electronPath = process.argv[2] || "";
+const chromeProofPath = process.argv[3] || "";
+function emit(k, v) { console.log(`${k}=${v === undefined || v === null ? "" : v}`); }
+function readJson(path) {
+  try { return path && fs.existsSync(path) ? JSON.parse(fs.readFileSync(path, "utf8")) : null; }
+  catch (_err) { return null; }
+}
+const electron = readJson(electronPath);
+const chrome = readJson(chromeProofPath);
+const electronVulkan = electron && electron.gpuFeatureStatus ? String(electron.gpuFeatureStatus.vulkan || "") : "";
+const electronHardware = Boolean(electron && electron.gpuInfo && electron.gpuInfo.auxAttributes && electron.gpuInfo.auxAttributes.hardwareSupportsVulkan);
+const electronStatus = /enabled/i.test(electronVulkan) && electronHardware ? "pass" : "fail";
+const electronReason = electronStatus === "pass" ? "electron-vulkan-backed" : `electron-vulkan-${electronVulkan || "unknown"}`;
+const chromeGpuInfo = chrome ? chrome.gpu_info : null;
+const chromeText = JSON.stringify(chromeGpuInfo || {});
+const chromeStatus = /vulkan/i.test(chromeText) && !/swiftshader|disabled_software|unavailable/i.test(chromeText) ? "pass" : "fail";
+const chromeReason = chromeStatus === "pass" ? "chrome-vulkan-backed" : (chromeGpuInfo ? "chrome-vulkan-not-proven" : "chrome-gpu-info-missing");
+emit("gui_web_2d_vulkan_browser_backing_mode", "gpu-feature-status");
+emit("gui_web_2d_vulkan_electron_browser_backing_status", electronStatus);
+emit("gui_web_2d_vulkan_electron_browser_backing_reason", electronReason);
+emit("gui_web_2d_vulkan_electron_browser_backing_vulkan", electronVulkan);
+emit("gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan", electronHardware ? "true" : "false");
+emit("gui_web_2d_vulkan_chrome_browser_backing_status", chromeStatus);
+emit("gui_web_2d_vulkan_chrome_browser_backing_reason", chromeReason);
+emit("gui_web_2d_vulkan_browser_backing_status", electronStatus === "pass" && chromeStatus === "pass" ? "pass" : "fail");
+emit("gui_web_2d_vulkan_browser_backing_reason", electronStatus === "pass" && chromeStatus === "pass" ? "electron-and-chrome-vulkan-backed" : `${electronReason};${chromeReason}`);
+NODE
     else
+        append_kv "gui_web_2d_vulkan_browser_backing_mode" "gpu-feature-status"
         append_kv "gui_web_2d_vulkan_browser_backing_status" "fail"
-        append_kv "gui_web_2d_vulkan_browser_backing_reason" "browser-vulkan-backing-not-proven"
+        append_kv "gui_web_2d_vulkan_browser_backing_reason" "missing-node"
     fi
 
     SIMPLE_OUT="$BUILD_DIR/simple-vulkan-readback.out"

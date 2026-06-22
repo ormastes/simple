@@ -11,12 +11,20 @@
 gui_web_2d_vulkan_loader_status=present
 gui_web_2d_vulkan_device=llvmpipe (LLVM 20.1.2, 256 bits)
 gui_web_2d_vulkan_electron_argb_status=pass
+gui_web_2d_vulkan_electron_argb_path=build/gui-web-2d-vulkan-env/electron_argb.json
 gui_web_2d_vulkan_chrome_argb_status=pass
+gui_web_2d_vulkan_chrome_argb_proof=build/gui-web-2d-vulkan-env/chrome_argb_proof.json
 gui_web_2d_vulkan_simple_status=pass
 gui_web_2d_vulkan_simple_backend_name=vulkan
-gui_web_2d_vulkan_browser_backing_mode=requested-angle-vulkan-log-check
+gui_web_2d_vulkan_browser_backing_mode=gpu-feature-status
+gui_web_2d_vulkan_electron_browser_backing_status=fail
+gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-disabled_off
+gui_web_2d_vulkan_electron_browser_backing_vulkan=disabled_off
+gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=false
+gui_web_2d_vulkan_chrome_browser_backing_status=fail
+gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-gpu-info-missing
 gui_web_2d_vulkan_browser_backing_status=fail
-gui_web_2d_vulkan_browser_backing_reason=browser-vulkan-backing-not-proven
+gui_web_2d_vulkan_browser_backing_reason=electron-vulkan-disabled_off;chrome-gpu-info-missing
 gui_web_2d_vulkan_simple_argb_status=pass
 gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=403594
 gui_web_2d_vulkan_electron_chrome_diff_status=pass
@@ -70,6 +78,6 @@ geometry fills, transparent image witnesses, and browser-stable media/control
 geometry patches, and squared header button corners. The strict aggregate now
 passes with zero Electron/Chrome, Electron/Simple, and Chrome/Simple ARGB
 mismatches. Browser backing remains a separate blocker:
-`gui_web_2d_vulkan_browser_backing_status=fail` because the current Electron and
-Chrome evidence only proves requested `--use-angle=vulkan` was not rejected by
-the logs, not that the browser compositor was actually Vulkan-backed.
+Electron reports `vulkan=disabled_off` and `hardwareSupportsVulkan=false`, while
+the current Chrome proof does not include GPU info. The backing claim remains
+fail-closed.

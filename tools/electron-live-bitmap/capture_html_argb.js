@@ -28,6 +28,7 @@ const auditSelectors = (process.env.ELECTRON_CAPTURE_AUDIT_SELECTORS || "")
   .filter(Boolean);
 const auditOutputPath = process.env.ELECTRON_CAPTURE_AUDIT_OUTPUT || "";
 const geometryOutputPath = process.env.ELECTRON_CAPTURE_GEOMETRY_OUTPUT || "";
+const proofPath = process.env.ELECTRON_CAPTURE_PROOF_PATH || "";
 const contrastMinX100 = Number(process.env.ELECTRON_CAPTURE_CONTRAST_MIN_X100 || 450);
 const touchMinPx = Number(process.env.ELECTRON_CAPTURE_TOUCH_MIN_PX || 44);
 const failOnAudit = /^(1|true|yes)$/i.test(process.env.ELECTRON_CAPTURE_FAIL_ON_AUDIT || "");
@@ -466,6 +467,13 @@ async function main() {
   }
 
   await app.whenReady();
+  const gpuFeatureStatus = app.getGPUFeatureStatus();
+  let gpuInfo = null;
+  try {
+    gpuInfo = await app.getGPUInfo("complete");
+  } catch (err) {
+    gpuInfo = { error: err && err.message ? err.message : "gpu-info-unavailable" };
+  }
   const win = new BrowserWindow({
     show: false,
     useContentSize: true,
@@ -499,6 +507,8 @@ async function main() {
     nativeWidth: result.nativeWidth,
     nativeHeight: result.nativeHeight,
     downsampled: result.downsampled,
+    gpuFeatureStatus,
+    gpuInfo,
     pixels: Array.from(result.pixels, v => v >>> 0),
   };
   if (audit) payload.audit = audit;
@@ -513,6 +523,23 @@ async function main() {
   if (geometry && geometryOutputPath) {
     fs.mkdirSync(path.dirname(geometryOutputPath), { recursive: true });
     fs.writeFileSync(geometryOutputPath, JSON.stringify(geometry, null, 2));
+  }
+  if (proofPath) {
+    fs.mkdirSync(path.dirname(proofPath), { recursive: true });
+    fs.writeFileSync(proofPath, JSON.stringify({
+      status: "pass",
+      reason: "pass",
+      width,
+      height,
+      native_width: result.nativeWidth,
+      native_height: result.nativeHeight,
+      downsampled: result.downsampled,
+      captured_argb_written: Boolean(outputPath),
+      geometry_written: Boolean(geometryOutputPath && geometry),
+      blur_or_tolerance_used: false,
+      gpu_feature_status: gpuFeatureStatus,
+      gpu_info: gpuInfo,
+    }));
   }
   console.log("captured=" + outputPath);
   console.log("size=" + width + "x" + height);
