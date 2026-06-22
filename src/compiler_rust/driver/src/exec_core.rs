@@ -620,12 +620,19 @@ impl ExecCore {
                 }
                 if self.execution_mode.is_jit() {
                     // Try JIT first, fall back to interpreter on failure
-                    match self.run_file_jit(path) {
-                        Ok(exit_code) => Ok(exit_code),
-                        Err(jit_err) => {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_file_jit(path))) {
+                        Ok(Ok(exit_code)) => Ok(exit_code),
+                        Ok(Err(jit_err)) => {
                             eprintln!(
                                 "[INFO] JIT compilation failed, falling back to interpreter: {}",
                                 jit_err
+                            );
+                            self.run_file_interpreted_with_args(path, args)
+                        }
+                        Err(payload) => {
+                            eprintln!(
+                                "[INFO] JIT panicked, falling back to interpreter: {}",
+                                panic_payload_to_string(payload.as_ref())
                             );
                             self.run_file_interpreted_with_args(path, args)
                         }
@@ -840,11 +847,21 @@ fn source_uses_jit_unsafe_graphics_runtime(path: &Path) -> bool {
     source.contains("window_winit") || source.contains("gpu.engine2d")
 }
 
+fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "non-string panic payload".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        should_force_interpreter_for_source, should_prefer_interpreter_for_source, source_uses_cli_args,
-        source_uses_jit_unsafe_graphics_runtime,
+        panic_payload_to_string, should_force_interpreter_for_source, should_prefer_interpreter_for_source,
+        source_uses_cli_args, source_uses_jit_unsafe_graphics_runtime,
     };
     use std::fs;
     use std::path::Path;
@@ -922,6 +939,12 @@ mod tests {
 
         assert!(source_uses_jit_unsafe_graphics_runtime(&script));
         assert!(should_prefer_interpreter_for_source(&script, "spl"));
+    }
+
+    #[test]
+    fn panic_payload_formatter_keeps_jit_fallback_message_readable() {
+        let payload = std::panic::catch_unwind(|| panic!("rt_winit_event_loop_new")).unwrap_err();
+        assert_eq!(panic_payload_to_string(payload.as_ref()), "rt_winit_event_loop_new");
     }
 
     /// B3 for-in regression: the generator-detection helper correctly identifies

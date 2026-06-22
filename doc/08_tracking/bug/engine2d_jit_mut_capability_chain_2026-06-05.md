@@ -34,6 +34,10 @@ runtime (`window_winit` or `gpu.engine2d`). This keeps plain
 `rt_winit_event_loop_new` linker panic. Explicit `SIMPLE_EXECUTION_MODE` still
 wins for users who intentionally force a mode.
 
+Follow-up hardening: the driver now wraps `run_file_jit` with `catch_unwind`.
+If a JIT backend still panics instead of returning `Err`, the process falls back
+to the interpreter instead of aborting.
+
 ## Original W1006 pattern (for the eventual JIT-enablement work)
 **Severity:** Perf — pure-Simple GUI lane (engine2d CPU + web layout) runs fully
 interpreted; `draw_text`/glyph rasterization is the dominant cost, making the GUI
