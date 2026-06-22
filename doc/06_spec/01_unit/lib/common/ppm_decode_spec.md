@@ -27,7 +27,7 @@ ppm_decode_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -452,6 +452,26 @@ expect(encoded.len()).to_equal(0)
 
 </details>
 
+#### AC-1: rejects PPM dimensions too large to size safely
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var data: [u8] = []
+data = data + [80, 54, 10]                 # P6\n
+data = data + [49, 48, 48, 48, 48, 48, 10] # 100000\n
+data = data + [49, 48, 48, 48, 48, 48, 10] # 100000\n
+data = data + [50, 53, 53, 10]             # 255\n
+val result = decode_ppm_to_argb(data)
+expect(result.is_err()).to_equal(true)
+```
+
+</details>
+
 #### PpmImage struct fields
 
 #### AC-1: PpmImage width field is accessible
@@ -535,8 +555,8 @@ match result:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
