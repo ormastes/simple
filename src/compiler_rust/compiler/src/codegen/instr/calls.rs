@@ -2281,9 +2281,8 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_file_write_bytes" => Some(&[0]),
 
         // Directory operations
-        "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all" | "rt_dir_glob" | "rt_dir_walk" | "rt_set_current_dir" => {
-            Some(&[0])
-        }
+        "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all" | "rt_dir_glob" | "rt_dir_walk"
+        | "rt_set_current_dir" => Some(&[0]),
         "rt_file_find" => Some(&[0, 1]),
 
         // Async I/O driver text arguments
@@ -2377,9 +2376,7 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 
 fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static [usize], &'static [usize])> {
     match func_name {
-        "rt_process_run" | "rt_process_spawn" | "rt_process_execute" | "rt_process_run_timeout" => {
-            Some((&[0], &[1]))
-        }
+        "rt_process_run" | "rt_process_spawn" | "rt_process_execute" | "rt_process_run_timeout" => Some((&[0], &[1])),
         _ => None,
     }
 }

@@ -5,24 +5,54 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
-BUILD_DIR="${BUILD_DIR:-build/widget-showcase-4k-200fps}"
+RESOLUTION="${RESOLUTION:-4k}"
+case "$RESOLUTION" in
+    4k)
+        WIDTH=3840
+        HEIGHT=2160
+        EXPECTED_PIXELS=8294400
+        PROBE_FN=run_4k_perf_probe
+        PROBE_PREFIX=gui_showcase_4k_perf
+        STATUS_PREFIX=gui_showcase_4k_200fps
+        PASS_REASON=met-200fps
+        BELOW_REASON=below-200fps
+        : "${TARGET_FPS:=200}"
+        : "${FRAMES:=200}"
+        : "${BUILD_DIR:=build/widget-showcase-4k-200fps}"
+        ;;
+    8k)
+        WIDTH=7680
+        HEIGHT=4320
+        EXPECTED_PIXELS=33177600
+        PROBE_FN=run_8k_perf_probe
+        PROBE_PREFIX=gui_showcase_8k_perf
+        STATUS_PREFIX=gui_showcase_8k_perf
+        PASS_REASON=met-target-fps
+        BELOW_REASON=below-target-fps
+        : "${TARGET_FPS:=60}"
+        : "${FRAMES:=120}"
+        : "${BUILD_DIR:=build/widget-showcase-8k-perf}"
+        ;;
+    *)
+        echo "FAIL: unsupported RESOLUTION=$RESOLUTION (use 4k or 8k)"
+        exit 1
+        ;;
+esac
 STATUS_ENV="$BUILD_DIR/status.env"
 LOG="$BUILD_DIR/showcase.log"
 BUILD_LOG="$BUILD_DIR/native-build.log"
 NATIVE_BIN="$BUILD_DIR/widget_showcase_gui_perf"
-ALIAS_SRC="$BUILD_DIR/widget_showcase_4k_perf.spl"
+ALIAS_SRC="$BUILD_DIR/widget_showcase_${RESOLUTION}_perf.spl"
 APP="examples/06_io/ui/widget_showcase_gui.spl"
-TARGET_FPS="${TARGET_FPS:-200}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-20}"
 USE_NATIVE="${USE_NATIVE:-1}"
-FRAMES=200
 
 mkdir -p "$BUILD_DIR"
 
 if [ ! -x "$SIMPLE_BIN" ]; then
     {
-        echo "gui_showcase_4k_200fps_status=fail"
-        echo "gui_showcase_4k_200fps_reason=missing-simple-binary"
+        echo "${STATUS_PREFIX}_status=fail"
+        echo "${STATUS_PREFIX}_reason=missing-simple-binary"
     } >"$STATUS_ENV"
     echo "FAIL: $SIMPLE_BIN not executable"
     exit 1
@@ -35,20 +65,28 @@ if [ "$USE_NATIVE" = "1" ]; then
         !stop { print }
         END {
             print "fn main() -> i64:"
-            print "    run_4k_perf_probe()"
+            print "    '"$PROBE_FN"'()"
         }
     ' "$APP" >"$ALIAS_SRC"
     if ! "$SIMPLE_BIN" native-build --source src --source examples --entry "$ALIAS_SRC" --entry-closure --opt-level=aggressive --strip --output "$NATIVE_BIN" >"$BUILD_LOG" 2>&1; then
         {
-            echo "gui_showcase_4k_200fps_status=fail"
-            echo "gui_showcase_4k_200fps_reason=native-build-failed"
-            echo "gui_showcase_4k_200fps_native_build_log=$BUILD_LOG"
+            echo "${STATUS_PREFIX}_status=fail"
+            echo "${STATUS_PREFIX}_reason=native-build-failed"
+            echo "${STATUS_PREFIX}_native_build_log=$BUILD_LOG"
         } >"$STATUS_ENV"
         tail -30 "$BUILD_LOG"
         exit 1
     fi
     RUN_CMD="$NATIVE_BIN"
 else
+    if [ "$RESOLUTION" != "4k" ]; then
+        {
+            echo "${STATUS_PREFIX}_status=fail"
+            echo "${STATUS_PREFIX}_reason=native-required"
+        } >"$STATUS_ENV"
+        cat "$STATUS_ENV"
+        exit 1
+    fi
     RUN_CMD="$SIMPLE_BIN run $APP --mode=interpreter --clean"
 fi
 
@@ -57,7 +95,7 @@ set +e
 timeout "$TIMEOUT_SECS" env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_LIB=src SHOWCASE_4K_PERF=1 sh -c "$RUN_CMD" >"$LOG" 2>&1
 probe_rc=$?
 set -e
-if [ "$probe_rc" -ne 0 ] && ! grep -q '^gui_showcase_4k_perf_width=' "$LOG"; then
+if [ "$probe_rc" -ne 0 ] && ! grep -q "^${PROBE_PREFIX}_width=" "$LOG"; then
     reason=showcase-probe-failed
     if [ "$probe_rc" -eq 124 ]; then
         reason=timeout-before-200fps
@@ -65,15 +103,15 @@ if [ "$probe_rc" -ne 0 ] && ! grep -q '^gui_showcase_4k_perf_width=' "$LOG"; the
         reason=native-showcase-probe-failed
     fi
     {
-        echo "gui_showcase_4k_200fps_status=fail"
-        echo "gui_showcase_4k_200fps_reason=$reason"
-        echo "gui_showcase_4k_200fps_probe_exit_code=$probe_rc"
-        echo "gui_showcase_4k_200fps_timeout_secs=$TIMEOUT_SECS"
-        echo "gui_showcase_4k_200fps_use_native=$USE_NATIVE"
-        echo "gui_showcase_4k_200fps_native_bin=$NATIVE_BIN"
-        echo "gui_showcase_4k_200fps_alias_src=$ALIAS_SRC"
-        echo "gui_showcase_4k_200fps_native_build_log=$BUILD_LOG"
-        echo "gui_showcase_4k_200fps_log=$LOG"
+        echo "${STATUS_PREFIX}_status=fail"
+        echo "${STATUS_PREFIX}_reason=$reason"
+        echo "${STATUS_PREFIX}_probe_exit_code=$probe_rc"
+        echo "${STATUS_PREFIX}_timeout_secs=$TIMEOUT_SECS"
+        echo "${STATUS_PREFIX}_use_native=$USE_NATIVE"
+        echo "${STATUS_PREFIX}_native_bin=$NATIVE_BIN"
+        echo "${STATUS_PREFIX}_alias_src=$ALIAS_SRC"
+        echo "${STATUS_PREFIX}_native_build_log=$BUILD_LOG"
+        echo "${STATUS_PREFIX}_log=$LOG"
     } >"$STATUS_ENV"
     tail -30 "$LOG"
     exit 1
@@ -83,34 +121,34 @@ end_ns="$(date +%s%N)"
 elapsed_ns=$((end_ns - start_ns))
 fps_x1000=$((FRAMES * 1000000000000 / elapsed_ns))
 target_x1000=$((TARGET_FPS * 1000))
-width="$(sed -n 's/^gui_showcase_4k_perf_width=//p' "$LOG")"
-height="$(sed -n 's/^gui_showcase_4k_perf_height=//p' "$LOG")"
-pixels="$(sed -n 's/^gui_showcase_4k_perf_pixels=//p' "$LOG")"
-nonzero="$(sed -n 's/^gui_showcase_4k_perf_nonzero_pixels=//p' "$LOG")"
-checksum="$(sed -n 's/^gui_showcase_4k_perf_checksum=//p' "$LOG")"
-render_mode="$(sed -n 's/^gui_showcase_4k_perf_render_mode=//p' "$LOG")"
-redraw_frames="$(sed -n 's/^gui_showcase_4k_perf_redraw_frames=//p' "$LOG")"
+width="$(sed -n "s/^${PROBE_PREFIX}_width=//p" "$LOG")"
+height="$(sed -n "s/^${PROBE_PREFIX}_height=//p" "$LOG")"
+pixels="$(sed -n "s/^${PROBE_PREFIX}_pixels=//p" "$LOG")"
+nonzero="$(sed -n "s/^${PROBE_PREFIX}_nonzero_pixels=//p" "$LOG")"
+checksum="$(sed -n "s/^${PROBE_PREFIX}_checksum=//p" "$LOG")"
+render_mode="$(sed -n "s/^${PROBE_PREFIX}_render_mode=//p" "$LOG")"
+redraw_frames="$(sed -n "s/^${PROBE_PREFIX}_redraw_frames=//p" "$LOG")"
 
-if [ "$width" != "3840" ] || [ "$height" != "2160" ] || [ "$pixels" != "8294400" ] || [ "${nonzero:-0}" -le 0 ]; then
-    reason=invalid-4k-readback
-    if [ "$width" = "3840" ] && [ "$height" = "2160" ] && [ "$pixels" = "8294400" ] && [ "${nonzero:-0}" -le 0 ]; then
+if [ "$width" != "$WIDTH" ] || [ "$height" != "$HEIGHT" ] || [ "$pixels" != "$EXPECTED_PIXELS" ] || [ "${nonzero:-0}" -le 0 ]; then
+    reason=invalid-${RESOLUTION}-readback
+    if [ "$width" = "$WIDTH" ] && [ "$height" = "$HEIGHT" ] && [ "$pixels" = "$EXPECTED_PIXELS" ] && [ "${nonzero:-0}" -le 0 ]; then
         reason=readback-nonblank-unverified
     fi
     {
-        echo "gui_showcase_4k_200fps_status=fail"
-        echo "gui_showcase_4k_200fps_reason=$reason"
-        echo "gui_showcase_4k_200fps_width=${width:-}"
-        echo "gui_showcase_4k_200fps_height=${height:-}"
-        echo "gui_showcase_4k_200fps_frames=$FRAMES"
-        echo "gui_showcase_4k_200fps_elapsed_ns=$elapsed_ns"
-        echo "gui_showcase_4k_200fps_fps_x1000=$fps_x1000"
-        echo "gui_showcase_4k_200fps_target_fps=$TARGET_FPS"
-        echo "gui_showcase_4k_200fps_pixels=${pixels:-}"
-        echo "gui_showcase_4k_200fps_nonzero_pixels=${nonzero:-}"
-        echo "gui_showcase_4k_200fps_checksum=${checksum:-}"
-        echo "gui_showcase_4k_200fps_render_mode=${render_mode:-}"
-        echo "gui_showcase_4k_200fps_redraw_frames=${redraw_frames:-}"
-        echo "gui_showcase_4k_200fps_log=$LOG"
+        echo "${STATUS_PREFIX}_status=fail"
+        echo "${STATUS_PREFIX}_reason=$reason"
+        echo "${STATUS_PREFIX}_width=${width:-}"
+        echo "${STATUS_PREFIX}_height=${height:-}"
+        echo "${STATUS_PREFIX}_frames=$FRAMES"
+        echo "${STATUS_PREFIX}_elapsed_ns=$elapsed_ns"
+        echo "${STATUS_PREFIX}_fps_x1000=$fps_x1000"
+        echo "${STATUS_PREFIX}_target_fps=$TARGET_FPS"
+        echo "${STATUS_PREFIX}_pixels=${pixels:-}"
+        echo "${STATUS_PREFIX}_nonzero_pixels=${nonzero:-}"
+        echo "${STATUS_PREFIX}_checksum=${checksum:-}"
+        echo "${STATUS_PREFIX}_render_mode=${render_mode:-}"
+        echo "${STATUS_PREFIX}_redraw_frames=${redraw_frames:-}"
+        echo "${STATUS_PREFIX}_log=$LOG"
     } >"$STATUS_ENV"
     cat "$LOG"
     exit 1
@@ -118,31 +156,32 @@ fi
 
 if [ "$fps_x1000" -lt "$target_x1000" ]; then
     status=fail
-    reason=below-200fps
+    reason=$BELOW_REASON
 else
     status=pass
-    reason=met-200fps
+    reason=$PASS_REASON
 fi
 
 {
-    echo "gui_showcase_4k_200fps_status=$status"
-    echo "gui_showcase_4k_200fps_reason=$reason"
-    echo "gui_showcase_4k_200fps_use_native=$USE_NATIVE"
-    echo "gui_showcase_4k_200fps_native_bin=$NATIVE_BIN"
-    echo "gui_showcase_4k_200fps_alias_src=$ALIAS_SRC"
-    echo "gui_showcase_4k_200fps_native_build_log=$BUILD_LOG"
-    echo "gui_showcase_4k_200fps_width=$width"
-    echo "gui_showcase_4k_200fps_height=$height"
-    echo "gui_showcase_4k_200fps_frames=$FRAMES"
-    echo "gui_showcase_4k_200fps_elapsed_ns=$elapsed_ns"
-    echo "gui_showcase_4k_200fps_fps_x1000=$fps_x1000"
-    echo "gui_showcase_4k_200fps_target_fps=$TARGET_FPS"
-    echo "gui_showcase_4k_200fps_pixels=$pixels"
-    echo "gui_showcase_4k_200fps_nonzero_pixels=$nonzero"
-    echo "gui_showcase_4k_200fps_checksum=$checksum"
-    echo "gui_showcase_4k_200fps_render_mode=${render_mode:-}"
-    echo "gui_showcase_4k_200fps_redraw_frames=${redraw_frames:-}"
-    echo "gui_showcase_4k_200fps_log=$LOG"
+    echo "${STATUS_PREFIX}_status=$status"
+    echo "${STATUS_PREFIX}_reason=$reason"
+    echo "${STATUS_PREFIX}_resolution=$RESOLUTION"
+    echo "${STATUS_PREFIX}_use_native=$USE_NATIVE"
+    echo "${STATUS_PREFIX}_native_bin=$NATIVE_BIN"
+    echo "${STATUS_PREFIX}_alias_src=$ALIAS_SRC"
+    echo "${STATUS_PREFIX}_native_build_log=$BUILD_LOG"
+    echo "${STATUS_PREFIX}_width=$width"
+    echo "${STATUS_PREFIX}_height=$height"
+    echo "${STATUS_PREFIX}_frames=$FRAMES"
+    echo "${STATUS_PREFIX}_elapsed_ns=$elapsed_ns"
+    echo "${STATUS_PREFIX}_fps_x1000=$fps_x1000"
+    echo "${STATUS_PREFIX}_target_fps=$TARGET_FPS"
+    echo "${STATUS_PREFIX}_pixels=$pixels"
+    echo "${STATUS_PREFIX}_nonzero_pixels=$nonzero"
+    echo "${STATUS_PREFIX}_checksum=$checksum"
+    echo "${STATUS_PREFIX}_render_mode=${render_mode:-}"
+    echo "${STATUS_PREFIX}_redraw_frames=${redraw_frames:-}"
+    echo "${STATUS_PREFIX}_log=$LOG"
 } >"$STATUS_ENV"
 
 cat "$STATUS_ENV"

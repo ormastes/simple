@@ -154,6 +154,15 @@ perf script. Do not rewrite Simple features in C/Rust to claim C-level speed; if
 parity is blocked by runtime/compiler behavior, record a measured blocker under
 `doc/08_tracking/bug/`.
 
+Minimize direct `rt_*` use in SPipe lanes. App, GUI, web, 2D, MCP/LSP, and
+benchmark code should use Simple facades or a build-local alias entrypoint
+instead of new raw runtime calls, env/CLI shortcuts, or direct backend field
+poking. If performance or correctness is blocked by generated native code, fix
+the Simple compiler/codegen/runtime owner path with the smallest reproducer and
+gate; only edit `src/runtime/**` when the lane is explicitly runtime-owned or
+the bug is proven there. Do not hide a compiler/runtime bug by normalizing an
+`rt_*` workaround in feature code.
+
 For runtime-vs-pure-Simple algorithm work, use the shared dual-backend mode
 names consistently in specs, docs, and code:
 
