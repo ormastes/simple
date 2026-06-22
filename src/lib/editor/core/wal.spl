@@ -1,8 +1,6 @@
 # Editor WAL — append-only recovery log for session persistence.
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
+use std.io_runtime.{file_read, file_write, file_delete}
 
 struct WalEntry:
     sequence: i64
@@ -23,8 +21,8 @@ class WalWriter:
 
     me append(table: text, operation: text, key: text, data_sdn: text) -> bool:
         val entry = WalEntry(sequence: me.next_sequence, table: table, operation: operation, key: key, data_sdn: data_sdn)
-        val existing = rt_file_read_text(me.wal_path) ?? ""
-        val ok = rt_file_write_text(me.wal_path, existing + wal_format_entry(entry) + "\n")
+        val existing = file_read(me.wal_path) ?? ""
+        val ok = file_write(me.wal_path, existing + wal_format_entry(entry) + "\n")
         if ok:
             me.next_sequence = me.next_sequence + 1
             me.entry_count = me.entry_count + 1
@@ -39,16 +37,16 @@ class WalWriter:
         me.append(table, "delete", key, "")
 
     me checkpoint() -> bool:
-        val db_content = rt_file_read_text(me.db_path) ?? ""
-        val wal_content = rt_file_read_text(me.wal_path) ?? ""
+        val db_content = file_read(me.db_path) ?? ""
+        val wal_content = file_read(me.wal_path) ?? ""
         val merged = _wal_apply_entries(db_content, wal_parse_entries(wal_content))
         val tmp_path = me.db_path + ".tmp"
-        if not rt_file_write_text(tmp_path, merged):
+        if not file_write(tmp_path, merged):
             return false
-        if not rt_file_write_text(me.db_path, rt_file_read_text(tmp_path) ?? merged):
+        if not file_write(me.db_path, file_read(tmp_path) ?? merged):
             return false
-        rt_file_delete(tmp_path)
-        rt_file_write_text(me.wal_path, "")
+        file_delete(tmp_path)
+        file_write(me.wal_path, "")
         me.entry_count = 0
         true
 
@@ -59,7 +57,7 @@ class WalReader:
         WalReader(wal_path: wal_path)
 
     me read_entries() -> [WalEntry]:
-        wal_parse_entries(rt_file_read_text(me.wal_path) ?? "")
+        wal_parse_entries(file_read(me.wal_path) ?? "")
 
     me has_entries() -> bool:
         me.read_entries().len() > 0
