@@ -4,10 +4,10 @@
 
 ## Quick Stats
 
-- **Total Features:** 29
-- **Complete Documentation:** 29 (100%)
+- **Total Features:** 30
+- **Complete Documentation:** 30 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 290
+- **Total Lines:** 300
 
 ---
 
@@ -41,7 +41,7 @@
 
 ---
 
-## Standard Library (6 features)
+## Standard Library (7 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
@@ -51,3 +51,4 @@
 | [Range Numeric Guard Specification](test/01_unit/lib/nogc_async_mut/http_server/range_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Range Numeric Guard Specification](test/01_unit/lib/nogc_sync_mut/http_server/range_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Response Code Numeric Guard Specification](test/01_unit/lib/smtp/response_code_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
+| [Subscribe Content Length Numeric Guard Specification](test/01_unit/lib/nogc_sync_mut/stomp/subscribe_content_length_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
