@@ -27,7 +27,7 @@ serialization_extended_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 154 | 154 | 0 | 0 |
+| 155 | 155 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -942,6 +942,23 @@ val result = read_bytes(data, 0, 4)
 val bytes = result.0
 # Only 2 of 4 requested bytes are in bounds
 expect(result.1).to_equal(4)
+```
+
+</details>
+
+#### rejects negative offset
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = read_bytes([10, 20], 0 - 1, 2)
+val bytes = result.0
+expect(bytes.len()).to_equal(0)
+expect(result.1).to_equal(2)
 ```
 
 </details>
@@ -2371,8 +2388,8 @@ expect(char_code_safe("/")).to_equal(47)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 154 |
-| Active scenarios | 154 |
+| Total scenarios | 155 |
+| Active scenarios | 155 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
