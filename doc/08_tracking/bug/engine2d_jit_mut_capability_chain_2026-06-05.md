@@ -1,9 +1,11 @@
 # Engine2D/web GUI apps fall back to interpreter: W1006 `mut`-capability JIT-blocker chain
 
-Status: OPEN — `mut` fixes REVERTED (they unmasked a latent JIT panic; see below).
+Status: MITIGATED — default JIT now skips known winit/engine2d sources; broader
+JIT enablement remains open.
 
-**Status:** OPEN — `mut` fixes REVERTED (they unmasked a latent JIT panic; see below).
-The real fix is driver-side (prefer interpreter for winit/graphics sources).
+**Status:** MITIGATED — `mut` fixes REVERTED (they unmasked a latent JIT panic;
+see below). The driver now prefers the interpreter for winit/graphics sources
+unless `SIMPLE_EXECUTION_MODE` explicitly overrides it.
 
 ## ⚠️ Why the `mut` fixes were reverted (2026-06-05)
 
@@ -23,17 +25,14 @@ maps, so JIT could never correctly run these apps anyway). Net: the `mut` fixes
 gave **zero** runtime benefit and turned a working (interpreted) run into a hard
 panic in default JIT mode. Reverted to restore the graceful fallback.
 
-## Correct fix (tracked, not yet applied — requires GUI-driver rebuild)
+## Driver-side crash mitigation (landed 2026-06-22)
 
 `src/compiler_rust/driver/src/exec_core.rs::should_prefer_interpreter_for_source`
-already short-circuits JIT for `.shs` / CLI-arg / specific sources. Extend it to
-also prefer the interpreter when the source uses the winit/engine2d graphics
-runtime (e.g. source imports `std.io.window_winit` or `gpu.engine2d.backend_*`),
-so these apps skip JIT entirely instead of panicking. (Belt-and-suspenders: wrap
-`run_file_jit` so an unresolved-symbol panic converts to the interpreter
-fallback.) The documented launch path `scripts/gui/macos-gui-run.shs` already sets
-`SIMPLE_EXECUTION_MODE=interpret`, so on-screen launches are unaffected; the panic
-only hits plain `bin/simple run <gui_app>.spl` in default JIT mode.
+now prefers the interpreter when the source uses the winit/engine2d graphics
+runtime (`window_winit` or `gpu.engine2d`). This keeps plain
+`bin/simple run <gui_app>.spl` in default JIT mode from reaching the unresolved
+`rt_winit_event_loop_new` linker panic. Explicit `SIMPLE_EXECUTION_MODE` still
+wins for users who intentionally force a mode.
 
 ## Original W1006 pattern (for the eventual JIT-enablement work)
 **Severity:** Perf — pure-Simple GUI lane (engine2d CPU + web layout) runs fully

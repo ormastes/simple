@@ -818,7 +818,7 @@ fn should_prefer_interpreter_for_source(path: &Path, extension: &str) -> bool {
     if std::env::var_os("SIMPLE_EXECUTION_MODE").is_some() {
         return false;
     }
-    source_uses_cli_args(path)
+    source_uses_cli_args(path) || source_uses_jit_unsafe_graphics_runtime(path)
 }
 
 fn source_uses_cli_args(path: &Path) -> bool {
@@ -833,9 +833,19 @@ fn source_uses_cli_args(path: &Path) -> bool {
     source.contains("get_cli_args") || source.contains("std.cli")
 }
 
+fn source_uses_jit_unsafe_graphics_runtime(path: &Path) -> bool {
+    let Ok(source) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    source.contains("window_winit") || source.contains("gpu.engine2d")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{should_force_interpreter_for_source, should_prefer_interpreter_for_source, source_uses_cli_args};
+    use super::{
+        should_force_interpreter_for_source, should_prefer_interpreter_for_source, source_uses_cli_args,
+        source_uses_jit_unsafe_graphics_runtime,
+    };
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
@@ -898,6 +908,20 @@ mod tests {
             Path::new("scripts/check.shs"),
             "shs"
         ));
+    }
+
+    #[test]
+    fn graphics_runtime_sources_use_interpreter_fast_path() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("gui.spl");
+        fs::write(
+            &script,
+            "use std.io.window_winit.{create_window}\nuse std.gc_async_mut.gpu.engine2d.engine.{Engine2D}\nfn main():\n    print \"gui\"\n",
+        )
+        .unwrap();
+
+        assert!(source_uses_jit_unsafe_graphics_runtime(&script));
+        assert!(should_prefer_interpreter_for_source(&script, "spl"));
     }
 
     /// B3 for-in regression: the generator-detection helper correctly identifies
