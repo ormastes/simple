@@ -86,6 +86,15 @@ So the child is fine. The leak is the **parent re-allocating, per spec, in a pro
    *children*, and cap the *parent* via the container cgroup; cap specs-per-invocation so the
    parent is re-spawned often (a coarse version of fix 1).
 
+## Mitigation applied — 2026-06-22
+
+The parent-side output parser functions in `test_executor_parsing.spl`
+(`extract_error_message`, `parse_test_output`, `output_has_zero_pass_summary`, and coverage block
+strip/extract helpers) now scan output line-by-line with `index_of("\n", pos)` instead of
+materializing `output.split("\n")`. This does not solve the no-GC parent model, but removes the
+largest per-spec `[text]` allocation named in the accumulation analysis while preserving the
+existing summary/error parsing rules.
+
 ## Safe minimal reproduction (memory-capped — do NOT run the whole suite)
 
 Demonstrate parent-side growth on a small, output-heavy set under a hard cap. The cap makes the

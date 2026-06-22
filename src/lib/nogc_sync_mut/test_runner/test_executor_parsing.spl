@@ -101,33 +101,32 @@ fn find_simple_binary() -> text:
 # Test Output Parsing
 # =========================================================================
 
+fn _is_test_error_line(clean: text) -> bool:
+    clean.contains("semantic:") or clean.contains("parse error:") or clean.contains("compile failed:") or clean.contains("ERROR:") or clean.starts_with("Error:") or clean.starts_with("error:") or clean.contains("unsupported path call:") or clean.contains("not found")
+
 fn extract_error_message(output: text) -> text:
-    # Extract first meaningful error message from test output
-    val lines = output.split("\n")
-    var error_lines: [text] = []
-
-    for line in lines:
+    # Extract first meaningful error message from test output.
+    # ponytail: scan lines directly to avoid leaking a full split array in the
+    # no-GC parent runner; move to a reusable iterator only when another caller needs it.
+    var result = ""
+    var count = 0
+    var pos = 0
+    val output_len = output.len()
+    while pos <= output_len:
+        val next = output.index_of("\n", pos) ?? -1
+        val line = if next >= 0: output[pos:next] else: output[pos:]
         val clean = strip_ansi(line).trim()
-
-        # Look for error patterns
-        if clean.contains("semantic:") or clean.contains("parse error:") or clean.contains("compile failed:") or clean.contains("ERROR:"):
-            error_lines.push(clean)
-            if error_lines.len() >= 3:  # Limit to first 3 error lines
+        if _is_test_error_line(clean):
+            if result != "":
+                result = result + "; "
+            result = result + clean
+            count = count + 1
+            if count >= 3:
                 break
-        elif clean.starts_with("Error:") or clean.starts_with("error:"):
-            error_lines.push(clean)
-            if error_lines.len() >= 3:
-                break
-        elif clean.contains("unsupported path call:") or clean.contains("not found"):
-            error_lines.push(clean)
-            if error_lines.len() >= 3:
-                break
-
-    # Join error lines with semicolon separator
-    if error_lines.len() > 0:
-        error_lines[0:3].join("; ")
-    else:
-        ""
+        if next < 0:
+            break
+        pos = next + 1
+    result
 
 fn parse_test_output(output: text) -> (i64, i64, i64, i64):
     var total_passed = 0
@@ -136,8 +135,11 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
     var total_pending = 0
     var summary_passed = -1
     var summary_failed = -1
-    val lines = output.split("\n")
-    for line in lines:
+    var pos = 0
+    val output_len = output.len()
+    while pos <= output_len:
+        val next = output.index_of("\n", pos) ?? -1
+        val line = if next >= 0: output[pos:next] else: output[pos:]
         val clean = strip_ansi(line)
         val trimmed = clean.trim()
         if trimmed.starts_with("Passed:"):
@@ -172,6 +174,9 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
             val skip_count2 = extract_number_before(s: clean, keyword: "skipped")
             if skip_count2 > 0:
                 total_skipped = total_skipped + skip_count2
+        if next < 0:
+            break
+        pos = next + 1
     if summary_passed >= 0 and summary_failed >= 0:
         return (summary_passed, summary_failed, total_skipped, total_pending)
     (total_passed, total_failed, total_skipped, total_pending)
@@ -179,13 +184,19 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
 fn output_has_zero_pass_summary(output: text) -> bool:
     var saw_passed_zero = false
     var saw_failed_zero = false
-    val lines = output.split("\n")
-    for line in lines:
+    var pos = 0
+    val output_len = output.len()
+    while pos <= output_len:
+        val next = output.index_of("\n", pos) ?? -1
+        val line = if next >= 0: output[pos:next] else: output[pos:]
         val clean = strip_ansi(line).trim()
         if clean == "Passed: 0":
             saw_passed_zero = true
         elif clean == "Failed: 0":
             saw_failed_zero = true
+        if next < 0:
+            break
+        pos = next + 1
     saw_passed_zero and saw_failed_zero
 
 fn extract_number_after_colon(s: text, prefix: text) -> i64:
@@ -328,36 +339,48 @@ fn build_coverage_wrapper(file_path: text, options: TestOptions) -> (text, text)
     (tmp_path, tmp_path)
 
 fn extract_coverage_sdn(output: text) -> text:
-    val lines = output.split("\n")
     var in_block = false
-    var sdn_lines: [text] = []
-    for line in lines:
+    var result = ""
+    var pos = 0
+    val output_len = output.len()
+    while pos <= output_len:
+        val next = output.index_of("\n", pos) ?? -1
+        val line = if next >= 0: output[pos:next] else: output[pos:]
         val clean = strip_ansi(line).trim()
         if clean == COVERAGE_BEGIN:
             in_block = true
-            continue
-        if clean == COVERAGE_END:
+        elif clean == COVERAGE_END:
             in_block = false
-            continue
-        if in_block:
-            sdn_lines.push(line)
-    sdn_lines.join("\n")
+        elif in_block:
+            if result != "":
+                result = result + "\n"
+            result = result + line
+        if next < 0:
+            break
+        pos = next + 1
+    result
 
 fn strip_coverage_blocks(output: text) -> text:
-    val lines = output.split("\n")
     var in_block = false
-    var kept: [text] = []
-    for line in lines:
+    var result = ""
+    var pos = 0
+    val output_len = output.len()
+    while pos <= output_len:
+        val next = output.index_of("\n", pos) ?? -1
+        val line = if next >= 0: output[pos:next] else: output[pos:]
         val clean = strip_ansi(line).trim()
         if clean == COVERAGE_BEGIN:
             in_block = true
-            continue
-        if clean == COVERAGE_END:
+        elif clean == COVERAGE_END:
             in_block = false
-            continue
-        if not in_block:
-            kept.push(line)
-    kept.join("\n")
+        elif not in_block:
+            if result != "":
+                result = result + "\n"
+            result = result + line
+        if next < 0:
+            break
+        pos = next + 1
+    result
 
 # =========================================================================
 # G3: Static test listing (parse source without execution)
