@@ -130,6 +130,12 @@ Scan for stub patterns — any match is a **FAIL**:
   Check with `sh scripts/audit/direct-env-runtime-guard.shs --working` and
   `sh scripts/audit/direct-env-runtime-guard.shs --staged`.
 - **Artifact naming:** no newly added/renamed numbered copy/version/part files
+- **Runtime boundary:** new direct `rt_*` extern use in Simple code is a FAIL
+  unless it is an infrastructure/provider boundary or has a linked
+  compiler/runtime performance or baremetal/direct-hardware blocker explaining
+  why generated/native Simple cannot handle the path yet. Prefer stdlib,
+  generated Simple, capability records, traits, or direct hardware backends over
+  runtime bypasses.
 - **GUI/MDI evidence gates:** wrappers that claim live visual/event proof must
   fail when requested evidence is unavailable, times out, or only proves file
   existence. For Electron, Tauri mobile/iOS, hosted WM, QEMU/GTK WM, and pure WM
@@ -222,6 +228,9 @@ STATUS: FAIL (3 failures, 1 warning)
 - If verification finds issues, report them — do not auto-fix without user approval
 - Fail production wrapper verification if an MCP or LSP launcher executes a source entrypoint directly instead of a cached compiled artifact
 - Audit hot request paths for repeated full scans, repeated file rereads, and per-request subprocesses; flag uncached patterns as FAIL or WARN based on impact
+- Audit new `rt_*` use and fail runtime bypasses outside infrastructure/provider
+  code unless a concrete direct-hardware or Simple-codegen/performance blocker
+  is recorded.
 - Verify cache invalidation exists for write flows that affect cached or indexed data
 - Require startup and representative request performance evidence for performance-sensitive tooling changes
 - For `simple run` script-startup changes, require evidence from

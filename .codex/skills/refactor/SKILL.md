@@ -52,6 +52,18 @@ For each public function, identify complexity. Flag O(n^2)+:
 - `arr + [item]` in loops -> `.push()`
 - Re-reading files/recomputing in loops -> cache/hoist
 
+## Runtime Boundary Audit
+
+- Remove direct `rt_*` extern use from Simple code unless the file is an
+  infrastructure/provider boundary that supplies a capability to higher layers.
+- Prefer generated Simple, stdlib wrappers, or capability/trait injection over a
+  runtime bypass. If Simple cannot express the required hardware operation yet,
+  record the compiler/runtime performance or baremetal/direct-hardware gap
+  before keeping the `rt_*` bridge.
+- For baremetal or direct hardware work, keep the hot path in generated/native
+  Simple where possible; use runtime glue only for host/board services such as
+  boot, MMIO, interrupts, clocks, DMA, process/filesystem access, or probes.
+
 ## Phase 5: Test Verification
 
 ```bash
@@ -64,3 +76,5 @@ Run after EACH phase. NEVER skip failing tests. Fix refactoring, not tests.
 - All code in `.spl` — no Python, no Bash
 - Generics: `<>` not `[]`
 - No inheritance — use composition, traits, mixins
+- New `rt_*` use is refactor debt unless it is an infrastructure/provider
+  boundary or has a linked direct-hardware/compiler-performance blocker.
