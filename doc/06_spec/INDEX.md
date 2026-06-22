@@ -4,14 +4,14 @@
 
 ## Quick Stats
 
-- **Total Features:** 6
-- **Complete Documentation:** 6 (100%)
+- **Total Features:** 7
+- **Complete Documentation:** 7 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 60
+- **Total Lines:** 70
 
 ---
 
-## Application (6 features)
+## Application (7 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
@@ -20,4 +20,5 @@
 | [Query Rich Numeric Guard Specification](test/01_unit/app/cli/query_rich_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Query Tokens Numeric Guard Specification](test/01_unit/app/cli/query_tokens_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Query Numeric Guard Specification](test/01_unit/app/cli/query_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
+| [Tree Depth Numeric Guard Specification](test/01_unit/app/tree/tree_depth_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Watch Numeric Guard Specification](test/01_unit/app/watch/watch_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
