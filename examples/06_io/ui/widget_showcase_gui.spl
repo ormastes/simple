@@ -19,6 +19,7 @@ use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
 use common.image.ppm_decode.{encode_ppm_p6}
 use std.nogc_sync_mut.sffi.io.{file_write_bytes}
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
 
 use std.io_runtime.{env_get}
 
@@ -270,6 +271,19 @@ fn nonzero_pixels(pixels: [u32]) -> i64:
         i = i + 1
     count
 
+fn pixel_stats(pixels: [u32]) -> (i64, i64):
+    var nonzero = 0i64
+    var checksum = 0i64
+    var i = 0
+    val n = pixels.len()
+    while i < n:
+        val pixel = pixels[i]
+        if pixel != 0u32:
+            nonzero = nonzero + 1
+        checksum = checksum + (pixel.to_i64() & 0xFFFFFFFF)
+        i = i + 1
+    (nonzero, checksum)
+
 fn run_widget_showcase_perf_probe(w: i32, h: i32, frames: i64, prefix: text) -> i64:
     var b = SoftwareBackend.create()
     if not b.init(w, h):
@@ -277,20 +291,25 @@ fn run_widget_showcase_perf_probe(w: i32, h: i32, frames: i64, prefix: text) -> 
         print "{prefix}_reason=cpu-backend-init-failed"
         return 1
     draw_frame(b, w, h)
+    val frame_start_us = time_now_micros()
     var frame = 0
     while frame < frames:
         b.present()
         frame = frame + 1
+    val frame_elapsed_ns = (time_now_micros() - frame_start_us) * 1000
     val pixels = b.read_pixels()
-    val nonzero = nonzero_pixels(pixels)
-    val checksum = checksum_pixels(pixels)
-    val ok = pixels.len() >= w * h
+    val stats = pixel_stats(pixels)
+    val nonzero = stats.0
+    val checksum = stats.1
+    val pixel_count = pixels.len()
+    val ok = pixel_count >= w * h
     print "{prefix}_width={w}"
     print "{prefix}_height={h}"
     print "{prefix}_frames={frames}"
+    print "{prefix}_frame_elapsed_ns={frame_elapsed_ns}"
     print "{prefix}_redraw_frames=1"
     print "{prefix}_render_mode=retained-static-frame"
-    print "{prefix}_pixels={pixels.len()}"
+    print "{prefix}_pixels={pixel_count}"
     print "{prefix}_nonzero_pixels={nonzero}"
     print "{prefix}_checksum={checksum}"
     print "{prefix}_readback_status=full-scan"

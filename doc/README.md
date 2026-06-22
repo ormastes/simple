@@ -74,6 +74,8 @@ All documentation lives under numbered top-level folders.
 | 3D/game system test plan | [03_plan/sys_test/graphics_3d_session_managed_backend.md](03_plan/sys_test/graphics_3d_session_managed_backend.md) |
 | Graphics executable spec | [../test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl](../test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl) |
 | GPU API notes | [07_guide/api/gpu_api.md](07_guide/api/gpu_api.md) |
+| GUI/Web/2D Vulkan capture guide | [07_guide/tooling/renderdoc_capture_infra.md](07_guide/tooling/renderdoc_capture_infra.md) |
+| GUI/Web/2D Vulkan current evidence | [08_tracking/bug/gui_web_2d_vulkan_pairwise_aggregate_2026-06-22.md](08_tracking/bug/gui_web_2d_vulkan_pairwise_aggregate_2026-06-22.md) |
 | Optimization plugin integration | [07_guide/compiler_optimization_plugin.md](07_guide/compiler_optimization_plugin.md) |
 | IDE + LLM/agent-dashboard integration | [07_guide/ide_llm_integration_guide.md](07_guide/ide_llm_integration_guide.md) |
 | Editor TUI components & status | [07_guide/editor_tui.md](07_guide/editor_tui.md) |

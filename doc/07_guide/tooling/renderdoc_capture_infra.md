@@ -158,6 +158,13 @@ The browser Vulkan-backed proof is a separate rollup:
 comparison evidence, but it is not Electron/Chrome Vulkan-backed RenderDoc
 proof, and the aggregate audit cannot report complete while browser backing is
 not `pass`.
+As of 2026-06-22, Linux Xvfb evidence has Chrome Vulkan-backed and Simple
+Vulkan passing with pairwise pixel parity, but Electron reports
+`electron-vulkan-disabled_off`. Treat Electron backing as postponed to a real
+desktop GPU host or macOS MoltenVK lane; do not keep adding Chromium flags on
+the Xvfb host without new evidence. The current status and rejected shortcuts
+are tracked in
+`doc/08_tracking/bug/gui_web_2d_vulkan_pairwise_aggregate_2026-06-22.md`.
 The current blockers are machine-readable in
 `gui_web_2d_vulkan_renderdoc_blocker_status`,
 `gui_web_2d_vulkan_renderdoc_blocker_reason`,

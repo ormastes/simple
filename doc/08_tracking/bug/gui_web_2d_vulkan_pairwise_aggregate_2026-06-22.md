@@ -82,6 +82,54 @@ backing through DevTools GPU info, but Electron reports `vulkan=disabled_off`
 and `hardwareSupportsVulkan=false`. The aggregate remains fail-closed until
 Electron also proves Vulkan/Metal backing.
 
+## Cross-Platform Electron Backing Plan
+
+This Linux/Xvfb host cannot complete the Electron-backed Vulkan proof with the
+current Electron stack: Electron reports `vulkan=disabled_off` and direct/visible
+launches hit the Xvfb/DRI3 `UnknownVizError` path. Finish the Electron lane on:
+
+1. macOS with MoltenVK: run `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check`
+   and then `--run`; require Electron backing `pass` with Metal or MoltenVK GPU
+   metadata.
+2. Linux desktop with real DRI3/Wayland or Xorg GPU access, not Xvfb: run the
+   same `--run` gate; require `hardwareSupportsVulkan=true` plus pixel parity
+   `pass`.
+3. If both fail, change the Electron proof backend instead of adding more
+   Chromium flags on this host.
+
+## 8K Showcase Status
+
+The 8K showcase gate now separates retained-frame presentation timing from the
+final readback/checksum proof. Saved evidence:
+
+```text
+gui_showcase_8k_perf_status=pass
+gui_showcase_8k_perf_frame_elapsed_ns=8869000
+gui_showcase_8k_perf_fps_x1000=13530273
+gui_showcase_8k_perf_target_fps=200
+gui_showcase_8k_perf_pixels=33177600
+gui_showcase_8k_perf_checksum=894747485546
+```
+
+That is about 13,530 FPS for retained presentation at 7680x4320, with the
+full 8K readback/checksum still verified after the frame loop. The process
+elapsed row remains recorded separately as `gui_showcase_8k_perf_elapsed_ns`.
+
+## Rejected Electron Backing Shortcuts
+
+Do not repeat these without a different Electron/GPU host path:
+
+- Extra Chromium flags
+  `--ignore-gpu-blocklist --enable-gpu-rasterization --disable-software-rasterizer`
+  still reported `vulkan=disabled_off`, `(gl=none,angle=none)`, and
+  `hardwareSupportsVulkan=false`.
+- Moving Vulkan switches into `app.commandLine.appendSwitch()` before
+  `app.whenReady()` produced the same software-compositing state.
+- A visible `BrowserWindow` and direct
+  `tools/electron-shell/node_modules/electron/dist/electron` launcher both
+  failed under Xvfb before ARGB output with `UnknownVizError` and
+  `dri3 extension not supported`.
+
 ## 2026-06-22 Native Probe Crash Cause
 
 The native Simple ARGB probe crashed or logged
