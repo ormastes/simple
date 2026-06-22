@@ -21,10 +21,10 @@ gui_web_2d_vulkan_electron_browser_backing_status=fail
 gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-disabled_off
 gui_web_2d_vulkan_electron_browser_backing_vulkan=disabled_off
 gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=false
-gui_web_2d_vulkan_chrome_browser_backing_status=fail
-gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-gpu-info-missing
+gui_web_2d_vulkan_chrome_browser_backing_status=pass
+gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed
 gui_web_2d_vulkan_browser_backing_status=fail
-gui_web_2d_vulkan_browser_backing_reason=electron-vulkan-disabled_off;chrome-gpu-info-missing
+gui_web_2d_vulkan_browser_backing_reason=electron-vulkan-disabled_off;chrome-vulkan-backed
 gui_web_2d_vulkan_simple_argb_status=pass
 gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=403594
 gui_web_2d_vulkan_electron_chrome_diff_status=pass
@@ -77,10 +77,10 @@ about `111918` to `232`/`226` after the measured fieldset/native-widget
 geometry fills, transparent image witnesses, and browser-stable media/control
 geometry patches, and squared header button corners. The strict aggregate now
 passes with zero Electron/Chrome, Electron/Simple, and Chrome/Simple ARGB
-mismatches. Browser backing remains a separate blocker:
-Electron reports `vulkan=disabled_off` and `hardwareSupportsVulkan=false`, while
-the current Chrome proof does not include GPU info. The backing claim remains
-fail-closed.
+mismatches. Browser backing remains a separate blocker: Chrome now proves Vulkan
+backing through DevTools GPU info, but Electron reports `vulkan=disabled_off`
+and `hardwareSupportsVulkan=false`. The aggregate remains fail-closed until
+Electron also proves Vulkan/Metal backing.
 
 ## 2026-06-22 Native Probe Crash Cause
 

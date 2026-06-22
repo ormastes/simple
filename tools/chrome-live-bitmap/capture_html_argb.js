@@ -467,7 +467,15 @@ async function captureViaDevTools(fileUrl) {
     });
   });
   let conn;
+  let browserConn;
   try {
+    let gpuInfo = null;
+    try {
+      browserConn = await connectWebSocket(endpoint);
+      gpuInfo = await cdpSend(browserConn, 1, "SystemInfo.getInfo");
+    } catch (err) {
+      gpuInfo = { error: err && err.message ? err.message : "system-info-unavailable" };
+    }
     const page = await fetchPageTarget(endpoint, timeoutMs);
     conn = await connectWebSocket(page.webSocketDebuggerUrl);
     let id = 1;
@@ -487,17 +495,12 @@ async function captureViaDevTools(fileUrl) {
       awaitPromise: true,
     });
     const geometry = geomEval.result ? geomEval.result.value : null;
-    let gpuInfo = null;
-    try {
-      gpuInfo = await cdpSend(conn, id++, "SystemInfo.getInfo");
-    } catch (err) {
-      gpuInfo = { error: err && err.message ? err.message : "system-info-unavailable" };
-    }
     const shot = await cdpSend(conn, id++, "Page.captureScreenshot", { format: "png", fromSurface: true });
     const elapsedUs = Number((process.hrtime.bigint() - start) / 1000n);
     return { png: Buffer.from(shot.data || "", "base64"), geometry, gpuInfo, elapsedUs };
   } finally {
     if (conn) conn.socket.destroy();
+    if (browserConn) browserConn.socket.destroy();
     child.kill();
     if (activeChromeChild === child) activeChromeChild = null;
   }
