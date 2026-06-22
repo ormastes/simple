@@ -17,9 +17,9 @@ gui_web_2d_vulkan_simple_backend_name=vulkan
 gui_web_2d_vulkan_simple_argb_status=pass
 gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=404880
 gui_web_2d_vulkan_electron_chrome_diff_status=fail
-gui_web_2d_vulkan_electron_chrome_mismatch_count=3471
+gui_web_2d_vulkan_electron_chrome_mismatch_count=232
 gui_web_2d_vulkan_electron_simple_diff_status=fail
-gui_web_2d_vulkan_electron_simple_mismatch_count=3050
+gui_web_2d_vulkan_electron_simple_mismatch_count=515
 gui_web_2d_vulkan_chrome_simple_diff_status=fail
 gui_web_2d_vulkan_chrome_simple_mismatch_count=509
 gui_web_2d_vulkan_pixel_comparison_status=fail
@@ -36,7 +36,7 @@ facades instead of direct `rt_*` calls. The fixture is now boxes-only CSS
 Electron/Chrome mismatch from `10656` to `232` and Simple/browser mismatch from
 about `111918` to about `509` after the measured fieldset/native-widget
 geometry fills. The aggregate is still blocked because Electron/Chrome ARGB
-captures differ (`3471` pixels), and Simple still diverges from Electron
-(`3050` pixels). Do not
+captures differ (`232` pixels), and Simple still diverges from Electron
+(`515` pixels). Do not
 claim GUI/Web/2D Vulkan parity from the individual pass keys until all pairwise
 ARGB diffs pass.
