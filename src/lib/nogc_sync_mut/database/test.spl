@@ -119,6 +119,27 @@ fn unwrap_text(opt: text?, default: text) -> text:
 fn unwrap_i64(opt: i64?, default: i64) -> i64:
     if opt != nil: opt else: default
 
+fn parse_duration_ms_or_zero(value: text) -> f64:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return 0.0
+    var seen_digit = false
+    var seen_dot = false
+    for i in trimmed.len():
+        val c = trimmed[i:i + 1]
+        val is_digit = c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or c == "5" or c == "6" or c == "7" or c == "8" or c == "9"
+        if c == ".":
+            if seen_dot:
+                return 0.0
+            seen_dot = true
+        elif is_digit:
+            seen_digit = true
+        else:
+            return 0.0
+    if not seen_digit:
+        return 0.0
+    trimmed.to_float()
+
 class TestDatabase:
     db: SdnDatabase
 
@@ -276,7 +297,7 @@ class TestDatabase:
                 passed = passed + 1
             elif status == "failed":
                 failed = failed + 1
-            total_duration = total_duration + ((row.get("duration_ms") ?? "0").to_float())
+            total_duration = total_duration + parse_duration_ms_or_zero(row.get("duration_ms") ?? "0")
         val pass_rate = if total_tests > 0: (passed as f64) * 100.0 / (total_tests as f64) else: 0.0
         val avg_duration = if total_tests > 0: total_duration / (total_tests as f64) else: 0.0
         TestStats(total_runs: runs.len(), total_tests: total_tests, passed: passed, failed: failed, pass_rate: pass_rate, avg_duration_ms: avg_duration)
@@ -307,7 +328,7 @@ class TestDatabase:
         val results_table = self.db.get_table("test_results")?
         var result: [(text, f64)] = []
         for row in results_table.valid_rows():
-            val duration = (row.get("duration_ms") ?? "0").to_float()
+            val duration = parse_duration_ms_or_zero(row.get("duration_ms") ?? "0")
             if duration > threshold_ms:
                 result.push((row.get("test_name") ?? "", duration))
         result
@@ -319,7 +340,7 @@ class TestDatabase:
         for row in results_table.rows:
             if row.get("test_name")? == test_name and row.get("run_id")? == run_id:
                 val duration_str = row.get("duration_ms")?
-                val duration = duration_str.to_float()
+                val duration = parse_duration_ms_or_zero(duration_str)
 
                 return Some(TestResult(
                     test_name: test_name,
