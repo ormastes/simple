@@ -1,7 +1,7 @@
 # GUI/Web/2D Vulkan Pairwise Aggregate Evidence
 
 - Date: 2026-06-22
-- Status: pass — Simple is within browser drift floor
+- Status: fail — strict pairwise pixel comparison still blocked
 - Gate: `scripts/setup/setup-gui-web-2d-vulkan-env.shs --run`
 - Evidence: `build/gui-web-2d-vulkan-env/evidence.env`
 
@@ -15,7 +15,7 @@ gui_web_2d_vulkan_chrome_argb_status=pass
 gui_web_2d_vulkan_simple_status=pass
 gui_web_2d_vulkan_simple_backend_name=vulkan
 gui_web_2d_vulkan_simple_argb_status=pass
-gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=404880
+gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=404993
 gui_web_2d_vulkan_electron_chrome_diff_status=fail
 gui_web_2d_vulkan_electron_chrome_mismatch_count=232
 gui_web_2d_vulkan_electron_chrome_max_channel_delta=54
@@ -45,8 +45,10 @@ gui_web_2d_vulkan_chrome_simple_diff_component_count=26
 gui_web_2d_vulkan_chrome_simple_diff_top_components=93,221,101,230:40|87,222,92,236:40|22,359,27,373:40|29,358,35,367:34|94,230,98,233:9|98,232,100,236:9|29,367,33,370:9|33,369,35,373:9
 gui_web_2d_vulkan_electron_simple_excess_over_browser_floor=0
 gui_web_2d_vulkan_chrome_simple_excess_over_browser_floor=0
-gui_web_2d_vulkan_pixel_comparison_status=pass
-gui_web_2d_vulkan_pixel_comparison_reason=simple-within-browser-drift-floor
+gui_web_2d_vulkan_simple_browser_floor_status=pass
+gui_web_2d_vulkan_simple_browser_floor_reason=simple-has-no-excess-over-electron-chrome-drift
+gui_web_2d_vulkan_pixel_comparison_status=fail
+gui_web_2d_vulkan_pixel_comparison_reason=pairwise-diff-incomplete-or-mismatch
 gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff
 ```
 
@@ -58,7 +60,8 @@ facades instead of direct `rt_*` calls. The fixture is now boxes-only CSS
 (`color: transparent`, native control appearance disabled), reducing
 Electron/Chrome mismatch from `10656` to `232` and Simple/browser mismatch from
 about `111918` to `232`/`226` after the measured fieldset/native-widget
-geometry fills and browser-stable missing-image glyph patches. The aggregate now
-passes because Simple has `0` excess mismatches over the Electron/Chrome browser
-floor. This is not a claim that Electron and Chrome are bit-identical; their
-native rendering divergence remains recorded as diagnostic evidence.
+geometry fills and browser-stable missing-image glyph patches. Simple now has
+`0` excess mismatches over the Electron/Chrome browser floor, reported by
+`gui_web_2d_vulkan_simple_browser_floor_status=pass`. The strict aggregate still
+fails until Electron/Chrome, Electron/Simple, and Chrome/Simple pairwise ARGB
+diffs are all zero.
