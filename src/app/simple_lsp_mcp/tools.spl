@@ -4,6 +4,7 @@
 
 use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, run_command_text, make_tool_result, make_tool_error, has_method, _char_at, _is_ws, _find_json_value_start}
 use std.io_runtime.{process_run}
+use app.io.mod.{process_run_timeout}
 
 fn lsp_query_path() -> text:
     "src/lib/nogc_sync_mut/lsp/lsp_query.spl"
@@ -36,7 +37,15 @@ fn run_lsp_diagnostics(file: text) -> text:
     val enabled = env_get("SIMPLE_LSP_ENABLE_DIAGNOSTICS") ?? ""
     if enabled != "1":
         return "diagnostics unavailable in source mode (process_run deadlocks on the `simple check` subcommand spawn). Run `simple check " + file + "` directly, or set SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 on a working native build."
-    run_command_text(find_simple_binary(), ["check", file])
+    val (stdout, stderr, code) = process_run_timeout(find_simple_binary(), ["check", file], 10000)
+    val clean = clean_command_output(stdout)
+    if code == 0:
+        return clean
+    if stderr.trim() != "":
+        return stderr.trim()
+    if clean != "":
+        return clean
+    "command failed with exit code " + str(code)
 
 fn lsp_parse_diag_line(line: text) -> text:
     # Parses: path:line:col: error/warning: message

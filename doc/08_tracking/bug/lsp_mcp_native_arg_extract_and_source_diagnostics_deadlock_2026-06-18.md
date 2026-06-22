@@ -56,6 +56,10 @@ self-exec guard (cf. `stage4-self-exec-fork-bomb`,
 - `run_lsp_diagnostics` is **gated off** unless `SIMPLE_LSP_ENABLE_DIAGNOSTICS=1`: it returns
   a clear "diagnostics unavailable in source mode … run `simple check <file>` directly"
   message instead of spawning `simple check` and hanging the server.
+- 2026-06-22 hardening: the opt-in diagnostics path now uses
+  `process_run_timeout(..., 10000)` instead of the unbounded `process_run`, so
+  an accidental enable cannot wedge the LSP MCP server indefinitely. Guarded by
+  `test/01_unit/app/simple_lsp_mcp/lsp_diagnostics_timeout_spec.spl`.
 
 So 10/11 LSP tools work today; `lsp_diagnostics` is degraded to a message (no hang).
 
