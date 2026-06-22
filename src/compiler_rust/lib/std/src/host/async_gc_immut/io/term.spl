@@ -23,7 +23,7 @@ impl Terminal:
         val stdin = native_stdin()_handle
         val stdout = native_stdout()_handle
         val stderr = native_stderr()_handle
-        val is_tty = native_is_tty(stdout as i64)
+        val is_tty = (stdout as i64) >= 0 and native_is_tty(stdout as i64)
         val size = if is_tty: get_term_size(stdout) else: None
         Terminal {stdin: stdin, stdout: stdout, stderr: stderr, is_tty: is_tty, raw_mode: false, size: size}
 
@@ -38,7 +38,7 @@ impl Terminal:
 
     # Refresh terminal info, return updated Terminal
     fn refresh() -> Terminal:
-        val is_tty = native_is_tty(self.stdout as i64)
+        val is_tty = (self.stdout as i64) >= 0 and native_is_tty(self.stdout as i64)
         val size = if is_tty: get_term_size(self.stdout) else: None
         Terminal {
             stdin: self.stdin,
@@ -53,6 +53,8 @@ impl Terminal:
     pub fn enable_raw_mode(self) -> Result<Terminal, TermError>:
         if self.raw_mode:
             return Ok(self)
+        if (self.stdin as i64) < 0:
+            return Err(TermError.Io(-9))
         match native_enable_raw_mode(self.stdin as i64):
             case 0:
                 Ok(Terminal {
@@ -69,6 +71,8 @@ impl Terminal:
     pub fn disable_raw_mode(self) -> Result<Terminal, TermError>:
         if not self.raw_mode:
             return Ok(self)
+        if (self.stdin as i64) < 0:
+            return Err(TermError.Io(-9))
         match native_disable_raw_mode(self.stdin as i64):
             case 0:
                 Ok(Terminal {
@@ -83,6 +87,8 @@ impl Terminal:
 
     # Write string to stdout
     pub fn write(self, s: text) -> Result<ByteCount, TermError>:
+        if (self.stdout as i64) < 0:
+            return Err(TermError.Io(-9))
         val written = native_term_write(self.stdout as i64, s, s.len() as i64)
         if written < 0:
             Err(TermError.from_code(written as i32))
@@ -97,6 +103,8 @@ impl Terminal:
 
     # Write to stderr
     pub fn write_stderr(self, s: text) -> Result<ByteCount, TermError>:
+        if (self.stderr as i64) < 0:
+            return Err(TermError.Io(-9))
         val written = native_term_write(self.stderr as i64, s, s.len() as i64)
         if written < 0:
             Err(TermError.from_code(written as i32))
@@ -105,12 +113,16 @@ impl Terminal:
 
     # Flush stdout
     pub fn flush(self) -> Result<(), TermError>:
+        if (self.stdout as i64) < 0:
+            return Err(TermError.Io(-9))
         match native_term_flush(self.stdout as i64):
             case 0: Ok(())
             case e: Err(TermError.from_code(e))
 
     # Read line from stdin
     pub fn read_line(self) -> Result<text, TermError>:
+        if (self.stdin as i64) < 0:
+            return Err(TermError.Io(-9))
         val buf = native_term_read(self.stdin as i64, 4096)
         if buf.len() > 0:
             Ok(buf.to_string())
@@ -119,6 +131,8 @@ impl Terminal:
 
     # Read with timeout (returns None on timeout)
     pub fn read_line_timeout(self, timeout_ms: u64) -> Option<text>:
+        if (self.stdin as i64) < 0:
+            return None
         val buf = native_term_read_timeout(self.stdin as i64, 4096, timeout_ms as i64)
         if buf.len() > 0:
             Some(buf.to_string())
@@ -127,6 +141,8 @@ impl Terminal:
 
     # Poll for input availability
     pub fn has_input(self, timeout_ms: u64) -> bool:
+        if (self.stdin as i64) < 0:
+            return false
         native_term_poll(self.stdin as i64, timeout_ms as i64)
 
     # ===================================
@@ -347,6 +363,8 @@ impl Terminal:
         return "Terminal: {tty_str}, raw_mode={raw_str}, {size_str}"
 
 fn get_term_size(handle: TermHandle) -> Option<TermSize>:
+    if (handle as i64) < 0:
+        return None
     val result = native_get_term_size(handle as i64)
     if result.len() == 2 and result[0] >= 0 and result[1] >= 0:
         Some(TermSize { rows: result[0] as u16, cols: result[1] as u16 })
@@ -361,6 +379,8 @@ fn get_term_size(handle: TermHandle) -> Option<TermSize>:
 # Exits cleanly on broken pipe (EPIPE) — normal MCP/CLI shutdown.
 pub fn print(s: text):
     val stdout = native_stdout()
+    if stdout < 0:
+        return
     val written = native_term_write(stdout, s, s.len() as i64)
     if written == -32:
         rt_exit(0)
@@ -370,6 +390,8 @@ pub fn print(s: text):
 # Exits cleanly on broken pipe (EPIPE) — normal MCP/CLI shutdown.
 pub fn println(s: text):
     val stdout = native_stdout()
+    if stdout < 0:
+        return
     val written = native_term_write(stdout, s, s.len() as i64)
     if written == -32:
         rt_exit(0)
@@ -382,6 +404,8 @@ pub fn println(s: text):
 # Exits cleanly on broken pipe (EPIPE) — normal MCP/CLI shutdown.
 pub fn eprint(s: text):
     val stderr = native_stderr()
+    if stderr < 0:
+        return
     val written = native_term_write(stderr, s, s.len() as i64)
     if written == -32:
         rt_exit(0)
@@ -391,6 +415,8 @@ pub fn eprint(s: text):
 # Exits cleanly on broken pipe (EPIPE) — normal MCP/CLI shutdown.
 pub fn eprintln(s: text):
     val stderr = native_stderr()
+    if stderr < 0:
+        return
     val written = native_term_write(stderr, s, s.len() as i64)
     if written == -32:
         rt_exit(0)
@@ -404,6 +430,8 @@ pub fn input(prompt: text) -> text:
     if prompt.len() > 0:
         print(prompt)
     val stdin = native_stdin()
+    if stdin < 0:
+        return ""
     val buf = native_term_read(stdin, 4096)
     buf.to_string().trim_end()
 
