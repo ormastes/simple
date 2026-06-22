@@ -77,6 +77,9 @@ pub extern "C" fn rt_serial_open(device: RuntimeValue, baud: i64) -> i64 {
 pub extern "C" fn rt_serial_close(fd: i64) -> RuntimeValue {
     #[cfg(unix)]
     {
+        if !is_valid_serial_fd(fd) {
+            return RuntimeValue::from_bool(false);
+        }
         let ok = unsafe { libc::close(fd as libc::c_int) == 0 };
         if !ok {
             eprintln!("rt_serial_close: {}", std::io::Error::last_os_error());
@@ -99,6 +102,9 @@ pub extern "C" fn rt_serial_read(fd: i64, max_bytes: i64) -> RuntimeValue {
     {
         use std::time::{Duration, Instant};
 
+        if !is_valid_serial_fd(fd) {
+            return string_to_runtime_value("");
+        }
         let fd_raw = fd as libc::c_int;
         let cap = max_bytes.clamp(1, 65536) as usize;
         let mut buf = vec![0u8; cap];
@@ -140,6 +146,9 @@ pub extern "C" fn rt_serial_read(fd: i64, max_bytes: i64) -> RuntimeValue {
 pub extern "C" fn rt_serial_write(fd: i64, data: RuntimeValue) -> i64 {
     #[cfg(unix)]
     {
+        if !is_valid_serial_fd(fd) {
+            return 0;
+        }
         let text = match runtime_value_to_string(data) {
             Some(s) => s,
             None => return 0,
@@ -169,6 +178,9 @@ pub extern "C" fn rt_serial_set_timeout(fd: i64, timeout_ms: i64) -> RuntimeValu
     #[cfg(unix)]
     {
         use nix::sys::termios::{tcgetattr, tcsetattr, SetArg};
+        if !is_valid_serial_fd(fd) {
+            return RuntimeValue::from_bool(false);
+        }
         let borrowed = unsafe { BorrowedFd::borrow_raw(fd as i32) };
         match tcgetattr(borrowed) {
             Ok(mut tios) => {
@@ -206,6 +218,9 @@ pub extern "C" fn rt_serial_flush(fd: i64) -> RuntimeValue {
     #[cfg(unix)]
     {
         use nix::sys::termios::tcdrain;
+        if !is_valid_serial_fd(fd) {
+            return RuntimeValue::from_bool(false);
+        }
         let borrowed = unsafe { BorrowedFd::borrow_raw(fd as i32) };
         let ok = tcdrain(borrowed).is_ok();
         RuntimeValue::from_bool(ok)
@@ -225,6 +240,9 @@ pub extern "C" fn rt_serial_flush(fd: i64) -> RuntimeValue {
 pub extern "C" fn rt_serial_relay(serial_fd: i64) -> RuntimeValue {
     #[cfg(unix)]
     {
+        if !is_valid_serial_fd(serial_fd) {
+            return RuntimeValue::from_bool(false);
+        }
         let sfd = serial_fd as libc::c_int;
         let stdin_fd: libc::c_int = 0;
         let stdout_fd: libc::c_int = 1;
@@ -325,6 +343,10 @@ fn string_to_runtime_value(s: &str) -> RuntimeValue {
     super::collections::rt_string_new(s.as_ptr(), s.len() as u64)
 }
 
+fn is_valid_serial_fd(fd: i64) -> bool {
+    fd > 0 && fd <= i32::MAX as i64
+}
+
 fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
     let ptr = get_typed_ptr::<super::collections::RuntimeString>(val, HeapObjectType::String)?;
     unsafe {
@@ -403,6 +425,20 @@ mod tests {
 
         assert_eq!(runtime_value_to_string(forged_heap), None);
         assert_eq!(rt_serial_open(forged_heap, 9600), 0);
-        assert_eq!(rt_serial_write(-1, forged_heap), -1);
+        assert_eq!(rt_serial_write(-1, forged_heap), 0);
+    }
+
+    #[test]
+    fn test_serial_rejects_invalid_fds_before_libc_calls() {
+        let empty = string_to_runtime_value("");
+
+        for fd in [i64::MIN, -1, 0, i32::MAX as i64 + 1] {
+            assert_eq!(rt_serial_close(fd), RuntimeValue::FALSE);
+            assert_eq!(runtime_value_to_string(rt_serial_read(fd, 8)).as_deref(), Some(""));
+            assert_eq!(rt_serial_write(fd, empty), 0);
+            assert_eq!(rt_serial_set_timeout(fd, 100), RuntimeValue::FALSE);
+            assert_eq!(rt_serial_flush(fd), RuntimeValue::FALSE);
+            assert_eq!(rt_serial_relay(fd), RuntimeValue::FALSE);
+        }
     }
 }

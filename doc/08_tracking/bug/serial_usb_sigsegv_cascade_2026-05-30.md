@@ -1,10 +1,10 @@
 # Bug: serial_open SIGSEGV cascade on USB disconnect kills tmux session
 
-Status: Open (Phase 2 landed: runtime crash handler)
+Status: Open (runtime crash handler and serial fd guards landed)
 
 **Date:** 2026-05-30
 **Severity:** Critical
-**Status:** Open (Phase 2 landed: runtime crash handler)
+**Status:** Open (runtime crash handler and serial fd guards landed)
 **Component:** runtime (runtime.c), serial FFI, signal handling
 
 ## Summary
@@ -53,6 +53,11 @@ uncontrolled process termination.
 - `serial_open` / `serial_read` / `serial_write` must check device handle
   validity before dereference
 - Return error result instead of crashing on invalid handle
+- 2026-06-22: `src/compiler_rust/runtime/src/value/serial.rs` now rejects
+  invalid serial fd values (`<= 0` or outside `i32`) before close/read/write,
+  timeout, flush, or relay call into libc/termios/poll. Guarded by
+  `value::serial::tests::test_serial_rejects_invalid_fds_before_libc_calls`.
+  Physical USB disconnect validation remains open.
 
 ### Layer 4: Simple-level signal wiring (signal_handlers.spl)
 - Wire SIGSEGV into `std.os.signal` so Simple code can register handlers
