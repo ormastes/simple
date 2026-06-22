@@ -30,6 +30,7 @@ use std.http_server.compression.{compress_response_body, supported_encodings}
 use std.nogc_async_mut.http.accept_encoding.{negotiate_encoding}
 use std.nogc_async_mut.io.file_ops.{file_exists, file_size, file_read_text, file_stat, file_read_text_at}
 use std.nogc_async_mut.io.dir_ops.{is_dir}
+use std.crypto.types.{text_to_bytes}
 
 # ============================================================================
 # Static Compression Cache
@@ -108,9 +109,9 @@ class StaticCompressionCache:
         var i: i64 = 0
         while i < self.entries.len():
             if i != found_idx:
-                new_entries.push(self.entries[i])
+                new_entries = new_entries.push(self.entries[i])
             i = i + 1
-        new_entries.push(hit)
+        new_entries = new_entries.push(hit)
         self.entries = new_entries
         Some(hit.compressed)
 
@@ -131,7 +132,7 @@ class StaticCompressionCache:
                 return
             self.evict_oldest()
         val entry = CacheEntry(path: path, encoding: encoding, compressed: compressed, size: sz)
-        self.entries.push(entry)
+        self.entries = self.entries.push(entry)
         self.current_size = self.current_size + sz
 
     me evict_oldest():
@@ -143,7 +144,7 @@ class StaticCompressionCache:
         var new_entries: [CacheEntry] = []
         var i: i64 = 1
         while i < self.entries.len():
-            new_entries.push(self.entries[i])
+            new_entries = new_entries.push(self.entries[i])
             i = i + 1
         self.entries = new_entries
 
@@ -151,6 +152,27 @@ class StaticCompressionCache:
         """Remove all entries from the cache."""
         self.entries = []
         self.current_size = 0
+
+    me serve_compressed_or_plain(content: text, mime: text, actual_path: text, accept_header: text) -> HttpResponseData:
+        """Serve plain or compressed bytes while preserving cache mutations."""
+        if accept_header.len() == 0:
+            return build_html_or_typed(content, mime)
+        if not is_mime_compressible(mime):
+            return build_html_or_typed(content, mime)
+        val chosen = negotiate_encoding(accept_header, supported_encodings())
+        if chosen.len() == 0:
+            return build_html_or_typed(content, mime)
+        val hit = self.get(actual_path, chosen)
+        if hit != nil:
+            val cached = hit ?? []
+            return build_compressed_response(cached, mime, chosen)
+        val raw = _static_text_to_bytes(content)
+        val res = compress_response_body(raw, chosen)
+        if res.is_err():
+            return build_html_or_typed(content, mime)
+        val compressed = res.unwrap()
+        self.put(actual_path, chosen, compressed)
+        build_compressed_response(compressed, mime, chosen)
 
 # ============================================================================
 # MIME Type Detection
@@ -287,7 +309,7 @@ class StaticFileHandler:
         """
         StaticFileHandler(root: root, index_file: index_file, cache: cache)
 
-    fn handle(request: HttpRequestData, location: LocationConfig) -> HttpResponseData:
+    me handle(request: HttpRequestData, location: LocationConfig) -> HttpResponseData:
         """Serve a static file for the given request.
 
         Args:
@@ -375,7 +397,7 @@ class StaticFileHandler:
         if size <= 65536:
             val content = file_read_text(actual_path)
             val accept = _get_header_ci(request.headers, "accept-encoding")
-            base_resp = serve_compressed_or_plain(content, mime, actual_path, accept, self.cache)
+            base_resp = self.cache.serve_compressed_or_plain(content, mime, actual_path, accept)
         else:
             base_resp = build_file_response(actual_path, mime, size)
 
@@ -676,7 +698,7 @@ fn serve_compressed_or_plain(
     mime: text,
     actual_path: text,
     accept_header: text,
-    cache: StaticCompressionCache
+    mut cache: StaticCompressionCache
 ) -> HttpResponseData:
     """Pick a Content-Encoding and serve cached/freshly-compressed bytes.
 
@@ -688,31 +710,7 @@ fn serve_compressed_or_plain(
     On a cache miss for an eligible response, compresses once and stores
     the bytes for subsequent hits.
     """
-    if accept_header.len() == 0:
-        return build_html_or_typed(content, mime)
-    if not is_mime_compressible(mime):
-        return build_html_or_typed(content, mime)
-    val chosen = negotiate_encoding(accept_header, supported_encodings())
-    if chosen.len() == 0:
-        return build_html_or_typed(content, mime)
-    # Cache hit?
-    val hit = cache.get(actual_path, chosen)
-    if hit != nil:
-        val cached = hit ?? []
-        return build_compressed_response(cached, mime, chosen)
-    # Miss: compress, cache on success, fall back to plain on Err.
-    val raw = _static_text_to_bytes(content)
-    val res = compress_response_body(raw, chosen)
-    if res.is_err():
-        return build_html_or_typed(content, mime)
-    val compressed = res.unwrap()
-    cache.put(actual_path, chosen, compressed)
-    build_compressed_response(compressed, mime, chosen)
+    cache.serve_compressed_or_plain(content, mime, actual_path, accept_header)
 
 fn _static_text_to_bytes(s: text) -> [u8]:
-    var out: [u8] = []
-    var i = 0
-    while i < s.len():
-        out.push(s.byte_at(i))
-        i = i + 1
-    out
+    text_to_bytes(s)

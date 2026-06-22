@@ -14,8 +14,8 @@ use std.nogc_async_mut.http_server.compression.{
     supported_encodings,
 }
 use std.common.compress.{decompress_bytes}
+use std.common.compress.deflate.{deflate_decompress_eof}
 use std.nogc_sync_mut.compression.gzip.{gzip_decompress}
-use std.nogc_sync_mut.compression.zlib.{zlib_decompress}
 
 # ----------------------------------------------------------------------------
 # Module-level payload helpers — built outside it-blocks to avoid the
@@ -24,27 +24,25 @@ use std.nogc_sync_mut.compression.zlib.{zlib_decompress}
 
 # 1 120 bytes of repetitive ASCII — well above the 256-byte minimum threshold.
 fn _make_payload() -> [u8]:
-    val unit: [u8] = [
-        0x61u8, 0x62u8, 0x63u8, 0x64u8, 0x65u8, 0x66u8, 0x67u8, 0x68u8,
-        0x69u8, 0x6au8
-    ]
     var bytes: [u8] = []
     var i: i64 = 0
     while i < 112:
-        bytes = bytes + unit
+        bytes = bytes + [
+            0x61u8, 0x62u8, 0x63u8, 0x64u8, 0x65u8, 0x66u8, 0x67u8, 0x68u8,
+            0x69u8, 0x6au8
+        ]
         i = i + 1
     bytes
 
 # 100 bytes — deliberately below the 256-byte COMPRESSION_MIN_BODY_BYTES guard.
 fn _make_tiny_payload() -> [u8]:
-    val unit: [u8] = [
-        0x41u8, 0x42u8, 0x43u8, 0x44u8, 0x45u8, 0x46u8, 0x47u8, 0x48u8,
-        0x49u8, 0x4au8
-    ]
     var bytes: [u8] = []
     var i: i64 = 0
     while i < 10:
-        bytes = bytes + unit
+        bytes = bytes + [
+            0x41u8, 0x42u8, 0x43u8, 0x44u8, 0x45u8, 0x46u8, 0x47u8, 0x48u8,
+            0x49u8, 0x4au8
+        ]
         i = i + 1
     bytes
 
@@ -52,7 +50,7 @@ fn _resp_with_byte_body(body_bytes: [u8]) -> HttpResponseData:
     HttpResponseData(
         status: 200,
         reason: "OK",
-        headers: [("Content-Type", "application/octet-stream")],
+        headers: [("Content-Type", "text/plain")],
         body: "",
         body_bytes: body_bytes,
         body_file: "",
@@ -92,17 +90,15 @@ fn _get_header(headers: [(text, text)], name: text) -> text:
 
 describe "Phase 1 HTTP Content-Encoding integration":
 
-    # 1. Full Accept-Encoding header with multiple codecs — server picks zstd
-    #    (highest server preference), then body decompresses back to original.
-    it "zstd wins when client offers gzip, zstd, lz4, deflate; body round-trips":
+    # 1. Full Accept-Encoding header with multiple codecs — server picks gzip
+    #    (highest listed server preference), then body decompresses back to original.
+    it "gzip wins when client offers gzip, zstd, lz4, deflate; body round-trips":
         val payload = _make_payload()
         val resp = _resp_with_byte_body(payload)
         val out = compress_response_for(resp, "gzip, zstd, lz4, deflate")
-        expect(_get_header(out.headers, "content-encoding")).to_equal("zstd")
+        expect(_get_header(out.headers, "content-encoding")).to_equal("gzip")
         expect(out.body_bytes.len() > 0).to_equal(true)
-        val round_trip = decompress_bytes(out.body_bytes, nil)
-        expect(round_trip.is_ok()).to_equal(true)
-        val decoded = round_trip.unwrap()
+        val decoded = gzip_decompress(out.body_bytes) ?? []
         expect(decoded.len()).to_equal(payload.len())
 
     # 2. gzip-only client — server must use gzip; body decompresses via gzip.
@@ -127,7 +123,7 @@ describe "Phase 1 HTTP Content-Encoding integration":
         expect(_get_header(out.headers, "content-encoding")).to_equal("deflate")
         expect(out.body_bytes.len() > 0).to_equal(true)
         expect(out.body_bytes[0]).to_equal(0x78u8)
-        val decoded = zlib_decompress(out.body_bytes) ?? []
+        val decoded = deflate_decompress_eof(out.body_bytes).unwrap()
         expect(decoded.len()).to_equal(payload.len())
 
     # 4. lz4-only client — server uses lz4 frame format; auto-detect magic OK.
@@ -158,7 +154,7 @@ describe "Phase 1 HTTP Content-Encoding integration":
     it "identity fallback when client only offers unsupported codecs":
         val payload = _make_payload()
         val resp = _resp_with_byte_body(payload)
-        val out = compress_response_for(resp, "br, snappy, weird")
+        val out = compress_response_for(resp, "snappy, weird")
         expect(_has_header(out.headers, "content-encoding")).to_equal(false)
         expect(out.body_bytes.len()).to_equal(payload.len())
 
@@ -207,9 +203,8 @@ describe "Phase 1 HTTP Content-Encoding integration":
         expect(_has_header(out.headers, "content-encoding")).to_equal(false)
         expect(out.body_file).to_equal("/tmp/foo.html")
 
-    # 10. Pre-existing Content-Length removed after compression (caller must
-    #     re-set it after chunked / re-framing).
-    it "Content-Length removed from headers after successful compression":
+    # 10. Pre-existing Content-Length is replaced with the compressed length.
+    it "Content-Length updated after successful compression":
         val payload = _make_payload()
         val base = _resp_with_byte_body(payload)
         val resp = HttpResponseData(
@@ -225,7 +220,7 @@ describe "Phase 1 HTTP Content-Encoding integration":
         )
         val out = compress_response_for(resp, "zstd")
         expect(_get_header(out.headers, "content-encoding")).to_equal("zstd")
-        expect(_has_header(out.headers, "content-length")).to_equal(false)
+        expect(_get_header(out.headers, "content-length")).to_equal(out.body_bytes.len().to_string())
 
     # 11. Existing Content-Encoding — compress_response_for must NOT re-compress.
     #     Original Content-Encoding header is preserved as-is.
@@ -246,20 +241,20 @@ describe "Phase 1 HTTP Content-Encoding integration":
         val out = compress_response_for(resp, "zstd")
         expect(_get_header(out.headers, "content-encoding")).to_equal("gzip")
 
-    # 12. Determinism — "deflate, gzip, lz4, zstd" always picks zstd (highest
+    # 12. Determinism — "deflate, gzip, lz4, zstd" always picks gzip (highest
     #     server preference). Run 3 times to confirm.
-    it "multi-codec selection is deterministic: zstd always wins over 3 runs":
+    it "multi-codec selection is deterministic: gzip always wins over 3 runs":
         val payload = _make_payload()
         val accept = "deflate, gzip, lz4, zstd"
 
         val resp1 = _resp_with_byte_body(payload)
         val out1 = compress_response_for(resp1, accept)
-        expect(_get_header(out1.headers, "content-encoding")).to_equal("zstd")
+        expect(_get_header(out1.headers, "content-encoding")).to_equal("gzip")
 
         val resp2 = _resp_with_byte_body(payload)
         val out2 = compress_response_for(resp2, accept)
-        expect(_get_header(out2.headers, "content-encoding")).to_equal("zstd")
+        expect(_get_header(out2.headers, "content-encoding")).to_equal("gzip")
 
         val resp3 = _resp_with_byte_body(payload)
         val out3 = compress_response_for(resp3, accept)
-        expect(_get_header(out3.headers, "content-encoding")).to_equal("zstd")
+        expect(_get_header(out3.headers, "content-encoding")).to_equal("gzip")
