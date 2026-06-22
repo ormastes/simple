@@ -1,6 +1,6 @@
 # BUG: memory_capabilities_spec failures — enum-field method call crash + match-on-dict.get SIGSEGV + RefEnv.consume copy loss
 
-Status: PARTIAL-FIXED (Bug A fixed 2026-06-11; Bugs B and C open)
+Status: PARTIAL-FIXED (Bug A fixed 2026-06-11; Bug C fixed 2026-06-22; Bug B open)
 
 **Date:** 2026-06-11
 **Status:** PARTIAL-FIXED
@@ -38,9 +38,21 @@ Blocks the whole test body.
 
 ## Bug C — RefEnv.consume mutates a Dict.get copy (silent wrong result)
 
+**Status: FIXED 2026-06-22**
+
 `RefEnv.consume()` (code under test in the spec) does `self.refs.get(name)`, mutates the
 returned value, and never writes it back. Dict.get returns a value COPY, so
 `is_available()` stays true after consume. Same root pattern as the documented
 arrays/values-are-value-types + cross-module mutation loss limitations. Either the
 language needs reference semantics here, or RefEnv must re-insert after mutation —
 decide at language level, then fix RefEnv accordingly.
+
+Fix: `RefEnv` now keeps parallel `ref_names` / `ref_values` arrays for its own
+storage and mirrors writes to `refs` only for compatibility. `consume()` updates
+the array slot after mutating the copied `Reference`, avoiding the crashing
+`match self.refs.get(name)` class-value path and preserving the consumed state.
+
+Evidence: isolated interpreter probe changed from `before=false` / crash-prone
+dict behavior to `before=true` and `after=false`; the full
+`memory_capabilities_spec.spl` improved from 4 pass / 2 fail to 5 pass / 1 fail.
+The remaining failure is Bug B.
