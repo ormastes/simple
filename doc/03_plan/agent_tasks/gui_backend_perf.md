@@ -587,6 +587,12 @@ Acceptance:
      `production_gui_web_renderer_parity_reason=electron-generated-gui-matrix-failed`,
      and `matrix_electron_generated_gui_web_matrix_reason=case-80x64-failed`;
      the 80x64 case evidence reports `missing-electron-dependency`.
+   - 2026-06-23 focused 80x64 retry after installing `tools/electron-shell`
+     dependencies is archived in
+     `doc/09_report/electron_generated_gui_web_parity_evidence_80x64_2026-06-23.md`.
+     The blocker moved to `simple-render-failed`: the Simple render step times
+     out after 60s with `CODEGEN-AMBIGUOUS-METHOD` diagnostics for `Engine2D`
+     draw calls.
    - Previous local blocker after installing `tools/electron-shell` dependencies:
      generated-GUI Electron matrix and layout manifest passed, but the
      Tauri/Chrome surface manifest failed with live-surface divergence
