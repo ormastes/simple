@@ -50,7 +50,8 @@ REQUIREMENTS -> NFR;  RESEARCH -> DESIGN -> ADR;  GUIDES <- OPERATIONS
 
 ## doc/06_spec Structure (Generated vs Manual)
 
-`doc/06_spec/` uses a 4-level hierarchy: `{category}/{domain}/{subdomain}/{file}`.
+Current generated SPipe docs under `doc/06_spec/` mirror numbered executable
+test paths after stripping the leading `test/` segment.
 
 | Content | Naming | Lifecycle |
 |---------|--------|-----------|
@@ -58,8 +59,8 @@ REQUIREMENTS -> NFR;  RESEARCH -> DESIGN -> ADR;  GUIDES <- OPERATIONS
 | **Manual** specs | Non-`_spec.md` names (README, INDEX, guides) | Hand-edited, survives regeneration |
 | **Auto-meta** | `feature.md`, `pending_feature.md` | Regenerated every test run |
 
-Categories mirror the numbered `test/` structure:
-- `01_unit/` -> `test/01_unit/`, `02_integration/` -> `test/02_integration/`, `03_system/` -> `test/03_system/`
+Current generated SPipe docs mirror the numbered `test/` structure:
+- `01_unit/` -> `test/01_unit/`, `02_integration/` -> `test/02_integration/`, `03_system/` -> `test/03_system/`, `05_perf/` -> `test/05_perf/`
 - feature specs keep their mirrored numbered tier instead of moving to a flat `feature/` tree.
 
 Path mapping: `test/01_unit/compiler/parser/x_spec.spl` -> `doc/06_spec/01_unit/compiler/parser/x_spec.md`
@@ -75,7 +76,7 @@ See `doc/06_spec/FILE.md` for full manifest.
 5. **Architecture** -> `doc/04_architecture/<domain>/<topic>/<feature>.md`
 6. **Design** -> `doc/05_design/<domain>/<topic>/<feature>.md`
 7. **ADR** -> `doc/04_architecture/adr/ADR-NNN-title.md` (major decisions)
-8. **Feature Spec** -> `doc/06_spec/{category}/{domain}/{subdomain}/<feature>_spec.md` (generated from test)
+8. **Feature Spec** -> `doc/06_spec/<mirrored-test-path>/<feature>_spec.md` (generated from test)
 9. **BDD Tests** -> `test/*_spec.spl` (link Requirements + Design in docstring)
 10. **Guide** -> `doc/07_guide/<domain>/<topic>/<feature>_guide.md` (if applicable)
 11. **Report** -> `doc/09_report/<feature>_complete_YYYY-MM-DD.md`
