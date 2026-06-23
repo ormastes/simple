@@ -43,13 +43,14 @@ serial_proxy_baud_guard_spec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("src/lib/nogc_sync_mut/io/serial_proxy.spl") ?? ""
 
 expect(source).to_contain("fn parse_baud_or_zero(value: text) -> i64")
+expect(source).to_contain("return trimmed.to_int() ?? 0")
 expect(source).to_contain("val baud = parse_baud_or_zero(args[1])")
 expect(source).to_contain("if baud <= 0:")
 expect(source.contains("val baud = args[1].to_int()")).to_equal(false)
