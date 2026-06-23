@@ -26,14 +26,18 @@ impl PkgManager:
     me load() -> Result<bool, text>:
         """Load installed package database from /pkg/installed/."""
         val db_result = _load_installed_db()
-        if val Err(e) = db_result:
-            return Result.Err(e)
-        self.installed = db_result.unwrap()
+        match db_result:
+            Err(e):
+                return Result.Err(e)
+            Ok(db):
+                self.installed = db
 
         val repo_result = load_repositories()
-        if val Err(e) = repo_result:
-            return Result.Err(e)
-        self.repositories = repo_result.unwrap()
+        match repo_result:
+            Err(e):
+                return Result.Err(e)
+            Ok(repos):
+                self.repositories = repos
 
         return Result.Ok(true)
 
@@ -58,9 +62,12 @@ impl PkgManager:
 
         # Resolve dependencies
         val resolve_result = resolve(name, available, self.installed.packages)
-        if val Err(e) = resolve_result:
-            return Result.Err(e)
-        val resolved = resolve_result.unwrap()
+        var resolved = ResolvedSet(install_order: [], packages: [])
+        match resolve_result:
+            Err(e):
+                return Result.Err(e)
+            Ok(resolved_set):
+                resolved = resolved_set
 
         # Install each package in dependency order
         for pkg_name in resolved.install_order:
@@ -68,9 +75,12 @@ impl PkgManager:
                 pass_dn
             else:
                 val install_result = _install_single(pkg_name, resolved.packages)
-                if val Err(e) = install_result:
-                    return Result.Err("Failed to install {pkg_name}: {e}")
-                val manifest = install_result.unwrap()
+                var manifest = PackageManifest(name: "", version: PackageVersion(major: 0, minor: 0, patch: 0), description: "", dependencies: [], files: [], checksum: "")
+                match install_result:
+                    Err(e):
+                        return Result.Err("Failed to install {pkg_name}: {e}")
+                    Ok(installed_manifest):
+                        manifest = installed_manifest
                 self.installed.packages.push(manifest)
 
         # Save updated database
@@ -152,10 +162,7 @@ impl PkgManager:
         var updated_any = false
         for pkg_name in to_update:
             val current = self.info(pkg_name)
-            if current.? == false:
-                pass_dn
-            else:
-                val cur = current.unwrap()
+            if val Some(cur) = current:
                 # Find available version
                 for avail in available:
                     if avail.name == pkg_name:
@@ -170,6 +177,8 @@ impl PkgManager:
                                 return Result.Err("Failed to install new {pkg_name}: {e}")
                             updated_any = true
                         break
+            else:
+                pass_dn
 
         if updated_any == false:
             print "All packages are up to date."
