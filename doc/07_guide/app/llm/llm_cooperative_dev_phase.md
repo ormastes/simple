@@ -123,10 +123,10 @@ If multiple LLMs participate in research:
 - SPipe BDD tests with real assertions
 - Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 - Every REQ-NNN must have at least one test
-- Define shared interface names and manual-facing setup/checker helper names
-  before implementation. Temporary helper placeholders must fail explicitly
-  with `assert(false)` or `fail(...)`; silent no-op helpers are not valid
-  coverage.
+- Before lower-model sidecars fan out, define shared interface names,
+  manual-facing `step("...")` flow helper names, and setup/checker helper
+  names. Temporary helper placeholders must fail explicitly with
+  `assert(false)` or `fail(...)`; silent no-op helpers are not valid coverage.
 - Generate mirrored `doc/06_spec/...` manuals from SSpec and read them as
   manuals; revise steps, captures, inline/previous expansion, and visibility
   until primary flows are understandable without opening the source test.
