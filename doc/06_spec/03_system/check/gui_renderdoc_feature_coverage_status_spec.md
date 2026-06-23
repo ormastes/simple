@@ -27,7 +27,7 @@ gui_renderdoc_feature_coverage_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,9 +43,9 @@ Validates the restart audit for GUI item rendering coverage, HTML/CSS traceabili
 | Category | Other |
 | Status | Active |
 | Requirements | N/A |
-| Plan | doc/03_plan/sys_test/html_css_spec_traceability.md |
+| Plan | doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md |
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
-| Research | doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md |
+| Research | doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-21.md |
 | Source | `test/03_system/check/gui_renderdoc_feature_coverage_status_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -58,9 +58,9 @@ evidence, and RenderDoc completion gates. The audit is intentionally
 non-launching: it reports current evidence and references the heavy capture
 commands without starting Electron, Chrome, or RenderDoc.
 
-**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+**Plan:** doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md
 **Requirements:** N/A
-**Research:** doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md
+**Research:** doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-21.md
 **Architecture:** doc/04_architecture/ui/simple_gui_stack.md
 **Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
 
@@ -84,6 +84,9 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 - The audit includes current production parity evidence status when present.
 - The audit requires production GUI/web renderer-core parity evidence before
   the aggregate GUI audit can report `pass`.
+- The audit forwards retained 8K GUI/web/2D perf evidence, including FPS,
+  checksum, and RSS budget rows, and keeps completion blocked when it is
+  missing or not passing.
 - The audit reports the active RenderDoc goal, Simple `.rdc`, and external
   Chrome/Vulkan `.rdc` gates without treating missing host captures as pass.
 - The audit reports macOS RenderDoc package/support status separately from the
@@ -216,7 +219,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 647 lines folded for reproduction.
+Runnable source: 653 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -357,6 +360,11 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_su
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_backend_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_font_offload_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_readback_status=pass")
+expect(evidence).to_contain("gui_showcase_8k_perf_status=missing")
+expect(evidence).to_contain("gui_showcase_8k_perf_reason=missing-8k-perf-evidence")
+expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_kb=")
+expect(evidence).to_contain("gui_showcase_8k_perf_rss_status=")
+expect(evidence).to_contain("gui_showcase_8k_perf_checksum=")
 expect(evidence).to_contain("renderdoc_goal_status_command=sh scripts/check/check-html-css-renderdoc-goal-status.shs")
 expect(evidence).to_contain("renderdoc_goal_blocked_gate=")
 expect(evidence).to_contain("renderdoc_goal_blocked_gate_count=")
@@ -863,6 +871,7 @@ expect(report).to_contain("- macOS RenderDoc:")
 expect(report).to_contain("- GUI/web/2D browser Vulkan backing:")
 expect(report).to_contain("- GUI/web/2D Vulkan RenderDoc blockers:")
 expect(report).to_contain("- Production GUI/web parity gate:")
+expect(report).to_contain("- GUI/web/2D 8K retained perf:")
 expect(report).to_contain("- Production surface host:")
 expect(report).to_contain("- Production Tauri surface capture:")
 expect(report).to_contain("- Production Chrome surface capture:")
@@ -939,6 +948,40 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_core_reason=pass
 expect(evidence).to_contain("gui_renderdoc_feature_coverage_status=incomplete")
 expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-renderdoc")
 expect(blocked_gates.contains("production GUI/web parity evidence with live Tauri and Chrome captures")).to_equal(false)
+```
+
+</details>
+
+#### forwards retained 8K perf RSS evidence into the aggregate audit
+
+- Create synthetic retained 8K perf evidence
+   - Expected: code equals `0`
+- Assert the aggregate carries FPS, checksum, and RSS budget rows
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create synthetic retained 8K perf evidence")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k/source && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_resolution=8k\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_frames=120\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_nonzero_pixels=1000\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_render_mode=retained-static-frame\\ngui_showcase_8k_perf_redraw_frames=1\\ngui_showcase_8k_perf_log=build/test-gui-renderdoc-feature-coverage-status-8k/source/showcase.log\\ngui_showcase_8k_perf_time_log=build/test-gui-renderdoc-feature-coverage-status-8k/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k/source/status.env BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate carries FPS, checksum, and RSS budget rows")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-8k/out/evidence.env")
+val report = file_read("build/test-gui-renderdoc-feature-coverage-status-8k/report.md")
+expect(evidence).to_contain("gui_showcase_8k_perf_env=build/test-gui-renderdoc-feature-coverage-status-8k/source/status.env")
+expect(evidence).to_contain("gui_showcase_8k_perf_status=pass")
+expect(evidence).to_contain("gui_showcase_8k_perf_fps_x1000=201000")
+expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_kb=524288")
+expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_budget_kb=1048576")
+expect(evidence).to_contain("gui_showcase_8k_perf_rss_status=pass")
+expect(evidence).to_contain("gui_showcase_8k_perf_checksum=123456")
+expect(report).to_contain("- GUI/web/2D 8K retained perf: pass")
 ```
 
 </details>
@@ -1127,8 +1170,8 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-produ
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -1136,9 +1179,9 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-produ
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/sys_test/html_css_spec_traceability.md](doc/03_plan/sys_test/html_css_spec_traceability.md)
+- **Plan:** [doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md](doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md)
 - **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
-- **Research:** [doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md](doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md)
+- **Research:** [doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-21.md](doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-21.md)
 
 
 </details>
