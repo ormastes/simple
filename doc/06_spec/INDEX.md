@@ -4,10 +4,10 @@
 
 ## Quick Stats
 
-- **Total Features:** 35
-- **Complete Documentation:** 35 (100%)
+- **Total Features:** 36
+- **Complete Documentation:** 36 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 350
+- **Total Lines:** 360
 
 ---
 
@@ -41,7 +41,7 @@
 
 ---
 
-## Standard Library (12 features)
+## Standard Library (13 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
@@ -54,6 +54,7 @@
 | [Range Numeric Guard Specification](test/01_unit/lib/nogc_sync_mut/http_server/range_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Response Code Numeric Guard Specification](test/01_unit/lib/smtp/response_code_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Semver Numeric Guard Specification](test/01_unit/lib/package/semver_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
+| [Serial Proxy Baud Guard Specification](test/01_unit/lib/io/serial_proxy_baud_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Session Int Numeric Guard Specification](test/01_unit/lib/web_framework/session_int_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Subscribe Content Length Numeric Guard Specification](test/01_unit/lib/nogc_sync_mut/stomp/subscribe_content_length_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
 | [Udp Utils Numeric Guard Specification](test/01_unit/lib/nogc_sync_mut/udp_utils_numeric_guard_spec.md) | Minimal | N/A | 1 | 20% | 10 lines |
