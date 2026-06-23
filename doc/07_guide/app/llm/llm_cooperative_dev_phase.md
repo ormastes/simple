@@ -314,6 +314,12 @@ bounded implementation slices before deleting anything:
 5. Tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
 6. **Ask before push** -- never push without user approval
 
+After approval, use the jj linear push flow from `$release`: capture file count,
+`jj git fetch`, `jj rebase -d main@origin`, verify file count did not drop, set
+`main` with `jj bookmark set main -r @-`, then push with
+`env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main` and
+`env -u GITHUB_TOKEN -u GH_TOKEN git push --tags`.
+
 ### Skills / Commands
 
 | LLM | Invocation |
