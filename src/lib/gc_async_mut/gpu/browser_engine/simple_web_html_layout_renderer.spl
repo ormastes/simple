@@ -1157,6 +1157,8 @@ fn apply_decls(st: Style, decls: text) -> Style:
             overflow_hidden_v = true
         if overflow_y_decl == "auto" or overflow_y_decl == "scroll":
             overflow_auto_y_v = true
+    if overflow_x_decl == "hidden" and overflow_y_decl == "visible":
+        overflow_auto_y_v = true
     val visibility_decl = decl_get(decls, "visibility")
     if visibility_decl.len() > 0:
         if visibility_decl == "hidden":
@@ -4852,6 +4854,23 @@ fn paint_clip_at(cache: PaintClipCache, i: i32) -> ClipRect:
         return cache.clips[i]
     cache.default_clip
 
+fn fb_vertical_scrollbar_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, h: i32, clip: ClipRect) -> [u32]:
+    var out = fb_rect_clip(fb, fbw, fbh, x, y, 15, h, argb(241, 241, 241), clip)
+    val mid_x = x + 7
+    val up_y = y + 3
+    var row = 0
+    while row < 4:
+        val half = row
+        out = fb_rect_clip(out, fbw, fbh, mid_x - half, up_y + row, half * 2 + 1, 1, argb(163, 163, 163), clip)
+        row = row + 1
+    val down_y = y + h - 7
+    row = 0
+    while row < 4:
+        val half = 3 - row
+        out = fb_rect_clip(out, fbw, fbh, mid_x - half, down_y + row, half * 2 + 1, 1, argb(80, 80, 80), clip)
+        row = row + 1
+    out
+
 # ---------------------------------------------------------------------------
 # Paint into a staging [u32] framebuffer before Engine2D presentation.
 # ---------------------------------------------------------------------------
@@ -4994,6 +5013,20 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         if fbh <= 66:
             out = fb_rect(out, fbw, fbh, 1, fbh - 1, 4, 1, argb(245, 245, 245))
             out = fb_rect(out, fbw, fbh, fbw - 5, fbh - 1, 4, 1, argb(245, 245, 245))
+    if not widget_mode:
+        i = 0
+        while i < node_count:
+            val nd = nodes[i]
+            val st = styles[i]
+            if st.display != "none" and not st.visibility_hidden and nd.tag != "#text" and st.overflow_auto_y and st.overflow_hidden:
+                val x = bx[i]
+                val y = by[i]
+                val w = bw[i]
+                val h = bh[i]
+                if w >= 15 and h >= 8 and y < fbh:
+                    val clip = paint_clip_at(clip_cache, i)
+                    out = fb_vertical_scrollbar_clip(out, fbw, fbh, x + w - st.border_r - 15, y + st.border_t, h - st.border_t - st.border_b, clip)
+            i = i + 1
     # text on top
     i = 0
     while i < node_count:

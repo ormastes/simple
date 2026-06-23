@@ -112,12 +112,14 @@ Acceptance:
   `SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple`. Partial bounded
   evidence is archived in
   `doc/09_report/electron_simple_web_layout_manifest_after_engine_dispatch_2026-06-23.md`;
-  the first exact remaining case is `overflow_axis_matrix` with 270 mismatched
+  the first exact remaining case was `overflow_axis_matrix` with 270 mismatched
   pixels. A pure axis-aware clip-state patch made this case worse (342
-  mismatches) because Chromium renders scrollbar/auto-overflow artifacts in the
-  mixed-axis overflow boxes. Next code work should model the CSS computed
-  overflow/scrollbar path for mixed `overflow-x`/`overflow-y` values rather than
-  only splitting the clip rectangle by axis.
+  mismatches); the accepted fix instead models the CSS computed mixed-axis
+  overflow path by treating `overflow-x:hidden; overflow-y:visible` as
+  vertical auto overflow and painting the native-width vertical scrollbar.
+  Focused evidence is archived in
+  `doc/09_report/electron_simple_web_layout_overflow_axis_after_scrollbar_paint_2026-06-23.md`
+  with 0 mismatches.
 - this commit -- top-level font evidence propagation: the canonical production
   GUI web renderer parity wrapper now runs the font offload/readback wrapper and
   promotes typed vector and bitmap font evidence under

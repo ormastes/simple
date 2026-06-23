@@ -13,6 +13,10 @@
   this case to 342 mismatches. The remaining evidence points at mixed-axis
   overflow computed behavior and scrollbar/auto-overflow painting, not just
   clipping the existing rectangle on one axis.
+- follow-up resolution: the focused `overflow_axis_matrix` rerun now passes
+  exactly after modeling mixed-axis vertical auto overflow and painting the
+  scrollbar. See
+  `doc/09_report/electron_simple_web_layout_overflow_axis_after_scrollbar_paint_2026-06-23.md`.
 
 ## Cases
 - css_box_matrix: status=pass reason=pass policy=exact exit=0 mismatch=0 blur_or_tolerance=false
