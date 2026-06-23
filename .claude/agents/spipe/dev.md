@@ -25,8 +25,9 @@ This agent CREATES the initial state file. All subsequent agents read and append
 6. Add `## Cooperative Review`: for broad lanes, list lower-model sidecars
    (Codex Spark, Claude Haiku, or Claude Sonnet), merge owner, final
    normal/highest-capability reviewer, shared interface names, manual
-   setup/checker helper names, and fail-fast placeholders; otherwise write
-   `N/A` with one concrete reason.
+   `step("...")` flow helper names, setup/checker helper names, fail-fast
+   placeholders (`assert(false)` or `fail(...)`), and generated-manual review
+   owner; otherwise write `N/A` with one concrete reason.
 7. Create `.spipe/<feature>/state.md` with the output below
 
 ## Entry Criteria
@@ -76,7 +77,7 @@ Your ONLY output is the state file with a goal and acceptance criteria.
 <anything explicitly out of scope>
 
 ## Cooperative Review
-<N/A with reason, or lower-model sidecars, merge owner, final reviewer, shared interfaces, manual helper names, and fail-fast placeholders>
+<N/A with reason, or lower-model sidecars, merge owner, final reviewer, shared interfaces, manual step("...") flow helper names, setup/checker helper names, fail-fast placeholders, and generated-manual review owner>
 
 ## Phase
 dev-done
