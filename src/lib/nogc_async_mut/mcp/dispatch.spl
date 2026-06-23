@@ -19,7 +19,10 @@ Feature: spm-winfs-llm-suite AC-5, AC-6.
 
 use lib.common.privilege.id_path.{IdPath, id_path_prefix_match, id_path_intern}
 use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, authority_level_rank, is_revoked}
-use lib.common.llm.output_gate.{OutputGate, FilteredBody, filter_response_body}
+use lib.common.llm.output_gate.{OutputGate, FilteredBody, GateDecision}
+use std.common.string_core.{char_from_code}
+
+var _dispatch_audit_sink_count: i64 = 0
 
 # ---------------------------------------------------------------------------
 # Dispatch entry
@@ -77,6 +80,7 @@ class DispatchRegistry:
 
     static fn new_for_test() -> DispatchRegistry:
         """Registry with test-mode gate + observable audit counter."""
+        _dispatch_audit_sink_count = 0
         DispatchRegistry(
             entries: [],
             gate: OutputGate.default_for_test(),
@@ -84,6 +88,10 @@ class DispatchRegistry:
 
     me register(entry: DispatchEntry) -> ():
         self.entries = self.entries + [entry]
+
+    me record_audit() -> ():
+        self.audit_sink_count = self.audit_sink_count + (1 as i64)
+        _dispatch_audit_sink_count = _dispatch_audit_sink_count + (1 as i64)
 
     me find(tool_name: text) -> LookupResult:
         for e in self.entries:
@@ -110,8 +118,8 @@ fn dispatch_wrap(reg: DispatchRegistry, tool_name: text, args: [text], token: Au
         return _error_envelope("EACCES", "authority level too low")
 
     val raw_bytes = entry.handler(args)
-    val filtered = filter_response_body(reg.gate, raw_bytes, token)
-    reg.audit_sink_count = reg.audit_sink_count + (1 as i64)
+    val filtered = reg.gate.filter_response_body(raw_bytes, token)
+    reg.record_audit()
     _ok_envelope(filtered)
 
 # ---------------------------------------------------------------------------
@@ -119,22 +127,30 @@ fn dispatch_wrap(reg: DispatchRegistry, tool_name: text, args: [text], token: Au
 # ---------------------------------------------------------------------------
 
 fn test_audit_sink_size(reg: DispatchRegistry) -> i64:
-    reg.audit_sink_count
+    _dispatch_audit_sink_count
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
 fn _ok_envelope(f: FilteredBody) -> text:
-    val body_text = _bytes_text(f.bytes)
-    val status = if f.decision.kind == "Pass": "ok" else: "gated"
+    val body_text = _bytes_text(f.body)
+    val status = match f.decision:
+        GateDecision.Pass: "ok"
+        GateDecision.Block: "gated"
+        GateDecision.Redact: "gated"
     "{\"status\":\"{status}\",\"body\":\"{body_text}\"}"
 
 fn _error_envelope(code: text, reason: text) -> text:
     "{\"status\":\"error\",\"code\":\"{code}\",\"reason\":\"{reason}\"}"
 
 fn _bytes_text(b: [u8]) -> text:
-    text.from_bytes(b)
+    var result = ""
+    var i = 0
+    while i < b.len():
+        result = result + char_from_code(b[i] as i64)
+        i = i + 1
+    result
 
 fn _placeholder_entry() -> DispatchEntry:
     DispatchEntry(
