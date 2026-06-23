@@ -73,8 +73,9 @@ git tag -a vX.Y.Z -m "Release vX.Y.Z"
 Show the user what will happen and ask for confirmation before running:
 
 ```bash
-jj bookmark set main -r @- && jj git push --bookmark main
-git push origin vX.Y.Z
+jj bookmark set main -r @-
+env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
+env -u GITHUB_TOKEN -u GH_TOKEN git push origin vX.Y.Z
 ```
 
 Do NOT push without explicit user approval.
