@@ -20,7 +20,10 @@ proof for the generated widget HTML fixture.
 
 Completion requires:
 
-- `gui_widget_renderdoc_goal_widget_feature_covered_count=43`
+- `gui_widget_renderdoc_goal_widget_feature_covered_count` matching the emitted
+  `gui_widget_renderdoc_goal_widget_count`
+- `gui_widget_renderdoc_goal_missing_widget_features` empty after comparing
+  against `gui_widget_renderdoc_goal_expected_widget_features`
 - `gui_widget_renderdoc_goal_simple_gate_status=pass`
 - `gui_widget_renderdoc_goal_electron_gate_status=pass`
 - `gui_widget_renderdoc_goal_blocked_gate_count=0`
