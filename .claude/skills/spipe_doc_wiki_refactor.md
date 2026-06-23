@@ -1,12 +1,13 @@
 ---
 name: spipe_doc_wiki_refactor
-description: "SPipe documentation/wiki refactoring pass. Use during SPipe refactor and ship phases to update docs, wiki-style process knowledge, feature/layer expert links, and stale references after implementation changes."
+description: "SPipe documentation/wiki refactoring pass. Use during SPipe refactor before final verification to update docs, wiki-style process knowledge, feature/layer expert links, and stale references after implementation changes."
 ---
 
 # SPipe Doc/Wiki Refactor
 
-Run this as a support skill during SPipe Phase 6 (Refactor) and Phase 8
-(Ship). Its job is documentation hygiene, not product behavior.
+Run this as a support skill during SPipe Phase 6 (Refactor), before final
+verification. Ship consumes verify evidence and must not repair stale
+doc/wiki/process links. Its job is documentation hygiene, not product behavior.
 
 ## Inputs
 
