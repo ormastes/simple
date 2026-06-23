@@ -40,12 +40,14 @@ case "$RESOLUTION" in
 esac
 STATUS_ENV="$BUILD_DIR/status.env"
 LOG="$BUILD_DIR/showcase.log"
+TIME_LOG="$BUILD_DIR/time.log"
 BUILD_LOG="$BUILD_DIR/native-build.log"
 NATIVE_BIN="$BUILD_DIR/widget_showcase_gui_perf"
 ALIAS_SRC="$BUILD_DIR/widget_showcase_${RESOLUTION}_perf.spl"
 APP="examples/06_io/ui/widget_showcase_gui.spl"
 TIMEOUT_SECS="${TIMEOUT_SECS:-20}"
 USE_NATIVE="${USE_NATIVE:-1}"
+MAX_RSS_KB="${MAX_RSS_KB:-0}"
 
 mkdir -p "$BUILD_DIR"
 
@@ -92,9 +94,27 @@ fi
 
 start_ns="$(date +%s%N)"
 set +e
-timeout "$TIMEOUT_SECS" env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_LIB=src SHOWCASE_4K_PERF=1 sh -c "$RUN_CMD" >"$LOG" 2>&1
+if [ -x /usr/bin/time ]; then
+    timeout "$TIMEOUT_SECS" env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_LIB=src SHOWCASE_4K_PERF=1 /usr/bin/time -v -o "$TIME_LOG" sh -c "$RUN_CMD" >"$LOG" 2>&1
+else
+    : >"$TIME_LOG"
+    timeout "$TIMEOUT_SECS" env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_LIB=src SHOWCASE_4K_PERF=1 sh -c "$RUN_CMD" >"$LOG" 2>&1
+fi
 probe_rc=$?
 set -e
+max_rss_kb="$(sed -n 's/^[[:space:]]*Maximum resident set size (kbytes):[[:space:]]*//p' "$TIME_LOG" | tail -n 1)"
+rss_status=unavailable
+if [ -n "$max_rss_kb" ]; then
+    if [ "$MAX_RSS_KB" -gt 0 ] 2>/dev/null; then
+        if [ "$max_rss_kb" -le "$MAX_RSS_KB" ] 2>/dev/null; then
+            rss_status=pass
+        else
+            rss_status=fail
+        fi
+    else
+        rss_status=measured
+    fi
+fi
 if [ "$probe_rc" -ne 0 ] && ! grep -q "^${PROBE_PREFIX}_width=" "$LOG"; then
     reason=showcase-probe-failed
     if [ "$probe_rc" -eq 124 ]; then
@@ -111,6 +131,10 @@ if [ "$probe_rc" -ne 0 ] && ! grep -q "^${PROBE_PREFIX}_width=" "$LOG"; then
         echo "${STATUS_PREFIX}_native_bin=$NATIVE_BIN"
         echo "${STATUS_PREFIX}_alias_src=$ALIAS_SRC"
         echo "${STATUS_PREFIX}_native_build_log=$BUILD_LOG"
+        echo "${STATUS_PREFIX}_max_rss_kb=${max_rss_kb:-}"
+        echo "${STATUS_PREFIX}_max_rss_budget_kb=$MAX_RSS_KB"
+        echo "${STATUS_PREFIX}_rss_status=$rss_status"
+        echo "${STATUS_PREFIX}_time_log=$TIME_LOG"
         echo "${STATUS_PREFIX}_log=$LOG"
     } >"$STATUS_ENV"
     tail -30 "$LOG"
@@ -156,6 +180,10 @@ if [ "$width" != "$WIDTH" ] || [ "$height" != "$HEIGHT" ] || [ "$pixels" != "$EX
         echo "${STATUS_PREFIX}_fps_elapsed_ns=$fps_elapsed_ns"
         echo "${STATUS_PREFIX}_fps_x1000=$fps_x1000"
         echo "${STATUS_PREFIX}_target_fps=$TARGET_FPS"
+        echo "${STATUS_PREFIX}_max_rss_kb=${max_rss_kb:-}"
+        echo "${STATUS_PREFIX}_max_rss_budget_kb=$MAX_RSS_KB"
+        echo "${STATUS_PREFIX}_rss_status=$rss_status"
+        echo "${STATUS_PREFIX}_time_log=$TIME_LOG"
         echo "${STATUS_PREFIX}_pixels=${pixels:-}"
         echo "${STATUS_PREFIX}_nonzero_pixels=${nonzero:-}"
         echo "${STATUS_PREFIX}_checksum=${checksum:-}"
@@ -170,6 +198,9 @@ fi
 if [ "$fps_x1000" -lt "$target_x1000" ]; then
     status=fail
     reason=$BELOW_REASON
+elif [ "$rss_status" = "fail" ]; then
+    status=fail
+    reason=rss-budget-exceeded
 else
     status=pass
     reason=$PASS_REASON
@@ -191,6 +222,10 @@ fi
     echo "${STATUS_PREFIX}_fps_elapsed_ns=$fps_elapsed_ns"
     echo "${STATUS_PREFIX}_fps_x1000=$fps_x1000"
     echo "${STATUS_PREFIX}_target_fps=$TARGET_FPS"
+    echo "${STATUS_PREFIX}_max_rss_kb=${max_rss_kb:-}"
+    echo "${STATUS_PREFIX}_max_rss_budget_kb=$MAX_RSS_KB"
+    echo "${STATUS_PREFIX}_rss_status=$rss_status"
+    echo "${STATUS_PREFIX}_time_log=$TIME_LOG"
     echo "${STATUS_PREFIX}_pixels=$pixels"
     echo "${STATUS_PREFIX}_nonzero_pixels=$nonzero"
     echo "${STATUS_PREFIX}_checksum=$checksum"

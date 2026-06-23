@@ -44,3 +44,16 @@ Blocker: `8k-host-unavailable-for-this-turn`.
 
 The default smoke run is useful regression evidence, but it must not be counted
 as a full 8K GUI/web/2D performance pass.
+
+## Follow-up Evidence Wrapper
+
+`scripts/check/check-widget-showcase-4k-200fps.shs` now emits retained
+showcase RSS rows for both `RESOLUTION=4k` and `RESOLUTION=8k`:
+
+- `gui_showcase_8k_perf_max_rss_kb`
+- `gui_showcase_8k_perf_max_rss_budget_kb`
+- `gui_showcase_8k_perf_rss_status`
+- `gui_showcase_8k_perf_time_log`
+
+Set `MAX_RSS_KB` to enforce a memory budget. With the default `MAX_RSS_KB=0`,
+the wrapper records measured RSS without enforcing a budget.
