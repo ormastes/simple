@@ -191,10 +191,14 @@ The aggregate audit must also expose comparison artifact status keys:
 `gui_web_2d_vulkan_electron_argb_viewport_match_status`,
 `gui_web_2d_vulkan_electron_argb_file_status`,
 `gui_web_2d_vulkan_electron_argb_nonblank_status`,
-`gui_web_2d_vulkan_chrome_screenshot_file_status`,
-`gui_web_2d_vulkan_chrome_screenshot_png_status`,
+`gui_web_2d_vulkan_chrome_argb_file_status`,
+`gui_web_2d_vulkan_chrome_argb_viewport_match_status`,
+`gui_web_2d_vulkan_chrome_argb_nonblank_status`,
 `gui_web_2d_vulkan_simple_evidence_file_status`, and
-`gui_web_2d_vulkan_simple_backend_status`.
+`gui_web_2d_vulkan_simple_backend_status`. The audit may still emit
+`gui_web_2d_vulkan_chrome_screenshot_*` diagnostic keys, but a missing Chrome
+PNG is not a comparison blocker when the Chrome ARGB artifact is present,
+viewport-matched, and nonblank.
 Artifact presence is not a pixel-equivalence claim. Require
 `gui_web_2d_vulkan_pixel_comparison_status=pass`,
 `gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff`, ARGB metadata for
