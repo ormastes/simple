@@ -115,6 +115,19 @@ That is about 13,530 FPS for retained presentation at 7680x4320, with the
 full 8K readback/checksum still verified after the frame loop. The process
 elapsed row remains recorded separately as `gui_showcase_8k_perf_elapsed_ns`.
 
+## When The Aggregate Fails
+
+Use this same record as the blocker target when the aggregate reports either:
+
+- `gui_web_2d_vulkan_comparison_artifact_status` is not `pass`
+- `gui_web_2d_vulkan_pixel_comparison_status` is not `pass`
+
+Artifact failures mean one of Electron, Chrome, or Simple lacks the required
+ARGB/screenshot/evidence file. Pixel failures mean the pairwise ARGB diff lanes
+did not all reach zero mismatch. Do not claim GUI/web/2D Vulkan parity until the
+aggregate returns `gui_web_2d_vulkan_pixel_comparison_status=pass` with
+`gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff`.
+
 ## Rejected Electron Backing Shortcuts
 
 Do not repeat these without a different Electron/GPU host path:
