@@ -83,7 +83,8 @@ The aggregate forwards these fields:
 Completion remains blocked until the 8K status is `pass`. A measured RSS row
 with no budget is useful diagnostic evidence, but a release-quality memory claim
 should set `MAX_RSS_KB` so `gui_showcase_8k_perf_rss_status=pass` proves the
-budget was enforced.
+budget was enforced. A bare `gui_showcase_8k_perf_status=pass` without FPS,
+checksum, and RSS budget fields is downgraded to `fail`.
 
 ## Result Interpretation
 
@@ -868,6 +869,34 @@ describe "GUI RenderDoc feature coverage status gate":
         expect(evidence).to_contain("gui_showcase_8k_perf_rss_status=pass")
         expect(evidence).to_contain("gui_showcase_8k_perf_checksum=123456")
         expect(report).to_contain("- GUI/web/2D 8K retained perf: pass")
+
+    it "rejects bare 8K pass rows without checksum and RSS proof":
+        step("Create an incomplete retained 8K status env")
+        val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-bare && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-bare/source && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-bare/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-bare/source/status.env BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-bare/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-bare/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        step("Assert the aggregate fails the incomplete 8K row")
+        val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-8k-bare/out/evidence.env")
+        expect(evidence).to_contain("gui_showcase_8k_perf_status=fail")
+        expect(evidence).to_contain("gui_showcase_8k_perf_reason=missing-required-8k-perf-evidence:")
+        expect(evidence).to_contain("fps_x1000")
+        expect(evidence).to_contain("target_fps")
+        expect(evidence).to_contain("checksum")
+        expect(evidence).to_contain("max_rss_kb")
+        expect(evidence).to_contain("max_rss_budget_kb")
+        expect(evidence).to_contain("rss_status")
+
+    it "rejects 8K pass rows when RSS budget status is not pass":
+        step("Create a retained 8K status env with failing RSS status")
+        val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/source && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_max_rss_kb=2097152\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=fail\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/source/status.env BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        step("Assert the aggregate fails the RSS-over-budget 8K row")
+        val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/out/evidence.env")
+        expect(evidence).to_contain("gui_showcase_8k_perf_status=fail")
+        expect(evidence).to_contain("gui_showcase_8k_perf_reason=8k-rss-budget-not-pass:fail")
 
     it "requires Electron Vulkan RenderDoc evidence after Simple and external gates pass":
         step("Create controlled Simple and original external RenderDoc evidence but no Electron evidence")
