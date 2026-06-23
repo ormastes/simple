@@ -291,7 +291,7 @@ budget was enforced.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 656 lines folded for reproduction.
+Runnable source: 658 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -874,6 +874,7 @@ if browser_backing_status == "pass":
 else:
     expect(browser_backing_status).to_equal("fail")
     expect(browser_backing_reason.len()).to_be_greater_than(0)
+    expect(browser_backing_reason.contains("missing-reason")).to_be(false)
     expect(browser_backing_mode).to_equal("fallback-bitmap-comparison")
 expect(production_gate_status.len()).to_be_greater_than(0)
 if renderdoc_blocker_status == "pass":
@@ -883,6 +884,7 @@ if renderdoc_blocker_status == "pass":
 else:
     expect(renderdoc_blocker_status).to_equal("blocked")
     expect(renderdoc_blocker_reason.len()).to_be_greater_than(0)
+    expect(renderdoc_blocker_reason.contains("missing-reason")).to_be(false)
     expect(renderdoc_blocker_gate_count.to_i64()).to_be_greater_than(0)
     expect(renderdoc_blocker_gates.len()).to_be_greater_than(0)
     if browser_backing_status == "fail":
