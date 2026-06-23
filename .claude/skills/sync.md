@@ -83,7 +83,7 @@ fi
 
 # 6. Push
 jj bookmark set main -r @-
-jj git push --bookmark main
+env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
 ```
 
 ---
@@ -132,7 +132,7 @@ jj abandon <orphan_change_id>
 
 # 4. Push
 jj bookmark set main -r @-
-jj git push --bookmark main
+env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
 ```
 
 **Alternative — squash orphan into main lineage:**
@@ -183,7 +183,7 @@ done
 | Describe | `jj describe -m "message"` |
 | Log | `jj log` |
 | Show | `jj show <change_id>` |
-| Push | `jj bookmark set main -r @- && jj git push --bookmark main` |
+| Push | `jj bookmark set main -r @- && env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main` |
 | Fetch | `jj git fetch` |
 | Rebase | `jj rebase -d main@origin` |
 | Squash | `jj squash` |
@@ -191,6 +191,11 @@ done
 | Op log | `jj op log` |
 | Restore | `jj op restore <op_id>` |
 | File count | `git ls-files \| wc -l` |
+
+If HTTPS push auth fails, stale `GH_TOKEN` or `GITHUB_TOKEN` can override the
+stored GitHub CLI credential. Do not print tokens or put them in remotes; use
+`env -u GITHUB_TOKEN -u GH_TOKEN gh auth setup-git` and push with those
+variables unset.
 
 ## Conflict Resolution
 
