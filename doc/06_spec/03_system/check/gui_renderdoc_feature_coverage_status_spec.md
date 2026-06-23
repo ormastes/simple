@@ -1165,6 +1165,35 @@ expect(evidence).to_contain("production GUI/web raw Metal readback evidence")
 
 </details>
 
+#### keeps missing Metal readback status as a completion blocker
+
+- Create production parity evidence with no raw Metal readback status
+   - Expected: code equals `0`
+- Assert missing Metal readback remains a named blocker
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create production parity evidence with no raw Metal readback status")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-metal-missing && mkdir -p build/test-gui-renderdoc-feature-coverage-status-metal-missing/source && printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_reason=pass\\nproduction_gui_web_renderer_parity_matrix_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_case_count=50\\nproduction_gui_web_renderer_parity_layout_manifest_pass_count=36\\nproduction_gui_web_renderer_parity_layout_manifest_tracked_count=14\\nproduction_gui_web_renderer_parity_layout_manifest_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_electron_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_blur_or_tolerance_used=false\\nproduction_gui_web_renderer_parity_backend_status=pass\\nproduction_gui_web_renderer_parity_font_offload_status=pass\\n' > build/test-gui-renderdoc-feature-coverage-status-metal-missing/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-renderdoc-feature-coverage-status-metal-missing/source/evidence.env BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-metal-missing/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-metal-missing/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert missing Metal readback remains a named blocker")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-metal-missing/out/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readback_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_readback_status=pass")
+expect(evidence).to_contain("blocked_completion_gates=")
+expect(evidence).to_contain("production GUI/web raw Metal readback evidence")
+```
+
+</details>
+
 #### requires Electron Vulkan RenderDoc evidence after Simple and external gates pass
 
 - Create controlled Simple and original external RenderDoc evidence but no Electron evidence
