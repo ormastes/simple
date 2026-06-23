@@ -43,7 +43,7 @@ semver_numeric_guard_spec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -54,6 +54,12 @@ val nogc_sync_old = rt_file_read_text("src/lib/nogc_sync_mut/package/semver_old.
 val nogc_async_old = rt_file_read_text("src/lib/nogc_async_mut/package/semver_old.spl") ?? ""
 val gc_async_old = rt_file_read_text("src/lib/gc_async_mut/package/semver_old.spl") ?? ""
 
+expect(nogc_sync).to_contain("if ch < \"0\" or ch > \"9\":")
+expect(nogc_async).to_contain("if ch < \"0\" or ch > \"9\":")
+expect(gc_async).to_contain("if ch < \"0\" or ch > \"9\":")
+expect(nogc_sync_old).to_contain("if ch < \"0\" or ch > \"9\":")
+expect(nogc_async_old).to_contain("if ch < \"0\" or ch > \"9\":")
+expect(gc_async_old).to_contain("if ch < \"0\" or ch > \"9\":")
 expect(nogc_sync).to_contain("if num == nil:")
 expect(nogc_async).to_contain("if num == nil:")
 expect(gc_async).to_contain("if num == nil:")
