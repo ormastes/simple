@@ -1,11 +1,36 @@
 # GUI/Web/2D Vulkan Pairwise Aggregate Evidence
 
 - Date: 2026-06-22
-- Status: pass — strict pairwise pixel comparison passes
+- Status: open — latest direct run fails in the Simple native lane
 - Gate: `scripts/setup/setup-gui-web-2d-vulkan-env.shs --run`
 - Evidence: `build/gui-web-2d-vulkan-env/evidence.env`
 
 ## Current Evidence
+
+Latest refresh on 2026-06-23 selected `bin/simple_native` because the linked
+worktree has no `bin/simple`. Electron and Chrome ARGB capture still passed
+with zero Electron/Chrome mismatch, but Simple readback and Simple ARGB crashed
+with exit `139`:
+
+```text
+gui_web_2d_vulkan_simple_bin=bin/simple_native
+gui_web_2d_vulkan_simple_bin_selection_reason=default-missing-fallback
+gui_web_2d_vulkan_simple_status=fail
+gui_web_2d_vulkan_simple_reason=evidence-program-failed
+gui_web_2d_vulkan_simple_argb_exit_code=139
+gui_web_2d_vulkan_simple_argb_status=missing
+gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass
+gui_web_2d_vulkan_electron_simple_pairwise_diff_status=unavailable
+gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=unavailable
+gui_web_2d_vulkan_pixel_comparison_status=fail
+gui_web_2d_vulkan_pixel_comparison_reason=comparison-artifacts-incomplete;simple-argb-file-missing;simple-argb-viewport-fail;simple-argb-nonblank-fail;electron-simple-diff-fail;chrome-simple-diff-fail
+gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff-mismatch
+```
+
+Tracked crash blocker:
+`doc/08_tracking/bug/gui_web_2d_vulkan_simple_native_crash_2026-06-23.md`.
+
+Historical retained pass evidence:
 
 ```text
 gui_web_2d_vulkan_loader_status=present
@@ -66,21 +91,16 @@ gui_web_2d_vulkan_pixel_comparison_reason=all-pairwise-diffs-pass
 gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff
 ```
 
-## Notes
+## Historical Notes
 
-Simple Vulkan Engine2D readback itself passes with exact clear/rect readback,
-and the Simple HTML ARGB renderer now produces a full capture through Simple
-facades instead of direct `rt_*` calls. The fixture is now boxes-only CSS
-(`color: transparent`, native control appearance disabled), reducing
-Electron/Chrome mismatch from `10656` to `232` and Simple/browser mismatch from
-about `111918` to `232`/`226` after the measured fieldset/native-widget
-geometry fills, transparent image witnesses, and browser-stable media/control
-geometry patches, and squared header button corners. The strict aggregate now
-passes with zero Electron/Chrome, Electron/Simple, and Chrome/Simple ARGB
-mismatches. Browser backing remains a separate blocker: Chrome now proves Vulkan
-backing through DevTools GPU info, but Electron reports `vulkan=disabled_off`
-and `hardwareSupportsVulkan=false`. The aggregate remains fail-closed until
-Electron also proves Vulkan/Metal backing.
+Earlier retained evidence showed Simple Vulkan Engine2D readback passing and
+the Simple HTML ARGB renderer producing a full capture through Simple facades
+instead of direct `rt_*` calls. That historical pass is no longer current on the
+linked worktree until the 2026-06-23 Simple native crash above is fixed. Browser
+backing also remains separate: Chrome had proved Vulkan backing through DevTools
+GPU info, but Electron reported `vulkan=disabled_off` and
+`hardwareSupportsVulkan=false`. The aggregate remains fail-closed until Simple
+ARGB, pairwise comparison, and Electron browser backing all pass again.
 
 ## Cross-Platform Electron Backing Plan
 

@@ -179,9 +179,11 @@ On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
 `src/compiler_rust/target/debug/simple` when that binary advertises the macOS
 Vulkan loader paths (`libvulkan.1.dylib`). The selected executable is recorded
 as `gui_web_2d_vulkan_simple_bin`, with the reason in
-`gui_web_2d_vulkan_simple_bin_selection_reason`. If no fresh driver exists and
-`bin/simple` is older than the Rust runtime changes under test, build the
-driver and rerun:
+`gui_web_2d_vulkan_simple_bin_selection_reason`. If `bin/simple` is missing in
+a linked worktree, the wrapper falls back to another checked-in or PATH Simple
+binary and records `default-missing-fallback`. If no fresh driver exists and
+`bin/simple` is older than the Rust runtime changes under test, build the driver
+and rerun:
 
 ```sh
 (cd src/compiler_rust && cargo build --release --bin simple)
