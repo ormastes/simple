@@ -1,33 +1,39 @@
 # GUI/Web/2D Vulkan Pairwise Aggregate Evidence
 
 - Date: 2026-06-22
-- Status: open — latest direct run fails in the Simple native lane
+- Status: pass for pairwise pixels; browser/RenderDoc completion still blocked
 - Gate: `scripts/setup/setup-gui-web-2d-vulkan-env.shs --run`
 - Evidence: `build/gui-web-2d-vulkan-env/evidence.env`
 
 ## Current Evidence
 
-Latest refresh on 2026-06-23 selected `bin/simple_native` because the linked
-worktree has no `bin/simple`. Electron and Chrome ARGB capture still passed
-with zero Electron/Chrome mismatch, but Simple readback and Simple ARGB crashed
-with exit `139`:
+Latest refresh on 2026-06-23 selects a same-repository PATH `simple` when the
+linked worktree has no `bin/simple`. Electron, Chrome, and Simple ARGB capture
+pass with zero pairwise mismatches:
 
 ```text
-gui_web_2d_vulkan_simple_bin=bin/simple_native
-gui_web_2d_vulkan_simple_bin_selection_reason=default-missing-fallback
-gui_web_2d_vulkan_simple_status=fail
-gui_web_2d_vulkan_simple_reason=evidence-program-failed
-gui_web_2d_vulkan_simple_argb_exit_code=139
-gui_web_2d_vulkan_simple_argb_status=missing
+gui_web_2d_vulkan_simple_bin=/home/ormastes/.local/bin/simple
+gui_web_2d_vulkan_simple_bin_selection_reason=default-missing-same-repo-path-fallback
+gui_web_2d_vulkan_simple_status=pass
+gui_web_2d_vulkan_simple_argb_exit_code=0
+gui_web_2d_vulkan_simple_argb_status=pass
 gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass
-gui_web_2d_vulkan_electron_simple_pairwise_diff_status=unavailable
-gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=unavailable
-gui_web_2d_vulkan_pixel_comparison_status=fail
-gui_web_2d_vulkan_pixel_comparison_reason=comparison-artifacts-incomplete;simple-argb-file-missing;simple-argb-viewport-fail;simple-argb-nonblank-fail;electron-simple-diff-fail;chrome-simple-diff-fail
-gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff-mismatch
+gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass
+gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass
+gui_web_2d_vulkan_comparison_artifact_status=pass
+gui_web_2d_vulkan_comparison_artifact_reason=pass
+gui_web_2d_vulkan_pixel_comparison_status=pass
+gui_web_2d_vulkan_pixel_comparison_reason=all-pairwise-diffs-pass
+gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff
+gui_web_2d_vulkan_chrome_screenshot_file_status=missing
+gui_web_2d_vulkan_chrome_argb_file_status=pass
+gui_web_2d_vulkan_chrome_argb_viewport_match_status=pass
+gui_web_2d_vulkan_chrome_argb_nonblank_status=pass
+gui_web_2d_vulkan_browser_backing_status=fail
+gui_web_2d_vulkan_browser_backing_reason=electron-vulkan-disabled_off;chrome-vulkan-backed
 ```
 
-Tracked crash blocker:
+The stale checked-in `bin/simple_native` crash is tracked separately:
 `doc/08_tracking/bug/gui_web_2d_vulkan_simple_native_crash_2026-06-23.md`.
 
 Historical retained pass evidence:

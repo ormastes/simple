@@ -116,7 +116,7 @@ browser lane is Vulkan-backed. The same aggregate evidence exposes the
 comparison fixture and viewport through `gui_web_2d_vulkan_html_path`,
 `gui_web_2d_vulkan_width`, and `gui_web_2d_vulkan_height`, plus the runtime
 artifacts `gui_web_2d_vulkan_electron_argb_path`,
-`gui_web_2d_vulkan_chrome_screenshot`, and
+`gui_web_2d_vulkan_chrome_argb_path`, and
 `gui_web_2d_vulkan_simple_evidence_env`. The machine-checkable comparison
 artifact contract is `gui_web_2d_vulkan_comparison_fixture_status`,
 `gui_web_2d_vulkan_comparison_artifact_status`,
@@ -124,14 +124,13 @@ artifact contract is `gui_web_2d_vulkan_comparison_fixture_status`,
 `gui_web_2d_vulkan_electron_argb_viewport_match_status`,
 `gui_web_2d_vulkan_electron_argb_file_status`,
 `gui_web_2d_vulkan_electron_argb_nonblank_status`,
-`gui_web_2d_vulkan_chrome_screenshot_file_status`,
-`gui_web_2d_vulkan_chrome_screenshot_png_status`,
-`gui_web_2d_vulkan_chrome_screenshot_png_width`,
-`gui_web_2d_vulkan_chrome_screenshot_png_height`,
+`gui_web_2d_vulkan_chrome_argb_file_status`,
+`gui_web_2d_vulkan_chrome_argb_viewport_match_status`,
+`gui_web_2d_vulkan_chrome_argb_nonblank_status`,
 `gui_web_2d_vulkan_simple_evidence_file_status`, and
 `gui_web_2d_vulkan_simple_backend_status`; use those fields to decide whether
-the Electron baseline exists and is nonblank, the Chrome screenshot is a
-viewport-matching PNG, and the Simple evidence env proves the Vulkan backend
+the Electron baseline exists and is nonblank, the Chrome ARGB output is
+viewport-matching and nonblank, and the Simple evidence env proves the Vulkan backend
 before making a GUI/web/2D Vulkan comparison claim.
 Artifact evidence is not enough for a pixel-equivalence claim. The pairwise
 pixel comparison contract is `gui_web_2d_vulkan_pixel_comparison_status`,
@@ -180,10 +179,12 @@ On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
 Vulkan loader paths (`libvulkan.1.dylib`). The selected executable is recorded
 as `gui_web_2d_vulkan_simple_bin`, with the reason in
 `gui_web_2d_vulkan_simple_bin_selection_reason`. If `bin/simple` is missing in
-a linked worktree, the wrapper falls back to another checked-in or PATH Simple
-binary and records `default-missing-fallback`. If no fresh driver exists and
-`bin/simple` is older than the Rust runtime changes under test, build the driver
-and rerun:
+a linked worktree, the wrapper falls back to compiler-rust release/debug, then a
+PATH `simple` only when the resolved executable belongs to the same Git
+repository, then checked-in wrappers. It records
+`default-missing-same-repo-path-fallback` for the guarded PATH case and
+`default-missing-fallback` for local file fallbacks. If no fresh driver exists and `bin/simple` is older
+than the Rust runtime changes under test, build the driver and rerun:
 
 ```sh
 (cd src/compiler_rust && cargo build --release --bin simple)

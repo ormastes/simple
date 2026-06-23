@@ -250,9 +250,9 @@ budget was enforced.
    - Expected: comparison_artifact_reason equals `pass`
    - Expected: electron_argb_file_status equals `pass`
    - Expected: electron_argb_nonblank_status equals `pass`
-   - Expected: chrome_screenshot_png_status equals `pass`
-   - Expected: chrome_screenshot_png_width equals `1280`
-   - Expected: chrome_screenshot_png_height equals `720`
+   - If Chrome PNG status is `pass`, expected PNG dimensions equal `1280x720`.
+   - Otherwise expected Chrome ARGB file, viewport match, and nonblank statuses
+     equal `pass`.
    - Expected: simple_backend_status equals `pass`
    - Expected: comparison_artifact_status equals `incomplete`
    - Expected: pixel_comparison_reason equals `pass`
@@ -843,9 +843,13 @@ if comparison_artifact_status == "pass":
     expect(comparison_artifact_reason).to_equal("pass")
     expect(electron_argb_file_status).to_equal("pass")
     expect(electron_argb_nonblank_status).to_equal("pass")
-    expect(chrome_screenshot_png_status).to_equal("pass")
-    expect(chrome_screenshot_png_width).to_equal("1280")
-    expect(chrome_screenshot_png_height).to_equal("720")
+    if chrome_screenshot_png_status == "pass":
+        expect(chrome_screenshot_png_width).to_equal("1280")
+        expect(chrome_screenshot_png_height).to_equal("720")
+    else:
+        expect(chrome_argb_file_status).to_equal("pass")
+        expect(chrome_argb_viewport_match_status).to_equal("pass")
+        expect(chrome_argb_nonblank_status).to_equal("pass")
     expect(simple_backend_status).to_equal("pass")
 else:
     expect(comparison_artifact_status).to_equal("incomplete")
