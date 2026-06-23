@@ -25,9 +25,9 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
 3. **Write manual steps with `step("...")`:**
    - Use `step("Human-readable text")` inside scenarios for the primary manual
      flow.
-   - Use helper functions only when they remove real duplication; keep the
-     `step("...")` call in the scenario or inside the helper so the generated
-     manual reads naturally.
+   - Use helper functions only when they remove real duplication; keep primary
+     manual `step("...")` calls in the scenario body so the generated manual
+     exposes the flow without opening helper code.
    - Use `@step "Human-readable text"` only when labeling an existing helper or
      checker call that cannot be replaced cleanly with `step("...")`.
    - For broad cooperative lanes, use the shared interface and manual
@@ -148,8 +148,8 @@ If the answer is no to any of these, rewrite the helpers and metadata.
 - Spec files exist at `test/` paths for every module in the architecture
 - Every AC-N has at least one `it` block
 - All specs use only built-in matchers
-- **Manual steps read as operator actions** via `step("...")`; helper functions
-  are only supporting plumbing
+- **Manual steps read as operator actions** via scenario-body `step("...")`;
+  helper functions are only supporting setup/checker plumbing
 - **Cooperative helper names match state:** broad lanes use the shared
   interface/manual helper names from `## Cooperative Review`, or that section is
   explicitly `N/A`
