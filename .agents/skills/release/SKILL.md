@@ -21,7 +21,7 @@ description: Version bump and release. Accepts version argument (major/first, mi
    - `src/app/cli/main_part1.spl` — hardcoded fallback in `get_version()`
    - `src/app/cli/bootstrap_main.spl` — hardcoded in `bootstrap_version()`
 4. Update `CHANGELOG.md` with new section
-5. Commit: `jj commit -m "chore: release vX.Y.Z"` (or `git commit`)
+5. Commit: `jj commit -m "chore: release vX.Y.Z"`
 6. Tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
 7. Ask before push — do NOT push without user approval
 
@@ -46,7 +46,7 @@ FILE_COUNT_AFTER=$(git ls-files | wc -l | tr -d ' ')
 test "$FILE_COUNT_AFTER" -ge "$FILE_COUNT_BEFORE"
 jj bookmark set main -r @-
 env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
-git push --tags
+env -u GITHUB_TOKEN -u GH_TOKEN git push --tags
 ```
 
 If HTTPS auth fails, do not print tokens or embed them in remote URLs. Run

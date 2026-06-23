@@ -72,11 +72,6 @@ Populate from recent commits since last release tag.
 jj commit -m "chore: release vX.Y.Z"
 ```
 
-Or if jj unavailable:
-```bash
-git add -A && git commit -m "chore: release vX.Y.Z"
-```
-
 ### 6. Tag
 
 ```bash
@@ -98,7 +93,7 @@ FILE_COUNT_AFTER=$(git ls-files | wc -l | tr -d ' ')
 test "$FILE_COUNT_AFTER" -ge "$FILE_COUNT_BEFORE"
 jj bookmark set main -r @-
 env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
-git push --tags
+env -u GITHUB_TOKEN -u GH_TOKEN git push --tags
 ```
 
 If HTTPS auth fails, do not print tokens or embed them in remote URLs. Run
