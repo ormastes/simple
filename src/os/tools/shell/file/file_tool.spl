@@ -22,23 +22,23 @@ fn tool_file(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i
     for filename in args:
         val path = resolve_path(cwd, filename)
         val stat_result = vfs.stat(path)
-        if stat_result.is_err():
-            write_error(terminal, "file: {path}: {stat_result.unwrap_err()}")
-            exit_code = 1
-        else:
-            val node = stat_result.unwrap()
-            if node.kind == FsNodeKind.Directory:
-                write_line(terminal, "{filename}: directory")
-            elif node.kind == FsNodeKind.Symlink:
-                write_line(terminal, "{filename}: symbolic link")
-            elif node.kind == FsNodeKind.Device:
-                write_line(terminal, "{filename}: device")
-            elif node.kind == FsNodeKind.Pipe:
-                write_line(terminal, "{filename}: pipe")
-            else:
-                # Try to detect by extension and content
-                val file_type = _detect_type(filename, vfs, path)
-                write_line(terminal, "{filename}: {file_type}")
+        match stat_result:
+            Ok(node):
+                if node.kind == FsNodeKind.Directory:
+                    write_line(terminal, "{filename}: directory")
+                elif node.kind == FsNodeKind.Symlink:
+                    write_line(terminal, "{filename}: symbolic link")
+                elif node.kind == FsNodeKind.Device:
+                    write_line(terminal, "{filename}: device")
+                elif node.kind == FsNodeKind.Pipe:
+                    write_line(terminal, "{filename}: pipe")
+                else:
+                    # Try to detect by extension and content
+                    val file_type = _detect_type(filename, vfs, path)
+                    write_line(terminal, "{filename}: {file_type}")
+            Err(err):
+                write_error(terminal, "file: {path}: {err}")
+                exit_code = 1
     return exit_code
 
 fn _detect_type(filename: text, vfs: VfsManager, path: text) -> text:
@@ -75,13 +75,14 @@ fn _detect_type(filename: text, vfs: VfsManager, path: text) -> text:
 
     # Check content for magic bytes
     val result = vfs.read_text(path)
-    if result.is_ok():
-        val content = result.unwrap()
-        if content.len() == 0:
-            return "empty"
-        if content.starts_with("#!"):
-            return "script"
-        if content.starts_with("{"):
-            return "JSON data"
-        return "data"
-    return "regular file"
+    match result:
+        Ok(content):
+            if content.len() == 0:
+                return "empty"
+            if content.starts_with("#!"):
+                return "script"
+            if content.starts_with("{"):
+                return "JSON data"
+            return "data"
+        Err(_):
+            return "regular file"
