@@ -17,13 +17,14 @@
   exactly after modeling mixed-axis vertical auto overflow and painting the
   scrollbar. See
   `doc/09_report/electron_simple_web_layout_overflow_axis_after_scrollbar_paint_2026-06-23.md`.
-- next exact blocker: focused current-head evidence confirms
-  `position_relative_offset_matrix` still diverges with 18 geometry pixels. The
+- follow-up resolution: focused current-head evidence confirmed
+  `position_relative_offset_matrix` diverged with 18 geometry pixels. The
   mismatch is a 6x3 strip where Chromium keeps the relatively positioned blue
   box above the later normal-flow yellow box. A naive delayed relative repaint
   was tested and rejected because it worsened the fixture to 40 mismatches.
-  Evidence:
-  `doc/09_report/electron_simple_web_layout_position_relative_offset_current_2026-06-23.md`.
+  The accepted fix delays the relative normal-flow paint group and now passes
+  exactly. Evidence:
+  `doc/09_report/electron_simple_web_layout_position_relative_offset_after_relative_group_2026-06-23.md`.
 
 ## Cases
 - css_box_matrix: status=pass reason=pass policy=exact exit=0 mismatch=0 blur_or_tolerance=false

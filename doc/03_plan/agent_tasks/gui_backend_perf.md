@@ -121,14 +121,17 @@ Acceptance:
   `doc/09_report/electron_simple_web_layout_overflow_axis_after_scrollbar_paint_2026-06-23.md`
   with 0 mismatches.
 - this slice -- after the overflow-axis fix, the next confirmed exact Simple
-  Web layout blocker is `position_relative_offset_matrix`: focused evidence in
+  Web layout blocker was `position_relative_offset_matrix`: focused evidence in
   `doc/09_report/electron_simple_web_layout_position_relative_offset_current_2026-06-23.md`
   reports 18 geometry mismatches, all `#f59e0b -> #1d4ed8` in a 6x3 overlap
   strip where Chromium paints the relatively positioned blue box over the later
   normal-flow yellow box. A naive "skip relative in normal pass, repaint later"
-  source experiment worsened the case to 40 mismatches and was reverted; the
-  next implementation should model CSS positioned paint order without dropping
-  positioned descendants or double-painting opacity.
+  source experiment worsened the case to 40 mismatches and was reverted. The
+  accepted fix delays the entire relative normal-flow paint group so the
+  relative parent and its descendants keep their internal order while painting
+  above later non-positioned siblings. Focused evidence is archived in
+  `doc/09_report/electron_simple_web_layout_position_relative_offset_after_relative_group_2026-06-23.md`
+  with 0 mismatches.
 - this commit -- top-level font evidence propagation: the canonical production
   GUI web renderer parity wrapper now runs the font offload/readback wrapper and
   promotes typed vector and bitmap font evidence under

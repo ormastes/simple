@@ -4854,6 +4854,14 @@ fn paint_clip_at(cache: PaintClipCache, i: i32) -> ClipRect:
         return cache.clips[i]
     cache.default_clip
 
+fn has_relative_paint_root(nodes: [HNode], styles: [Style], i: i32) -> bool:
+    var cur = i
+    while cur >= 0:
+        if styles[cur].position_relative:
+            return true
+        cur = nodes[cur].parent as i32
+    false
+
 fn fb_vertical_scrollbar_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, h: i32, clip: ClipRect) -> [u32]:
     var out = fb_rect_clip(fb, fbw, fbh, x, y, 15, h, argb(241, 241, 241), clip)
     val mid_x = x + 7
@@ -4897,7 +4905,8 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         val h = bh[i]
         val skip_widget_page_bg = has_widget_panel and (nd.tag == "html" or nd.tag == "body")
         val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
-        val normal_flow = not st.position_absolute
+        val relative_paint_root = has_relative_paint_root(nodes, styles, i)
+        val normal_flow = not st.position_absolute and not relative_paint_root
         val visible_node = st.display != "none" and not st.visibility_hidden
         val visible_box = normal_flow and visible_node and nd.tag != "#text" and y < fbh
         val non_widget_mode = not widget_mode
@@ -4917,6 +4926,37 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 out = fb_rect(out, fbw, fbh, x, y, w, 1, argb(0, 102, 204))
         if normal_flow and non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
             out = fb_rect(out, fbw, fbh, x, y, w, h, argb(203, 213, 225))
+        i = i + 1
+    i = 0
+    while i < node_count:
+        val nd = nodes[i]
+        val st = styles[i]
+        if has_relative_paint_root(nodes, styles, i) and not st.position_absolute:
+            val x = bx[i]
+            val y = by[i]
+            val w = bw[i]
+            val h = bh[i]
+            val skip_widget_page_bg = has_widget_panel and (nd.tag == "html" or nd.tag == "body")
+            val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
+            val visible_node = st.display != "none" and not st.visibility_hidden
+            val visible_box = visible_node and nd.tag != "#text" and y < fbh
+            val non_widget_mode = not widget_mode
+            if visible_box:
+                val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and st.bg != 0u32
+                val paint_border = not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
+                if paint_bg or paint_border:
+                    val clip = paint_clip_at(clip_cache, i)
+                    if paint_bg:
+                        out = fb_rect_opacity_clip(out, fbw, fbh, x, y, w, h, st.bg, st.opacity_pct, clip)
+                    if paint_border:
+                        out = fb_border_sides_clip(out, fbw, fbh, x, y, w, h, st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
+            if non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh:
+                val panel_h = if fbh - y > h: fbh - y else: h
+                out = fb_rect(out, fbw, fbh, x, y, w, panel_h, argb(245, 245, 245))
+                if nd.has_focused_class:
+                    out = fb_rect(out, fbw, fbh, x, y, w, 1, argb(0, 102, 204))
+            if non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
+                out = fb_rect(out, fbw, fbh, x, y, w, h, argb(203, 213, 225))
         i = i + 1
     var positive_z_indices: [i32] = []
     var positive_z_count = 0
