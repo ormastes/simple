@@ -13,6 +13,11 @@ Updated: 2026-06-14
 - `8623bc39f8f` (`perf(gui): fast path canonical backend names`) added a canonical-name fast path before deeper backend checks.
 - `3d8cd2a636a` (`perf(gui): avoid duplicate backend canonicalization`) prevented redundant canonicalization on duplicate backend names.
 - `102a3853d49` (`perf(gui): share font backend priority ranking`) moved font offload priority lookup onto the shared canonical Engine2D backend priority helper.
+- `8c945adcd4f`, `e8f04e21e0e`, `52a07e28da6`, `798564eb892`,
+  and `80e1a2b9a29` hardened the aggregate completion gate so incomplete 8K
+  evidence, incomplete Metal readback evidence, missing named Metal/font
+  blockers, incomplete browser backing evidence, and non-8K geometry cannot
+  pass as complete evidence.
 
 ## Cooperative Review Routing
 
