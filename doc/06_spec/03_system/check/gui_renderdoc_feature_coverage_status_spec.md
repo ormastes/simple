@@ -278,7 +278,7 @@ downgraded to `fail`.
    - Expected: browser_backing_reason equals `pass`
    - Expected: browser_backing_mode equals `gpu-feature-status`
    - Expected: browser_backing_status equals `fail`
-   - Expected: browser_backing_mode equals `fallback-bitmap-comparison` when
+   - Expected: browser_backing_mode equals `focused-browser-backing-required` when
      focused browser backing evidence is missing; otherwise
      `gpu-feature-status`.
    - Expected: renderdoc_blocker_reason equals `pass`
@@ -890,7 +890,7 @@ else:
     expect(browser_backing_reason.len()).to_be_greater_than(0)
     expect(browser_backing_reason.contains("missing-reason")).to_be(false)
     if browser_backing_reason.contains("missing-focused-browser-backing"):
-        expect(browser_backing_mode).to_equal("fallback-bitmap-comparison")
+        expect(browser_backing_mode).to_equal("focused-browser-backing-required")
     else:
         expect(browser_backing_mode).to_equal("gpu-feature-status")
 expect(production_gate_status.len()).to_be_greater_than(0)

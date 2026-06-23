@@ -155,9 +155,9 @@ pixel differences that must be fixed before claiming parity.
 The browser Vulkan-backed proof is a separate rollup:
 `gui_web_2d_vulkan_browser_backing_status`,
 `gui_web_2d_vulkan_browser_backing_reason`, and
-`gui_web_2d_vulkan_browser_backing_mode`. A passing comparison artifact with
-`gui_web_2d_vulkan_browser_backing_mode=fallback-bitmap-comparison` is useful
-comparison evidence, but it is not Electron/Chrome Vulkan-backed proof. The
+`gui_web_2d_vulkan_browser_backing_mode`. Missing focused proof reports
+`focused-browser-backing-required`. Pixel comparison artifacts are useful
+comparison evidence, but they are not Electron/Chrome Vulkan-backed proof. The
 focused `--browser-backing` probe can provide `gpu-feature-status` evidence;
 RenderDoc capture and gate readiness remains a separate blocker reported by
 `gui_web_2d_vulkan_renderdoc_blocker_*`.
