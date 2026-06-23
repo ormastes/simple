@@ -111,8 +111,10 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
    names, and fail-fast placeholder helpers (`assert(false)` or `fail(...)`)
    before lower-model sidecars such as Codex Spark, Claude Haiku, or Claude
    Sonnet fan out
-4. **Write step helpers** named as manual sentences (`open_editor`, `Then_file_is_saved`)
-5. **Write scenarios** using helpers with `@inline`/`@prev` chains and `@capture` evidence
+4. **Write `step("...")` text** as manual sentences; keep setup/checker helper
+   names explicit and fail-fast until implemented
+5. **Write scenarios** using `step("...")`, setup/checker helpers, `@inline`/`@prev`
+   chains, and `@capture` evidence
 6. Create SPipe test file(s) following `.claude/templates/spipe_template.spl`
 7. Add `# @cover src/path/to/impl.spl` coverage markers
 8. Tests should be runnable but FAILING (red phase of TDD)
@@ -121,7 +123,7 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - At least one `.spl` spec file created in `test/`
 - Every AC has at least one corresponding `it` block
 - Spec file(s) follow SPipe format (describe/it/expect with built-in matchers only)
-- **Step helpers read as manual sentences** — no raw function calls in scenario bodies
+- **`step("...")` text reads as manual sentences** — setup/checker helper calls stay named and visible
 - **Manual visibility assigned:** `@manual: show/folded/skip` on every scenario group
 - **Capture kinds match spec type** (tui/exec/protocol/api/log/binary)
 - **Inline/prev chains** connect setup to dependent scenarios
@@ -195,7 +197,7 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - All TODOs are genuine (not disguised NOTEs)
 - Code style consistent with project conventions
 - No newly added/renamed file uses numbered copy/version/part naming
-- **Spec step helpers** read as manual sentences (refactor names if not)
+- **Spec `step("...")` text** reads as manual sentences, and setup/checker helper names are explicit
 - **Manual visibility annotations** are present and appropriate
 - A doc/wiki refactor pass is recorded in the state file, including either
   updated doc paths or "no doc/wiki updates needed"
