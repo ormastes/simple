@@ -4,11 +4,11 @@ use test.system.qemu.os.common.qemu_os_harness.{
     allocate_live_host_port, can_run_target, spawn_guest_with_qmp_scenario,
     wait_for_serial_marker, read_serial_log, read_qemu_stderr_log}
 use std.nogc_sync_mut.sffi.io.{dir_create_all}
+use app.io.mod.{env_get}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_copy(src: text, dst: text) -> bool
-extern fn rt_env_get(key: text) -> text?
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
@@ -61,10 +61,11 @@ fn main():
     val backend = "cranelift"
     val target = get_ssh_live_target()
     val port_result = allocate_live_host_port(32000)
-    if port_result.is_err():
-        print "[ssh_live_boot_only] failed to allocate host port"
-        return
-    val host_port = port_result.unwrap()
+    val host_port = match port_result:
+        Ok(value): value
+        Err(_):
+            print "[ssh_live_boot_only] failed to allocate host port"
+            return
 
     if not build_os_with_backend(target, backend):
         print "[ssh_live_boot_only] build failed for backend={backend}"
@@ -73,13 +74,14 @@ fn main():
         print "[ssh_live_boot_only] target unavailable after build"
         return
 
-    val build_marker = rt_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
+    val build_marker = env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
     val run_token = "manual_{backend}_{rt_getpid()}_{rt_time_now_unix_micros()}"
     val disk_result = _prepare_run_disk(run_token)
-    if disk_result.is_err():
-        print "[ssh_live_boot_only] {disk_result.unwrap_err()}"
-        return
-    val run_disk = disk_result.unwrap()
+    val run_disk = match disk_result:
+        Ok(value): value
+        Err(message):
+            print "[ssh_live_boot_only] {message}"
+            return
 
     val scenario = _scenario_x64_ssh_on_port(host_port, run_disk)
     if not ensure_scenario_media(scenario):
