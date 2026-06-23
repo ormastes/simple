@@ -27,7 +27,7 @@ interpreter_native_buffer_guard_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -56,6 +56,22 @@ expect(source).to_contain("val obj_id = _get_obj_id(arg_vals.get(0))")
 
 </details>
 
+#### keeps WebAssembly payload parsing on safe arg access
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = interpreter_native_source()
+expect(source).to_contain("me _native_webassembly_payload_hex(arg_vals: [JsValue]) -> text:")
+expect(source).to_contain("match arg_vals.get(0):")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -75,8 +91,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
