@@ -1038,6 +1038,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_core_reason=pass
 expect(evidence).to_contain("gui_renderdoc_feature_coverage_status=incomplete")
 expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-renderdoc")
 expect(blocked_gates.contains("production GUI/web parity evidence with live Tauri and Chrome captures")).to_equal(false)
+expect(blocked_gates.contains("production GUI/web font offload readback evidence")).to_equal(true)
 ```
 
 </details>
