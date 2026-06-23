@@ -343,12 +343,12 @@ as unfinished work, not release cleanup.
 
 For broad SPipe planning lanes, split independent research or implementation
 checks across lower-model parallel agents when available (for example Codex
-Spark, Claude Haiku, or Claude Sonnet). A normal/highest-capability LLM must
-review and accept the merged result before requirements, done marks, broad
-exclusions, or release-blocking verification are trusted.
-Before lower-model sidecars fan out, the first normal/highest-capability pass
-must define shared interface names, manual-facing `step("...")` flow helpers,
-and setup/checker helper names; temporary helpers must fail explicitly with
+Spark, Claude Haiku, or Claude Sonnet). The best available
+normal/highest-capability model must review and accept the merged result before
+requirements, done marks, broad exclusions, or release-blocking verification are
+trusted. Before lower-model sidecars fan out, that best-model pass must define
+shared interface names, manual-facing `step("...")` flow helpers, and
+setup/checker helper names; temporary helpers must fail explicitly with
 `assert(false)` or `fail(...)`.
 Final verification must prove the recorded cooperative review plan is complete
 or explicitly `N/A`, including generated-manual quality and done-mark review.
