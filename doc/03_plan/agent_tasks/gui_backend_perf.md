@@ -113,9 +113,11 @@ Acceptance:
   evidence is archived in
   `doc/09_report/electron_simple_web_layout_manifest_after_engine_dispatch_2026-06-23.md`;
   the first exact remaining case is `overflow_axis_matrix` with 270 mismatched
-  pixels. Next code work should split the renderer's single `overflow_hidden`
-  flag into axis-aware clip state instead of treating `overflow-x:hidden` or
-  `overflow-y:hidden` as both-axis clipping.
+  pixels. A pure axis-aware clip-state patch made this case worse (342
+  mismatches) because Chromium renders scrollbar/auto-overflow artifacts in the
+  mixed-axis overflow boxes. Next code work should model the CSS computed
+  overflow/scrollbar path for mixed `overflow-x`/`overflow-y` values rather than
+  only splitting the clip rectangle by axis.
 - this commit -- top-level font evidence propagation: the canonical production
   GUI web renderer parity wrapper now runs the font offload/readback wrapper and
   promotes typed vector and bitmap font evidence under

@@ -9,6 +9,10 @@
 - first exact failing reason: `checksum-mismatch`
 - first exact failing classification: `Chrome extra text pixels=270`, no blur/tolerance
 - note: the manifest did not complete all 50 cases before the outer cap, so this report is partial evidence, not a full manifest PASS/FAIL verdict.
+- follow-up correction: a simple axis-only clip split was tested and worsened
+  this case to 342 mismatches. The remaining evidence points at mixed-axis
+  overflow computed behavior and scrollbar/auto-overflow painting, not just
+  clipping the existing rectangle on one axis.
 
 ## Cases
 - css_box_matrix: status=pass reason=pass policy=exact exit=0 mismatch=0 blur_or_tolerance=false
