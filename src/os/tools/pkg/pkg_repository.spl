@@ -75,60 +75,61 @@ fn parse_http_url(url: text) -> (text, i32, text):
 fn _http_get(host: text, port: i32, path: text) -> Result<text, text>:
     """Perform HTTP GET and return the response body."""
     val ip_result = IpAddr.from_text(host)
-    if val Err(msg) = ip_result:
-        return Result.Err("Cannot resolve host '{host}': {msg}")
-    val ip = ip_result.unwrap()
+    match ip_result:
+        Ok(ip):
+            val sock_result = socket(2, 1)
+            match sock_result:
+                Ok(sock):
+                    val addr = SockAddr(ip: ip, port: port as u16)
+                    val conn_result = connect(sock, addr)
+                    if val Err(msg) = conn_result:
+                        return Result.Err("connect: {msg}")
 
-    val sock_result = socket(2, 1)
-    if val Err(msg) = sock_result:
-        return Result.Err("socket: {msg}")
-    val sock = sock_result.unwrap()
+                    val request = "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+                    val send_result = send(sock, request.as_bytes())
+                    if val Err(msg) = send_result:
+                        return Result.Err("send: {msg}")
 
-    val addr = SockAddr(ip: ip, port: port as u16)
-    val conn_result = connect(sock, addr)
-    if val Err(msg) = conn_result:
-        return Result.Err("connect: {msg}")
-
-    val request = "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    val send_result = send(sock, request.as_bytes())
-    if val Err(msg) = send_result:
-        return Result.Err("send: {msg}")
-
-    val recv_result = recv(sock, 65536)
-    if val Err(msg) = recv_result:
-        return Result.Err("recv: {msg}")
-    val raw = recv_result.unwrap().as_text()
-
-    val separator = "\r\n\r\n"
-    val sep_idx = raw.index_of(separator)
-    if sep_idx >= 0:
-        return Result.Ok(raw.slice(sep_idx + 4, raw.len()))
-    return Result.Ok(raw)
+                    val recv_result = recv(sock, 65536)
+                    match recv_result:
+                        Ok(bytes):
+                            val raw = bytes.as_text()
+                            val separator = "\r\n\r\n"
+                            val sep_idx = raw.index_of(separator)
+                            if sep_idx >= 0:
+                                return Result.Ok(raw.slice(sep_idx + 4, raw.len()))
+                            return Result.Ok(raw)
+                        Err(msg):
+                            return Result.Err("recv: {msg}")
+                Err(msg):
+                    return Result.Err("socket: {msg}")
+        Err(msg):
+            return Result.Err("Cannot resolve host '{host}': {msg}")
 
 fn _https_get(host: text, port: i32, path: text) -> Result<text, text>:
     """Perform HTTPS GET via TlsClient and return the response body."""
     val handle_result = TlsClient.connect(host, port)
-    if val Err(msg) = handle_result:
-        return Result.Err("TLS connect: {msg}")
-    val handle = handle_result.unwrap()
+    match handle_result:
+        Ok(handle):
+            val request = "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+            val write_result = TlsClient.write(handle, request)
+            if val Err(msg) = write_result:
+                TlsClient.close(handle)
+                return Result.Err("TLS write: {msg}")
 
-    val request = "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    val write_result = TlsClient.write(handle, request)
-    if val Err(msg) = write_result:
-        TlsClient.close(handle)
-        return Result.Err("TLS write: {msg}")
-
-    val read_result = TlsClient.read(handle, 65536)
-    TlsClient.close(handle)
-    if val Err(msg) = read_result:
-        return Result.Err("TLS read: {msg}")
-    val raw = read_result.unwrap()
-
-    val separator = "\r\n\r\n"
-    val sep_idx = raw.index_of(separator)
-    if sep_idx >= 0:
-        return Result.Ok(raw.slice(sep_idx + 4, raw.len()))
-    return Result.Ok(raw)
+            val read_result = TlsClient.read(handle, 65536)
+            TlsClient.close(handle)
+            match read_result:
+                Ok(raw):
+                    val separator = "\r\n\r\n"
+                    val sep_idx = raw.index_of(separator)
+                    if sep_idx >= 0:
+                        return Result.Ok(raw.slice(sep_idx + 4, raw.len()))
+                    return Result.Ok(raw)
+                Err(msg):
+                    return Result.Err("TLS read: {msg}")
+        Err(msg):
+            return Result.Err("TLS connect: {msg}")
 
 pub fn pkg_fetch_url_text(url: text) -> Result<text, text>:
     val parsed = parse_http_url(url)
@@ -159,12 +160,13 @@ fn fetch_index(repo: Repository) -> Result<PackageIndex, text>:
             body_result = _https_get(host, port, path)
         else:
             body_result = _http_get(host, port, path)
-        if val Err(msg) = body_result:
-            return Result.Err("fetch_index: {msg}")
-        val body = body_result.unwrap()
-        if body == "":
-            return Result.Ok(PackageIndex(packages: []))
-        return _parse_index(body)
+        match body_result:
+            Ok(body):
+                if body == "":
+                    return Result.Ok(PackageIndex(packages: []))
+                return _parse_index(body)
+            Err(msg):
+                return Result.Err("fetch_index: {msg}")
 
     # Local repository
     val index_path = "{repo.url}/index.sdn"
