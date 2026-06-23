@@ -262,11 +262,12 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 **Actions:**
 1. Review the full state file for completeness
 2. Commit changes using jj (per CLAUDE.md VCS rules): `jj commit -m "<message>"`
-3. Update any tracking docs if applicable (TODO scan, bug reports)
-4. Run the SPipe doc/wiki refactor support skill (`.claude/skills/spipe_doc_wiki_refactor.md`) one final time to catch stale guide, skill, command, and process links before closing the feature
-5. Run numbered artifact guard: `sh scripts/audit/numbered-artifact-guard.shs --working` and `sh scripts/audit/numbered-artifact-guard.shs --staged`
-6. Write final summary in state file
-7. Mark Phase 8 complete in checklist
+3. Confirm verify already covered doc/wiki/process freshness; if stale guide,
+   skill, command, or process links remain, stop and return to
+   verify/implementation instead of repairing them in ship
+4. Run numbered artifact guard: `sh scripts/audit/numbered-artifact-guard.shs --working` and `sh scripts/audit/numbered-artifact-guard.shs --staged`
+5. Write final summary in state file
+6. Mark Phase 8 complete in checklist
 
 **Exit Criteria:**
 - All changes committed (jj, not git branch)

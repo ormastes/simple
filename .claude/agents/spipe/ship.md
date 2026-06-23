@@ -32,7 +32,10 @@
    # See "CLI Flags (3-Level Review wiring)" below for $TARGET / $REVIEW_LEVEL detection.
    /repo_and_pull_req push --target=$TARGET --level=$REVIEW_LEVEL
    ```
-6. Run `.claude/skills/spipe_doc_wiki_refactor.md` one final time to update stale guide, skill, command, and process links before closing the feature
+6. Confirm verify already covered workflow/tooling, evidence-wrapper,
+   generated-spec-shape, and verification-contract doc/process freshness.
+   Do not repair stale guide, skill, command, or process links in ship; stop
+   and return to verify/implementation if they are stale.
 7. Confirm workflow/tooling, evidence-wrapper, generated-spec-shape, or
    verification-contract changes refreshed matching `doc/07_guide`,
    `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,

@@ -25,12 +25,13 @@ Start with the SPipe dev agent instructions in `.claude/agents/spipe/dev.md`.
 Use `.claude/skills/spipe.md` for SPipe test/spec conventions when the workflow
 reaches specification and verification phases.
 
-During the SPipe Refactor and Ship phases, run the doc/wiki refactor support
-skill at `.claude/skills/spipe_doc_wiki_refactor.md` so stale docs, command
-references, wiki-style process knowledge, and feature/layer expert links are
-cleaned before completion.
+During the SPipe Refactor phase, run the doc/wiki refactor support skill at
+`.claude/skills/spipe_doc_wiki_refactor.md` so stale docs, command references,
+wiki-style process knowledge, and feature/layer expert links are cleaned before
+final verification. Ship consumes verify evidence and must not repair stale
+process docs.
 
-Before final verification or ship handoff, update every process artifact that
+Before final verification, update every process artifact that
 the lane changed: generated/manual SPipe docs under `doc/06_spec`, matching
 `doc/07_guide` pages, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
 `.claude/agents/spipe/`, and `.gemini/commands/` instructions. Treat stale workflow/tooling docs as

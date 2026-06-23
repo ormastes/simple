@@ -19,6 +19,12 @@ Perform a version bump and release of the Simple Language compiler.
 
 Given argument: `$ARGUMENTS`
 
+Prerequisite: `/verify` must show `STATUS: PASS`. Release consumes verified
+SPipe/manual evidence; it must not create or update SPipe specs, repair
+generated-manual quality, or accept lower-model sidecar-review gaps after
+verify. If generated manuals, sidecar review, or SPipe coverage are missing or
+stale, stop and return to verify/implementation.
+
 ### Step 1 — Determine new version
 
 1. Read current version from the root `VERSION` file
