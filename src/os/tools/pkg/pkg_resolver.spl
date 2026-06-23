@@ -20,15 +20,20 @@ fn resolve(target: text, available: [PackageManifest], installed: [PackageManife
     # Collect all needed packages recursively
     var needed: [PackageManifest] = []
     val collect_result = _collect_deps(target, available, installed, needed)
-    if val Err(e) = collect_result:
-        return Result.Err(e)
-    needed = collect_result.unwrap()
+    match collect_result:
+        Err(e):
+            return Result.Err(e)
+        Ok(collected):
+            needed = collected
 
     # Topological sort
     val sort_result = _topo_sort(needed)
-    if val Err(e) = sort_result:
-        return Result.Err(e)
-    val order = sort_result.unwrap()
+    var order: [text] = []
+    match sort_result:
+        Err(e):
+            return Result.Err(e)
+        Ok(sorted_order):
+            order = sorted_order
 
     return Result.Ok(ResolvedSet(packages: needed, install_order: order))
 
@@ -45,9 +50,12 @@ fn _collect_deps(name: text, available: [PackageManifest], installed: [PackageMa
             return Result.Ok(collected)
 
     val pkg = _find_package(name, available)
-    if pkg.? == false:
-        return Result.Err("Dependency not found: {name}")
-    val manifest = pkg.unwrap()
+    var manifest = PackageManifest(name: "", version: PackageVersion(major: 0, minor: 0, patch: 0), description: "", dependencies: [], files: [], checksum: "")
+    match pkg:
+        nil:
+            return Result.Err("Dependency not found: {name}")
+        Some(found_manifest):
+            manifest = found_manifest
 
     var result = collected
     result.push(manifest)
@@ -57,9 +65,11 @@ fn _collect_deps(name: text, available: [PackageManifest], installed: [PackageMa
         val parsed = _parse_dep(dep_str)
         val dep_name = parsed.0
         val recurse_result = _collect_deps(dep_name, available, installed, result)
-        if val Err(e) = recurse_result:
-            return Result.Err(e)
-        result = recurse_result.unwrap()
+        match recurse_result:
+            Err(e):
+                return Result.Err(e)
+            Ok(collected_deps):
+                result = collected_deps
 
     return Result.Ok(result)
 
@@ -76,9 +86,12 @@ fn _topo_sort(packages: [PackageManifest]) -> Result<[text], text>:
     while i < packages.len():
         if states[i] == 0:
             val result = _topo_visit(i, packages, states, order)
-            if val Err(e) = result:
-                return Result.Err(e)
-            val updated = result.unwrap()
+            var updated = (states, order)
+            match result:
+                Err(e):
+                    return Result.Err(e)
+                Ok(updated_state):
+                    updated = updated_state
             states = updated.0
             order = updated.1
         i = i + 1
@@ -113,9 +126,12 @@ fn _topo_visit(idx: i32, packages: [PackageManifest], states: [i32], order: [tex
 
         if dep_idx >= 0:
             val result = _topo_visit(dep_idx, packages, s, o)
-            if val Err(e) = result:
-                return Result.Err(e)
-            val updated = result.unwrap()
+            var updated = (s, o)
+            match result:
+                Err(e):
+                    return Result.Err(e)
+                Ok(updated_state):
+                    updated = updated_state
             s = updated.0
             o = updated.1
 
@@ -137,11 +153,15 @@ fn _satisfies_dep(dep_str: text, available: [PackageManifest]) -> bool:
     val min_version = parsed.1
 
     val pkg = _find_package(name, available)
-    if pkg.? == false:
-        return false
+    var found_pkg = PackageManifest(name: "", version: PackageVersion(major: 0, minor: 0, patch: 0), description: "", dependencies: [], files: [], checksum: "")
+    match pkg:
+        nil:
+            return false
+        Some(manifest):
+            found_pkg = manifest
 
     if val Some(min_ver) = min_version:
-        val cmp = pkg.unwrap().version.compare(min_ver)
+        val cmp = found_pkg.version.compare(min_ver)
         return cmp >= 0
     return true
 
