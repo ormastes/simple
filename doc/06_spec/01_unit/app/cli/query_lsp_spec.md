@@ -27,7 +27,7 @@ query_lsp_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 30 | 30 | 0 | 0 |
+| 32 | 32 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -184,6 +184,49 @@ Reproduction: this block contains the complete executable scenario source.
 val args = ["semantic-tokens", "src/test.spl", "--start-line", "10", "--end-line", "50"]
 expect(args[2]).to_equal("--start-line")
 expect(args[4]).to_equal("--end-line")
+```
+
+</details>
+
+#### semantic token range flags use guarded integer parsing
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val query_source = rt_file_read_text("src/app/cli/query.spl") ?? ""
+val visibility_source = rt_file_read_text("src/app/cli/query_visibility_part1.spl") ?? ""
+
+expect(query_source).to_contain("query_nonnegative_int_or_zero(start_line_str)")
+expect(query_source).to_contain("query_nonnegative_int_or_zero(end_line_str)")
+expect(visibility_source).to_contain("query_visibility_nonnegative_int_or_zero(args[j + 1])")
+expect(query_source.contains("start_line_str.to_int()")).to_equal(false)
+expect(query_source.contains("end_line_str.to_int()")).to_equal(false)
+```
+
+</details>
+
+#### position arguments use guarded integer parsing
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val query_source = rt_file_read_text("src/app/cli/query.spl") ?? ""
+val rich_source = rt_file_read_text("src/app/cli/query_rich_common.spl") ?? ""
+
+expect(query_source).to_contain("val line_num = query_nonnegative_int_or_zero(cmd_args[2])")
+expect(query_source).to_contain("col = query_nonnegative_int_or_zero(cmd_args[3])")
+expect(rich_source).to_contain("query_rich_nonnegative_int_or_zero(line_str)")
+expect(rich_source).to_contain("query_rich_nonnegative_int_or_zero(col_str)")
+expect(query_source.contains("cmd_args[2].to_int()")).to_equal(false)
+expect(query_source.contains("cmd_args[3].to_int()")).to_equal(false)
 ```
 
 </details>
@@ -569,8 +612,8 @@ expect(has_colon).to_equal(true)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 30 |
-| Active scenarios | 30 |
+| Total scenarios | 32 |
+| Active scenarios | 32 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

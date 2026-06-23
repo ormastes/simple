@@ -27,7 +27,7 @@ process_ops_ext_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -293,6 +293,21 @@ expect(result).to_equal(99)
 
 </details>
 
+#### returns default on malformed output
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = shell_int("echo nope", 77)
+expect(result).to_equal(77)
+```
+
+</details>
+
 ### process_run
 
 #### runs a command and returns tuple
@@ -373,8 +388,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -27,7 +27,7 @@ lsp_diagnostics_timeout_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -57,6 +57,27 @@ expect(source).to_contain("diagnostics unavailable in source mode")
 
 </details>
 
+#### keeps client position parsing on the safe digit parser
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val main_source = rt_file_read_text("src/app/simple_lsp_mcp/main.spl") ?? ""
+val tools_source = rt_file_read_text("src/app/simple_lsp_mcp/tools.spl") ?? ""
+
+expect(main_source).to_contain("arg_int_field(a, \"line\")")
+expect(main_source).to_contain("arg_int_field(a, \"character\")")
+expect(main_source.contains("line_raw.to_int()")).to_equal(false)
+expect(main_source.contains("char_raw.to_int()")).to_equal(false)
+expect(tools_source).to_contain("parse_nonnegative_int_or_minus_one(line_str)")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -76,8 +97,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

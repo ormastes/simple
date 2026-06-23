@@ -213,7 +213,7 @@ expect(eval_get_value("x")).to_equal("x")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -224,6 +224,7 @@ expect(eval_arith("i:6", "/", "i:3")).to_equal("i:2")
 expect(eval_arith("i:6", "%", "i:4")).to_equal("i:2")
 expect(eval_arith("i:1", "/", "i:0")).to_equal("e:division by zero")
 expect(eval_arith("i:1", "%", "i:0")).to_equal("e:modulo by zero")
+expect(eval_arith("i:not-int", "+", "i:1")).to_equal("e:invalid integer")
 ```
 
 </details>
@@ -249,7 +250,7 @@ expect(err.starts_with("e:cannot apply")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -261,6 +262,7 @@ expect(eval_compare("i:1", "<=", "i:1")).to_equal("b:true")
 expect(eval_compare("i:2", ">=", "i:2")).to_equal("b:true")
 expect(eval_compare("s:a", "==", "s:a")).to_equal("b:true")
 expect(eval_compare("s:a", "!=", "s:b")).to_equal("b:true")
+expect(eval_compare("i:not-int", "==", "i:1")).to_equal("e:invalid integer")
 val err = eval_compare("s:a", "<", "s:b")
 expect(err.starts_with("e:cannot compare")).to_equal(true)
 ```
@@ -310,7 +312,7 @@ expect(t11.value).to_equal("i:7")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -319,6 +321,8 @@ val err1 = eval_primary([], 0, vars)
 expect(err1.value.starts_with("e:unexpected end")).to_equal(true)
 val err2 = eval_primary(["-", "Q:hi"], 0, vars)
 expect(err2.value.starts_with("e:cannot negate")).to_equal(true)
+val err_bad_int = eval_primary(["-", "not-int"], 0, ["not-int = not-int : Int"])
+expect(err_bad_int.value).to_equal("e:invalid integer")
 val err3 = eval_primary(["not", "1"], 0, vars)
 expect(err3.value.starts_with("e:cannot apply 'not'")).to_equal(true)
 val err4 = eval_primary(["len", "(", "1", ")"], 0, vars)

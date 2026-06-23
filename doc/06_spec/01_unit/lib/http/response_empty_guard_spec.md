@@ -43,17 +43,20 @@ response_empty_guard_spec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val gc_source = rt_file_read_text("src/lib/gc_async_mut/http/response.spl") ?? ""
 val nogc_source = rt_file_read_text("src/lib/nogc_async_mut/http/response.spl") ?? ""
+val sync_source = rt_file_read_text("src/lib/nogc_sync_mut/http/response.spl") ?? ""
 
 expect(gc_source).to_contain("if text == \"\":")
 expect(gc_source).to_contain("return (\"HTTP/1.1\", 200, \"OK\", [], \"\")")
 expect(nogc_source).to_contain("if text == \"\":")
 expect(nogc_source).to_contain("return (\"HTTP/1.1\", 200, \"OK\", [], \"\")")
+expect(sync_source).to_contain("if text == \"\":")
+expect(sync_source).to_contain("return (\"HTTP/1.1\", 200, \"OK\", [], \"\")")
 ```
 
 </details>

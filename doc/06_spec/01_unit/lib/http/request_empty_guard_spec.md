@@ -43,15 +43,19 @@ request_empty_guard_spec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("src/lib/nogc_async_mut/http/request.spl") ?? ""
+val sync_source = rt_file_read_text("src/lib/nogc_sync_mut/http/request.spl") ?? ""
 
 expect(source).to_contain("if text == \"\":")
 expect(source).to_contain("return (\"GET\", \"/\", \"HTTP/1.1\", [], \"\")")
 expect(source).to_contain("val request_line = if lines.length() > 0: lines[0] else: \"\"")
+expect(sync_source).to_contain("if text == \"\":")
+expect(sync_source).to_contain("return (\"GET\", \"/\", \"HTTP/1.1\", [], \"\")")
+expect(sync_source).to_contain("val request_line = if lines.length() > 0: lines[0] else: \"\"")
 ```
 
 </details>
