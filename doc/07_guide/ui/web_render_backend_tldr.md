@@ -20,6 +20,8 @@ web_render_backend:
     pure_simple: { layout: simple, raster: engine2d.auto, window: winit, live: false }
     chromium:    { engine: real-chromium(electron), window: BrowserWindow, live: true }
   gate: check-electron-simple-web-engine2d-bitmap-evidence.shs  # mismatch=0
+  overflow_axis: exact scene simple-web-layout-overflow-axis-matrix; mixed
+                 overflow-x hidden / overflow-y visible paints vertical scrollbar.
   perf: pure_simple interpreted+canvas-bound; keep viewport small; binary must
         carry the in-place array-write fix (2d4579a0) or every pixel write clones.
   8k: retain a doc/09_report or doc/10_metrics row with viewport, backend,

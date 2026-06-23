@@ -123,6 +123,19 @@ ELECTRON_LAYOUT_CAPTURE_MODE=dom \
 sh scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs
 ```
 
+Mixed-axis overflow exact parity is covered by the focused scene:
+
+```bash
+SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple \
+ELECTRON_BITMAP_SCENE=simple-web-layout-overflow-axis-matrix \
+sh scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs
+```
+
+This row depends on Chromium's computed overflow rule where
+`overflow-x:hidden; overflow-y:visible` becomes vertical auto overflow, including
+the native-width scrollbar paint. Evidence:
+`doc/09_report/electron_simple_web_layout_overflow_axis_after_scrollbar_paint_2026-06-23.md`.
+
 ### Text fixtures: honest render + known-divergent (2026-06-06)
 
 The two text-heavy web-layout manifest cases (`text_raster_track`,
