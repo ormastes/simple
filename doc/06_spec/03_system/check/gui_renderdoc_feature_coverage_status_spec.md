@@ -291,7 +291,7 @@ budget was enforced.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 653 lines folded for reproduction.
+Runnable source: 656 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -503,6 +503,8 @@ expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_nonblank_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_simple_pairwise_diff_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=")
+expect(evidence).to_contain("renderdoc_evidence_tool=scripts/tool/renderdoc-evidence.shs")
+expect(evidence).to_contain("renderdoc_evidence_tool_status=pass")
 expect(evidence).to_contain("simple_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple")
 expect(evidence).to_contain("simple_renderdoc_evidence_env=")
 expect(evidence).to_contain("simple_renderdoc_capture_status=")
@@ -942,6 +944,7 @@ expect(report).to_contain("- macOS Vulkan:")
 expect(report).to_contain("- macOS RenderDoc:")
 expect(report).to_contain("- GUI/web/2D browser Vulkan backing:")
 expect(report).to_contain("- GUI/web/2D Vulkan RenderDoc blockers:")
+expect(report).to_contain("- RenderDoc evidence CLI: pass (scripts/tool/renderdoc-evidence.shs)")
 expect(report).to_contain("- Production GUI/web parity gate:")
 expect(report).to_contain("- GUI/web/2D 8K retained perf:")
 expect(report).to_contain("- Production surface host:")
