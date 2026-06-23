@@ -579,13 +579,18 @@ Acceptance:
 ## Current remaining work
 
 1. Collect and record additional startup/render evidence (timing + throughput + parity)
-   - Run and archive the full production GUI web renderer parity evidence wrapper
-     now that it promotes backend aggregate sample fields.
-   - Current local blocker after installing `tools/electron-shell` dependencies:
-     generated-GUI Electron matrix and layout manifest pass, but the
-     Tauri/Chrome surface manifest still fails with live-surface divergence
-     (`tauri`: 16/18 pass, 216 mismatches; `chrome`: 14/18 pass, 1785 mismatches
-     in the latest local run) and one bounded Chrome timeout row.
+   - 2026-06-23 wrapper run archived:
+     `doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-23.md`.
+   - Current blocker: `ELECTRON_BITMAP_TIMEOUT_SECS=20 sh
+     scripts/check/check-production-gui-web-renderer-parity-evidence.shs`
+     reports `production_gui_web_renderer_parity_status=fail`,
+     `production_gui_web_renderer_parity_reason=electron-generated-gui-matrix-failed`,
+     and `matrix_electron_generated_gui_web_matrix_reason=case-80x64-failed`.
+   - Previous local blocker after installing `tools/electron-shell` dependencies:
+     generated-GUI Electron matrix and layout manifest passed, but the
+     Tauri/Chrome surface manifest failed with live-surface divergence
+     (`tauri`: 16/18 pass, 216 mismatches; `chrome`: 14/18 pass, 1785 mismatches)
+     and one bounded Chrome timeout row.
    - Re-run the surface manifest after the tracked-text policy change; any
      remaining failures should now represent exact-row divergence or a bounded
      host capture timeout, not the two known text-raster tracking rows.
