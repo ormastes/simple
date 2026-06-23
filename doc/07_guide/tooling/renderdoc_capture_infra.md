@@ -3,8 +3,6 @@
 Use the shared RenderDoc interface for both capture styles:
 
 ```sh
-scripts/setup/setup-renderdoc-env.shs --check
-scripts/setup/setup-renderdoc-env.shs --register-vulkan-layer
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 scripts/tool/renderdoc-evidence.shs capture-simple
@@ -244,13 +242,11 @@ host is not enough. Point the scripts at the concrete bundle/tree:
 
 ```sh
 export RDOC_HOME=/Applications/RenderDoc.app
-scripts/setup/setup-renderdoc-env.shs --check
-scripts/setup/setup-renderdoc-env.shs --register-vulkan-layer
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
 ```
 
 If `RDOC_HOME` is unset or invalid, the setup scripts now emit stable blocker
-keys such as `rdoc_status_reason`,
-`gui_web_2d_vulkan_renderdoc_reason`,
+keys such as `gui_web_2d_vulkan_renderdoc_reason`,
 `gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status`,
 `gui_web_2d_vulkan_renderdoc_macos_upstream_support_status`,
 `gui_web_2d_vulkan_renderdoc_search_paths`, and
@@ -369,13 +365,14 @@ Important keys:
 
 - `rdoc_backend`: `simple` or `original`.
 - `rdoc_scene`: capture scenario name.
-- `rdoc_status_reason`: readiness reason from
-  `scripts/setup/setup-renderdoc-env.shs --check`; for macOS missing RenderDoc
-  this is usually `missing-renderdoccmd-in-search-paths` or
+- `gui_web_2d_vulkan_renderdoc_reason`: readiness reason from
+  `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check`; for macOS missing
+  RenderDoc this is usually `missing-renderdoccmd-in-search-paths` or
   `rdoc-home-missing-renderdoccmd`.
-- `rdoc_search_paths`: RenderDoc roots checked for `renderdoccmd`.
-- `rdoc_install_hint`: platform-specific install or `RDOC_HOME` hint when
-  `renderdoccmd` is missing.
+- `gui_web_2d_vulkan_renderdoc_search_paths`: RenderDoc roots checked for
+  `renderdoccmd`.
+- `gui_web_2d_vulkan_renderdoc_install_hint`: platform-specific install or
+  `RDOC_HOME` hint when `renderdoccmd` is missing.
 - `rdoc_log`: capture log path.
 - `rdoc_capture_status`: `pass`, `fail`, or `unavailable`.
 - `rdoc_capture_reason`: concrete pass/fail/unavailable reason.
@@ -644,7 +641,7 @@ first and treat Chrome/Electron capture attempts as exploratory until their
 Vulkan logs and RDOC gates both pass:
 
 ```sh
-scripts/setup/setup-renderdoc-env.shs --check
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
 scripts/tool/renderdoc-evidence.shs capture-simple
 sh scripts/check/check-renderdoc-macos-portability-probe.shs
 ```
