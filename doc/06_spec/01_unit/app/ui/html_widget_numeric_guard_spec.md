@@ -43,7 +43,7 @@ html_widget_numeric_guard_spec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -54,6 +54,7 @@ expect(source).to_contain("html_int_or(sel_str, -1)")
 expect(source).to_contain("html_int_or(active_idx_str, 0)")
 expect(source).to_contain("html_int_or(active_str, 0)")
 expect(source).to_contain("html_int_or(active_idx_str, -1)")
+expect(source).to_contain("trimmed.to_int() ?? default_value")
 expect(source.contains("sel_str.to_int()")).to_equal(false)
 expect(source.contains("active_idx_str.to_int()")).to_equal(false)
 expect(source.contains("active_str.to_int()")).to_equal(false)

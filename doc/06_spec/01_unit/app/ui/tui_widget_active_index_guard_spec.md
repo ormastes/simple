@@ -43,7 +43,7 @@ tui_widget_active_index_guard_spec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -52,6 +52,7 @@ val source = rt_file_read_text("src/app/ui.render/tui_widgets_part2.spl") ?? ""
 expect(source).to_contain("fn tui_active_index_or_default(value: text, default_value: i64) -> i64")
 expect(source).to_contain("for ch in trimmed:")
 expect(source).to_contain("if ch < \"0\" or ch > \"9\":")
+expect(source).to_contain("return trimmed.to_int() ?? default_value")
 expect(source).to_contain("tui_active_index_or_default(active_str, 0)")
 expect(source.contains("active_idx = active_str.to_int()")).to_equal(false)
 ```

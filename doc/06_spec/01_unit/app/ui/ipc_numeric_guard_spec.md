@@ -43,13 +43,14 @@ ipc_numeric_guard_spec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("src/app/ui.ipc/protocol.spl") ?? ""
 expect(source).to_contain("fn ipc_int_or(value: text, default_value: i64) -> i64")
 expect(source).to_contain("return default_value")
+expect(source).to_contain("trimmed.to_int() ?? default_value")
 expect(source).to_contain("val w = ipc_int_or(w_str, -1)")
 expect(source).to_contain("val x = ipc_int_or(x_str, -1)")
 expect(source).to_contain("val w = ipc_int_or(width_str, -1)")

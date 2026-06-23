@@ -43,7 +43,7 @@ terminal_size_numeric_guard_spec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -53,6 +53,7 @@ expect(source).to_contain("terminal_size_int_or_zero(cols)")
 expect(source).to_contain("terminal_size_int_or_zero(rows)")
 expect(source).to_contain("terminal_size_int_or_zero(parts[0])")
 expect(source).to_contain("terminal_size_int_or_zero(num_str)")
+expect(source).to_contain("trimmed.to_int() ?? 0")
 expect(source.contains("cols.to_int()")).to_equal(false)
 expect(source.contains("rows.to_int()")).to_equal(false)
 ```

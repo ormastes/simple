@@ -43,7 +43,7 @@ render_parser_dimension_guard_spec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -52,6 +52,7 @@ val source = rt_file_read_text("src/app/ui.render/parser.spl") ?? ""
 expect(source).to_contain("fn parse_dimension_or_default(value: text, default_value: i64) -> i64")
 expect(source).to_contain("for ch in trimmed:")
 expect(source).to_contain("if ch < \"0\" or ch > \"9\":")
+expect(source).to_contain("val parsed = trimmed.to_int() ?? default_value")
 expect(source).to_contain("config.width = parse_dimension_or_default(args[i + 1], config.width)")
 expect(source).to_contain("config.width = parse_dimension_or_default(arg[8:], config.width)")
 expect(source).to_contain("config.height = parse_dimension_or_default(args[i + 1], config.height)")

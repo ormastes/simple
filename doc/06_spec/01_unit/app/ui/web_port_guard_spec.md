@@ -43,7 +43,7 @@ web_port_guard_spec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -52,6 +52,7 @@ val source = rt_file_read_text("src/app/ui.web/server.spl") ?? ""
 expect(source).to_contain("fn parse_web_port_or_default(value: text) -> i64")
 expect(source).to_contain("for ch in trimmed:")
 expect(source).to_contain("if ch < \"0\" or ch > \"9\":")
+expect(source).to_contain("val parsed = trimmed.to_int() ?? 8080")
 expect(source).to_contain("if parsed <= 0 or parsed > 65535:")
 expect(source).to_contain("val port = parse_web_port_or_default(port_str)")
 expect(source.contains("val port = port_str.to_int()")).to_equal(false)

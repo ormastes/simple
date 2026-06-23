@@ -43,7 +43,7 @@ tui_widget_numeric_guard_spec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -54,6 +54,7 @@ expect(source).to_contain("tui_int_or(sel_str, -1)")
 expect(source).to_contain("tui_int_or(value_str, 0)")
 expect(source).to_contain("tui_int_or(active_idx_str, 0)")
 expect(source).to_contain("tui_int_or(offset_str, 0)")
+expect(source).to_contain("trimmed.to_int() ?? default_value")
 expect(source.contains("sel_str.to_int()")).to_equal(false)
 expect(source.contains("active_idx_str.to_int()")).to_equal(false)
 ```
