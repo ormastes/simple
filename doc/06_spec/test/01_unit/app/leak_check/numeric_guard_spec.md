@@ -43,17 +43,19 @@ numeric_guard_spec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val config = rt_file_read_text("src/compiler/90.tools/leak_check/config.spl") ?? ""
 val parser = rt_file_read_text("src/compiler/90.tools/leak_check/parser.spl") ?? ""
+val internal_runner = rt_file_read_text("src/compiler/90.tools/leak_check/internal_runner.spl") ?? ""
 
 expect(config).to_contain("cfg.gc_leak_window = window_str.to_int() ?? cfg.gc_leak_window")
 expect(config).to_contain("cfg.timeout_seconds = timeout_str.to_int() ?? cfg.timeout_seconds")
 expect(parser).to_contain("return cleaned.to_int() ?? 0")
 expect(parser).to_contain("return num_str.to_int() ?? 0")
+expect(internal_runner).to_contain("return num_str.to_int() ?? -1")
 ```
 
 </details>
