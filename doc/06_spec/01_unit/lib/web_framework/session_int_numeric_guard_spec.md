@@ -43,15 +43,17 @@ session_int_numeric_guard_spec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("src/lib/nogc_sync_mut/web_framework/session.spl") ?? ""
 
-expect(source).to_contain("val value = s[2:].to_int()")
+expect(source).to_contain("fn _parse_session_int(raw: text) -> i64?:")
+expect(source).to_contain("if ch < \"0\" or ch > \"9\":")
+expect(source).to_contain("val value = self._parse_session_int(s[2:])")
 expect(source).to_contain("if value == nil:")
-expect(source).to_contain("return value")
+expect(source.contains("val value = s[2:].to_int()")).to_equal(false)
 ```
 
 </details>
