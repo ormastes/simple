@@ -16,6 +16,7 @@
 
 use .deferred_subst (deferred_set_error)
 use ..ast (FunctionDef, StructDef, ClassDef, EnumDef, TraitDef)
+use std.string_core.{char_from_code}
 
 # ============================================================================
 # Binary Deserialization Helpers
@@ -42,11 +43,78 @@ fn read_text_field(data: [u8], offset: i64) -> (text, i64)?:
     if pos + text_len > data.len():
         deferred_set_error("Unexpected end of data reading text at offset {pos}")
         return nil
-    val text_bytes = data[pos..(pos + text_len)]
-    val text_value = String.from_utf8(text_bytes)
+    val text_value = deferred_utf8_bytes_to_text(data[pos..(pos + text_len)])
     if text_value == nil:
         return nil
     (text_value, pos + text_len)
+
+fn deferred_utf8_bytes_to_text(text_bytes: [u8]) -> text?:
+    if not deferred_is_valid_utf8(text_bytes):
+        deferred_set_error("Invalid UTF-8 text field")
+        return nil
+    var result = ""
+    var i = 0
+    while i < text_bytes.len():
+        val b = text_bytes[i] as i64
+        if b < 0x80:
+            result = result + char_from_code(b)
+            i = i + 1
+        elif b < 0xE0:
+            val b1 = text_bytes[i + 1] as i64
+            result = result + char_from_code(((b & 0x1F) << 6) | (b1 & 0x3F))
+            i = i + 2
+        elif b < 0xF0:
+            val b1 = text_bytes[i + 1] as i64
+            val b2 = text_bytes[i + 2] as i64
+            result = result + char_from_code(((b & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F))
+            i = i + 3
+        else:
+            val b1 = text_bytes[i + 1] as i64
+            val b2 = text_bytes[i + 2] as i64
+            val b3 = text_bytes[i + 3] as i64
+            result = result + char_from_code(((b & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F))
+            i = i + 4
+    result
+
+fn deferred_is_valid_utf8(bytes: [u8]) -> bool:
+    var i = 0
+    while i < bytes.len():
+        val b = bytes[i] as i64
+        var need = 0
+        if b < 0x80:
+            need = 0
+        elif b >= 0xC2 and b < 0xE0:
+            need = 1
+        elif b >= 0xE0 and b < 0xF0:
+            if i + 2 >= bytes.len():
+                return false
+            val b1 = bytes[i + 1] as i64
+            if b == 0xE0 and b1 < 0xA0:
+                return false
+            if b == 0xED and b1 >= 0xA0:
+                return false
+            need = 2
+        elif b >= 0xF0 and b < 0xF5:
+            if i + 3 >= bytes.len():
+                return false
+            val b1 = bytes[i + 1] as i64
+            if b == 0xF0 and b1 < 0x90:
+                return false
+            if b == 0xF4 and b1 >= 0x90:
+                return false
+            need = 3
+        else:
+            return false
+        if i + need >= bytes.len():
+            return false
+        var j = 1
+        while j <= need:
+            val cont = bytes[i + j] as i64
+            if cont < 0x80 or cont >= 0xC0:
+                return false
+            j = j + 1
+        i = i + need + 1
+    true
 
 fn read_optional_text_field(data: [u8], offset: i64) -> (text?, i64)?:
     """Read an optional text field (0x01 + data or 0x00 for nil)."""
