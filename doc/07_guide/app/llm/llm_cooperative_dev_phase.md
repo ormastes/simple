@@ -177,7 +177,7 @@ If multiple LLMs participate in research:
 | Requirements | `doc/02_requirements/feature/<feature>.md` | Do Phase 1 |
 | Architecture | `doc/04_architecture/<feature>.md` | Do Phase 2 |
 | Detail design | `doc/05_design/<feature>.md` | Do Phase 2 |
-| System tests | `test/.../<feature>_spec.spl` | Do Phase 2 |
+| System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` | Do Phase 2 |
 
 **If ALL exist**, skip directly to coding (Phase 3.4 below).
 
@@ -197,7 +197,7 @@ If multiple LLMs participate in research:
 
 **3.4-3.5** Plan + Design -- skip if artifacts exist, otherwise do inline.
 
-**3.6-3.7** System Test + Doc Consistency -- create `test/03_system/<feature>_spec.spl`, validate cross-references.
+**3.6-3.7** System Test + Doc Consistency -- create `test/03_system/app/<app_name>/feature/<feature>_spec.spl`, validate cross-references.
 
 **3.8** Implementation -- write code in `src/**/<feature>.spl` following `/coding` rules.
 
@@ -453,7 +453,7 @@ Before starting any phase, check if prerequisite artifacts exist:
 | Requirements | `doc/02_requirements/feature/<feature>.md` | Research + user selection |
 | UI design | `doc/05_design/<feature>_tui.md` | Create mockups yourself |
 | Architecture | `doc/04_architecture/<feature>.md` | Design it yourself |
-| System tests | `test/.../<feature>_spec.spl` | Create SPipe tests yourself |
+| System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` | Create SPipe tests yourself |
 | Detail design | `doc/05_design/<feature>.md` | Create it yourself |
 | Implementation | `src/**/<feature>.spl` | Implement it yourself |
 | Verification | Verify report shows PASS | Run verify yourself |
