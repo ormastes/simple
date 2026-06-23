@@ -152,9 +152,10 @@ The browser Vulkan-backed proof is a separate rollup:
 `gui_web_2d_vulkan_browser_backing_reason`, and
 `gui_web_2d_vulkan_browser_backing_mode`. A passing comparison artifact with
 `gui_web_2d_vulkan_browser_backing_mode=fallback-bitmap-comparison` is useful
-comparison evidence, but it is not Electron/Chrome Vulkan-backed RenderDoc
-proof, and the aggregate audit cannot report complete while browser backing is
-not `pass`.
+comparison evidence, but it is not Electron/Chrome Vulkan-backed proof. The
+focused `--browser-backing` probe can provide `gpu-feature-status` evidence;
+RenderDoc capture and gate readiness remains a separate blocker reported by
+`gui_web_2d_vulkan_renderdoc_blocker_*`.
 As of 2026-06-22, Linux Xvfb evidence has Chrome Vulkan-backed and Simple
 Vulkan passing with pairwise pixel parity, but Electron reports
 `electron-vulkan-disabled_off`. Treat Electron backing as postponed to a real

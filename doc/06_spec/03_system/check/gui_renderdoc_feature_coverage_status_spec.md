@@ -87,8 +87,8 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    evidence, and missing production parity evidence as real completion
    blockers. They are not warnings and must not be normalized into pass rows.
 5. Do not infer Vulkan-backed browser rendering from fallback bitmaps. Browser
-   backing is proven only when the browser backing and RenderDoc-specific keys
-   both report pass.
+   backing is proven by focused GPU-status evidence; completion also requires
+   the RenderDoc-specific keys to report pass.
 
 ## Evidence Inputs
 
@@ -268,9 +268,11 @@ budget was enforced.
    - Expected: pixel_comparison_mode equals `pairwise-argb-diff-mismatch`
    - Expected: pixel_comparison_mode equals `artifact-only-no-pairwise-diff`
    - Expected: browser_backing_reason equals `pass`
-   - Expected: browser_backing_mode equals `vulkan-backed-renderdoc`
+   - Expected: browser_backing_mode equals `gpu-feature-status`
    - Expected: browser_backing_status equals `fail`
-   - Expected: browser_backing_mode equals `fallback-bitmap-comparison`
+   - Expected: browser_backing_mode equals `fallback-bitmap-comparison` when
+     focused browser backing evidence is missing; otherwise
+     `gpu-feature-status`.
    - Expected: renderdoc_blocker_reason equals `pass`
    - Expected: renderdoc_blocker_gate_count equals `0`
    - Expected: renderdoc_blocker_gates equals ``
@@ -874,12 +876,15 @@ else:
         expect(pixel_comparison_mode).to_equal("artifact-only-no-pairwise-diff")
 if browser_backing_status == "pass":
     expect(browser_backing_reason).to_equal("pass")
-    expect(browser_backing_mode).to_equal("vulkan-backed-renderdoc")
+    expect(browser_backing_mode).to_equal("gpu-feature-status")
 else:
     expect(browser_backing_status).to_equal("fail")
     expect(browser_backing_reason.len()).to_be_greater_than(0)
     expect(browser_backing_reason.contains("missing-reason")).to_be(false)
-    expect(browser_backing_mode).to_equal("fallback-bitmap-comparison")
+    if browser_backing_reason.contains("missing-focused-browser-backing"):
+        expect(browser_backing_mode).to_equal("fallback-bitmap-comparison")
+    else:
+        expect(browser_backing_mode).to_equal("gpu-feature-status")
 expect(production_gate_status.len()).to_be_greater_than(0)
 if renderdoc_blocker_status == "pass":
     expect(renderdoc_blocker_reason).to_equal("pass")
@@ -1231,7 +1236,7 @@ expect(evidence).to_contain("gui_web_2d_vulkan_electron_simple_pairwise_diff_sta
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_reason=pass")
-expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_mode=vulkan-backed-renderdoc")
+expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_mode=gpu-feature-status")
 expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_reason=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_gate_count=0")
