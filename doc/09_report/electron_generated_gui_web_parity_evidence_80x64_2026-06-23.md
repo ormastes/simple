@@ -1,25 +1,53 @@
-# Electron Generated GUI Web Parity 80x64 Evidence
+# Electron Generated GUI Web Parity Evidence
 
-- status: unavailable
-- reason: simple-render-failed
-- command: `SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple ELECTRON_BITMAP_WIDTH=80 ELECTRON_BITMAP_HEIGHT=64 ELECTRON_BITMAP_TIMEOUT_SECS=20 BUILD_DIR=build/electron_generated_gui_web_parity_evidence_80x64_retry REPORT_PATH=doc/09_report/electron_generated_gui_web_parity_evidence_80x64_2026-06-23.md sh scripts/check/check-electron-generated-gui-web-parity-evidence.shs`
-- dependency status: Electron installed under `tools/electron-shell/node_modules`
+- status: pass
+- reason: pass
 - scene: generated-gui-widget-html
-- width: 80
-- height: 64
+- dimensions: 80x64
+- generated HTML has style: true
+- generated HTML has app shell: true
+- Simple distinct colors: 7
+- mismatch count: 0
+- missing antialias pixels: 0
+- Simple text overpaint pixels: 0
+- other mismatch pixels: 0
+- blur/tolerance used: false
+- Electron frame us: 20233
+- capture native dimensions: 80x64
+- capture downsampled: false
+- watchdog teardown: false
+- text normalization pixels: 209
+- generated HTML path: build/electron_generated_gui_web_parity_evidence_80x64_after_import_fix/generated-gui.html
+- Simple expected ARGB path: build/electron_generated_gui_web_parity_evidence_80x64_after_import_fix/simple-cpu-simd-expected-argb.json
+- Electron captured ARGB path: build/electron_generated_gui_web_parity_evidence_80x64_after_import_fix/electron-captured-argb.json
 
 ## Raw Evidence
-
-- electron_generated_gui_web_status=unavailable
-- electron_generated_gui_web_reason=simple-render-failed
+- electron_generated_gui_web_status=pass
+- electron_generated_gui_web_reason=pass
 - electron_generated_gui_web_scene=generated-gui-widget-html
 - electron_generated_gui_web_width=80
 - electron_generated_gui_web_height=64
-
-## Blocker
-
-The previous `missing-electron-dependency` blocker is cleared locally by
-installing `tools/electron-shell` dependencies. The focused 80x64 run now reaches
-the Simple render step and fails there. `simple.out` ends with
-`error: example timed out after 60s: examples/06_io/ui/generated_gui_web_parity_expected.spl`
-and repeated `CODEGEN-AMBIGUOUS-METHOD` diagnostics for `Engine2D` draw calls.
+- electron_generated_gui_web_iterations=3
+- electron_generated_gui_web_html_has_style=true
+- electron_generated_gui_web_html_has_app_shell=true
+- electron_generated_gui_web_distinct_simple_colors=7
+- electron_generated_gui_web_simple_checksum=21975307291434
+- electron_generated_gui_web_electron_checksum=21975307291434
+- electron_generated_gui_web_simple_weighted_checksum=56260852535746445
+- electron_generated_gui_web_electron_weighted_checksum=56260852535746445
+- electron_generated_gui_web_mismatch_count=0
+- electron_generated_gui_web_missing_antialias_pixels=0
+- electron_generated_gui_web_simple_text_overpaint_pixels=0
+- electron_generated_gui_web_other_mismatch_pixels=0
+- electron_generated_gui_web_blur_or_tolerance_used=false
+- electron_generated_gui_web_electron_frame_us=20233
+- electron_generated_gui_web_capture_native_width=80
+- electron_generated_gui_web_capture_native_height=64
+- electron_generated_gui_web_capture_downsampled=false
+- electron_generated_gui_web_watchdog_teardown=false
+- electron_generated_gui_web_text_normalization_pixels=209
+- electron_generated_gui_web_html_path=build/electron_generated_gui_web_parity_evidence_80x64_after_import_fix/generated-gui.html
+- electron_generated_gui_web_expected_argb_path=build/electron_generated_gui_web_parity_evidence_80x64_after_import_fix/simple-cpu-simd-expected-argb.json
+- electron_generated_gui_web_captured_argb_path=build/electron_generated_gui_web_parity_evidence_80x64_after_import_fix/electron-captured-argb.json
+- electron_generated_gui_web_captured_argb_written=true
+- electron_generated_gui_web_exit_code=0
