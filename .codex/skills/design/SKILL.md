@@ -137,17 +137,17 @@ Reference: `doc/07_guide/infra/sspec_scenario_manual.md`.
 - Agent tasks: `doc/03_plan/agent_tasks/<feature>.md`
 - Agent-task docs for broad lanes must list lower-model sidecar lanes or `N/A`,
   such as Codex Spark, Claude Haiku, or Claude Sonnet for parallel exploration,
-  plus merge owner and final normal/highest-capability reviewer. Before those
-  sidecars start, the primary/best model defines the shared interface names,
-  manual `step("...")` flow helper names, setup/checker helper names, and
-  placeholder fail-fast helpers
+  plus merge owner and final best available normal/highest-capability reviewer.
+  Before those sidecars start, the primary/best-model pass defines shared interface names,
+  manual `step("...")` flow helper names, setup/checker helper names, and placeholder
+  fail-fast helpers
   (`assert(false)` or `fail(...)`) that sidecars must target.
 
 ## Phase 5: Quality Check
 
 - Verify every REQ-NNN has test coverage
 - Check SPipe quality: real assertions, edge cases, error paths
-- Check generated manual quality for scenario-oriented specs before accepting
+- Check generated-manual quality for scenario-oriented specs before accepting
   the design. A doc that exposes raw test mechanics as the primary flow is not
   design-complete.
 - If design changes workflow/tooling, evidence wrappers, generated spec shape,

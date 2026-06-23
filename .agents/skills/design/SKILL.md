@@ -57,13 +57,14 @@ description: Create architecture, UI design, system tests, and detail design for
 - Agent tasks: `doc/03_plan/agent_tasks/<feature>.md` with sidecar lanes/`N/A`, merge owner, and final reviewer
 - Agent-task docs for broad lanes must list lower-model sidecar lanes or `N/A`,
   such as Codex Spark, Claude Haiku, or Claude Sonnet for parallel exploration,
-  plus merge owner and final normal/highest-capability reviewer. Before those
-  sidecars start, the primary/best model defines the shared interface names,
-  manual `step("...")` flow helper names, setup/checker helper names, and
-  placeholder fail-fast helpers (`assert(false)` or `fail(...)`) that sidecars
-  must target.
-- The final normal/highest-capability reviewer must accept the merged sidecar
-  design before implementation handoff.
+  plus merge owner and final best available normal/highest-capability reviewer.
+  Before those sidecars start, the primary/best-model pass defines the shared
+  interface names, manual `step("...")` flow helper names, setup/checker helper
+  names, and placeholder fail-fast helpers (`assert(false)` or `fail(...)`) that
+  sidecars must target.
+- The final best available normal/highest-capability reviewer must accept the
+  merged sidecar design and generated-manual quality before implementation
+  handoff.
 
 ## Phase 5: Quality Check
 
