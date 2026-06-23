@@ -12,6 +12,7 @@ use os.apps.sshd.ssh_transport.{
     ssh_parse_version_string,
     ssh_build_kexinit,
     ssh_parse_kexinit,
+    SshKexInit,
     SSH_MSG_DEBUG,
     SSH_MSG_EXT_INFO,
     SSH_MSG_IGNORE,
@@ -31,7 +32,10 @@ use os.apps.sshd.ssh_packet.{
     ssh_put_u32,
     ssh_put_text,
     ssh_put_string,
-    ssh_put_bool
+    ssh_put_bool,
+    SshPacket,
+    SshPacketResult,
+    SshStringResult
 }
 use os.apps.sshd.ssh_kex.{
     ssh_kex_generate_keypair,
@@ -83,10 +87,12 @@ fn run_ssh(args: [text]) -> Result<bool, text>:
         return Err("ssh: missing host\nUsage: ssh [user@]host [-p port]")
 
     var parsed = _parse_args(args)
-    if parsed.is_err():
-        var e: text = parsed.unwrap_err()
-        return Err(e)
-    var parsed_val = parsed.unwrap()
+    var parsed_val = ("", "", 22)
+    match parsed:
+        Err(e):
+            return Err(e)
+        Ok(value):
+            parsed_val = value
     var user: text = parsed_val.0
     var host: text = parsed_val.1
     var port: u64 = parsed_val.2
@@ -110,16 +116,20 @@ fn run_ssh(args: [text]) -> Result<bool, text>:
         return Err("ssh: send version: {e}")
 
     var rv_result = _recv_version_line(sock)
-    if rv_result.is_err():
-        var e: text = rv_result.unwrap_err()
-        return Err("ssh: recv version: {e}")
-    var server_ver_bytes: [u8] = rv_result.unwrap()
+    var server_ver_bytes: [u8] = []
+    match rv_result:
+        Err(e):
+            return Err("ssh: recv version: {e}")
+        Ok(bytes):
+            server_ver_bytes = bytes
 
     var pv_result = ssh_parse_version_string(server_ver_bytes)
-    if pv_result.is_err():
-        var e: text = pv_result.unwrap_err()
-        return Err("ssh: version parse: {e}")
-    var server_version: text = pv_result.unwrap()
+    var server_version: text = ""
+    match pv_result:
+        Err(e):
+            return Err("ssh: version parse: {e}")
+        Ok(version):
+            server_version = version
     print "ssh: server version: {server_version}"
 
     # -----------------------------------------------------------------------
@@ -134,29 +144,36 @@ fn run_ssh(args: [text]) -> Result<bool, text>:
         return Err("ssh: send KEXINIT: {e}")
 
     var r_rk = _socket_recv_some(sock, 4096)
-    if r_rk.is_err():
-        var e: text = r_rk.unwrap_err()
-        return Err("ssh: recv KEXINIT: {e}")
-    var server_kex_bytes: [u8] = r_rk.unwrap()
+    var server_kex_bytes: [u8] = []
+    match r_rk:
+        Err(e):
+            return Err("ssh: recv KEXINIT: {e}")
+        Ok(bytes):
+            server_kex_bytes = bytes
 
     # Extract payload using ssh_packet_read to strip framing AND padding.
     # Manual offset-5 extraction would include padding bytes, corrupting I_S
     # in the exchange hash (host key verify would always fail).
     var pr_kex = ssh_packet_read(server_kex_bytes, 0)
-    if pr_kex.is_err():
-        var e: text = pr_kex.unwrap_err()
-        return Err("ssh: parse server KEXINIT frame: {e}")
-    var server_kexinit_payload: [u8] = pr_kex.unwrap().packet.payload
+    var parsed_kex_packet = SshPacketResult(packet: SshPacket(payload: [], sequence: 0), consumed: 0)
+    match pr_kex:
+        Err(e):
+            return Err("ssh: parse server KEXINIT frame: {e}")
+        Ok(packet_result):
+            parsed_kex_packet = packet_result
+    var server_kexinit_payload: [u8] = parsed_kex_packet.packet.payload
     if server_kexinit_payload.len() < 1:
         return Err("ssh: KEXINIT response too short")
     if server_kexinit_payload[0] != SSH_MSG_KEXINIT:
         return Err("ssh: expected KEXINIT (20), got {server_kexinit_payload[0]}")
 
     var pk_result = ssh_parse_kexinit(server_kexinit_payload)
-    if pk_result.is_err():
-        var e: text = pk_result.unwrap_err()
-        return Err("ssh: parse server KEXINIT: {e}")
-    var server_kex = pk_result.unwrap()
+    var server_kex = SshKexInit(cookie: [], kex_algorithms: "", server_host_key_algorithms: "", encryption_client_to_server: "", encryption_server_to_client: "", mac_client_to_server: "", mac_server_to_client: "", compression_client_to_server: "", compression_server_to_client: "", first_kex_packet_follows: false)
+    match pk_result:
+        Err(e):
+            return Err("ssh: parse server KEXINIT: {e}")
+        Ok(kexinit):
+            server_kex = kexinit
 
     print "ssh: server kex: {server_kex.kex_algorithms}"
     print "ssh: server host key: {server_kex.server_host_key_algorithms}"
@@ -184,16 +201,20 @@ fn run_ssh(args: [text]) -> Result<bool, text>:
     # Receive KEX_ECDH_REPLY (msg 31)
     # seq s2c=1
     var r_er = _recv_plain(sock)
-    if r_er.is_err():
-        var e: text = r_er.unwrap_err()
-        return Err("ssh: recv KEX_ECDH_REPLY: {e}")
-    var ecdh_reply_payload: [u8] = r_er.unwrap()
+    var ecdh_reply_payload: [u8] = []
+    match r_er:
+        Err(e):
+            return Err("ssh: recv KEX_ECDH_REPLY: {e}")
+        Ok(payload):
+            ecdh_reply_payload = payload
 
     var r_pr = _parse_ecdh_reply(ecdh_reply_payload)
-    if r_pr.is_err():
-        var e: text = r_pr.unwrap_err()
-        return Err("ssh: parse KEX_ECDH_REPLY: {e}")
-    var ecdh_fields = r_pr.unwrap()
+    var ecdh_fields = ([], [], "", [], [])
+    match r_pr:
+        Err(e):
+            return Err("ssh: parse KEX_ECDH_REPLY: {e}")
+        Ok(fields):
+            ecdh_fields = fields
     var host_key_blob: [u8] = ecdh_fields.0
     var q_s: [u8] = ecdh_fields.1
     var host_key_type: text = ecdh_fields.2
@@ -241,10 +262,12 @@ fn run_ssh(args: [text]) -> Result<bool, text>:
     # Receive server NEWKEYS
     # seq s2c=2
     var r_snk = _recv_plain(sock)
-    if r_snk.is_err():
-        var e: text = r_snk.unwrap_err()
-        return Err("ssh: recv NEWKEYS: {e}")
-    var snk_payload: [u8] = r_snk.unwrap()
+    var snk_payload: [u8] = []
+    match r_snk:
+        Err(e):
+            return Err("ssh: recv NEWKEYS: {e}")
+        Ok(payload):
+            snk_payload = payload
     if snk_payload.len() < 1:
         return Err("ssh: NEWKEYS empty")
     if snk_payload[0] != SSH_MSG_NEWKEYS:
@@ -280,10 +303,12 @@ fn run_ssh(args: [text]) -> Result<bool, text>:
         return Err("ssh: send SERVICE_REQUEST: {e}")
 
     var r_sa = _recv_encrypted_skip_post_kex_metadata(sock, cipher, swapped_keys.enc_key_c2s, swapped_keys.iv_c2s)
-    if r_sa.is_err():
-        var e: text = r_sa.unwrap_err()
-        return Err("ssh: recv SERVICE_ACCEPT: {e}")
-    var sa_payload: [u8] = r_sa.unwrap()
+    var sa_payload: [u8] = []
+    match r_sa:
+        Err(e):
+            return Err("ssh: recv SERVICE_ACCEPT: {e}")
+        Ok(payload):
+            sa_payload = payload
     if sa_payload.len() < 1:
         return Err("ssh: SERVICE_ACCEPT empty")
     if sa_payload[0] != SSH_MSG_SERVICE_ACCEPT:
@@ -304,10 +329,12 @@ fn run_ssh(args: [text]) -> Result<bool, text>:
         return Err("ssh: send USERAUTH_REQUEST: {e}")
 
     var r_auth_resp = recv_encrypted(sock, cipher, swapped_keys.enc_key_c2s, swapped_keys.iv_c2s)
-    if r_auth_resp.is_err():
-        var e: text = r_auth_resp.unwrap_err()
-        return Err("ssh: recv auth response: {e}")
-    var auth_resp: [u8] = r_auth_resp.unwrap()
+    var auth_resp: [u8] = []
+    match r_auth_resp:
+        Err(e):
+            return Err("ssh: recv auth response: {e}")
+        Ok(response):
+            auth_resp = response
     if auth_resp.len() < 1:
         return Err("ssh: auth response empty")
     if auth_resp[0] == SSH_MSG_USERAUTH_FAILURE:
@@ -328,10 +355,12 @@ fn run_ssh(args: [text]) -> Result<bool, text>:
         return Err("ssh: send CHANNEL_OPEN: {e}")
 
     var r_cc = recv_encrypted(sock, cipher, swapped_keys.enc_key_c2s, swapped_keys.iv_c2s)
-    if r_cc.is_err():
-        var e: text = r_cc.unwrap_err()
-        return Err("ssh: recv CHANNEL_OPEN_CONFIRMATION: {e}")
-    var cc_payload: [u8] = r_cc.unwrap()
+    var cc_payload: [u8] = []
+    match r_cc:
+        Err(e):
+            return Err("ssh: recv CHANNEL_OPEN_CONFIRMATION: {e}")
+        Ok(payload):
+            cc_payload = payload
     if cc_payload.len() < 1:
         return Err("ssh: CHANNEL_OPEN_CONFIRMATION empty")
     if cc_payload[0] == SSH_MSG_CHANNEL_OPEN_FAILURE:
@@ -390,10 +419,12 @@ fn run_ssh(args: [text]) -> Result<bool, text>:
 
             # Read server response (may be data, window adjust, eof, or close)
             var r_sp = recv_encrypted(sock, cipher, swapped_keys.enc_key_c2s, swapped_keys.iv_c2s)
-            if r_sp.is_err():
-                var e: text = r_sp.unwrap_err()
-                return Err("ssh: recv channel packet: {e}")
-            var srv_pkt: [u8] = r_sp.unwrap()
+            var srv_pkt: [u8] = []
+            match r_sp:
+                Err(e):
+                    return Err("ssh: recv channel packet: {e}")
+                Ok(packet):
+                    srv_pkt = packet
 
             if srv_pkt.len() < 1:
                 running = false
@@ -403,7 +434,12 @@ fn run_ssh(args: [text]) -> Result<bool, text>:
                     var data_off: u64 = 5
                     var r_data = ssh_get_string(srv_pkt, data_off)
                     if r_data.is_ok():
-                        var dp = r_data.unwrap()
+                        var dp = SshStringResult(data: [], next_offset: 0)
+                        match r_data:
+                            Err(_e):
+                                pass_dn
+                            Ok(data_part):
+                                dp = data_part
                         var data_text: text = rt_string_from_byte_array(dp.data)
                         print "{data_text}"
                         var wadj: [u8] = ssh_build_channel_window_adjust(remote_ch_id, dp.data.len().to_u32())
