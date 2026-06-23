@@ -214,5 +214,5 @@ jj op restore <op_id>       # Restore to previous state
 `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `build`
 
 ## Git Dependencies
-Tags: `git tag -a vX.Y.Z -m "msg" && git push origin vX.Y.Z`
+Tags: `git tag -a vX.Y.Z -m "msg" && env -u GITHUB_TOKEN -u GH_TOKEN git push origin vX.Y.Z`
 GitHub CLI: `gh pr`, `gh release`, `gh issue`
