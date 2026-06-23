@@ -20,10 +20,32 @@ Use `.spipe/gui-hardening-full/state.md` as the source of truth for broad-lane
 sidecars and manual helper names. Codex Spark owns bounded evidence-key and
 manual-readability checks, Claude Haiku owns bounded 8K retained-row/blocker
 checks, and Claude Sonnet owns broader web/Electron/Node/Bun and WM/QEMU/GTK
-matrix review. A normal/highest-capability model must merge and accept findings,
-generated-manual quality, coverage claims, exclusions, and done marks before
-closing this lane. Shared helper placeholders must fail explicitly with
+matrix review. The best available normal/highest-capability model must merge and
+accept findings, generated-manual quality, coverage claims, exclusions, and done
+marks before closing this lane. Before sidecars fan out, the best-model pass
+owns shared interface names, manual `step("...")` flow helper names, and
+setup/checker helper names. Shared helper placeholders must fail explicitly with
 `assert(false)` or `fail(...)`; silent helper passes are not evidence.
+
+## Cross-Cutting Runtime Facade Constraint
+
+Owner: Codex implementation lane.
+
+Sidecars: Spark may audit doc/spec references and focused evidence keys; Haiku
+may audit small 8K/perf blocker slices; Sonnet may audit broader host/platform
+matrix impact. The best available normal/highest-capability reviewer owns final
+acceptance.
+
+Acceptance:
+
+- GUI, web renderer, and Engine2D Metal/Vulkan hardening code must not add direct
+  `rt_*` environment or process calls outside the owning runtime/facade modules.
+- New app leaf or `src/lib/gc_async_mut` runtime access must go through existing
+  env/process facades, or the lane must add a named facade/alias with focused
+  specs and generated/manual `doc/06_spec` evidence.
+- Final verification for this lane includes the direct-env/runtime guard on the
+  working and staged trees, plus generated-manual quality review for any changed
+  SSpec docs.
 
 ## Completed (already pushed)
 
