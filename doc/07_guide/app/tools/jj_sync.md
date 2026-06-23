@@ -38,7 +38,7 @@ It complements `.codex/skills/sync/SKILL.md`.
 
    ```bash
    jj bookmark set main -r @-
-   jj git push --bookmark main
+   env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
    ```
 
 If HTTPS push fails because an environment `GH_TOKEN` or `GITHUB_TOKEN` is
