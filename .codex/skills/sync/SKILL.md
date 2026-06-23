@@ -41,7 +41,7 @@ fi
 
 # 5. Push
 jj bookmark set main -r @-
-jj git push --bookmark main
+env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
 ```
 
 ## GitHub Token Auth
