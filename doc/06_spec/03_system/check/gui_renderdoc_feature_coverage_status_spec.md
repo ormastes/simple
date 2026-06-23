@@ -121,6 +121,9 @@ The aggregate forwards these fields:
 
 - `gui_showcase_8k_perf_status`
 - `gui_showcase_8k_perf_reason`
+- `gui_showcase_8k_perf_width`
+- `gui_showcase_8k_perf_height`
+- `gui_showcase_8k_perf_pixels`
 - `gui_showcase_8k_perf_fps_x1000`
 - `gui_showcase_8k_perf_target_fps`
 - `gui_showcase_8k_perf_checksum`
@@ -133,7 +136,8 @@ Completion remains blocked until the 8K status is `pass`. A measured RSS row
 with no budget is useful diagnostic evidence, but a release-quality memory claim
 should set `MAX_RSS_KB` so `gui_showcase_8k_perf_rss_status=pass` proves the
 budget was enforced. A bare `gui_showcase_8k_perf_status=pass` without FPS,
-checksum, and RSS budget fields is downgraded to `fail`.
+checksum, RSS budget fields, and exact 7680x4320/33177600-pixel geometry is
+downgraded to `fail`.
 
 ## Result Interpretation
 
@@ -1073,6 +1077,33 @@ expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_budget_kb=1048576")
 expect(evidence).to_contain("gui_showcase_8k_perf_rss_status=pass")
 expect(evidence).to_contain("gui_showcase_8k_perf_checksum=123456")
 expect(report).to_contain("- GUI/web/2D 8K retained perf: pass")
+```
+
+</details>
+
+#### rejects non-8K perf rows that otherwise look healthy
+
+- Create a retained 4K performance status env
+   - Expected: code equals `0`
+- Assert the aggregate fails the non-8K row
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create a retained 4K performance status env")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/source && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_width=3840\\ngui_showcase_8k_perf_height=2160\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_pixels=8294400\\ngui_showcase_8k_perf_checksum=123456\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/source/status.env BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate fails the non-8K row")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/out/evidence.env")
+expect(evidence).to_contain("gui_showcase_8k_perf_status=fail")
+expect(evidence).to_contain("gui_showcase_8k_perf_reason=not-8k-resolution:3840x2160;pixels=8294400")
 ```
 
 </details>
