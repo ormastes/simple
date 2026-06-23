@@ -31,7 +31,8 @@
    f. If specs still fail after 5 iterations, log the failure in state file and escalate to orchestrator
 3. After all specs pass, verify no `pass_todo` stubs remain in implementation
 4. Run full compile check: `bin/simple build check`
-5. Update state file with implementation status
+5. Update state file with implementation status and any doc/process freshness
+   handoff that final verify must check, or record `N/A`
 
 ## Rules
 
@@ -56,6 +57,7 @@ Load the spec, load the target file, write code, run test. That is all.
 - [ ] No `pass_todo` stubs in implementation files
 - [ ] Code compiles cleanly: `bin/simple build check` passes
 - [ ] State file updated: `phase: implement` marked complete, `impl_files:` listed
+- [ ] State records doc/process freshness handoff for verify, or `N/A`
 
 ## Output
 
