@@ -97,8 +97,10 @@ environment variables:
 
 - `PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV` for production GUI/web parity.
 - `GUI_SHOWCASE_8K_PERF_ENV` for retained 8K perf, checksum, and RSS rows.
-- `GUI_WEB_2D_VULKAN_ENV` and `GUI_WEB_2D_VULKAN_RUN_EVIDENCE_ENV` for
-  Vulkan setup, browser backing, and pairwise artifact evidence.
+- `GUI_WEB_2D_VULKAN_ENV` for Vulkan setup/readiness,
+  `GUI_WEB_2D_VULKAN_RUN_EVIDENCE_ENV` for direct run pairwise artifact
+  evidence, and `GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV` for focused
+  `--browser-backing` browser GPU proof.
 - `RDOC_SIMPLE_EVIDENCE_ENV`, `RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV`, and
   `RDOC_ELECTRON_EVIDENCE_ENV` for Simple, Chrome, and Electron RenderDoc
   captures.
@@ -139,8 +141,9 @@ budget was enforced.
   browser Vulkan blockers.
 - `gui_web_2d_vulkan_pixel_comparison_status=pass` requires Electron, Chrome,
   and Simple ARGB artifacts plus zero-mismatch pairwise diffs.
-- `gui_web_2d_vulkan_browser_backing_status=pass` requires Vulkan-backed
-  browser evidence and RenderDoc gates, not fallback screenshots.
+- `gui_web_2d_vulkan_browser_backing_status=pass` requires focused
+  Vulkan-backed browser GPU evidence, not fallback screenshots. Completion also
+  requires the separate RenderDoc blocker gates to pass.
 - `blocked_completion_gate_count=0` is required before this aggregate can be
   used as completion evidence.
 

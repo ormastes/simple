@@ -98,8 +98,13 @@ scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 
 The aggregate status audit keeps readiness and direct launch evidence separate.
 `GUI_WEB_2D_VULKAN_ENV` points at the readiness/setup env, while
-`GUI_WEB_2D_VULKAN_RUN_EVIDENCE_ENV` can point at a previous `--run`,
-`--renderdoc`, or `--renderdoc-simple` env. If unset, the audit looks for
+`GUI_WEB_2D_VULKAN_RUN_EVIDENCE_ENV` points at a previous `--run`,
+`--renderdoc`, or `--renderdoc-simple` env for full pixel/RenderDoc evidence.
+Use `GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV` for focused
+`--browser-backing` browser GPU proof. Only `--browser-backing` envs satisfy
+`gui_web_2d_vulkan_browser_backing_*`; other modes leave that rollup failed
+with `missing-focused-browser-backing`.
+If unset, the audit looks for
 `build/gui-web-2d-vulkan-env-run-auto/evidence.env` and related run dirs. It
 emits `gui_web_2d_vulkan_direct_run_source`,
 `gui_web_2d_vulkan_direct_run_evidence_env`, and
