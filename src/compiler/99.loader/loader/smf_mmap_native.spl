@@ -23,6 +23,8 @@ extern fn rt_open_fd(path: text, flags: i64, mode: i64) -> i64
 extern fn rt_close_fd(fd: i64) -> i64
 extern fn rt_page_size() -> i64
 
+use std.string_core.{char_from_code}
+
 # ============================================================================
 # Constants (libc values)
 # ============================================================================
@@ -323,18 +325,48 @@ fn slice_from_raw_parts(ptr: *u8, len: usize) -> [u8]:
             i = i + 1
         result
 
-fn str_from_utf8_lossy(bytes: [u8]) -> text:
+pub fn str_from_utf8_lossy(bytes: [u8]) -> text:
     """Convert bytes to string, replacing invalid UTF-8."""
-    # Convert byte array to string
-    var chars: [text] = []
-    for b in bytes:
-        chars_push(chars, char_from_byte(b))
-    chars.join("")
+    var result = ""
+    var i = 0
+    while i < bytes.len():
+        val b = bytes[i] as i64
+        if b < 0x80:
+            result = result + char_from_code(b)
+            i = i + 1
+        elif b >= 0xC2 and b < 0xE0 and i + 1 < bytes.len() and is_utf8_continuation(bytes[i + 1]):
+            val b1 = bytes[i + 1] as i64
+            result = result + char_from_code(((b & 0x1F) << 6) | (b1 & 0x3F))
+            i = i + 2
+        elif b >= 0xE0 and b < 0xF0 and i + 2 < bytes.len() and is_valid_utf8_3(bytes, i):
+            val b1 = bytes[i + 1] as i64
+            val b2 = bytes[i + 2] as i64
+            result = result + char_from_code(((b & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F))
+            i = i + 3
+        elif b >= 0xF0 and b < 0xF5 and i + 3 < bytes.len() and is_valid_utf8_4(bytes, i):
+            val b1 = bytes[i + 1] as i64
+            val b2 = bytes[i + 2] as i64
+            val b3 = bytes[i + 3] as i64
+            result = result + char_from_code(((b & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F))
+            i = i + 4
+        else:
+            result = result + "?"
+            i = i + 1
+    result
 
-fn char_from_byte(b: u8) -> text:
-    """Convert byte to character."""
-    # Simple char conversion
-    "{b as char}"
+fn is_utf8_continuation(b: u8) -> bool:
+    val value = b as i64
+    value >= 0x80 and value < 0xC0
+
+fn is_valid_utf8_3(bytes: [u8], i: i64) -> bool:
+    val b = bytes[i] as i64
+    val b1 = bytes[i + 1] as i64
+    is_utf8_continuation(bytes[i + 1]) and is_utf8_continuation(bytes[i + 2]) and not (b == 0xE0 and b1 < 0xA0) and not (b == 0xED and b1 >= 0xA0)
+
+fn is_valid_utf8_4(bytes: [u8], i: i64) -> bool:
+    val b = bytes[i] as i64
+    val b1 = bytes[i + 1] as i64
+    is_utf8_continuation(bytes[i + 1]) and is_utf8_continuation(bytes[i + 2]) and is_utf8_continuation(bytes[i + 3]) and not (b == 0xF0 and b1 < 0x90) and not (b == 0xF4 and b1 >= 0x90)
 
 # ============================================================================
 # Relocation Patching Functions
