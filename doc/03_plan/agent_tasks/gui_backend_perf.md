@@ -585,7 +585,8 @@ Acceptance:
      scripts/check/check-production-gui-web-renderer-parity-evidence.shs`
      reports `production_gui_web_renderer_parity_status=fail`,
      `production_gui_web_renderer_parity_reason=electron-generated-gui-matrix-failed`,
-     and `matrix_electron_generated_gui_web_matrix_reason=case-80x64-failed`.
+     and `matrix_electron_generated_gui_web_matrix_reason=case-80x64-failed`;
+     the 80x64 case evidence reports `missing-electron-dependency`.
    - Previous local blocker after installing `tools/electron-shell` dependencies:
      generated-GUI Electron matrix and layout manifest passed, but the
      Tauri/Chrome surface manifest failed with live-surface divergence
@@ -630,7 +631,7 @@ Acceptance:
 - Continue pure Simple text/layout optimization with explicit behavior-preservation checks.
 +# GUI/Backend Performance Agent Task Plan
 +
-+Lane: ongoing Simple GUI/backend performance convergence  
++Lane: ongoing Simple GUI/backend performance convergence
 +Updated: 2026-06-11
 +
 +## Completed (already pushed)
