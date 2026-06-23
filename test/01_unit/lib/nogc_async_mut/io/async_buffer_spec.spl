@@ -53,6 +53,70 @@
 # val line = await reader.read_line()?
 # ```
 
+use std.spec
+use std.io.async_traits.{AsyncRead}
+use std.io.types.{IoError}
+use std.async.future.{Future}
+use std.async.poll.{Poll}
+use std.nogc_async_mut.io.buffer.{AsyncBufferedReader}
+
+class AsyncMemoryReader with AsyncRead:
+    data: [u8]
+    pos: i64
+
+    static fn new(data: [u8]) -> AsyncMemoryReader:
+        AsyncMemoryReader(data: data, pos: 0)
+
+    fn read(size: i64) -> Future<Result<[u8], IoError>>:
+        val end = if self.pos + size > self.data.len(): self.data.len() else: self.pos + size
+        val chunk = self.data.slice(self.pos, end)
+        self.pos = end
+        Future.from_value(Ok(chunk))
+
+    fn read_exact(size: i64) -> Future<Result<[u8], IoError>>:
+        self.read(size)
+
+    fn read_all() -> Future<Result<[u8], IoError>>:
+        self.read(self.data.len() - self.pos)
+
+    fn read_text() -> Future<Result<text, IoError>>:
+        Future.from_value(Ok(""))
+
+    fn read_line() -> Future<Result<text, IoError>>:
+        Future.from_value(Ok(""))
+
+
+# ============================================================================
+# Executable regression coverage
+# ============================================================================
+
+describe "AsyncBufferedReader byte conversion":
+    it "decodes text without text.from_bytes":
+        val raw = AsyncMemoryReader.new([111u8, 107u8, 255u8])
+        val reader = AsyncBufferedReader.with_capacity(raw, 2)
+        match reader.read_text().poll():
+            Poll.Ready(result):
+                match result:
+                    Ok(text_value):
+                        expect(text_value).to_equal("ok?")
+                    Err(err):
+                        expect(err.message).to_equal("")
+            Poll.Pending:
+                expect("pending").to_equal("")
+
+    it "preserves line controls while decoding buffered lines":
+        val raw = AsyncMemoryReader.new([111u8, 107u8, 10u8])
+        val reader = AsyncBufferedReader(inner: raw, buf: [111u8, 107u8, 10u8], buf_size: 4, pos: 0, filled: 3)
+        match reader.read_line().poll():
+            Poll.Ready(result):
+                match result:
+                    Ok(text_value):
+                        expect(text_value).to_equal("ok\n")
+                    Err(err):
+                        expect(err.message).to_equal("")
+            Poll.Pending:
+                expect("pending").to_equal("")
+
 
 # ============================================================================
 # AsyncBufferedReader
