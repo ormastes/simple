@@ -18,6 +18,9 @@ Updated: 2026-06-14
   evidence, incomplete Metal readback evidence, missing named Metal/font
   blockers, incomplete browser backing evidence, and non-8K geometry cannot
   pass as complete evidence.
+- `b481735f81d` renamed the missing focused browser-backing mode to
+  `focused-browser-backing-required`, so the plan and aggregate no longer imply
+  that fallback bitmap comparison is acceptable Vulkan-backed browser proof.
 
 ## Cooperative Review Routing
 
