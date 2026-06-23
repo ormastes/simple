@@ -32,9 +32,9 @@ Before starting, check what exists — missing artifacts are created in phases 1
 | 1 | Requirements | main | `doc/02_requirements/<domain>/<topic>/<feature>.md` |
 | 2 | Research | research-team | `doc/01_research/<domain>/<topic>/<feature>.md` |
 | 3 | Req Update | main | Updated requirement doc |
-| 4 | Plan + Design | design-team | `doc/03_plan/<domain>/<topic>/<feature>.md`, `doc/05_design/<domain>/<topic>/<feature>.md` |
+| 4 | Plan + Design | design-team | `doc/03_plan/agent_tasks/<feature>.md`, `doc/05_design/<domain>/<topic>/<feature>.md` |
 | 5 | Model Selection | main | Task-to-model assignment |
-| 6 | System Test | test-agent | `test/03_system/<feature>_spec.spl` |
+| 6 | System Test | test-agent | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` |
 | 7 | Doc Consistency | review-agent | Cross-ref validation |
 | 8 | Implementation | code-team | `src/**/<feature>.spl` |
 | 9 | Unit + IT Tests | test-agent | 80%+ branch coverage |
@@ -69,11 +69,11 @@ review-team:    explore -> docs          (sequential)
 **Skip if artifacts exist.** Otherwise do them inline:
 1. Architecture: `doc/04_architecture/<domain>/<topic>/<feature>.md`
 2. Detail design: `doc/05_design/<domain>/<topic>/<feature>.md`
-3. Agent tasks: `doc/03_plan/<domain>/<topic>/<feature>.md`
+3. Agent tasks: `doc/03_plan/agent_tasks/<feature>.md`
 4. UI design (if applicable): `doc/05_design/ui/<topic>/<feature>_tui.md`, `_gui.md`
 
 ### Phase 6-7: System Test + Doc Consistency
-1. Create `test/03_system/<feature>_spec.spl` (SPipe BDD, fail-first). See `/spipe`
+1. Create `test/03_system/app/<app_name>/feature/<feature>_spec.spl` (SPipe BDD, fail-first). See `/spipe`
    - **REQUIRED:** Add `# @cover src/path/to/impl.spl <pct>%` pointing to last-layer component
 2. Cross-ref: bidirectional links, consistent terminology, REQ-ID tracing
 3. If design introduced shared interface or manual setup/checker helper
