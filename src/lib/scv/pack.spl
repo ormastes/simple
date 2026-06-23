@@ -4,6 +4,7 @@ use app.io.mod (file_exists, file_read, file_copy, file_size, dir_create, dir_wa
 use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.common.compress.gzip.{gzip_compress, gzip_decompress}
+use std.common.string_core.{char_from_code}
 use std.scv.core.{scv_objects_dir, scv_state_test_ok, scv_state_public_ready, scv_metadata_path_safe, scv_object_path, scv_chunk_path, scv_line_set_contains}
 use std.scv.maintenance.{scv_count_files_under, scv_bytes_under, scv_object_id_from_path, scv_export_manifest}
 use std.scv.integrity.{scv_fsck}
@@ -36,6 +37,22 @@ fn scv_append_bytes(target: [u8], source: [u8]) -> [u8]:
 
 fn scv_append_text_bytes(target: [u8], value: text) -> [u8]:
     scv_append_bytes(target, value.bytes())
+
+fn scv_pack_bytes_to_text(bytes: [u8]) -> text:
+    var result = ""
+    var i = 0
+    while i < bytes.len():
+        val b = bytes[i] as i64
+        if b == 10:
+            result = result + "\n"
+        elif b == 13:
+            result = result + "\r"
+        elif b == 9:
+            result = result + "\t"
+        else:
+            result = result + char_from_code(b)
+        i = i + 1
+    result
 
 fn scv_pack_payload_for_kind(root: text, kind: text, payload: [u8]) -> [u8]:
     val dir = "{scv_objects_dir(root)}/{kind}"
@@ -108,7 +125,7 @@ fn scv_pack_manifest_path_for_entry(kind: text, id: text) -> text:
 fn scv_pack_payload_object_hash_ok(kind: text, id: text, raw: [u8]) -> bool:
     if kind == "chunks":
         return scv_content_id_for_u8(raw) == id
-    val raw_text = text.from_bytes(raw)
+    val raw_text = scv_pack_bytes_to_text(raw)
     if kind == "files":
         return scv_hash_text("file", raw_text) == id
     if kind == "trees":
@@ -262,7 +279,7 @@ fn scv_pack_bytes_line(payload: [u8], start: i64) -> (text, i64):
     var end = start
     while end < payload.len() and payload[end] != 10.to_u8():
         end = end + 1
-    (text.from_bytes(payload[start:end]), end)
+    (scv_pack_bytes_to_text(payload[start:end]), end)
 
 fn scv_pack_marker_at(payload: [u8], start: i64) -> bool:
     val marker = "\nendentry\n".bytes()
@@ -277,7 +294,7 @@ fn scv_pack_import_entry(root: text, kind: text, id: text, raw: [u8]) -> text:
         return "ERROR unsafe pack object id: {id}\n"
     if kind == "chunks" and scv_content_id_for_u8(raw) != id:
         return "ERROR chunk content mismatch: {id}\n"
-    val raw_text = if kind == "chunks": "" else: text.from_bytes(raw)
+    val raw_text = if kind == "chunks": "" else: scv_pack_bytes_to_text(raw)
     if kind == "files" and scv_hash_text("file", raw_text) != id:
         return "ERROR pack object hash mismatch: {id}\n"
     if kind == "trees" and scv_hash_text("tree", raw_text) != id:
