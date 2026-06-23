@@ -77,9 +77,10 @@ If multiple LLMs participate in research:
 - Validate prior findings against current `src/` state
 - Identify gaps, add supplementary research
 - For broad lanes, split independent checks across lower-model sidecars when
-  available (Codex Spark, Claude Haiku, Claude Sonnet), then require a
-  normal/highest-capability review before accepting broad findings, done marks,
-  generated-manual quality, or exclusions. Record `N/A` for narrow work.
+  available (Codex Spark, Claude Haiku, Claude Sonnet), then require the best
+  available normal/highest-capability model to review before accepting broad
+  findings, done marks, generated-manual quality, or exclusions. Record `N/A`
+  for narrow work.
 
 ---
 
@@ -209,9 +210,9 @@ If multiple LLMs participate in research:
 **3.15** Run `/verify` + VCS Sync.
 
 Broad implementation lanes must complete the recorded lower-model sidecar plan
-or mark it `N/A`, then pass normal/highest-capability review before claiming
-coverage, generated-manual quality, done marks, or broad exclusions.
-Before sidecars fan out, the first normal/highest-capability pass defines the
+or mark it `N/A`, then pass best available normal/highest-capability review
+before claiming coverage, generated-manual quality, done marks, or broad
+exclusions. Before sidecars fan out, the first best-model pass defines the
 shared interface names, manual `step("...")` flow helper names, setup/checker
 helper names, and fail-fast placeholders that sidecars must target.
 

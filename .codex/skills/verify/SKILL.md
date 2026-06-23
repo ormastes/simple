@@ -57,9 +57,10 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
   placeholder passes are a FAIL.
 - For broad SPipe lanes, the recorded cooperative review plan is complete or
   explicitly `N/A`: lower-model sidecars such as Codex Spark, Claude Haiku, or
-  Claude Sonnet were merged/reviewed when used, and a normal/highest-capability
-  LLM accepted broad findings, generated-manual quality, coverage claims,
-  exclusions, and done marks before PASS.
+  Claude Sonnet were merged/reviewed when used, and the best available
+  normal/highest-capability model accepted broad findings,
+  generated-manual quality, coverage claims, exclusions, and done marks before
+  PASS.
 - UI-facing specs include visible-state evidence when practical: TUI text/ANSI
   captures under `build/test-artifacts/<spec-relative-path>/`, GUI screenshots
   or goldens under `doc/06_spec/image/<spec-relative-path>/`, and embedded
