@@ -27,7 +27,7 @@
 5. Push to remote and trigger PR creation + review:
    ```
    jj bookmark set main -r @-
-   jj git push --bookmark main
+   env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
 
    # See "CLI Flags (3-Level Review wiring)" below for $TARGET / $REVIEW_LEVEL detection.
    /repo_and_pull_req push --target=$TARGET --level=$REVIEW_LEVEL
