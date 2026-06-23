@@ -16,7 +16,7 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
 | Architecture | `doc/04_architecture/<feature>.md` | Phase 6 |
 | Design | `doc/05_design/<feature>.md` | Phase 6 |
 | System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` | Phase 8 |
-| Generated spec docs | `doc/06_spec/.../<feature>_spec.md` | Phase 8 |
+| Generated spec docs | `doc/06_spec/03_system/app/<app_name>/feature/<feature>_spec.md` | Phase 8 |
 
 **If ALL exist**, skip to Phase 8 (Implementation).
 
