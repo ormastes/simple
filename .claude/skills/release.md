@@ -137,5 +137,5 @@ bin/simple --version
 ```bash
 gh release delete vX.Y.Z --yes
 git tag -d vX.Y.Z
-git push origin :refs/tags/vX.Y.Z
+env -u GITHUB_TOKEN -u GH_TOKEN git push origin :refs/tags/vX.Y.Z
 ```
