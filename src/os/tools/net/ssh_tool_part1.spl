@@ -31,7 +31,11 @@ use os.apps.sshd.ssh_packet.{
     ssh_put_u32,
     ssh_put_text,
     ssh_put_string,
-    ssh_put_bool
+    ssh_put_bool,
+    SshPacket,
+    SshPacketResult,
+    SshStringResult,
+    SshTextResult
 }
 use os.apps.sshd.ssh_kex.{
     ssh_kex_generate_keypair,
@@ -100,7 +104,13 @@ fn _socket_send_all(sock: ClientSocket, data: [u8]) -> Result<bool, text>:
         val r = _socket_send(sock, chunk)
         if r.is_err():
             return Err(r.unwrap_err())
-        sent = sent + r.unwrap()
+        var wrote: u64 = 0
+        match r:
+            Err(_e):
+                pass_dn
+            Ok(n):
+                wrote = n
+        sent = sent + wrote
     Ok(true)
 
 fn _socket_recv_some(sock: ClientSocket, max_len: u64) -> Result<[u8], text>:
@@ -115,7 +125,12 @@ fn _socket_recv_exact(sock: ClientSocket, size: u64) -> Result<[u8], text>:
         val r = _socket_recv_some(sock, need)
         if r.is_err():
             return Err(r.unwrap_err())
-        val chunk = r.unwrap()
+        var chunk: [u8] = []
+        match r:
+            Err(_e):
+                pass_dn
+            Ok(bytes):
+                chunk = bytes
         if chunk.len() == 0:
             return Err("EOF while reading {size} bytes")
         var i: u64 = 0
@@ -141,14 +156,24 @@ fn _recv_plain(sock: ClientSocket) -> Result<[u8], text>:
     val header_result = _socket_recv_exact(sock, 5)
     if header_result.is_err():
         return Err(header_result.unwrap_err())
-    var raw: [u8] = header_result.unwrap()
+    var raw: [u8] = []
+    match header_result:
+        Err(_e):
+            pass_dn
+        Ok(header):
+            raw = header
     val packet_length = ssh_get_u32(raw, 0).to_u64()
     if packet_length < 2:
         return Err("ssh: invalid plaintext packet length {packet_length}")
     val rest_result = _socket_recv_exact(sock, packet_length - 1)
     if rest_result.is_err():
         return Err(rest_result.unwrap_err())
-    val rest = rest_result.unwrap()
+    var rest: [u8] = []
+    match rest_result:
+        Err(_e):
+            pass_dn
+        Ok(bytes):
+            rest = bytes
     var i: u64 = 0
     while i < rest.len():
         raw.push(rest[i])
@@ -157,7 +182,13 @@ fn _recv_plain(sock: ClientSocket) -> Result<[u8], text>:
     if pr.is_err():
         var e: text = pr.unwrap_err()
         return Err(e)
-    Ok(pr.unwrap().packet.payload)
+    var parsed_packet = SshPacketResult(packet: SshPacket(payload: [], sequence: 0), consumed: 0)
+    match pr:
+        Err(_e):
+            pass_dn
+        Ok(packet_result):
+            parsed_packet = packet_result
+    Ok(parsed_packet.packet.payload)
 
 fn _recv_version_line(sock: ClientSocket) -> Result<[u8], text>:
     """Read SSH identification bytes until CRLF."""
@@ -167,7 +198,12 @@ fn _recv_version_line(sock: ClientSocket) -> Result<[u8], text>:
         if r.is_err():
             var e: text = r.unwrap_err()
             return Err(e)
-        var chunk: [u8] = r.unwrap()
+        var chunk: [u8] = []
+        match r:
+            Err(_e):
+                pass_dn
+            Ok(bytes):
+                chunk = bytes
         if chunk.len() == 0:
             return Err("EOF while reading version string")
         buf.push(chunk[0])
@@ -207,7 +243,12 @@ fn recv_encrypted(sock: ClientSocket, cipher: SshCipher, enc_key: [u8], iv: [u8]
     if r_len.is_err():
         var e: text = r_len.unwrap_err()
         return Err(e)
-    var len_bytes: [u8] = r_len.unwrap()
+    var len_bytes: [u8] = []
+    match r_len:
+        Err(_e):
+            pass_dn
+        Ok(bytes):
+            len_bytes = bytes
     if len_bytes.len() < 4:
         return Err("recv_encrypted: short length read")
 
@@ -219,7 +260,12 @@ fn recv_encrypted(sock: ClientSocket, cipher: SshCipher, enc_key: [u8], iv: [u8]
     if r_body.is_err():
         var e: text = r_body.unwrap_err()
         return Err(e)
-    var body: [u8] = r_body.unwrap()
+    var body: [u8] = []
+    match r_body:
+        Err(_e):
+            pass_dn
+        Ok(bytes):
+            body = bytes
 
     # Reassemble the full wire frame so decrypt_packet can see the AAD
     var frame: [u8] = []
@@ -239,7 +285,13 @@ fn recv_encrypted(sock: ClientSocket, cipher: SshCipher, enc_key: [u8], iv: [u8]
         var e: text = dr.unwrap_err()
         return Err(e)
     cipher.seq_c2s = (cipher.seq_c2s + 1) & 0xFFFFFFFF
-    Ok(dr.unwrap())
+    var decrypted: [u8] = []
+    match dr:
+        Err(_e):
+            pass_dn
+        Ok(payload):
+            decrypted = payload
+    Ok(decrypted)
 
 fn _recv_encrypted_skip_post_kex_metadata(sock: ClientSocket, cipher: SshCipher, enc_key: [u8], iv: [u8]) -> Result<[u8], text>:
     """Read one encrypted packet, skipping benign metadata/control messages.
@@ -251,7 +303,12 @@ fn _recv_encrypted_skip_post_kex_metadata(sock: ClientSocket, cipher: SshCipher,
         val rr = recv_encrypted(sock, cipher, enc_key, iv)
         if rr.is_err():
             return Err(rr.unwrap_err())
-        val payload = rr.unwrap()
+        var payload: [u8] = []
+        match rr:
+            Err(_e):
+                pass_dn
+            Ok(bytes):
+                payload = bytes
         if payload.len() == 0:
             return Ok(payload)
         val msg_type = payload[0]
@@ -331,7 +388,12 @@ fn _parse_ecdh_reply(payload: [u8]) -> Result<([u8], [u8], text, [u8], [u8]), te
     var r_ks = ssh_get_string(payload, off)
     if r_ks.is_err():
         return Err("KEX_ECDH_REPLY: bad K_S")
-    var ks_pair = r_ks.unwrap()
+    var ks_pair = SshStringResult(data: [], next_offset: 0)
+    match r_ks:
+        Err(_e):
+            pass_dn
+        Ok(pair):
+            ks_pair = pair
     var host_key_blob: [u8] = ks_pair.data
     off = ks_pair.next_offset
 
@@ -339,7 +401,12 @@ fn _parse_ecdh_reply(payload: [u8]) -> Result<([u8], [u8], text, [u8], [u8]), te
     var r_qs = ssh_get_string(payload, off)
     if r_qs.is_err():
         return Err("KEX_ECDH_REPLY: bad Q_S")
-    var qs_pair = r_qs.unwrap()
+    var qs_pair = SshStringResult(data: [], next_offset: 0)
+    match r_qs:
+        Err(_e):
+            pass_dn
+        Ok(pair):
+            qs_pair = pair
     var q_s: [u8] = qs_pair.data
     off = qs_pair.next_offset
 
@@ -347,14 +414,24 @@ fn _parse_ecdh_reply(payload: [u8]) -> Result<([u8], [u8], text, [u8], [u8]), te
     var r_sig = ssh_get_string(payload, off)
     if r_sig.is_err():
         return Err("KEX_ECDH_REPLY: bad signature blob")
-    var sig_pair = r_sig.unwrap()
+    var sig_pair = SshStringResult(data: [], next_offset: 0)
+    match r_sig:
+        Err(_e):
+            pass_dn
+        Ok(pair):
+            sig_pair = pair
     var sig_blob: [u8] = sig_pair.data
 
     # Extract key_type from inside host_key_blob
     var r_kt = ssh_get_text(host_key_blob, 0)
     if r_kt.is_err():
         return Err("KEX_ECDH_REPLY: bad key_type in K_S")
-    var kt_pair = r_kt.unwrap()
+    var kt_pair = SshTextResult(value: "", next_offset: 0)
+    match r_kt:
+        Err(_e):
+            pass_dn
+        Ok(pair):
+            kt_pair = pair
     var key_type: text = kt_pair.value
     var kt_off: u64 = kt_pair.next_offset
 
@@ -362,7 +439,12 @@ fn _parse_ecdh_reply(payload: [u8]) -> Result<([u8], [u8], text, [u8], [u8]), te
     var r_pk = ssh_get_string(host_key_blob, kt_off)
     if r_pk.is_err():
         return Err("KEX_ECDH_REPLY: bad pubkey in K_S")
-    var pk_pair = r_pk.unwrap()
+    var pk_pair = SshStringResult(data: [], next_offset: 0)
+    match r_pk:
+        Err(_e):
+            pass_dn
+        Ok(pair):
+            pk_pair = pair
     var raw_pubkey: [u8] = pk_pair.data
 
     # Extract raw signature bytes from inside sig_blob
@@ -370,13 +452,23 @@ fn _parse_ecdh_reply(payload: [u8]) -> Result<([u8], [u8], text, [u8], [u8]), te
     var r_sa = ssh_get_text(sig_blob, 0)
     if r_sa.is_err():
         return Err("KEX_ECDH_REPLY: bad sig algo")
-    var sa_pair = r_sa.unwrap()
+    var sa_pair = SshTextResult(value: "", next_offset: 0)
+    match r_sa:
+        Err(_e):
+            pass_dn
+        Ok(pair):
+            sa_pair = pair
     var sa_off: u64 = sa_pair.next_offset
 
     var r_sb = ssh_get_string(sig_blob, sa_off)
     if r_sb.is_err():
         return Err("KEX_ECDH_REPLY: bad sig bytes")
-    var sb_pair = r_sb.unwrap()
+    var sb_pair = SshStringResult(data: [], next_offset: 0)
+    match r_sb:
+        Err(_e):
+            pass_dn
+        Ok(pair):
+            sb_pair = pair
     var signature_bytes: [u8] = sb_pair.data
 
     Ok((host_key_blob, q_s, key_type, raw_pubkey, signature_bytes))
