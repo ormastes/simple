@@ -9,12 +9,12 @@
 #   pkg build examples/09_embedded/simple_os/apps/hello_world/ -o /tmp/packages/
 
 use os.tools.pkg.pkg_format.{
-    ExtendedManifest, PackageType, PkgArch,
+    ExtendedManifest, PackageType, PkgArch, InstallHooks,
     parse_extended_manifest, serialize_extended_manifest,
     spk_filename, SPK_MANIFEST_NAME, SPK_DATA_PREFIX,
     package_type_to_text, pkg_arch_to_text
 }
-use os.tools.pkg.pkg_manifest.{PackageVersion}
+use os.tools.pkg.pkg_manifest.{PackageManifest, PackageVersion}
 use os.tools.archive.tar_tool.{tar_create, TarHeader, TarEntry, BLOCK_SIZE, TYPE_FILE, TYPE_DIR}
 use os.userlib.fs.{read_text, write_text, stat, readdir, mkdir}
 
@@ -40,15 +40,21 @@ fn build_package(source_dir: text, output_dir: text) -> Result<text, text>:
         return Result.Err("No manifest.sdn found in {source_dir}")
 
     val manifest_result = parse_extended_manifest(manifest_content)
-    if val Err(e) = manifest_result:
-        return Result.Err("Invalid manifest: {e}")
-    var manifest = manifest_result.unwrap()
+    var manifest = ExtendedManifest(base: PackageManifest(name: "", version: PackageVersion(major: 0, minor: 0, patch: 0), description: "", dependencies: [], files: [], checksum: ""), pkg_type: PackageType.App, arch: PkgArch.Any, hooks: InstallHooks(pre_install: "", post_install: "", pre_remove: "", post_remove: ""), license: "", maintainer: "", homepage: "", installed_size: 0, provides: [], conflicts: [], replaces: [])
+    match manifest_result:
+        Err(e):
+            return Result.Err("Invalid manifest: {e}")
+        Ok(parsed_manifest):
+            manifest = parsed_manifest
 
     # Step 2: Collect files listed in manifest
     val collect_result = _collect_files(source_dir, manifest)
-    if val Err(e) = collect_result:
-        return Result.Err("File collection failed: {e}")
-    val file_list = collect_result.unwrap()
+    var file_list: [text] = []
+    match collect_result:
+        Err(e):
+            return Result.Err("File collection failed: {e}")
+        Ok(collected_files):
+            file_list = collected_files
 
     # Step 3: Compute total size
     var total_size: u64 = 0
@@ -68,9 +74,12 @@ fn build_package(source_dir: text, output_dir: text) -> Result<text, text>:
     val spk_path = "{output_dir}/{spk_name}"
 
     val archive_result = _create_spk_archive(source_dir, manifest, file_list)
-    if val Err(e) = archive_result:
-        return Result.Err("Archive creation failed: {e}")
-    val archive_data = archive_result.unwrap()
+    var archive_data = ""
+    match archive_result:
+        Err(e):
+            return Result.Err("Archive creation failed: {e}")
+        Ok(data):
+            archive_data = data
 
     write_text(spk_path, archive_data)
     return Result.Ok(spk_path)
