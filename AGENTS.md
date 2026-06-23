@@ -277,8 +277,8 @@ jj commit -m "chore: release vX.Y.Z"
 jj git fetch
 jj rebase -d main@origin
 jj bookmark set main -r @-
-jj git push --bookmark main
-git push --tags
+env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
+env -u GITHUB_TOKEN -u GH_TOKEN git push --tags
 ```
 
 Ask before pushing. Treat "pull" as `jj git fetch` plus `jj rebase`; do not use
