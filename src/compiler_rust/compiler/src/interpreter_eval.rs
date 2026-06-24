@@ -413,6 +413,17 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
         }
     }
 
+    // Capture the entry module's `main` as registered by the first pass, BEFORE the
+    // second pass merges imported functions into the flat `functions` map. The
+    // pipeline flattener strips imported `main` from flattened imports
+    // (strip_flattened_import_nodes), but when the import graph is large enough that
+    // some modules are loaded lazily during the second pass, their `fn main` is NOT
+    // stripped and gets merged into `functions`, clobbering the entry's `main`.
+    // Without this capture the program silently runs the wrong `main` (no output,
+    // exit code of an unrelated function). See bug doc
+    // selfhost_bootstrap_unresolved_symbols_2026-06-24.md.
+    let entry_main = functions.get("main").cloned();
+
     // Second pass: apply decorators and register other items
     for item in items {
         match item {
@@ -1482,8 +1493,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
         }
     }
 
-    // Check if main is defined as a function and call it
-    if let Some(main_func) = functions.get("main").cloned() {
+    // Check if main is defined as a function and call it. Prefer the entry module's
+    // `main` captured after the first pass (see above) so a lazily-imported module's
+    // `main` cannot clobber it; fall back to the flat map for programs whose entry
+    // file defines no `main` of its own.
+    let main_to_run = entry_main.clone().or_else(|| functions.get("main").cloned());
+    if let Some(main_func) = main_to_run {
         let result = exec_function(
             &main_func,
             &[], // No arguments
