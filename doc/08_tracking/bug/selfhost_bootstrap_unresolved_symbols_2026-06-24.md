@@ -148,6 +148,26 @@ with `error: semantic: class \`Module\` has no field named \`imports\``
 self-hosted-compiler bug, related to the `ParserModule` alias cluster above.
 This is the next thing to fix toward `run`-driving the pure-Simple wasm path.
 
+## 2026-06-24 (cont.) — FIXED next blocker: `Module` struct-name collision
+With `main()` now running, the driver hit `error: semantic: class `Module` has
+no field named `imports`` at `parser_module_new`. Root cause: two `struct Module`
+— the flat `ast.Module {name, items}` and the rich `parser_types.Module {name,
+imports, exports, functions, ...}` — collided in the interpreter's global
+bare-name struct registry (last-write-wins), so the rich constructor inside
+`parser_module_new` built the flat shape. FIXED (pushed, origin `f8ca83a68c8`)
+by renaming the flat one to `AstModule` and updating its 4 consumers
+(`type_system/checker`, `type_system/module_check`, `monomorphize/partition`,
+`module_resolver/manifest` — all use `.items`); `parser_types.Module` stays the
+canonical re-exported frontend `Module`. Verified (interpreter, pure-.spl, no
+rebuild): `bin/simple run .../80.driver/main.spl --check <file>` runs to
+completion (`built frontend module` -> `parsed module`, exit 0); all 5 edited
+files `check` OK.
+
+Next blockers toward run-driving the pure-Simple wasm path (separate): the
+driver `main.spl` arg parser does not accept `--target` (`Error: unknown option
+--target`) — needs `--target wasm32` wired to the backend; and `--check` returns
+exit 0 even when it prints a diagnostic.
+
 ## Notes
 - `bootstrap-from-scratch.sh` only probes the macOS LLVM path
   (`/opt/homebrew/opt/llvm@18`); on Linux it silently uses cranelift even though
