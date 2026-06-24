@@ -112,6 +112,42 @@ interpreter loads the full driver graph then silently declines to run the entry'
 `main()` — the deep run-mode trap, likely needing Rust-seed instrumentation to
 root-cause.
 
+## 2026-06-24 (cont.) — RESOLVED: the run-mode "main not invoked" trap
+Pinned via Rust-seed interpreter instrumentation and FIXED (pushed, origin
+`201372604ea`, seed `interpreter_eval.rs`). It was NOT "main never invoked" —
+the interpreter was running the **wrong** `main`.
+
+Root cause: `evaluate_module_impl` registers the entry's `fn main` in its first
+pass, but the second pass merges lazily-loaded imported modules' functions into
+the flat `functions: HashMap<String, FunctionDef>` (last-write-wins). The
+pipeline flattener strips imported `main` (`strip_flattened_import_nodes`), but
+the lazy second-pass merge does NOT, so when the import graph is large enough to
+trigger lazy loads, an imported module's `fn main` clobbers the entry's. The
+program then ran an unrelated `main` (no output, exit code of that function) —
+indistinguishable from "main not invoked".
+
+Evidence (instrumented seed, `SIMPLE_DEBUG_MAIN=1`): a probe entry with
+`use compiler.backend.*` + a trivial `main` had `main_overloads=13`,
+`has_main_fn=true`, "invoking main() now", yet returned exit 1 with no output.
+`use compiler.frontend.*` (smaller, 71 modules) had `main_overloads=1` and ran
+correctly. The trap reproduced with backend AND driver graphs (≥ a few hundred
+modules), not with small graphs — confirming it is import-graph driven, not
+symlink- or content-specific.
+
+Fix: capture the entry module's `main` right after the first pass (before the
+merge) and invoke that; fall back to the flat map for entries with no own `main`.
+Verified: backend/driver probes now exit 0 and print; no-import, std-import, and
+real app `check`s pass; no interpreter regression (the 186 `cargo test` lib
+failures are pre-existing codegen/LLVM/native + filesystem-layout path-resolution
+tests, none touching main-selection).
+
+**New downstream blocker (separate, pure-Simple):** with `main` now running, the
+driver proceeds through real compile phases and fails in its own frontend bridge
+with `error: semantic: class \`Module\` has no field named \`imports\``
+(`parser_types.Module` accessed via a non-existent `.imports` field) — a genuine
+self-hosted-compiler bug, related to the `ParserModule` alias cluster above.
+This is the next thing to fix toward `run`-driving the pure-Simple wasm path.
+
 ## Notes
 - `bootstrap-from-scratch.sh` only probes the macOS LLVM path
   (`/opt/homebrew/opt/llvm@18`); on Linux it silently uses cranelift even though
