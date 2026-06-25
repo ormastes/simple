@@ -338,7 +338,7 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 732 lines folded for reproduction.
+Runnable source: 737 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -545,17 +545,22 @@ expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_path=")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_file_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_viewport_match_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_nonblank_status=")
-expect(evidence).to_contain("gui_web_2d_vulkan_simple_evidence_env=")
+expect(evidence).to_contain("gui_web_2d_vulkan_simple_evidence_env=build/gui-web-2d-vulkan-env-run-auto/simple-vulkan-readback/evidence.env")
+expect(evidence).to_contain("gui_web_2d_vulkan_simple_evidence_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_evidence_file_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_backend_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_status=")
-expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_path=")
+expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_path=build/gui-web-2d-vulkan-env-run-auto/simple_argb.json")
+expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_file_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_viewport_match_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_nonblank_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_chrome_diff_path=build/gui-web-2d-vulkan-env-run-auto/electron_chrome_diff.ppm")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_simple_pairwise_diff_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_simple_diff_path=build/gui-web-2d-vulkan-env-run-auto/electron_simple_diff.ppm")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_simple_diff_path=build/gui-web-2d-vulkan-env-run-auto/chrome_simple_diff.ppm")
 expect(evidence).to_contain("renderdoc_evidence_tool=scripts/tool/renderdoc-evidence.shs")
 expect(evidence).to_contain("renderdoc_evidence_tool_status=pass")
 expect(evidence).to_contain("simple_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple")
@@ -1088,7 +1093,7 @@ expect(report).to_contain("  - full CSS specification rendering coverage beyond 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1102,6 +1107,9 @@ val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-missi
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_file_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_file_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_chrome_diff_path=build/test-gui-renderdoc-feature-coverage-status-missing-electron-argb/run/electron_chrome_diff.ppm")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_simple_diff_path=build/test-gui-renderdoc-feature-coverage-status-missing-electron-argb/run/electron_simple_diff.ppm")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_simple_diff_path=build/test-gui-renderdoc-feature-coverage-status-missing-electron-argb/run/chrome_simple_diff.ppm")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=unavailable")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_simple_pairwise_diff_status=unavailable")
 expect(evidence).to_contain("gui_web_2d_vulkan_comparison_artifact_status=incomplete")
