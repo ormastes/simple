@@ -155,11 +155,7 @@ fn atomic_write(path: text, content: text, config: DbConfig) -> Result<(), text>
         Err(message) on lock failure, write failure, etc.
     """
     # Acquire lock
-    val lock_result = FileLock.acquire(path, config.lock_timeout_secs)
-    if not lock_result.is_ok():
-        return Err(lock_result.unwrap_err())
-
-    val lock = lock_result.unwrap()
+    val lock = FileLock.acquire(path, config.lock_timeout_secs)?
 
     # Guard against overwriting non-empty with empty
     if content.trim() == "" and file_exists(path):
@@ -202,11 +198,7 @@ fn atomic_update(path: text, updater: fn(text) -> text, config: DbConfig) -> Res
         }, DbConfig.defaults())
     """
     # Acquire lock
-    val lock_result = FileLock.acquire(path, config.lock_timeout_secs)
-    if not lock_result.is_ok():
-        return Err(lock_result.unwrap_err())
-
-    val lock = lock_result.unwrap()
+    val lock = FileLock.acquire(path, config.lock_timeout_secs)?
 
     # Read current content
     var content = ""
@@ -313,9 +305,7 @@ impl AtomicTable:
         val header = "{table_name} |{columns.join(\", \")}|\n"
 
         # Write with locking
-        val result = atomic_write(path, header, config)
-        if not result.is_ok():
-            return Err(result.unwrap_err())
+        atomic_write(path, header, config)?
 
         Ok(AtomicTable(
             path: path,
@@ -338,27 +328,19 @@ impl AtomicTable:
             Ok(table) on success
             Err(message) if file doesn't exist or parse fails
         """
-        val content_result = atomic_read(path, config)
-        if not content_result.is_ok():
-            return Err(content_result.unwrap_err())
-
-        val content = content_result.unwrap()
+        val content = atomic_read(path, config)?
 
         # Parse table using std.sdn
         use std.sdn.{parse, SdnValue}
 
-        val parse_result = parse(content)
-        if not parse_result.is_ok():
-            return Err("Failed to parse SDN: {parse_result.unwrap_err()}")
-
-        val sdn_value = parse_result.unwrap()
+        val sdn_value = match parse(content):
+            case Ok(value):
+                value
+            case Err(err):
+                return Err("Failed to parse SDN: {err}")
 
         # Extract table data from SDN
-        val table_data = extract_table_from_sdn(sdn_value, table_name)
-        if not table_data.is_ok():
-            return Err(table_data.unwrap_err())
-
-        val (columns, rows) = table_data.unwrap()
+        val (columns, rows) = extract_table_from_sdn(sdn_value, table_name)?
 
         Ok(AtomicTable(
             path: path,
@@ -403,24 +385,17 @@ impl AtomicTable:
 
     fn reload() -> Result<(), text>:
         """Reload table from disk (discards in-memory changes)."""
-        val content_result = atomic_read(self.path, self.config)
-        if not content_result.is_ok():
-            return Err(content_result.unwrap_err())
+        val content = atomic_read(self.path, self.config)?
 
         # Parse content and update self.columns, self.rows
         use std.sdn.{parse, SdnValue}
 
-        val content = content_result.unwrap()
-        val parse_result = parse(content)
-        if not parse_result.is_ok():
-            return Err("Failed to parse SDN: {parse_result.unwrap_err()}")
-
-        val sdn_value = parse_result.unwrap()
-        val table_data = extract_table_from_sdn(sdn_value, self.table_name)
-        if not table_data.is_ok():
-            return Err(table_data.unwrap_err())
-
-        val (columns, rows) = table_data.unwrap()
+        val sdn_value = match parse(content):
+            case Ok(value):
+                value
+            case Err(err):
+                return Err("Failed to parse SDN: {err}")
+        val (columns, rows) = extract_table_from_sdn(sdn_value, self.table_name)?
         self.columns = columns
         self.rows = rows
         self.dirty = false
@@ -458,11 +433,11 @@ fn extract_table_from_sdn(sdn_value: SdnValue, table_name: text) -> Result<([tex
             match table_value:
                 case SdnValue.Table(fields, types, rows):
                     # Convert fields (Option) to required columns
-                    var columns: [text] = []
-                    if fields.?:
-                        columns = fields.unwrap()
-                    else:
-                        return Err("Table has no column headers")
+                    val columns = match fields:
+                        case Some(value):
+                            value
+                        case nil:
+                            return Err("Table has no column headers")
 
                     # Convert SdnValue rows to text rows
                     var text_rows: [[text]] = []
