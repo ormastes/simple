@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 121 | 121 | 0 | 0 |
+| 122 | 122 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -203,6 +203,28 @@ expect(border_box[3 + 3 * 40]).to_equal(0xFF2563EBu32)
 expect(content_box[3 + 3 * 40]).to_equal(WHITE_BG)
 expect(content_box[7 + 7 * 40]).to_equal(0xFF2563EBu32)
 expect(_count_color(content_box, 0xFF2563EBu32)).to_be_less_than(_count_color(border_box, 0xFF2563EBu32))
+```
+
+</details>
+
+#### positions background images from content-box when background-origin requests it
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val padding_origin_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 12px; height: 12px; padding: 4px; border: 2px solid #dc2626; background-color: #16a34a; background-image: linear-gradient(#2563eb, #f59e0b); background-size: 4px 4px; background-repeat: no-repeat; }</style></head><body><div class='card'></div></body></html>"
+val content_origin_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 12px; height: 12px; padding: 4px; border: 2px solid #dc2626; background-color: #16a34a; background-image: linear-gradient(#2563eb, #f59e0b); background-size: 4px 4px; background-repeat: no-repeat; background-origin: content-box; }</style></head><body><div class='card'></div></body></html>"
+val padding_origin = render_html_to_pixels_with_viewport(padding_origin_html, 40, 32).pixel_data
+val content_origin = render_html_to_pixels_with_viewport(content_origin_html, 40, 32).pixel_data
+
+expect(padding_origin[2 + 2 * 40]).to_equal(0xFF2563EBu32)
+expect(content_origin[2 + 2 * 40]).to_equal(0xFF16A34Au32)
+expect(content_origin[6 + 6 * 40]).to_equal(0xFF2563EBu32)
+expect(_pixels_equal(padding_origin, content_origin)).to_equal(false)
 ```
 
 </details>
@@ -2265,8 +2287,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 121 |
-| Active scenarios | 121 |
+| Total scenarios | 122 |
+| Active scenarios | 122 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
