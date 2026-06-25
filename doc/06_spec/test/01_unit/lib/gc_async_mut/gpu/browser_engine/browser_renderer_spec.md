@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 114 | 114 | 0 | 0 |
+| 115 | 115 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -266,6 +266,29 @@ expect(_count_color(rounded, 0xFF2563EBu32)).to_be_less_than(_count_color(square
 expect(rounded[4 + 4 * TEST_WIDTH]).to_equal(WHITE_BG)
 expect(rounded[10 + 8 * TEST_WIDTH]).to_equal(0xFF2563EBu32)
 expect(_pixels_equal(square, rounded)).to_equal(false)
+```
+
+</details>
+
+#### renders border corner radius longhands independently
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val square_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { margin: 4px; width: 18px; height: 12px; background-color: #2563eb; }</style></head><body><div class='card'></div></body></html>"
+val corner_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { margin: 4px; width: 18px; height: 12px; background-color: #2563eb; border-top-left-radius: 6px; }</style></head><body><div class='card'></div></body></html>"
+val square = render_html_to_pixels_with_viewport(square_html, TEST_WIDTH, TEST_HEIGHT).pixel_data
+val corner = render_html_to_pixels_with_viewport(corner_html, TEST_WIDTH, TEST_HEIGHT).pixel_data
+
+expect(corner[4 + 4 * TEST_WIDTH]).to_equal(WHITE_BG)
+expect(corner[21 + 4 * TEST_WIDTH]).to_equal(0xFF2563EBu32)
+expect(corner[4 + 15 * TEST_WIDTH]).to_equal(0xFF2563EBu32)
+expect(_count_color(corner, 0xFF2563EBu32)).to_be_less_than(_count_color(square, 0xFF2563EBu32))
+expect(_pixels_equal(square, corner)).to_equal(false)
 ```
 
 </details>
@@ -2117,8 +2140,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 114 |
-| Active scenarios | 114 |
+| Total scenarios | 115 |
+| Active scenarios | 115 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
