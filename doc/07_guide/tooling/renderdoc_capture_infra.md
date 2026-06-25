@@ -374,6 +374,13 @@ native_render_log_platform_matrix_required_platforms=linux-vulkan,macos-metal,wi
 native_render_log_platform_matrix_missing_platforms=
 ```
 
+The aggregate revalidates each platform row before marking the matrix complete:
+Linux must report `required_api=vulkan` and `pairwise_status=pass`, macOS must
+report `required_api=metal` and `pairwise_status=pass`, and Windows must report
+`required_api=d3d12` and `pairwise_status=pass`. A stale or forged
+`*_render_log_compare_status=pass` without those fields is downgraded to a
+failed platform row.
+
 If any platform compare evidence is missing or failing, the aggregate keeps
 `gui_renderdoc_feature_coverage_status` incomplete and adds the native
 render-log platform matrix to `blocked_completion_gates`.
