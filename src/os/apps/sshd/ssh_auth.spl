@@ -152,33 +152,30 @@ fn ssh_parse_auth_request(data: [u8]) -> Result<SshAuthRequest, text>:
 
     # Username
     var username: text = ""
-    var r_user = ssh_get_text(data, off)
-    if r_user.is_ok():
-        var user_pair = r_user.unwrap()
-        username = user_pair.value
-        off = user_pair.next_offset
-    else:
-        return Err("USERAUTH: bad username")
+    match ssh_get_text(data, off):
+        Ok(user_pair):
+            username = user_pair.value
+            off = user_pair.next_offset
+        Err(_):
+            return Err("USERAUTH: bad username")
 
     # Service name
     var service: text = ""
-    var r_service = ssh_get_text(data, off)
-    if r_service.is_ok():
-        var svc_pair = r_service.unwrap()
-        service = svc_pair.value
-        off = svc_pair.next_offset
-    else:
-        return Err("USERAUTH: bad service")
+    match ssh_get_text(data, off):
+        Ok(svc_pair):
+            service = svc_pair.value
+            off = svc_pair.next_offset
+        Err(_):
+            return Err("USERAUTH: bad service")
 
     # Method name
     var method: text = ""
-    var r_method = ssh_get_text(data, off)
-    if r_method.is_ok():
-        var meth_pair = r_method.unwrap()
-        method = meth_pair.value
-        off = meth_pair.next_offset
-    else:
-        return Err("USERAUTH: bad method")
+    match ssh_get_text(data, off):
+        Ok(meth_pair):
+            method = meth_pair.value
+            off = meth_pair.next_offset
+        Err(_):
+            return Err("USERAUTH: bad method")
 
     var password_val: text = ""
     var key_algo: text = ""
@@ -191,11 +188,12 @@ fn ssh_parse_auth_request(data: [u8]) -> Result<SshAuthRequest, text>:
         # string  plaintext password
         if off < data.len():
             off = off + 1   # skip bool byte
-        var r_pw = ssh_get_text(data, off)
-        if r_pw.is_ok():
-            var pw_pair = r_pw.unwrap()
-            password_val = pw_pair.value
-            off = pw_pair.next_offset
+        match ssh_get_text(data, off):
+            Ok(pw_pair):
+                password_val = pw_pair.value
+                off = pw_pair.next_offset
+            Err(_):
+                pass_do_nothing("password auth request has no password field")
 
     elif method == "publickey":
         # bool    has_signature
@@ -205,33 +203,40 @@ fn ssh_parse_auth_request(data: [u8]) -> Result<SshAuthRequest, text>:
         if off < data.len():
             has_signature = data[off] != 0
             off = off + 1
-        var r_algo = ssh_get_text(data, off)
-        if r_algo.is_ok():
-            var algo_pair = r_algo.unwrap()
-            key_algo = algo_pair.value
-            off = algo_pair.next_offset
-        var r_blob = ssh_get_string(data, off)
-        if r_blob.is_ok():
-            var blob_pair = r_blob.unwrap()
-            key_blob = blob_pair.data
-            off = blob_pair.next_offset
+        match ssh_get_text(data, off):
+            Ok(algo_pair):
+                key_algo = algo_pair.value
+                off = algo_pair.next_offset
+            Err(_):
+                pass_do_nothing("publickey auth request has no algorithm field")
+        match ssh_get_string(data, off):
+            Ok(blob_pair):
+                key_blob = blob_pair.data
+                off = blob_pair.next_offset
+            Err(_):
+                pass_do_nothing("publickey auth request has no key blob")
         # Read signature if has_signature is true
         if has_signature and off < data.len():
-            var r_sig = ssh_get_string(data, off)
-            if r_sig.is_ok():
-                var sig_pair = r_sig.unwrap()
-                signature = sig_pair.data
-                off = sig_pair.next_offset
+            match ssh_get_string(data, off):
+                Ok(sig_pair):
+                    signature = sig_pair.data
+                    off = sig_pair.next_offset
+                Err(_):
+                    pass_do_nothing("publickey auth request has no signature")
 
     elif method == "keyboard-interactive":
         # string language tag
         # string submethods
-        var r_lang = ssh_get_text(data, off)
-        if r_lang.is_ok():
-            off = r_lang.unwrap().next_offset
-        var r_submethods = ssh_get_text(data, off)
-        if r_submethods.is_ok():
-            off = r_submethods.unwrap().next_offset
+        match ssh_get_text(data, off):
+            Ok(lang_pair):
+                off = lang_pair.next_offset
+            Err(_):
+                pass_do_nothing("keyboard-interactive auth request has no language tag")
+        match ssh_get_text(data, off):
+            Ok(submethods_pair):
+                off = submethods_pair.next_offset
+            Err(_):
+                pass_do_nothing("keyboard-interactive auth request has no submethods")
 
     # method == "none" has no additional fields
 
@@ -340,10 +345,11 @@ fn ssh_parse_userauth_info_response(data: [u8]) -> Result<text, text>:
     val count = ssh_get_u32(data, 1).to_u64()
     if count < 1:
         return Err("USERAUTH_INFO_RESPONSE missing response")
-    val r_resp = ssh_get_text(data, 5)
-    if r_resp.is_err():
-        return Err("USERAUTH_INFO_RESPONSE bad response")
-    Ok(r_resp.unwrap().value)
+    match ssh_get_text(data, 5):
+        Ok(response):
+            Ok(response.value)
+        Err(_):
+            Err("USERAUTH_INFO_RESPONSE bad response")
 
 # NOTE: Public key authentication is currently DISABLED in ssh_session.spl.
 # To enable it, implement Ed25519 signature verification for userauth here.
