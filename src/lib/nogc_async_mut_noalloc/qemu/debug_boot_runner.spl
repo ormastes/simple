@@ -178,27 +178,44 @@ impl DebugBootRunner:
 
         # Override with boot test settings
         qemu_config.timeout_ms = base_cfg.timeout_ms
-        if base_cfg.machine.?:
-            qemu_config.machine = base_cfg.machine.unwrap()
+        match base_cfg.machine:
+            Some(machine):
+                qemu_config.machine = machine
+            nil:
+                pass
 
         # Start QEMU with GDB stub
         val start_result = QemuInstance.start(qemu_config)
-        if not start_result.is_ok():
-            val err_msg = start_result.err.unwrap()
-            val result = BootTestResult.failure("Failed to start QEMU: {err_msg}", "", -1)
-            return (result, DebugInfo.unavailable())
+        val qemu_instance = match start_result.ok:
+            Some(instance):
+                instance
+            nil:
+                val err_msg = match start_result.err:
+                    Some(err):
+                        err
+                    nil:
+                        "unknown error"
+                val result = BootTestResult.failure("Failed to start QEMU: {err_msg}", "", -1)
+                return (result, DebugInfo.unavailable())
 
-        self.qemu_instance = Some(start_result.ok.unwrap())
+        self.qemu_instance = Some(qemu_instance)
 
         # Connect GDB
         val gdb_result = self.connect_gdb()
-        if not gdb_result.is_ok():
-            val err_msg = gdb_result.err.unwrap()
-            self.cleanup()
-            val result = BootTestResult.failure("Failed to connect GDB: {err_msg}", "", -1)
-            return (result, DebugInfo.unavailable())
+        val gdb_client = match gdb_result.ok:
+            Some(client):
+                client
+            nil:
+                val err_msg = match gdb_result.err:
+                    Some(err):
+                        err
+                    nil:
+                        "unknown error"
+                self.cleanup()
+                val result = BootTestResult.failure("Failed to connect GDB: {err_msg}", "", -1)
+                return (result, DebugInfo.unavailable())
 
-        self.gdb_client = Some(gdb_result.ok.unwrap())
+        self.gdb_client = Some(gdb_client)
 
         # Set breakpoints if configured
         for bp_addr in self.config.breakpoints:
@@ -255,28 +272,39 @@ impl DebugBootRunner:
         ""
     fn set_breakpoint(addr: u64) -> Result<(), text>:
         """Set breakpoint at given address."""
-        if not self.gdb_client.?:
-            return Err("GDB not connected")
-
-        val gdb = self.gdb_client.unwrap()
+        val gdb = match self.gdb_client:
+            Some(client):
+                client
+            nil:
+                return Err("GDB not connected")
         val bp_result = gdb.set_breakpoint_at_addr(addr)
 
         if bp_result.is_ok():
             Ok(())
         else:
-            Err("Failed to set breakpoint at 0x{addr:x}: {bp_result.err.unwrap()}")
+            val err_msg = match bp_result.err:
+                Some(err):
+                    err
+                nil:
+                    "unknown error"
+            Err("Failed to set breakpoint at 0x{addr:x}: {err_msg}")
     fn continue_execution() -> (BootTestResult, DebugInfo):
         """Continue execution and wait for halt or crash."""
-        if not self.gdb_client.?:
-            val result = BootTestResult.failure("GDB not connected", "", -1)
-            return (result, DebugInfo.unavailable())
-
-        val gdb = self.gdb_client.unwrap()
+        val gdb = match self.gdb_client:
+            Some(client):
+                client
+            nil:
+                val result = BootTestResult.failure("GDB not connected", "", -1)
+                return (result, DebugInfo.unavailable())
 
         # Continue execution using GDB MI exec-continue
         val cont_result = gdb.resume()
         if not cont_result.is_ok():
-            val err_msg = cont_result.err.unwrap()
+            val err_msg = match cont_result.err:
+                Some(err):
+                    err
+                nil:
+                    "unknown error"
             val result = BootTestResult.failure("Failed to continue: {err_msg}", "", -1)
             return (result, DebugInfo.unavailable())
 
@@ -286,11 +314,12 @@ impl DebugBootRunner:
         stop_result
     fn wait_for_stop() -> (BootTestResult, DebugInfo):
         """Wait for program to stop (breakpoint, crash, or exit)."""
-        if not self.gdb_client.?:
-            val result = BootTestResult.failure("GDB not connected", "", -1)
-            return (result, DebugInfo.unavailable())
-
-        val gdb = self.gdb_client.unwrap()
+        match self.gdb_client:
+            Some(_):
+                pass
+            nil:
+                val result = BootTestResult.failure("GDB not connected", "", -1)
+                return (result, DebugInfo.unavailable())
 
         # Check stop reason
         val info_result = self.get_stop_info()
@@ -298,7 +327,12 @@ impl DebugBootRunner:
             val result = BootTestResult.failure("Failed to get stop info", "", -1)
             return (result, DebugInfo.unavailable())
 
-        val stop_info = info_result.ok.unwrap()
+        val stop_info = match info_result.ok:
+            Some(value):
+                value
+            nil:
+                val result = BootTestResult.failure("Failed to get stop info", "", -1)
+                return (result, DebugInfo.unavailable())
 
         # Extract debug information
         val debug_info = self.extract_debug_info()
@@ -317,17 +351,27 @@ impl DebugBootRunner:
         (result, debug_info)
     fn get_stop_info() -> Result<StopInfo, text>:
         """Get information about why execution stopped."""
-        if not self.gdb_client.?:
-            return Err("GDB not connected")
-
-        val gdb = self.gdb_client.unwrap()
+        val gdb = match self.gdb_client:
+            Some(client):
+                client
+            nil:
+                return Err("GDB not connected")
 
         # Query thread info to determine stop reason
         val thread_result = gdb.send_command("thread-info")
         if not thread_result.is_ok():
-            return Err("Failed to query thread info: {thread_result.err.unwrap()}")
+            val err_msg = match thread_result.err:
+                Some(err):
+                    err
+                nil:
+                    "unknown error"
+            return Err("Failed to query thread info: {err_msg}")
 
-        val data = thread_result.ok.unwrap()
+        val data = match thread_result.ok:
+            Some(value):
+                value
+            nil:
+                return Err("Failed to query thread info: empty response")
         val threads_raw = data.get("threads") ?? "[]"
         val threads = GdbMiParser.parse_tuple_records(threads_raw)
 
@@ -364,10 +408,11 @@ impl DebugBootRunner:
         Ok(StopInfo(reason: reason, address: address, signal: signal))
     fn extract_debug_info() -> DebugInfo:
         """Extract registers and stack trace from stopped program."""
-        if not self.gdb_client.?:
-            return DebugInfo.unavailable()
-
-        val gdb = self.gdb_client.unwrap()
+        match self.gdb_client:
+            Some(_):
+                pass
+            nil:
+                return DebugInfo.unavailable()
 
         # Get registers
         val registers = self.read_registers()
@@ -388,10 +433,11 @@ impl DebugBootRunner:
         """Read all general-purpose registers."""
         var registers: Dict<text, u64> = {}
 
-        if not self.gdb_client.?:
-            return registers
-
-        val gdb = self.gdb_client.unwrap()
+        val gdb = match self.gdb_client:
+            Some(client):
+                client
+            nil:
+                return registers
 
         # Use GDB MI to read all register names and values
         # read_all_registers returns Dict<text, i64> with parsed numeric values
@@ -399,7 +445,11 @@ impl DebugBootRunner:
         if not all_regs_result.is_ok():
             return registers
 
-        val all_regs = all_regs_result.ok.unwrap()
+        val all_regs = match all_regs_result.ok:
+            Some(value):
+                value
+            nil:
+                return registers
 
         # Filter to architecture-relevant registers
         val base_cfg = self.config.base_config
@@ -472,17 +522,22 @@ impl DebugBootRunner:
         """Read call stack backtrace."""
         var frames: [StackFrame] = []
 
-        if not self.gdb_client.?:
-            return frames
-
-        val gdb = self.gdb_client.unwrap()
+        val gdb = match self.gdb_client:
+            Some(client):
+                client
+            nil:
+                return frames
 
         # Use GDB MI stack-list-frames to get backtrace with addresses
         val bt_result = gdb.send_command("stack-list-frames")
         if not bt_result.is_ok():
             return frames
 
-        val data = bt_result.ok.unwrap()
+        val data = match bt_result.ok:
+            Some(value):
+                value
+            nil:
+                return frames
         val frames_raw = data.get("stack") ?? "[]"
         val tuples = GdbMiParser.parse_tuple_records(frames_raw)
 
@@ -506,15 +561,19 @@ impl DebugBootRunner:
         frames
     fn cleanup():
         """Clean up GDB and QEMU processes."""
-        if self.gdb_client.?:
-            var gdb = self.gdb_client.unwrap()
-            gdb.disconnect()
-            self.gdb_client = nil
+        match self.gdb_client:
+            Some(gdb):
+                gdb.disconnect()
+                self.gdb_client = nil
+            nil:
+                pass
 
-        if self.qemu_instance.?:
-            var qemu = self.qemu_instance.unwrap()
-            qemu.stop()
-            self.qemu_instance = nil
+        match self.qemu_instance:
+            Some(qemu):
+                qemu.stop()
+                self.qemu_instance = nil
+            nil:
+                pass
 # Stop information
 class StopInfo:
     """Information about why execution stopped."""
