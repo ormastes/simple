@@ -22,11 +22,23 @@ recursion. It is a JIT codegen bug:
   the interpreter reports the clean `undefined field 'n' on 'nil'` error (rc=1),
   which is why the older build "worked". The interpreter was never the crash site.
 
-**Fix:** `builder.ins().trapz(obj_ptr, TrapCode::unwrap_user(12))` before the load
+**Fix (round 1):** `builder.ins().trapz(obj_ptr, TrapCode::unwrap_user(12))` before the load
 (FieldGet) and store (FieldSet). A nil receiver now hits a defined trap (rc=132,
 the compiled-code analogue of a panic on nil access) instead of a wild memory
 deref. Verified: repro no longer rc=139; non-nil and nested struct field
 get/set still work (`Box(n:42).n` → 42, nested `l.a.x` → 3).
+
+**Fix (round 2 — diagnostic):** the bare `trapz` lowered to `ud2`, so the program
+died with a *message-less* SIGILL ("Illegal instruction (core dumped)"), giving the
+user no idea why. Replaced both `trapz` calls with `guard_nonnull_receiver()`: it
+branches on the nil receiver, prints `runtime error: field access on nil receiver`
+to stderr via `rt_eprintln_str` (a codegen-root runtime symbol, always available),
+then traps. The crash is still a deterministic trap (rc=132 — `rt_exit` has no
+confirmed JIT symbol binding, so a clean exit code was deliberately not chased),
+but it now carries a clear diagnostic. Verified 2026-06-25: nil `b.n` read and
+`val x = b.n` both print the message then trap; `Box(n:42).n` → 42, write+read
+`b.n = 99` → 99 unaffected; nil `b.n = 5` is caught earlier at the semantic layer
+(rc=1, "cannot assign field on non-object value").
 
 **Related logic bug — FIXED (interpreter) 2026-06-25:** typed optionals
 (`i32?`, `text?`, ...) mishandled the Option API. Root cause: `cast_value` for
