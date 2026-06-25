@@ -127,11 +127,31 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
     }
 }
 
-/// Execute a block closure (BDD DSL colon-block)
-/// Executes each statement in sequence and returns the last expression's value (or Nil)
+/// Execute a block closure (BDD DSL colon-block) against a fresh scope.
+/// Executes each statement in sequence and returns the last expression's value (or Nil).
+/// This is the clone-isolated wrapper most callers want; it never leaks the
+/// block's local bindings back to the caller.
 pub(super) fn exec_block_closure(
     nodes: &[Node],
     captured_env: &Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    let mut throwaway = captured_env.clone();
+    exec_block_closure_into(nodes, &mut throwaway, functions, classes, enums, impl_methods)
+}
+
+/// Like `exec_block_closure`, but runs against `out_env` and, on normal
+/// completion, writes the block's final bindings back into it. Lambda execution
+/// uses this so a `me`-method's mutation to an object argument is observable for
+/// write-back to the caller (control-flow exits — break/continue/return — do not
+/// sync, matching their unwinding semantics). Identical statement handling to the
+/// wrapper above, so DoBlock lambdas keep full block semantics.
+pub(super) fn exec_block_closure_into(
+    nodes: &[Node],
+    out_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
@@ -151,7 +171,7 @@ pub(super) fn exec_block_closure(
         diagram_sffi::trace_call("<block>");
     }
 
-    let mut local_env = captured_env.clone();
+    let mut local_env = out_env.clone();
     let mut last_value = Value::Nil;
 
     for node in nodes {
@@ -949,6 +969,9 @@ pub(super) fn exec_block_closure(
     // Restore CONST_NAMES and IMMUTABLE_VARS before returning
     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
     IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
+    // Propagate the block's final bindings so callers passing a mutable env (lambda
+    // write-back) observe argument mutations. The throwaway-clone wrapper discards this.
+    *out_env = local_env;
     Ok(last_value)
 }
 

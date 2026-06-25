@@ -23,7 +23,7 @@ pub(crate) fn exec_lambda(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    use super::super::block_execution::exec_block_closure;
+    use super::super::block_execution::exec_block_closure_into;
 
     // Diagram tracing for lambda execution
     if diagram_sffi::is_diagram_enabled() {
@@ -60,9 +60,70 @@ pub(crate) fn exec_lambda(
         }
     }
 
-    if let Expr::DoBlock(nodes) = body {
-        return exec_block_closure(nodes, &local_env, functions, classes, enums, impl_methods);
+    let result = if let Expr::DoBlock(nodes) = body {
+        // Run the block against local_env in place (same statement semantics as the
+        // clone-isolated wrapper) so a `me`-method's mutation to an object argument
+        // is observable for write-back below.
+        exec_block_closure_into(nodes, &mut local_env, functions, classes, enums, impl_methods)
+    } else {
+        evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)
+    };
+
+    // Write back mutated container arguments to the caller's bindings, mirroring the
+    // function-call write-back in `core::function_exec` (Bug #19). A lambda parameter
+    // lives only in this throwaway local_env, so without this a mutation a `me`-method
+    // performed on an Object/Array/Dict/Tuple argument would be lost to the caller.
+    // Only identifier and `obj.field` arguments map 1:1 to a caller binding; primitives
+    // keep value semantics. (Higher-order builtins like map/filter invoke lambdas via a
+    // separate value-based path, not exec_lambda, so they never reach this.)
+    if result.is_ok() {
+        let mut positional_idx = 0usize;
+        for arg in args {
+            let param_name = if let Some(name) = &arg.name {
+                name.clone()
+            } else {
+                let p = match params.get(positional_idx) {
+                    Some(p) => p.clone(),
+                    None => {
+                        positional_idx += 1;
+                        continue;
+                    }
+                };
+                positional_idx += 1;
+                p
+            };
+            match &arg.value {
+                Expr::Identifier(caller_name) => {
+                    if let Some(callee_val) = local_env.get(&param_name) {
+                        if matches!(
+                            callee_val,
+                            Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                        ) && call_env.contains_key(caller_name)
+                        {
+                            let new_val = callee_val.clone();
+                            call_env.insert(caller_name.clone(), new_val);
+                        }
+                    }
+                }
+                Expr::FieldAccess { receiver, field } => {
+                    if let Expr::Identifier(obj_name) = receiver.as_ref() {
+                        if let Some(callee_val) = local_env.get(&param_name).cloned() {
+                            if matches!(
+                                callee_val,
+                                Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                            ) {
+                                if let Some(Value::Object { class, mut fields }) = call_env.get(obj_name).cloned() {
+                                    Arc::make_mut(&mut fields).insert(field.clone(), callee_val);
+                                    call_env.insert(obj_name.clone(), Value::Object { class, fields });
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
-    evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)
+    result
 }
