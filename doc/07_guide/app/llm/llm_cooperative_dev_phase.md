@@ -490,7 +490,7 @@ doc/
     <feature>_tui.md              # Phase 2: TUI mockups
     <feature>_gui.md              # Phase 2: GUI mockups
   06_spec/
-    system/app/<app>/feature/<feature>_spec.md  # Phase 2: generated scenario docs
+    03_system/app/<app_name>/feature/<feature>_spec.md  # Phase 2: generated scenario docs
   07_guide/
     <feature>.md                  # Phase 3: user guide (if needed)
   08_tracking/
@@ -501,7 +501,7 @@ doc/
 
 ```
 test/
-  system/app/<app>/feature/<feature>_spec.spl  # Phase 2: executable SPipe system tests
+  03_system/app/<app_name>/feature/<feature>_spec.spl  # Phase 2: executable SPipe system tests
 ```
 
 ---
