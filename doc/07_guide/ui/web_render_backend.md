@@ -142,6 +142,12 @@ evidence. The canonical live renderer parity gate is:
 sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
 ```
 
+Production evidence should use the in-tree Simple release binary or an explicit
+`SIMPLE_BIN=...` override. The Electron generated-GUI and Simple Web layout
+evidence wrappers only use `command -v simple` when the caller deliberately
+sets `ALLOW_PATH_SIMPLE_BIN=1`; otherwise missing in-tree Simple binaries remain
+fail-closed as `missing-simple-bin`.
+
 The focused production web endpoint gate is:
 
 ```bash

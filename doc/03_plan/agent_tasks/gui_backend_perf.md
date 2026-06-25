@@ -120,8 +120,10 @@ Acceptance:
   explicit typed unavailable rows when the host has no device submit/readback
   proof.
 - this slice -- layout manifest progressed past the linked-worktree
-  `missing-simple-bin` blocker when run with
-  `SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple`. Partial bounded
+  `missing-simple-bin` blocker when run with an explicit Simple binary. Use
+  `SIMPLE_BIN=...` for the intended in-tree/compiler build; only set
+  `ALLOW_PATH_SIMPLE_BIN=1` when deliberately accepting `command -v simple` as
+  opt-in local evidence. Partial bounded
   evidence is archived in
   `doc/09_report/electron_simple_web_layout_manifest_after_engine_dispatch_2026-06-23.md`;
   the first exact remaining case was `overflow_axis_matrix` with 270 mismatched

@@ -190,6 +190,11 @@ For the production GUI renderer slice, use the aggregate wrapper:
 sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
 ```
 
+Use the checked in-tree Simple binary, or pass `SIMPLE_BIN=...` when the lane
+requires a specific compiler/runtime build. PATH discovery is intentionally not
+automatic for production parity evidence: the Electron generated-GUI and layout
+wrappers require `ALLOW_PATH_SIMPLE_BIN=1` before using `command -v simple`.
+
 It runs the generated-GUI Electron matrix, the Simple Web layout manifest,
 backend-executed CPU SIMD/Metal parity, and raw Metal framebuffer readback. On
 Linux hosts, native Metal readback is recorded as `unavailable` with

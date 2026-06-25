@@ -894,3 +894,8 @@ implementation-evidence-in-progress
   instead of `missing-simple-bin`. The default production evidence path remains
   fail-closed on missing in-tree Simple binary, and the full production parity
   gate remains open on layout/surface/backend/font/Metal evidence.
+- continue-docs: Refreshed the GUI/web production parity guide and agent task
+  plan for the new Simple binary provenance contract. Production parity evidence
+  should use the in-tree Simple binary or an explicit `SIMPLE_BIN=...`;
+  `ALLOW_PATH_SIMPLE_BIN=1` is documented as an opt-in local escape hatch before
+  wrappers may use `command -v simple`.
