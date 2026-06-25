@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 112 | 112 | 0 | 0 |
+| 113 | 113 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -244,6 +244,28 @@ val shadow = render_html_to_pixels_with_viewport(shadow_html, TEST_WIDTH, TEST_H
 expect(_count_color(shadow, 0xFF2563EBu32)).to_equal(_count_color(plain, 0xFF2563EBu32))
 expect(_count_color(shadow, 0xFFDC2626u32)).to_be_greater_than(0)
 expect(_pixels_equal(plain, shadow)).to_equal(false)
+```
+
+</details>
+
+#### renders border-radius by clipping background corner pixels
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val square_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { margin: 4px; width: 18px; height: 12px; background-color: #2563eb; }</style></head><body><div class='card'></div></body></html>"
+val round_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { margin: 4px; width: 18px; height: 12px; background-color: #2563eb; border-radius: 6px; }</style></head><body><div class='card'></div></body></html>"
+val square = render_html_to_pixels_with_viewport(square_html, TEST_WIDTH, TEST_HEIGHT).pixel_data
+val rounded = render_html_to_pixels_with_viewport(round_html, TEST_WIDTH, TEST_HEIGHT).pixel_data
+
+expect(_count_color(rounded, 0xFF2563EBu32)).to_be_less_than(_count_color(square, 0xFF2563EBu32))
+expect(rounded[4 + 4 * TEST_WIDTH]).to_equal(WHITE_BG)
+expect(rounded[10 + 8 * TEST_WIDTH]).to_equal(0xFF2563EBu32)
+expect(_pixels_equal(square, rounded)).to_equal(false)
 ```
 
 </details>
@@ -2074,8 +2096,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 112 |
-| Active scenarios | 112 |
+| Total scenarios | 113 |
+| Active scenarios | 113 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
