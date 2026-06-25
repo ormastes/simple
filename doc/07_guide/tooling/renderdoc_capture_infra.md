@@ -683,7 +683,7 @@ manifest traceability details from
 the manifest and fixture paths, HTML tag covered/total counts, implemented CSS
 property covered/total counts, missing tag/property lists, fixture scene count,
 and manifest scenes missing fixture HTML. A restart audit should therefore show
-the 105/105 HTML tag coverage and 63/63 implemented CSS property coverage in
+the 105/105 HTML tag coverage and 67/67 implemented CSS property coverage in
 the same evidence env as the Simple, original Chrome, Electron, and production
 parity gates. GUI widget witness provenance is inspectable as widget/class
 pairs through `gui_widget_rendering_fixture_coverage_spec_widget_classes`,
@@ -710,6 +710,10 @@ The matching implementation backlog names are emitted as
 `html_css_rendering_manifest_traceability_unrendered_spec_css_properties`.
 Those unsupported properties are assigned to the inventory SSpec, not claimed as
 rendered behavior, until they move into the implemented Simple Web CSS subset.
+The implemented `transform` subset is intentionally limited to static
+`translate(...)`, `translateX(...)`, and `translateY(...)` pixel offsets; it is
+covered by renderer pixel tests, while the live manifest carries a no-op
+fixture witness to keep existing Chrome/Electron bitmap baselines stable.
 The focused full-rendering status gate
 `scripts/check/check-html-css-full-rendering-goal-status.shs` makes that split
 explicit: `html_css_full_rendering_goal_html_tag_status=pass` and
