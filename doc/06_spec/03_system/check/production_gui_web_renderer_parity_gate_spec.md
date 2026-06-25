@@ -27,7 +27,7 @@ production_gui_web_renderer_parity_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,7 +82,9 @@ sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true
   14 tracked divergence cases, and 0 fail cases.
 - The surface manifest contract requires live Electron/Tauri/Chrome evidence,
   50 Tauri and Chrome cases, 36 pass cases, 14 tracked divergence cases,
-  0 fail cases, 0 mismatch counts, no fake capture, and no blur/tolerance.
+  0 fail cases, 0 mismatch counts, explicit Tauri/Chrome capture provenance,
+  no missing required Tauri capture commands, no fake capture, and no
+  blur/tolerance.
 
 ## Scenarios
 
@@ -199,11 +201,11 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_time
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-production-gui-web-renderer-parity-gate-pass && mkdir -p build/test-production-gui-web-renderer-parity-gate-pass/source && printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_reason=pass\\nproduction_gui_web_renderer_parity_matrix_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_case_count=50\\nproduction_gui_web_renderer_parity_layout_manifest_pass_count=36\\nproduction_gui_web_renderer_parity_layout_manifest_tracked_count=14\\nproduction_gui_web_renderer_parity_layout_manifest_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_electron_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_blur_or_tolerance_used=false\\nproduction_gui_web_renderer_parity_backend_status=pass\\nproduction_gui_web_renderer_parity_font_offload_status=pass\\nproduction_gui_web_renderer_parity_metal_readback_status=pass\\n' > build/test-production-gui-web-renderer-parity-gate-pass/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-production-gui-web-renderer-parity-gate-pass/source/evidence.env BUILD_DIR=build/test-production-gui-web-renderer-parity-gate-pass/out REPORT_PATH=build/test-production-gui-web-renderer-parity-gate-pass/report.md sh scripts/check/check-production-gui-web-renderer-parity-gate.shs"
+val command = "rm -rf build/test-production-gui-web-renderer-parity-gate-pass && mkdir -p build/test-production-gui-web-renderer-parity-gate-pass/source && printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_reason=pass\\nproduction_gui_web_renderer_parity_matrix_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_case_count=50\\nproduction_gui_web_renderer_parity_layout_manifest_pass_count=36\\nproduction_gui_web_renderer_parity_layout_manifest_tracked_count=14\\nproduction_gui_web_renderer_parity_layout_manifest_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_electron_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_backend=x11-xvfb-window-screenshot\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_required_commands=cargo,xvfb-run,dbus-run-session,xdotool,import,convert,node\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_missing_commands=\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_capture_backend=chrome-live-bitmap\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_blur_or_tolerance_used=false\\nproduction_gui_web_renderer_parity_backend_status=pass\\nproduction_gui_web_renderer_parity_font_offload_status=pass\\nproduction_gui_web_renderer_parity_metal_readback_status=pass\\n' > build/test-production-gui-web-renderer-parity-gate-pass/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-production-gui-web-renderer-parity-gate-pass/source/evidence.env BUILD_DIR=build/test-production-gui-web-renderer-parity-gate-pass/out REPORT_PATH=build/test-production-gui-web-renderer-parity-gate-pass/report.md sh scripts/check/check-production-gui-web-renderer-parity-gate.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -218,7 +220,11 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_mani
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_fail_count=0")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_electron_capture_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_backend=x11-xvfb-window-screenshot")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_required_commands=cargo,xvfb-run,dbus-run-session,xdotool,import,convert,node")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_missing_commands=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_backend=chrome-live-bitmap")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_live_capture=true")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_chrome_live_capture=true")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_case_count=50")
@@ -233,6 +239,54 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_man
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_chrome_mismatch_count=0")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_no_fake_capture=true")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_blur_or_tolerance_used=false")
+```
+
+</details>
+
+#### rejects pass status when surface capture provenance is missing
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-production-gui-web-renderer-parity-gate-provenance-missing && mkdir -p build/test-production-gui-web-renderer-parity-gate-provenance-missing/source && printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_reason=pass\\nproduction_gui_web_renderer_parity_matrix_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_case_count=50\\nproduction_gui_web_renderer_parity_layout_manifest_pass_count=36\\nproduction_gui_web_renderer_parity_layout_manifest_tracked_count=14\\nproduction_gui_web_renderer_parity_layout_manifest_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_electron_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_blur_or_tolerance_used=false\\nproduction_gui_web_renderer_parity_backend_status=pass\\nproduction_gui_web_renderer_parity_font_offload_status=pass\\nproduction_gui_web_renderer_parity_metal_readback_status=pass\\n' > build/test-production-gui-web-renderer-parity-gate-provenance-missing/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-production-gui-web-renderer-parity-gate-provenance-missing/source/evidence.env BUILD_DIR=build/test-production-gui-web-renderer-parity-gate-provenance-missing/out REPORT_PATH=build/test-production-gui-web-renderer-parity-gate-provenance-missing/report.md sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-production-gui-web-renderer-parity-gate-provenance-missing/out/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=surface-manifest-capture-provenance-missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_backend=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_required_commands=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_backend=")
+```
+
+</details>
+
+#### rejects pass status when required Tauri capture commands are missing
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-production-gui-web-renderer-parity-gate-required-missing && mkdir -p build/test-production-gui-web-renderer-parity-gate-required-missing/source && printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_reason=pass\\nproduction_gui_web_renderer_parity_matrix_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_case_count=50\\nproduction_gui_web_renderer_parity_layout_manifest_pass_count=36\\nproduction_gui_web_renderer_parity_layout_manifest_tracked_count=14\\nproduction_gui_web_renderer_parity_layout_manifest_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_electron_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_backend=x11-xvfb-window-screenshot\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_required_commands=cargo,xvfb-run,dbus-run-session,xdotool,import,convert,node\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_missing_commands=xdotool\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_capture_backend=chrome-live-bitmap\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_blur_or_tolerance_used=false\\nproduction_gui_web_renderer_parity_backend_status=pass\\nproduction_gui_web_renderer_parity_font_offload_status=pass\\nproduction_gui_web_renderer_parity_metal_readback_status=pass\\n' > build/test-production-gui-web-renderer-parity-gate-required-missing/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-production-gui-web-renderer-parity-gate-required-missing/source/evidence.env BUILD_DIR=build/test-production-gui-web-renderer-parity-gate-required-missing/out REPORT_PATH=build/test-production-gui-web-renderer-parity-gate-required-missing/report.md sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-production-gui-web-renderer-parity-gate-required-missing/out/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=surface-manifest-required-commands-missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_backend=x11-xvfb-window-screenshot")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_required_commands=cargo,xvfb-run,dbus-run-session,xdotool,import,convert,node")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_missing_commands=xdotool")
 ```
 
 </details>
@@ -267,7 +321,7 @@ Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-production-gui-web-renderer-parity-gate-metal-missing && mkdir -p build/test-production-gui-web-renderer-parity-gate-metal-missing/source && printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_reason=pass\\nproduction_gui_web_renderer_parity_matrix_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_case_count=50\\nproduction_gui_web_renderer_parity_layout_manifest_pass_count=36\\nproduction_gui_web_renderer_parity_layout_manifest_tracked_count=14\\nproduction_gui_web_renderer_parity_layout_manifest_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_electron_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_blur_or_tolerance_used=false\\nproduction_gui_web_renderer_parity_backend_status=pass\\nproduction_gui_web_renderer_parity_font_offload_status=pass\\nproduction_gui_web_renderer_parity_metal_readback_status=\\n' > build/test-production-gui-web-renderer-parity-gate-metal-missing/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-production-gui-web-renderer-parity-gate-metal-missing/source/evidence.env BUILD_DIR=build/test-production-gui-web-renderer-parity-gate-metal-missing/out REPORT_PATH=build/test-production-gui-web-renderer-parity-gate-metal-missing/report.md sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true"
+val command = "rm -rf build/test-production-gui-web-renderer-parity-gate-metal-missing && mkdir -p build/test-production-gui-web-renderer-parity-gate-metal-missing/source && printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_reason=pass\\nproduction_gui_web_renderer_parity_matrix_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_case_count=50\\nproduction_gui_web_renderer_parity_layout_manifest_pass_count=36\\nproduction_gui_web_renderer_parity_layout_manifest_tracked_count=14\\nproduction_gui_web_renderer_parity_layout_manifest_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_electron_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_backend=x11-xvfb-window-screenshot\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_required_commands=cargo,xvfb-run,dbus-run-session,xdotool,import,convert,node\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_missing_commands=\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_capture_backend=chrome-live-bitmap\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_blur_or_tolerance_used=false\\nproduction_gui_web_renderer_parity_backend_status=pass\\nproduction_gui_web_renderer_parity_font_offload_status=pass\\nproduction_gui_web_renderer_parity_metal_readback_status=\\n' > build/test-production-gui-web-renderer-parity-gate-metal-missing/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-production-gui-web-renderer-parity-gate-metal-missing/source/evidence.env BUILD_DIR=build/test-production-gui-web-renderer-parity-gate-metal-missing/out REPORT_PATH=build/test-production-gui-web-renderer-parity-gate-metal-missing/report.md sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -286,8 +340,8 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_me
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -789,6 +789,15 @@ The current canonical evidence contract is:
   including font offload/readback and Metal readback fields, but those
   supplemental production lanes do not substitute for or block the narrower
   GUI/web/2D RenderDoc completion claim unless the core parity fields fail.
+  Passing surface capture rows must also carry explicit capture provenance:
+  `production_gui_web_renderer_parity_surface_manifest_tauri_capture_backend`,
+  `production_gui_web_renderer_parity_surface_manifest_tauri_capture_required_commands`,
+  empty
+  `production_gui_web_renderer_parity_surface_manifest_tauri_capture_missing_commands`,
+  and
+  `production_gui_web_renderer_parity_surface_manifest_chrome_capture_backend`.
+  Missing provenance or nonempty missing-command evidence fails the gate instead
+  of being backfilled from the current host.
 
 ## External Host Gate
 
