@@ -1,21 +1,21 @@
 ---
 name: dev
-description: "Full feature development via SPipe: intake, research, design, SPipe specs, implementation, refactor, verify, and ship."
+description: "Deprecated /dev pointer. Use /sp_dev for SPipe feature development."
 ---
 
-# Dev -- Full Feature Development
+# Dev -- Deprecated Pointer
 
-`/dev` runs the full SPipe feature-development pipeline.
+`/dev` is no longer a standalone Codex skill. Use `/sp_dev` for the full SPipe
+feature-development pipeline.
 
-Use it for features, bug fixes, refactors, and TODO implementation that should
+Use `/sp_dev` for features, bug fixes, refactors, and TODO implementation that should
 move through intake, research, architecture/design, SPipe specs, implementation,
 refactor, verification, and ship handoff:
 
 ```
-/dev <description of what to build or fix>
+/sp_dev <description of what to build or fix>
 ```
 
 ## Dispatch
 
 Follow the current SPipe dev entrypoint in `.codex/skills/sp_dev/SKILL.md`.
-`/dev` and `/sp_dev` are the same feature-development pipeline.
