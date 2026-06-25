@@ -703,13 +703,20 @@ The current canonical evidence contract is:
   `rdoc_backend=simple`, `rdoc_scene=vulkan-engine2d`,
   `rdoc_program=src/app/test/renderdoc_vulkan_capture.spl`,
   `rdoc_capture_status=pass`, `rdoc_capture_magic=RDOC`, and an existing
-  `.rdc` file. The aggregate RenderDoc goal requires this through
+  `.rdc` file. It must also carry the probe log-derived runtime metadata:
+  `rdoc_simple_runtime_backend=vulkan`, `rdoc_simple_renderdoc_available=1`,
+  `rdoc_simple_renderdoc_start=1`, a recorded `rdoc_simple_renderdoc_end`, a
+  positive `rdoc_simple_renderdoc_num_captures`, and a positive
+  `rdoc_simple_pixel_count`. The Simple gate emits
+  `rdoc_simple_gate_runtime_metadata_status` and
+  `rdoc_simple_gate_missing_runtime_metadata` so a partial `.rdc` capture cannot
+  look like a Vulkan-backed pass. The aggregate RenderDoc goal requires this through
   `scripts/check/check-renderdoc-simple-gate.shs`; if that env/file is missing
   or not the Simple Vulkan Engine2D probe path, the GUI RenderDoc goal remains
   incomplete. The top-level GUI RenderDoc feature audit re-emits the Simple
-  evidence env, capture status/magic/file, gate status/reason, and required
-  backend/scene/program/status/magic fields so the Simple Vulkan requirement is
-  visible without opening the nested goal report.
+  evidence env, capture status/magic/file, gate status/reason, runtime metadata
+  status/missing list, and required backend/scene/program/status/magic fields so
+  the Simple Vulkan requirement is visible without opening the nested goal report.
 - Original Chrome HTML/CSS path:
   `build/renderdoc/canonical-probe/html/evidence.env`, or an external-host
   evidence env, must pass the original-backend gate with `rdoc_scene=html-css-chrome`,

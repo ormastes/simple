@@ -27,7 +27,7 @@ renderdoc_simple_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,9 +43,9 @@ Validates the fail-closed gate for Simple in-application Vulkan RenderDoc eviden
 | Category | Other |
 | Status | Active |
 | Requirements | N/A |
-| Plan | doc/03_plan/sys_test/html_css_spec_traceability.md |
+| Plan | doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md |
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
-| Research | doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md |
+| Research | doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-25.md |
 | Source | `test/03_system/check/renderdoc_simple_gate_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -57,9 +57,9 @@ evidence. The local host may not have RenderDoc installed, but the gate must
 record a deterministic non-pass state and accept only Simple `vulkan-engine2d`
 `.rdc` evidence.
 
-**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+**Plan:** doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md
 **Requirements:** N/A
-**Research:** doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md
+**Research:** doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-25.md
 **Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
 
 ## Syntax
@@ -91,7 +91,7 @@ sh scripts/check/check-renderdoc-simple-gate.shs || true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -118,6 +118,8 @@ expect(evidence).to_contain("rdoc_simple_gate_capture_file_magic=")
 expect(evidence).to_contain("rdoc_simple_gate_runtime_backend=")
 expect(evidence).to_contain("rdoc_simple_gate_renderdoc_num_captures=")
 expect(evidence).to_contain("rdoc_simple_gate_pixel_count=")
+expect(evidence).to_contain("rdoc_simple_gate_runtime_metadata_status=")
+expect(evidence).to_contain("rdoc_simple_gate_missing_runtime_metadata=")
 
 val status = _value_of(evidence, "rdoc_simple_gate_status")
 val reason = _value_of(evidence, "rdoc_simple_gate_reason")
@@ -146,7 +148,7 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -168,6 +170,31 @@ expect(evidence).to_contain("rdoc_simple_gate_renderdoc_start=1")
 expect(evidence).to_contain("rdoc_simple_gate_renderdoc_end=1")
 expect(evidence).to_contain("rdoc_simple_gate_renderdoc_num_captures=1")
 expect(evidence).to_contain("rdoc_simple_gate_pixel_count=3072")
+expect(evidence).to_contain("rdoc_simple_gate_runtime_metadata_status=pass")
+expect(evidence).to_contain("rdoc_simple_gate_missing_runtime_metadata=")
+```
+
+</details>
+
+#### reports every missing Simple runtime metadata field for partial RDOC evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-renderdoc-simple-gate-missing-runtime-metadata && mkdir -p build/test-renderdoc-simple-gate-missing-runtime-metadata/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-missing-runtime-metadata/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-missing-runtime-metadata/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-missing-runtime-metadata/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-missing-runtime-metadata/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-missing-runtime-metadata/out REPORT_PATH=build/test-renderdoc-simple-gate-missing-runtime-metadata/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-renderdoc-simple-gate-missing-runtime-metadata/out/evidence.env")
+expect(evidence).to_contain("rdoc_simple_gate_status=fail")
+expect(evidence).to_contain("rdoc_simple_gate_reason=missing-vulkan-runtime-backend")
+expect(evidence).to_contain("rdoc_simple_gate_capture_file_magic=RDOC")
+expect(evidence).to_contain("rdoc_simple_gate_runtime_metadata_status=missing")
+expect(evidence).to_contain("rdoc_simple_gate_missing_runtime_metadata=rdoc_simple_runtime_backend,rdoc_simple_renderdoc_available,rdoc_simple_renderdoc_start,rdoc_simple_renderdoc_end,rdoc_simple_renderdoc_num_captures,rdoc_simple_pixel_count")
 ```
 
 </details>
@@ -239,8 +266,8 @@ expect(evidence).to_contain("rdoc_simple_gate_runtime_backend=software")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -248,9 +275,9 @@ expect(evidence).to_contain("rdoc_simple_gate_runtime_backend=software")
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/sys_test/html_css_spec_traceability.md](doc/03_plan/sys_test/html_css_spec_traceability.md)
+- **Plan:** [doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md](doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md)
 - **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
-- **Research:** [doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md](doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md)
+- **Research:** [doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-25.md](doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-25.md)
 
 
 </details>

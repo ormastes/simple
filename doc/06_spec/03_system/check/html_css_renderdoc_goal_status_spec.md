@@ -43,9 +43,9 @@ Validates the aggregate status gate for the full HTML/CSS traceability and Rende
 | Category | Other |
 | Status | Active |
 | Requirements | N/A |
-| Plan | doc/03_plan/sys_test/html_css_spec_traceability.md |
+| Plan | doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md |
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
-| Research | doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md |
+| Research | doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-25.md |
 | Source | `test/03_system/check/html_css_renderdoc_goal_status_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -58,9 +58,9 @@ RenderDoc `.rdc` evidence in `build/`, so the spec checks the current-state
 failure contract and separately proves the aggregate pass path with controlled
 fixture evidence.
 
-**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+**Plan:** doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md
 **Requirements:** N/A
-**Research:** doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md
+**Research:** doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-25.md
 **Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
 
 ## Syntax
@@ -125,7 +125,7 @@ sh scripts/check/check-html-css-renderdoc-goal-status.shs || true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 160 lines folded for reproduction.
+Runnable source: 162 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -168,6 +168,8 @@ expect(evidence).to_contain("simple_renderdoc_gate_renderdoc_start=")
 expect(evidence).to_contain("simple_renderdoc_gate_renderdoc_end=")
 expect(evidence).to_contain("simple_renderdoc_gate_renderdoc_num_captures=")
 expect(evidence).to_contain("simple_renderdoc_gate_pixel_count=")
+expect(evidence).to_contain("simple_renderdoc_gate_runtime_metadata_status=")
+expect(evidence).to_contain("simple_renderdoc_gate_missing_runtime_metadata=")
 expect(evidence).to_contain("external_renderdoc_status=")
 expect(evidence).to_contain("external_renderdoc_capture_env=")
 expect(evidence).to_contain("external_renderdoc_capture_status=")
@@ -303,7 +305,7 @@ expect(report).to_contain("- blocked completion gates:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 69 lines folded for reproduction.
+Runnable source: 71 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -328,6 +330,8 @@ expect(evidence).to_contain("simple_renderdoc_gate_renderdoc_start=1")
 expect(evidence).to_contain("simple_renderdoc_gate_renderdoc_end=1")
 expect(evidence).to_contain("simple_renderdoc_gate_renderdoc_num_captures=1")
 expect(evidence).to_contain("simple_renderdoc_gate_pixel_count=3072")
+expect(evidence).to_contain("simple_renderdoc_gate_runtime_metadata_status=pass")
+expect(evidence).to_contain("simple_renderdoc_gate_missing_runtime_metadata=")
 expect(evidence).to_contain("external_renderdoc_status=pass")
 expect(evidence).to_contain("external_renderdoc_capture_status=pass")
 expect(evidence).to_contain("external_renderdoc_capture_magic=RDOC")
@@ -393,9 +397,9 @@ expect(evidence).to_contain("renderdoc_goal_blocked_gates=")
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/sys_test/html_css_spec_traceability.md](doc/03_plan/sys_test/html_css_spec_traceability.md)
+- **Plan:** [doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md](doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md)
 - **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
-- **Research:** [doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md](doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md)
+- **Research:** [doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-25.md](doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-25.md)
 
 
 </details>

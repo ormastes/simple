@@ -30,6 +30,47 @@ is_positive_int() {
     esac
 }
 
+append_missing_runtime_field() {
+    field="$1"
+    if [ -z "${missing_runtime_fields:-}" ]; then
+        missing_runtime_fields="$field"
+    else
+        missing_runtime_fields="$missing_runtime_fields,$field"
+    fi
+}
+
+classify_runtime_metadata() {
+    missing_runtime_fields=""
+    runtime_metadata_status="pass"
+    if [ -z "${runtime_backend:-}" ]; then
+        append_missing_runtime_field "rdoc_simple_runtime_backend"
+    fi
+    if [ -z "${renderdoc_available:-}" ]; then
+        append_missing_runtime_field "rdoc_simple_renderdoc_available"
+    fi
+    if [ -z "${renderdoc_start:-}" ]; then
+        append_missing_runtime_field "rdoc_simple_renderdoc_start"
+    fi
+    if [ -z "${renderdoc_end:-}" ]; then
+        append_missing_runtime_field "rdoc_simple_renderdoc_end"
+    fi
+    if [ -z "${renderdoc_num_captures:-}" ]; then
+        append_missing_runtime_field "rdoc_simple_renderdoc_num_captures"
+    fi
+    if [ -z "${pixel_count:-}" ]; then
+        append_missing_runtime_field "rdoc_simple_pixel_count"
+    fi
+    if [ -n "$missing_runtime_fields" ]; then
+        runtime_metadata_status="missing"
+    elif [ "${runtime_backend:-}" != "vulkan" ] \
+        || [ "${renderdoc_available:-}" != "1" ] \
+        || [ "${renderdoc_start:-}" != "1" ] \
+        || ! is_positive_int "${renderdoc_num_captures:-}" \
+        || ! is_positive_int "${pixel_count:-}"; then
+        runtime_metadata_status="fail"
+    fi
+}
+
 write_evidence() {
     status="$1"
     reason="$2"
@@ -51,6 +92,8 @@ write_evidence() {
         echo "rdoc_simple_gate_renderdoc_end=${renderdoc_end:-}"
         echo "rdoc_simple_gate_renderdoc_num_captures=${renderdoc_num_captures:-}"
         echo "rdoc_simple_gate_pixel_count=${pixel_count:-}"
+        echo "rdoc_simple_gate_runtime_metadata_status=${runtime_metadata_status:-missing}"
+        echo "rdoc_simple_gate_missing_runtime_metadata=${missing_runtime_fields:-}"
         echo "rdoc_simple_gate_unavailable_marker=${unavailable_marker:-}"
         echo "rdoc_simple_gate_required_backend=simple"
         echo "rdoc_simple_gate_required_scene=vulkan-engine2d"
@@ -84,6 +127,8 @@ write_evidence() {
         echo "- RenderDoc end: ${renderdoc_end:-}"
         echo "- RenderDoc captures: ${renderdoc_num_captures:-}"
         echo "- pixel count: ${pixel_count:-}"
+        echo "- runtime metadata status: ${runtime_metadata_status:-missing}"
+        echo "- missing runtime metadata: ${missing_runtime_fields:-}"
         echo
         echo "## Raw Evidence"
         sed 's/^/- /' "$OUT_ENV"
@@ -107,6 +152,7 @@ if [ ! -s "$SOURCE_ENV" ]; then
     renderdoc_num_captures=""
     pixel_count=""
     unavailable_marker=""
+    classify_runtime_metadata
     write_evidence "unavailable" "missing-source-evidence"
     exit 1
 fi
@@ -152,9 +198,12 @@ if [ "$backend" = "simple" ] \
     && is_positive_int "$renderdoc_num_captures" \
     && is_positive_int "$pixel_count" \
     && [ -s "$capture_file" ]; then
+    classify_runtime_metadata
     write_evidence "pass" "pass"
     exit 0
 fi
+
+classify_runtime_metadata
 
 if [ "$capture_status" = "" ]; then
     write_evidence "unavailable" "missing-capture-status"

@@ -373,7 +373,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 853 lines folded for reproduction.
+Runnable source: 855 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -527,6 +527,8 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readb
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readback_timed_out=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readback_timeout_secs=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_source_status=pass")
+expect(evidence).to_contain("simple_renderdoc_gate_runtime_metadata_status=")
+expect(evidence).to_contain("simple_renderdoc_gate_missing_runtime_metadata=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_case_count=50")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_pass_count=36")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_tracked_count=14")
@@ -1944,7 +1946,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 157 lines folded for reproduction.
+Runnable source: 159 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2038,6 +2040,8 @@ expect(evidence).to_contain("electron_renderdoc_gate_capture_status=pass")
 expect(evidence).to_contain("electron_renderdoc_gate_capture_magic=RDOC")
 expect(evidence).to_contain("electron_renderdoc_gate_capture_file_magic=RDOC")
 expect(evidence).to_contain("electron_renderdoc_gate_capture_file=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron.rdc")
+expect(evidence).to_contain("simple_renderdoc_gate_runtime_metadata_status=pass")
+expect(evidence).to_contain("simple_renderdoc_gate_missing_runtime_metadata=")
 expect(evidence).to_contain("electron_renderdoc_gate_requested_api=vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_requested_angle=vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_requested_features=Vulkan")
