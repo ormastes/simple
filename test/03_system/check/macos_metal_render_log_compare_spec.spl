@@ -7,7 +7,99 @@ Validates the macOS Metal normalized render-log gate with controlled fixtures.
 The spec proves pass and fail-closed paths without requiring a macOS host.
 
 **Plan:** doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md
+**Requirements:** N/A
+**Research:** N/A
 **Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+```sh
+SIMPLE_LIB=src bin/simple test test/03_system/check/macos_metal_render_log_compare_spec.spl --mode=interpreter --clean --fail-fast
+```
+
+## Operator Flow
+
+1. On macOS, run the generated Metal 2D readback evidence wrapper and keep the
+   resulting env file at `build/metal_generated_2d_readback/evidence.env`.
+2. Run the Engine2D framebuffer readback evidence wrapper and keep its env file
+   at `build/metal_engine2d_framebuffer_readback_evidence/evidence.env`.
+3. Produce Chrome and Electron Metal-backed browser evidence with pairwise ARGB
+   comparison and store it at `build/macos-metal-browser-backing/evidence.env`.
+4. If Xcode GPU Frame Capture is required for the host, write
+   `build/macos-metal-gpu-capture/evidence.env` and set
+   `MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1`.
+5. Run `scripts/check/check-macos-metal-render-log-compare.shs` and consume the
+   normalized `macos_metal_render_log_compare_*` keys from the output env.
+
+## Evidence Contract
+
+The gate requires native Metal generated/readback evidence:
+
+- `metal_generated_2d_readback_status=pass`
+- `metal_generated_2d_readback_module_verified=true`
+- `metal_generated_2d_readback_submit_attempted=true`
+- `metal_generated_2d_readback_readback_available=true`
+- Matching expected and actual checksums when both are present.
+
+It also requires Engine2D framebuffer readback evidence:
+
+- `metal_engine2d_framebuffer_readback_status=pass`
+- `metal_engine2d_framebuffer_gpu_readback_available=true`
+- `metal_engine2d_framebuffer_blur_or_tolerance_used=false`
+
+Browser evidence must prove Metal backing and exact pairwise ARGB comparison:
+
+- `macos_metal_electron_browser_backing_status=pass`
+- `macos_metal_chrome_browser_backing_status=pass`
+- `macos_metal_browser_backing_status=pass`
+- `macos_metal_pixel_comparison_status=pass`
+- `macos_metal_pixel_comparison_mode=pairwise-argb-diff`
+- All Electron/Chrome/Simple pairwise diff statuses are `pass`.
+
+## Failure Semantics
+
+The gate is fail-closed. A screenshot, cached bitmap, non-pairwise comparison,
+or browser process that falls back away from Metal is not a Metal-backed GUI/web
+proof. In strict mode, missing Xcode GPU Frame Capture evidence fails even when
+readback and browser pixels pass. Completion remains platform-local: a macOS
+pass does not prove Linux Vulkan or Windows D3D12.
+
+## Host Notes
+
+This spec uses controlled fixtures so it can run on Linux CI. A real macOS
+operator run must still create the native evidence files on macOS with Metal
+and Xcode tools available. Do not copy fixture evidence into production reports.
+
+## Normalized Outputs
+
+The wrapper writes:
+
+- `build/macos-metal-render-log-compare/evidence.env`
+- `build/macos-metal-render-log-compare/simple.srl.env`
+- `build/macos-metal-render-log-compare/chrome.srl.env`
+- `build/macos-metal-render-log-compare/electron.srl.env`
+- `build/macos-metal-render-log-compare/compare.srl.env`
+
+The source logs use `simple-render-log-v1`, set
+`simple_render_log_platform=macos`, and set
+`simple_render_log_native_api=metal`.
+
+## Completion Keys
+
+```text
+macos_metal_render_log_compare_status=pass
+macos_metal_render_log_compare_required_api=metal
+macos_metal_render_log_compare_pairwise_status=pass
+```
+
+## Test Matrix
+
+1. Accept complete Metal generated/readback, framebuffer, browser backing,
+   pairwise ARGB, and Xcode GPU capture evidence.
+2. Reject missing Engine2D framebuffer GPU readback.
+3. Reject browser fallback and non-pairwise comparisons even when native Metal
+   readback exists.
+4. Reject missing Xcode GPU capture when strict capture mode is enabled.
 """
 
 # @tag: system, gpu, metal, render-log, macos, evidence
@@ -48,3 +140,33 @@ describe "macOS Metal render-log compare gate":
         val evidence = file_read("build/test-macos-metal-render-log-fail/out/evidence.env")
         expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
         expect(evidence).to_contain("metal-framebuffer-readback-fail")
+
+    it "rejects browser fallback and non-pairwise Metal comparison evidence":
+        val command = "rm -rf build/test-macos-metal-render-log-browser-fallback && mkdir -p build/test-macos-metal-render-log-browser-fallback && " +
+            "printf 'metal_generated_2d_readback_status=pass\\nmetal_generated_2d_readback_module_verified=true\\nmetal_generated_2d_readback_submit_attempted=true\\nmetal_generated_2d_readback_readback_available=true\\nmetal_generated_2d_readback_expected_checksum=7\\nmetal_generated_2d_readback_actual_checksum=7\\n' > build/test-macos-metal-render-log-browser-fallback/generated.env && " +
+            "printf 'metal_engine2d_framebuffer_readback_status=pass\\nmetal_engine2d_framebuffer_gpu_readback_available=true\\nmetal_engine2d_framebuffer_blur_or_tolerance_used=false\\n' > build/test-macos-metal-render-log-browser-fallback/framebuffer.env && " +
+            "printf 'macos_metal_electron_browser_backing_status=fail\\nmacos_metal_chrome_browser_backing_status=pass\\nmacos_metal_browser_backing_status=fail\\nmacos_metal_pixel_comparison_status=pass\\nmacos_metal_pixel_comparison_mode=screenshot-present\\nmacos_metal_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_electron_simple_pairwise_diff_status=pass\\nmacos_metal_chrome_simple_pairwise_diff_status=pass\\n' > build/test-macos-metal-render-log-browser-fallback/browser.env && " +
+            "BUILD_DIR=build/test-macos-metal-render-log-browser-fallback/out METAL_GENERATED_2D_READBACK_ENV=build/test-macos-metal-render-log-browser-fallback/generated.env METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=build/test-macos-metal-render-log-browser-fallback/framebuffer.env MACOS_METAL_BROWSER_ENV=build/test-macos-metal-render-log-browser-fallback/browser.env sh scripts/check/check-macos-metal-render-log-compare.shs || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = file_read("build/test-macos-metal-render-log-browser-fallback/out/evidence.env")
+        expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
+        expect(evidence).to_contain("electron-metal-backing-fail")
+        expect(evidence).to_contain("browser-metal-backing-fail")
+        expect(evidence).to_contain("pixel-comparison-pass")
+        expect(evidence).to_contain("macos_metal_render_log_compare_pairwise_status=pass")
+
+    it "requires Xcode GPU capture evidence in strict Metal mode":
+        val command = "rm -rf build/test-macos-metal-render-log-strict-capture && mkdir -p build/test-macos-metal-render-log-strict-capture && " +
+            "printf 'metal_generated_2d_readback_status=pass\\nmetal_generated_2d_readback_module_verified=true\\nmetal_generated_2d_readback_submit_attempted=true\\nmetal_generated_2d_readback_readback_available=true\\nmetal_generated_2d_readback_expected_checksum=7\\nmetal_generated_2d_readback_actual_checksum=7\\n' > build/test-macos-metal-render-log-strict-capture/generated.env && " +
+            "printf 'metal_engine2d_framebuffer_readback_status=pass\\nmetal_engine2d_framebuffer_gpu_readback_available=true\\nmetal_engine2d_framebuffer_blur_or_tolerance_used=false\\n' > build/test-macos-metal-render-log-strict-capture/framebuffer.env && " +
+            "printf 'macos_metal_electron_browser_backing_status=pass\\nmacos_metal_chrome_browser_backing_status=pass\\nmacos_metal_browser_backing_status=pass\\nmacos_metal_pixel_comparison_status=pass\\nmacos_metal_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_electron_simple_pairwise_diff_status=pass\\nmacos_metal_chrome_simple_pairwise_diff_status=pass\\n' > build/test-macos-metal-render-log-strict-capture/browser.env && " +
+            "BUILD_DIR=build/test-macos-metal-render-log-strict-capture/out METAL_GENERATED_2D_READBACK_ENV=build/test-macos-metal-render-log-strict-capture/generated.env METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=build/test-macos-metal-render-log-strict-capture/framebuffer.env MACOS_METAL_BROWSER_ENV=build/test-macos-metal-render-log-strict-capture/browser.env MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1 sh scripts/check/check-macos-metal-render-log-compare.shs || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = file_read("build/test-macos-metal-render-log-strict-capture/out/evidence.env")
+        expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
+        expect(evidence).to_contain("macos-metal-gpu-capture-missing")
+        expect(evidence).to_contain("macos_metal_render_log_compare_require_gpu_capture=1")
