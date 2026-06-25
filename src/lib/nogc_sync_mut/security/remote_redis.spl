@@ -64,41 +64,47 @@ impl RemoteSecurityRedisSessionStore:
 
     me lookup_session(session_id: text) -> Result<RemoteSecuritySession?, IoError>:
         val raw = self.client.get(self.make_key(session_id))?
-        if not raw.?:
-            return Ok(nil)
-        Ok(remote_security_redis_decode_session(raw.unwrap()))
+        match raw:
+            Some(payload):
+                Ok(remote_security_redis_decode_session(payload))
+            nil:
+                Ok(nil)
 
     me lookup_active_session(session_id: text, now_ms: i64) -> Result<RemoteSecuritySession?, IoError>:
         val session = self.lookup_session(session_id)?
-        if session.?:
-            val loaded = session.unwrap()
-            if loaded.is_active(now_ms):
-                return Ok(Some(loaded))
-        Ok(nil)
+        match session:
+            Some(loaded):
+                if loaded.is_active(now_ms):
+                    return Ok(Some(loaded))
+                Ok(nil)
+            nil:
+                Ok(nil)
 
     me refresh_session(session_id: text, expires_at_ms: i64) -> Result<bool, IoError>:
         val session = self.lookup_session(session_id)?
-        if not session.?:
-            return Ok(false)
-        val loaded = session.unwrap()
-        if loaded.revoked:
-            return Ok(false)
-        self.save_session(loaded.refreshed(expires_at_ms))?
-        Ok(true)
+        match session:
+            Some(loaded):
+                if loaded.revoked:
+                    return Ok(false)
+                self.save_session(loaded.refreshed(expires_at_ms))?
+                Ok(true)
+            nil:
+                Ok(false)
 
     me revoke_session(session_id: text) -> Result<bool, IoError>:
         val session = self.lookup_session(session_id)?
-        if not session.?:
-            return Ok(false)
-        val loaded = session.unwrap()
-        self.save_session(RemoteSecuritySession(
-            session_id: loaded.session_id,
-            user_id: loaded.user_id,
-            capabilities: loaded.capabilities,
-            expires_at_ms: loaded.expires_at_ms,
-            revoked: true
-        ))?
-        Ok(true)
+        match session:
+            Some(loaded):
+                self.save_session(RemoteSecuritySession(
+                    session_id: loaded.session_id,
+                    user_id: loaded.user_id,
+                    capabilities: loaded.capabilities,
+                    expires_at_ms: loaded.expires_at_ms,
+                    revoked: true
+                ))?
+                Ok(true)
+            nil:
+                Ok(false)
 
 fn remote_security_redis_encode_session(session: RemoteSecuritySession) -> text:
     # Guard: session_id and user_id must not contain the '|' delimiter or
