@@ -19,7 +19,7 @@ Before starting, check what exists — missing artifacts are created in phases 1
 | Requirements | `doc/02_requirements/feature/<feature>.md` | 1-3 |
 | Architecture | `doc/04_architecture/<feature>.md` | 4 |
 | Design | `doc/05_design/<feature>.md` | 4 |
-| System tests | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` | 6 |
+| System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` | 6 |
 
 **If ALL artifacts exist** (from prior `/research_claude` + `/research_codex` + `/design_gemini` + `/design_codex` + `/design_claude`), skip to Phase 6.
 
@@ -34,7 +34,7 @@ Before starting, check what exists — missing artifacts are created in phases 1
 | 3 | Req Update | main | Updated requirement doc |
 | 4 | Plan + Design | design-team | `doc/03_plan/<feature>.md`, `doc/05_design/<feature>.md` |
 | 5 | Model Selection | main | Task-to-model assignment |
-| 6 | System Test | test-agent | `test/03_system/<feature>_spec.spl` |
+| 6 | System Test | test-agent | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` |
 | 7 | Doc Consistency | review-agent | Cross-ref validation |
 | 8 | Implementation | code-team | `src/**/<feature>.spl` |
 | 9 | Unit + IT Tests | test-agent | 80%+ branch coverage |
@@ -73,7 +73,7 @@ review-team:    explore -> docs          (sequential)
 4. UI design (if applicable): `doc/05_design/<feature>_tui.md`, `_gui.md`
 
 ### Phase 6-7: System Test + Doc Consistency
-1. Create `test/03_system/<feature>_spec.spl` (SPipe BDD, fail-first). See `/spipe`
+1. Create `test/03_system/app/<app_name>/feature/<feature>_spec.spl` (SPipe BDD, fail-first). See `/spipe`
    - **REQUIRED:** Add `# @cover src/path/to/impl.spl <pct>%` pointing to last-layer component
 2. Cross-ref: bidirectional links, consistent terminology, REQ-ID tracing
 

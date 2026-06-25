@@ -114,7 +114,7 @@ Output: `doc/03_plan/sys_test/<feature>.md`
 
 | Artifact | Path |
 |----------|------|
-| System test specs | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` |
+| System test specs | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` |
 | Test plan | `doc/03_plan/sys_test/<feature>.md` |
 | Traceability matrix | Included in test plan |
 

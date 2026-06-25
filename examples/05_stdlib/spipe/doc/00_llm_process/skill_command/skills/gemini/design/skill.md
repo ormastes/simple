@@ -19,7 +19,7 @@ Phase 2: Architecture — doc/04_architecture/<feature>.md
 - For MCP, LSP, and tool servers, include startup path, hot request path, cache or index strategy, invalidation strategy, and perf budgets
 
 Phase 3: System Test Design
-- SPipe BDD tests: doc/06_spec/app/<app_name>/feature/<feature>_spec.spl
+- SPipe BDD tests: test/03_system/app/<app_name>/feature/<feature>_spec.spl
 - Matchers (built-in only): to_equal, to_be, to_be_nil, to_contain, to_start_with, to_end_with, to_be_greater_than, to_be_less_than
 - Every REQ-NNN must have at least one test
 

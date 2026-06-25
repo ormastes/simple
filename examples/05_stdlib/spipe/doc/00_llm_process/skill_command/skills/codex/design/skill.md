@@ -53,7 +53,7 @@ Output: `doc/04_architecture/<feature>.md`
 - Include edge cases and error paths
 
 Output:
-- Test specs: `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl`
+- Test specs: `test/03_system/app/<app_name>/feature/<feature>_spec.spl`
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
 
 ### Built-in Matchers (ONLY these are allowed)
@@ -110,7 +110,7 @@ describe "<Feature>":
 | Artifact | Path |
 |----------|------|
 | Architecture | `doc/04_architecture/<feature>.md` |
-| System test specs | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` |
+| System test specs | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` |
 | Test plan | `doc/03_plan/sys_test/<feature>.md` |
 | Detail design | `doc/05_design/<feature>.md` |
 | Agent tasks | `doc/03_plan/agent_tasks/<feature>.md` |

@@ -87,8 +87,9 @@
 ## Rules
 
 - **No code changes:** If something is broken, send back to appropriate phase
-- **Doc/wiki hygiene allowed:** Only stale docs, wiki-style process knowledge,
-  skill links, command references, and completion-report content may change
+- **No doc/wiki repair:** Ship consumes verified freshness. If stale docs,
+  wiki-style process knowledge, skill links, or command references remain, send
+  back to implementation/verify
 - **Process docs fresh:** Do not ship workflow/tooling/evidence/spec/verify
   contract changes while matching guide, spec, skill, or SPipe-agent docs are
   stale
@@ -107,7 +108,7 @@ Four steps, in order, no shortcuts. Each must succeed before the next.
 - [ ] Code committed: `jj log` shows new commit
 - [ ] Code pushed: `jj git push` succeeded
 - [ ] Completion report exists: `doc/09_report/<feature>_complete_<date>.md`
-- [ ] Doc/wiki refactor pass recorded in state file
+- [ ] Verify/state records doc/wiki refactor complete or N/A; ship did not repair stale docs
 - [ ] Numbered artifact guard passes
 - [ ] State file updated: `phase: ship` marked complete, `status: done`
 
