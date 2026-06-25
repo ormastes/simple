@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 101 | 101 | 0 | 0 |
+| 103 | 103 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -205,6 +205,41 @@ expect(base_red).to_be_greater_than(left_red)
 expect(base_red).to_be_greater_than(top_red)
 expect(base_red).to_be_greater_than(right_red)
 expect(base_red).to_be_greater_than(bottom_red)
+```
+
+</details>
+
+#### renders CSS outline outside border box without affecting flow layout
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { margin: 4px; width: 8px; height: 6px; background-color: #ffffff; outline-width: 2px; outline-style: solid; outline-color: #7c3aed; } .next { width: 6px; height: 4px; background-color: #16a34a; }</style></head><body><div class='card'></div><div class='next'></div></body></html>"
+val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+expect(_count_color(result.pixel_data, 0xFF7C3AEDu32)).to_be_greater_than(0)
+expect(_count_region_changed(result.pixel_data, TEST_WIDTH, 0, 14, 6, 4, WHITE_BG)).to_equal(24)
+```
+
+</details>
+
+#### does not render CSS outline when outline-style disables paint
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { margin: 4px; width: 8px; height: 6px; background-color: #ffffff; outline: 2px solid #7c3aed; outline-style: none; }</style></head><body><div class='card'></div></body></html>"
+val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+expect(_count_color(result.pixel_data, 0xFF7C3AEDu32)).to_equal(0)
 ```
 
 </details>
@@ -1847,8 +1882,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 101 |
-| Active scenarios | 101 |
+| Total scenarios | 103 |
+| Active scenarios | 103 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
