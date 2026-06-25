@@ -359,6 +359,9 @@ Completion keys:
 linux_vulkan_render_log_compare_status=pass
 linux_vulkan_render_log_compare_required_api=vulkan
 linux_vulkan_render_log_compare_pairwise_status=pass
+linux_vulkan_render_log_compare_renderdoc_simple_status=pass
+linux_vulkan_render_log_compare_renderdoc_chrome_status=pass
+linux_vulkan_render_log_compare_renderdoc_electron_status=pass
 ```
 
 The source logs use `simple-render-log-v1` and include
@@ -388,6 +391,7 @@ Frame Capture evidence is expected. Completion keys:
 macos_metal_render_log_compare_status=pass
 macos_metal_render_log_compare_required_api=metal
 macos_metal_render_log_compare_pairwise_status=pass
+macos_metal_render_log_compare_gpu_capture_status=pass
 ```
 
 The gate rejects missing Metal submit/readback, missing raw framebuffer
@@ -413,6 +417,8 @@ debugger capture is required. Completion keys:
 windows_d3d12_render_log_compare_status=pass
 windows_d3d12_render_log_compare_required_api=d3d12
 windows_d3d12_render_log_compare_pairwise_status=pass
+windows_d3d12_render_log_compare_pix_status=pass
+windows_d3d12_render_log_compare_gpu_debugger_status=pass
 ```
 
 The gate rejects D3D11-only evidence, missing PIX/GPU-debugger proof in strict
@@ -436,9 +442,11 @@ native_render_log_platform_matrix_missing_platforms=
 ```
 
 The aggregate revalidates each platform row before marking the matrix complete:
-Linux must report `required_api=vulkan` and `pairwise_status=pass`, macOS must
-report `required_api=metal` and `pairwise_status=pass`, and Windows must report
-`required_api=d3d12` and `pairwise_status=pass`. A stale or forged
+Linux must report `required_api=vulkan`, `pairwise_status=pass`, and pass
+RenderDoc statuses for Simple, Chrome, and Electron; macOS must report
+`required_api=metal`, `pairwise_status=pass`, and GPU capture status `pass`;
+Windows must report `required_api=d3d12`, `pairwise_status=pass`, PIX status
+`pass`, and GPU debugger status `pass`. A stale or forged
 `*_render_log_compare_status=pass` without those fields is downgraded to a
 failed platform row.
 

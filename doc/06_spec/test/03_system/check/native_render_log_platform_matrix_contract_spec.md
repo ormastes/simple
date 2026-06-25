@@ -1,6 +1,6 @@
 # Native Render-Log Platform Matrix Contract
 
-> Validates the aggregate GUI RenderDoc status gate's normalized native render-log platform matrix. The matrix must not accept a platform row only because `*_render_log_compare_status=pass`; it also requires the expected native API and pairwise comparison status for Linux Vulkan, macOS Metal, and Windows D3D12.
+> Validates the aggregate GUI RenderDoc status gate's normalized native render-log platform matrix. The matrix must not accept a platform row only because `*_render_log_compare_status=pass`; it also requires the expected native API, pairwise comparison status, and platform-native capture/debugger proof for Linux Vulkan, macOS Metal, and Windows D3D12.
 
 <!-- sdn-diagram:id=native_render_log_platform_matrix_contract_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ native_render_log_platform_matrix_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Native Render-Log Platform Matrix Contract
 
-Validates the aggregate GUI RenderDoc status gate's normalized native render-log platform matrix. The matrix must not accept a platform row only because `*_render_log_compare_status=pass`; it also requires the expected native API and pairwise comparison status for Linux Vulkan, macOS Metal, and Windows D3D12.
+Validates the aggregate GUI RenderDoc status gate's normalized native render-log platform matrix. The matrix must not accept a platform row only because `*_render_log_compare_status=pass`; it also requires the expected native API, pairwise comparison status, and platform-native capture/debugger proof for Linux Vulkan, macOS Metal, and Windows D3D12.
 
 ## At a Glance
 
@@ -55,8 +55,8 @@ Validates the aggregate GUI RenderDoc status gate's normalized native render-log
 Validates the aggregate GUI RenderDoc status gate's normalized native
 render-log platform matrix. The matrix must not accept a platform row only
 because `*_render_log_compare_status=pass`; it also requires the expected
-native API and pairwise comparison status for Linux Vulkan, macOS Metal, and
-Windows D3D12.
+native API, pairwise comparison status, and platform-native capture/debugger
+proof for Linux Vulkan, macOS Metal, and Windows D3D12.
 
 **Plan:** doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md
 **Requirements:** N/A
@@ -74,8 +74,11 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 
 ## Acceptance
 
-- A `pass` Linux row with missing pairwise status is normalized to fail.
+- A `pass` Linux row with missing pairwise status is normalized to fail before
+  capture checks.
 - A `pass` Windows row with `required_api=d3d11` is normalized to fail.
+- A `pass` row that omits required RenderDoc/GPU capture/PIX/debugger proof is
+  normalized to fail.
 - The platform matrix reports invalid present rows as failed, not missing.
 - A missing macOS row remains in the missing list without being counted as a
   failed row.
@@ -89,12 +92,16 @@ The aggregate reads three independent platform evidence files:
 - `WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV`
 
 Each row has its own native API contract. Linux must report
-`linux_vulkan_render_log_compare_required_api=vulkan` and
-`linux_vulkan_render_log_compare_pairwise_status=pass`. macOS must report
-`macos_metal_render_log_compare_required_api=metal` and
-`macos_metal_render_log_compare_pairwise_status=pass`. Windows must report
-`windows_d3d12_render_log_compare_required_api=d3d12` and
-`windows_d3d12_render_log_compare_pairwise_status=pass`.
+`linux_vulkan_render_log_compare_required_api=vulkan`,
+`linux_vulkan_render_log_compare_pairwise_status=pass`, and RenderDoc pass
+statuses for Simple, Chrome, and Electron. macOS must report
+`macos_metal_render_log_compare_required_api=metal`,
+`macos_metal_render_log_compare_pairwise_status=pass`, and
+`macos_metal_render_log_compare_gpu_capture_status=pass`. Windows must report
+`windows_d3d12_render_log_compare_required_api=d3d12`,
+`windows_d3d12_render_log_compare_pairwise_status=pass`,
+`windows_d3d12_render_log_compare_pix_status=pass`, and
+`windows_d3d12_render_log_compare_gpu_debugger_status=pass`.
 
 ## Matrix Semantics
 
@@ -105,10 +112,11 @@ The matrix emits three rollup keys:
 - `native_render_log_platform_matrix_failed_platforms`
 
 `missing_platforms` is reserved for absent or unavailable platform rows. A row
-that exists but claims the wrong API or lacks pairwise comparison proof is a
-failed row, not a missing row. This distinction matters for parallel platform
-work: a Linux failure needs Linux evidence repair, while missing macOS or
-Windows rows need execution on those hosts.
+that exists but claims the wrong API, lacks pairwise comparison proof, or omits
+the native capture/debugger proof is a failed row, not a missing row. This
+distinction matters for parallel platform work: a Linux failure needs Linux
+evidence repair, while missing macOS or Windows rows need execution on those
+hosts.
 
 ## Failure Examples
 
@@ -168,7 +176,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Create controlled platform render-log rows with invalid pass claims")
-val command = "rm -rf build/test-native-render-log-platform-matrix-contract && mkdir -p build/test-native-render-log-platform-matrix-contract/renderlogs && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nlinux_vulkan_render_log_compare_required_api=vulkan\\n' > build/test-native-render-log-platform-matrix-contract/renderlogs/linux.env && printf 'macos_metal_render_log_compare_status=pass\\nmacos_metal_render_log_compare_reason=pass\\nmacos_metal_render_log_compare_required_api=metal\\nmacos_metal_render_log_compare_pairwise_status=pass\\n' > build/test-native-render-log-platform-matrix-contract/renderlogs/macos.env && printf 'windows_d3d12_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_reason=pass\\nwindows_d3d12_render_log_compare_required_api=d3d11\\nwindows_d3d12_render_log_compare_pairwise_status=pass\\n' > build/test-native-render-log-platform-matrix-contract/renderlogs/windows.env && LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-contract/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-contract/renderlogs/macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-contract/renderlogs/windows.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-native-render-log-platform-matrix-static-cache BUILD_DIR=build/test-native-render-log-platform-matrix-contract/out REPORT_PATH=build/test-native-render-log-platform-matrix-contract/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true"
+val command = "rm -rf build/test-native-render-log-platform-matrix-contract && mkdir -p build/test-native-render-log-platform-matrix-contract/renderlogs && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nlinux_vulkan_render_log_compare_required_api=vulkan\\n' > build/test-native-render-log-platform-matrix-contract/renderlogs/linux.env && printf 'macos_metal_render_log_compare_status=pass\\nmacos_metal_render_log_compare_reason=pass\\nmacos_metal_render_log_compare_required_api=metal\\nmacos_metal_render_log_compare_pairwise_status=pass\\nmacos_metal_render_log_compare_gpu_capture_status=pass\\n' > build/test-native-render-log-platform-matrix-contract/renderlogs/macos.env && printf 'windows_d3d12_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_reason=pass\\nwindows_d3d12_render_log_compare_required_api=d3d11\\nwindows_d3d12_render_log_compare_pairwise_status=pass\\nwindows_d3d12_render_log_compare_pix_status=pass\\nwindows_d3d12_render_log_compare_gpu_debugger_status=pass\\n' > build/test-native-render-log-platform-matrix-contract/renderlogs/windows.env && LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-contract/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-contract/renderlogs/macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-contract/renderlogs/windows.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-native-render-log-platform-matrix-static-cache BUILD_DIR=build/test-native-render-log-platform-matrix-contract/out REPORT_PATH=build/test-native-render-log-platform-matrix-contract/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -202,7 +210,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Create Linux pass evidence and leave macOS/Windows rows absent")
-val command = "rm -rf build/test-native-render-log-platform-matrix-missing && mkdir -p build/test-native-render-log-platform-matrix-missing/renderlogs && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nlinux_vulkan_render_log_compare_required_api=vulkan\\nlinux_vulkan_render_log_compare_pairwise_status=pass\\n' > build/test-native-render-log-platform-matrix-missing/renderlogs/linux.env && LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-missing/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-missing/renderlogs/missing-macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-missing/renderlogs/missing-windows.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-native-render-log-platform-matrix-static-cache BUILD_DIR=build/test-native-render-log-platform-matrix-missing/out REPORT_PATH=build/test-native-render-log-platform-matrix-missing/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true"
+val command = "rm -rf build/test-native-render-log-platform-matrix-missing && mkdir -p build/test-native-render-log-platform-matrix-missing/renderlogs && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nlinux_vulkan_render_log_compare_required_api=vulkan\\nlinux_vulkan_render_log_compare_pairwise_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_status=pass\\n' > build/test-native-render-log-platform-matrix-missing/renderlogs/linux.env && LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-missing/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-missing/renderlogs/missing-macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-missing/renderlogs/missing-windows.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-native-render-log-platform-matrix-static-cache BUILD_DIR=build/test-native-render-log-platform-matrix-missing/out REPORT_PATH=build/test-native-render-log-platform-matrix-missing/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -218,12 +226,43 @@ expect(evidence).to_contain("windows_d3d12_render_log_compare_status=unavailable
 
 </details>
 
+#### rejects pass rows that omit native capture and debugger proof
+
+- Create pass-looking rows without the required native proof fields
+   - Expected: code equals `0`
+- Assert missing native proof fields are failed platform rows
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create pass-looking rows without the required native proof fields")
+val command = "rm -rf build/test-native-render-log-platform-matrix-debugger-proof && mkdir -p build/test-native-render-log-platform-matrix-debugger-proof/renderlogs && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nlinux_vulkan_render_log_compare_required_api=vulkan\\nlinux_vulkan_render_log_compare_pairwise_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_status=pass\\n' > build/test-native-render-log-platform-matrix-debugger-proof/renderlogs/linux.env && printf 'macos_metal_render_log_compare_status=pass\\nmacos_metal_render_log_compare_reason=pass\\nmacos_metal_render_log_compare_required_api=metal\\nmacos_metal_render_log_compare_pairwise_status=pass\\n' > build/test-native-render-log-platform-matrix-debugger-proof/renderlogs/macos.env && printf 'windows_d3d12_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_reason=pass\\nwindows_d3d12_render_log_compare_required_api=d3d12\\nwindows_d3d12_render_log_compare_pairwise_status=pass\\nwindows_d3d12_render_log_compare_pix_status=pass\\n' > build/test-native-render-log-platform-matrix-debugger-proof/renderlogs/windows.env && LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-debugger-proof/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-debugger-proof/renderlogs/macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-native-render-log-platform-matrix-debugger-proof/renderlogs/windows.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-native-render-log-platform-matrix-static-cache BUILD_DIR=build/test-native-render-log-platform-matrix-debugger-proof/out REPORT_PATH=build/test-native-render-log-platform-matrix-debugger-proof/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert missing native proof fields are failed platform rows")
+val evidence = file_read("build/test-native-render-log-platform-matrix-debugger-proof/out/evidence.env")
+expect(evidence).to_contain("native_render_log_platform_matrix_status=fail")
+expect(evidence).to_contain("native_render_log_platform_matrix_missing_platforms=")
+expect(evidence).to_contain("native_render_log_platform_matrix_failed_platforms=linux-vulkan,macos-metal,windows-d3d12")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=linux-vulkan-renderdoc-electron-not-pass:<missing>")
+expect(evidence).to_contain("macos_metal_render_log_compare_reason=macos-metal-gpu-capture-not-pass:<missing>")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_reason=windows-d3d12-gpu-debugger-not-pass:<missing>")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
