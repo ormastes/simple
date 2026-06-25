@@ -30,14 +30,19 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 - reason: `met-200fps`
 - geometry: `3840x2160`, pixels `8294400`
 - frames: `200`
-- fps_x1000: `58428279`
+- fps_x1000: `56689342`
 - target_fps: `200`
 - checksum: `23357114226484`
 - nonzero_pixels: `5458`
 - render_mode: `retained-static-frame`
 - redraw_frames: `1`
-- max_rss_kb: `131328`
-- rss_status: `measured`
+- max_rss_kb: `131072`
+- max_rss_budget_kb: `262144`
+- rss_status: `pass`
+- source_revision: `51ba1025b4d9`
+- simple_bin: `src/compiler_rust/target/release/simple`
+- native_build_mode: `aggressive-native`
+- fallback_state: `none`
 
 ## 8K Row
 
@@ -45,7 +50,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 - reason: `met-target-fps`
 - geometry: `7680x4320`, pixels `33177600`
 - frames: `200`
-- fps_x1000: `24218939`
+- fps_x1000: `22711787`
 - target_fps: `200`
 - checksum: `869060580878`
 - nonzero_pixels: `203`
@@ -54,6 +59,10 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 - max_rss_kb: `520192`
 - max_rss_budget_kb: `750000`
 - rss_status: `pass`
+- source_revision: `51ba1025b4d9`
+- simple_bin: `src/compiler_rust/target/release/simple`
+- native_build_mode: `aggressive-native`
+- fallback_state: `none`
 
 The aggregate now forwards passing `gui_showcase_4k_200fps_*` and
 `gui_showcase_8k_perf_*` fields. Completion remains blocked by the non-perf

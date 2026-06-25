@@ -31,15 +31,20 @@ sh scripts/check/check-widget-showcase-4k-200fps.shs
 | height | 2160 |
 | pixels | 8294400 |
 | frames | 200 |
-| fps_x1000 | 56306306 |
+| fps_x1000 | 56689342 |
 | target_fps | 200 |
-| max_rss_kb | 131328 |
+| max_rss_kb | 131072 |
 | max_rss_budget_kb | 262144 |
 | rss_status | pass |
 | nonzero_pixels | 5458 |
 | checksum | 23357114226484 |
 | render_mode | retained-static-frame |
 | redraw_frames | 1 |
+| source_revision | 51ba1025b4d9 |
+| simple_bin | src/compiler_rust/target/release/simple |
+| use_native | 1 |
+| native_build_mode | aggressive-native |
+| fallback_state | none |
 | native_bin | build/widget-showcase-4k-200fps/widget_showcase_gui_perf |
 | status_env | build/widget-showcase-4k-200fps/status.env |
 
@@ -54,15 +59,20 @@ sh scripts/check/check-widget-showcase-4k-200fps.shs
 | height | 4320 |
 | pixels | 33177600 |
 | frames | 200 |
-| fps_x1000 | 24218939 |
+| fps_x1000 | 22711787 |
 | target_fps | 200 |
-| max_rss_kb | 519936 |
+| max_rss_kb | 520192 |
 | max_rss_budget_kb | 750000 |
 | rss_status | pass |
 | nonzero_pixels | 203 |
 | checksum | 869060580878 |
 | render_mode | retained-static-frame |
 | redraw_frames | 1 |
+| source_revision | 51ba1025b4d9 |
+| simple_bin | src/compiler_rust/target/release/simple |
+| use_native | 1 |
+| native_build_mode | aggressive-native |
+| fallback_state | none |
 | native_bin | build/widget-showcase-8k-perf/widget_showcase_gui_perf |
 | status_env | build/widget-showcase-8k-perf/status.env |
 
