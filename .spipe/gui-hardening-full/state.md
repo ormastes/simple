@@ -876,3 +876,12 @@ implementation-evidence-in-progress
   accepting generated-manual quality or done marks, and fail final verification
   on stale workflow/guide/skill docs. This is process alignment only; the
   GUI/Web/2D Vulkan browser-backing blocker remains open.
+- continue-verify: Tightened the retained 8K widget perf wrapper so the 8K
+  mode has a real default RSS ceiling (`750000 KB`) instead of emitting
+  measured-only RSS with a `0` budget. Focused 8K evidence now passes with
+  `gui_showcase_8k_perf_status=pass`, `fps_x1000=13175230`, RSS
+  `520192/750000 KB`, 8K geometry `7680x4320`, nonblank readback, checksum
+  `869060580878`, retained-static-frame, and one redraw. The refreshed
+  aggregate report records the 8K perf gate as pass while preserving
+  `focused-browser-backing-required` / `missing-focused-browser-backing` for the
+  still-open browser-backing blocker.
