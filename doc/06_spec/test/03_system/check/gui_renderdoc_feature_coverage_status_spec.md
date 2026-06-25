@@ -2090,7 +2090,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 194 lines folded for reproduction.
+Runnable source: 198 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2099,13 +2099,17 @@ val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-productio
 step("Assert browser-backing setup producer requires Chrome hardware and Vulkan details")
 val setup_script = file_read("scripts/setup/setup-gui-web-2d-vulkan-env.shs")
 expect(setup_script).to_contain("const electronMentionsVulkan = /vulkan/i.test")
-expect(setup_script).to_contain("const electronStatus = electronEnabled && electronHardware && electronMentionsVulkan ? \"pass\" : \"fail\"")
+expect(setup_script).to_contain("const electronGpuEnabled = /enabled/i.test(electronGpuCompositing)")
+expect(setup_script).to_contain("const electronStatus = electronEnabled && electronGpuEnabled && electronHardware && electronMentionsVulkan ? \"pass\" : \"fail\"")
 expect(setup_script).to_contain("gui_web_2d_vulkan_electron_browser_backing_gpu_compositing")
 expect(setup_script).to_contain("gui_web_2d_vulkan_electron_browser_backing_display_type")
 expect(setup_script).to_contain("electron-vulkan-enabled-without-angle-vulkan-proof")
+expect(setup_script).to_contain("electron-vulkan-gpu-compositing-disabled")
 expect(setup_script).to_contain("const chromeMentionsVulkan = /vulkan/i.test")
-expect(setup_script).to_contain("const chromeStatus = chromeHardware && chromeMentionsVulkan ? \"pass\" : \"fail\"")
+expect(setup_script).to_contain("const chromeGpuEnabled = /enabled/i.test(chromeGpuCompositing)")
+expect(setup_script).to_contain("const chromeStatus = chromeGpuEnabled && chromeHardware && chromeMentionsVulkan ? \"pass\" : \"fail\"")
 expect(setup_script).to_contain("gui_web_2d_vulkan_chrome_browser_backing_gpu_compositing")
+expect(setup_script).to_contain("chrome-vulkan-gpu-compositing-disabled")
 expect(setup_script).to_contain("chrome-vulkan-hardware-missing")
 expect(setup_script).to_contain("function sourceFileStatus(path)")
 expect(setup_script).to_contain("gui_web_2d_vulkan_electron_browser_backing_source_file_status")
