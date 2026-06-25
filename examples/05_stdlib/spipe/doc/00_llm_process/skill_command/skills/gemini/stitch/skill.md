@@ -1,4 +1,4 @@
-<!-- llm-process-gen: managed source=gemini_stitch_skill source_sha256=9e92661b40ef1b8a76416531aef8d93f61b2170cc8cb88b2cd546b507c6e4dbd content_sha256=694d33a07747469a8c3a92c984c365ece0768042d9b49d84093c5d6e74c2794c -->
+<!-- llm-process-gen: managed source=gemini_stitch_skill source_sha256=9e92661b40ef1b8a76416531aef8d93f61b2170cc8cb88b2cd546b507c6e4dbd content_sha256=adba7d1b4413576c4b70206a12b9e788437d13eb204ab2c80a9f2b0f386cab5c -->
 # stitch
 
 Source: `.gemini/commands/stitch.toml`

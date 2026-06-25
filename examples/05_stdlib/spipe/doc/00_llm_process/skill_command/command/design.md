@@ -1,4 +1,4 @@
-<!-- llm-process-gen: managed source=claude_design_command source_sha256=f233a3f394bc92a029c2937e8f2e0bf405baac3d95714152e400190d70d92cce content_sha256=f233a3f394bc92a029c2937e8f2e0bf405baac3d95714152e400190d70d92cce -->
+<!-- llm-process-gen: managed source=claude_design_command source_sha256=f233a3f394bc92a029c2937e8f2e0bf405baac3d95714152e400190d70d92cce content_sha256=421a2290c22457c6515eee10aa910e8a68e36010d3fc9e362b70d904ee1ee9be -->
 # Design Skill — Detail Design
 
 ## Prerequisites

@@ -1,4 +1,4 @@
-<!-- llm-process-gen: managed source=codex_verify_skill source_sha256=dda10f1d227a06c9cbf49386156494d66c9e381cbfedf1f3ae6081617bf62f38 content_sha256=dda10f1d227a06c9cbf49386156494d66c9e381cbfedf1f3ae6081617bf62f38 -->
+<!-- llm-process-gen: managed source=codex_verify_skill source_sha256=dda10f1d227a06c9cbf49386156494d66c9e381cbfedf1f3ae6081617bf62f38 content_sha256=8232051295f1e6e320e74f318de90beb325871fda7d1fba71c83e1fbee7d3bec -->
 ---
 name: verify
 description: "Codex verification skill (primary verifier in cooperative mode). 6-phase production readiness verification: scope, SPipe quality, implementation stubs, requirements tracing, NFR, docs. STATUS: PASS/FAIL/WARN output. Must PASS before release."

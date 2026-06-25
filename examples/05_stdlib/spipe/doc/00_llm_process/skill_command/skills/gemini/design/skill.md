@@ -1,4 +1,4 @@
-<!-- llm-process-gen: managed source=gemini_design_skill source_sha256=1a9de54c39ff8fc15d051cdedbebbac6af8ea47236db6380cf53e68e4ccba7b4 content_sha256=c5cefc3598cbe7fd5aa436cb33ba32259bc78a09cab6274cb680d2cf1429c66c -->
+<!-- llm-process-gen: managed source=gemini_design_skill source_sha256=1a9de54c39ff8fc15d051cdedbebbac6af8ea47236db6380cf53e68e4ccba7b4 content_sha256=bfcc4b59919451357e84424682040e9b333f59351a16098b1c80858371f15dfb -->
 # design
 
 Source: `.gemini/commands/design.toml`
