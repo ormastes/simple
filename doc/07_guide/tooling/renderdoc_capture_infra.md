@@ -585,7 +585,10 @@ The top-level GUI audit now runs that focused wrapper, re-emits
 `gui_widget_renderdoc_goal_simple_gate_status`,
 `gui_widget_renderdoc_goal_electron_gate_status`, and
 `gui_widget_renderdoc_goal_blocked_gate_count`, and remains incomplete until
-the widget goal reaches `pass`. Use
+the widget goal reaches `pass`. When the Simple widget RenderDoc lane is the
+focused widget blocker, the top-level audit also includes that widget blocker in
+`blocked_completion_gates` so the top-level reason is not disconnected from the
+full completion list. Use
 `doc/08_tracking/bug/gui_widget_renderdoc_goal_blockers_2026-06-23.md` for the
 current Simple/Electron widget RenderDoc blocker record.
 
