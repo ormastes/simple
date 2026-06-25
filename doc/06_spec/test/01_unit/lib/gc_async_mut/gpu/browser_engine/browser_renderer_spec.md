@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 111 | 111 | 0 | 0 |
+| 112 | 112 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -223,6 +223,27 @@ val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
 
 expect(_count_color(result.pixel_data, 0xFF7C3AEDu32)).to_be_greater_than(0)
 expect(_count_region_changed(result.pixel_data, TEST_WIDTH, 0, 14, 6, 4, WHITE_BG)).to_equal(24)
+```
+
+</details>
+
+#### renders box-shadow behind the element background box
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plain_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { margin: 4px; width: 18px; height: 10px; background-color: #2563eb; }</style></head><body><div class='card'></div></body></html>"
+val shadow_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { margin: 4px; width: 18px; height: 10px; background-color: #2563eb; box-shadow: 5px 4px #dc2626; }</style></head><body><div class='card'></div></body></html>"
+val plain = render_html_to_pixels_with_viewport(plain_html, TEST_WIDTH, TEST_HEIGHT).pixel_data
+val shadow = render_html_to_pixels_with_viewport(shadow_html, TEST_WIDTH, TEST_HEIGHT).pixel_data
+
+expect(_count_color(shadow, 0xFF2563EBu32)).to_equal(_count_color(plain, 0xFF2563EBu32))
+expect(_count_color(shadow, 0xFFDC2626u32)).to_be_greater_than(0)
+expect(_pixels_equal(plain, shadow)).to_equal(false)
 ```
 
 </details>
@@ -2053,8 +2074,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 111 |
-| Active scenarios | 111 |
+| Total scenarios | 112 |
+| Active scenarios | 112 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
