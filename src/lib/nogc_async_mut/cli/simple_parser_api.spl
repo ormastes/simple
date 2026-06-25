@@ -200,8 +200,12 @@ impl SimpleParser:
 
         # Initialize options with defaults
         for a in self.args:
-            if a.arg_kind == "option" and a.default_value.?:
-                options[a.name] = a.default_value.unwrap()
+            if a.arg_kind == "option":
+                match a.default_value:
+                    Some(default_value):
+                        options[a.name] = default_value
+                    nil:
+                        pass
 
         var i = 0
         var positional_idx = 0
@@ -211,8 +215,8 @@ impl SimpleParser:
             # Check for subcommand
             if not arg.starts_with("-") and subcommand == nil and self.subcommands.len() > 0:
                 val resolved = self.resolve_subcommand(arg)
-                if resolved.?:
-                    subcommand = Some(resolved.unwrap())
+                if val Some(resolved_name) = resolved:
+                    subcommand = Some(resolved_name)
                     # Remaining args go to subcommand
                     var j = i + 1
                     while j < input_args.len():
@@ -228,24 +232,27 @@ impl SimpleParser:
                     val name = rest[0:eq_pos]
                     val value = rest[eq_pos + 1:]
                     val opt = self.find_option_by_long(name)
-                    if opt.?:
-                        options[opt.unwrap().name] = value
-                    else:
-                        return Err("Unknown option: --{name}")
+                    match opt:
+                        Some(option_def):
+                            options[option_def.name] = value
+                        nil:
+                            return Err("Unknown option: --{name}")
                 else:
                     val flag_def = self.find_flag_by_long(rest)
-                    if flag_def.?:
-                        flags[flag_def.unwrap().name] = true
-                    else:
-                        val opt_def = self.find_option_by_long(rest)
-                        if opt_def.?:
-                            if i + 1 < input_args.len():
-                                i = i + 1
-                                options[opt_def.unwrap().name] = input_args[i]
-                            else:
-                                return Err("Option --{rest} requires a value")
-                        else:
-                            return Err("Unknown argument: --{rest}")
+                    match flag_def:
+                        Some(flag):
+                            flags[flag.name] = true
+                        nil:
+                            val opt_def = self.find_option_by_long(rest)
+                            match opt_def:
+                                Some(option_def):
+                                    if i + 1 < input_args.len():
+                                        i = i + 1
+                                        options[option_def.name] = input_args[i]
+                                    else:
+                                        return Err("Option --{rest} requires a value")
+                                nil:
+                                    return Err("Unknown argument: --{rest}")
             elif arg.starts_with("-") and arg.len() > 1:
                 # Short option/flag (possibly combined)
                 val chars = arg[1:]
@@ -253,25 +260,27 @@ impl SimpleParser:
                 while ci < chars.len():
                     val ch = chars[ci:ci + 1]
                     val flag_def = self.find_flag_by_short(ch)
-                    if flag_def.?:
-                        flags[flag_def.unwrap().name] = true
-                        ci = ci + 1
-                    else:
-                        val opt_def = self.find_option_by_short(ch)
-                        if opt_def.?:
-                            # Rest of string is the option value
-                            val remaining = chars[ci + 1:]
-                            if remaining.len() > 0:
-                                options[opt_def.unwrap().name] = remaining
-                            elif i + 1 < input_args.len():
-                                i = i + 1
-                                options[opt_def.unwrap().name] = input_args[i]
-                            else:
-                                return Err("Option -{ch} requires a value")
-                            break
-                        else:
-                            return Err("Unknown flag: -{ch}")
-                            break
+                    match flag_def:
+                        Some(flag):
+                            flags[flag.name] = true
+                            ci = ci + 1
+                        nil:
+                            val opt_def = self.find_option_by_short(ch)
+                            match opt_def:
+                                Some(option_def):
+                                    # Rest of string is the option value
+                                    val remaining = chars[ci + 1:]
+                                    if remaining.len() > 0:
+                                        options[option_def.name] = remaining
+                                    elif i + 1 < input_args.len():
+                                        i = i + 1
+                                        options[option_def.name] = input_args[i]
+                                    else:
+                                        return Err("Option -{ch} requires a value")
+                                    break
+                                nil:
+                                    return Err("Unknown flag: -{ch}")
+                                    break
             else:
                 # Positional argument
                 positionals.push(arg)
