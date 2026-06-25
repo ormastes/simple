@@ -128,8 +128,11 @@ impl MappedSmf:
     me read_note_sdn() -> Result<NoteSdnMetadata, text>:
         """Read and parse note.sdn metadata."""
         # Check cache
-        if self.note_sdn.?:
-            return Ok(self.note_sdn.unwrap())
+        match self.note_sdn:
+            Some(cached_note_sdn):
+                return Ok(cached_note_sdn)
+            nil:
+                pass
 
         # For now, since we don't have proper SMF section parsing yet,
         # try to read the entire file as text and look for SDN data
@@ -629,10 +632,11 @@ fn validated_smf_load(smf_path: text, source_path: text, backend: text, opt_leve
 
     # Open the SMF file
     val mapped_result = MappedSmf.open(smf_path)
-    if mapped_result.is_err():
-        return mapped_result
-
-    val mapped = mapped_result.unwrap()
+    val mapped = match mapped_result:
+        case Ok(value):
+            value
+        case Err(_):
+            return mapped_result
 
     # Read compile options hash from header reserved bytes
     val reserved_bytes = mapped.header.get_compile_options_bytes()
@@ -657,10 +661,12 @@ fn validated_smf_load_with_semantics(smf_path: text, source_path: text, backend:
     """Load an SMF and fail closed on public ABI/accessor/field-wrapper mismatch."""
     val mapped = validated_smf_load(smf_path, source_path, backend, opt_level, release, debug_info, gc_off, profile, allowed_families)?
     val stored_semantics_result = mapped.read_semantic_fingerprint()
-    if stored_semantics_result.is_err():
-        val _ = mapped.close()
-        return Err(stored_semantics_result.unwrap_err())
-    val stored_semantics = stored_semantics_result.unwrap()
+    val stored_semantics = match stored_semantics_result:
+        case Ok(value):
+            value
+        case Err(err):
+            val _ = mapped.close()
+            return Err(err)
     if stored_semantics.combined != expected_semantics.combined:
         val _ = mapped.close()
         return Err("SMF semantic fingerprint mismatch for {smf_path}")
