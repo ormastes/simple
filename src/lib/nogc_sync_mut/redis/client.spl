@@ -297,8 +297,11 @@ impl RedisClient:
                 return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "incomplete reply", source: nil))
             buf = buf + chunk
             val attempt = try_parse_resp(buf, 0)
-            if attempt.?:
-                return Ok(attempt.unwrap().reply)
+            match attempt:
+                Some(parsed):
+                    return Ok(parsed.reply)
+                nil:
+                    pass
 
 # ============================================================================
 # RESP Reply Type
@@ -354,31 +357,36 @@ fn try_parse_resp(buf: [u8], start: i64) -> Option<ParseResult>:
 
     if type_byte == 43:
         val line = try_read_line_from(buf, rest_start)
-        if not line.?:
-            return nil
-        val l = line.unwrap()
-        return Some(ParseResult(reply: RedisReply.Status(value: l.content), offset: l.end))
+        match line:
+            Some(l):
+                return Some(ParseResult(reply: RedisReply.Status(value: l.content), offset: l.end))
+            nil:
+                return nil
 
     if type_byte == 45:
         val line = try_read_line_from(buf, rest_start)
-        if not line.?:
-            return nil
-        val l = line.unwrap()
-        return Some(ParseResult(reply: RedisReply.Error(value: l.content), offset: l.end))
+        match line:
+            Some(l):
+                return Some(ParseResult(reply: RedisReply.Error(value: l.content), offset: l.end))
+            nil:
+                return nil
 
     if type_byte == 58:
         val line = try_read_line_from(buf, rest_start)
-        if not line.?:
-            return nil
-        val l = line.unwrap()
-        val num = l.content.to_int() ?? 0
-        return Some(ParseResult(reply: RedisReply.Integer(value: num), offset: l.end))
+        match line:
+            Some(l):
+                val num = l.content.to_int() ?? 0
+                return Some(ParseResult(reply: RedisReply.Integer(value: num), offset: l.end))
+            nil:
+                return nil
 
     if type_byte == 36:
         val line = try_read_line_from(buf, rest_start)
-        if not line.?:
-            return nil
-        val l = line.unwrap()
+        val l = match line:
+            Some(parsed_line):
+                parsed_line
+            nil:
+                return nil
         val length = l.content.to_int() ?? -1
         if length < 0:
             return Some(ParseResult(reply: RedisReply.Nil, offset: l.end))
@@ -397,9 +405,11 @@ fn try_parse_resp(buf: [u8], start: i64) -> Option<ParseResult>:
 
     if type_byte == 42:
         val line = try_read_line_from(buf, rest_start)
-        if not line.?:
-            return nil
-        val l = line.unwrap()
+        val l = match line:
+            Some(parsed_line):
+                parsed_line
+            nil:
+                return nil
         val count = l.content.to_int() ?? -1
         if count < 0:
             return Some(ParseResult(reply: RedisReply.Nil, offset: l.end))
@@ -408,9 +418,11 @@ fn try_parse_resp(buf: [u8], start: i64) -> Option<ParseResult>:
         var idx = 0
         while idx < count:
             val parsed = try_parse_resp(buf, pos)
-            if not parsed.?:
-                return nil
-            val p = parsed.unwrap()
+            val p = match parsed:
+                Some(parsed_value):
+                    parsed_value
+                nil:
+                    return nil
             elements.push(p.reply)
             pos = p.offset
             idx = idx + 1
