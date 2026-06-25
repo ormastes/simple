@@ -29,7 +29,7 @@ REPORT_PATH=build/gui-renderdoc-feature-coverage-showcase-current/report.md \
 - Viewport: `3840x2160`
 - Pixels: `8294400`
 - Frames: `200`
-- FPS x1000: `57553956`
+- FPS x1000: `54377379`
 - Target FPS: `200`
 - RSS: `131328 / 262144 KiB`
 - RSS status: `pass`
@@ -48,7 +48,7 @@ REPORT_PATH=build/gui-renderdoc-feature-coverage-showcase-current/report.md \
 - Viewport: `7680x4320`
 - Pixels: `33177600`
 - Frames: `200`
-- FPS x1000: `24218939`
+- FPS x1000: `22750540`
 - Target FPS: `200`
 - RSS: `520192 / 750000 KiB`
 - RSS status: `pass`
