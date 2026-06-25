@@ -236,7 +236,8 @@ The `--browser-backing` setup producer uses the same rule; Chrome hardware
 missing with Vulkan-looking display/GL text is emitted as
 `chrome-vulkan-hardware-missing`, not a pass.
 Both Electron and Chrome child passes also require their
-`*_browser_backing_source` files to exist; the `--browser-backing` producer
+`*_browser_backing_source` files to exist and `gpu_compositing` to remain
+enabled in the captured GPU feature status; the `--browser-backing` producer
 emits `*_browser_backing_source_file_status`, and the aggregate verifies or
 recomputes that status for older evidence before accepting proof.
 The aggregate also normalizes stale child rows: a child `pass` without those
@@ -245,9 +246,12 @@ or `chrome-vulkan-proof-missing`, so agents must fix the probe evidence rather
 than copying a prior pass row.
 For failed or partial hosts, inspect
 `gui_web_2d_vulkan_electron_browser_backing_vulkan`,
+`gui_web_2d_vulkan_electron_browser_backing_gpu_compositing`,
+`gui_web_2d_vulkan_electron_browser_backing_display_type`,
 `gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan`,
 `gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts`,
 `gui_web_2d_vulkan_chrome_browser_backing_display_type`,
+`gui_web_2d_vulkan_chrome_browser_backing_gpu_compositing`,
 `gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts`, and the
 matching `*_browser_backing_source` files before changing Chromium flags.
 RenderDoc capture and gate readiness remains a separate blocker reported by

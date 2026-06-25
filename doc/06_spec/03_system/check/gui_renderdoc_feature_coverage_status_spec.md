@@ -373,7 +373,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 855 lines folded for reproduction.
+Runnable source: 862 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -888,11 +888,14 @@ val browser_backing_mode = _value_of(evidence, "gui_web_2d_vulkan_browser_backin
 val electron_browser_backing_status = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_status")
 val electron_browser_backing_reason = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_reason")
 val electron_browser_backing_vulkan = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_vulkan")
+val electron_browser_backing_gpu = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_gpu_compositing")
+val electron_browser_backing_display = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_display_type")
 val electron_browser_backing_hardware = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan")
 val electron_browser_backing_gl = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts")
 val chrome_browser_backing_status = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_status")
 val chrome_browser_backing_reason = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_reason")
 val chrome_browser_backing_display = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_display_type")
+val chrome_browser_backing_gpu = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_gpu_compositing")
 val chrome_browser_backing_gl = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts")
 val chrome_browser_backing_hardware = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan")
 val renderdoc_blocker_status = _value_of(evidence, "gui_web_2d_vulkan_renderdoc_blocker_status")
@@ -1108,9 +1111,11 @@ if browser_backing_status == "pass":
     expect(electron_browser_backing_status).to_equal("pass")
     expect(electron_browser_backing_reason).to_equal("electron-vulkan-backed")
     expect(electron_browser_backing_vulkan).to_contain("enabled")
+    expect(electron_browser_backing_gpu).to_contain("enabled")
     expect(electron_browser_backing_hardware).to_equal("true")
     expect(chrome_browser_backing_status).to_equal("pass")
     expect(chrome_browser_backing_reason).to_equal("chrome-vulkan-backed")
+    expect(chrome_browser_backing_gpu).to_contain("enabled")
 else:
     expect(browser_backing_status).to_equal("fail")
     expect(browser_backing_reason.len()).to_be_greater_than(0)
@@ -1128,9 +1133,11 @@ else:
         expect(chrome_browser_backing_status.len()).to_be_greater_than(0)
         expect(chrome_browser_backing_reason.len()).to_be_greater_than(0)
 if electron_browser_backing_status.len() > 0:
+    expect(electron_browser_backing_gpu.len()).to_be_greater_than(0)
     expect(electron_browser_backing_hardware.len()).to_be_greater_than(0)
     expect(electron_browser_backing_gl.len()).to_be_greater_than(0)
 if chrome_browser_backing_status.len() > 0:
+    expect(chrome_browser_backing_gpu.len()).to_be_greater_than(0)
     expect(chrome_browser_backing_hardware.len()).to_be_greater_than(0)
     if chrome_browser_backing_status == "pass":
         expect(chrome_browser_backing_display + chrome_browser_backing_gl).to_contain("vulkan")
@@ -2030,7 +2037,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 171 lines folded for reproduction.
+Runnable source: 179 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2039,9 +2046,12 @@ val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-productio
 step("Assert browser-backing setup producer requires Chrome hardware and Vulkan details")
 val setup_script = file_read("scripts/setup/setup-gui-web-2d-vulkan-env.shs")
 expect(setup_script).to_contain("const electronStatus = electronEnabled && electronHardware ? \"pass\" : \"fail\"")
+expect(setup_script).to_contain("gui_web_2d_vulkan_electron_browser_backing_gpu_compositing")
+expect(setup_script).to_contain("gui_web_2d_vulkan_electron_browser_backing_display_type")
 expect(setup_script).to_contain("electron-vulkan-hardware-missing")
 expect(setup_script).to_contain("const chromeMentionsVulkan = /vulkan/i.test")
 expect(setup_script).to_contain("const chromeStatus = chromeHardware && chromeMentionsVulkan ? \"pass\" : \"fail\"")
+expect(setup_script).to_contain("gui_web_2d_vulkan_chrome_browser_backing_gpu_compositing")
 expect(setup_script).to_contain("chrome-vulkan-hardware-missing")
 expect(setup_script).to_contain("function sourceFileStatus(path)")
 expect(setup_script).to_contain("gui_web_2d_vulkan_electron_browser_backing_source_file_status")
@@ -2069,8 +2079,9 @@ val stale_evidence = file_read("build/test-gui-renderdoc-feature-coverage-status
 expect(stale_evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_status=fail")
 expect(stale_evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-proof-missing:")
 expect(stale_evidence).to_contain("chrome_hardware")
+expect(stale_evidence).to_contain("chrome_gpu_compositing")
 expect(stale_evidence).to_contain("chrome_vulkan")
-val command_with_stale_electron_browser_env = command_with_pixel_env.replace("GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env", "printf 'gui_web_2d_vulkan_mode=--browser-backing\\ngui_web_2d_vulkan_browser_backing_status=pass\\ngui_web_2d_vulkan_browser_backing_reason=pass\\ngui_web_2d_vulkan_browser_backing_mode=gpu-feature-status\\ngui_web_2d_vulkan_electron_browser_backing_status=pass\\ngui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed\\ngui_web_2d_vulkan_electron_browser_backing_vulkan=enabled\\ngui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=false\\ngui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_electron_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron_argb.json\\ngui_web_2d_vulkan_chrome_browser_backing_status=pass\\ngui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed\\ngui_web_2d_vulkan_chrome_browser_backing_display_type=vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_chrome_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env && RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/evidence.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env")
+val command_with_stale_electron_browser_env = command_with_pixel_env.replace("GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env", "printf 'gui_web_2d_vulkan_mode=--browser-backing\\ngui_web_2d_vulkan_browser_backing_status=pass\\ngui_web_2d_vulkan_browser_backing_reason=pass\\ngui_web_2d_vulkan_browser_backing_mode=gpu-feature-status\\ngui_web_2d_vulkan_electron_browser_backing_status=pass\\ngui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed\\ngui_web_2d_vulkan_electron_browser_backing_vulkan=enabled\\ngui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=false\\ngui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_electron_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron_argb.json\\ngui_web_2d_vulkan_chrome_browser_backing_status=pass\\ngui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed\\ngui_web_2d_vulkan_chrome_browser_backing_display_type=vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_gpu_compositing=enabled\\ngui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_chrome_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env && RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/evidence.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env")
 val command_with_stale_electron_pixel_files = command_with_stale_electron_browser_env.replace("electron/electron_argb.json && printf 'rdoc_backend=simple", "electron/electron_argb.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"chrome-vulkan-capture\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb.json && printf '{\"gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"vulkan\",\"glImplementationParts\":\"angle-vulkan\"}}}}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"simple-vulkan-web2d\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/simple_argb.json && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_chrome_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_simple_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_simple_diff.env && printf 'rdoc_backend=simple")
 val (_stale_electron_stdout, _stale_electron_stderr, stale_electron_code) = process_run("/bin/sh", ["-c", command_with_stale_electron_pixel_files])
 expect(stale_electron_code).to_equal(0)
@@ -2079,8 +2090,9 @@ step("Reject stale Electron child pass without hardware Vulkan proof")
 val stale_electron_evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-production-required/out/evidence.env")
 expect(stale_electron_evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_status=fail")
 expect(stale_electron_evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-proof-missing:")
+expect(stale_electron_evidence).to_contain("electron_gpu_compositing")
 expect(stale_electron_evidence).to_contain("electron_hardware")
-val command_with_browser_env = command_with_pixel_env.replace("GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env", "printf 'gui_web_2d_vulkan_mode=--browser-backing\\ngui_web_2d_vulkan_browser_backing_status=pass\\ngui_web_2d_vulkan_browser_backing_reason=pass\\ngui_web_2d_vulkan_browser_backing_mode=gpu-feature-status\\ngui_web_2d_vulkan_electron_browser_backing_status=pass\\ngui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed\\ngui_web_2d_vulkan_electron_browser_backing_vulkan=enabled\\ngui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_electron_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron_argb.json\\ngui_web_2d_vulkan_chrome_browser_backing_status=pass\\ngui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed\\ngui_web_2d_vulkan_chrome_browser_backing_display_type=vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_chrome_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env && RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/evidence.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env")
+val command_with_browser_env = command_with_pixel_env.replace("GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env", "printf 'gui_web_2d_vulkan_mode=--browser-backing\\ngui_web_2d_vulkan_browser_backing_status=pass\\ngui_web_2d_vulkan_browser_backing_reason=pass\\ngui_web_2d_vulkan_browser_backing_mode=gpu-feature-status\\ngui_web_2d_vulkan_electron_browser_backing_status=pass\\ngui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed\\ngui_web_2d_vulkan_electron_browser_backing_vulkan=enabled\\ngui_web_2d_vulkan_electron_browser_backing_gpu_compositing=enabled\\ngui_web_2d_vulkan_electron_browser_backing_display_type=vulkan\\ngui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_electron_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron_argb.json\\ngui_web_2d_vulkan_chrome_browser_backing_status=pass\\ngui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed\\ngui_web_2d_vulkan_chrome_browser_backing_display_type=vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_gpu_compositing=enabled\\ngui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_chrome_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env && RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/evidence.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env")
 val command_with_pixel_files = command_with_browser_env.replace("electron/electron_argb.json && printf 'rdoc_backend=simple", "electron/electron_argb.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"chrome-vulkan-capture\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb.json && printf '{\"gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"vulkan\",\"glImplementationParts\":\"angle-vulkan\"}}}}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"simple-vulkan-web2d\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/simple_argb.json && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_chrome_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_simple_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_simple_diff.env && printf 'rdoc_backend=simple")
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command_with_pixel_files])
 expect(code).to_equal(0)
@@ -2177,10 +2189,13 @@ expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_mode=gpu-feature-
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_vulkan=enabled")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_gpu_compositing=enabled")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_display_type=vulkan")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=true")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_source_file_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_gpu_compositing=enabled")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_source_file_status=pass")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_status=pass")

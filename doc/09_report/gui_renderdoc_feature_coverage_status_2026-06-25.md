@@ -28,8 +28,8 @@
 - GUI/web/2D Vulkan setup mode: --run
 - GUI/web/2D Vulkan direct-run source: configured-main (--run; evidence build/gui-web-2d-vulkan-env/evidence.env)
 - GUI/web/2D browser Vulkan backing: fail (gpu-feature-status; electron-vulkan-hardware-missing;chrome-vulkan-backed)
-- GUI/web/2D Electron browser backing: fail (electron-vulkan-hardware-missing; vulkan enabled_on; gl (gl=none,angle=none); source build/gui-web-2d-vulkan-env-browser-backing/electron_argb.json)
-- GUI/web/2D Chrome browser backing: pass (chrome-vulkan-backed; display ANGLE_VULKAN; gl (gl=egl-angle,angle=vulkan); source build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json)
+- GUI/web/2D Electron browser backing: fail (electron-vulkan-hardware-missing; vulkan enabled_on; gpu enabled; display ; gl (gl=none,angle=none); source build/gui-web-2d-vulkan-env-browser-backing/electron_argb.json)
+- GUI/web/2D Chrome browser backing: pass (chrome-vulkan-backed; display ANGLE_VULKAN; gpu enabled; gl (gl=egl-angle,angle=vulkan); source build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json)
 - GUI/web/2D browser backing blocker: doc/08_tracking/bug/gui_web_2d_vulkan_browser_backing_2026-06-23.md
 - GUI/web/2D Vulkan RenderDoc blockers: blocked (5; renderdoc-command-ready-ready;simple-renderdoc-gate-unavailable-missing-source-evidence;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run)
 - GUI/web/2D RenderDoc blocker: doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
@@ -300,6 +300,8 @@
 - gui_web_2d_vulkan_electron_browser_backing_status=fail
 - gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-hardware-missing
 - gui_web_2d_vulkan_electron_browser_backing_vulkan=enabled_on
+- gui_web_2d_vulkan_electron_browser_backing_gpu_compositing=enabled
+- gui_web_2d_vulkan_electron_browser_backing_display_type=
 - gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=false
 - gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=(gl=none,angle=none)
 - gui_web_2d_vulkan_electron_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/electron_argb.json
@@ -307,6 +309,7 @@
 - gui_web_2d_vulkan_chrome_browser_backing_status=pass
 - gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed
 - gui_web_2d_vulkan_chrome_browser_backing_display_type=ANGLE_VULKAN
+- gui_web_2d_vulkan_chrome_browser_backing_gpu_compositing=enabled
 - gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=(gl=egl-angle,angle=vulkan)
 - gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true
 - gui_web_2d_vulkan_chrome_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json
