@@ -5,6 +5,7 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+SOURCE_REVISION="${SOURCE_REVISION:-$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
 RESOLUTION="${RESOLUTION:-4k}"
 case "$RESOLUTION" in
     4k)
@@ -56,6 +57,36 @@ PLAN_ONLY="${PLAN_ONLY:-0}"
 
 mkdir -p "$BUILD_DIR"
 
+native_build_mode() {
+    if [ "$USE_NATIVE" = "1" ]; then
+        echo aggressive-native
+    else
+        echo interpreter
+    fi
+}
+
+fallback_state() {
+    if [ "$USE_NATIVE" = "1" ]; then
+        echo none
+    else
+        echo interpreter-fallback
+    fi
+}
+
+emit_common_fields() {
+    echo "${STATUS_PREFIX}_source_revision=$SOURCE_REVISION"
+    echo "${STATUS_PREFIX}_simple_bin=$SIMPLE_BIN"
+    echo "${STATUS_PREFIX}_use_native=$USE_NATIVE"
+    echo "${STATUS_PREFIX}_native_bin=$NATIVE_BIN"
+    echo "${STATUS_PREFIX}_alias_src=$ALIAS_SRC"
+    echo "${STATUS_PREFIX}_probe_fn=$PROBE_FN"
+    echo "${STATUS_PREFIX}_probe_prefix=$PROBE_PREFIX"
+    echo "${STATUS_PREFIX}_perf_env_flag=$PERF_ENV_FLAG"
+    echo "${STATUS_PREFIX}_native_build_log=$BUILD_LOG"
+    echo "${STATUS_PREFIX}_native_build_mode=$(native_build_mode)"
+    echo "${STATUS_PREFIX}_fallback_state=$(fallback_state)"
+}
+
 write_alias_source() {
     awk '
         /^fn main\(\) -> i64:/ { stop=1 }
@@ -75,12 +106,7 @@ if [ "$PLAN_ONLY" = "1" ]; then
         echo "${STATUS_PREFIX}_status=plan-only"
         echo "${STATUS_PREFIX}_reason=plan-only"
         echo "${STATUS_PREFIX}_resolution=$RESOLUTION"
-        echo "${STATUS_PREFIX}_probe_fn=$PROBE_FN"
-        echo "${STATUS_PREFIX}_probe_prefix=$PROBE_PREFIX"
-        echo "${STATUS_PREFIX}_perf_env_flag=$PERF_ENV_FLAG"
-        echo "${STATUS_PREFIX}_use_native=$USE_NATIVE"
-        echo "${STATUS_PREFIX}_native_bin=$NATIVE_BIN"
-        echo "${STATUS_PREFIX}_alias_src=$ALIAS_SRC"
+        emit_common_fields
         echo "${STATUS_PREFIX}_width=$WIDTH"
         echo "${STATUS_PREFIX}_height=$HEIGHT"
         echo "${STATUS_PREFIX}_frames=$FRAMES"
@@ -98,6 +124,7 @@ if [ ! -x "$SIMPLE_BIN" ]; then
     {
         echo "${STATUS_PREFIX}_status=fail"
         echo "${STATUS_PREFIX}_reason=missing-simple-binary"
+        emit_common_fields
     } >"$STATUS_ENV"
     echo "FAIL: $SIMPLE_BIN not executable"
     exit 1
@@ -110,11 +137,7 @@ if [ "$USE_NATIVE" = "1" ]; then
         {
             echo "${STATUS_PREFIX}_status=fail"
             echo "${STATUS_PREFIX}_reason=native-build-failed"
-            echo "${STATUS_PREFIX}_probe_fn=$PROBE_FN"
-            echo "${STATUS_PREFIX}_probe_prefix=$PROBE_PREFIX"
-            echo "${STATUS_PREFIX}_perf_env_flag=$PERF_ENV_FLAG"
-            echo "${STATUS_PREFIX}_alias_src=$ALIAS_SRC"
-            echo "${STATUS_PREFIX}_native_build_log=$BUILD_LOG"
+            emit_common_fields
         } >"$STATUS_ENV"
         tail -30 "$BUILD_LOG"
         exit 1
@@ -125,6 +148,7 @@ else
         {
             echo "${STATUS_PREFIX}_status=fail"
             echo "${STATUS_PREFIX}_reason=native-required"
+            emit_common_fields
         } >"$STATUS_ENV"
         cat "$STATUS_ENV"
         exit 1
@@ -167,13 +191,7 @@ if [ "$probe_rc" -ne 0 ] && ! grep -q "^${PROBE_PREFIX}_width=" "$LOG"; then
         echo "${STATUS_PREFIX}_reason=$reason"
         echo "${STATUS_PREFIX}_probe_exit_code=$probe_rc"
         echo "${STATUS_PREFIX}_timeout_secs=$TIMEOUT_SECS"
-        echo "${STATUS_PREFIX}_use_native=$USE_NATIVE"
-        echo "${STATUS_PREFIX}_native_bin=$NATIVE_BIN"
-        echo "${STATUS_PREFIX}_alias_src=$ALIAS_SRC"
-        echo "${STATUS_PREFIX}_probe_fn=$PROBE_FN"
-        echo "${STATUS_PREFIX}_probe_prefix=$PROBE_PREFIX"
-        echo "${STATUS_PREFIX}_perf_env_flag=$PERF_ENV_FLAG"
-        echo "${STATUS_PREFIX}_native_build_log=$BUILD_LOG"
+        emit_common_fields
         echo "${STATUS_PREFIX}_max_rss_kb=${max_rss_kb:-}"
         echo "${STATUS_PREFIX}_max_rss_budget_kb=$MAX_RSS_KB"
         echo "${STATUS_PREFIX}_rss_status=$rss_status"
@@ -227,9 +245,7 @@ if [ "$width" != "$WIDTH" ] || [ "$height" != "$HEIGHT" ] || [ "$pixels" != "$EX
         echo "${STATUS_PREFIX}_max_rss_budget_kb=$MAX_RSS_KB"
         echo "${STATUS_PREFIX}_rss_status=$rss_status"
         echo "${STATUS_PREFIX}_time_log=$TIME_LOG"
-        echo "${STATUS_PREFIX}_probe_fn=$PROBE_FN"
-        echo "${STATUS_PREFIX}_probe_prefix=$PROBE_PREFIX"
-        echo "${STATUS_PREFIX}_perf_env_flag=$PERF_ENV_FLAG"
+        emit_common_fields
         echo "${STATUS_PREFIX}_pixels=${pixels:-}"
         echo "${STATUS_PREFIX}_nonzero_pixels=${nonzero:-}"
         echo "${STATUS_PREFIX}_checksum=${checksum:-}"
@@ -256,13 +272,7 @@ fi
     echo "${STATUS_PREFIX}_status=$status"
     echo "${STATUS_PREFIX}_reason=$reason"
     echo "${STATUS_PREFIX}_resolution=$RESOLUTION"
-    echo "${STATUS_PREFIX}_use_native=$USE_NATIVE"
-    echo "${STATUS_PREFIX}_native_bin=$NATIVE_BIN"
-    echo "${STATUS_PREFIX}_alias_src=$ALIAS_SRC"
-    echo "${STATUS_PREFIX}_probe_fn=$PROBE_FN"
-    echo "${STATUS_PREFIX}_probe_prefix=$PROBE_PREFIX"
-    echo "${STATUS_PREFIX}_perf_env_flag=$PERF_ENV_FLAG"
-    echo "${STATUS_PREFIX}_native_build_log=$BUILD_LOG"
+    emit_common_fields
     echo "${STATUS_PREFIX}_width=$width"
     echo "${STATUS_PREFIX}_height=$height"
     echo "${STATUS_PREFIX}_frames=$FRAMES"

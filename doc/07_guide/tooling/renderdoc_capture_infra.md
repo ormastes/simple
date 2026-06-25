@@ -201,13 +201,18 @@ pixels, target FPS met, nonempty checksum,
 `gui_showcase_4k_200fps_time_log_file_status=pass`,
 `retained-static-frame`, one redraw frame, at least 200 measured frames, and
 `target_fps >= 200`, plus RSS budget status with `max_rss_kb` and
-`max_rss_budget_kb`. The default wrapper budget is 262144 KiB for 4K and
+`max_rss_budget_kb`. A pass row must also retain binary provenance:
+`source_revision`, `simple_bin`, `use_native=1`,
+`native_build_mode=aggressive-native`, and `fallback_state=none`. The default
+wrapper budget is 262144 KiB for 4K and
 750000 KiB for 8K; rows with `rss_status=measured` are diagnostics, not
 completion evidence. The 8K row must likewise prove
 `7680x4320`, `33177600` pixels, nonzero readback pixels, target FPS at least
 200, positive measured frame count, checksum,
 `gui_showcase_8k_perf_log_file_status=pass`,
-`gui_showcase_8k_perf_time_log_file_status=pass`, and RSS budget status.
+`gui_showcase_8k_perf_time_log_file_status=pass`, RSS budget status, and the
+same native binary provenance fields. Interpreter or fallback rows remain useful
+diagnostics, but they are not 4K/8K completion evidence.
 Use `PLAN_ONLY=1 RESOLUTION=4k|8k
 scripts/check/check-widget-showcase-4k-200fps.shs` to verify wrapper routing
 without launching the expensive native perf run. Plan-only evidence is not
