@@ -92,9 +92,12 @@ class CompilerQueryContext:
         val result = parse_source(source, file_path)
 
         # Update cache
-        if result.ok.?:
-            self.cached_asts[file_path] = result.unwrap()
-            self.file_mtimes[file_path] = get_file_mtime(file_path)
+        match result:
+            Ok(ast):
+                self.cached_asts[file_path] = ast
+                self.file_mtimes[file_path] = get_file_mtime(file_path)
+            Err(_):
+                pass
 
         result
 
@@ -115,7 +118,11 @@ class CompilerQueryContext:
         if not ast_result.is_ok():
             return Err(Error("Failed to parse file"))
 
-        val ast = ast_result.unwrap()
+        val ast = match ast_result:
+            Ok(value):
+                value
+            Err(_):
+                return Err(Error("Failed to parse file"))
 
         # Build symbol table
         val symbol_table = build_symbol_table(ast)
@@ -131,7 +138,11 @@ class CompilerQueryContext:
         if not symbol_table_result.is_ok():
             return nil
 
-        val symbol_table = symbol_table_result.unwrap()
+        val symbol_table = match symbol_table_result:
+            Ok(value):
+                value
+            Err(_):
+                return nil
         find_symbol_at_position(symbol_table, pos)
 
     # Find symbol at a specific position with scoped visibility metadata
@@ -140,7 +151,11 @@ class CompilerQueryContext:
         if not symbol_table_result.is_ok():
             return nil
 
-        val symbol_table = symbol_table_result.unwrap()
+        val symbol_table = match symbol_table_result:
+            Ok(value):
+                value
+            Err(_):
+                return nil
         find_symbol_at_position_v2(symbol_table, pos)
 
     # Find all references to a symbol
@@ -167,10 +182,12 @@ class CompilerQueryContext:
         var all_refs = []
         for file in candidate_files:
             val symbol_table_result = self.get_symbol_table(file)
-            if symbol_table_result.ok.?:
-                val table = symbol_table_result.unwrap()
-                val refs = find_symbol_references(table, symbol.name)
-                all_refs.extend(refs)
+            match symbol_table_result:
+                Ok(table):
+                    val refs = find_symbol_references(table, symbol.name)
+                    all_refs.extend(refs)
+                Err(_):
+                    pass
 
         all_refs
 
@@ -191,20 +208,23 @@ class CompilerQueryContext:
         var all_refs: [Location] = []
         for file in candidate_files:
             val symbol_table_result = self.get_symbol_table(file)
-            if symbol_table_result.ok.?:
-                val table = symbol_table_result.unwrap()
-                val refs = find_symbol_references(table, symbol.name)
-                all_refs.extend(refs)
+            match symbol_table_result:
+                Ok(table):
+                    val refs = find_symbol_references(table, symbol.name)
+                    all_refs.extend(refs)
+                Err(_):
+                    pass
 
         all_refs
 
     # Find definition of symbol at position
     fn find_definition(file_path: text, pos: Position) -> Option<DefinitionResult>:
         val symbol_opt = self.symbol_at(file_path, pos)
-        if not symbol_opt.?:
-            return nil
-
-        val symbol = symbol_opt.unwrap()
+        val symbol = match symbol_opt:
+            Some(value):
+                value
+            None:
+                return nil
 
         # Return the definition location
         Some(DefinitionResult(
@@ -215,10 +235,11 @@ class CompilerQueryContext:
     # Find definition of symbol at position with scoped visibility metadata
     fn find_definition_v2(file_path: text, pos: Position) -> Option<DefinitionResultV2>:
         val symbol_opt = self.symbol_at_v2(file_path, pos)
-        if not symbol_opt.?:
-            return nil
-
-        val symbol = symbol_opt.unwrap()
+        val symbol = match symbol_opt:
+            Some(value):
+                value
+            None:
+                return nil
 
         Some(DefinitionResultV2(
             locations: [symbol.location],
@@ -231,15 +252,22 @@ class CompilerQueryContext:
     fn type_at(file_path: text, pos: Position) -> Option<text>:
         # Check symbol first (fast path)
         val symbol_opt = self.symbol_at_v2(file_path, pos)
-        if symbol_opt.?:
-            return symbol_opt.unwrap().type_info
+        match symbol_opt:
+            Some(symbol):
+                return symbol.type_info
+            None:
+                pass
 
         # Try to infer type from AST
         val ast_result = self.parse_file(file_path)
         if not ast_result.is_ok():
             return nil
 
-        val ast = ast_result.unwrap()
+        val ast = match ast_result:
+            Ok(value):
+                value
+            Err(_):
+                return nil
 
         # Full expression type inference requires type checker integration.
         # This would involve:
@@ -260,7 +288,11 @@ class CompilerQueryContext:
         if not symbol_table_result.is_ok():
             return []
 
-        val symbol_table = symbol_table_result.unwrap()
+        val symbol_table = match symbol_table_result:
+            Ok(value):
+                value
+            Err(_):
+                return []
 
         # Get scope at position
         val scope = get_scope_at_position(symbol_table, pos)
@@ -296,22 +328,29 @@ class CompilerQueryContext:
     # Get hover information at a position
     fn hover_at(file_path: text, pos: Position) -> Option<HoverInfo>:
         val symbol_opt = self.symbol_at_v2(file_path, pos)
-        if not symbol_opt.?:
-            return nil
-
-        val symbol = symbol_opt.unwrap()
+        val symbol = match symbol_opt:
+            Some(value):
+                value
+            None:
+                return nil
 
         # Build markdown content
         var content = "```simple\n"
         content = content + symbol.name
 
-        if symbol.type_info.?:
-            content = content + ": " + symbol.type_info.unwrap()
+        match symbol.type_info:
+            Some(type_info):
+                content = content + ": " + type_info
+            None:
+                pass
 
         content = content + "\n```\n"
 
-        if symbol.doc_comment.?:
-            content = content + "\n" + symbol.doc_comment.unwrap()
+        match symbol.doc_comment:
+            Some(doc_comment):
+                content = content + "\n" + doc_comment
+            None:
+                pass
 
         Some(HoverInfo(
             range: position_to_range(pos),
@@ -331,16 +370,13 @@ class CompilerQueryContext:
 
         # Parse and collect parse errors
         val ast_result = self.parse_file(file_path)
-        if not ast_result.is_ok():
-            val parse_error = ast_result.err.unwrap()
-            diagnostics.push(parse_error_to_diagnostic(parse_error))
-
-        # Type check and collect type errors
-        if ast_result.ok.?:
-            val ast = ast_result.unwrap()
-            val type_errors = type_check_ast(ast)
-            for err in type_errors:
-                diagnostics.push(type_error_to_diagnostic(err))
+        match ast_result:
+            Ok(ast):
+                val type_errors = type_check_ast(ast)
+                for err in type_errors:
+                    diagnostics.push(type_error_to_diagnostic(err))
+            Err(parse_error):
+                diagnostics.push(parse_error_to_diagnostic(parse_error))
 
         # Cache result
         self.cached_diagnostics[file_path] = diagnostics
@@ -355,7 +391,11 @@ class CompilerQueryContext:
         if not symbol_table_result.is_ok():
             return []
 
-        val symbol_table = symbol_table_result.unwrap()
+        val symbol_table = match symbol_table_result:
+            Ok(value):
+                value
+            Err(_):
+                return []
         extract_all_symbols(symbol_table)
 
     # Get all symbols in a document with scoped visibility metadata
@@ -364,7 +404,11 @@ class CompilerQueryContext:
         if not symbol_table_result.is_ok():
             return []
 
-        val symbol_table = symbol_table_result.unwrap()
+        val symbol_table = match symbol_table_result:
+            Ok(value):
+                value
+            Err(_):
+                return []
         extract_all_symbols_v2(symbol_table)
 
     # --- Workspace Symbols ---
@@ -414,22 +458,27 @@ class CompilerQueryContext:
     fn signature_help(file_path: text, pos: Position) -> Option<SignatureHelp>:
         # Find the function being called at the cursor position
         val symbol_opt = self.symbol_at_v2(file_path, pos)
-        if not symbol_opt.?:
-            return nil
-
-        val symbol = symbol_opt.unwrap()
+        val symbol = match symbol_opt:
+            Some(value):
+                value
+            None:
+                return nil
         if symbol.kind != SymbolKind.Function and symbol.kind != SymbolKind.Method:
             return nil
 
         # Build parameter info from type signature
         var params: [ParameterInfo] = []
-        if symbol.type_info.?:
-            val sig = symbol.type_info.unwrap()
-            # Parse parameter names from type signature (e.g., "fn(x: i64, y: text) -> bool")
-            params.push(ParameterInfo(label: sig, documentation: nil))
+        var signature_suffix = ""
+        match symbol.type_info:
+            Some(sig):
+                # Parse parameter names from type signature (e.g., "fn(x: i64, y: text) -> bool")
+                params.push(ParameterInfo(label: sig, documentation: nil))
+                signature_suffix = ": " + sig
+            None:
+                pass
 
         val sig_info = SignatureInfo(
-            label: symbol.name + (if symbol.type_info.?: ": " + symbol.type_info.unwrap() else: ""),
+            label: symbol.name + signature_suffix,
             documentation: symbol.doc_comment,
             parameters: params
         )
@@ -444,10 +493,11 @@ class CompilerQueryContext:
 
     fn prepare_rename(file_path: text, pos: Position) -> Option<Range>:
         val symbol_opt = self.symbol_at_v2(file_path, pos)
-        if not symbol_opt.?:
-            return nil
-
-        val symbol = symbol_opt.unwrap()
+        val symbol = match symbol_opt:
+            Some(value):
+                value
+            None:
+                return nil
         # Return the range of the symbol name at the definition
         Some(Range(
             start: symbol.location.start,
@@ -459,10 +509,11 @@ class CompilerQueryContext:
 
     me rename(file_path: text, pos: Position, new_name: text) -> Option<WorkspaceEdit>:
         val symbol_opt = self.symbol_at_v2(file_path, pos)
-        if not symbol_opt.?:
-            return nil
-
-        val symbol = symbol_opt.unwrap()
+        val symbol = match symbol_opt:
+            Some(value):
+                value
+            None:
+                return nil
         val refs = self.find_references_v2(file_path, symbol)
 
         var edits: [RenameEdit] = []
@@ -500,10 +551,11 @@ class CompilerQueryContext:
 
     fn call_hierarchy_prepare(file_path: text, pos: Position) -> [CallHierarchyItem]:
         val symbol_opt = self.symbol_at_v2(file_path, pos)
-        if not symbol_opt.?:
-            return []
-
-        val symbol = symbol_opt.unwrap()
+        val symbol = match symbol_opt:
+            Some(value):
+                value
+            None:
+                return []
         if symbol.kind != SymbolKind.Function and symbol.kind != SymbolKind.Method:
             return []
 
@@ -521,21 +573,23 @@ class CompilerQueryContext:
 
         for file in all_files:
             val symbol_table_result = self.get_symbol_table(file)
-            if symbol_table_result.ok.?:
-                val table = symbol_table_result.unwrap()
-                val refs = find_symbol_references(table, item.name)
-                for ref_loc in refs:
-                    # Each reference is a potential call site
-                    val caller = CallHierarchyItem(
-                        name: file,
-                        kind: SymbolKind.Function,
-                        location: ref_loc,
-                        detail: nil
-                    )
-                    incoming.push(CallHierarchyIncomingCall(
-                        from_item: caller,
-                        from_ranges: [Range(start: ref_loc.start, end: ref_loc.end)]
-                    ))
+            match symbol_table_result:
+                Ok(table):
+                    val refs = find_symbol_references(table, item.name)
+                    for ref_loc in refs:
+                        # Each reference is a potential call site
+                        val caller = CallHierarchyItem(
+                            name: file,
+                            kind: SymbolKind.Function,
+                            location: ref_loc,
+                            detail: nil
+                        )
+                        incoming.push(CallHierarchyIncomingCall(
+                            from_item: caller,
+                            from_ranges: [Range(start: ref_loc.start, end: ref_loc.end)]
+                        ))
+                Err(_):
+                    pass
 
         incoming
 
@@ -546,7 +600,11 @@ class CompilerQueryContext:
         if not symbol_table_result.ok.?:
             return []
 
-        val table = symbol_table_result.unwrap()
+        val table = match symbol_table_result:
+            Ok(value):
+                value
+            Err(_):
+                return []
         val all_symbols = extract_all_symbols_v2(table)
 
         var outgoing: [CallHierarchyOutgoingCall] = []
@@ -574,10 +632,11 @@ class CompilerQueryContext:
 
     fn type_hierarchy_prepare(file_path: text, pos: Position) -> [TypeHierarchyItem]:
         val symbol_opt = self.symbol_at_v2(file_path, pos)
-        if not symbol_opt.?:
-            return []
-
-        val symbol = symbol_opt.unwrap()
+        val symbol = match symbol_opt:
+            Some(value):
+                value
+            None:
+                return []
         match symbol.kind:
             case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum | SymbolKind.Trait:
                 [TypeHierarchyItem(
@@ -600,17 +659,19 @@ class CompilerQueryContext:
                 # Look for "impl TraitName for item.name" patterns
                 if content.contains("impl ") and content.contains(item.name):
                     val symbol_table_result = self.get_symbol_table(file)
-                    if symbol_table_result.ok.?:
-                        val table = symbol_table_result.unwrap()
-                        val symbols = extract_all_symbols_v2(table)
-                        for sym in symbols:
-                            if sym.kind == SymbolKind.Trait:
-                                supertypes.push(TypeHierarchyItem(
-                                    name: sym.name,
-                                    kind: sym.kind,
-                                    location: sym.location,
-                                    detail: sym.type_info
-                                ))
+                    match symbol_table_result:
+                        Ok(table):
+                            val symbols = extract_all_symbols_v2(table)
+                            for sym in symbols:
+                                if sym.kind == SymbolKind.Trait:
+                                    supertypes.push(TypeHierarchyItem(
+                                        name: sym.name,
+                                        kind: sym.kind,
+                                        location: sym.location,
+                                        detail: sym.type_info
+                                    ))
+                        Err(_):
+                            pass
 
         supertypes
 
@@ -625,19 +686,21 @@ class CompilerQueryContext:
                 # Look for "impl item.name for TypeName" patterns
                 if content.contains("impl {item.name}"):
                     val symbol_table_result = self.get_symbol_table(file)
-                    if symbol_table_result.ok.?:
-                        val table = symbol_table_result.unwrap()
-                        val symbols = extract_all_symbols_v2(table)
-                        for sym in symbols:
-                            if (sym.kind == SymbolKind.Class or
-                                sym.kind == SymbolKind.Struct or
-                                sym.kind == SymbolKind.Enum):
-                                subtypes.push(TypeHierarchyItem(
-                                    name: sym.name,
-                                    kind: sym.kind,
-                                    location: sym.location,
-                                    detail: sym.type_info
-                                ))
+                    match symbol_table_result:
+                        Ok(table):
+                            val symbols = extract_all_symbols_v2(table)
+                            for sym in symbols:
+                                if (sym.kind == SymbolKind.Class or
+                                    sym.kind == SymbolKind.Struct or
+                                    sym.kind == SymbolKind.Enum):
+                                    subtypes.push(TypeHierarchyItem(
+                                        name: sym.name,
+                                        kind: sym.kind,
+                                        location: sym.location,
+                                        detail: sym.type_info
+                                    ))
+                        Err(_):
+                            pass
 
         subtypes
 
@@ -648,7 +711,11 @@ class CompilerQueryContext:
         if not symbol_table_result.ok.?:
             return []
 
-        val table = symbol_table_result.unwrap()
+        val table = match symbol_table_result:
+            Ok(value):
+                value
+            Err(_):
+                return []
         val symbols = extract_all_symbols_v2(table)
 
         var tokens: [SemanticToken] = []
@@ -709,23 +776,31 @@ class CompilerQueryContext:
         if not symbol_table_result.ok.?:
             return []
 
-        val table = symbol_table_result.unwrap()
+        val table = match symbol_table_result:
+            Ok(value):
+                value
+            Err(_):
+                return []
         val symbols = extract_all_symbols_v2(table)
 
         var hints: [InlayHint] = []
         for sym in symbols:
             # Only emit type hints for variables with inferred types
-            if sym.kind == SymbolKind.Variable and sym.type_info.?:
-                val line = sym.location.start.line
-                if line >= range_val.start.line and line <= range_val.end.line:
-                    hints.push(InlayHint(
-                        position: Position(
-                            line: line,
-                            column: sym.location.end.column
-                        ),
-                        label: ": " + sym.type_info.unwrap(),
-                        kind: InlayHintKind.TypeHint
-                    ))
+            if sym.kind == SymbolKind.Variable:
+                match sym.type_info:
+                    Some(type_info):
+                        val line = sym.location.start.line
+                        if line >= range_val.start.line and line <= range_val.end.line:
+                            hints.push(InlayHint(
+                                position: Position(
+                                    line: line,
+                                    column: sym.location.end.column
+                                ),
+                                label: ": " + type_info,
+                                kind: InlayHintKind.TypeHint
+                            ))
+                    None:
+                        pass
 
         hints
 
@@ -741,23 +816,23 @@ class CompilerQueryContext:
         for pos in positions:
             # Find the innermost symbol at this position and build hierarchy
             val symbol_opt = self.symbol_at_v2(file_path, pos)
-            if symbol_opt.?:
-                val sym = symbol_opt.unwrap()
-                # Innermost range: the symbol itself
-                val inner_idx = entries.len()
-                entries.push(SelectionRangeEntry(
-                    range: Range(start: sym.location.start, end: sym.location.end),
-                    parent_index: -1
-                ))
-            else:
-                # No symbol found — return the full line range
-                entries.push(SelectionRangeEntry(
-                    range: Range(
-                        start: Position(line: pos.line, column: 0),
-                        end: Position(line: pos.line + 1, column: 0)
-                    ),
-                    parent_index: -1
-                ))
+            match symbol_opt:
+                Some(sym):
+                    # Innermost range: the symbol itself
+                    val inner_idx = entries.len()
+                    entries.push(SelectionRangeEntry(
+                        range: Range(start: sym.location.start, end: sym.location.end),
+                        parent_index: -1
+                    ))
+                None:
+                    # No symbol found — return the full line range
+                    entries.push(SelectionRangeEntry(
+                        range: Range(
+                            start: Position(line: pos.line, column: 0),
+                            end: Position(line: pos.line + 1, column: 0)
+                        ),
+                        parent_index: -1
+                    ))
 
         entries
 
