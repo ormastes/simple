@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 107 | 107 | 0 | 0 |
+| 108 | 108 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -324,6 +324,27 @@ val spaced = render_html_to_pixels_with_viewport(spaced_html, 128, 32).pixel_dat
 
 expect(_count_color(spaced, 0xFF111827u32)).to_equal(_count_color(plain, 0xFF111827u32))
 expect(_count_region_changed(spaced, 128, 32, 0, 48, 12, WHITE_BG)).to_be_greater_than(_count_region_changed(plain, 128, 32, 0, 48, 12, WHITE_BG))
+expect(_pixels_equal(plain, spaced)).to_equal(false)
+```
+
+</details>
+
+#### renders word-spacing by widening space advances
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plain_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; }</style></head><body><div class='label'>WORD GAP TEST</div></body></html>"
+val spaced_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; word-spacing: 6px; }</style></head><body><div class='label'>WORD GAP TEST</div></body></html>"
+val plain = render_html_to_pixels_with_viewport(plain_html, 160, 32).pixel_data
+val spaced = render_html_to_pixels_with_viewport(spaced_html, 160, 32).pixel_data
+
+expect(_count_color(spaced, 0xFF111827u32)).to_equal(_count_color(plain, 0xFF111827u32))
+expect(_count_region_changed(spaced, 160, 45, 0, 60, 12, WHITE_BG)).to_be_greater_than(_count_region_changed(plain, 160, 45, 0, 60, 12, WHITE_BG))
 expect(_pixels_equal(plain, spaced)).to_equal(false)
 ```
 
@@ -1967,8 +1988,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 107 |
-| Active scenarios | 107 |
+| Total scenarios | 108 |
+| Active scenarios | 108 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
