@@ -79,10 +79,9 @@ keeps these states separate:
 - Simple Engine2D Vulkan readback availability;
 - optional RenderDoc `.rdc` capture availability and gate status.
 
-Current top-level scope is macOS-only. Use this section to prove and debug the
-macOS path now. Do not infer Windows or Linux status from this workflow. Add
-Windows and Linux parity capture runbooks later using the same evidence keys
-rather than inventing platform-specific status names.
+Current platform order is Linux Vulkan first, then macOS Metal/MoltenVK and
+Windows D3D12/PIX. Use the Linux render-log gate below before claiming Chrome,
+Electron, and Simple are comparable on a Vulkan host.
 
 Run a readiness-only probe first:
 
@@ -178,7 +177,97 @@ Electron ANGLE Vulkan acceptance, Electron RenderDoc gate status, Chrome ANGLE
 Vulkan acceptance, Chrome RenderDoc gate status, and pairwise pixel comparison.
 A blocker status of `blocked` means the GUI/web/2D comparison can still be
 useful, but at least one required Vulkan-backed `.rdc` proof or pixel-diff lane
-is missing, and completion remains `incomplete`.
+remains a completion blocker.
+
+### Linux Vulkan Render-Log Compare
+
+The Linux-first comparison gate normalizes existing aggregate evidence and
+optional native RenderDoc evidence into the Simple render-log format:
+
+```sh
+GUI_WEB_2D_VULKAN_ENV=build/gui-web-2d-vulkan-env/evidence.env \
+sh scripts/check/check-linux-vulkan-render-log-compare.shs
+```
+
+It writes:
+
+- `build/linux-vulkan-render-log-compare/evidence.env`
+- `build/linux-vulkan-render-log-compare/simple.srl.env`
+- `build/linux-vulkan-render-log-compare/chrome.srl.env`
+- `build/linux-vulkan-render-log-compare/electron.srl.env`
+- `build/linux-vulkan-render-log-compare/compare.srl.env`
+
+The gate is fail-closed. It requires Simple Vulkan backend evidence, focused
+Chrome and Electron Vulkan browser backing, `pairwise-argb-diff` mode, and all
+three pairwise diff lanes to pass. Missing RenderDoc `.rdc` evidence is
+reported through `linux_vulkan_render_log_compare_renderdoc_*_status`; set
+`LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=1` when the host is expected to provide
+real `.rdc` files and `RDOC` magic.
+
+Completion keys:
+
+```text
+linux_vulkan_render_log_compare_status=pass
+linux_vulkan_render_log_compare_required_api=vulkan
+linux_vulkan_render_log_compare_pairwise_status=pass
+```
+
+The source logs use `simple-render-log-v1` and include
+`simple_render_log_native_info` for native-only metadata that does not yet fit
+the normalized schema. Metal, D3D12/PIX, GPU debugger, and Tauri mobile lanes
+must keep this schema and add native sidecar fields instead of inventing
+unrelated key names. If any required render-log or native capture field is
+missing, completion remains `incomplete`.
+
+### macOS Metal Render-Log Compare
+
+The macOS gate normalizes native Metal generated/readback evidence, Engine2D
+framebuffer readback evidence, and Chrome/Electron Metal-backed browser
+evidence:
+
+```sh
+METAL_GENERATED_2D_READBACK_ENV=build/metal_generated_2d_readback/evidence.env \
+METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=build/metal_engine2d_framebuffer_readback_evidence/evidence.env \
+MACOS_METAL_BROWSER_ENV=build/macos-metal-browser-backing/evidence.env \
+sh scripts/check/check-macos-metal-render-log-compare.shs
+```
+
+Set `MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1` on a host where Xcode GPU
+Frame Capture evidence is expected. Completion keys:
+
+```text
+macos_metal_render_log_compare_status=pass
+macos_metal_render_log_compare_required_api=metal
+macos_metal_render_log_compare_pairwise_status=pass
+```
+
+The gate rejects missing Metal submit/readback, missing raw framebuffer
+download, checksum mismatch, browser fallback, and non-pairwise comparisons.
+
+### Windows D3D12/PIX Render-Log Compare
+
+The Windows gate requires explicit D3D12 native readback evidence and
+Chrome/Electron D3D12-backed browser evidence. The older DirectX/D3D11 wrapper
+is diagnostic only unless its evidence explicitly states `d3d12`.
+
+```sh
+WINDOWS_D3D12_NATIVE_READBACK_ENV=build/windows-d3d12-native-readback/evidence.env \
+WINDOWS_D3D12_BROWSER_ENV=build/windows-d3d12-browser-backing/evidence.env \
+WINDOWS_D3D12_PIX_ENV=build/windows-d3d12-pix/evidence.env \
+sh scripts/check/check-windows-d3d12-render-log-compare.shs
+```
+
+Set `WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1` when PIX or an equivalent GPU
+debugger capture is required. Completion keys:
+
+```text
+windows_d3d12_render_log_compare_status=pass
+windows_d3d12_render_log_compare_required_api=d3d12
+windows_d3d12_render_log_compare_pairwise_status=pass
+```
+
+The gate rejects D3D11-only evidence, missing PIX/GPU-debugger proof in strict
+mode, browser fallback, and non-pairwise comparisons.
 
 On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
 `src/compiler_rust/target/debug/simple` when that binary advertises the macOS
@@ -358,14 +447,11 @@ Current local macOS result on 2026-06-21:
   `rdoc_capture_reason=missing-renderdoc` because `renderdoccmd` is not
   installed or discoverable on this host.
 
-### Deferred Windows/Linux Scope
+### Cross-Platform Scope
 
-Do not use this top-level guide to claim Windows or Linux GUI/web/2D RenderDoc
-completion yet. Add those runbooks later as separate platform sections that
-validate the same contract: host Vulkan readiness, Chrome/Electron Vulkan logs,
-Simple Engine2D Vulkan readback, and RenderDoc `.rdc` files with `RDOC` magic.
-The existing Windows readiness helper can seed that future work, but it is not
-currently a passing capture gate.
+Do not use one platform gate to claim another platform. Linux Vulkan, macOS
+Metal, and Windows D3D12/PIX must each pass their own `simple-render-log-v1`
+comparison gate on a matching native host.
 
 ## Evidence Artifacts
 
