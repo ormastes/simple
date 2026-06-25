@@ -392,8 +392,9 @@ State file at `.sstack/<feature>/state.md` is the sole communication channel bet
 Integrates cooperative workflow: Phases 2-3 delegate to Codex/Gemini when available, fall back to Claude solo with notification when unavailable or quota-exceeded.
 
 ## Dev Workflow
-`/dev` is an alias for `/sstack`. Same 8 phases, same state file, same quality gates, same cooperative workflow.
-No separate phase definitions — just a thin redirect.
+Current Codex feature development routes through `/sp_dev`. Legacy `/sstack`
+docs remain for historical SStack references, but `/dev` is no longer a
+standalone Codex skill.
 
 ## SPipe
 SPipe is the BDD (Behavior-Driven Development) test framework for Simple.

@@ -16,9 +16,9 @@ subprojects.
 
 ## Pipeline
 
-Use SPipe/SStack full feature development for cross-cutting work:
+Use SPipe full feature development for cross-cutting work:
 
-- `/dev` or `/sp_dev` for full feature development
+- `/sp_dev` for full feature development
 - `/spipe` for focused SPipe test/spec authoring
 - `/verify` before release
 

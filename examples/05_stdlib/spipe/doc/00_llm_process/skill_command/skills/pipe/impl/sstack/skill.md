@@ -1,7 +1,7 @@
 <!-- llm-process-gen: managed source=pipe_impl_sstack_skill source_sha256=18d16a12ffb4c4cab1582f0bdc44e85660433a64a71fe38e63743698ed5571b1 content_sha256=18d16a12ffb4c4cab1582f0bdc44e85660433a64a71fe38e63743698ed5571b1 -->
 ---
 name: sstack
-description: SStack 8-phase BDD/TDD pipeline orchestrator with cooperative workflow (Codex/Gemini fallback). Use for any dev task — /dev is an alias.
+description: Legacy SStack 8-phase BDD/TDD pipeline orchestrator with cooperative workflow (Codex/Gemini fallback). Prefer /sp_dev for current dev work.
 ---
 
 # SStack Skill -- Superpowers + GSD + GStack Orchestrator
@@ -15,10 +15,10 @@ SStack is a full-lifecycle development pipeline that combines three frameworks:
 
 ```
 /sstack <user request>
-/dev <user request>              # alias — same 8 phases
 ```
 
-`/dev` is an alias for `/sstack`. Both run the same 8-phase pipeline.
+For current feature development, prefer `/sp_dev`. `/dev` is no longer a
+standalone Codex skill.
 
 ## How It Works
 
@@ -251,7 +251,7 @@ SStack agents invoke existing skills per phase:
 
 | Workflow | Relationship |
 |----------|-------------|
-| `/dev` | Alias for `/sstack` — same 8 phases, same pipeline |
+| `/sp_dev` | Current SPipe feature-development entrypoint |
 | `/impl` | 15-phase heavyweight workflow — generates doc artifacts, uses agent teams. Independent of sstack but shares skill references (`/coding`, `/spipe`, `/verify`) |
 | `/research` | Standalone research skill — used within sstack Phase 2, also runs independently |
 | `/research_codex` | Codex cooperative research — used within sstack Phase 2 when Codex available |
