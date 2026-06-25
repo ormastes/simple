@@ -46,9 +46,11 @@ fn pattern_to_text(p: PatternRepr) -> text:
         case Tuple(pats): "({pats.map(pattern_to_text(_)).join(\", \")})"
         case Array(pats): "[{pats.map(pattern_to_text(_)).join(\", \")}]"
         case Enum(name, payload):
-            if payload.?:
-                "{name}({pattern_to_text(payload.unwrap())})"
-            else: name
+            match payload:
+                Some(value):
+                    "{name}({pattern_to_text(value)})"
+                nil:
+                    name
         case Struct(name, fields):
             val fs = fields.map("{_.0}: {pattern_to_text(_.1)}").join(", ")
             "{name}({fs})"
@@ -70,6 +72,17 @@ struct ExhaustivenessCheck:
 # Pattern Analysis
 # ============================================================================
 
+fn enum_payload_subsumes(broader: PatternRepr?, narrower: PatternRepr?) -> bool:
+    match broader:
+        Some(broader_payload):
+            match narrower:
+                Some(narrower_payload):
+                    pattern_subsumes(broader_payload, narrower_payload)
+                nil:
+                    false
+        nil:
+            false
+
 fn pattern_subsumes(broader: PatternRepr, narrower: PatternRepr) -> bool:
     """Check if broader pattern covers all cases of narrower pattern."""
     if is_wildcard(broader): return true
@@ -81,8 +94,7 @@ fn pattern_subsumes(broader: PatternRepr, narrower: PatternRepr) -> bool:
         case (Enum(na, pa), Enum(nb, pb)):
             if na != nb: false
             elif not pa.? and not pb.?: true
-            elif pa.? and pb.?: pattern_subsumes(pa.unwrap(), pb.unwrap())
-            else: false
+            else: enum_payload_subsumes(pa, pb)
         case (Tuple(as_), Tuple(bs)):
             if as_.len() != bs.len(): false
             else:
