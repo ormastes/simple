@@ -122,3 +122,35 @@ the seed-derived model does NOT map to the `.spl` backend. Four findings:
 - **(C) Infra prerequisite:** fix stage-3 self-host stubs (esp. `builder_emit_*`)
   or provide an in-process `compile`, so `.spl` codegen is testable without the
   seed. (A)/(B) cannot be verified end-to-end until this lands.
+## (C) testability diagnosis 2026-06-25 — gated by deep self-host failure
+
+Attempting (C) "make `.spl` codegen testable" revealed it is gated by the
+long-standing self-host failure (see `project_bootstrap_stage3_selfhost_broken`),
+not a small enabler:
+
+- **stage-2 is a stub.** `bootstrap_main.spl` `compile` only prints
+  `"compile: <file>"` (no codegen); `native-build` errors "rebuild with the full
+  Simple driver." So stage-2 cannot test `.spl` codegen.
+- **full-CLI build completes but stubs 551 unresolved symbols.** The seed→full
+  build (`build/bootstrap/full/.../simple`, 782 compiled/0 failed) emits
+  "Generating 551 stub functions for unresolved symbols." Categories (systematic,
+  not 551 independent bugs): `*__ParserModule` per-module singletons (dominant),
+  `builder_emit_*` SPIR-V builders, `BidirHirExpr_dot_*` method dispatch, `Jit*`
+  (JitMapper/JitInstantiator), builtins (`Dict`/`alloc`/`chars_len`), and libc
+  externs (`cfgetispeed@GLIBC`). The compiler's own backend codegen + parser
+  modules are stubbed in the self-hosted binary → native codegen is unreachable.
+- **fresh full-CLI `run` is non-functional.** `<full>/simple run p11.spl`
+  (`print(1+1)`) exits rc=0 with NO output. Only the STALE deployed `bin/simple`
+  runs (via interpreter fallback), and it predates current sources.
+
+**Consequence:** A/B (native optional/`any` codegen) cannot be verified
+end-to-end until self-host produces a binary whose native codegen actually links
+and runs. (C) is therefore the foundational blocker — a dedicated self-host
+repair project.
+
+**Highest-leverage entry point:** the `*__ParserModule` systematic emission/
+resolution gap (one unresolved singleton per module) likely accounts for the
+largest share; resolving how module `ParserModule` singletons are emitted/named
+in the self-hosted backend is the first sub-problem to attack. Then `builder_emit_*`
+(SPIR-V builder module not linked) and `BidirHirExpr_dot_*` (method-symbol
+mangling). Diagnose against `build/bootstrap/logs/.../stage4-native-build.log`.
