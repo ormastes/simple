@@ -2037,7 +2037,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 188 lines folded for reproduction.
+Runnable source: 193 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2061,8 +2061,13 @@ expect(aggregate_script).to_contain("default_simple_renderdoc_env = \"build/gui-
 expect(aggregate_script.contains("default_simple_renderdoc_env = \"build/gui-web-2d-vulkan-env-renderdoc-simple-explicit-layer-owner-env/renderdoc/simple/evidence.env\"")).to_be(false)
 expect(aggregate_script).to_contain("default_chrome_renderdoc_env = \"build/renderdoc/chrome-display-helper/evidence.env\"")
 expect(aggregate_script.contains("default_chrome_renderdoc_env = \"build/renderdoc/chrome-display-helper/html/evidence.env\"")).to_be(false)
+expect(aggregate_script).to_contain("def path_fingerprint(value: str) -> str:")
+expect(aggregate_script).to_contain("hashlib.sha256(data).hexdigest()")
+expect(aggregate_script).to_contain("path_fingerprint(os.environ.get(\"RDOC_ELECTRON_HTML_EVIDENCE_ENV\", default_electron_renderdoc_env))")
+expect(aggregate_script).to_contain("\"RDOC_ELECTRON_HTML_EVIDENCE_ENV\": os.environ.get(\"RDOC_ELECTRON_HTML_EVIDENCE_ENV\", default_electron_renderdoc_env)")
 val renderdoc_common = file_read("scripts/lib/renderdoc-evidence-common.shs")
 expect(renderdoc_common).to_contain("chromium-gpu-process-crashed-under-renderdoc")
+expect(renderdoc_common).to_contain("electron-process-sigtrap-under-renderdoc")
 expect(renderdoc_common).to_contain("rdoc_rewrite_missing_rdc_reason \"$tmp_env\" \"$out_dir/renderdoc-html.log\"")
 expect(renderdoc_common).to_contain("rdoc_rewrite_missing_rdc_reason \"$tmp_env\" \"$out_dir/renderdoc-electron-html.log\"")
 val command_with_pixel_env = command.replace("gui_web_2d_vulkan_simple_backend_name=vulkan\\n", "gui_web_2d_vulkan_simple_backend_name=vulkan\\ngui_web_2d_vulkan_electron_argb_checksum=1234\\ngui_web_2d_vulkan_electron_argb_weighted_checksum=5678\\ngui_web_2d_vulkan_chrome_argb_status=pass\\ngui_web_2d_vulkan_chrome_argb_path=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb.json\\ngui_web_2d_vulkan_chrome_argb_width=1024\\ngui_web_2d_vulkan_chrome_argb_height=768\\ngui_web_2d_vulkan_chrome_argb_nonblank_pixel_count=1\\ngui_web_2d_vulkan_chrome_argb_checksum=1234\\ngui_web_2d_vulkan_chrome_argb_weighted_checksum=5678\\ngui_web_2d_vulkan_simple_argb_status=pass\\ngui_web_2d_vulkan_simple_argb_path=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/simple_argb.json\\ngui_web_2d_vulkan_simple_argb_width=1024\\ngui_web_2d_vulkan_simple_argb_height=768\\ngui_web_2d_vulkan_simple_argb_nonblank_pixel_count=1\\ngui_web_2d_vulkan_simple_argb_checksum=1234\\ngui_web_2d_vulkan_simple_argb_weighted_checksum=5678\\ngui_web_2d_vulkan_electron_chrome_diff_status=pass\\ngui_web_2d_vulkan_electron_chrome_diff_reason=pass\\ngui_web_2d_vulkan_electron_chrome_mismatch_count=0\\ngui_web_2d_vulkan_electron_chrome_diff_path=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_chrome_diff.env\\ngui_web_2d_vulkan_electron_simple_diff_status=pass\\ngui_web_2d_vulkan_electron_simple_diff_reason=pass\\ngui_web_2d_vulkan_electron_simple_mismatch_count=0\\ngui_web_2d_vulkan_electron_simple_diff_path=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_simple_diff.env\\ngui_web_2d_vulkan_chrome_simple_diff_status=pass\\ngui_web_2d_vulkan_chrome_simple_diff_reason=pass\\ngui_web_2d_vulkan_chrome_simple_mismatch_count=0\\ngui_web_2d_vulkan_chrome_simple_diff_path=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_simple_diff.env\\n")

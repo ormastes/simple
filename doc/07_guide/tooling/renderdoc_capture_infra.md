@@ -993,9 +993,12 @@ hooking is disabled.
 
 Current real-display evidence still does not satisfy the browser `.rdc` gates:
 Chrome with RenderDoc child-process hooking exits the Chromium GPU process with
-code 139, Chrome single-process reports that Vulkan is unsupported in the
-in-process GPU path, and Electron 42/X11/Vulkan captures ARGB outside RenderDoc
-but exits with `SIGTRAP` under `renderdoccmd capture` before `.rdc` output.
+code 139 and is recorded as
+`chromium-gpu-process-crashed-under-renderdoc`; Chrome single-process reports
+that Vulkan is unsupported in the in-process GPU path; and Electron
+42/X11/Vulkan captures ARGB outside RenderDoc but exits with `SIGTRAP` under
+`renderdoccmd capture` before ARGB or `.rdc` output, recorded as
+`electron-process-sigtrap-under-renderdoc`.
 
 ## macOS Notes
 

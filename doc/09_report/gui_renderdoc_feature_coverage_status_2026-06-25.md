@@ -22,8 +22,8 @@
 - RenderDoc goal: fail (gate-command-failed)
 - Simple RenderDoc: pass (pass)
 - External Chrome/Vulkan RenderDoc: fail (gate-command-failed)
-- Electron Chromium/Vulkan RenderDoc: unavailable (missing-electron-rdoc)
-- Electron Chromium/Vulkan gate: unavailable (missing-source-evidence)
+- Electron Chromium/Vulkan RenderDoc: fail (electron-process-sigtrap-under-renderdoc)
+- Electron Chromium/Vulkan gate: fail (electron-process-sigtrap-under-renderdoc)
 - GUI/web/2D Vulkan setup source: existing-evidence
 - GUI/web/2D Vulkan setup mode: --run
 - GUI/web/2D Vulkan direct-run source: configured-main (--run; evidence build/gui-web-2d-vulkan-env/evidence.env)
@@ -31,7 +31,7 @@
 - GUI/web/2D Electron browser backing: fail (electron-vulkan-hardware-missing; vulkan enabled_on; gpu enabled; display ; gl (gl=none,angle=none); source build/gui-web-2d-vulkan-env-browser-backing/electron_argb.json)
 - GUI/web/2D Chrome browser backing: pass (chrome-vulkan-backed; display ANGLE_VULKAN; gpu enabled; gl (gl=egl-angle,angle=vulkan); source build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json)
 - GUI/web/2D browser backing blocker: doc/08_tracking/bug/gui_web_2d_vulkan_browser_backing_2026-06-23.md
-- GUI/web/2D Vulkan RenderDoc blockers: blocked (4; renderdoc-command-ready-ready;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-fail-gate-command-failed)
+- GUI/web/2D Vulkan RenderDoc blockers: blocked (4; renderdoc-command-ready-ready;electron-renderdoc-gate-fail-electron-process-sigtrap-under-renderdoc;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-fail-gate-command-failed)
 - GUI/web/2D RenderDoc blocker: doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
 - GUI/web/2D Vulkan loader: present (NVIDIA TITAN RTX / NVIDIA)
 - GUI/web/2D Vulkan RenderDoc: ready (ready)
@@ -155,8 +155,8 @@
 - gui_widget_renderdoc_goal_simple_gate_status=pass
 - gui_widget_renderdoc_goal_simple_gate_source_env_file_status=pass
 - gui_widget_renderdoc_goal_simple_gate_capture_file_status=pass
-- gui_widget_renderdoc_goal_electron_gate_status=unavailable
-- gui_widget_renderdoc_goal_electron_gate_source_env_file_status=missing
+- gui_widget_renderdoc_goal_electron_gate_status=fail
+- gui_widget_renderdoc_goal_electron_gate_source_env_file_status=pass
 - gui_widget_renderdoc_goal_electron_gate_capture_file_status=missing
 - gui_widget_renderdoc_goal_electron_gate_argb_file_status=missing
 - gui_widget_renderdoc_goal_blocked_gate_count=1
@@ -312,9 +312,9 @@
 - gui_web_2d_vulkan_chrome_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json
 - gui_web_2d_vulkan_chrome_browser_backing_source_file_status=pass
 - gui_web_2d_vulkan_renderdoc_blocker_status=blocked
-- gui_web_2d_vulkan_renderdoc_blocker_reason=renderdoc-command-ready-ready;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-fail-gate-command-failed
+- gui_web_2d_vulkan_renderdoc_blocker_reason=renderdoc-command-ready-ready;electron-renderdoc-gate-fail-electron-process-sigtrap-under-renderdoc;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-fail-gate-command-failed
 - gui_web_2d_vulkan_renderdoc_blocker_gate_count=4
-- gui_web_2d_vulkan_renderdoc_blocker_gates=renderdoc-command-ready-ready|electron-renderdoc-gate-unavailable-missing-source-evidence|chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|chrome-renderdoc-gate-fail-gate-command-failed
+- gui_web_2d_vulkan_renderdoc_blocker_gates=renderdoc-command-ready-ready|electron-renderdoc-gate-fail-electron-process-sigtrap-under-renderdoc|chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|chrome-renderdoc-gate-fail-gate-command-failed
 - gui_web_2d_vulkan_renderdoc_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
 - gui_web_2d_vulkan_direct_run_evidence_env=build/gui-web-2d-vulkan-env/evidence.env
 - gui_web_2d_vulkan_direct_run_source=configured-main
@@ -595,7 +595,7 @@
 - simple_renderdoc_capture_magic=RDOC
 - simple_renderdoc_capture_file_magic=RDOC
 - simple_renderdoc_capture_file=build/gui-web-2d-vulkan-env-renderdoc-simple/renderdoc/simple/simple_gui_app_capture.rdc
-- simple_renderdoc_gate_env=build/gui-renderdoc-feature-coverage-static-cache/renderdoc-goal-status-ca2cddedf06ed285/simple-gate/evidence.env
+- simple_renderdoc_gate_env=build/gui-renderdoc-feature-coverage-static-cache/renderdoc-goal-status-52bc4e77715e6345/simple-gate/evidence.env
 - simple_renderdoc_gate_status=pass
 - simple_renderdoc_gate_reason=pass
 - simple_renderdoc_gate_capture_file_magic=RDOC
@@ -648,54 +648,54 @@
 - external_renderdoc_required_launch_flag_enable_features=--enable-features=Vulkan
 - external_renderdoc_required_launch_flag_use_angle=--use-angle=vulkan
 - electron_renderdoc_evidence_env=build/renderdoc/electron-display-helper/electron-html/evidence.env
-- electron_renderdoc_status=unavailable
-- electron_renderdoc_reason=missing-electron-rdoc
+- electron_renderdoc_status=fail
+- electron_renderdoc_reason=electron-process-sigtrap-under-renderdoc
 - electron_renderdoc_magic=
-- electron_renderdoc_scene=
+- electron_renderdoc_scene=html-css-electron
 - electron_renderdoc_capture_file=
 - electron_renderdoc_capture_file_magic=
-- electron_renderdoc_html_path=
-- electron_renderdoc_binary=
-- electron_renderdoc_capture_script=
-- electron_renderdoc_requested_api=
-- electron_renderdoc_requested_angle=
-- electron_renderdoc_requested_features=
-- electron_renderdoc_launch_flags=
+- electron_renderdoc_html_path=/home/ormastes/dev/pub/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- electron_renderdoc_binary=/home/ormastes/dev/pub/simple/tools/electron-shell/node_modules/.bin/electron
+- electron_renderdoc_capture_script=/home/ormastes/dev/pub/simple/tools/electron-live-bitmap/capture_html_argb.js
+- electron_renderdoc_requested_api=vulkan
+- electron_renderdoc_requested_angle=vulkan
+- electron_renderdoc_requested_features=Vulkan
+- electron_renderdoc_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform=x11 --enable-features=Vulkan --use-angle=vulkan
 - electron_renderdoc_gate_command=RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/electron-html/evidence.env sh scripts/check/check-renderdoc-electron-html-gate.shs
 - electron_renderdoc_gate_exit_code=1
-- electron_renderdoc_gate_status=unavailable
-- electron_renderdoc_gate_reason=missing-source-evidence
+- electron_renderdoc_gate_status=fail
+- electron_renderdoc_gate_reason=electron-process-sigtrap-under-renderdoc
 - electron_renderdoc_gate_source_env=build/renderdoc/electron-display-helper/electron-html/evidence.env
-- electron_renderdoc_gate_backend=
-- electron_renderdoc_gate_scene=
-- electron_renderdoc_gate_capture_status=
-- electron_renderdoc_gate_capture_reason=missing-source-evidence
+- electron_renderdoc_gate_backend=electron
+- electron_renderdoc_gate_scene=html-css-electron
+- electron_renderdoc_gate_capture_status=fail
+- electron_renderdoc_gate_capture_reason=electron-process-sigtrap-under-renderdoc
 - electron_renderdoc_gate_capture_file=
 - electron_renderdoc_gate_capture_magic=
 - electron_renderdoc_gate_capture_file_magic=
-- electron_renderdoc_gate_html_path=
-- electron_renderdoc_gate_binary=
-- electron_renderdoc_gate_capture_script=
-- electron_renderdoc_gate_argb_path=
-- electron_renderdoc_gate_argb_status=
-- electron_renderdoc_gate_argb_reason=
+- electron_renderdoc_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- electron_renderdoc_gate_binary=tools/electron-shell/node_modules/.bin/electron
+- electron_renderdoc_gate_capture_script=tools/electron-live-bitmap/capture_html_argb.js
+- electron_renderdoc_gate_argb_path=build/renderdoc/electron-display-helper/electron-html/electron_argb.json
+- electron_renderdoc_gate_argb_status=missing
+- electron_renderdoc_gate_argb_reason=missing-electron-argb-file
 - electron_renderdoc_gate_argb_width=
 - electron_renderdoc_gate_argb_height=
 - electron_renderdoc_gate_argb_format=
 - electron_renderdoc_gate_argb_producer=
 - electron_renderdoc_gate_argb_native_width=
 - electron_renderdoc_gate_argb_native_height=
-- electron_renderdoc_gate_argb_pixel_count=
-- electron_renderdoc_gate_argb_nonblank_pixel_count=
-- electron_renderdoc_gate_argb_expected_width=
-- electron_renderdoc_gate_argb_expected_height=
-- electron_renderdoc_gate_requested_api=
-- electron_renderdoc_gate_requested_angle=
-- electron_renderdoc_gate_requested_features=
-- electron_renderdoc_gate_launch_flags=
-- electron_renderdoc_gate_log=
-- electron_renderdoc_gate_vulkan_log_status=
-- electron_renderdoc_gate_vulkan_log_reason=
+- electron_renderdoc_gate_argb_pixel_count=0
+- electron_renderdoc_gate_argb_nonblank_pixel_count=0
+- electron_renderdoc_gate_argb_expected_width=1280
+- electron_renderdoc_gate_argb_expected_height=720
+- electron_renderdoc_gate_requested_api=vulkan
+- electron_renderdoc_gate_requested_angle=vulkan
+- electron_renderdoc_gate_requested_features=Vulkan
+- electron_renderdoc_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform=x11 --enable-features=Vulkan --use-angle=vulkan
+- electron_renderdoc_gate_log=build/renderdoc/electron-display-helper/electron-html/renderdoc-electron-html.log
+- electron_renderdoc_gate_vulkan_log_status=pass
+- electron_renderdoc_gate_vulkan_log_reason=pass
 - electron_renderdoc_gate_required_backend=electron
 - electron_renderdoc_gate_required_scene=html-css-electron
 - electron_renderdoc_gate_required_status=pass
