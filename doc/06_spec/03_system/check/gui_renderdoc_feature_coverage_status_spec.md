@@ -27,7 +27,7 @@ gui_renderdoc_feature_coverage_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1296,6 +1296,60 @@ expect(evidence).to_contain("gui_showcase_8k_perf_reason=missing-8k-retained-log
 
 </details>
 
+#### rejects retained 4K pass rows with a target below 200 FPS
+
+- Create an otherwise valid retained 4K row with a 60 FPS target
+   - Expected: code equals `0`
+- Assert the aggregate rejects the low 4K target
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create an otherwise valid retained 4K row with a 60 FPS target")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-4k-low-target && mkdir -p build/test-gui-renderdoc-feature-coverage-status-4k-low-target/source && printf 'showcase retained log\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-low-target/source/showcase.log && printf 'elapsed_ms=983\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-low-target/source/time.log && printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_reason=met-target-fps\\ngui_showcase_4k_200fps_resolution=4k\\ngui_showcase_4k_200fps_width=3840\\ngui_showcase_4k_200fps_height=2160\\ngui_showcase_4k_200fps_frames=60\\ngui_showcase_4k_200fps_fps_x1000=61000\\ngui_showcase_4k_200fps_target_fps=60\\ngui_showcase_4k_200fps_max_rss_kb=131072\\ngui_showcase_4k_200fps_max_rss_budget_kb=262144\\ngui_showcase_4k_200fps_rss_status=pass\\ngui_showcase_4k_200fps_pixels=8294400\\ngui_showcase_4k_200fps_nonzero_pixels=1000\\ngui_showcase_4k_200fps_checksum=123456\\ngui_showcase_4k_200fps_render_mode=retained-static-frame\\ngui_showcase_4k_200fps_redraw_frames=1\\ngui_showcase_4k_200fps_log=build/test-gui-renderdoc-feature-coverage-status-4k-low-target/source/showcase.log\\ngui_showcase_4k_200fps_time_log=build/test-gui-renderdoc-feature-coverage-status-4k-low-target/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-low-target/source/status.env && GUI_SHOWCASE_4K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-4k-low-target/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-4k-low-target/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-4k-low-target/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate rejects the low 4K target")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-4k-low-target/out/evidence.env")
+expect(evidence).to_contain("gui_showcase_4k_200fps_status=fail")
+expect(evidence).to_contain("gui_showcase_4k_200fps_reason=below-required-4k-target-fps:60")
+```
+
+</details>
+
+#### rejects retained 8K pass rows with a target below 200 FPS
+
+- Create an otherwise valid retained 8K row with a 60 FPS target
+   - Expected: code equals `0`
+- Assert the aggregate rejects the low 8K target
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create an otherwise valid retained 8K row with a 60 FPS target")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-low-target && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-low-target/source && printf 'showcase retained log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-low-target/source/showcase.log && printf 'elapsed_ms=983\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-low-target/source/time.log && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_resolution=8k\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_frames=60\\ngui_showcase_8k_perf_fps_x1000=61000\\ngui_showcase_8k_perf_target_fps=60\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_nonzero_pixels=1000\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_render_mode=retained-static-frame\\ngui_showcase_8k_perf_redraw_frames=1\\ngui_showcase_8k_perf_log=build/test-gui-renderdoc-feature-coverage-status-8k-low-target/source/showcase.log\\ngui_showcase_8k_perf_time_log=build/test-gui-renderdoc-feature-coverage-status-8k-low-target/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-low-target/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-low-target/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-low-target/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-low-target/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate rejects the low 8K target")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-8k-low-target/out/evidence.env")
+expect(evidence).to_contain("gui_showcase_8k_perf_status=fail")
+expect(evidence).to_contain("gui_showcase_8k_perf_reason=below-required-8k-target-fps:60")
+```
+
+</details>
+
 #### rejects non-8K perf rows that otherwise look healthy
 
 - Create a retained 4K performance status env
@@ -1760,8 +1814,8 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-produ
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
