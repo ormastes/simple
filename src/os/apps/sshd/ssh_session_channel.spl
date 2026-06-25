@@ -92,28 +92,31 @@ impl SshSession:
         serial_println("[sshd-session] handle_channel_open len={payload.len()}")
         if payload.len() >= 24 and _u8_at(payload, 0) == 90:
             val r_type = _read_text_field_fast(payload, 1)
-            if r_type.is_ok():
-                val ch_type = r_type.unwrap()
-                if _text_equals_bytes(ch_type.value, [0x73, 0x65, 0x73, 0x73, 0x69, 0x6F, 0x6E]) and ch_type.next_offset + 12 <= payload.len():
-                    val remote_id = _read_u32_stable(payload, ch_type.next_offset)
-                    val remote_window = _read_u32_stable(payload, ch_type.next_offset + 4)
-                    val remote_max_packet = _read_u32_stable(payload, ch_type.next_offset + 8)
-                    serial_println("[sshd-session] channel open=session (live fast path)")
-                    val local_id: u32 = 0
-                    self.active_remote_channel_id = remote_id
-                    self.channels.seed_open(local_id, ChannelType.Session, remote_id, remote_window, remote_max_packet)
-                    val confirm = _build_channel_open_confirmation_stable(
-                        remote_id, local_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET
-                    )
-                    serial_println("[sshd-session] channel open confirm len={confirm.len()}")
-                    self.send_packet(confirm)
-                    return
+            match r_type:
+                Ok(ch_type):
+                    if _text_equals_bytes(ch_type.value, [0x73, 0x65, 0x73, 0x73, 0x69, 0x6F, 0x6E]) and ch_type.next_offset + 12 <= payload.len():
+                        val remote_id = _read_u32_stable(payload, ch_type.next_offset)
+                        val remote_window = _read_u32_stable(payload, ch_type.next_offset + 4)
+                        val remote_max_packet = _read_u32_stable(payload, ch_type.next_offset + 8)
+                        serial_println("[sshd-session] channel open=session (live fast path)")
+                        val local_id: u32 = 0
+                        self.active_remote_channel_id = remote_id
+                        self.channels.seed_open(local_id, ChannelType.Session, remote_id, remote_window, remote_max_packet)
+                        val confirm = _build_channel_open_confirmation_stable(
+                            remote_id, local_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET
+                        )
+                        serial_println("[sshd-session] channel open confirm len={confirm.len()}")
+                        self.send_packet(confirm)
+                        return
+                Err(_):
+                    pass_dn
 
         val r = ssh_parse_channel_open(payload)
-        if r.is_err():
-            return
-
-        val parsed = r.unwrap()
+        val parsed = match r:
+            Ok(parsed):
+                parsed
+            Err(_):
+                return
         val ch_type_str = parsed.0
         val remote_id = parsed.1
         val remote_window = parsed.2
@@ -136,10 +139,11 @@ impl SshSession:
     me _handle_channel_data(payload: [u8]):
         """Handle SSH_MSG_CHANNEL_DATA — forward to the headless remote shell."""
         val r = ssh_parse_channel_data(payload)
-        if r.is_err():
-            return
-
-        val parsed = r.unwrap()
+        val parsed = match r:
+            Ok(parsed):
+                parsed
+            Err(_):
+                return
         val recipient = parsed.0
         val data = parsed.1
 
@@ -166,10 +170,11 @@ impl SshSession:
     me _handle_window_adjust(payload: [u8]):
         """Handle SSH_MSG_CHANNEL_WINDOW_ADJUST."""
         val r = ssh_parse_window_adjust(payload)
-        if r.is_err():
-            return
-
-        val parsed = r.unwrap()
+        val parsed = match r:
+            Ok(parsed):
+                parsed
+            Err(_):
+                return
         val recipient = parsed.0
         val bytes = parsed.1
 
@@ -192,10 +197,11 @@ impl SshSession:
     me _handle_channel_close(payload: [u8]):
         """Handle SSH_MSG_CHANNEL_CLOSE."""
         val r = ssh_parse_channel_close(payload)
-        if r.is_err():
-            return
-
-        val recipient = r.unwrap()
+        val recipient = match r:
+            Ok(parsed):
+                parsed
+            Err(_):
+                return
         val ch = self.channels.find(recipient)
         if ch != nil:
             # Send CHANNEL_CLOSE back
@@ -216,9 +222,11 @@ impl SshSession:
             return
         val recipient = _read_u32_stable(payload, 1)
         val r_type = _read_text_field_fast(payload, 5)
-        if r_type.is_err():
-            return
-        val req_type = r_type.unwrap()
+        val req_type = match r_type:
+            Ok(parsed):
+                parsed
+            Err(_):
+                return
         if req_type.next_offset >= payload.len():
             return
         val want_reply = _u8_at(payload, req_type.next_offset) != 0
@@ -301,10 +309,12 @@ impl SshSession:
         # Parse TERM
         var term_type: text = "xterm"
         val r_term = ssh_get_text(payload, pos)
-        if r_term.is_ok():
-            val term_pair = r_term.unwrap()
-            term_type = term_pair.value
-            pos = term_pair.next_offset
+        match r_term:
+            Ok(term_pair):
+                term_type = term_pair.value
+                pos = term_pair.next_offset
+            Err(_):
+                pass_dn
 
         # Parse dimensions
         var cols: u32 = 80
@@ -347,13 +357,14 @@ impl SshSession:
     me _handle_exec_request(payload: [u8], off: u64, local_id: u32, remote_id: u32, want_reply: bool):
         """Handle exec requests by running the command through the same shell REPL."""
         val r_command = _read_text_field_fast(payload, off)
-        if r_command.is_err():
-            if want_reply:
-                val fail = _build_channel_failure_stable(remote_id)
-                self.send_packet(fail)
-            return
-
-        val command = r_command.unwrap().value
+        val command = match r_command:
+            Ok(parsed):
+                parsed.value
+            Err(_):
+                if want_reply:
+                    val fail = _build_channel_failure_stable(remote_id)
+                    self.send_packet(fail)
+                return
         serial_println("[sshd-session] exec command={command}")
 
         var i: u64 = 0
