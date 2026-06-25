@@ -212,6 +212,9 @@ Chrome must report `gui_web_2d_vulkan_chrome_browser_backing_status=pass`,
 `gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed`,
 `gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true`, and
 Vulkan in either display type or GL implementation parts.
+The `--browser-backing` setup producer uses the same rule; Chrome hardware
+missing with Vulkan-looking display/GL text is emitted as
+`chrome-vulkan-hardware-missing`, not a pass.
 The aggregate also normalizes stale child rows: a child `pass` without those
 matching proof fields is emitted as `fail` with `electron-vulkan-proof-missing`
 or `chrome-vulkan-proof-missing`, so agents must fix the probe evidence rather

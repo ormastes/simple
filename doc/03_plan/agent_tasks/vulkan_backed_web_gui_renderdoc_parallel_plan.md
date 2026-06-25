@@ -181,6 +181,9 @@ gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true
 The aggregate normalizes stale child `pass` rows to `fail` when the matching
 hardware and Vulkan detail fields are missing. Do not hand-edit a pass row; rerun
 `--browser-backing` and keep the Electron/Chrome source proof files.
+The setup producer applies the same Chrome rule: `hardwareSupportsVulkan=true`
+and Vulkan display/GL detail are both required before emitting
+`chrome-vulkan-backed`.
 
 Retained showcase performance:
 
