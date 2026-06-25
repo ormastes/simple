@@ -877,6 +877,21 @@ Without `RDOC_EXTERNAL_RUN_CAPTURE=1`, the wrapper performs a readiness-only
 run and writes `rdoc_external_host_capture_status=unavailable` with
 `rdoc_external_host_capture_reason=capture-not-requested`.
 
+The top-level GUI RenderDoc aggregate consumes the focused Chrome wrapper
+summary from `build/renderdoc/chrome-display-helper/evidence.env` by default.
+That summary is produced with:
+
+```sh
+RDOC_EXTERNAL_RUN_CAPTURE=1 \
+  BUILD_DIR=build/renderdoc/chrome-display-helper \
+  sh scripts/check/check-renderdoc-external-host-capture.shs
+```
+
+If Chrome's GPU process crashes while hooked by RenderDoc before any `.rdc` is
+written, the capture remains failed but the raw reason is preserved as
+`rdoc_external_host_capture_reason_raw=chromium-gpu-process-crashed-under-renderdoc`
+instead of the generic `missing-rdc`.
+
 ## Simple Vulkan Gate
 
 Use the Simple gate when the canonical Simple in-application capture or a CI

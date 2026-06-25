@@ -463,6 +463,42 @@ rdoc_validate_rdc_magic() {
     return 1
 }
 
+rdoc_missing_rdc_reason_from_log() {
+    log_path="$1"
+    default_reason="${2:-missing-rdc}"
+    if [ ! -s "$log_path" ]; then
+        printf '%s\n' "$default_reason"
+        return 0
+    fi
+    if grep -E "GPU process exited unexpectedly: exit_code=139|Received signal 11|librenderdoc[.]so" "$log_path" >/dev/null 2>&1; then
+        printf '%s\n' "chromium-gpu-process-crashed-under-renderdoc"
+        return 0
+    fi
+    if grep -E "Trace/breakpoint trap|segmentation fault|Segmentation fault|core dumped" "$log_path" >/dev/null 2>&1; then
+        printf '%s\n' "chromium-process-crashed-under-renderdoc"
+        return 0
+    fi
+    printf '%s\n' "$default_reason"
+}
+
+rdoc_rewrite_missing_rdc_reason() {
+    status_env_path="$1"
+    log_path="$2"
+    if [ ! -s "$status_env_path" ]; then
+        return 0
+    fi
+    if ! grep '^rdoc_capture_reason=missing-rdc$' "$status_env_path" >/dev/null 2>&1; then
+        return 0
+    fi
+    reason="$(rdoc_missing_rdc_reason_from_log "$log_path" "missing-rdc")"
+    if [ "$reason" = "missing-rdc" ]; then
+        return 0
+    fi
+    tmp_status_env="$status_env_path.tmp"
+    sed "s/^rdoc_capture_reason=missing-rdc$/rdoc_capture_reason=$reason/" "$status_env_path" >"$tmp_status_env"
+    mv "$tmp_status_env" "$status_env_path"
+}
+
 rdoc_emit_simple_runtime_metadata() {
     log_path="$1"
     if [ -s "$log_path" ]; then
@@ -598,6 +634,7 @@ rdoc_capture_simple_vulkan() {
     rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
     validate_code=$?
     set -e
+    rdoc_rewrite_missing_rdc_reason "$tmp_env" "$out_dir/renderdoc-html.log"
     cat "$tmp_env" >> "$env_path"
     return "$validate_code"
 }
@@ -736,6 +773,7 @@ rdoc_capture_html() {
     rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
     validate_code=$?
     set -e
+    rdoc_rewrite_missing_rdc_reason "$tmp_env" "$out_dir/renderdoc-html.log"
     cat "$tmp_env" >> "$env_path"
     return "$validate_code"
 }
@@ -834,6 +872,7 @@ rdoc_capture_electron_html() {
     rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
     validate_code=$?
     set -e
+    rdoc_rewrite_missing_rdc_reason "$tmp_env" "$out_dir/renderdoc-electron-html.log"
     cat "$tmp_env" >> "$env_path"
     return "$validate_code"
 }
