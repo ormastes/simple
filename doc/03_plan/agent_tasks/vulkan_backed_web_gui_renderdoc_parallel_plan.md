@@ -221,11 +221,18 @@ gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass
 
 All pairwise mismatch counts must be `0`. If any capture is missing, inspect
 `gui_web_2d_vulkan_electron_stdout`,
+`gui_web_2d_vulkan_electron_stdout_file_status`,
 `gui_web_2d_vulkan_electron_log`,
+`gui_web_2d_vulkan_electron_log_file_status`,
 `gui_web_2d_vulkan_chrome_stdout`,
+`gui_web_2d_vulkan_chrome_stdout_file_status`,
 `gui_web_2d_vulkan_chrome_log`,
-`gui_web_2d_vulkan_chrome_argb_stdout`, and
-`gui_web_2d_vulkan_simple_argb_stdout` before rerunning the platform lane.
+`gui_web_2d_vulkan_chrome_log_file_status`,
+`gui_web_2d_vulkan_chrome_argb_stdout`,
+`gui_web_2d_vulkan_chrome_argb_stdout_file_status`,
+`gui_web_2d_vulkan_simple_argb_stdout`, and
+`gui_web_2d_vulkan_simple_argb_stdout_file_status` before rerunning the
+platform lane.
 
 Simple backend:
 

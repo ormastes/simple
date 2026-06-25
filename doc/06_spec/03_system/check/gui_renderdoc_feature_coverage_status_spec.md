@@ -338,7 +338,7 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 747 lines folded for reproduction.
+Runnable source: 753 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -528,7 +528,9 @@ expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_source=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/evidence.env")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/evidence.env")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_stdout=build/gui-web-2d-vulkan-env-run-auto/electron.out")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_stdout_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_log=build/gui-web-2d-vulkan-env-run-auto/electron.log")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_log_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_path=build/gui-web-2d-vulkan-env-run-auto/electron_argb.json")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_proof=build/gui-web-2d-vulkan-env-run-auto/electron_argb_proof.json")
@@ -540,7 +542,9 @@ expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_nonblank_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_checksum=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_weighted_checksum=")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_stdout=build/gui-web-2d-vulkan-env-run-auto/chrome.out")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_stdout_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_log=build/gui-web-2d-vulkan-env-run-auto/chrome.log")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_log_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_screenshot=build/gui-web-2d-vulkan-env-run-auto/chrome.png")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_screenshot_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_screenshot_png_status=missing")
@@ -550,6 +554,7 @@ expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_path=build/gui-web-2d-vulkan-env-run-auto/chrome_argb.json")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_stdout=build/gui-web-2d-vulkan-env-run-auto/chrome_argb.out")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_stdout_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof=build/gui-web-2d-vulkan-env-run-auto/chrome_argb_proof.json")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_viewport_match_status=")
@@ -561,6 +566,7 @@ expect(evidence).to_contain("gui_web_2d_vulkan_simple_backend_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_path=build/gui-web-2d-vulkan-env-run-auto/simple_argb.json")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_stdout=build/gui-web-2d-vulkan-env-run-auto/simple_argb.out")
+expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_stdout_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_file_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_viewport_match_status=")
