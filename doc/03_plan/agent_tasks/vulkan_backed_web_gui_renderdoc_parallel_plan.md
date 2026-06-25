@@ -178,6 +178,10 @@ gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=<contains-vulka
 gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true
 ```
 
+The aggregate normalizes stale child `pass` rows to `fail` when the matching
+hardware and Vulkan detail fields are missing. Do not hand-edit a pass row; rerun
+`--browser-backing` and keep the Electron/Chrome source proof files.
+
 Retained showcase performance:
 
 ```text
