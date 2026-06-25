@@ -12,6 +12,14 @@
 1. Create detailed design: data structures, algorithms, module interactions, error handling
 2. Output: `doc/05_design/<feature>.md`
 3. Agent task breakdown: `doc/03_plan/agent_tasks/<feature>.md`
+   - For broad lanes, list lower-model sidecars such as Codex Spark, Claude
+     Haiku, or Claude Sonnet, or mark `N/A`
+   - Before sidecars fan out, the best available model defines shared
+     interface names, manual `step("...")` flow helper names, setup/checker
+     helper names, and fail-fast placeholders using `assert(false)` or
+     `fail(...)`
+   - Normal/highest-capability review must accept merged sidecar output and
+     generated-manual quality before handoff
 
 ## Quality Check
 

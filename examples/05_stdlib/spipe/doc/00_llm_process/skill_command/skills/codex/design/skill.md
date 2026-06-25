@@ -97,11 +97,20 @@ describe "<Feature>":
 - Data structures, algorithms, module interactions, error handling
 - Output: `doc/05_design/<feature>.md`
 - Agent tasks: `doc/03_plan/agent_tasks/<feature>.md`
+- For broad lanes, agent tasks must list lower-model sidecars such as Codex
+  Spark, Claude Haiku, or Claude Sonnet, or mark `N/A`, plus merge owner and
+  final normal/highest-capability reviewer.
+- Before sidecars fan out, the best available model defines shared interface
+  names, manual `step("...")` flow helper names, setup/checker helper names, and
+  fail-fast placeholders using `assert(false)` or `fail(...)`.
 
 ## Phase 5: Quality Check
 
 - Verify every REQ-NNN has test coverage
 - Check SPipe quality: real assertions, edge cases, error paths
+- Check generated-manual quality for scenario-oriented specs and require
+  normal/highest-capability review to accept merged sidecar output before
+  handoff
 - Verify architecture alignment with MDSOC rules
 - Ask user if architecture/design needs changes
 

@@ -24,12 +24,20 @@
 3. Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 4. Verify every REQ-NNN has at least one test
 5. Test plan: `doc/03_plan/sys_test/<feature>.md`
+6. For broad lanes, define lower-model sidecars such as Codex Spark, Claude
+   Haiku, or Claude Sonnet, or mark `N/A`; record merge owner and final
+   normal/highest-capability reviewer in `doc/03_plan/agent_tasks/<feature>.md`
+7. Before sidecars fan out, the best available model defines shared interface
+   names, manual `step("...")` flow helper names, setup/checker helper names,
+   and fail-fast placeholders using `assert(false)` or `fail(...)`
 
 ## Quality Check
 
 1. Verify SPipe quality (target: A grade) — real assertions, edge cases, full REQ coverage
-2. Ask user: "Should architecture change?"
-3. If yes, loop back
+2. Verify generated-manual quality and normal/highest-capability review of
+   merged sidecar output before handoff
+3. Ask user: "Should architecture change?"
+4. If yes, loop back
 
 ## Outputs
 | Artifact | Location |
@@ -37,6 +45,7 @@
 | Architecture | `doc/04_architecture/<feature>.md` |
 | System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` |
 | Test plan | `doc/03_plan/sys_test/<feature>.md` |
+| Agent tasks | `doc/03_plan/agent_tasks/<feature>.md` |
 
 ## Critical Rules
 

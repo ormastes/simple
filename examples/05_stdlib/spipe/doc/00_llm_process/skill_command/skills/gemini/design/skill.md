@@ -24,8 +24,17 @@ Phase 3: System Test Design
 - Every REQ-NNN must have at least one test
 
 Phase 4: Detail Design — doc/05_design/<feature>.md
+- Agent tasks: doc/03_plan/agent_tasks/<feature>.md
+- Broad lanes list lower-model sidecars such as Codex Spark, Claude Haiku, or
+  Claude Sonnet, or mark N/A; include merge owner and final
+  normal/highest-capability reviewer.
+- Before sidecars fan out, the best available model defines shared interface
+  names, manual step("...") flow helper names, setup/checker helper names, and
+  fail-fast placeholders using assert(false) or fail(...).
 
-Phase 5: Quality Check — verify SPipe quality, ask user if changes needed.
+Phase 5: Quality Check — verify SPipe quality, generated-manual quality, and
+normal/highest-capability review of merged sidecar output; ask user if changes
+needed.
 
 If another LLM already created artifacts, review and extend — never overwrite.
 Treat full-tree scans, repeated file rereads, and per-request subprocesses as design risks unless explicitly justified.
