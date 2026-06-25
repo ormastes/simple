@@ -446,6 +446,50 @@ pub(crate) fn evaluate_method_call(
             }
             return Ok(Value::Bool(matched));
         }
+        "to_not_contain" | "to_not_include" => {
+            let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let contains = match &recv_val {
+                Value::Str(s) => {
+                    if let Value::Str(n) = &needle {
+                        s.contains(n.as_str())
+                    } else {
+                        false
+                    }
+                }
+                Value::Array(arr) => arr.contains(&needle),
+                _ => false,
+            };
+            let matched = !contains;
+            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            if !matched {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+                let failure_msg = format!(
+                    "expected {} to not contain {}",
+                    recv_val.to_display_string(),
+                    needle.to_display_string()
+                );
+                BDD_FAILURE_MSG
+                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            } else {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
+            }
+            return Ok(Value::Bool(matched));
+        }
+        "to_not_be_nil" => {
+            let matched = recv_val != Value::Nil;
+            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            if !matched {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| {
+                    *cell.borrow_mut() = Some("expected value to not be nil, got nil".to_string())
+                });
+            } else {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = None);
+            }
+            return Ok(Value::Bool(matched));
+        }
         // BDD assertion methods: to(matcher) and not_to(matcher)
         // These work on any value type and are used with matchers like eq(5), gt(3), etc.
         "to" | "not_to" | "to_not" => {

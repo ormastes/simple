@@ -1034,10 +1034,18 @@ fn rewrite_method_expect_line(line: &str) -> String {
     };
     // Find matcher name (alphanumeric/underscore until '(').
     let matcher_end = after_neg.find('(').unwrap_or(after_neg.len());
-    let matcher = &after_neg[..matcher_end];
     if matcher_end == after_neg.len() {
         return line.to_string();
     }
+    let matcher_raw = &after_neg[..matcher_end];
+    // `to_not_<x>` is sugar for a negated `to_<x>` matcher (e.g. to_not_contain,
+    // to_not_equal, to_not_be_nil) — equivalent to the `.not_().to_<x>()` form.
+    let (negated, matcher_owned) = if let Some(rest) = matcher_raw.strip_prefix("to_not_") {
+        (true, format!("to_{}", rest))
+    } else {
+        (negated, matcher_raw.to_string())
+    };
+    let matcher = matcher_owned.as_str();
     let matcher_args = &after_neg[matcher_end + 1..];
     // Strip the closing paren of the matcher call (best-effort: take up to last ')').
     let arg_str = match matcher_args.rfind(')') {
