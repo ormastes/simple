@@ -338,7 +338,7 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 721 lines folded for reproduction.
+Runnable source: 723 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1054,6 +1054,8 @@ expect(report).to_contain("- Electron Chromium/Vulkan gate:")
 expect(report).to_contain("- macOS Vulkan:")
 expect(report).to_contain("- macOS RenderDoc:")
 expect(report).to_contain("- GUI/web/2D browser Vulkan backing:")
+expect(report).to_contain("- GUI/web/2D Electron browser backing: unavailable (missing-focused-browser-backing; vulkan unknown; gl missing-focused-browser-backing)")
+expect(report).to_contain("- GUI/web/2D Chrome browser backing: unavailable (missing-focused-browser-backing; display unknown; gl missing-focused-browser-backing)")
 expect(report).to_contain("- GUI/web/2D Vulkan RenderDoc blockers:")
 expect(report).to_contain("- RenderDoc evidence CLI: pass (scripts/tool/renderdoc-evidence.shs)")
 expect(report).to_contain("- Production GUI/web parity gate:")
