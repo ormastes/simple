@@ -42,12 +42,61 @@ handlers. Fix (two sites):
    API. Verified: nil→`false/true/5`, present→`7/true/7`; plain `Some`/`None`,
    int/text/dict methods, and genuine unknown-method errors all unaffected.
 
-**STILL OPEN — JIT/native backend:** the same typed optionals are unimplemented
-in the JIT/native path (present optional renders as raw `<value:0xN>` via
-`rt_value_to_string`, `unwrap_or` returns nil, `is_some` reported as "Function
-not found"). Separate, larger codegen work — not addressed here. Also the
-self-hosted `.spl` interpreter needs the parity fix (Rust/Simple parity) for
-production `bin/simple` to benefit; this change only fixes the Rust seed.
+**STILL OPEN — JIT/native backend (both seed + self-hosted `.spl`; design below).**
+
+### Symptoms (confirmed on both `bin/simple` and the seed, JIT path)
+- `mj: i32? = 7; print mj` → `<value:0x7>` (raw untagged int; `rt_value_to_string`
+  can't classify it).
+- `mj.unwrap_or(9)` / `mj.is_some()` → `Function 'is_some' not found` (method not lowered).
+- `a: i32? = 3; a == nil` → **`true`** — value `3` collides with the nil sentinel
+  (latent correctness bug). `text?`/pointer optionals work (already tagged).
+
+### Root cause
+1. `i32?` resolves to `HirType::Pointer{Shared, inner: I32}` (seed
+   `hir/lower/type_resolver.rs:282`), **not** an enum.
+2. The Option-method lowering guards
+   (`hir/lower/expr/mod.rs:792-867` `lower_builtin_method_call`;
+   mirror in `mir/lower/lowering_expr_method.rs:~136`) only fire for
+   `HirType::Enum` (`enum_has_variant_for_builtin_method`,
+   `enum_payload_type_for_builtin_method` at `hir/lower/expr/mod.rs:57-89`), so a
+   `Pointer`-shaped optional falls through → "method not found". `unwrap_or`/
+   `unwrap_or_else` aren't lowered for any receiver.
+3. The present primitive payload is stored **raw/untagged**, so the type decays to
+   `ANY`, `BoxInt` is skipped in the print path (`hir/lower/stmt_lowering.rs:521`),
+   and a raw `3` is indistinguishable from `nil`.
+
+### Design (representation = box the primitive payload, mirrors `text?`)
+Make a present primitive optional carry a **tagged/boxed** payload (BoxInt =
+`value<<3`), nil stays sentinel `3`. Then: prints via `rt_value_to_string`
+correctly; `i32?=3` → `BoxInt(3)=24 ≠ 3` (collision gone); `rt_is_some` already
+returns `!special || payload!=NIL` so it works on the boxed value.
+- **Coerce `T → T?`**: BoxInt primitives at the optional-coercion site (same shape
+  as `mir/lower/lowering_expr_call.rs:83` `box_arg_for_any_param`, which already
+  boxes for `ANY` params). Pointers/text pass through unchanged.
+- **Method dispatch** (add an `Optional`/`Pointer{inner}` arm alongside the enum
+  guards): `is_some`→`rt_is_some` (exists), `is_none`→`rt_is_none`,
+  `unwrap`→`UnboxInt`/value typed as `inner` (+ optional nil trap reusing the
+  `trapz` pattern from `codegen/instr/fields.rs`), `unwrap_or(x,d)`→
+  `select(rt_is_some(x), unbox(x), d)`.
+
+### Sites to patch (SEED `src/compiler_rust/…`)
+- `hir/lower/expr/mod.rs:792-867` — method dispatch arms (+ `unwrap_or`).
+- `hir/lower/expr/mod.rs:57-89` — let helpers see `Pointer`/optional, return inner.
+- `mir/lower/lowering_expr_method.rs:~136` — mirror dispatch.
+- `mir/lower/lowering_expr_call.rs:83` — box primitive on `T→T?` coercion.
+- `codegen/instr/mod.rs` `BoxInt`/`UnboxInt` already exist; reuse.
+
+### Sites to patch (self-hosted `.spl` `src/compiler/…`) — required for `bin/simple`
+- `50.mir/mir_lowering_expr_part3.spl` (`lower_method_call`) — method dispatch.
+- `20.hir/hir_types.spl:479` already has `Optional(inner)` (richer than the seed's
+  `Pointer` decay) — box at its coercion + print path.
+- Reaching production needs a **bootstrap rebuild + `--deploy`** (flagged risky in
+  `.claude/rules/bootstrap.md`; smoke-test + restore-on-break afterward).
+
+### Verification target
+`i32?`/`text?`/`f64?`: `print present` → value; `unwrap_or` → value-or-default;
+`is_some`/`is_none` correct; `i32?=3` not nil; enum `Some`/`None`, plain
+pointers, and non-optional methods unaffected.
 
 ---
 
