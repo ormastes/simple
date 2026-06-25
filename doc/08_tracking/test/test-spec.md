@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-26 00:10:06*
+*Generated: 2026-06-25 21:50:49*
 
-## test/01_unit/app/ui
+## test/01_unit/lib/gc_async_mut/gpu/browser_engine
 
-❌ **web_wm_modern_shell_spec.spl** (2658ms)
-  - Source: `test/01_unit/app/ui/web_wm_modern_shell_spec.spl`
-  - Generated doc: `doc/06_spec/web_wm_modern_shell_spec.md`
+✅ **browser_renderer_spec.spl** (29480ms)
+  - Source: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl`
+  - Generated doc: `doc/06_spec/browser_renderer_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 4 ✅
-- **Failed:** 1 ❌
-- **Duration:** 2664ms
+- **Passed:** 117 ✅
+- **Failed:** 0 ❌
+- **Duration:** 10ms

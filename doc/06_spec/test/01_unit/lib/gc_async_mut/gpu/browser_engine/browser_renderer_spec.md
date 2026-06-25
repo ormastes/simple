@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 116 | 116 | 0 | 0 |
+| 117 | 117 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -159,6 +159,28 @@ expect(result.pixel_data[0]).to_equal(0xFFDC2626u32)
 expect(result.pixel_data[9 * TEST_WIDTH]).to_equal(0xFF2563EBu32)
 expect(_count_color(result.pixel_data, 0xFFDC2626u32)).to_be_greater_than(0)
 expect(_count_color(result.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)
+```
+
+</details>
+
+#### clips gradient background images to background-size when repeat is disabled
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 12px; height: 12px; background-color: #16a34a; background-image: linear-gradient(#dc2626, #2563eb); background-size: 6px 6px; background-repeat: no-repeat; }</style></head><body><div class='card'></div></body></html>"
+val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+expect(result.pixel_data[0]).to_equal(0xFFDC2626u32)
+expect(result.pixel_data[5 * TEST_WIDTH]).to_equal(0xFF2563EBu32)
+expect(result.pixel_data[6 * TEST_WIDTH]).to_equal(0xFF16A34Au32)
+expect(result.pixel_data[6]).to_equal(0xFF16A34Au32)
+expect(_count_region_changed(result.pixel_data, TEST_WIDTH, 0, 0, 6, 6, 0xFF16A34Au32)).to_equal(36)
+expect(_count_region_changed(result.pixel_data, TEST_WIDTH, 6, 6, 6, 6, 0xFF16A34Au32)).to_equal(0)
 ```
 
 </details>
@@ -2160,8 +2182,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 116 |
-| Active scenarios | 116 |
+| Total scenarios | 117 |
+| Active scenarios | 117 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
