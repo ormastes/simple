@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 100 | 100 | 0 | 0 |
+| 101 | 101 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -177,6 +177,34 @@ val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
 expect(_count_region_changed(result.pixel_data, TEST_WIDTH, 2, 0, 6, 4, WHITE_BG)).to_equal(0)
 expect(_count_region_changed(result.pixel_data, TEST_WIDTH, 2, 13, 6, 4, WHITE_BG)).to_equal(24)
 expect(_count_color(result.pixel_data, 0xFF16A34Au32)).to_equal(24)
+```
+
+</details>
+
+#### renders side-specific border style none without painting disabled sides
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val base_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 10px; height: 10px; background-color: #ffffff; border: 2px solid #dc2626; }</style></head><body><div class='card'></div></body></html>"
+val left_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 10px; height: 10px; background-color: #ffffff; border: 2px solid #dc2626; border-left-style: none; }</style></head><body><div class='card'></div></body></html>"
+val top_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 10px; height: 10px; background-color: #ffffff; border: 2px solid #dc2626; border-top-style: none; }</style></head><body><div class='card'></div></body></html>"
+val right_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 10px; height: 10px; background-color: #ffffff; border: 2px solid #dc2626; border-right-style: none; }</style></head><body><div class='card'></div></body></html>"
+val bottom_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 10px; height: 10px; background-color: #ffffff; border: 2px solid #dc2626; border-bottom-style: none; }</style></head><body><div class='card'></div></body></html>"
+val base_red = _count_color(render_html_to_pixels_with_viewport(base_html, TEST_WIDTH, TEST_HEIGHT).pixel_data, 0xFFDC2626u32)
+val left_red = _count_color(render_html_to_pixels_with_viewport(left_html, TEST_WIDTH, TEST_HEIGHT).pixel_data, 0xFFDC2626u32)
+val top_red = _count_color(render_html_to_pixels_with_viewport(top_html, TEST_WIDTH, TEST_HEIGHT).pixel_data, 0xFFDC2626u32)
+val right_red = _count_color(render_html_to_pixels_with_viewport(right_html, TEST_WIDTH, TEST_HEIGHT).pixel_data, 0xFFDC2626u32)
+val bottom_red = _count_color(render_html_to_pixels_with_viewport(bottom_html, TEST_WIDTH, TEST_HEIGHT).pixel_data, 0xFFDC2626u32)
+
+expect(base_red).to_be_greater_than(left_red)
+expect(base_red).to_be_greater_than(top_red)
+expect(base_red).to_be_greater_than(right_red)
+expect(base_red).to_be_greater_than(bottom_red)
 ```
 
 </details>
@@ -1819,8 +1847,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 100 |
-| Active scenarios | 100 |
+| Total scenarios | 101 |
+| Active scenarios | 101 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
