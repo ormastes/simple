@@ -392,12 +392,14 @@ impl SshSession:
             serial_println("[sshd-session] recv encrypted live packet len={enc_packet.len()} seq={self.cipher.seq_c2s}")
             serial_println("[sshd-session] recv encrypted live packet data={_bytes_to_hex(enc_packet)}")
             val decrypted = ssh_decrypt_packet_aes_gcm(enc_packet, self.cipher.seq_c2s, self.enc_key_c2s, self.iv_c2s)
-            if decrypted.is_ok():
-                self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
-                self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
-                return decrypted.unwrap()
-            serial_println("[sshd-session] recv decrypt fail aes256-gcm live seq={self.cipher.seq_c2s}")
-            return []
+            match decrypted:
+                Ok(payload):
+                    self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
+                    self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
+                    return payload
+                Err(_):
+                    serial_println("[sshd-session] recv decrypt fail aes256-gcm live seq={self.cipher.seq_c2s}")
+                    return []
 
         var i: u64 = 0
         if self.recv_buf.len() == 0:
@@ -465,13 +467,14 @@ impl SshSession:
             # Decrypt
             if self.negotiated_cipher_c2s == "aes256-gcm@openssh.com":
                 val decrypted = ssh_decrypt_packet_aes_gcm(enc_packet, self.cipher.seq_c2s, self.enc_key_c2s, self.iv_c2s)
-                if decrypted.is_ok():
-                    self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
-                    self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
-                    return decrypted.unwrap()
-                else:
-                    serial_println("[sshd-session] recv decrypt fail aes256-gcm seq={self.cipher.seq_c2s}")
-                    return []
+                match decrypted:
+                    Ok(payload):
+                        self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
+                        self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
+                        return payload
+                    Err(_):
+                        serial_println("[sshd-session] recv decrypt fail aes256-gcm seq={self.cipher.seq_c2s}")
+                        return []
             else:
                 serial_println("[sshd-session] aes128-gcm c2s unsupported on freestanding lane seq={self.cipher.seq_c2s} packet_len={enc_packet.len()}")
                 return []

@@ -385,3 +385,49 @@ fn rt_net_recv_ssh_plain_packet_payload(sock_fd: i64) -> [u8]:
         payload.push(_rt_net_last_plain_payload[i])
         i = i + 1
     payload
+
+@export("C", name: "rt_net_recv_ssh_encrypted_packet")
+fn rt_net_recv_ssh_encrypted_packet(sock_fd: i64) -> [u8]:
+    serial_println("[rt-net] encrypted recv fn sock_fd={sock_fd}")
+    val entry = _rt_net_find(sock_fd)
+    val os_fd =
+        if entry == nil:
+            if sock_fd == 200:
+                sock_fd
+            else:
+                return []
+        else:
+            val socket_entry = match entry:
+                Some(found):
+                    found
+                nil:
+                    return []
+            if socket_entry.os_fd < 0:
+                return []
+            if not _rt_net_ensure_ready():
+                return []
+            socket_entry.os_fd.to_i64()
+    val header = _rt_net_read_exact(os_fd, 4u64)
+    if header.len() != 4u64:
+        return []
+    val packet_len =
+        (_rt_net_byte_u32(header, 0u64) << 24) |
+        (_rt_net_byte_u32(header, 1u64) << 16) |
+        (_rt_net_byte_u32(header, 2u64) << 8) |
+        _rt_net_byte_u32(header, 3u64)
+    if packet_len < 1u32 or packet_len > 262144u32:
+        return []
+    val rest_len = packet_len.to_u64() + 16u64
+    val rest = _rt_net_read_exact(os_fd, rest_len)
+    if rest.len() != rest_len:
+        return []
+    var packet: [u8] = []
+    var i: u64 = 0
+    while i < header.len():
+        packet.push(header[i])
+        i = i + 1
+    i = 0
+    while i < rest.len():
+        packet.push(rest[i])
+        i = i + 1
+    packet
