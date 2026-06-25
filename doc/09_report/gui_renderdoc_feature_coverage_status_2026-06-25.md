@@ -252,7 +252,7 @@
 - linux_vulkan_render_log_compare_pairwise_status=pass
 - linux_vulkan_render_log_compare_renderdoc_simple_status=pass
 - linux_vulkan_render_log_compare_renderdoc_chrome_status=fail
-- linux_vulkan_render_log_compare_renderdoc_electron_status=unavailable
+- linux_vulkan_render_log_compare_renderdoc_electron_status=fail
 - macos_metal_render_log_compare_env=build/macos-metal-render-log-compare/evidence.env
 - macos_metal_render_log_compare_env_file_status=missing
 - macos_metal_render_log_compare_status=unavailable
@@ -582,7 +582,7 @@
 - gui_showcase_8k_perf_time_log=build/widget-showcase-8k-perf/time.log
 - gui_showcase_8k_perf_time_log_file_status=pass
 - renderdoc_goal_status_command=sh scripts/check/check-html-css-renderdoc-goal-status.shs
-- renderdoc_goal_status_exit_code=1
+- renderdoc_goal_status_exit_code=0
 - renderdoc_goal_status=fail
 - renderdoc_goal_reason=gate-command-failed
 - renderdoc_goal_blocked_gate=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
@@ -662,7 +662,7 @@
 - electron_renderdoc_requested_features=Vulkan
 - electron_renderdoc_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform=x11 --enable-features=Vulkan --use-angle=vulkan
 - electron_renderdoc_gate_command=RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/electron-html/evidence.env sh scripts/check/check-renderdoc-electron-html-gate.shs
-- electron_renderdoc_gate_exit_code=1
+- electron_renderdoc_gate_exit_code=0
 - electron_renderdoc_gate_status=fail
 - electron_renderdoc_gate_reason=electron-process-sigtrap-under-renderdoc
 - electron_renderdoc_gate_source_env=build/renderdoc/electron-display-helper/electron-html/evidence.env

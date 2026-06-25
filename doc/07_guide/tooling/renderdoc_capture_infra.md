@@ -312,6 +312,16 @@ GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/gui-web-2d-vulkan-env-brows
 sh scripts/check/check-linux-vulkan-render-log-compare.shs
 ```
 
+By default this Linux row consumes the focused RenderDoc evidence paths:
+
+- `build/gui-web-2d-vulkan-env-renderdoc-simple/renderdoc/simple/evidence.env`
+- `build/renderdoc/chrome-display-helper/evidence.env`
+- `build/renderdoc/electron-display-helper/electron-html/evidence.env`
+
+Override `RDOC_SIMPLE_EVIDENCE_ENV`, `RDOC_HTML_EVIDENCE_ENV`, or
+`RDOC_ELECTRON_HTML_EVIDENCE_ENV` only when deliberately comparing a different
+capture set.
+
 It writes:
 
 - `build/linux-vulkan-render-log-compare/evidence.env`
@@ -330,6 +340,13 @@ RenderDoc `.rdc` evidence is
 reported through `linux_vulkan_render_log_compare_renderdoc_*_status`; set
 `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=1` when the host is expected to provide
 real `.rdc` files and `RDOC` magic.
+
+Current Linux host evidence on 2026-06-25 has
+`linux_vulkan_render_log_compare_pairwise_status=pass`, Simple RenderDoc
+`pass`, Chrome RenderDoc `fail`, and Electron RenderDoc `fail`. The row remains
+failed because focused Electron browser Vulkan backing is still
+`electron-browser-backing-fail`; do not treat the passing pairwise ARGB result
+as browser Vulkan completion.
 
 Completion keys:
 

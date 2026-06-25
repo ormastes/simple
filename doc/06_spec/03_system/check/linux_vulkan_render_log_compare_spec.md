@@ -27,7 +27,7 @@ linux_vulkan_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -142,6 +142,8 @@ The spec covers three cases:
    live in separate files. This proves current real host evidence is interpreted
    precisely: Chrome can be pass while Electron is fail, without reporting
    Chrome as missing.
+4. A source contract check that keeps the default RenderDoc evidence paths on
+   the focused current-capture rows instead of stale canonical probe rows.
 
 ## Completion Boundaries
 
@@ -303,12 +305,45 @@ expect(evidence.contains("chrome-browser-backing-fail")).to_equal(false)
 
 </details>
 
+#### defaults RenderDoc inputs to focused current capture evidence
+
+- Read the Linux render-log wrapper defaults
+- Assert default RenderDoc env paths use focused evidence rows
+   - Expected: script does not contain `build/renderdoc/canonical-probe/simple/evidence.env`
+   - Expected: script does not contain `build/renderdoc/canonical-probe/html/evidence.env`
+   - Expected: script does not contain `build/renderdoc/canonical-probe/electron-html/evidence.env`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read the Linux render-log wrapper defaults")
+val script = file_read("scripts/check/check-linux-vulkan-render-log-compare.shs")
+
+step("Assert default RenderDoc env paths use focused evidence rows")
+expect(script).to_contain("RDOC_SIMPLE_EVIDENCE_ENV")
+expect(script).to_contain("build/gui-web-2d-vulkan-env-renderdoc-simple/renderdoc/simple/evidence.env")
+expect(script).to_contain("RDOC_HTML_EVIDENCE_ENV")
+expect(script).to_contain("build/renderdoc/chrome-display-helper/evidence.env")
+expect(script).to_contain("RDOC_ELECTRON_HTML_EVIDENCE_ENV")
+expect(script).to_contain("build/renderdoc/electron-display-helper/electron-html/evidence.env")
+expect(script.contains("build/renderdoc/canonical-probe/simple/evidence.env")).to_equal(false)
+expect(script.contains("build/renderdoc/canonical-probe/html/evidence.env")).to_equal(false)
+expect(script.contains("build/renderdoc/canonical-probe/electron-html/evidence.env")).to_equal(false)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
