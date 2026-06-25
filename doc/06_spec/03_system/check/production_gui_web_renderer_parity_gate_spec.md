@@ -93,7 +93,7 @@ sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 67 lines folded for reproduction.
+Runnable source: 68 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -105,6 +105,7 @@ val evidence = file_read("build/test-production-gui-web-renderer-parity-gate/evi
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env_status=missing")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_exit_code=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_host_uname_s=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_host_uname_m=")
@@ -198,7 +199,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_time
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -209,6 +210,7 @@ expect(code).to_equal(0)
 val evidence = file_read("build/test-production-gui-web-renderer-parity-gate-pass/out/evidence.env")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_case_count=50")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_pass_count=36")
