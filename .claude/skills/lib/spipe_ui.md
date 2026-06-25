@@ -6,6 +6,18 @@ and verify the **framebuffer** (not the screenshot — see the oracle rule below
 
 On macOS the pure-Simple lane = **Engine2D CPU/NEON** (aarch64) + **Metal** (GPU).
 
+> **Linux Vulkan-backed browser lane IS available (verified 2026-06-25).** Do not
+> assume the Vulkan/RenderDoc lane is macOS-only — on the Ubuntu host (Intel RPL-P,
+> Mesa ANV, Vulkan 1.4.318) **Electron `v42.5.0` and Chrome `139` both render through
+> Vulkan** (ANGLE → Vulkan, confirmed), and **RenderDoc `v1.44` CLI is installed**
+> (`/opt/renderdoc`, on `PATH`, Vulkan-capable). Electron project: `~/electron-vulkan`
+> (verify: `electron gpu-probe.js --ozone-platform=x11` → `vulkan: enabled_on`).
+> **Mandatory Wayland gotcha:** force `--ozone-platform=x11` or Chromium falls back to
+> software. RenderDoc `.rdc` capture of Electron works via
+> `~/electron-vulkan/capture-renderdoc.sh`; Chrome GPU-process hooking is blocked by a
+> `localtime64_r` crash under `--disable-gpu-sandbox`. Full runbook:
+> `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md` § Linux Status.
+
 ## The 3 main GUI check apps
 
 | # | Surface | App | What it must show |

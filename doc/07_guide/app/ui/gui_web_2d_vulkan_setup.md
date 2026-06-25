@@ -32,6 +32,83 @@ administrator installer prompt and was canceled. Treat the host as
 `sdk-tools-missing` until the elevated install completes and a fresh shell can
 find the SDK tools.
 
+## Linux Status (Ubuntu) — verified 2026-06-25
+
+Observed on an Ubuntu 24.04.3 host, Intel Raptor Lake-P (RPL-P) iGPU. This closes
+the previously-deferred Linux leg of this lane: **Electron and Chrome are confirmed
+rendering through Vulkan**, and the RenderDoc CLI is installed and Vulkan-capable.
+
+- **Vulkan runtime/driver: READY.** `vulkaninfo --summary` reports `Intel(R) Graphics
+  (RPL-P)`, `apiVersion = 1.4.318`, `driverName = Intel open-source Mesa driver` (Mesa
+  ANV), `llvmpipe` software fallback. ICD `/usr/share/vulkan/icd.d/intel_icd.json`.
+- **Electron: VULKAN-BACKED, CONFIRMED.** `~/electron-vulkan` (Electron `v42.5.0`).
+  `app.getGPUFeatureStatus().vulkan == "enabled_on"`; live WebGL `UNMASKED_RENDERER`
+  = `ANGLE (Intel, Vulkan 1.4.318 (Intel(R) Graphics (RPL-P)), Intel open-source Mesa
+  driver)`. `node_modules/electron/dist/chrome-sandbox` set `root:root` mode `4755`.
+- **Chrome: VULKAN-BACKED, CONFIRMED.** `google-chrome-stable 139.0.7258.138`; same
+  ANGLE-Vulkan renderer, read via the DevTools `/json` endpoint. Vulkan is **not** on
+  by default — it requires the launch flags below.
+- **RenderDoc: INSTALLED + VULKAN-CAPABLE.** `renderdoccmd`/`qrenderdoc` `v1.44` at
+  `/opt/renderdoc` (on `PATH`); `renderdoccmd version` → `APIs supported at compile-time:
+  Vulkan, GL, GLES`. **Not yet proven by an actual `.rdc` capture** on this host (see
+  blocker). Treat as `renderdoc-installed`, capture-evidence pending.
+
+### CRITICAL gotcha — Wayland is incompatible with Chromium Vulkan
+
+This is a Wayland session. Chromium's Vulkan path is **not** compatible with the Wayland
+Ozone backend; without forcing X11 the GPU process silently falls back to software and
+Vulkan stays `disabled_off`. Mandatory flag set for **both** Electron and Chrome:
+
+```sh
+--ozone-platform=x11 --use-angle=vulkan \
+--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist
+```
+
+### RenderDoc-capture blocker (Chrome) — record, do not retry blindly
+
+RenderDoc must hook the process doing Vulkan (un-sandboxed, in-process:
+`--in-process-gpu --no-sandbox --disable-gpu-sandbox`). For **Electron** this works
+(`~/electron-vulkan/capture-renderdoc.sh`). For **Chrome**, `--disable-gpu-sandbox`
+crashes the GPU process with `undefined symbol: localtime64_r`, so hooking Chrome's GPU
+process is not currently achievable here. Record
+`gui_web_2d_vulkan_browser_backing_reason=renderdoc-chrome-gpu-sandbox-localtime64_r`
+and leave the Chrome `.rdc` gate open.
+
+## Linux Install Commands (Ubuntu/Debian)
+
+```sh
+sudo apt-get update
+sudo apt-get install -y mesa-vulkan-drivers vulkan-tools vulkan-validationlayers libvulkan-dev
+
+# RenderDoc (not in apt — official binary tarball)
+# download renderdoc_1.44.tar.gz from renderdoc.org/stable/1.44/, then:
+sudo tar xzf renderdoc_1.44.tar.gz -C /opt && sudo mv /opt/renderdoc_1.44 /opt/renderdoc
+sudo ln -sf /opt/renderdoc/bin/qrenderdoc /usr/local/bin/qrenderdoc
+sudo ln -sf /opt/renderdoc/bin/renderdoccmd /usr/local/bin/renderdoccmd
+
+# Electron needs Node >= 22 (modern installer is ESM-only; breaks on Node 18/20).
+cd ~/electron-vulkan && npm install --save-dev electron
+sudo chown root:root node_modules/electron/dist/chrome-sandbox
+sudo chmod 4755     node_modules/electron/dist/chrome-sandbox
+# Google Chrome: install google-chrome-stable from the google-chrome apt repo.
+```
+
+## Linux Readiness Checks
+
+```sh
+vulkaninfo --summary | grep -E 'deviceName|driverName|apiVersion'
+~/electron-vulkan/node_modules/.bin/electron --version
+google-chrome-stable --version
+renderdoccmd version | head -2
+# Prove Electron Vulkan (expects vulkan: enabled_on + ANGLE Vulkan renderer):
+cd ~/electron-vulkan && ./node_modules/.bin/electron gpu-probe.js --ozone-platform=x11
+# Prove Chrome Vulkan: launch with the flag set above + --remote-debugging-port=9222 on a
+# WebGL page, then read the renderer from http://localhost:9222/json (title field).
+```
+
+`vulkaninfo --summary` proves host Vulkan discovery only — NOT that Chrome/Electron render
+through Vulkan. Use the Electron `gpu-probe.js` and the Chrome DevTools read for that.
+
 ## Install Commands
 
 Windows PowerShell:
