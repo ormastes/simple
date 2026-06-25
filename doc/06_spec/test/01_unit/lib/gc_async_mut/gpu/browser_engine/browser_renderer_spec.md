@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 113 | 113 | 0 | 0 |
+| 114 | 114 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -454,6 +454,27 @@ val shadow = render_html_to_pixels_with_viewport(shadow_html, 96, 32).pixel_data
 expect(_count_color(shadow, 0xFF111827u32)).to_equal(_count_color(plain, 0xFF111827u32))
 expect(_count_color(shadow, 0xFFDC2626u32)).to_be_greater_than(0)
 expect(_pixels_equal(plain, shadow)).to_equal(false)
+```
+
+</details>
+
+#### renders text-overflow ellipsis for clipped nowrap text
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val clipped_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; width: 42px; overflow: hidden; white-space: nowrap; }</style></head><body><div class='label'>OVERFLOWINGTEXT</div></body></html>"
+val ellipsis_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; width: 42px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }</style></head><body><div class='label'>OVERFLOWINGTEXT</div></body></html>"
+val clipped = render_html_to_pixels_with_viewport(clipped_html, 96, 32).pixel_data
+val ellipsis = render_html_to_pixels_with_viewport(ellipsis_html, 96, 32).pixel_data
+
+expect(_count_color(ellipsis, 0xFF111827u32)).to_be_greater_than(0)
+expect(_count_color(ellipsis, 0xFF111827u32)).to_be_less_than(_count_color(clipped, 0xFF111827u32))
+expect(_pixels_equal(clipped, ellipsis)).to_equal(false)
 ```
 
 </details>
@@ -2096,8 +2117,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 113 |
-| Active scenarios | 113 |
+| Total scenarios | 114 |
+| Active scenarios | 114 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
