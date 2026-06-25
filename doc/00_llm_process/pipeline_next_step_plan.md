@@ -56,12 +56,14 @@ References:
    - append or refresh links in affected `layer_expert/<layer>/skill.md`
    - update next-step plan status and handoff notes
    - update `skill_command/` only when reusable project-neutral process knowledge changed.
-6. During implementation cleanup and final closeout, run the doc/wiki refactor
-   checkpoint:
+6. During implementation cleanup before final verification, run the doc/wiki
+   refactor checkpoint:
    - use `.claude/skills/spipe_doc_wiki_refactor.md` as the checklist
    - fix stale guide, command, skill, phase, and file-path references
    - record changed doc/wiki paths, or "no doc/wiki updates needed", in
      `.spipe/<feature>/state.md`.
+   - final closeout consumes verify evidence; if stale references remain, return
+     to implementation/verify instead of repairing them in ship/release.
 
 ## Research And Design Pairing
 
@@ -98,7 +100,8 @@ Research and design outputs are drafts until the lead agent reconciles conflicts
 
 Implementation can invalidate docs and wiki-style process knowledge after the
 normal per-stage expert updates have already run. SPipe therefore includes an
-explicit doc/wiki refactor checkpoint in the Refactor and Ship phases.
+explicit doc/wiki refactor checkpoint in the Refactor phase before final
+verification; Ship only consumes verified freshness.
 
 Refactor checkpoint:
 

@@ -187,6 +187,8 @@ Production readiness check:
 | Design | `doc/05_design/` missing or outdated |
 
 Must show `STATUS: PASS` before release.
+Generated-manual quality and lower-model sidecar review must already be covered
+by verify PASS; release must not repair or accept those gaps afterward.
 
 Run:
 ```bash
