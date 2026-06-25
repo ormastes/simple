@@ -858,3 +858,9 @@ implementation-evidence-in-progress
 - continue-hardening: Recent aggregate gates now fail closed on incomplete retained 8K evidence, incomplete Metal readback evidence, incomplete browser backing evidence, missing named Metal/font blockers, and non-8K geometry masquerading as 8K. Pushed commits: `8c945adcd4f`, `e8f04e21e0e`, `52a07e28da6`, `798564eb892`, and `80e1a2b9a29`.
 - verification: Normal LLM review accepted the latest exact-8K-geometry gate with no findings. Targeted checks passed for shell syntax, the focused SSpec check, synthetic non-8K aggregate evidence, `git diff --check`, generated-spec layout (`0` executable specs under `doc/06_spec`), and direct-env-runtime guard for working/staged scopes.
 - continue-hardening: Browser backing missing-proof mode now reports `focused-browser-backing-required` instead of the misleading `fallback-bitmap-comparison`, preserving the fail-closed `missing-focused-browser-backing` blocker while making clear that pairwise pixel artifacts do not prove browser Vulkan backing. Spark review was attempted but quota was unavailable until 2026-06-29; normal LLM review returned no findings.
+- continue-verify: Current lightweight SPipe hygiene gates pass after the
+  process-skill/doc alignment updates: generated-spec layout guard returned
+  `0` executable specs under `doc/06_spec`, and `direct-env-runtime-guard`
+  passed for both working and staged scopes. This records doc/process/runtime
+  hygiene only; the GUI/Web/2D Vulkan browser-backing blocker remains open until
+  focused browser backing evidence passes.
