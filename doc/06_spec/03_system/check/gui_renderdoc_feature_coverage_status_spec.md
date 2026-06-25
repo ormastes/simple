@@ -27,7 +27,7 @@ gui_renderdoc_feature_coverage_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1331,6 +1331,41 @@ expect(blocked_gates.contains("production GUI/web font offload readback evidence
 
 </details>
 
+#### reports status-less production parity evidence as missing source status
+
+- Create production evidence with only matrix rows
+   - Expected: code equals `0`
+- Assert the aggregate carries the precise production source-status failure
+   - Expected: blocked_gates contains `production GUI/web parity evidence with live Tauri and Chrome captures`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create production evidence with only matrix rows")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-production-statusless && mkdir -p build/test-gui-renderdoc-feature-coverage-status-production-statusless/source && printf 'production_gui_web_renderer_parity_matrix_status=pass\\nproduction_gui_web_renderer_parity_matrix_reason=pass\\n' > build/test-gui-renderdoc-feature-coverage-status-production-statusless/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-renderdoc-feature-coverage-status-production-statusless/source/evidence.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-production-statusless/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-production-statusless/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate carries the precise production source-status failure")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-production-statusless/out/evidence.env")
+val blocked_gates = _value_of(evidence, "blocked_completion_gates")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=missing-production-parity-source-status")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_core_status=fail")
+expect(evidence).to_contain("production_gui_web_renderer_parity_core_reason=core-gui-web-parity-missing:")
+expect(blocked_gates.contains("production GUI/web parity evidence with live Tauri and Chrome captures")).to_equal(true)
+```
+
+</details>
+
 #### forwards retained 4K perf RSS evidence into the aggregate audit report
 
 - Create synthetic retained 4K perf evidence
@@ -2054,8 +2089,8 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-produ
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

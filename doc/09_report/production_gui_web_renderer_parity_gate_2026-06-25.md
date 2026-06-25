@@ -1,30 +1,31 @@
 # Production GUI Web Renderer Parity Gate
 
-- status: unavailable
-- reason: missing-production-parity-evidence
+- status: fail
+- reason: missing-production-parity-source-status
 - source evidence: build/production_gui_web_renderer_parity_evidence/evidence.env
-- source status:
-- source reason: missing-production-parity-evidence
-- matrix:  (; timed out: )
+- source status: 
+- source reason: 
+- matrix: pass (pass; timed out: )
 - layout manifest:  (; timed out: ; / pass,  tracked,  fail)
 - surface manifest:  (; timed out: ; Tauri / pass,  tracked,  fail; Chrome / pass,  tracked,  fail)
 - surface host: /
-- Tauri surface capture backend: ; missing commands: ; reason:
-- Chrome surface capture backend: ; reason:
-- live captures: Tauri , Chrome ; no fake capture: ; blur/tolerance:
-- backend parity:
-- font offload/readback:
-- raw Metal framebuffer readback:
+- Tauri surface capture backend: ; missing commands: ; reason: 
+- Chrome surface capture backend: ; reason: 
+- live captures: Tauri , Chrome ; no fake capture: ; blur/tolerance: 
+- backend parity: 
+- font offload/readback: 
+- raw Metal framebuffer readback: 
 
 ## Raw Evidence
-- production_gui_web_renderer_parity_gate_status=unavailable
-- production_gui_web_renderer_parity_gate_reason=missing-production-parity-evidence
+- production_gui_web_renderer_parity_gate_status=fail
+- production_gui_web_renderer_parity_gate_reason=missing-production-parity-source-status
 - production_gui_web_renderer_parity_gate_source_env=build/production_gui_web_renderer_parity_evidence/evidence.env
+- production_gui_web_renderer_parity_gate_source_env_status=pass
 - production_gui_web_renderer_parity_gate_source_status=
-- production_gui_web_renderer_parity_gate_source_reason=missing-production-parity-evidence
-- production_gui_web_renderer_parity_gate_matrix_exit_code=
-- production_gui_web_renderer_parity_gate_matrix_status=
-- production_gui_web_renderer_parity_gate_matrix_reason=
+- production_gui_web_renderer_parity_gate_source_reason=
+- production_gui_web_renderer_parity_gate_matrix_exit_code=0
+- production_gui_web_renderer_parity_gate_matrix_status=pass
+- production_gui_web_renderer_parity_gate_matrix_reason=pass
 - production_gui_web_renderer_parity_gate_matrix_timed_out=
 - production_gui_web_renderer_parity_gate_matrix_timeout_secs=
 - production_gui_web_renderer_parity_gate_layout_manifest_exit_code=
