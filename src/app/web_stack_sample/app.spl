@@ -328,10 +328,11 @@ impl WebStackSampleApp:
         var users: WebRecordStore<SampleUser> = self.users
         val id = users.insert_record(user)?
         val saved = users.load_record_by_id(id)?
-        if saved.?:
-            val saved_user = saved.unwrap()
-            return Ok(saved_user)
-        Err("Failed to reload registered user")
+        match saved:
+            Some(saved_user):
+                Ok(saved_user)
+            None:
+                Err("Failed to reload registered user")
 
     me post_register(username: text, email: text, password: text) -> Result<SampleResponse, text>:
         val user = self.register_user(username, email, password)?
@@ -359,7 +360,12 @@ impl WebStackSampleApp:
         val user = self.authenticate(username, password)?
         if not user.?:
             return Ok(SampleResponse(status: 401, redirect_to: "", body: render_login_page("Invalid credentials"), session_id: "", flash: ""))
-        val sid = self.sessions.create("{user.unwrap().id}")?
+        val current_user = match user:
+            Some(value):
+                value
+            None:
+                return Ok(SampleResponse(status: 401, redirect_to: "", body: render_login_page("Invalid credentials"), session_id: "", flash: ""))
+        val sid = self.sessions.create("{current_user.id}")?
         Ok(SampleResponse(status: 302, redirect_to: "/items", body: "", session_id: sid, flash: "logged-in"))
 
     me post_logout(session_id: text) -> Result<SampleResponse, text>:
@@ -409,9 +415,11 @@ impl WebStackSampleApp:
         var items: WebRecordStore<SampleItem> = self.items
         val id = items.insert_record(item)?
         val saved = items.load_record_by_id(id)?
-        if saved.?:
-            return Ok(saved.unwrap())
-        Err("Failed to reload created item")
+        match saved:
+            Some(saved_item):
+                Ok(saved_item)
+            None:
+                Err("Failed to reload created item")
 
     me post_new_item(session_id: text, title: text, details: text) -> Result<SampleResponse, text>:
         val item = self.create_item(session_id, title, details)?
@@ -474,17 +482,21 @@ impl WebStackSampleApp:
             return Err("Authentication required")
         var users: WebRecordStore<SampleUser> = self.users
         val maybe_user = users.load_record_by_id(user_id.to_int() ?? 0)?
-        if maybe_user.?:
-            return Ok(maybe_user.unwrap())
-        Err("User not found")
+        match maybe_user:
+            Some(user):
+                Ok(user)
+            None:
+                Err("User not found")
 
     fn require_owned_item(session_id: text, item_id: i64) -> Result<SampleItem, text>:
         val user = self.require_user(session_id)?
         var items: WebRecordStore<SampleItem> = self.items
         val maybe_item = items.load_record_by_id(item_id)?
-        if not maybe_item.?:
-            return Err("Item not found")
-        val item = maybe_item.unwrap()
+        val item = match maybe_item:
+            Some(value):
+                value
+            None:
+                return Err("Item not found")
         if item.user_id != user.id:
             return Err("Item does not belong to the current user")
         Ok(item)
