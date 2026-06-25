@@ -34,6 +34,9 @@ struct CliArgs:
     profile: text
     help: bool
     version: bool
+    # Codegen target/backend selector from `--target` (e.g. "wasm32").
+    # Empty = default (native/auto backend).
+    target: text
 
     static fn default() -> CliArgs:
         # Explicit construction to avoid bootstrap codegen eliding struct returns.
@@ -52,7 +55,8 @@ struct CliArgs:
             log_level: 4,
             profile: "dev",
             help: false,
-            version: false
+            version: false,
+            target: ""
         )
         args
 
@@ -72,6 +76,13 @@ struct CliArgs:
         opts.log_level = self.log_level
         opts.profile = self.profile
         opts.release = self.optimize or self.profile == "prod"
+        # Map `--target` to the codegen backend. wasm32/wasm select the pure-Simple
+        # WASM backend (driver dispatches on backend == "wasm"/"wasm32"); any other
+        # non-empty target is passed through as the backend name (c/cuda/opencl/vhdl).
+        if self.target == "wasm32" or self.target == "wasm":
+            opts.backend = "wasm"
+        elif self.target != "":
+            opts.backend = self.target
         compileoptions_normalize_mir_optimization(opts)
 
 # ------------------------------------------------------------------------------
@@ -495,6 +506,14 @@ fn main() -> i32:
             if level_opt.?:
                 cli_args.log_level = level_opt.unwrap()
             idx = idx + 1
+        elif arg == "--target":
+            if idx >= args.len():
+                print "Error: --target requires a value"
+                return 1
+            cli_args.target = args[idx]
+            idx = idx + 1
+        elif arg.starts_with("--target="):
+            cli_args.target = arg.slice(9, arg.len())
         elif arg.starts_with("-"):
             print "Error: unknown option {arg}"
             return 1
