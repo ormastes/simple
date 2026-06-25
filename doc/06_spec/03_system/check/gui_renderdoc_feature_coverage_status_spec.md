@@ -195,6 +195,9 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
 - Every `WidgetKind` wire value has a canonical RenderDoc HTML fixture marker.
 - The Electron Simple Web layout manifest remains visible with its 50 cases.
 - The HTML/CSS rendering manifest traceability gate is included and passing.
+- The audit answers HTML/CSS readiness explicitly: all implemented Simple Web
+  HTML/CSS is ready, while full CSS-spec rendering remains incomplete until the
+  unrendered CSS count reaches zero.
 - The audit includes current production parity evidence status when present.
 - The audit requires production GUI/web renderer-core parity evidence before
   the aggregate GUI audit can report `pass`.
@@ -284,6 +287,18 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
    - Expected: full_rendering_goal_full_css_rendered equals `63`
    - Expected: full_rendering_goal_full_css_unrendered equals `rendering_manifest_unrendered_css_count`
    - Expected: full_rendering_goal_full_css_unrendered_properties equals `rendering_manifest_unrendered_css_properties`
+   - Expected: html_css_implemented_surface_status equals `pass`
+   - Expected: html_css_implemented_surface_reason equals `all-implemented-html-and-css-rendered`
+   - Expected: html_css_implemented_surface_html_total equals `full_rendering_goal_html_total`
+   - Expected: html_css_implemented_surface_html_rendered equals `full_rendering_goal_html_rendered`
+   - Expected: html_css_implemented_surface_css_total equals `full_rendering_goal_implemented_css_total`
+   - Expected: html_css_implemented_surface_css_rendered equals `full_rendering_goal_implemented_css_rendered`
+   - Expected: html_css_full_css_completion_status equals `incomplete`
+   - Expected: html_css_full_css_completion_reason equals `css-spec-properties-unrendered`
+   - Expected: html_css_full_css_completion_total equals `full_rendering_goal_full_css_total`
+   - Expected: html_css_full_css_completion_rendered equals `full_rendering_goal_full_css_rendered`
+   - Expected: html_css_full_css_completion_unrendered equals `full_rendering_goal_full_css_unrendered`
+   - Expected: html_css_readiness_answer equals `implemented-html-css-ready-full-css-incomplete`
    - Expected: traceability_status equals `pass`
    - Expected: traceability_html_count equals `105`
    - Expected: traceability_implemented_css_count equals `63`
@@ -351,7 +366,7 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 771 lines folded for reproduction.
+Runnable source: 806 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -396,6 +411,17 @@ expect(evidence).to_contain("html_css_full_rendering_goal_full_css_status=incomp
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=63")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_unrendered_count=")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_unrendered_properties=")
+expect(evidence).to_contain("html_css_implemented_surface_status=pass")
+expect(evidence).to_contain("html_css_implemented_surface_reason=all-implemented-html-and-css-rendered")
+expect(evidence).to_contain("html_css_implemented_surface_html_total_count=105")
+expect(evidence).to_contain("html_css_implemented_surface_html_rendered_count=105")
+expect(evidence).to_contain("html_css_implemented_surface_css_total_count=63")
+expect(evidence).to_contain("html_css_implemented_surface_css_rendered_count=63")
+expect(evidence).to_contain("html_css_full_css_completion_status=incomplete")
+expect(evidence).to_contain("html_css_full_css_completion_reason=css-spec-properties-unrendered")
+expect(evidence).to_contain("html_css_full_css_completion_rendered_count=63")
+expect(evidence).to_contain("html_css_full_css_completion_unrendered_count=")
+expect(evidence).to_contain("html_css_readiness_answer=implemented-html-css-ready-full-css-incomplete")
 expect(evidence).to_contain("html_css_traceability_status=pass")
 expect(evidence).to_contain("html_css_traceability_reason=pass")
 expect(evidence).to_contain("html_css_traceability_exit_code=0")
@@ -786,6 +812,18 @@ val full_rendering_goal_full_css_total = _value_of(evidence, "html_css_full_rend
 val full_rendering_goal_full_css_rendered = _value_of(evidence, "html_css_full_rendering_goal_full_css_rendered_count")
 val full_rendering_goal_full_css_unrendered = _value_of(evidence, "html_css_full_rendering_goal_full_css_unrendered_count")
 val full_rendering_goal_full_css_unrendered_properties = _value_of(evidence, "html_css_full_rendering_goal_full_css_unrendered_properties")
+val html_css_implemented_surface_status = _value_of(evidence, "html_css_implemented_surface_status")
+val html_css_implemented_surface_reason = _value_of(evidence, "html_css_implemented_surface_reason")
+val html_css_implemented_surface_html_total = _value_of(evidence, "html_css_implemented_surface_html_total_count")
+val html_css_implemented_surface_html_rendered = _value_of(evidence, "html_css_implemented_surface_html_rendered_count")
+val html_css_implemented_surface_css_total = _value_of(evidence, "html_css_implemented_surface_css_total_count")
+val html_css_implemented_surface_css_rendered = _value_of(evidence, "html_css_implemented_surface_css_rendered_count")
+val html_css_full_css_completion_status = _value_of(evidence, "html_css_full_css_completion_status")
+val html_css_full_css_completion_reason = _value_of(evidence, "html_css_full_css_completion_reason")
+val html_css_full_css_completion_total = _value_of(evidence, "html_css_full_css_completion_total_count")
+val html_css_full_css_completion_rendered = _value_of(evidence, "html_css_full_css_completion_rendered_count")
+val html_css_full_css_completion_unrendered = _value_of(evidence, "html_css_full_css_completion_unrendered_count")
+val html_css_readiness_answer = _value_of(evidence, "html_css_readiness_answer")
 val traceability_status = _value_of(evidence, "html_css_traceability_status")
 val traceability_html_count = _value_of(evidence, "html_css_traceability_html_tag_count")
 val traceability_css_count = _value_of(evidence, "html_css_traceability_css_property_count")
@@ -954,6 +992,18 @@ expect(full_rendering_goal_full_css_total).to_equal(traceability_css_count)
 expect(full_rendering_goal_full_css_rendered).to_equal("63")
 expect(full_rendering_goal_full_css_unrendered).to_equal(rendering_manifest_unrendered_css_count)
 expect(full_rendering_goal_full_css_unrendered_properties).to_equal(rendering_manifest_unrendered_css_properties)
+expect(html_css_implemented_surface_status).to_equal("pass")
+expect(html_css_implemented_surface_reason).to_equal("all-implemented-html-and-css-rendered")
+expect(html_css_implemented_surface_html_total).to_equal(full_rendering_goal_html_total)
+expect(html_css_implemented_surface_html_rendered).to_equal(full_rendering_goal_html_rendered)
+expect(html_css_implemented_surface_css_total).to_equal(full_rendering_goal_implemented_css_total)
+expect(html_css_implemented_surface_css_rendered).to_equal(full_rendering_goal_implemented_css_rendered)
+expect(html_css_full_css_completion_status).to_equal("incomplete")
+expect(html_css_full_css_completion_reason).to_equal("css-spec-properties-unrendered")
+expect(html_css_full_css_completion_total).to_equal(full_rendering_goal_full_css_total)
+expect(html_css_full_css_completion_rendered).to_equal(full_rendering_goal_full_css_rendered)
+expect(html_css_full_css_completion_unrendered).to_equal(full_rendering_goal_full_css_unrendered)
+expect(html_css_readiness_answer).to_equal("implemented-html-css-ready-full-css-incomplete")
 expect(traceability_status).to_equal("pass")
 expect(traceability_html_count).to_equal("105")
 expect(traceability_css_count.to_i64()).to_be_greater_than(389)
