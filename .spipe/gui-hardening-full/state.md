@@ -899,3 +899,8 @@ implementation-evidence-in-progress
   should use the in-tree Simple binary or an explicit `SIMPLE_BIN=...`;
   `ALLOW_PATH_SIMPLE_BIN=1` is documented as an opt-in local escape hatch before
   wrappers may use `command -v simple`.
+- continue-verify: Added Simple binary provenance fields to the Electron
+  generated-GUI and Simple Web layout evidence wrappers. Reports now include the
+  selected `*_simple_bin` and `*_simple_bin_source` (`explicit-env`,
+  `in-tree-release`, `repo-bin`, `path-opt-in`, or `default-missing`) so PATH
+  opt-in evidence remains auditable.

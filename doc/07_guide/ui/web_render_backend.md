@@ -146,7 +146,10 @@ Production evidence should use the in-tree Simple release binary or an explicit
 `SIMPLE_BIN=...` override. The Electron generated-GUI and Simple Web layout
 evidence wrappers only use `command -v simple` when the caller deliberately
 sets `ALLOW_PATH_SIMPLE_BIN=1`; otherwise missing in-tree Simple binaries remain
-fail-closed as `missing-simple-bin`.
+fail-closed as `missing-simple-bin`. The wrappers emit
+`*_simple_bin` and `*_simple_bin_source` so reports can distinguish
+`explicit-env`, `in-tree-release`, `repo-bin`, `path-opt-in`, and
+`default-missing` evidence.
 
 The focused production web endpoint gate is:
 
