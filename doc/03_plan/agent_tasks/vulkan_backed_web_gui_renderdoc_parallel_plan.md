@@ -172,15 +172,18 @@ gui_web_2d_vulkan_chrome_browser_backing_status=pass
 gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed
 gui_web_2d_vulkan_electron_browser_backing_vulkan=enabled
 gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=true
+gui_web_2d_vulkan_electron_browser_backing_source_file_status=pass
 gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed
 gui_web_2d_vulkan_chrome_browser_backing_display_type=<contains-vulkan>
 gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=<contains-vulkan>
 gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true
+gui_web_2d_vulkan_chrome_browser_backing_source_file_status=pass
 ```
 
 The aggregate normalizes stale child `pass` rows to `fail` when the matching
-hardware and Vulkan detail fields are missing. Do not hand-edit a pass row; rerun
-`--browser-backing` and keep the Electron/Chrome source proof files.
+hardware, Vulkan detail, or source proof files are missing. Do not hand-edit a
+pass row; rerun `--browser-backing` and keep the Electron/Chrome source proof
+files.
 The setup producer applies the same Chrome rule: `hardwareSupportsVulkan=true`
 and Vulkan display/GL detail are both required before emitting
 `chrome-vulkan-backed`.

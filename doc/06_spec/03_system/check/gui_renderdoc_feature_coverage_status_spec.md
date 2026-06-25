@@ -348,7 +348,7 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 763 lines folded for reproduction.
+Runnable source: 765 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -538,7 +538,9 @@ expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_mode=")
 expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_evidence_env=build/gui-web-2d-vulkan-env-browser-backing/evidence.env")
 expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_source=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/evidence.env")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_source_file_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/evidence.env")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_source_file_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_stdout=build/gui-web-2d-vulkan-env-run-auto/electron.out")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_stdout_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_log=build/gui-web-2d-vulkan-env-run-auto/electron.log")
@@ -1576,7 +1578,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 134 lines folded for reproduction.
+Runnable source: 136 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1612,7 +1614,7 @@ expect(stale_evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_reas
 expect(stale_evidence).to_contain("chrome_hardware")
 expect(stale_evidence).to_contain("chrome_vulkan")
 val command_with_browser_env = command_with_pixel_env.replace("GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env", "printf 'gui_web_2d_vulkan_mode=--browser-backing\\ngui_web_2d_vulkan_browser_backing_status=pass\\ngui_web_2d_vulkan_browser_backing_reason=pass\\ngui_web_2d_vulkan_browser_backing_mode=gpu-feature-status\\ngui_web_2d_vulkan_electron_browser_backing_status=pass\\ngui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed\\ngui_web_2d_vulkan_electron_browser_backing_vulkan=enabled\\ngui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_electron_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron_argb.json\\ngui_web_2d_vulkan_chrome_browser_backing_status=pass\\ngui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed\\ngui_web_2d_vulkan_chrome_browser_backing_display_type=vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_chrome_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env && RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/evidence.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env")
-val command_with_pixel_files = command_with_browser_env.replace("electron/electron_argb.json && printf 'rdoc_backend=simple", "electron/electron_argb.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"chrome-vulkan-capture\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"simple-vulkan-web2d\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/simple_argb.json && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_chrome_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_simple_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_simple_diff.env && printf 'rdoc_backend=simple")
+val command_with_pixel_files = command_with_browser_env.replace("electron/electron_argb.json && printf 'rdoc_backend=simple", "electron/electron_argb.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"chrome-vulkan-capture\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb.json && printf '{\"gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"vulkan\",\"glImplementationParts\":\"angle-vulkan\"}}}}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"simple-vulkan-web2d\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/simple_argb.json && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_chrome_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_simple_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_simple_diff.env && printf 'rdoc_backend=simple")
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command_with_pixel_files])
 expect(code).to_equal(0)
 
@@ -1698,9 +1700,11 @@ expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_status=p
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_vulkan=enabled")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=true")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_source_file_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_source_file_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_reason=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_gate_count=0")
