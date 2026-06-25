@@ -192,10 +192,13 @@ Retained showcase performance is also machine-gated. The aggregate consumes
 `GUI_SHOWCASE_4K_PERF_ENV` and `GUI_SHOWCASE_8K_PERF_ENV`, forwarding
 `gui_showcase_4k_200fps_*` and `gui_showcase_8k_perf_*` rows. Completion
 requires the 4K row to prove `3840x2160`, `8294400` pixels, nonzero readback
-pixels, target FPS met, nonempty checksum, retained log/time-log artifacts,
+pixels, target FPS met, nonempty checksum,
+`gui_showcase_4k_200fps_log_file_status=pass`,
+`gui_showcase_4k_200fps_time_log_file_status=pass`,
 `retained-static-frame`, and one redraw frame; the 8K row must likewise prove
 `7680x4320`, `33177600` pixels, nonzero readback pixels, target FPS, checksum,
-retained log/time-log artifact statuses, and RSS budget status.
+`gui_showcase_8k_perf_log_file_status=pass`,
+`gui_showcase_8k_perf_time_log_file_status=pass`, and RSS budget status.
 The browser Vulkan-backed proof is a separate rollup:
 `gui_web_2d_vulkan_browser_backing_status`,
 `gui_web_2d_vulkan_browser_backing_reason`, and

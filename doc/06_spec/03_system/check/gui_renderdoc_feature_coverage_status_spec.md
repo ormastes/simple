@@ -27,7 +27,7 @@ gui_renderdoc_feature_coverage_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1248,7 +1248,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Create synthetic retained 8K perf evidence")
-val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k/source && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_resolution=8k\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_frames=120\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_nonzero_pixels=1000\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_render_mode=retained-static-frame\\ngui_showcase_8k_perf_redraw_frames=1\\ngui_showcase_8k_perf_log=build/test-gui-renderdoc-feature-coverage-status-8k/source/showcase.log\\ngui_showcase_8k_perf_time_log=build/test-gui-renderdoc-feature-coverage-status-8k/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k/source && printf 'showcase retained log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k/source/showcase.log && printf 'elapsed_ms=597\\n' > build/test-gui-renderdoc-feature-coverage-status-8k/source/time.log && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_resolution=8k\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_frames=120\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_nonzero_pixels=1000\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_render_mode=retained-static-frame\\ngui_showcase_8k_perf_redraw_frames=1\\ngui_showcase_8k_perf_log=build/test-gui-renderdoc-feature-coverage-status-8k/source/showcase.log\\ngui_showcase_8k_perf_time_log=build/test-gui-renderdoc-feature-coverage-status-8k/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -1262,9 +1262,36 @@ expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_kb=524288")
 expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_budget_kb=1048576")
 expect(evidence).to_contain("gui_showcase_8k_perf_rss_status=pass")
 expect(evidence).to_contain("gui_showcase_8k_perf_checksum=123456")
-expect(evidence).to_contain("gui_showcase_8k_perf_log_file_status=missing")
-expect(evidence).to_contain("gui_showcase_8k_perf_time_log_file_status=missing")
+expect(evidence).to_contain("gui_showcase_8k_perf_log_file_status=pass")
+expect(evidence).to_contain("gui_showcase_8k_perf_time_log_file_status=pass")
 expect(report).to_contain("- GUI/web/2D 8K retained perf: pass")
+```
+
+</details>
+
+#### rejects retained 8K pass rows without log artifacts
+
+- Create a retained 8K performance row with missing log files
+   - Expected: code equals `0`
+- Assert the aggregate fails missing retained log artifacts
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create a retained 8K performance row with missing log files")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-missing-logs && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-missing-logs/source && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_resolution=8k\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_frames=120\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_nonzero_pixels=1000\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_render_mode=retained-static-frame\\ngui_showcase_8k_perf_redraw_frames=1\\ngui_showcase_8k_perf_log=build/test-gui-renderdoc-feature-coverage-status-8k-missing-logs/source/showcase.log\\ngui_showcase_8k_perf_time_log=build/test-gui-renderdoc-feature-coverage-status-8k-missing-logs/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-missing-logs/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-missing-logs/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-missing-logs/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-missing-logs/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate fails missing retained log artifacts")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-8k-missing-logs/out/evidence.env")
+expect(evidence).to_contain("gui_showcase_8k_perf_status=fail")
+expect(evidence).to_contain("gui_showcase_8k_perf_reason=missing-8k-retained-log-artifacts:log=missing;time_log=missing")
 ```
 
 </details>
@@ -1733,8 +1760,8 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-produ
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

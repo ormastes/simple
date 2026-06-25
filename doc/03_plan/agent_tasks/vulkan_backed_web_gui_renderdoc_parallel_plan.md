@@ -212,6 +212,10 @@ gui_showcase_8k_perf_render_mode=retained-static-frame
 gui_showcase_8k_perf_redraw_frames=1
 ```
 
+The aggregate fails retained showcase `pass` rows when either the showcase log
+or timing log file is missing. A path string alone is not retained performance
+evidence.
+
 Reject these reasons for completion:
 
 ```text
