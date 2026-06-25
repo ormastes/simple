@@ -318,33 +318,19 @@ fn run_test_file_jit(file_path: text, options: TestOptions, arch: text, target: 
 fn run_test_file_jit_stm32h7(file_path: text, source: text, options: TestOptions) -> TestFileResult:
     val setup_start = time_now_unix_micros()
     val connect_result = stm32h7_connect()
-    if connect_result.is_err():
-        val end = time_now_unix_micros()
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
-            error: "JIT target connect failed: {connect_result.err().unwrap()}", timed_out: false, cached: false)
-
-    var openocd_pid: i64 = 0
-    match connect_result:
-        case Ok(v):
-            openocd_pid = v
-        case Err(_):
-            openocd_pid = 0
+    val openocd_pid = match connect_result:
+        Ok(v): v
+        Err(msg):
+            val end = time_now_unix_micros()
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+                error: "JIT target connect failed: {msg}", timed_out: false, cached: false)
 
     val limits = MemoryMap.stm32h7()
     val compile_result = compile_remote_binary(source, Architecture.Arm32, limits.code_start)
-    if compile_result.is_err():
-        stm32h7_disconnect(openocd_pid)
-        val end = time_now_unix_micros()
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
-            error: "JIT compile failed: {compile_result.err().unwrap()}", timed_out: false, cached: false)
-
-    var compiled_bytes: [i32] = []
-    match compile_result:
-        case Ok(v):
-            compiled_bytes = v
-        case Err(msg):
+    val compiled_bytes = match compile_result:
+        Ok(v): v
+        Err(msg):
             stm32h7_disconnect(openocd_pid)
             val end = time_now_unix_micros()
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
@@ -359,20 +345,23 @@ fn run_test_file_jit_stm32h7(file_path: text, source: text, options: TestOptions
         arch: Architecture.Arm32
     )
     val layout_result = plan_binary_layout_arm32(binary, limits)
-    if layout_result.is_err():
-        stm32h7_disconnect(openocd_pid)
-        val end = time_now_unix_micros()
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
-            error: "JIT layout failed: {layout_result.err().unwrap()}", timed_out: false, cached: false)
-    var layout = layout_result.ok.unwrap()
+    val layout = match layout_result:
+        Ok(v): v
+        Err(msg):
+            stm32h7_disconnect(openocd_pid)
+            val end = time_now_unix_micros()
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+                error: "JIT layout failed: {msg}", timed_out: false, cached: false)
     val write_result = stm32h7_write_code(layout.code_base, bytes)
-    if write_result.is_err():
-        stm32h7_disconnect(openocd_pid)
-        val end = time_now_unix_micros()
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
-            error: "JIT upload failed: {write_result.err().unwrap()}", timed_out: false, cached: false)
+    match write_result:
+        Ok(_): ()
+        Err(msg):
+            stm32h7_disconnect(openocd_pid)
+            val end = time_now_unix_micros()
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+                error: "JIT upload failed: {msg}", timed_out: false, cached: false)
 
     val readback_result = stm32h7_read_code(layout.code_base, bytes.len())
     match readback_result:
@@ -394,40 +383,48 @@ fn run_test_file_jit_stm32h7(file_path: text, source: text, options: TestOptions
                     error: "SRAM readback mismatch", timed_out: false, cached: false)
 
     val sp_result = stm32h7_write_register(13, layout.stack_top)
-    if sp_result.is_err():
-        stm32h7_disconnect(openocd_pid)
-        val end = time_now_unix_micros()
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
-            error: "JIT set SP failed: {sp_result.err().unwrap()}", timed_out: false, cached: false)
+    match sp_result:
+        Ok(_): ()
+        Err(msg):
+            stm32h7_disconnect(openocd_pid)
+            val end = time_now_unix_micros()
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+                error: "JIT set SP failed: {msg}", timed_out: false, cached: false)
 
     val lr_result = stm32h7_write_register(14, jit_return_pc_arm32(layout))
-    if lr_result.is_err():
-        stm32h7_disconnect(openocd_pid)
-        val end = time_now_unix_micros()
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
-            error: "JIT set LR failed: {lr_result.err().unwrap()}", timed_out: false, cached: false)
+    match lr_result:
+        Ok(_): ()
+        Err(msg):
+            stm32h7_disconnect(openocd_pid)
+            val end = time_now_unix_micros()
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+                error: "JIT set LR failed: {msg}", timed_out: false, cached: false)
 
     val pc_result = stm32h7_write_register(15, jit_entry_pc_arm32(layout))
-    if pc_result.is_err():
-        stm32h7_disconnect(openocd_pid)
-        val end = time_now_unix_micros()
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
-            error: "JIT set PC failed: {pc_result.err().unwrap()}", timed_out: false, cached: false)
+    match pc_result:
+        Ok(_): ()
+        Err(msg):
+            stm32h7_disconnect(openocd_pid)
+            val end = time_now_unix_micros()
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+                error: "JIT set PC failed: {msg}", timed_out: false, cached: false)
 
     val setup_end = time_now_unix_micros()
     val setup_ms = (setup_end - setup_start) / 1000
 
     val exec_start = time_now_unix_micros()
     val resume_result = stm32h7_resume()
-    if resume_result.is_err():
-        stm32h7_disconnect(openocd_pid)
-        val end = time_now_unix_micros()
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: 0, setup_ms: setup_ms,
-            error: "JIT resume failed: {resume_result.err().unwrap()}", timed_out: false, cached: false)
+    match resume_result:
+        Ok(_): ()
+        Err(msg):
+            stm32h7_disconnect(openocd_pid)
+            val end = time_now_unix_micros()
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: 0, setup_ms: setup_ms,
+                error: "JIT resume failed: {msg}", timed_out: false, cached: false)
 
     shell("sleep 0.5")
     val r0_result = stm32h7_read_register(0)
@@ -435,29 +432,19 @@ fn run_test_file_jit_stm32h7(file_path: text, source: text, options: TestOptions
     val exec_end = time_now_unix_micros()
     stm32h7_disconnect(openocd_pid)
 
-    if r0_result.is_err():
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: (exec_end - exec_start) / 1000, setup_ms: setup_ms,
-            error: "JIT read R0 failed: {r0_result.err().unwrap()}", timed_out: false, cached: false)
+    val r0 = match r0_result:
+        Ok(v): v
+        Err(msg):
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: (exec_end - exec_start) / 1000, setup_ms: setup_ms,
+                error: "JIT read R0 failed: {msg}", timed_out: false, cached: false)
 
-    if pc_after_result.is_err():
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: (exec_end - exec_start) / 1000, setup_ms: setup_ms,
-            error: "JIT read PC failed: {pc_after_result.err().unwrap()}", timed_out: false, cached: false)
-
-    var r0 = 0
-    match r0_result:
-        case Ok(v):
-            r0 = v
-        case Err(_):
-            r0 = 0
-
-    var pc_after = 0
-    match pc_after_result:
-        case Ok(v):
-            pc_after = v
-        case Err(_):
-            pc_after = 0
+    val pc_after = match pc_after_result:
+        Ok(v): v
+        Err(msg):
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: (exec_end - exec_start) / 1000, setup_ms: setup_ms,
+                error: "JIT read PC failed: {msg}", timed_out: false, cached: false)
     val expected_halt_pc = layout.halt_addr
     val expected_pc = layout.halt_addr + 2
     val pc_ok = pc_after == expected_halt_pc or pc_after == expected_pc
