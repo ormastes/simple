@@ -55,6 +55,27 @@ evidence lanes only; they do not close acceptance criteria alone.
   must use `assert(false)` or `fail(...)`; silent no-op helper passes are not
   valid evidence.
 
+## Runtime Boundary Decision
+
+- runtime_need: GUI/web/2D Vulkan parity and retained 8K evidence require host
+  env/file/process access for evidence wrappers, native Simple ARGB rendering,
+  backend readback, and browser/Electron GPU metadata. Feature code must not add
+  direct `rt_*` plumbing to satisfy those probes.
+- facade_checked: Existing `std.nogc_sync_mut.io.file_ops`,
+  `std.gc_async_mut.io.mod_stub`, env/process facades, Engine2D backend facades,
+  and browser/evidence wrapper scripts were checked before accepting any
+  runtime-adjacent change.
+- chosen_path: Reuse facades in feature/evidence code; add or repair the
+  smallest owner facade when a facade is missing; use
+  `fix-codegen-runtime-owner` only for proven native lowering/runtime owner
+  bugs such as tagged `rt_env_get` strings and compiler-lowered `rt_file_*`
+  aliases in `runtime_native.c`.
+- rejected_shortcuts: No new app-leaf or `src/lib/gc_async_mut` raw `rt_*`
+  env/process/file declarations; no fixture-only backend pokes to claim GPU
+  proof; no flag-only Electron GPU forcing; no fallback bitmap comparison as
+  browser Vulkan proof; no deterministic CSS/image/header substitutions unless
+  a new capture reason proves they improve real parity.
+
 ## Phase
 implementation-evidence-in-progress
 

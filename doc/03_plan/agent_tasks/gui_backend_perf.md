@@ -51,6 +51,10 @@ Acceptance:
 - New app leaf or `src/lib/gc_async_mut` runtime access must go through existing
   env/process facades, or the lane must add a named facade/alias with focused
   specs and generated/manual `doc/06_spec` evidence.
+- Before runtime-adjacent edits, update `.spipe/gui-hardening-full/state.md`
+  with the structured decision keys `runtime_need`, `facade_checked`,
+  `chosen_path`, and `rejected_shortcuts`. Default to `reuse-facade`; use
+  `fix-codegen-runtime-owner` only for a proven compiler/runtime owner bug.
 - Final verification for this lane includes the direct-env/runtime guard on the
   working and staged trees, plus generated-manual quality review for any changed
   SSpec docs.
