@@ -17,7 +17,7 @@
 - HTML/CSS full rendering goal: incomplete (full-css-rendering-incomplete; full CSS 63/394)
 - HTML/CSS readiness answer: implemented-html-css-ready-full-css-incomplete (implemented surface pass, full CSS incomplete; unrendered CSS 331)
 - Web WM modern shell evidence: pass (pass; interaction pass; bitmap pass; audit pass)
-- Native render-log platform matrix: incomplete (missing-or-failing-native-render-log-platforms; missing linux-vulkan,macos-metal,windows-d3d12; required linux-vulkan,macos-metal,windows-d3d12)
+- Native render-log platform matrix: fail (missing-or-failing-native-render-log-platforms; missing linux-vulkan,macos-metal,windows-d3d12; required linux-vulkan,macos-metal,windows-d3d12)
 - HTML/CSS animation rendering: incomplete (0/18; animation-transition-transform-css)
 - RenderDoc goal: fail (missing-source-evidence)
 - Simple RenderDoc: fail (missing-source-evidence)
@@ -242,20 +242,20 @@
 - html_css_full_css_completion_rendered_count=63
 - html_css_full_css_completion_unrendered_count=331
 - html_css_readiness_answer=implemented-html-css-ready-full-css-incomplete
-- native_render_log_platform_matrix_status=incomplete
+- native_render_log_platform_matrix_status=fail
 - native_render_log_platform_matrix_reason=missing-or-failing-native-render-log-platforms
 - native_render_log_platform_matrix_required_platforms=linux-vulkan,macos-metal,windows-d3d12
 - native_render_log_platform_matrix_missing_platforms=linux-vulkan,macos-metal,windows-d3d12
-- native_render_log_platform_matrix_failed_platforms=
+- native_render_log_platform_matrix_failed_platforms=linux-vulkan
 - linux_vulkan_render_log_compare_env=build/linux-vulkan-render-log-compare/evidence.env
-- linux_vulkan_render_log_compare_env_file_status=missing
-- linux_vulkan_render_log_compare_status=unavailable
-- linux_vulkan_render_log_compare_reason=missing-linux-vulkan-render-log-compare-evidence
+- linux_vulkan_render_log_compare_env_file_status=pass
+- linux_vulkan_render_log_compare_status=fail
+- linux_vulkan_render_log_compare_reason=electron-browser-backing-fail;browser-backing-fail
 - linux_vulkan_render_log_compare_required_api=vulkan
-- linux_vulkan_render_log_compare_pairwise_status=
-- linux_vulkan_render_log_compare_renderdoc_simple_status=
-- linux_vulkan_render_log_compare_renderdoc_chrome_status=
-- linux_vulkan_render_log_compare_renderdoc_electron_status=
+- linux_vulkan_render_log_compare_pairwise_status=pass
+- linux_vulkan_render_log_compare_renderdoc_simple_status=pass
+- linux_vulkan_render_log_compare_renderdoc_chrome_status=fail
+- linux_vulkan_render_log_compare_renderdoc_electron_status=unavailable
 - macos_metal_render_log_compare_env=build/macos-metal-render-log-compare/evidence.env
 - macos_metal_render_log_compare_env_file_status=missing
 - macos_metal_render_log_compare_status=unavailable

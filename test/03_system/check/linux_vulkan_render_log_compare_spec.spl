@@ -8,6 +8,8 @@ Electron Vulkan evidence. The spec uses controlled key/value fixtures so it can
 run on non-GUI hosts without launching browsers or RenderDoc.
 
 **Plan:** doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md
+**Requirements:** N/A
+**Research:** N/A
 **Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
 
 ## Syntax
@@ -15,6 +17,90 @@ run on non-GUI hosts without launching browsers or RenderDoc.
 ```sh
 SIMPLE_LIB=src bin/simple test test/03_system/check/linux_vulkan_render_log_compare_spec.spl --mode=interpreter --clean --fail-fast
 ```
+
+## Operator Flow
+
+1. Produce direct GUI/web/2D Vulkan run evidence with
+   `scripts/setup/setup-gui-web-2d-vulkan-env.shs --run`.
+2. Produce focused browser GPU-status evidence with
+   `scripts/setup/setup-gui-web-2d-vulkan-env.shs --browser-backing`.
+3. Run `scripts/check/check-linux-vulkan-render-log-compare.shs` with
+   `GUI_WEB_2D_VULKAN_ENV` pointing at the direct-run evidence and
+   `GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV` pointing at the focused
+   browser-backing evidence.
+4. Treat `linux_vulkan_render_log_compare_status=pass` as a Linux-only result.
+   macOS Metal and Windows D3D12 have separate compare gates and must not be
+   inferred from the Linux row.
+
+## Evidence Contract
+
+The Linux compare gate reads pixel equivalence from the direct-run evidence:
+
+- `gui_web_2d_vulkan_pixel_comparison_status=pass`
+- `gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff`
+- `gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass`
+- `gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass`
+- `gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass`
+
+It reads browser Vulkan proof from the focused browser-backing evidence when
+that file exists:
+
+- `gui_web_2d_vulkan_browser_backing_status=pass`
+- `gui_web_2d_vulkan_electron_browser_backing_status=pass`
+- `gui_web_2d_vulkan_chrome_browser_backing_status=pass`
+
+The fallback to `GUI_WEB_2D_VULKAN_ENV` exists only for older fixtures that
+store both direct-run and browser-backing fields in the same env file.
+
+## Failure Semantics
+
+The gate is fail-closed. If Electron hardware Vulkan backing fails, the Linux
+row must report `electron-browser-backing-fail`; if Chrome is proven pass in
+the focused browser env, the reason must not report Chrome as missing. Missing
+RenderDoc `.rdc` evidence is reported separately through
+`linux_vulkan_render_log_compare_renderdoc_*_status` and becomes release
+blocking only when `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=1`.
+
+## Normalized Outputs
+
+The wrapper writes one rollup env and four Simple render-log env files:
+
+- `evidence.env` contains `linux_vulkan_render_log_compare_*` keys for the
+  platform-matrix gate.
+- `simple.srl.env` records the Simple Vulkan source in `simple-render-log-v1`
+  format.
+- `chrome.srl.env` records the Chrome source in `simple-render-log-v1` format.
+- `electron.srl.env` records the Electron source in `simple-render-log-v1`
+  format.
+- `compare.srl.env` records the pairwise comparison result and references the
+  direct-run evidence file.
+
+Each source log records platform, native API, source name, capture tool,
+backend, scene, viewport, nonblank count, artifact path, artifact magic, and a
+native-info field for backend details not yet represented by the normalized
+schema.
+
+## Test Matrix
+
+The spec covers three cases:
+
+1. A combined fixture where direct-run, browser-backing, pairwise diff, and
+   RenderDoc statuses all pass. This proves the pass contract and source-log
+   shape.
+2. A combined fixture where Electron browser backing fails. This proves the
+   gate remains failed even when Simple Vulkan and pairwise pixels pass.
+3. A split fixture where direct-run pixels and focused browser-backing evidence
+   live in separate files. This proves current real host evidence is interpreted
+   precisely: Chrome can be pass while Electron is fail, without reporting
+   Chrome as missing.
+
+## Completion Boundaries
+
+`linux_vulkan_render_log_compare_status=pass` only proves the Linux Vulkan row.
+It does not prove macOS Metal, Windows D3D12, production GUI/web parity, full
+CSS rendering, or RenderDoc completion. The aggregate audit must still combine
+this row with `macos_metal_render_log_compare_*` and
+`windows_d3d12_render_log_compare_*` before the native platform matrix can pass.
 """
 
 # @tag: system, gpu, vulkan, render-log, linux, evidence
@@ -90,3 +176,34 @@ describe "Linux Vulkan render-log compare gate":
         expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
         expect(evidence).to_contain("electron-browser-backing-fail")
         expect(evidence).to_contain("browser-backing-fail")
+
+    it "uses focused browser backing evidence with direct-run pixel evidence":
+        step("Create direct-run pixel evidence and a separate focused browser-backing env")
+        val command = "rm -rf build/test-linux-vulkan-render-log-focused-backing && mkdir -p build/test-linux-vulkan-render-log-focused-backing && cat > build/test-linux-vulkan-render-log-focused-backing/run.env <<'EOF'\n" +
+            "gui_web_2d_vulkan_simple_status=pass\n" +
+            "gui_web_2d_vulkan_simple_backend_name=vulkan\n" +
+            "gui_web_2d_vulkan_simple_argb_backend=vulkan\n" +
+            "gui_web_2d_vulkan_pixel_comparison_status=pass\n" +
+            "gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff\n" +
+            "gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass\n" +
+            "gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass\n" +
+            "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass\n" +
+            "EOF\n" +
+            "cat > build/test-linux-vulkan-render-log-focused-backing/browser.env <<'EOF'\n" +
+            "gui_web_2d_vulkan_browser_backing_status=fail\n" +
+            "gui_web_2d_vulkan_electron_browser_backing_status=fail\n" +
+            "gui_web_2d_vulkan_chrome_browser_backing_status=pass\n" +
+            "EOF\n" +
+            "BUILD_DIR=build/test-linux-vulkan-render-log-focused-backing/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-focused-backing/run.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-linux-vulkan-render-log-focused-backing/browser.env sh scripts/check/check-linux-vulkan-render-log-compare.shs || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        step("Assert the Linux compare reason uses focused backing statuses")
+        val evidence = file_read("build/test-linux-vulkan-render-log-focused-backing/out/evidence.env")
+        expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
+        expect(evidence).to_contain("linux_vulkan_render_log_compare_browser_backing_env=build/test-linux-vulkan-render-log-focused-backing/browser.env")
+        expect(evidence).to_contain("linux_vulkan_render_log_compare_pairwise_status=pass")
+        expect(evidence).to_contain("electron-browser-backing-fail")
+        expect(evidence).to_contain("browser-backing-fail")
+        expect(evidence.contains("chrome-browser-backing-missing")).to_equal(false)
+        expect(evidence.contains("chrome-browser-backing-fail")).to_equal(false)

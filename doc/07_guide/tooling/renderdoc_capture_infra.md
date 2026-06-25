@@ -304,6 +304,7 @@ optional native RenderDoc evidence into the Simple render-log format:
 
 ```sh
 GUI_WEB_2D_VULKAN_ENV=build/gui-web-2d-vulkan-env/evidence.env \
+GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/gui-web-2d-vulkan-env-browser-backing/evidence.env \
 sh scripts/check/check-linux-vulkan-render-log-compare.shs
 ```
 
@@ -315,9 +316,13 @@ It writes:
 - `build/linux-vulkan-render-log-compare/electron.srl.env`
 - `build/linux-vulkan-render-log-compare/compare.srl.env`
 
-The gate is fail-closed. It requires Simple Vulkan backend evidence, focused
-Chrome and Electron Vulkan browser backing, `pairwise-argb-diff` mode, and all
-three pairwise diff lanes to pass. Missing RenderDoc `.rdc` evidence is
+The gate is fail-closed. It reads direct-run pixel comparison from
+`GUI_WEB_2D_VULKAN_ENV` and focused Chrome/Electron GPU-status proof from
+`GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV` when present, falling back to
+`GUI_WEB_2D_VULKAN_ENV` only for older combined fixtures. It requires Simple
+Vulkan backend evidence, focused Chrome and Electron Vulkan browser backing,
+`pairwise-argb-diff` mode, and all three pairwise diff lanes to pass. Missing
+RenderDoc `.rdc` evidence is
 reported through `linux_vulkan_render_log_compare_renderdoc_*_status`; set
 `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=1` when the host is expected to provide
 real `.rdc` files and `RDOC` magic.
