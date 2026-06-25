@@ -27,7 +27,7 @@ linux_vulkan_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -145,7 +145,10 @@ The spec covers three cases:
 4. A fresh main `--browser-backing` fixture plus a stale focused env. This proves
    the wrapper does not let stale focused evidence override the current backing
    run.
-5. A source contract check that keeps the default RenderDoc evidence paths on
+5. A RenderDoc failure fixture where Chrome fails with a concrete crash reason.
+   This proves the normalized Linux rollup and Chrome source log preserve
+   failure detail for platform-agent comparison.
+6. A source contract check that keeps the default RenderDoc evidence paths on
    the focused current-capture rows instead of stale canonical probe rows.
 
 ## Completion Boundaries
@@ -358,6 +361,52 @@ expect(evidence.contains("browser-backing-fail")).to_equal(false)
 
 </details>
 
+#### preserves RenderDoc failure reasons in Linux source logs
+
+- Create passing pixel evidence with a Chrome RenderDoc crash reason
+   - Expected: code equals `0`
+- Assert Chrome RenderDoc reason is normalized
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create passing pixel evidence with a Chrome RenderDoc crash reason")
+val command = "rm -rf build/test-linux-vulkan-render-log-rdoc-reason && mkdir -p build/test-linux-vulkan-render-log-rdoc-reason/rdoc/simple build/test-linux-vulkan-render-log-rdoc-reason/rdoc/html build/test-linux-vulkan-render-log-rdoc-reason/rdoc/electron && cat > build/test-linux-vulkan-render-log-rdoc-reason/gui.env <<'EOF'\n" +
+    "gui_web_2d_vulkan_simple_status=pass\n" +
+    "gui_web_2d_vulkan_simple_backend_name=vulkan\n" +
+    "gui_web_2d_vulkan_simple_argb_backend=vulkan\n" +
+    "gui_web_2d_vulkan_electron_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_chrome_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_pixel_comparison_status=pass\n" +
+    "gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff\n" +
+    "gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass\n" +
+    "EOF\n" +
+    "printf 'rdoc_simple_gate_status=pass\\nrdoc_simple_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\n' > build/test-linux-vulkan-render-log-rdoc-reason/rdoc/simple/evidence.env\n" +
+    "printf 'rdoc_external_host_capture_gate_status=fail\\nrdoc_external_host_gate_reason=gate-command-failed\\nrdoc_external_host_capture_reason_raw=chromium-gpu-process-crashed-under-renderdoc\\nrdoc_capture_status=fail\\nrdoc_capture_reason=chromium-gpu-process-crashed-under-renderdoc\\n' > build/test-linux-vulkan-render-log-rdoc-reason/rdoc/html/evidence.env\n" +
+    "printf 'rdoc_electron_html_gate_status=pass\\nrdoc_electron_html_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\n' > build/test-linux-vulkan-render-log-rdoc-reason/rdoc/electron/evidence.env\n" +
+    "BUILD_DIR=build/test-linux-vulkan-render-log-rdoc-reason/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-rdoc-reason/gui.env RDOC_SIMPLE_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-reason/rdoc/simple/evidence.env RDOC_HTML_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-reason/rdoc/html/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-reason/rdoc/electron/evidence.env sh scripts/check/check-linux-vulkan-render-log-compare.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert Chrome RenderDoc reason is normalized")
+val evidence = file_read("build/test-linux-vulkan-render-log-rdoc-reason/out/evidence.env")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_status=fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_reason=gate-command-failed")
+val chrome_log = file_read("build/test-linux-vulkan-render-log-rdoc-reason/out/chrome.srl.env")
+expect(chrome_log).to_contain("simple_render_log_status=fail")
+expect(chrome_log).to_contain("simple_render_log_reason=gate-command-failed")
+```
+
+</details>
+
 #### defaults RenderDoc inputs to focused current capture evidence
 
 - Read the Linux render-log wrapper defaults
@@ -395,8 +444,8 @@ expect(script.contains("build/renderdoc/canonical-probe/electron-html/evidence.e
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

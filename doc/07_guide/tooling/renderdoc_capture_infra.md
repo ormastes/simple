@@ -345,8 +345,9 @@ wins over a stale separate focused env; otherwise the separate focused env is
 used and older combined fixtures fall back to `GUI_WEB_2D_VULKAN_ENV`. It
 requires Simple Vulkan backend evidence, focused Chrome and Electron Vulkan
 browser backing, `pairwise-argb-diff` mode, and all three pairwise diff lanes to
-pass. Missing RenderDoc `.rdc` evidence is
-reported through `linux_vulkan_render_log_compare_renderdoc_*_status`; set
+pass. Missing RenderDoc `.rdc` evidence is reported through
+`linux_vulkan_render_log_compare_renderdoc_*_status` plus the matching
+`linux_vulkan_render_log_compare_renderdoc_*_reason`; set
 `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=1` when the host is expected to provide
 real `.rdc` files and `RDOC` magic.
 
@@ -364,11 +365,15 @@ linux_vulkan_render_log_compare_status=pass
 linux_vulkan_render_log_compare_required_api=vulkan
 linux_vulkan_render_log_compare_pairwise_status=pass
 linux_vulkan_render_log_compare_renderdoc_simple_status=pass
+linux_vulkan_render_log_compare_renderdoc_simple_reason=pass
 linux_vulkan_render_log_compare_renderdoc_chrome_status=pass
+linux_vulkan_render_log_compare_renderdoc_chrome_reason=pass
 linux_vulkan_render_log_compare_renderdoc_electron_status=pass
+linux_vulkan_render_log_compare_renderdoc_electron_reason=pass
 ```
 
 The source logs use `simple-render-log-v1` and include
+`simple_render_log_reason` for normalized failure detail and
 `simple_render_log_native_info` for native-only metadata that does not yet fit
 the normalized schema. Metal, D3D12/PIX, GPU debugger, and Tauri mobile lanes
 must keep this schema and add native sidecar fields instead of inventing
