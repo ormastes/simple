@@ -30,6 +30,10 @@ rewrite, or weaken SPipe during release; if SPipe is missing, stale, or
 placeholder-based, stop and go back to verify/implementation.
 Generated-manual quality and lower-model sidecar review must already be covered
 by verify PASS; release does not repair or accept them afterward.
+Workflow/tooling/evidence/spec/verification contract docs must already be fresh
+from verify; release must not repair stale `doc/07_guide`, `doc/06_spec`,
+`.codex/skills`, `.agents/skills`, `.claude/skills`, `.claude/agents/spipe`,
+or `.gemini/commands` instructions.
 
 ## Steps
 
