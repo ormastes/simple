@@ -17,7 +17,7 @@
 - HTML/CSS full rendering goal: incomplete (full-css-rendering-incomplete; full CSS 63/394)
 - HTML/CSS readiness answer: implemented-html-css-ready-full-css-incomplete (implemented surface pass, full CSS incomplete; unrendered CSS 331)
 - Web WM modern shell evidence: pass (pass; interaction pass; bitmap pass; audit pass)
-- Native render-log platform matrix: fail (missing-or-failing-native-render-log-platforms; missing linux-vulkan,macos-metal,windows-d3d12; required linux-vulkan,macos-metal,windows-d3d12)
+- Native render-log platform matrix: fail (missing-or-failing-native-render-log-platforms; missing macos-metal,windows-d3d12; failed linux-vulkan; required linux-vulkan,macos-metal,windows-d3d12)
 - HTML/CSS animation rendering: incomplete (0/18; animation-transition-transform-css)
 - RenderDoc goal: fail (missing-source-evidence)
 - Simple RenderDoc: fail (missing-source-evidence)
@@ -245,7 +245,7 @@
 - native_render_log_platform_matrix_status=fail
 - native_render_log_platform_matrix_reason=missing-or-failing-native-render-log-platforms
 - native_render_log_platform_matrix_required_platforms=linux-vulkan,macos-metal,windows-d3d12
-- native_render_log_platform_matrix_missing_platforms=linux-vulkan,macos-metal,windows-d3d12
+- native_render_log_platform_matrix_missing_platforms=macos-metal,windows-d3d12
 - native_render_log_platform_matrix_failed_platforms=linux-vulkan
 - linux_vulkan_render_log_compare_env=build/linux-vulkan-render-log-compare/evidence.env
 - linux_vulkan_render_log_compare_env_file_status=pass
