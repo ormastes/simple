@@ -1252,7 +1252,7 @@ expect(blocked_gates.contains("production GUI/web font offload readback evidence
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1276,6 +1276,8 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_time_log_file_status=pass")
 expect(report).to_contain("- GUI/web/2D 4K retained perf: pass")
 expect(report).to_contain("frames 120")
 expect(report).to_contain("target_fps 200")
+expect(report).to_contain("nonzero_pixels 1000")
+expect(report).to_contain("checksum 123456")
 expect(report).to_contain("rss 131072/262144 kB")
 ```
 
@@ -1291,7 +1293,7 @@ expect(report).to_contain("rss 131072/262144 kB")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1315,6 +1317,8 @@ expect(evidence).to_contain("gui_showcase_8k_perf_time_log_file_status=pass")
 expect(report).to_contain("- GUI/web/2D 8K retained perf: pass")
 expect(report).to_contain("frames 120")
 expect(report).to_contain("target_fps 200")
+expect(report).to_contain("nonzero_pixels 1000")
+expect(report).to_contain("checksum 123456")
 ```
 
 </details>
