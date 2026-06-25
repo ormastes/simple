@@ -69,15 +69,17 @@ fn plan_synthetic_driver_registration(fn_: HirFunction, symbols: SymbolTable) ->
             )
         case Driver:
             val ops_value = find_driver_ops_value(symbols)
-            if ops_value.?:
-                val ops_name = ops_value.unwrap()
-                return SyntheticDriverRegistrationPlan(
-                    function_name: fn_.name,
-                    status: SyntheticDriverRegistrationStatus.ReadyToSynthesize,
-                    reason: "@driver manifest can synthesize register_static_driver(manifest, ops) because a DriverOps value is identified",
-                    has_ops_value: true,
-                    ops_value_name: ops_name
-                )
+            match ops_value:
+                Some(ops_name):
+                    return SyntheticDriverRegistrationPlan(
+                        function_name: fn_.name,
+                        status: SyntheticDriverRegistrationStatus.ReadyToSynthesize,
+                        reason: "@driver manifest can synthesize register_static_driver(manifest, ops) because a DriverOps value is identified",
+                        has_ops_value: true,
+                        ops_value_name: ops_name
+                    )
+                nil:
+                    pass_do_nothing("driver manifest has no visible DriverOps value")
             return SyntheticDriverRegistrationPlan(
                 function_name: fn_.name,
                 status: SyntheticDriverRegistrationStatus.BlockedMissingDriverOps,
@@ -129,10 +131,11 @@ fn expr_find_register_static_driver_call(expr: HirExpr, symbols: SymbolTable) ->
                 i = i + 1
             empty_register_static_driver_call()
         case Ret(value):
-            if value.?:
-                expr_find_register_static_driver_call(value.unwrap(), symbols)
-            else:
-                empty_register_static_driver_call()
+            match value:
+                Some(return_value):
+                    expr_find_register_static_driver_call(return_value, symbols)
+                nil:
+                    empty_register_static_driver_call()
         case Block(block):
             find_register_static_driver_call(block, symbols)
         case If(cond, then_, else_):
@@ -142,8 +145,11 @@ fn expr_find_register_static_driver_call(expr: HirExpr, symbols: SymbolTable) ->
             val then_found = find_register_static_driver_call(then_, symbols)
             if then_found.found:
                 return then_found
-            if else_.?:
-                return find_register_static_driver_call(else_.unwrap(), symbols)
+            match else_:
+                Some(else_block):
+                    return find_register_static_driver_call(else_block, symbols)
+                nil:
+                    pass_do_nothing("if expression has no else block")
             empty_register_static_driver_call()
         case Binary(_, left, right):
             val left_found = expr_find_register_static_driver_call(left, symbols)
@@ -187,8 +193,11 @@ fn classify_register_static_driver_args(args: [HirCallArg], symbols: SymbolTable
                     var ops_name = symbol_name_in_current_scope(symbol, symbols)
                     if ops_name == "":
                         val visible_ops = find_driver_ops_value(symbols)
-                        if visible_ops.?:
-                            ops_name = visible_ops.unwrap()
+                        match visible_ops:
+                            Some(visible_name):
+                                ops_name = visible_name
+                            nil:
+                                pass_do_nothing("no visible DriverOps value name")
                     return RegisterStaticDriverCall(found: true, has_ops_value: true, ops_value_name: ops_name)
             case _:
                 false
@@ -215,18 +224,21 @@ fn symbol_name_in_current_scope(symbol_id: SymbolId, symbols: SymbolTable) -> te
         for name in scope.symbols.keys():
             if scope.symbols[name].id == symbol_id.id:
                 return name
-        if scope.parent.?:
-            scope_id = scope.parent.unwrap()
-        else:
-            break
+        match scope.parent:
+            Some(parent):
+                scope_id = parent
+            nil:
+                break
     val symbol = symbols.get(symbol_id)
     symbol.name
 
 fn symbol_is_driver_ops_value(symbol_id: SymbolId, symbols: SymbolTable) -> bool:
     val symbol = symbols.get(symbol_id)
-    if not symbol.type_.?:
-        return false
-    return type_is_named(symbol.type_.unwrap(), symbols, "DriverOps")
+    match symbol.type_:
+        Some(symbol_type):
+            return type_is_named(symbol_type, symbols, "DriverOps")
+        nil:
+            return false
 
 fn type_is_named(type_: HirType, symbols: SymbolTable, expected: text) -> bool:
     match type_.kind:
