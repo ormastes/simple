@@ -338,7 +338,7 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 728 lines folded for reproduction.
+Runnable source: 730 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -520,9 +520,11 @@ expect(evidence).to_contain("gui_web_2d_vulkan_chrome_requested_api=vulkan")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_requested_angle=vulkan")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_requested_features=Vulkan")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan")
-expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_evidence_env=")
-expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_source=")
+expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_evidence_env=build/gui-web-2d-vulkan-env-run-auto/evidence.env")
+expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_source=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_mode=")
+expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_evidence_env=build/gui-web-2d-vulkan-env-browser-backing/evidence.env")
+expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_source=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_path=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_file_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_width=")
