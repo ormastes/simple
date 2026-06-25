@@ -143,6 +143,21 @@ artifact contract is `gui_web_2d_vulkan_comparison_fixture_status`,
 the Electron baseline exists and is nonblank, the Chrome ARGB output is
 viewport-matching and nonblank, and the Simple evidence env proves the Vulkan backend
 before making a GUI/web/2D Vulkan comparison claim.
+When direct-run evidence is missing, the aggregate still emits the expected
+capture diagnostics under the selected run directory. Inspect
+`gui_web_2d_vulkan_electron_stdout`, `gui_web_2d_vulkan_electron_log`,
+`gui_web_2d_vulkan_electron_argb_proof`, and
+`gui_web_2d_vulkan_electron_argb_proof_file_status` for Electron capture
+failures. Inspect `gui_web_2d_vulkan_chrome_stdout`,
+`gui_web_2d_vulkan_chrome_log`,
+`gui_web_2d_vulkan_chrome_screenshot`,
+`gui_web_2d_vulkan_chrome_argb_stdout`,
+`gui_web_2d_vulkan_chrome_argb_proof`, and
+`gui_web_2d_vulkan_chrome_argb_proof_file_status` for Chrome capture
+failures. Inspect `gui_web_2d_vulkan_simple_argb_stdout` together with
+`gui_web_2d_vulkan_simple_evidence_env` for Simple capture failures. A
+`missing` proof or output file is a completion blocker, not a substitute for
+browser or Simple Vulkan proof.
 Artifact evidence is not enough for a pixel-equivalence claim. The pairwise
 pixel comparison contract is `gui_web_2d_vulkan_pixel_comparison_status`,
 `gui_web_2d_vulkan_pixel_comparison_reason`, and
