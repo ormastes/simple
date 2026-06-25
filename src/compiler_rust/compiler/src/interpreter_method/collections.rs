@@ -54,6 +54,12 @@ pub fn handle_array_methods(
             Value::array(new_arr)
         }
         "pop" => {
+            // NOTE: returns the TRIMMED ARRAY, not the popped element. The
+            // identifier-lvalue path (interpreter_helpers/patterns.rs) special-
+            // cases pop to return the element + trim the binding; the field/Index
+            // self-update writeback paths still depend on this array return to
+            // mutate. Direct non-lvalue `arr.pop()` therefore yields the array
+            // (pre-existing; element-return for those paths is a separate fix).
             let mut new_arr = arr.to_vec();
             new_arr.pop();
             Value::array(new_arr)

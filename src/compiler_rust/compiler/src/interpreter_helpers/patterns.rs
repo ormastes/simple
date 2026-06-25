@@ -464,6 +464,18 @@ pub(crate) fn handle_method_call_with_self_update(
                             ctx,
                         ));
                     }
+                    // pop is special: it returns the REMOVED ELEMENT (or Nil if
+                    // empty) while trimming the bound array. The generic branch
+                    // below returns the mutated array as the result, which is
+                    // correct for push/insert/remove/clear but wrong for pop
+                    // (parity with native rt_array_pop, which returns the element).
+                    if method == "pop" {
+                        if let Some(Value::Array(arr)) = env.get(obj_name) {
+                            let mut new_arr = arr.to_vec();
+                            let popped = new_arr.pop().unwrap_or(Value::Nil);
+                            return Ok((popped, Some((obj_name.clone(), Value::array(new_arr)))));
+                        }
+                    }
                     // Evaluate the method call - it returns the new array
                     let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
                     if let Value::Array(new_arr) = &result {
