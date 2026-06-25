@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 109 | 109 | 0 | 0 |
+| 110 | 110 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -367,6 +367,29 @@ val italic = render_html_to_pixels_with_viewport(italic_html, 96, 32).pixel_data
 expect(_count_color(italic, 0xFF111827u32)).to_equal(_count_color(plain, 0xFF111827u32))
 expect(_count_region_changed(italic, 96, 1, 0, 40, 8, WHITE_BG)).to_be_greater_than(0)
 expect(_pixels_equal(plain, italic)).to_equal(false)
+```
+
+</details>
+
+#### renders direction rtl by reversing simple text glyph order
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ltr_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; }</style></head><body><div class='label'>ABC</div></body></html>"
+val reversed_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; }</style></head><body><div class='label'>CBA</div></body></html>"
+val rtl_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; direction: rtl; }</style></head><body><div class='label'>ABC</div></body></html>"
+val ltr = render_html_to_pixels_with_viewport(ltr_html, 96, 32).pixel_data
+val reversed = render_html_to_pixels_with_viewport(reversed_html, 96, 32).pixel_data
+val rtl = render_html_to_pixels_with_viewport(rtl_html, 96, 32).pixel_data
+
+expect(_count_color(rtl, 0xFF111827u32)).to_equal(_count_color(reversed, 0xFF111827u32))
+expect(_pixels_equal(ltr, rtl)).to_equal(false)
+expect(_pixels_equal(reversed, rtl)).to_equal(true)
 ```
 
 </details>
@@ -2009,8 +2032,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 109 |
-| Active scenarios | 109 |
+| Total scenarios | 110 |
+| Active scenarios | 110 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
