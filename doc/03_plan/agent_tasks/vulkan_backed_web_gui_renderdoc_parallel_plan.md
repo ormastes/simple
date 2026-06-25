@@ -215,8 +215,14 @@ gui_web_2d_vulkan_simple_argb_file_status=pass
 gui_web_2d_vulkan_pixel_comparison_status=pass
 gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff
 gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass
+gui_web_2d_vulkan_electron_chrome_diff_path=<run-dir>/electron_chrome_diff.ppm
+gui_web_2d_vulkan_electron_chrome_diff_file_status=pass
 gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass
+gui_web_2d_vulkan_electron_simple_diff_path=<run-dir>/electron_simple_diff.ppm
+gui_web_2d_vulkan_electron_simple_diff_file_status=pass
 gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass
+gui_web_2d_vulkan_chrome_simple_diff_path=<run-dir>/chrome_simple_diff.ppm
+gui_web_2d_vulkan_chrome_simple_diff_file_status=pass
 ```
 
 All pairwise mismatch counts must be `0`. If any capture is missing, inspect

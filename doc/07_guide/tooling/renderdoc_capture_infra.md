@@ -172,8 +172,14 @@ three surfaces (`gui_web_2d_vulkan_electron_argb_*`,
 `gui_web_2d_vulkan_chrome_argb_*`, and
 `gui_web_2d_vulkan_simple_argb_*`) plus zero-mismatch diff lanes:
 `gui_web_2d_vulkan_electron_chrome_pairwise_diff_status`,
-`gui_web_2d_vulkan_electron_simple_pairwise_diff_status`, and
-`gui_web_2d_vulkan_chrome_simple_pairwise_diff_status`. A status of
+`gui_web_2d_vulkan_electron_chrome_diff_path`,
+`gui_web_2d_vulkan_electron_chrome_diff_file_status`,
+`gui_web_2d_vulkan_electron_simple_pairwise_diff_status`,
+`gui_web_2d_vulkan_electron_simple_diff_path`,
+`gui_web_2d_vulkan_electron_simple_diff_file_status`,
+`gui_web_2d_vulkan_chrome_simple_pairwise_diff_status`,
+`gui_web_2d_vulkan_chrome_simple_diff_path`, and
+`gui_web_2d_vulkan_chrome_simple_diff_file_status`. A status of
 `incomplete` with mode `artifact-only-no-pairwise-diff` means the run captured
 useful artifacts but did not prove Electron, Chrome, and Simple rendered the
 same GUI/web/2D pixels. Missing Electron, Chrome, or Simple ARGB input stays in
