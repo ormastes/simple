@@ -188,8 +188,11 @@ pub fn start_run(config: ExpConfig, tags: [text]) -> Run:
     meta["status"] = "running"
     meta["start_time"] = system_info.start_time
     meta["hostname"] = system_info.hostname
-    if system_info.vcs_hash.?:
-        meta["vcs_hash"] = system_info.vcs_hash.unwrap()
+    match system_info.vcs_hash:
+        Some(vcs_hash):
+            meta["vcs_hash"] = vcs_hash
+        nil:
+            pass
     meta["config_hash"] = config.hash()
     meta["tags"] = tags.join(", ")
     write_run_meta(run_id, meta)
@@ -221,10 +224,11 @@ pub fn resume_run(run_id: text) -> Result<Run, text>:
     val meta = read_run_meta(run_id)
     val config_path = "{run_dir_path(run_id)}/config.sdn"
     val config_result = load_sdn_config(config_path)
-    val config = if config_result.is_ok():
-        config_result.unwrap()
-    else:
-        ExpConfig.empty()
+    val config = match config_result:
+        Ok(loaded_config):
+            loaded_config
+        Err(_):
+            ExpConfig.empty()
 
     val events = read_events(run_id)
 
@@ -255,9 +259,10 @@ pub fn resume_run(run_id: text) -> Result<Run, text>:
             case _: ()
 
     val status = RunStatus.from_text(meta["status"] ?? "running")
+    val vcs_hash_text = meta["vcs_hash"] ?? ""
     val system_info = SystemInfo(
         hostname: meta["hostname"] ?? "",
-        vcs_hash: if (meta["vcs_hash"] ?? "").?: Some(meta["vcs_hash"].unwrap()) else: nil,
+        vcs_hash: if vcs_hash_text.?: Some(vcs_hash_text) else: nil,
         start_time: meta["start_time"] ?? "",
         start_time_micros: 0
     )
@@ -279,8 +284,11 @@ fn finish_run(run: Run):
     meta["start_time"] = run.system_info.start_time
     meta["end_time"] = "{time_now_unix_micros()}"
     meta["hostname"] = run.system_info.hostname
-    if run.system_info.vcs_hash.?:
-        meta["vcs_hash"] = run.system_info.vcs_hash.unwrap()
+    match run.system_info.vcs_hash:
+        Some(vcs_hash):
+            meta["vcs_hash"] = vcs_hash
+        nil:
+            pass
     meta["config_hash"] = run.config.hash()
     meta["tags"] = run.tags.join(", ")
     write_run_meta(run.run_id, meta)
@@ -306,11 +314,13 @@ fn generate_run_id(config: ExpConfig, vcs_hash: text) -> text:
 fn write_file(path: text, content: text):
     """Atomically write file with backup."""
     val result = atomic_write(path, content, DbConfig.defaults())
-    if not result.is_ok():
-        eprintln("[WARNING] Failed to write {path}: {result.unwrap_err()}")
-        return
+    match result:
+        Ok(_):
+            pass
+        Err(err):
+            eprintln("[WARNING] Failed to write {path}: {err}")
+            return
 
 # ============================================================================
 # Exports
 # ============================================================================
-
