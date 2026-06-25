@@ -50,10 +50,7 @@ fn _simple_labeled_body_lowering(body_lines: [text], labels: [text], port_names:
         if trimmed == "":
             continue
         if trimmed.starts_with("val "):
-            val call_result = _simple_lower_hardware_local_call(trimmed, call_ordinal, param_names + local_field_names, param_types + local_field_types, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)
-            if call_result.is_err():
-                return Err(call_result.unwrap_err())
-            val lowered = call_result.unwrap()
+            val lowered = _simple_lower_hardware_local_call(trimmed, call_ordinal, param_names + local_field_names, param_types + local_field_types, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)?
             local_names = local_names.push(lowered[0])
             if lowered[1] != "":
                 for decl in lowered[1].split("\n"):
@@ -73,10 +70,8 @@ fn _simple_labeled_body_lowering(body_lines: [text], labels: [text], port_names:
         else:
             return_lines = return_lines.push(trimmed)
 
-    val assignment_result = _simple_labeled_body_assignments(return_lines, labels, port_names, return_types, param_names + local_field_names, param_types + local_field_types)
-    if assignment_result.is_err():
-        return Err(assignment_result.unwrap_err())
-    Ok([_simple_join_text(signal_decls, "\n") + if signal_decls.len() > 0: "\n" else: "", _simple_join_text(instances, ""), assignment_result.unwrap()])
+    val assignment = _simple_labeled_body_assignments(return_lines, labels, port_names, return_types, param_names + local_field_names, param_types + local_field_types)?
+    Ok([_simple_join_text(signal_decls, "\n") + if signal_decls.len() > 0: "\n" else: "", _simple_join_text(instances, ""), assignment])
 
 fn _simple_anonymous_body_lowering(body_lines: [text], labels: [text], port_names: [text], return_types: [text], param_names: [text], param_types: [text], all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text], alias_names: [text], alias_types: [text]) -> Result<[text], text>:
     var local_field_names: [text] = []
@@ -91,10 +86,7 @@ fn _simple_anonymous_body_lowering(body_lines: [text], labels: [text], port_name
         if trimmed == "":
             continue
         if trimmed.starts_with("val "):
-            val call_result = _simple_lower_hardware_local_call(trimmed, call_ordinal, param_names + local_field_names, param_types + local_field_types, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)
-            if call_result.is_err():
-                return Err(call_result.unwrap_err())
-            val lowered = call_result.unwrap()
+            val lowered = _simple_lower_hardware_local_call(trimmed, call_ordinal, param_names + local_field_names, param_types + local_field_types, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)?
             if lowered[1] != "":
                 for decl in lowered[1].split("\n"):
                     if decl.trim() != "":
@@ -113,22 +105,24 @@ fn _simple_anonymous_body_lowering(body_lines: [text], labels: [text], port_name
         else:
             return_lines = return_lines.push(trimmed)
 
-    val assignment_result = _simple_anonymous_body_assignments(return_lines, labels, port_names, return_types, param_names + local_field_names, param_types + local_field_types)
-    if assignment_result.is_err():
-        return Err(assignment_result.unwrap_err())
-    Ok([_simple_join_text(signal_decls, "\n") + if signal_decls.len() > 0: "\n" else: "", _simple_join_text(instances, ""), assignment_result.unwrap()])
+    val assignment = _simple_anonymous_body_assignments(return_lines, labels, port_names, return_types, param_names + local_field_names, param_types + local_field_types)?
+    Ok([_simple_join_text(signal_decls, "\n") + if signal_decls.len() > 0: "\n" else: "", _simple_join_text(instances, ""), assignment])
 
 fn _simple_lower_hardware_local_call(line: text, call_ordinal: i64, param_names: [text], param_types: [text], all_names: [text], all_params: [text], all_returns: [text], hardware_flags: [text], alias_names: [text], alias_types: [text]) -> Result<[text], text>:
     val eq_opt = line.find("=")
     if not eq_opt.?:
         return Err("VHDL subset fallback hardware local binding must use `val name = callee(...)`")
-    val eq_index = eq_opt.unwrap()
+    val eq_index = match eq_opt:
+        case Some(value): value
+        case nil: return Err("VHDL subset fallback hardware local binding must use `val name = callee(...)`")
     val local_name = line.substring(4, eq_index).trim()
     val call_text = line.substring(eq_index + 1, line.len()).trim()
     val open_opt = call_text.find("(")
     if local_name == "" or not open_opt.? or not call_text.ends_with(")"):
         return Err("VHDL subset fallback hardware local binding must call a direct hardware function")
-    val open_index = open_opt.unwrap()
+    val open_index = match open_opt:
+        case Some(value): value
+        case nil: return Err("VHDL subset fallback hardware local binding must call a direct hardware function")
     val callee_name = call_text.substring(0, open_index).trim()
     val callee_index = _text_list_index(all_names, callee_name)
     if callee_index < 0 or hardware_flags[callee_index] != "hardware":
@@ -144,10 +138,7 @@ fn _simple_lower_hardware_local_call(line: text, call_ordinal: i64, param_names:
         callee_types = _simple_anonymous_tuple_types_alias(callee_return, alias_names, alias_types)
     else:
         return Err("VHDL subset fallback hardware local call requires tuple callee return")
-    val callee_param_result = _simple_param_context(all_params[callee_index], alias_names, alias_types)
-    if callee_param_result.is_err():
-        return Err(callee_param_result.unwrap_err())
-    val callee_param_ctx = callee_param_result.unwrap()
+    val callee_param_ctx = _simple_param_context(all_params[callee_index], alias_names, alias_types)?
     val callee_param_names = if callee_param_ctx[1] == "": [] else: callee_param_ctx[1].split("\n")
     val callee_param_types = if callee_param_ctx[2] == "": [] else: callee_param_ctx[2].split("\n")
     val arg_parts = _simple_split_top_level(call_text.substring(open_index + 1, call_text.len() - 1), ",")
@@ -157,10 +148,8 @@ fn _simple_lower_hardware_local_call(line: text, call_ordinal: i64, param_names:
     var port_lines: [text] = []
     var arg_i = 0
     while arg_i < callee_param_names.len():
-        val arg_result = _simple_expr_to_vhdl(arg_parts[arg_i].trim(), callee_param_types[arg_i], param_names, param_types)
-        if arg_result.is_err():
-            return Err(arg_result.unwrap_err())
-        port_lines = port_lines.push("            {_simple_param_vhdl_name(callee_param_names[arg_i])} => {arg_result.unwrap()}")
+        val arg_vhdl = _simple_expr_to_vhdl(arg_parts[arg_i].trim(), callee_param_types[arg_i], param_names, param_types)?
+        port_lines = port_lines.push("            {_simple_param_vhdl_name(callee_param_names[arg_i])} => {arg_vhdl}")
         arg_i = arg_i + 1
 
     var signal_decls: [text] = []
@@ -230,8 +219,11 @@ fn _simple_labeled_tuple_labels(type_text: text) -> [text]:
     for part in parts:
         val trimmed = part.trim()
         val sep = _simple_find_top_level(trimmed, ":")
-        if sep.?:
-            labels = labels.push(trimmed.substring(0, sep.unwrap()).trim())
+        match sep:
+            case Some(sep_index):
+                labels = labels.push(trimmed.substring(0, sep_index).trim())
+            case nil:
+                pass
     labels
 
 fn _simple_labeled_tuple_types(type_text: text) -> [text]:
@@ -242,8 +234,11 @@ fn _simple_labeled_tuple_types(type_text: text) -> [text]:
     for part in parts:
         val trimmed = part.trim()
         val sep = _simple_find_top_level(trimmed, ":")
-        if sep.?:
-            types = types.push(trimmed.substring(sep.unwrap() + 1, trimmed.len()).trim())
+        match sep:
+            case Some(sep_index):
+                types = types.push(trimmed.substring(sep_index + 1, trimmed.len()).trim())
+            case nil:
+                pass
     types
 
 fn _simple_labeled_body_assignments(body_lines: [text], labels: [text], port_names: [text], return_types: [text], param_names: [text], param_types: [text]) -> Result<text, text>:
@@ -269,14 +264,15 @@ fn _simple_labeled_body_assignments(body_lines: [text], labels: [text], port_nam
         val sep = part.find(":")
         if not sep.?:
             return Err("VHDL subset fallback labeled tuple return field is missing ':'")
-        val label = part.substring(0, sep.unwrap()).trim()
+        val sep_index = match sep:
+            case Some(value): value
+            case nil: return Err("VHDL subset fallback labeled tuple return field is missing ':'")
+        val label = part.substring(0, sep_index).trim()
         if label != labels[i]:
             return Err("VHDL subset fallback labeled tuple return expected `{labels[i]}`, found `{label}`")
-        val expr_text = part.substring(sep.unwrap() + 1, part.len()).trim()
-        val expr_result = _simple_expr_to_vhdl(expr_text, return_types[i], param_names, param_types)
-        if expr_result.is_err():
-            return Err(expr_result.unwrap_err())
-        out = out + "    {port_names[i]} <= {expr_result.unwrap()};\n"
+        val expr_text = part.substring(sep_index + 1, part.len()).trim()
+        val expr_vhdl = _simple_expr_to_vhdl(expr_text, return_types[i], param_names, param_types)?
+        out = out + "    {port_names[i]} <= {expr_vhdl};\n"
         i = i + 1
     Ok(out)
 
@@ -301,15 +297,16 @@ fn _simple_anonymous_body_assignments(body_lines: [text], labels: [text], port_n
     while i < labels.len():
         var expr_text = parts[i].trim()
         val sep = _simple_find_top_level(expr_text, ":")
-        if sep.?:
-            val label = expr_text.substring(0, sep.unwrap()).trim()
-            if label != labels[i]:
-                return Err("VHDL subset fallback anonymous tuple return expected `{labels[i]}`, found `{label}`")
-            expr_text = expr_text.substring(sep.unwrap() + 1, expr_text.len()).trim()
-        val expr_result = _simple_expr_to_vhdl(expr_text, return_types[i], param_names, param_types)
-        if expr_result.is_err():
-            return Err(expr_result.unwrap_err())
-        out = out + "    {port_names[i]} <= {expr_result.unwrap()};\n"
+        match sep:
+            case Some(sep_index):
+                val label = expr_text.substring(0, sep_index).trim()
+                if label != labels[i]:
+                    return Err("VHDL subset fallback anonymous tuple return expected `{labels[i]}`, found `{label}`")
+                expr_text = expr_text.substring(sep_index + 1, expr_text.len()).trim()
+            case nil:
+                pass
+        val expr_vhdl = _simple_expr_to_vhdl(expr_text, return_types[i], param_names, param_types)?
+        out = out + "    {port_names[i]} <= {expr_vhdl};\n"
         i = i + 1
     Ok(out)
 
@@ -331,16 +328,10 @@ fn _simple_if_block_to_vhdl(lines: [text], result_type: text, param_names: [text
         return Err("VHDL subset fallback if block requires an else branch")
 
     val cond_text = first.substring(3, first.len() - 1).trim()
-    val then_result = _simple_single_branch_expr(lines, 1, else_index, result_type, param_names, param_types)
-    if then_result.is_err():
-        return Err(then_result.unwrap_err())
-    val else_result = _simple_single_branch_expr(lines, else_index + 1, lines.len(), result_type, param_names, param_types)
-    if else_result.is_err():
-        return Err(else_result.unwrap_err())
-    val cond_result = _simple_expr_to_vhdl(cond_text, "bool", param_names, param_types)
-    if cond_result.is_err():
-        return Err(cond_result.unwrap_err())
-    Ok("{then_result.unwrap()} when {cond_result.unwrap()} = '1' else {else_result.unwrap()}")
+    val then_vhdl = _simple_single_branch_expr(lines, 1, else_index, result_type, param_names, param_types)?
+    val else_vhdl = _simple_single_branch_expr(lines, else_index + 1, lines.len(), result_type, param_names, param_types)?
+    val cond_vhdl = _simple_expr_to_vhdl(cond_text, "bool", param_names, param_types)?
+    Ok("{then_vhdl} when {cond_vhdl} = '1' else {else_vhdl}")
 
 fn _simple_single_branch_expr(lines: [text], start_index: i64, end_index: i64, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
     var branch_lines: [text] = []
