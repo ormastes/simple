@@ -408,14 +408,16 @@ class SdnDatabase:
                 # tables. Ignore any section that does not parse as a table.
                 continue
 
-            val table = table_opt.unwrap()
-
-            # Special handling for strings table
-            if table.name == "strings":
-                db.interner = interner_from_sdn(table)
-            else:
-                table.rebuild_index()
-                db.tables[table.name] = table
+            match table_opt:
+                Some(table):
+                    # Special handling for strings table
+                    if table.name == "strings":
+                        db.interner = interner_from_sdn(table)
+                    else:
+                        table.rebuild_index()
+                        db.tables[table.name] = table
+                nil:
+                    pass
 
         db.modified = false
 
@@ -428,13 +430,15 @@ class SdnDatabase:
                     if db.tables.contains_key(entry.table_name):
                         var t = db.tables[entry.table_name]
                         val row_opt = wal_payload_to_row(entry.data, t.columns)
-                        if row_opt.?:
-                            val replayed_row = row_opt.unwrap()
-                            if entry.entry_type == WalEntryType.Update:
-                                t.update_row(entry.row_key, replayed_row)
-                            else:
-                                t.add_row(replayed_row)
-                            db.tables[entry.table_name] = t
+                        match row_opt:
+                            Some(replayed_row):
+                                if entry.entry_type == WalEntryType.Update:
+                                    t.update_row(entry.row_key, replayed_row)
+                                else:
+                                    t.add_row(replayed_row)
+                                db.tables[entry.table_name] = t
+                            nil:
+                                pass
                 elif entry.entry_type == WalEntryType.Delete:
                     if db.tables.contains_key(entry.table_name):
                         var t = db.tables[entry.table_name]
@@ -468,10 +472,13 @@ class SdnDatabase:
         self.modified = false
 
         # Checkpoint WAL now that main file is successfully written
-        if self.wal.?:
-            var w = self.wal.unwrap()
-            w.checkpoint()
-            self.wal = Some(w)
+        match self.wal:
+            Some(wal):
+                var w = wal
+                w.checkpoint()
+                self.wal = Some(w)
+            nil:
+                pass
 
         true
 
@@ -497,13 +504,14 @@ class SdnDatabase:
     # Add row to table (helper for common pattern)
     me add_row_to_table(table_name: text, row: SdnRow) -> bool:
         var table_opt = self.get_table_mut(table_name)
-        if not table_opt.?:
-            return false
-
-        var table = table_opt.unwrap()
-        table.add_row(row)
-        self.set_table(table_name, table)
-        true
+        match table_opt:
+            Some(table_value):
+                var table = table_value
+                table.add_row(row)
+                self.set_table(table_name, table)
+                true
+            nil:
+                false
 
     # Export a table to SDN text
     fn export_table_sdn(name: text) -> text?:
@@ -515,13 +523,14 @@ class SdnDatabase:
     # Import a table from SDN text
     me import_table_sdn(content: text) -> bool:
         val table = parse_sdn_table(content)
-        if not table.?:
-            return false
-        val t = table.unwrap()
-        t.rebuild_index()
-        self.tables[t.name] = t
-        self.modified = true
-        true
+        match table:
+            Some(t):
+                t.rebuild_index()
+                self.tables[t.name] = t
+                self.modified = true
+                true
+            nil:
+                false
 
     # String interning helpers
     me intern(s: text) -> i32:
