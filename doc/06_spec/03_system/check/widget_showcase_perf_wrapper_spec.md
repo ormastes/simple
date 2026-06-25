@@ -88,6 +88,8 @@ PLAN_ONLY=1 RESOLUTION=8k sh scripts/check/check-widget-showcase-4k-200fps.shs
   `SHOWCASE_4K_PERF`, 3840x2160, 200 frames, and target FPS 200.
 - 8K plan-only evidence selects `run_8k_perf_probe`, `gui_showcase_8k_perf`,
   `SHOWCASE_8K_PERF`, 7680x4320, 200 frames, and target FPS 200.
+- Plan-only evidence includes native provenance and marks runtime log artifact
+  status as `fail` because no expensive benchmark has executed yet.
 - Native plan-only mode writes the generated alias source that calls the
   selected probe function directly.
 
@@ -108,6 +110,7 @@ The full 4K row must prove:
 - `gui_showcase_4k_200fps_redraw_frames=1`
 - `gui_showcase_4k_200fps_rss_status=pass`
 - The showcase log and `/usr/bin/time` log exist.
+- Producer-side `*_log_file_status` and `*_time_log_file_status` are `pass`.
 
 The full 8K row has the same contract with:
 
@@ -115,6 +118,7 @@ The full 8K row has the same contract with:
 - `gui_showcase_8k_perf_height=4320`
 - `gui_showcase_8k_perf_pixels=33177600`
 - `gui_showcase_8k_perf_frames` is at least 200.
+- Producer-side `*_log_file_status` and `*_time_log_file_status` are `pass`.
 
 ## Completion Boundary
 
@@ -155,7 +159,8 @@ showcase source imports and helper definitions.
 
 The spec covers plan-only 4K and 8K routing. It verifies the selected probe
 function, evidence prefix, environment flag, resolution, frame count, target
-FPS, pixel count, and generated native alias source.
+FPS, pixel count, native provenance fields, plan-only log artifact status, and
+generated native alias source.
 
 ## Scenarios
 
@@ -171,7 +176,7 @@ FPS, pixel count, and generated native alias source.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -193,6 +198,13 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_height=2160")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frames=200")
 expect(evidence).to_contain("gui_showcase_4k_200fps_target_fps=200")
 expect(evidence).to_contain("gui_showcase_4k_200fps_pixels=8294400")
+expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_simple_bin=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_use_native=1")
+expect(evidence).to_contain("gui_showcase_4k_200fps_native_build_mode=aggressive-native")
+expect(evidence).to_contain("gui_showcase_4k_200fps_fallback_state=none")
+expect(evidence).to_contain("gui_showcase_4k_200fps_log_file_status=fail")
+expect(evidence).to_contain("gui_showcase_4k_200fps_time_log_file_status=fail")
 
 val alias_src = file_read("build/test-widget-showcase-perf-wrapper-4k/widget_showcase_4k_perf.spl")
 expect(alias_src).to_contain("fn main() -> i64:")
@@ -211,7 +223,7 @@ expect(alias_src).to_contain("run_4k_perf_probe()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -233,6 +245,13 @@ expect(evidence).to_contain("gui_showcase_8k_perf_height=4320")
 expect(evidence).to_contain("gui_showcase_8k_perf_frames=200")
 expect(evidence).to_contain("gui_showcase_8k_perf_target_fps=200")
 expect(evidence).to_contain("gui_showcase_8k_perf_pixels=33177600")
+expect(evidence).to_contain("gui_showcase_8k_perf_source_revision=")
+expect(evidence).to_contain("gui_showcase_8k_perf_simple_bin=")
+expect(evidence).to_contain("gui_showcase_8k_perf_use_native=1")
+expect(evidence).to_contain("gui_showcase_8k_perf_native_build_mode=aggressive-native")
+expect(evidence).to_contain("gui_showcase_8k_perf_fallback_state=none")
+expect(evidence).to_contain("gui_showcase_8k_perf_log_file_status=fail")
+expect(evidence).to_contain("gui_showcase_8k_perf_time_log_file_status=fail")
 
 val alias_src = file_read("build/test-widget-showcase-perf-wrapper-8k/widget_showcase_8k_perf.spl")
 expect(alias_src).to_contain("fn main() -> i64:")

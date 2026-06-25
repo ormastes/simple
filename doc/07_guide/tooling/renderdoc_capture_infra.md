@@ -218,7 +218,9 @@ scripts/check/check-widget-showcase-4k-200fps.shs` to verify wrapper routing
 without launching the expensive native perf run. Plan-only evidence is not
 completion evidence; it proves only that the wrapper selects the expected
 `*_probe_fn`, `*_probe_prefix`, and `*_perf_env_flag`, and that native alias
-generation points at the selected probe.
+generation points at the selected probe. The wrapper emits producer-side
+`*_log_file_status` and `*_time_log_file_status` fields; plan-only rows should
+mark them `fail`, while completion rows must mark them `pass`.
 The browser Vulkan-backed proof is a separate rollup:
 `gui_web_2d_vulkan_browser_backing_status`,
 `gui_web_2d_vulkan_browser_backing_reason`, and
