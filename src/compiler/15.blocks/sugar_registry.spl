@@ -142,24 +142,23 @@ fn apply_rule(name: text, input: text) -> text:
       plugins; the spec path uses the sentinel.
     """
     val maybe_rule = lookup_rule(name)
-    if not maybe_rule.?:
-        return input
+    match maybe_rule:
+        Some(r):
+            if r.rewrite_fn != 0:
+                # Native text rewrite output is not available in the bootstrap surface.
+                # AST rewrite plugins use apply_rule_ast(), which keeps the i64 result.
+                # [STATIC-NEXT] sugar rule registry — dynamic dispatch today; static lowering deferred to next release.
+                return input
 
-    val r = maybe_rule.unwrap()
+            # Sentinel path: built-in text rewrites for spec-time proof.
+            # Only pattern_tag 4096 (null-coalescing) has a built-in rewrite.
+            if r.pattern_tag == 4096:
+                return _builtin_null_coalesce_rewrite(input)
 
-    if r.rewrite_fn != 0:
-        # Native text rewrite output is not available in the bootstrap surface.
-        # AST rewrite plugins use apply_rule_ast(), which keeps the i64 result.
-        # [STATIC-NEXT] sugar rule registry — dynamic dispatch today; static lowering deferred to next release.
-        return input
-
-    # Sentinel path: built-in text rewrites for spec-time proof.
-    # Only pattern_tag 4096 (null-coalescing) has a built-in rewrite.
-    if r.pattern_tag == 4096:
-        return _builtin_null_coalesce_rewrite(input)
-
-    # No built-in rewrite for this tag — return input unchanged.
-    input
+            # No built-in rewrite for this tag — return input unchanged.
+            input
+        nil:
+            input
 
 
 # ============================================================================
@@ -225,16 +224,16 @@ fn apply_rule_ast(name: text, node_index: i64) -> i64:
         Replacement node index (or original if no rewrite applies).
     """
     val maybe_rule = lookup_rule(name)
-    if not maybe_rule.?:
-        return node_index
+    match maybe_rule:
+        Some(r):
+            if r.ast_rewrite_fn == 0:
+                return node_index
 
-    val r = maybe_rule.unwrap()
-    if r.ast_rewrite_fn == 0:
-        return node_index
-
-    # Call the native AST rewrite function via WFFI.
-    # Signature: fn(node_index: i64) -> i64
-    spl_wffi_call_i64(r.ast_rewrite_fn, [node_index], 1)
+            # Call the native AST rewrite function via WFFI.
+            # Signature: fn(node_index: i64) -> i64
+            spl_wffi_call_i64(r.ast_rewrite_fn, [node_index], 1)
+        nil:
+            node_index
 
 
 fn apply_sugar_rules_ast(tag: i64, node_index: i64) -> i64:
