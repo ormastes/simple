@@ -27,7 +27,7 @@ gui_renderdoc_feature_coverage_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -133,6 +133,8 @@ The aggregate forwards these 4K fields:
 - `gui_showcase_4k_200fps_target_fps`
 - `gui_showcase_4k_200fps_checksum`
 - `gui_showcase_4k_200fps_rss_status`
+- `gui_showcase_4k_200fps_render_mode`
+- `gui_showcase_4k_200fps_redraw_frames`
 - `gui_showcase_4k_200fps_log_file_status`
 - `gui_showcase_4k_200fps_time_log`
 - `gui_showcase_4k_200fps_time_log_file_status`
@@ -150,6 +152,8 @@ The aggregate forwards these 8K fields:
 - `gui_showcase_8k_perf_max_rss_kb`
 - `gui_showcase_8k_perf_max_rss_budget_kb`
 - `gui_showcase_8k_perf_rss_status`
+- `gui_showcase_8k_perf_render_mode`
+- `gui_showcase_8k_perf_redraw_frames`
 - `gui_showcase_8k_perf_log_file_status`
 - `gui_showcase_8k_perf_time_log`
 - `gui_showcase_8k_perf_time_log_file_status`
@@ -1275,7 +1279,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Create a retained 4K performance status env")
-val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/source && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_width=3840\\ngui_showcase_8k_perf_height=2160\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_pixels=8294400\\ngui_showcase_8k_perf_checksum=123456\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/source && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_width=3840\\ngui_showcase_8k_perf_height=2160\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_pixels=8294400\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_render_mode=retained-static-frame\\ngui_showcase_8k_perf_redraw_frames=1\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-wrong-resolution/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -1297,7 +1301,7 @@ expect(evidence).to_contain("gui_showcase_8k_perf_reason=not-8k-resolution:3840x
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1316,6 +1320,8 @@ expect(evidence).to_contain("checksum")
 expect(evidence).to_contain("max_rss_kb")
 expect(evidence).to_contain("max_rss_budget_kb")
 expect(evidence).to_contain("rss_status")
+expect(evidence).to_contain("render_mode")
+expect(evidence).to_contain("redraw_frames")
 ```
 
 </details>
@@ -1335,7 +1341,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Create a retained 8K status env with failing RSS status")
-val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/source && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_max_rss_kb=2097152\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=fail\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/source && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_max_rss_kb=2097152\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=fail\\ngui_showcase_8k_perf_render_mode=retained-static-frame\\ngui_showcase_8k_perf_redraw_frames=1\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -1362,7 +1368,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Create a retained 8K status env below the FPS target")
-val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/source && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_fps_x1000=199999\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/source && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_fps_x1000=199999\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_render_mode=retained-static-frame\\ngui_showcase_8k_perf_redraw_frames=1\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -1370,6 +1376,33 @@ step("Assert the aggregate fails the below-target 8K row")
 val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/out/evidence.env")
 expect(evidence).to_contain("gui_showcase_8k_perf_status=fail")
 expect(evidence).to_contain("gui_showcase_8k_perf_reason=below-8k-target-fps")
+```
+
+</details>
+
+#### rejects 8K pass rows that are not retained static redraw evidence
+
+- Create a retained 8K status env with dynamic redraw evidence
+   - Expected: code equals `0`
+- Assert the aggregate fails non-retained 8K redraw evidence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create a retained 8K status env with dynamic redraw evidence")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-redraw-fail && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-redraw-fail/source && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_render_mode=full-redraw\\ngui_showcase_8k_perf_redraw_frames=120\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-redraw-fail/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-redraw-fail/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-redraw-fail/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-redraw-fail/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate fails non-retained 8K redraw evidence")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-8k-redraw-fail/out/evidence.env")
+expect(evidence).to_contain("gui_showcase_8k_perf_status=fail")
+expect(evidence).to_contain("gui_showcase_8k_perf_reason=not-retained-8k-render-mode:full-redraw;redraw_frames=120")
 ```
 
 </details>
@@ -1619,8 +1652,8 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-produ
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
