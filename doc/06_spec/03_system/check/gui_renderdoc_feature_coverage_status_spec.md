@@ -338,7 +338,7 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 730 lines folded for reproduction.
+Runnable source: 732 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -525,6 +525,8 @@ expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_source=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_mode=")
 expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_evidence_env=build/gui-web-2d-vulkan-env-browser-backing/evidence.env")
 expect(evidence).to_contain("gui_web_2d_vulkan_browser_backing_source=missing")
+expect(evidence).to_contain("gui_web_2d_vulkan_electron_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/evidence.env")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/evidence.env")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_path=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_file_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_electron_argb_width=")
@@ -1056,8 +1058,8 @@ expect(report).to_contain("- Electron Chromium/Vulkan gate:")
 expect(report).to_contain("- macOS Vulkan:")
 expect(report).to_contain("- macOS RenderDoc:")
 expect(report).to_contain("- GUI/web/2D browser Vulkan backing:")
-expect(report).to_contain("- GUI/web/2D Electron browser backing: unavailable (missing-focused-browser-backing; vulkan unknown; gl missing-focused-browser-backing)")
-expect(report).to_contain("- GUI/web/2D Chrome browser backing: unavailable (missing-focused-browser-backing; display unknown; gl missing-focused-browser-backing)")
+expect(report).to_contain("- GUI/web/2D Electron browser backing: unavailable (missing-focused-browser-backing; vulkan unknown; gl missing-focused-browser-backing; source build/gui-web-2d-vulkan-env-browser-backing/evidence.env)")
+expect(report).to_contain("- GUI/web/2D Chrome browser backing: unavailable (missing-focused-browser-backing; display unknown; gl missing-focused-browser-backing; source build/gui-web-2d-vulkan-env-browser-backing/evidence.env)")
 expect(report).to_contain("- GUI/web/2D Vulkan RenderDoc blockers:")
 expect(report).to_contain("- RenderDoc evidence CLI: pass (scripts/tool/renderdoc-evidence.shs)")
 expect(report).to_contain("- Production GUI/web parity gate:")
