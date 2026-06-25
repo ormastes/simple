@@ -173,6 +173,23 @@ gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=true
 gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true
 ```
 
+Retained showcase performance:
+
+```text
+gui_showcase_4k_200fps_status=pass
+gui_showcase_4k_200fps_width=3840
+gui_showcase_4k_200fps_height=2160
+gui_showcase_4k_200fps_pixels=8294400
+gui_showcase_4k_200fps_render_mode=retained-static-frame
+gui_showcase_4k_200fps_redraw_frames=1
+gui_showcase_8k_perf_status=pass
+gui_showcase_8k_perf_width=7680
+gui_showcase_8k_perf_height=4320
+gui_showcase_8k_perf_pixels=33177600
+gui_showcase_8k_perf_render_mode=retained-static-frame
+gui_showcase_8k_perf_redraw_frames=1
+```
+
 Reject these reasons for completion:
 
 ```text
