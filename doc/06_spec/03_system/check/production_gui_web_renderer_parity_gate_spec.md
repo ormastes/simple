@@ -108,6 +108,9 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env_status=missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_partial_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_partial_reason=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_refresh_command=sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_exit_code=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_host_uname_s=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_host_uname_m=")
@@ -167,6 +170,32 @@ if surface_tauri_status.len() > 0:
         expect(surface_tauri_required).to_equal("cargo,xvfb-run,dbus-run-session,xdotool,import,convert,node")
 if surface_chrome_status.len() > 0:
     expect(surface_chrome_backend.len()).to_be_greater_than(0)
+```
+
+</details>
+
+#### classifies statusless production parity evidence as partial source evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-production-gui-web-renderer-parity-gate-statusless && mkdir -p build/test-production-gui-web-renderer-parity-gate-statusless/source && printf 'production_gui_web_renderer_parity_matrix_status=pass\\nproduction_gui_web_renderer_parity_matrix_reason=pass\\n' > build/test-production-gui-web-renderer-parity-gate-statusless/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-production-gui-web-renderer-parity-gate-statusless/source/evidence.env BUILD_DIR=build/test-production-gui-web-renderer-parity-gate-statusless/out REPORT_PATH=build/test-production-gui-web-renderer-parity-gate-statusless/report.md sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-production-gui-web-renderer-parity-gate-statusless/out/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=partial-production-parity-source-status")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_partial_status=partial")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_partial_reason=missing-top-level-production-parity-status")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_refresh_command=sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_status=pass")
 ```
 
 </details>

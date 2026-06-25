@@ -840,9 +840,11 @@ The current canonical evidence contract is:
   `production_gui_web_renderer_parity_gate_source_env_status` so a missing
   source env is tied to the exact checked file and typed as `missing` instead
   of only a reason string. A source env that exists but omits the top-level
-  `production_gui_web_renderer_parity_status` is still incomplete and must
-  report `missing-production-parity-source-status`; matrix-only evidence is not
-  live renderer parity evidence.
+  `production_gui_web_renderer_parity_status` is partial evidence and must
+  report `partial-production-parity-source-status`,
+  `production_gui_web_renderer_parity_gate_source_partial_status=partial`, and
+  `production_gui_web_renderer_parity_gate_refresh_command`; matrix-only
+  evidence is not live renderer parity evidence.
   wrapper exports the resolved `SIMPLE_BIN` to nested parity checks and records
   `production_gui_web_renderer_parity_simple_bin` plus
   `production_gui_web_renderer_parity_simple_bin_source`; a clean worktree with

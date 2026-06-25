@@ -1383,7 +1383,7 @@ expect(blocked_gates.contains("production GUI/web font offload readback evidence
 
 </details>
 
-#### reports status-less production parity evidence as missing source status
+#### reports status-less production parity evidence as partial source status
 
 - Create production evidence with only matrix rows
    - Expected: code equals `0`
@@ -1394,7 +1394,7 @@ expect(blocked_gates.contains("production GUI/web font offload readback evidence
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1407,9 +1407,12 @@ step("Assert the aggregate carries the precise production source-status failure"
 val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-production-statusless/out/evidence.env")
 val blocked_gates = _value_of(evidence, "blocked_completion_gates")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
-expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=missing-production-parity-source-status")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=partial-production-parity-source-status")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_partial_status=partial")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_partial_reason=missing-top-level-production-parity-status")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_refresh_command=sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_core_status=fail")
 expect(evidence).to_contain("production_gui_web_renderer_parity_core_reason=core-gui-web-parity-missing:")
