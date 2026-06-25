@@ -27,7 +27,7 @@ production_gui_web_renderer_parity_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -163,6 +163,34 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_matrix_timeout_s
 
 </details>
 
+#### prints bounded summary output while keeping full evidence on disk
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-production-gui-web-renderer-parity-bounded-stdout"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_ROOT\"\\nprintf \"electron_generated_gui_web_matrix_status=pass\\\\nelectron_generated_gui_web_matrix_reason=pass\\\\nelectron_generated_gui_web_matrix_verbose_marker=stored-only\\\\n\" > \"$BUILD_ROOT/evidence.env\"\\n' > " + root + "/fixture/matrix.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"electron_simple_web_layout_manifest_status=fail\\\\nelectron_simple_web_layout_manifest_reason=fixture-layout-fail\\\\nelectron_simple_web_layout_manifest_verbose_marker=stored-only\\\\n\" > \"$BUILD_DIR/evidence.env\"\\nexit 1\\n' > " + root + "/fixture/layout.sh && " +
+    "PRODUCTION_GUI_WEB_RENDERER_PARITY_MATRIX_SCRIPT=" + root + "/fixture/matrix.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_SCRIPT=" + root + "/fixture/layout.sh BUILD_ROOT=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs || true"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("matrix_electron_generated_gui_web_matrix_verbose_marker=stored-only")
+expect(evidence).to_contain("layout_electron_simple_web_layout_manifest_verbose_marker=stored-only")
+expect(stdout).to_contain("production_gui_web_renderer_parity_status=fail")
+expect(stdout).to_contain("production_gui_web_renderer_parity_layout_manifest_status=fail")
+expect(stdout.contains("verbose_marker=stored-only")).to_equal(false)
+expect(stdout.length()).to_be_less_than(800)
+```
+
+</details>
+
 #### fails top-level parity when font offload is unavailable
 
 <details>
@@ -249,8 +277,8 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_surface_manifest
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
