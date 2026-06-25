@@ -203,6 +203,15 @@ statuses as `unavailable` with `missing-focused-browser-backing`, not blank.
 Pixel comparison artifacts are useful
 comparison evidence, but they are not Electron/Chrome Vulkan-backed proof. The
 focused `--browser-backing` probe can provide `gpu-feature-status` evidence.
+The aggregate rejects a summary-only browser backing pass: Electron must report
+`gui_web_2d_vulkan_electron_browser_backing_status=pass`,
+`gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed`,
+an `enabled` Vulkan feature value, and
+`gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=true`;
+Chrome must report `gui_web_2d_vulkan_chrome_browser_backing_status=pass`,
+`gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed`,
+`gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true`, and
+Vulkan in either display type or GL implementation parts.
 For failed or partial hosts, inspect
 `gui_web_2d_vulkan_electron_browser_backing_vulkan`,
 `gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan`,
