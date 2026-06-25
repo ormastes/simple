@@ -86,7 +86,8 @@ review-team:    explore -> docs          (sequential)
    - `bin/simple build lint` on touched files
    - `bin/simple query workspace-symbols --query pass_todo` to find stubs
    - No function ignoring all params (STUB001 = hard fail)
-   - Every incomplete fn MUST use `pass_todo("reason")`
+   - Design/spec placeholders must fail explicitly with `assert(false)` or
+     `fail(...)`; final implementation must not contain `pass_todo`
 
 ### Phase 9-10: Tests + Doctest
 1. Unit + integration tests, target 80%+ branch coverage

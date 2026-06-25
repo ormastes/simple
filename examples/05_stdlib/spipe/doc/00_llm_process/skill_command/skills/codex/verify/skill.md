@@ -34,7 +34,8 @@ description: "Codex verification skill (primary verifier in cooperative mode). 6
 - Edge cases and error paths tested
 - Every REQ-NNN has at least one test
 - Built-in matchers only: `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
-- Use `to_equal(true)` not `to_be_true()`
+- Do not use `to_be_true()` / `to_be_false()`; assert concrete values, or use
+  `to_be(true/false)` only when the boolean itself is the behavior.
 
 ### Phase 3: Implementation Stubs
 

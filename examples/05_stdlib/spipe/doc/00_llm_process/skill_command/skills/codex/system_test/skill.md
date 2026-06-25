@@ -137,7 +137,8 @@ bin/simple test path/to/spec.spl --native  # Compiled mode (full execution)
 
 - Built-in matchers ONLY — no custom matchers
 - Every REQ-NNN must have test coverage — zero is a FAIL
-- Use `to_equal(true)` not `to_be_true()`
+- Do not use `to_be_true()` / `to_be_false()`; assert concrete values, or use
+  `to_be(true/false)` only when the boolean itself is the behavior.
 - All test code in `.spl` — no Python, no Bash
 - Generics use `<>` not `[]`
 - NO inheritance in test helpers — use composition

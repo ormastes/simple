@@ -29,13 +29,15 @@ Phase 3: Test Scaffolding
 - Use SPipe BDD format: describe/context/it blocks
 - Include built-in matchers only: to_equal, to_be, to_be_nil, to_contain,
   to_start_with, to_end_with, to_be_greater_than, to_be_less_than
-- Use to_equal(true) not to_be_true()
+- Do not use to_be_true()/to_be_false(); assert concrete values, or use
+  to_be(true/false) only when the boolean itself is the behavior.
 
 Phase 4: Documentation Scaffolding
 - Create stub design doc: doc/05_design/<feature>.md
 - Create stub architecture doc: doc/04_architecture/<feature>.md (if new subsystem)
 
 All code in .spl files — no Python, no Bash.
-No pass_todo in generated code — use real placeholder implementations.
+No pass_todo in generated code. Temporary shared placeholders must fail
+explicitly with assert(false) or fail(...).
 Reference: doc/07_guide/quick_reference/syntax_quick_reference.md
 """

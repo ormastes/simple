@@ -69,8 +69,8 @@ to_be_greater_than(val)   # Numeric comparison
 to_be_less_than(val)      # Numeric comparison
 ```
 
-- Use `to_equal(true)` not `to_be_true()`
-- Use `to_equal(false)` not `to_be_false()`
+- Do not use `to_be_true()` / `to_be_false()`; assert concrete values, or use
+  `to_be(true/false)` only when the boolean itself is the behavior.
 
 ### SPipe Test Template
 

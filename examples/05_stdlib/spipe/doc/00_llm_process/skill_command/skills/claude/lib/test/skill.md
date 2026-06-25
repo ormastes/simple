@@ -70,7 +70,8 @@ describe "Feature":
 
 `to_equal(val)`, `to_be(val)`, `to_be_nil()`, `to_contain(item)`, `to_start_with(s)`, `to_end_with(s)`, `to_be_greater_than(n)`, `to_be_less_than(n)`
 
-Use `to_equal(true)` NOT `to_be_true()`.
+Do not use `to_be_true()` / `to_be_false()`. Assert concrete values, or use
+`to_be(true/false)` only when the boolean itself is the behavior.
 
 ## Run Tracking
 
