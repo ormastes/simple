@@ -633,7 +633,13 @@ The current canonical evidence contract is:
   `build/production_gui_web_renderer_parity_evidence/evidence.env` must report
   the GUI/web/2D core parity components as `pass`: renderer matrix, 50-case
   layout manifest, live Tauri/Chrome surface manifest, and backend parity. The
-  Tauri/Chrome surface manifest must prove live Electron, Tauri, and Chrome
+  wrapper exports the resolved `SIMPLE_BIN` to nested parity checks and records
+  `production_gui_web_renderer_parity_simple_bin` plus
+  `production_gui_web_renderer_parity_simple_bin_source`; a clean worktree with
+  no `src/compiler_rust/target/release/simple` should use repo/path fallback
+  evidence instead of failing with `missing-simple-bin`. Font offload
+  `unavailable` is recorded but does not satisfy the production parity wrapper.
+  The Tauri/Chrome surface manifest must prove live Electron, Tauri, and Chrome
   captures, 50 Tauri and 50 Chrome cases, 36 pass cases plus 14 tracked
   divergence cases for each browser surface, 0 fail cases, 0 mismatch counts,
   `no_fake_capture=true`, and `blur_or_tolerance_used=false`. The GUI RenderDoc
