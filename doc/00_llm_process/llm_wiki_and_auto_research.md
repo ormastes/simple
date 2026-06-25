@@ -30,12 +30,13 @@ After each stage the lead agent must:
 - update the next-step plan status and handoff notes
 - update `skill_command/` only when reusable, project-neutral process knowledge changed
 
-There is also an explicit doc/wiki refactor checkpoint during SPipe Refactor and
-Ship. The checkpoint uses `.claude/skills/spipe_doc_wiki_refactor.md` as the
-operational checklist for stale docs, command names, process links, and
-feature/layer expert cross-links. It does not replace the per-stage knowledge
-update obligation; it catches accumulated drift after implementation has
-stabilized and again before completion.
+There is also an explicit doc/wiki refactor checkpoint during SPipe Refactor
+before final verification. The checkpoint uses
+`.claude/skills/spipe_doc_wiki_refactor.md` as the operational checklist for
+stale docs, command names, process links, and feature/layer expert cross-links.
+It does not replace the per-stage knowledge update obligation; it catches
+accumulated drift after implementation has stabilized, before completion
+consumes verify evidence.
 
 This is specified in [`pipeline_next_step_plan.md`](pipeline_next_step_plan.md)
 (§"Runtime Process" step 5 and §"Design And Implementation Emphasis") and enforced
