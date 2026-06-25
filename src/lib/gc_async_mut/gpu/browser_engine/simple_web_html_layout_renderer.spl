@@ -760,6 +760,33 @@ fn parse_color_any(raw: text) -> u32:
         return parse_color(raw.substring(hash, raw.len()))
     0u32
 
+fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
+    val lower = raw.lower()
+    val start = text_index_of(lower, "linear-gradient(")
+    if start < 0:
+        return 0u32
+    val lp = find_from(raw, "(", start)
+    val rp = find_from(raw, ")", lp + 1)
+    if lp < 0 or rp <= lp:
+        return 0u32
+    val inner = raw.substring(lp + 1, rp)
+    var item_index = 0
+    var pos = 0
+    val inner_len = inner.len()
+    while pos <= inner_len:
+        val comma = find_from(inner, ",", pos)
+        val end = if comma >= 0: comma else: inner_len
+        val part = inner.substring(pos, end).trim()
+        if part.starts_with("to ") or part == "top" or part == "bottom" or part == "left" or part == "right":
+            item_index = item_index - 1
+        elif item_index == target:
+            return parse_color_any(part)
+        if comma < 0:
+            break
+        item_index = item_index + 1
+        pos = comma + 1
+    0u32
+
 fn parse_int(s: text) -> i32:
     var i = 0
     var v = 0
@@ -933,6 +960,8 @@ fn decl_last_pos(decls: text, prop: text) -> i32:
 
 class Style:
     bg: u32
+    background_gradient_from: u32
+    background_gradient_to: u32
     fg: u32
     font_size: i32
     line_height_px: i32
@@ -1018,11 +1047,11 @@ class Style:
     bold: bool
 
 fn default_style() -> Style:
-    Style(bg: 0u32, fg: argb(0, 0, 0), font_size: 16, line_height_px: 0, width_px: 0, height_px: 0, border_box: false, min_width_px: 0, max_width_px: 0, min_height_px: 0, max_height_px: 0, min_height_vh: false, flex_fill: false, flex_grow: 0, flex_shrink: 1, flex_basis_px: 0, order: 0, flex_wrap: "nowrap", justify_content: "flex-start", align_items: "stretch", align_self: "auto", align_content: "stretch", pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, outline_w: 0, outline_color: 0u32, box_shadow_x_px: 0, box_shadow_y_px: 0, box_shadow_color: 0u32, border_radius_px: 0, border_radius_tl_px: 0, border_radius_tr_px: 0, border_radius_br_px: 0, border_radius_bl_px: 0, gap_px: 0, row_gap_px: 0, column_gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, margin_l_auto: false, margin_r_auto: false, margin_t_auto: false, margin_b_auto: false, display: "block", overflow_hidden: false, overflow_auto_y: false, text_overflow_ellipsis: false, visibility_hidden: false, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: "left", text_transform: "none", text_indent_px: 0, letter_spacing_px: 0, word_spacing_px: 0, font_style_italic: false, direction_rtl: false, text_shadow_x_px: 0, text_shadow_y_px: 0, text_shadow_color: 0u32, text_decoration_underline: false, white_space_nowrap: false, bold: false)
+    Style(bg: 0u32, background_gradient_from: 0u32, background_gradient_to: 0u32, fg: argb(0, 0, 0), font_size: 16, line_height_px: 0, width_px: 0, height_px: 0, border_box: false, min_width_px: 0, max_width_px: 0, min_height_px: 0, max_height_px: 0, min_height_vh: false, flex_fill: false, flex_grow: 0, flex_shrink: 1, flex_basis_px: 0, order: 0, flex_wrap: "nowrap", justify_content: "flex-start", align_items: "stretch", align_self: "auto", align_content: "stretch", pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, outline_w: 0, outline_color: 0u32, box_shadow_x_px: 0, box_shadow_y_px: 0, box_shadow_color: 0u32, border_radius_px: 0, border_radius_tl_px: 0, border_radius_tr_px: 0, border_radius_br_px: 0, border_radius_bl_px: 0, gap_px: 0, row_gap_px: 0, column_gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, margin_l_auto: false, margin_r_auto: false, margin_t_auto: false, margin_b_auto: false, display: "block", overflow_hidden: false, overflow_auto_y: false, text_overflow_ellipsis: false, visibility_hidden: false, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: "left", text_transform: "none", text_indent_px: 0, letter_spacing_px: 0, word_spacing_px: 0, font_style_italic: false, direction_rtl: false, text_shadow_x_px: 0, text_shadow_y_px: 0, text_shadow_color: 0u32, text_decoration_underline: false, white_space_nowrap: false, bold: false)
 
 fn inherit_style(p: Style) -> Style:
     val display = if p.display == "none": "none" else: "block"
-    Style(bg: 0u32, fg: p.fg, font_size: p.font_size, line_height_px: p.line_height_px, width_px: 0, height_px: 0, border_box: false, min_width_px: 0, max_width_px: 0, min_height_px: 0, max_height_px: 0, min_height_vh: false, flex_fill: false, flex_grow: 0, flex_shrink: 1, flex_basis_px: 0, order: 0, flex_wrap: "nowrap", justify_content: "flex-start", align_items: "stretch", align_self: "auto", align_content: "stretch", pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, outline_w: 0, outline_color: 0u32, box_shadow_x_px: 0, box_shadow_y_px: 0, box_shadow_color: 0u32, border_radius_px: 0, border_radius_tl_px: 0, border_radius_tr_px: 0, border_radius_br_px: 0, border_radius_bl_px: 0, gap_px: 0, row_gap_px: 0, column_gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, margin_l_auto: false, margin_r_auto: false, margin_t_auto: false, margin_b_auto: false, display: display, overflow_hidden: false, overflow_auto_y: false, text_overflow_ellipsis: p.text_overflow_ellipsis, visibility_hidden: p.visibility_hidden, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: p.text_align, text_transform: p.text_transform, text_indent_px: p.text_indent_px, letter_spacing_px: p.letter_spacing_px, word_spacing_px: p.word_spacing_px, font_style_italic: p.font_style_italic, direction_rtl: p.direction_rtl, text_shadow_x_px: p.text_shadow_x_px, text_shadow_y_px: p.text_shadow_y_px, text_shadow_color: p.text_shadow_color, text_decoration_underline: p.text_decoration_underline, white_space_nowrap: p.white_space_nowrap, bold: p.bold)
+    Style(bg: 0u32, background_gradient_from: 0u32, background_gradient_to: 0u32, fg: p.fg, font_size: p.font_size, line_height_px: p.line_height_px, width_px: 0, height_px: 0, border_box: false, min_width_px: 0, max_width_px: 0, min_height_px: 0, max_height_px: 0, min_height_vh: false, flex_fill: false, flex_grow: 0, flex_shrink: 1, flex_basis_px: 0, order: 0, flex_wrap: "nowrap", justify_content: "flex-start", align_items: "stretch", align_self: "auto", align_content: "stretch", pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, outline_w: 0, outline_color: 0u32, box_shadow_x_px: 0, box_shadow_y_px: 0, box_shadow_color: 0u32, border_radius_px: 0, border_radius_tl_px: 0, border_radius_tr_px: 0, border_radius_br_px: 0, border_radius_bl_px: 0, gap_px: 0, row_gap_px: 0, column_gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, margin_l_auto: false, margin_r_auto: false, margin_t_auto: false, margin_b_auto: false, display: display, overflow_hidden: false, overflow_auto_y: false, text_overflow_ellipsis: p.text_overflow_ellipsis, visibility_hidden: p.visibility_hidden, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: p.text_align, text_transform: p.text_transform, text_indent_px: p.text_indent_px, letter_spacing_px: p.letter_spacing_px, word_spacing_px: p.word_spacing_px, font_style_italic: p.font_style_italic, direction_rtl: p.direction_rtl, text_shadow_x_px: p.text_shadow_x_px, text_shadow_y_px: p.text_shadow_y_px, text_shadow_color: p.text_shadow_color, text_decoration_underline: p.text_decoration_underline, white_space_nowrap: p.white_space_nowrap, bold: p.bold)
 
 fn is_inline_tag(tag: text) -> bool:
     tag == "a" or tag == "span" or tag == "b" or tag == "strong" or tag == "em" or tag == "i" or tag == "small" or tag == "code" or tag == "#text"
@@ -1038,6 +1067,8 @@ fn apply_decls(st: Style, decls: text) -> Style:
     if decls.len() == 0:
         return st
     var bg_v = st.bg
+    var background_gradient_from_v = st.background_gradient_from
+    var background_gradient_to_v = st.background_gradient_to
     var fg_v = st.fg
     var font_size_v = st.font_size
     var line_height_v = st.line_height_px
@@ -1123,13 +1154,35 @@ fn apply_decls(st: Style, decls: text) -> Style:
     var bold_v = st.bold
     val bg = decl_get(decls, "background-color")
     val bgs = decl_get(decls, "background")
+    val bg_image = decl_get(decls, "background-image")
     val bg_pos = decl_last_pos(decls, "background-color")
     val bgs_pos = decl_last_pos(decls, "background")
     if bg_pos >= 0 or bgs_pos >= 0:
         if bgs_pos > bg_pos:
-            bg_v = parse_color_any(bgs)
+            val gradient_from = parse_linear_gradient_color(bgs, 0)
+            val gradient_to = parse_linear_gradient_color(bgs, 1)
+            if gradient_from != 0u32 and gradient_to != 0u32:
+                background_gradient_from_v = gradient_from
+                background_gradient_to_v = gradient_to
+            else:
+                bg_v = parse_color_any(bgs)
+                background_gradient_from_v = 0u32
+                background_gradient_to_v = 0u32
         else:
             bg_v = parse_color(bg)
+            background_gradient_from_v = 0u32
+            background_gradient_to_v = 0u32
+    if bg_image.len() > 0:
+        val image_lower = bg_image.trim().lower()
+        if image_lower == "none":
+            background_gradient_from_v = 0u32
+            background_gradient_to_v = 0u32
+        else:
+            val gradient_from = parse_linear_gradient_color(bg_image, 0)
+            val gradient_to = parse_linear_gradient_color(bg_image, 1)
+            if gradient_from != 0u32 and gradient_to != 0u32:
+                background_gradient_from_v = gradient_from
+                background_gradient_to_v = gradient_to
     val col = decl_get(decls, "color")
     if col.len() > 0:
         val cv = parse_color(col)
@@ -1699,7 +1752,7 @@ fn apply_decls(st: Style, decls: text) -> Style:
         margin_r_auto_v = false
         margin_t_auto_v = false
         margin_b_auto_v = false
-    Style(bg: bg_v, fg: fg_v, font_size: font_size_v, line_height_px: line_height_v, width_px: width_v, height_px: height_v, border_box: border_box_v, min_width_px: min_width_v, max_width_px: max_width_v, min_height_px: min_height_v, max_height_px: max_height_v, min_height_vh: min_height_vh_v, flex_fill: flex_fill_v, flex_grow: flex_grow_v, flex_shrink: flex_shrink_v, flex_basis_px: flex_basis_px_v, order: order_v, flex_wrap: flex_wrap_v, justify_content: justify_content_v, align_items: align_items_v, align_self: align_self_v, align_content: align_content_v, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: border_w_v, border_color: border_color_v, border_l: border_l_v, border_t: border_t_v, border_r: border_r_v, border_b: border_b_v, border_color_l: border_color_l_v, border_color_t: border_color_t_v, border_color_r: border_color_r_v, border_color_b: border_color_b_v, outline_w: outline_w_v, outline_color: outline_color_v, box_shadow_x_px: box_shadow_x_px_v, box_shadow_y_px: box_shadow_y_px_v, box_shadow_color: box_shadow_color_v, border_radius_px: border_radius_px_v, border_radius_tl_px: border_radius_tl_px_v, border_radius_tr_px: border_radius_tr_px_v, border_radius_br_px: border_radius_br_px_v, border_radius_bl_px: border_radius_bl_px_v, gap_px: gap_v, row_gap_px: row_gap_v, column_gap_px: column_gap_v, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_l_auto: margin_l_auto_v, margin_r_auto: margin_r_auto_v, margin_t_auto: margin_t_auto_v, margin_b_auto: margin_b_auto_v, display: display_v, overflow_hidden: overflow_hidden_v, overflow_auto_y: overflow_auto_y_v, text_overflow_ellipsis: text_overflow_ellipsis_v, visibility_hidden: visibility_hidden_v, position_relative: position_relative_v, position_absolute: position_absolute_v, left_px: left_px_v, top_px: top_px_v, right_px: right_px_v, bottom_px: bottom_px_v, z_index: z_index_v, opacity_pct: opacity_pct_v, flex_direction: flex_direction_v, text_align: text_align_v, text_transform: text_transform_v, text_indent_px: text_indent_px_v, letter_spacing_px: letter_spacing_px_v, word_spacing_px: word_spacing_px_v, font_style_italic: font_style_italic_v, direction_rtl: direction_rtl_v, text_shadow_x_px: text_shadow_x_px_v, text_shadow_y_px: text_shadow_y_px_v, text_shadow_color: text_shadow_color_v, text_decoration_underline: text_decoration_underline_v, white_space_nowrap: white_space_nowrap_v, bold: bold_v)
+    Style(bg: bg_v, background_gradient_from: background_gradient_from_v, background_gradient_to: background_gradient_to_v, fg: fg_v, font_size: font_size_v, line_height_px: line_height_v, width_px: width_v, height_px: height_v, border_box: border_box_v, min_width_px: min_width_v, max_width_px: max_width_v, min_height_px: min_height_v, max_height_px: max_height_v, min_height_vh: min_height_vh_v, flex_fill: flex_fill_v, flex_grow: flex_grow_v, flex_shrink: flex_shrink_v, flex_basis_px: flex_basis_px_v, order: order_v, flex_wrap: flex_wrap_v, justify_content: justify_content_v, align_items: align_items_v, align_self: align_self_v, align_content: align_content_v, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: border_w_v, border_color: border_color_v, border_l: border_l_v, border_t: border_t_v, border_r: border_r_v, border_b: border_b_v, border_color_l: border_color_l_v, border_color_t: border_color_t_v, border_color_r: border_color_r_v, border_color_b: border_color_b_v, outline_w: outline_w_v, outline_color: outline_color_v, box_shadow_x_px: box_shadow_x_px_v, box_shadow_y_px: box_shadow_y_px_v, box_shadow_color: box_shadow_color_v, border_radius_px: border_radius_px_v, border_radius_tl_px: border_radius_tl_px_v, border_radius_tr_px: border_radius_tr_px_v, border_radius_br_px: border_radius_br_px_v, border_radius_bl_px: border_radius_bl_px_v, gap_px: gap_v, row_gap_px: row_gap_v, column_gap_px: column_gap_v, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_l_auto: margin_l_auto_v, margin_r_auto: margin_r_auto_v, margin_t_auto: margin_t_auto_v, margin_b_auto: margin_b_auto_v, display: display_v, overflow_hidden: overflow_hidden_v, overflow_auto_y: overflow_auto_y_v, text_overflow_ellipsis: text_overflow_ellipsis_v, visibility_hidden: visibility_hidden_v, position_relative: position_relative_v, position_absolute: position_absolute_v, left_px: left_px_v, top_px: top_px_v, right_px: right_px_v, bottom_px: bottom_px_v, z_index: z_index_v, opacity_pct: opacity_pct_v, flex_direction: flex_direction_v, text_align: text_align_v, text_transform: text_transform_v, text_indent_px: text_indent_px_v, letter_spacing_px: letter_spacing_px_v, word_spacing_px: word_spacing_px_v, font_style_italic: font_style_italic_v, direction_rtl: direction_rtl_v, text_shadow_x_px: text_shadow_x_px_v, text_shadow_y_px: text_shadow_y_px_v, text_shadow_color: text_shadow_color_v, text_decoration_underline: text_decoration_underline_v, white_space_nowrap: white_space_nowrap_v, bold: bold_v)
 
 # default per-tag tweaks (block/inline, heading sizes, spacing)
 fn tag_defaults(st: Style, tag: text) -> Style:
@@ -1716,7 +1769,7 @@ fn tag_defaults(st: Style, tag: text) -> Style:
     var border_box_v = st.border_box
     var bold_v = st.bold
     if is_non_rendered_tag(tag):
-        return Style(bg: st.bg, fg: st.fg, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: margin_t_v, margin_r: st.margin_r, margin_b: margin_b_v, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: "none", overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_style_italic: st.font_style_italic, direction_rtl: st.direction_rtl, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_underline: st.text_decoration_underline, white_space_nowrap: st.white_space_nowrap, bold: bold_v)
+        return Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, fg: st.fg, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: margin_t_v, margin_r: st.margin_r, margin_b: margin_b_v, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: "none", overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_style_italic: st.font_style_italic, direction_rtl: st.direction_rtl, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_underline: st.text_decoration_underline, white_space_nowrap: st.white_space_nowrap, bold: bold_v)
     if is_inline_tag(tag):
         display_v = "inline"
     if tag == "h1":
@@ -1759,7 +1812,7 @@ fn tag_defaults(st: Style, tag: text) -> Style:
         margin_b_v = 3
     elif tag == "header" or tag == "footer" or tag == "nav" or tag == "section" or tag == "table" or tag == "tr" or tag == "div" or tag == "ul" or tag == "li":
         display_v = "block"
-    Style(bg: st.bg, fg: st.fg, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: border_box_v, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: display_v, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_style_italic: st.font_style_italic, direction_rtl: st.direction_rtl, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_underline: st.text_decoration_underline, white_space_nowrap: st.white_space_nowrap, bold: bold_v)
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, fg: st.fg, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: border_box_v, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: display_v, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_style_italic: st.font_style_italic, direction_rtl: st.direction_rtl, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_underline: st.text_decoration_underline, white_space_nowrap: st.white_space_nowrap, bold: bold_v)
 
 # ---------------------------------------------------------------------------
 # CSS rules from <style> blocks
@@ -3616,6 +3669,30 @@ fn fb_rounded_rect_corners_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y
 fn fb_style_rounded_rect_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, st: Style, color: u32, opacity_pct: i32, clip: ClipRect) -> [u32]:
     fb_rounded_rect_corners_opacity_clip(fb, fbw, fbh, x, y, w, h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, opacity_pct, clip)
 
+fn mix_color_vertical(a: u32, b: u32, pos: i32, denom: i32) -> u32:
+    if denom <= 0:
+        return a
+    val ar = (((a >> 16) & 255u32) as i32)
+    val ag = (((a >> 8) & 255u32) as i32)
+    val ab = ((a & 255u32) as i32)
+    val br = (((b >> 16) & 255u32) as i32)
+    val bg = (((b >> 8) & 255u32) as i32)
+    val bb = ((b & 255u32) as i32)
+    val inv = denom - pos
+    argb((ar * inv + br * pos) / denom, (ag * inv + bg * pos) / denom, (ab * inv + bb * pos) / denom)
+
+fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, st: Style, clip: ClipRect) -> [u32]:
+    if st.background_gradient_from == 0u32 or st.background_gradient_to == 0u32:
+        return fb_style_rounded_rect_opacity_clip(fb, fbw, fbh, x, y, w, h, st, st.bg, st.opacity_pct, clip)
+    var out = fb
+    var py = 0
+    val denom = if h > 1: h - 1 else: 1
+    while py < h:
+        val color = mix_color_vertical(st.background_gradient_from, st.background_gradient_to, py, denom)
+        out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, x, y + py, w, 1, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, st.opacity_pct, clip)
+        py = py + 1
+    out
+
 fn fb_border(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, border_w: i32, color: u32) -> [u32]:
     var out = fb
     if border_w <= 0 or color == 0u32:
@@ -4189,10 +4266,10 @@ fn flex_item_outer_height(node: HNode, st: Style) -> i32:
     constrained_outer_height(node, st, style_line_h(st))
 
 fn style_with_height(st: Style, height_px: i32) -> Style:
-    Style(bg: st.bg, fg: st.fg, font_size: st.font_size, line_height_px: st.line_height_px, width_px: st.width_px, height_px: height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_style_italic: st.font_style_italic, direction_rtl: st.direction_rtl, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_underline: st.text_decoration_underline, white_space_nowrap: st.white_space_nowrap, bold: st.bold)
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, fg: st.fg, font_size: st.font_size, line_height_px: st.line_height_px, width_px: st.width_px, height_px: height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_style_italic: st.font_style_italic, direction_rtl: st.direction_rtl, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_underline: st.text_decoration_underline, white_space_nowrap: st.white_space_nowrap, bold: st.bold)
 
 fn style_with_width(st: Style, width_px: i32) -> Style:
-    Style(bg: st.bg, fg: st.fg, font_size: st.font_size, line_height_px: st.line_height_px, width_px: width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_style_italic: st.font_style_italic, direction_rtl: st.direction_rtl, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_underline: st.text_decoration_underline, white_space_nowrap: st.white_space_nowrap, bold: st.bold)
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, fg: st.fg, font_size: st.font_size, line_height_px: st.line_height_px, width_px: width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_style_italic: st.font_style_italic, direction_rtl: st.direction_rtl, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_underline: st.text_decoration_underline, white_space_nowrap: st.white_space_nowrap, bold: st.bold)
 
 fn styles_with_height(styles: [Style], index: i32, height_px: i32) -> [Style]:
     val style_count = styles.len()
@@ -5364,7 +5441,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         val visible_box = normal_flow and visible_node and nd.tag != "#text" and y < fbh
         val non_widget_mode = not widget_mode
         if visible_box:
-            val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and st.bg != 0u32
+            val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32))
             val paint_border = not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
             val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
             val paint_shadow = not skip_widget_node_bg and st.box_shadow_color != 0u32
@@ -5373,7 +5450,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 if paint_shadow:
                     out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st, st.box_shadow_color, 100, clip)
                 if paint_bg:
-                    out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x, y, w, h, st, st.bg, st.opacity_pct, clip)
+                    out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
                 if paint_border:
                     out = fb_border_sides_clip(out, fbw, fbh, x, y, w, h, st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
                 if paint_outline:
@@ -5401,7 +5478,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             val visible_box = visible_node and nd.tag != "#text" and y < fbh
             val non_widget_mode = not widget_mode
             if visible_box:
-                val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and st.bg != 0u32
+                val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32))
                 val paint_border = not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
                 val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
                 val paint_shadow = not skip_widget_node_bg and st.box_shadow_color != 0u32
@@ -5410,7 +5487,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                     if paint_shadow:
                         out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st, st.box_shadow_color, 100, clip)
                     if paint_bg:
-                        out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x, y, w, h, st, st.bg, st.opacity_pct, clip)
+                        out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
                     if paint_border:
                         out = fb_border_sides_clip(out, fbw, fbh, x, y, w, h, st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
                     if paint_outline:
@@ -5443,7 +5520,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 val visible_box = visible_node and nd.tag != "#text" and y < fbh
                 val non_widget_mode = not widget_mode
                 if visible_box:
-                    val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and st.bg != 0u32
+                    val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32))
                     val paint_border = not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
                     val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
                     val paint_shadow = not skip_widget_node_bg and st.box_shadow_color != 0u32
@@ -5452,7 +5529,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                         if paint_shadow:
                             out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st, st.box_shadow_color, 100, clip)
                         if paint_bg:
-                            out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x, y, w, h, st, st.bg, st.opacity_pct, clip)
+                            out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
                         if paint_border:
                             out = fb_border_sides_clip(out, fbw, fbh, x, y, w, h, st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
                         if paint_outline:
@@ -5492,7 +5569,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             val visible_box = visible_node and nd.tag != "#text" and y < fbh
             val non_widget_mode = not widget_mode
             if visible_box:
-                val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and st.bg != 0u32
+                val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32))
                 val paint_border = not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
                 val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
                 val paint_shadow = not skip_widget_node_bg and st.box_shadow_color != 0u32
@@ -5501,7 +5578,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                     if paint_shadow:
                         out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st, st.box_shadow_color, 100, clip)
                     if paint_bg:
-                        out = fb_style_rounded_rect_opacity_clip(out, fbw, fbh, x, y, w, h, st, st.bg, st.opacity_pct, clip)
+                        out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
                     if paint_border:
                         out = fb_border_sides_clip(out, fbw, fbh, x, y, w, h, st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
                     if paint_outline:
@@ -5654,6 +5731,7 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("align-items", st.align_items),
         draw_ir_style_prop("align-self", st.align_self),
         draw_ir_style_prop("background-color", "{st.bg}"),
+        draw_ir_style_prop("background-image", if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32: "linear-gradient({st.background_gradient_from},{st.background_gradient_to})" else: "none"),
         draw_ir_style_prop("box-shadow", if st.box_shadow_color != 0u32: "{st.box_shadow_x_px}px {st.box_shadow_y_px}px {st.box_shadow_color}" else: "none"),
         draw_ir_style_prop("color", "{st.fg}"),
         draw_ir_style_prop("direction", if st.direction_rtl: "rtl" else: "ltr"),

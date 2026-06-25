@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 115 | 115 | 0 | 0 |
+| 116 | 116 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -138,6 +138,26 @@ Reproduction: this block contains the complete executable scenario source.
 val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div { width: 12px; height: 8px; background-color: #2563eb; }</style></head><body><div></div></body></html>"
 val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
 
+expect(_count_color(result.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)
+```
+
+</details>
+
+#### renders CSS linear-gradient background images as vertical pixels
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 10px; height: 10px; background-image: linear-gradient(#dc2626, #2563eb); }</style></head><body><div class='card'></div></body></html>"
+val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+expect(result.pixel_data[0]).to_equal(0xFFDC2626u32)
+expect(result.pixel_data[9 * TEST_WIDTH]).to_equal(0xFF2563EBu32)
+expect(_count_color(result.pixel_data, 0xFFDC2626u32)).to_be_greater_than(0)
 expect(_count_color(result.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)
 ```
 
@@ -2140,8 +2160,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 115 |
-| Active scenarios | 115 |
+| Total scenarios | 116 |
+| Active scenarios | 116 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
