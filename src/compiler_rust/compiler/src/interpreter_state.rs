@@ -203,6 +203,14 @@ thread_local! {
     /// This keeps all duplicate definitions so runtime dispatch can choose the
     /// correct overload instead of relying on the flat function map.
     pub(crate) static FUNCTION_OVERLOADS: RefCell<HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>> = RefCell::new(HashMap::new());
+
+    /// Interpreted struct/class overload registry keyed by source-level type name.
+    /// The flat `classes` map is keyed by bare name (last-write-wins), so two
+    /// modules that both define e.g. `struct CompileOptions` shadow each other.
+    /// This keeps all duplicate definitions so class construction can pick the one
+    /// whose fields match the literal instead of failing on the shadowing def.
+    /// (Mirror of FUNCTION_OVERLOADS for free functions.)
+    pub(crate) static CLASS_OVERLOADS: RefCell<HashMap<String, Vec<Arc<simple_parser::ast::ClassDef>>>> = RefCell::new(HashMap::new());
 }
 
 //==============================================================================

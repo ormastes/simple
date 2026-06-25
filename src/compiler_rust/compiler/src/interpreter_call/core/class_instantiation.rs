@@ -24,6 +24,32 @@ thread_local! {
     pub(crate) static IN_NEW_METHOD: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
+/// Whether a class definition can accept every named field in a construction.
+/// Positional args are ignored here (they bind by position to the def's fields).
+fn class_def_accepts_named_args(def: &ClassDef, args: &[Argument]) -> bool {
+    args.iter().all(|a| match &a.name {
+        Some(n) => def.fields.iter().any(|f| &f.name == n),
+        None => true,
+    })
+}
+
+/// Resolve a class construction to the definition whose fields fit the literal.
+/// The flat class registry keeps only one def per bare name (last-write-wins); if
+/// that def doesn't fit, consult CLASS_OVERLOADS for a same-named def that does.
+/// Returns the primary def unchanged when it already fits (the common case).
+fn pick_fitting_class_def(class_name: &str, primary: Arc<ClassDef>, args: &[Argument]) -> Arc<ClassDef> {
+    if class_def_accepts_named_args(&primary, args) {
+        return primary;
+    }
+    crate::interpreter::CLASS_OVERLOADS
+        .with(|cell| {
+            cell.borrow()
+                .get(class_name)
+                .and_then(|defs| defs.iter().find(|d| class_def_accepts_named_args(d, args)).cloned())
+        })
+        .unwrap_or(primary)
+}
+
 pub(crate) fn instantiate_class(
     class_name: &str,
     args: &[Argument],
@@ -56,6 +82,14 @@ pub(crate) fn instantiate_class(
 
         CompileError::semantic_with_context(format!("class `{}` not found in this scope", class_name), ctx)
     })?;
+
+    // Structural disambiguation across colliding type names. The interpreter's
+    // flat class registry is keyed by bare name (last-write-wins), so two modules
+    // that both define e.g. `struct CompileOptions` shadow each other. If the
+    // registered def doesn't have all the fields this literal sets, pick a
+    // same-named overload whose fields do. Only rescues constructions that would
+    // otherwise fail, so it cannot change the result of an already-valid literal.
+    let class_def = pick_fitting_class_def(class_name, class_def, args);
 
     let mut fields: HashMap<String, Value> = HashMap::new();
     for field in &class_def.fields {

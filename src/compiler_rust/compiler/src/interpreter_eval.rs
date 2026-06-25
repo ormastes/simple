@@ -31,7 +31,7 @@ use super::{
     validate_unit_type, with_effect_context, Dimension, ExternFunctions, ImplMethods, Macros, TraitImplRegistry,
     TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
-    BLANKET_IMPL_METHODS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, FUNCTION_OVERLOADS, GLOBAL_ENUMS,
+    BLANKET_IMPL_METHODS, CLASS_OVERLOADS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, FUNCTION_OVERLOADS, GLOBAL_ENUMS,
     GLOBAL_IMPL_METHODS, MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS, MODULE_GLOBALS, SI_BASE_UNITS,
     UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
@@ -277,6 +277,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
     // Bitfields are module declarations; clear stale definitions before registration.
     super::BITFIELDS.with(|cell| cell.borrow_mut().clear());
+    // Clear the struct/class overload registry from previous runs.
+    CLASS_OVERLOADS.with(|cell| cell.borrow_mut().clear());
 
     let mut env = Env::new();
     let mut functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
@@ -313,28 +315,29 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         class_name: s.name.clone(),
                     },
                 );
-                classes.insert(
-                    s.name.clone(),
-                    Arc::new(ClassDef {
-                        span: s.span,
-                        name: s.name.clone(),
-                        generic_params: Vec::new(),
-                        where_clause: vec![],
-                        fields: s.fields.clone(),
-                        methods: s.methods.clone(),
-                        parent: None,
-                        visibility: s.visibility,
-                        effects: Vec::new(),
-                        attributes: Vec::new(),
-                        doc_comment: None,
-                        invariant: None,
-                        macro_invocations: Vec::new(),
-                        mixins: vec![],
-                        is_generic_template: false,
-                        specialization_of: None,
-                        type_bindings: std::collections::HashMap::new(),
-                    }),
-                );
+                let struct_class = Arc::new(ClassDef {
+                    span: s.span,
+                    name: s.name.clone(),
+                    generic_params: Vec::new(),
+                    where_clause: vec![],
+                    fields: s.fields.clone(),
+                    methods: s.methods.clone(),
+                    parent: None,
+                    visibility: s.visibility,
+                    effects: Vec::new(),
+                    attributes: Vec::new(),
+                    doc_comment: None,
+                    invariant: None,
+                    macro_invocations: Vec::new(),
+                    mixins: vec![],
+                    is_generic_template: false,
+                    specialization_of: None,
+                    type_bindings: std::collections::HashMap::new(),
+                });
+                classes.insert(s.name.clone(), Arc::clone(&struct_class));
+                CLASS_OVERLOADS.with(|cell| {
+                    cell.borrow_mut().entry(s.name.clone()).or_default().push(struct_class);
+                });
             }
             Node::Enum(e) => {
                 // Pre-register enum
@@ -358,7 +361,11 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         class_name: c.name.clone(),
                     },
                 );
-                classes.insert(c.name.clone(), Arc::new(c.clone()));
+                let arc_c = Arc::new(c.clone());
+                classes.insert(c.name.clone(), Arc::clone(&arc_c));
+                CLASS_OVERLOADS.with(|cell| {
+                    cell.borrow_mut().entry(c.name.clone()).or_default().push(arc_c);
+                });
             }
             Node::Bitfield(bitfield) => {
                 super::register_bitfield(bitfield);
