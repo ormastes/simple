@@ -197,7 +197,9 @@ pixels, target FPS met, nonempty checksum,
 `gui_showcase_4k_200fps_time_log_file_status=pass`,
 `retained-static-frame`, one redraw frame, positive measured frame count, and
 `target_fps >= 200`, plus RSS budget status with `max_rss_kb` and
-`max_rss_budget_kb`; the 8K row must likewise prove
+`max_rss_budget_kb`. The default wrapper budget is 262144 KiB for 4K and
+750000 KiB for 8K; rows with `rss_status=measured` are diagnostics, not
+completion evidence. The 8K row must likewise prove
 `7680x4320`, `33177600` pixels, nonzero readback pixels, target FPS at least
 200, positive measured frame count, checksum,
 `gui_showcase_8k_perf_log_file_status=pass`,

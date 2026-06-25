@@ -31,11 +31,11 @@ sh scripts/check/check-widget-showcase-4k-200fps.shs
 | height | 2160 |
 | pixels | 8294400 |
 | frames | 200 |
-| fps_x1000 | 49578582 |
+| fps_x1000 | 56306306 |
 | target_fps | 200 |
 | max_rss_kb | 131328 |
-| max_rss_budget_kb | 0 |
-| rss_status | measured |
+| max_rss_budget_kb | 262144 |
+| rss_status | pass |
 | nonzero_pixels | 5458 |
 | checksum | 23357114226484 |
 | render_mode | retained-static-frame |

@@ -16,6 +16,7 @@
 - HTML/CSS full CSS spec render gap: 331 of 394
 - HTML/CSS full rendering goal: incomplete (full-css-rendering-incomplete; full CSS 63/394)
 - HTML/CSS readiness answer: implemented-html-css-ready-full-css-incomplete (implemented surface pass, full CSS incomplete; unrendered CSS 331)
+- Native render-log platform matrix: incomplete (missing-or-failing-native-render-log-platforms; missing linux-vulkan,macos-metal,windows-d3d12; required linux-vulkan,macos-metal,windows-d3d12)
 - RenderDoc goal: fail (missing-vulkan-runtime-backend)
 - Simple RenderDoc: fail (missing-vulkan-runtime-backend)
 - External Chrome/Vulkan RenderDoc: unavailable (capture-not-requested)
@@ -43,7 +44,7 @@
 - Production GUI/web core parity: fail (core-gui-web-parity-missing:layout_manifest:<missing>!=pass,layout_manifest_case_count:<missing>!=50,layout_manifest_pass_count:<missing>!=36,layout_manifest_tracked_count:<missing>!=14,layout_manifest_fail_count:<missing>!=0,surface_manifest:<missing>!=pass,surface_manifest_electron_capture:<missing>!=pass,surface_manifest_tauri_capture:<missing>!=pass,surface_manifest_chrome_capture:<missing>!=pass,surface_manifest_tauri_live_capture:<missing>!=true,surface_manifest_chrome_live_capture:<missing>!=true,surface_manifest_tauri_case_count:<missing>!=50,surface_manifest_tauri_pass_count:<missing>!=36,surface_manifest_tauri_tracked_count:<missing>!=14,surface_manifest_tauri_fail_count:<missing>!=0,surface_manifest_chrome_case_count:<missing>!=50,surface_manifest_chrome_pass_count:<missing>!=36,surface_manifest_chrome_tracked_count:<missing>!=14,surface_manifest_chrome_fail_count:<missing>!=0,surface_manifest_tauri_mismatch_count:<missing>!=0,surface_manifest_chrome_mismatch_count:<missing>!=0,surface_manifest_no_fake_capture:<missing>!=true,surface_manifest_blur_or_tolerance_used:<missing>!=false,backend:<missing>!=pass)
 - Production GUI/web parity gate: fail (production-parity-not-pass)
 - Production GUI/web parity source env: build/production_gui_web_renderer_parity_evidence/evidence.env (pass)
-- GUI/web/2D 4K retained perf: fail (4k-rss-budget-not-pass:measured; resolution 4k; size 3840x2160; pixels 8294400; frames 200; fps_x1000 54570259; target_fps 200; render_mode retained-static-frame; redraw_frames 1; nonzero_pixels 5458; checksum 23357114226484; rss 131328/0 kB)
+- GUI/web/2D 4K retained perf: pass (met-200fps; resolution 4k; size 3840x2160; pixels 8294400; frames 200; fps_x1000 56306306; target_fps 200; render_mode retained-static-frame; redraw_frames 1; nonzero_pixels 5458; checksum 23357114226484; rss 131328/262144 kB)
 - GUI/web/2D 8K retained perf: pass (met-target-fps; resolution 8k; size 7680x4320; pixels 33177600; frames 120; fps_x1000 13303769; target_fps 200; render_mode retained-static-frame; redraw_frames 1; nonzero_pixels 203; checksum 869060580878; rss 519936/750000 kB)
 - Production surface host:
 - Production Tauri surface capture:
@@ -58,10 +59,10 @@
   - GUI/web/2D Vulkan comparison artifacts for Electron, Chrome, and Simple
   - Electron, Chrome, and Simple GUI/web/2D Vulkan pairwise pixel comparison
   - Electron and Chrome Vulkan-backed browser RenderDoc proof
+  - native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12
   - production GUI/web font offload readback evidence
   - production GUI/web raw Metal readback evidence
   - production GUI/web parity evidence with live Tauri and Chrome captures
-  - retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum
   - full CSS specification rendering coverage beyond implemented Simple Web subset
 
 ## Commands
@@ -213,6 +214,35 @@
 - html_css_full_css_completion_rendered_count=63
 - html_css_full_css_completion_unrendered_count=331
 - html_css_readiness_answer=implemented-html-css-ready-full-css-incomplete
+- native_render_log_platform_matrix_status=incomplete
+- native_render_log_platform_matrix_reason=missing-or-failing-native-render-log-platforms
+- native_render_log_platform_matrix_required_platforms=linux-vulkan,macos-metal,windows-d3d12
+- native_render_log_platform_matrix_missing_platforms=linux-vulkan,macos-metal,windows-d3d12
+- native_render_log_platform_matrix_failed_platforms=
+- linux_vulkan_render_log_compare_env=build/linux-vulkan-render-log-compare/evidence.env
+- linux_vulkan_render_log_compare_env_file_status=missing
+- linux_vulkan_render_log_compare_status=unavailable
+- linux_vulkan_render_log_compare_reason=missing-linux-vulkan-render-log-compare-evidence
+- linux_vulkan_render_log_compare_required_api=vulkan
+- linux_vulkan_render_log_compare_pairwise_status=
+- linux_vulkan_render_log_compare_renderdoc_simple_status=
+- linux_vulkan_render_log_compare_renderdoc_chrome_status=
+- linux_vulkan_render_log_compare_renderdoc_electron_status=
+- macos_metal_render_log_compare_env=build/macos-metal-render-log-compare/evidence.env
+- macos_metal_render_log_compare_env_file_status=missing
+- macos_metal_render_log_compare_status=unavailable
+- macos_metal_render_log_compare_reason=missing-macos-metal-render-log-compare-evidence
+- macos_metal_render_log_compare_required_api=metal
+- macos_metal_render_log_compare_pairwise_status=
+- macos_metal_render_log_compare_gpu_capture_status=
+- windows_d3d12_render_log_compare_env=build/windows-d3d12-render-log-compare/evidence.env
+- windows_d3d12_render_log_compare_env_file_status=missing
+- windows_d3d12_render_log_compare_status=unavailable
+- windows_d3d12_render_log_compare_reason=missing-windows-d3d12-render-log-compare-evidence
+- windows_d3d12_render_log_compare_required_api=d3d12
+- windows_d3d12_render_log_compare_pairwise_status=
+- windows_d3d12_render_log_compare_pix_status=
+- windows_d3d12_render_log_compare_gpu_debugger_status=
 - gui_web_2d_vulkan_setup_command=sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
 - gui_web_2d_vulkan_setup_source=existing-evidence
 - gui_web_2d_vulkan_setup_exit_code=
@@ -476,17 +506,17 @@
 - production_gui_web_renderer_parity_core_reason=core-gui-web-parity-missing:layout_manifest:<missing>!=pass,layout_manifest_case_count:<missing>!=50,layout_manifest_pass_count:<missing>!=36,layout_manifest_tracked_count:<missing>!=14,layout_manifest_fail_count:<missing>!=0,surface_manifest:<missing>!=pass,surface_manifest_electron_capture:<missing>!=pass,surface_manifest_tauri_capture:<missing>!=pass,surface_manifest_chrome_capture:<missing>!=pass,surface_manifest_tauri_live_capture:<missing>!=true,surface_manifest_chrome_live_capture:<missing>!=true,surface_manifest_tauri_case_count:<missing>!=50,surface_manifest_tauri_pass_count:<missing>!=36,surface_manifest_tauri_tracked_count:<missing>!=14,surface_manifest_tauri_fail_count:<missing>!=0,surface_manifest_chrome_case_count:<missing>!=50,surface_manifest_chrome_pass_count:<missing>!=36,surface_manifest_chrome_tracked_count:<missing>!=14,surface_manifest_chrome_fail_count:<missing>!=0,surface_manifest_tauri_mismatch_count:<missing>!=0,surface_manifest_chrome_mismatch_count:<missing>!=0,surface_manifest_no_fake_capture:<missing>!=true,surface_manifest_blur_or_tolerance_used:<missing>!=false,backend:<missing>!=pass
 - production_gui_web_renderer_parity_core_missing=layout_manifest:<missing>!=pass|layout_manifest_case_count:<missing>!=50|layout_manifest_pass_count:<missing>!=36|layout_manifest_tracked_count:<missing>!=14|layout_manifest_fail_count:<missing>!=0|surface_manifest:<missing>!=pass|surface_manifest_electron_capture:<missing>!=pass|surface_manifest_tauri_capture:<missing>!=pass|surface_manifest_chrome_capture:<missing>!=pass|surface_manifest_tauri_live_capture:<missing>!=true|surface_manifest_chrome_live_capture:<missing>!=true|surface_manifest_tauri_case_count:<missing>!=50|surface_manifest_tauri_pass_count:<missing>!=36|surface_manifest_tauri_tracked_count:<missing>!=14|surface_manifest_tauri_fail_count:<missing>!=0|surface_manifest_chrome_case_count:<missing>!=50|surface_manifest_chrome_pass_count:<missing>!=36|surface_manifest_chrome_tracked_count:<missing>!=14|surface_manifest_chrome_fail_count:<missing>!=0|surface_manifest_tauri_mismatch_count:<missing>!=0|surface_manifest_chrome_mismatch_count:<missing>!=0|surface_manifest_no_fake_capture:<missing>!=true|surface_manifest_blur_or_tolerance_used:<missing>!=false|backend:<missing>!=pass
 - gui_showcase_4k_200fps_env=build/widget-showcase-4k-200fps/status.env
-- gui_showcase_4k_200fps_status=fail
-- gui_showcase_4k_200fps_reason=4k-rss-budget-not-pass:measured
+- gui_showcase_4k_200fps_status=pass
+- gui_showcase_4k_200fps_reason=met-200fps
 - gui_showcase_4k_200fps_resolution=4k
 - gui_showcase_4k_200fps_width=3840
 - gui_showcase_4k_200fps_height=2160
 - gui_showcase_4k_200fps_frames=200
-- gui_showcase_4k_200fps_fps_x1000=54570259
+- gui_showcase_4k_200fps_fps_x1000=56306306
 - gui_showcase_4k_200fps_target_fps=200
 - gui_showcase_4k_200fps_max_rss_kb=131328
-- gui_showcase_4k_200fps_max_rss_budget_kb=0
-- gui_showcase_4k_200fps_rss_status=measured
+- gui_showcase_4k_200fps_max_rss_budget_kb=262144
+- gui_showcase_4k_200fps_rss_status=pass
 - gui_showcase_4k_200fps_pixels=8294400
 - gui_showcase_4k_200fps_nonzero_pixels=5458
 - gui_showcase_4k_200fps_checksum=23357114226484
@@ -671,4 +701,4 @@
 - electron_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-electron-html
 - blocked_completion_gate=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic
 - blocked_completion_gate_count=13
-- blocked_completion_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic|original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Simple GUI widget RenderDoc .rdc on Vulkan Engine2D|Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof|GUI/web/2D Vulkan comparison artifacts for Electron, Chrome, and Simple|Electron, Chrome, and Simple GUI/web/2D Vulkan pairwise pixel comparison|Electron and Chrome Vulkan-backed browser RenderDoc proof|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum|full CSS specification rendering coverage beyond implemented Simple Web subset
+- blocked_completion_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic|original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Simple GUI widget RenderDoc .rdc on Vulkan Engine2D|Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof|GUI/web/2D Vulkan comparison artifacts for Electron, Chrome, and Simple|Electron, Chrome, and Simple GUI/web/2D Vulkan pairwise pixel comparison|Electron and Chrome Vulkan-backed browser RenderDoc proof|native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|full CSS specification rendering coverage beyond implemented Simple Web subset
