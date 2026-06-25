@@ -97,7 +97,7 @@ sh scripts/check/check-gui-widget-renderdoc-goal-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -114,7 +114,12 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_widget_count=43")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_widget_feature_covered_count=43")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_missing_widget_features=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_source_env_file_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_source_env_file_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_file_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gate_count=")
 
 step("Assert representative widget RenderDoc feature witnesses")
@@ -147,7 +152,7 @@ expect(report).to_contain("- widgets with RenderDoc fixture features: 43 / 43")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -164,11 +169,16 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_widget_fixture_status=pas
 expect(evidence).to_contain("gui_widget_renderdoc_goal_widget_count=43")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_widget_feature_covered_count=43")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_source_env_file_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_magic=RDOC")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_runtime_backend=vulkan")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_source_env_file_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_fixture_path_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_file_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_file_magic=RDOC")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_file_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_nonblank_pixel_count=1")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_requested_api=vulkan")

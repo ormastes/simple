@@ -604,7 +604,12 @@ return `gui_widget_renderdoc_goal_status=incomplete` on hosts without live
 macOS RenderDoc evidence; release/completion lanes should pass `--strict` and
 require `gui_widget_renderdoc_goal_widget_feature_covered_count=43`,
 `gui_widget_renderdoc_goal_simple_gate_status=pass`,
+`gui_widget_renderdoc_goal_simple_gate_source_env_file_status=pass`,
+`gui_widget_renderdoc_goal_simple_gate_capture_file_status=pass`,
 `gui_widget_renderdoc_goal_electron_gate_status=pass`, and
+`gui_widget_renderdoc_goal_electron_gate_source_env_file_status=pass`,
+`gui_widget_renderdoc_goal_electron_gate_capture_file_status=pass`,
+`gui_widget_renderdoc_goal_electron_gate_argb_file_status=pass`, and
 `gui_widget_renderdoc_goal_blocked_gate_count=0`.
 The top-level GUI audit now runs that focused wrapper, re-emits
 `gui_widget_renderdoc_goal_status`, `gui_widget_renderdoc_goal_reason`,
@@ -612,7 +617,12 @@ The top-level GUI audit now runs that focused wrapper, re-emits
 `gui_widget_renderdoc_goal_simple_blocker_doc`,
 `gui_widget_renderdoc_goal_electron_blocker_doc`,
 `gui_widget_renderdoc_goal_simple_gate_status`,
+`gui_widget_renderdoc_goal_simple_gate_source_env_file_status`,
+`gui_widget_renderdoc_goal_simple_gate_capture_file_status`,
 `gui_widget_renderdoc_goal_electron_gate_status`, and
+`gui_widget_renderdoc_goal_electron_gate_source_env_file_status`,
+`gui_widget_renderdoc_goal_electron_gate_capture_file_status`,
+`gui_widget_renderdoc_goal_electron_gate_argb_file_status`, and
 `gui_widget_renderdoc_goal_blocked_gate_count`, and remains incomplete until
 the widget goal reaches `pass`. When the Simple widget RenderDoc lane is the
 focused widget blocker, the top-level audit also includes that widget blocker in
