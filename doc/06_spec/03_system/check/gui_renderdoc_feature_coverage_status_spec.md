@@ -334,7 +334,7 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 714 lines folded for reproduction.
+Runnable source: 715 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -417,6 +417,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_command=ELECTRON
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_command=PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_evidence/evidence.env sh scripts/check/check-production-gui-web-renderer-parity-gate.shs")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env_status=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_exit_code=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_reason=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_timed_out=")
@@ -1419,7 +1420,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 97 lines folded for reproduction.
+Runnable source: 98 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1515,6 +1516,7 @@ expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_gate_count=0")
 expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_gates=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=unavailable")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=missing-production-parity-evidence")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env_status=missing")
 expect(evidence).to_contain("blocked_completion_gate=production GUI/web parity evidence with live Tauri and Chrome captures")
 expect(evidence).to_contain("blocked_completion_gate_count=4")
 expect(evidence).to_contain("blocked_completion_gates=production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|full CSS specification rendering coverage beyond implemented Simple Web subset")
