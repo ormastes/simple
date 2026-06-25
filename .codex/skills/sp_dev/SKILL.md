@@ -54,6 +54,10 @@ matching guide/process documentation in the same lane. For GPU, Engine2D, Simple
 Web, Electron/Tauri, QEMU, or backend readback evidence, update the relevant
 `doc/03_plan`, `doc/07_guide`, and `doc/09_report` references so future agents
 can find the canonical wrapper instead of repeating stale commands.
+For HTML-backed GUI modernization, pair screenshot or bitmap evidence with
+structured Electron interaction evidence. A pass needs visible controls to
+receive focus, keyboard/input, pointer, and click events, or the wrapper must
+classify the missing GUI host dependency explicitly.
 For RenderDoc evidence specifically, use
 `scripts/tool/renderdoc-evidence.shs capture-simple` for the Simple
 in-application `rt_renderdoc_*` path and
@@ -66,8 +70,11 @@ For GUI/web/2D RenderDoc+Vulkan work, use
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check` for readiness,
 `--browser-backing` for focused direct Electron Chromium backing proof, `--run`
 for direct Electron/Chrome/Simple probes, and `--renderdoc-simple` for the
-supported macOS Simple RenderDoc debug path on a prepared RenderDoc host. Use
-all-lane `--renderdoc` only for cross-surface evidence collection.
+Simple in-application RenderDoc debug path on a prepared Linux or macOS
+RenderDoc host. Leave `RDOC_SIMPLE_BIN` unset unless deliberately overriding;
+the helper builds `src/compiler_rust/target/release/simple` so the
+`rt_renderdoc_*` externs are current. Use all-lane `--renderdoc` only for
+cross-surface evidence collection.
 On Windows, first read `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`.
 `vulkaninfo --summary` plus Chrome/Electron installation proves host readiness
 only; it does not prove Chrome or Electron are Vulkan-backed. The Vulkan SDK

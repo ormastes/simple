@@ -144,6 +144,11 @@ Scan for stub patterns — any match is a **FAIL**:
   checks for rendered windows and taskbar/dock icon or label regions. Explicit
   environment-based skips may pass only when the report says `skipped`, not when
   it claims live proof.
+- **HTML-backed GUI interaction gates:** a static preview can pass live-browser
+  event delivery only when it opens in Chromium/Electron and records trusted
+  focus, keyboard/input, pointer, and click events against visible controls.
+  Do not treat DOM shape, generated HTML, or screenshot existence as event
+  handling proof.
 - **GUI/web queue proof:** runtime queue/drain receipts are necessary evidence,
   not sufficient production proof. A GUI/web production pass requires same-frame
   backend `device_readback`, a positive backend handle, and matching checksum;
@@ -156,6 +161,9 @@ Scan for stub patterns — any match is a **FAIL**:
   and production GUI/web parity evidence. If Chrome or Electron logs show
   `angle=vulkan` unavailable, report
   `vulkan-angle-unavailable` and fail the Vulkan proof even when pixels render.
+  For Simple RenderDoc capture, leave `RDOC_SIMPLE_BIN` unset unless testing an
+  explicit override; the helper must build/use the Rust interpreter carrying
+  current `rt_renderdoc_*` externs.
 - **Metal/Vulkan/8K claims:** native Metal proof is macOS-only and must include
   raw Metal readback; Linux Metal is only `metal-requires-macos`. Vulkan claims
   need the readback/RenderDoc gate above. Any 8K performance claim needs a

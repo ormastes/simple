@@ -222,3 +222,44 @@ P0 and P4 can start immediately and in parallel; P1 precedes P2; P3 is independe
   proposes (`00-normalize` … `91-chromium`, plus flattened builds) is a **reference layering** to fold into
   the existing `generate_css(theme)` pipeline — adopt the normalize layer + small WebKit/Chromium override
   files, not a parallel build system.
+
+---
+
+## 12. Concrete Web WM evidence slice
+
+This implementation slice advances the Web WM shell from static contract
+coverage to repeatable Electron evidence. It does not claim the full typed UI
+core migration, native SimpleOS WM parity, or RenderDoc/Vulkan parity.
+
+**Current evidence:**
+- `doc/01_research/ui/protocol/ui_modernization_plan.md` defines the broader typed UI core migration.
+- `doc/01_research/ui/wm/simple_wm_modernization_local.md` records the generated CSS, preview HTML,
+  runtime hooks, and focused unit contract.
+- `test/01_unit/app/ui/web_wm_modern_shell_spec.spl` remains the low-dependency static contract.
+
+**Acceptance criteria:**
+- AC-1: The evidence wrapper records the generated preview, DOM audit JSON, ARGB JSON, PNG bitmap,
+  interaction JSON, and post-interaction PNG under `build/test-artifacts/...`.
+- AC-2: The wrapper validates contrast, target size, clipping, unexpected overlap, text containment,
+  nonblank bitmap status, and Electron-delivered focus/keyboard/pointer/click events.
+- AC-3: Hosts without Electron, Chromium backing, display support, or a working Simple runtime report
+  `environment-unavailable` instead of passing placeholder assertions.
+- AC-4: The generated/manual docs and process skills name the rendering and interaction evidence gates.
+- AC-5: The interaction artifact proves real Chromium event delivery on the static preview. Full
+  WebSocket-backed app action semantics remain a later gate.
+
+**Canonical files:**
+- `scripts/check/check-web-wm-modern-shell-evidence.shs`
+- `tools/electron-live-bitmap/interact_html_controls.js`
+- `test/02_integration/app/ui/web_wm_modern_shell_evidence_spec.spl`
+- `doc/06_spec/02_integration/app/ui/web_wm_modern_shell_evidence_spec.md`
+- `doc/07_guide/app/ui/web_wm_modern_shell.md`
+
+**Focused verification:**
+
+```bash
+src/compiler_rust/target/release/simple test test/01_unit/app/ui/web_wm_modern_shell_spec.spl --mode=interpreter
+sh scripts/check/check-web-wm-modern-shell-evidence.shs
+src/compiler_rust/target/release/simple spipe-docgen test/02_integration/app/ui/web_wm_modern_shell_evidence_spec.spl --output doc/06_spec --no-index
+src/compiler_rust/target/release/simple test test/02_integration/app/ui/web_wm_modern_shell_evidence_spec.spl --mode=interpreter --clean
+```

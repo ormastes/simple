@@ -65,6 +65,10 @@ Skip if exist. See `design` skill for details.
   typed evidence.
 - For Simple Web or other HTML-backed GUI behavior, capture and check HTML
   visible text when possible, then use GUI screenshots as fallback evidence.
+- When a GUI/web evidence wrapper claims live rendering, record structured
+  browser event evidence too: focus, keyboard/input, pointer, and click delivery
+  on visible controls. Static screenshots alone are visual evidence, not event
+  handling evidence.
 - Use `# @evidence-display: embed_tui`, `links`, or `embed_all` when generated
   evidence should differ from the default embedded TUI plus linked non-TUI
   artifacts.
@@ -105,6 +109,11 @@ bin/simple test && bin/simple build lint
 
 ### Phase 15: Verify + VCS Sync
 - Run `verify` skill — must show STATUS: PASS
+- For GUI/web/2D RenderDoc+Vulkan implementation work, use
+  `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc`
+  as the canonical wrapper. For `--renderdoc-simple`, leave `RDOC_SIMPLE_BIN`
+  unset in normal runs so the helper builds `src/compiler_rust/target/release/simple`
+  with current `rt_renderdoc_*` externs.
 - If `src/compiler/**`, `src/lib/**`, `src/app/mcp/**`, `src/app/simple_lsp_mcp/**`, or MCP packaging files changed, run:
   - `<runtime> check src/compiler`
   - `<runtime> check src/lib`

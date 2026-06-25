@@ -170,12 +170,19 @@ Record `.rdc` path, `RDOC` magic validation, capture log path, and any
 host-unavailable reason as artifact captures. Screenshot-only evidence is not
 Vulkan IO-level RenderDoc evidence.
 
+For HTML-backed GUI modernization, screenshots and DOM audits are not enough
+when a lane claims event handling. Require structured Electron interaction
+evidence for focus, keyboard/input, pointer, and click delivery on visible
+controls, or an explicit host-unavailable result.
+
 For GUI/web/2D Vulkan comparison, use
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check` for readiness,
 `--browser-backing` for focused direct Electron Chromium backing proof, `--run`
 for direct Electron/Chrome/Simple launch probes, and
-`--renderdoc-simple` for the supported macOS Simple RenderDoc debug path on a
-prepared RenderDoc host. Use all-lane `--renderdoc` only for cross-surface
+`--renderdoc-simple` for the Simple in-application RenderDoc debug path on a
+prepared Linux or macOS RenderDoc host. Leave `RDOC_SIMPLE_BIN` unset for normal
+runs so the helper builds `src/compiler_rust/target/release/simple` with current
+`rt_renderdoc_*` externs. Use all-lane `--renderdoc` only for cross-surface
 evidence collection. For Windows setup, read
 `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`: `vulkaninfo --summary`,
 DirectX availability, Chrome installation, and Electron installation are host

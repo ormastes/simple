@@ -21,6 +21,7 @@ const htmlPath = process.env.ELECTRON_CAPTURE_HTML || "";
 const width = Number(process.env.ELECTRON_CAPTURE_WIDTH || 320);
 const height = Number(process.env.ELECTRON_CAPTURE_HEIGHT || 240);
 const outputPath = process.env.ELECTRON_CAPTURE_OUTPUT || "build/pixel_compare/captured.json";
+const pngOutputPath = process.env.ELECTRON_CAPTURE_PNG_OUTPUT || "";
 const settleMs = Number(process.env.ELECTRON_CAPTURE_SETTLE_MS || 1500);
 const auditSelectors = (process.env.ELECTRON_CAPTURE_AUDIT_SELECTORS || "")
   .split(",")
@@ -516,6 +517,10 @@ async function main() {
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, JSON.stringify(payload));
+  if (pngOutputPath) {
+    fs.mkdirSync(path.dirname(pngOutputPath), { recursive: true });
+    fs.writeFileSync(pngOutputPath, image.toPNG());
+  }
   if (audit && auditOutputPath) {
     fs.mkdirSync(path.dirname(auditOutputPath), { recursive: true });
     fs.writeFileSync(auditOutputPath, JSON.stringify(audit, null, 2));
@@ -542,6 +547,7 @@ async function main() {
     }));
   }
   console.log("captured=" + outputPath);
+  if (pngOutputPath) console.log("png=" + pngOutputPath);
   console.log("size=" + width + "x" + height);
   console.log("native=" + result.nativeWidth + "x" + result.nativeHeight);
   console.log("downsampled=" + result.downsampled);
