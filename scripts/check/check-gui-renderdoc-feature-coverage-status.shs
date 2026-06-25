@@ -15,14 +15,20 @@ export GUI_RENDERDOC_AGGREGATE_BUILD_DIR="$BUILD_DIR"
 
 python3 - <<'PY' >"$OUT_ENV"
 from pathlib import Path
+import hashlib
 import os
 import re
+import shutil
 import subprocess
 
 ROOT = Path.cwd()
 AGG_BUILD = Path(os.environ.get("GUI_RENDERDOC_AGGREGATE_BUILD_DIR", "build/gui_renderdoc_feature_coverage_status"))
 if not AGG_BUILD.is_absolute():
     AGG_BUILD = ROOT / AGG_BUILD
+STATIC_CACHE_DIR_TEXT = os.environ.get("GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR", "")
+STATIC_CACHE_DIR = Path(STATIC_CACHE_DIR_TEXT) if STATIC_CACHE_DIR_TEXT else None
+if STATIC_CACHE_DIR is not None and not STATIC_CACHE_DIR.is_absolute():
+    STATIC_CACHE_DIR = ROOT / STATIC_CACHE_DIR
 renderdoc_evidence_tool = ROOT / "scripts/tool/renderdoc-evidence.shs"
 
 def value_of(key: str, text: str) -> str:
@@ -124,6 +130,47 @@ def file_magic_of(value: str) -> str:
 
 def env_text_from_path(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore") if path.exists() else ""
+
+def copy_cached_gate(cache_dir: Path, target_dir: Path) -> None:
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    shutil.copytree(cache_dir, target_dir)
+
+def run_nested_gate(name: str, argv, build_subdir: str, report_name: str, timeout: int, extra_env=None, static_cache: bool = False, cache_key: str = ""):
+    target_dir = AGG_BUILD / build_subdir
+    target_env = target_dir / "evidence.env"
+    if static_cache and STATIC_CACHE_DIR is not None:
+        cache_name = name
+        if cache_key:
+            cache_name = f"{name}-{hashlib.sha256(cache_key.encode('utf-8')).hexdigest()[:16]}"
+        cache_dir = STATIC_CACHE_DIR / cache_name
+        cache_env = cache_dir / "evidence.env"
+        if cache_env.exists():
+            copy_cached_gate(cache_dir, target_dir)
+            return target_env.read_text(encoding="utf-8", errors="ignore"), 0
+        run_dir = cache_dir
+    else:
+        run_dir = target_dir
+
+    nested_env = os.environ.copy()
+    nested_env["BUILD_DIR"] = str(run_dir)
+    nested_env["REPORT_PATH"] = str(run_dir / report_name)
+    if extra_env:
+        nested_env.update(extra_env)
+    proc = subprocess.run(
+        argv,
+        cwd=ROOT,
+        env=nested_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+        check=False,
+    )
+    if static_cache and STATIC_CACHE_DIR is not None and run_dir != target_dir and run_dir.exists():
+        copy_cached_gate(run_dir, target_dir)
+    output = target_env.read_text(encoding="utf-8", errors="ignore") if target_env.exists() else proc.stdout
+    return output, proc.returncode
 
 def is_gui_web_2d_direct_run_env(text: str) -> bool:
     mode = value_of("gui_web_2d_vulkan_mode", text)
@@ -274,21 +321,14 @@ traceability_output = ""
 traceability_code = 127
 traceability_env_path = AGG_BUILD / "sspec-traceability/evidence.env"
 if Path("scripts/check/check-html-css-sspec-traceability.shs").exists():
-    nested_env = os.environ.copy()
-    nested_env["BUILD_DIR"] = str(AGG_BUILD / "sspec-traceability")
-    nested_env["REPORT_PATH"] = str(AGG_BUILD / "sspec-traceability/report.md")
-    proc = subprocess.run(
+    traceability_output, traceability_code = run_nested_gate(
+        "sspec-traceability",
         ["sh", "scripts/check/check-html-css-sspec-traceability.shs"],
-        cwd=ROOT,
-        env=nested_env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=120,
-        check=False,
+        "sspec-traceability",
+        "report.md",
+        120,
+        static_cache=True,
     )
-    traceability_output = proc.stdout
-    traceability_code = proc.returncode
     traceability_env = traceability_env_path.read_text(encoding="utf-8", errors="ignore") if traceability_env_path.exists() else traceability_output
     traceability_status = value_of("html_css_sspec_traceability_status", traceability_env)
     traceability_reason = value_of("html_css_sspec_traceability_reason", traceability_env)
@@ -323,79 +363,55 @@ if not traceability_reason:
 widget_fixture_output = ""
 widget_fixture_code = 127
 if Path("scripts/check/check-gui-widget-rendering-fixture-coverage.shs").exists():
-    nested_env = os.environ.copy()
-    nested_env["BUILD_DIR"] = str(AGG_BUILD / "widget-rendering-fixture-coverage")
-    nested_env["REPORT_PATH"] = str(AGG_BUILD / "widget-rendering-fixture-coverage/report.md")
-    proc = subprocess.run(
+    widget_fixture_output, widget_fixture_code = run_nested_gate(
+        "widget-rendering-fixture-coverage",
         ["sh", "scripts/check/check-gui-widget-rendering-fixture-coverage.shs"],
-        cwd=ROOT,
-        env=nested_env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=120,
-        check=False,
+        "widget-rendering-fixture-coverage",
+        "report.md",
+        120,
+        static_cache=True,
     )
-    widget_fixture_output = proc.stdout
-    widget_fixture_code = proc.returncode
 
 widget_goal_output = ""
 widget_goal_code = 127
 if Path("scripts/check/check-gui-widget-renderdoc-goal-status.shs").exists():
-    nested_env = os.environ.copy()
-    nested_env["BUILD_DIR"] = str(AGG_BUILD / "widget-renderdoc-goal-status")
-    nested_env["REPORT_PATH"] = str(AGG_BUILD / "widget-renderdoc-goal-status/report.md")
-    proc = subprocess.run(
+    widget_goal_output, widget_goal_code = run_nested_gate(
+        "widget-renderdoc-goal-status",
         ["sh", "scripts/check/check-gui-widget-renderdoc-goal-status.shs"],
-        cwd=ROOT,
-        env=nested_env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=120,
-        check=False,
+        "widget-renderdoc-goal-status",
+        "report.md",
+        120,
+        static_cache=True,
+        cache_key="|".join([
+            os.environ.get("RDOC_SIMPLE_EVIDENCE_ENV", ""),
+            os.environ.get("RDOC_ELECTRON_HTML_EVIDENCE_ENV", ""),
+        ]),
     )
-    widget_goal_output = proc.stdout
-    widget_goal_code = proc.returncode
 
 rendering_manifest_output = ""
 rendering_manifest_code = 127
 if Path("scripts/check/check-html-css-rendering-manifest-traceability.shs").exists():
-    nested_env = os.environ.copy()
-    nested_env["BUILD_DIR"] = str(AGG_BUILD / "rendering-manifest-traceability")
-    nested_env["REPORT_PATH"] = str(AGG_BUILD / "rendering-manifest-traceability/report.md")
-    proc = subprocess.run(
+    rendering_manifest_output, rendering_manifest_code = run_nested_gate(
+        "rendering-manifest-traceability",
         ["sh", "scripts/check/check-html-css-rendering-manifest-traceability.shs"],
-        cwd=ROOT,
-        env=nested_env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=120,
-        check=False,
+        "rendering-manifest-traceability",
+        "report.md",
+        120,
+        static_cache=True,
     )
-    rendering_manifest_output = proc.stdout
-    rendering_manifest_code = proc.returncode
 
 full_rendering_goal_output = ""
 full_rendering_goal_code = 127
 if Path("scripts/check/check-html-css-full-rendering-goal-status.shs").exists():
-    nested_env = os.environ.copy()
-    nested_env["BUILD_DIR"] = str(AGG_BUILD / "full-rendering-goal-status")
-    nested_env["REPORT_PATH"] = str(AGG_BUILD / "full-rendering-goal-status/report.md")
-    nested_env["HTML_CSS_RENDERING_MANIFEST_FETCH"] = nested_env.get("HTML_CSS_RENDERING_MANIFEST_FETCH", "0")
-    proc = subprocess.run(
+    full_rendering_goal_output, full_rendering_goal_code = run_nested_gate(
+        "full-rendering-goal-status",
         ["sh", "scripts/check/check-html-css-full-rendering-goal-status.shs"],
-        cwd=ROOT,
-        env=nested_env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=180,
-        check=False,
+        "full-rendering-goal-status",
+        "report.md",
+        180,
+        extra_env={"HTML_CSS_RENDERING_MANIFEST_FETCH": os.environ.get("HTML_CSS_RENDERING_MANIFEST_FETCH", "0")},
+        static_cache=True,
     )
-    full_rendering_goal_output = proc.stdout
-    full_rendering_goal_code = proc.returncode
 
 gui_web_2d_vulkan_output = ""
 gui_web_2d_vulkan_code = ""
@@ -658,21 +674,20 @@ gui_web_2d_vulkan_pixel_comparison_blocker_doc = "" if gui_web_2d_vulkan_pixel_c
 goal_output = ""
 goal_code = 127
 if Path("scripts/check/check-html-css-renderdoc-goal-status.shs").exists():
-    nested_env = os.environ.copy()
-    nested_env["BUILD_DIR"] = str(AGG_BUILD / "renderdoc-goal-status")
-    nested_env["REPORT_PATH"] = str(AGG_BUILD / "renderdoc-goal-status/report.md")
-    proc = subprocess.run(
+    goal_output, goal_code = run_nested_gate(
+        "renderdoc-goal-status",
         ["sh", "scripts/check/check-html-css-renderdoc-goal-status.shs"],
-        cwd=ROOT,
-        env=nested_env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=120,
-        check=False,
+        "renderdoc-goal-status",
+        "report.md",
+        120,
+        static_cache=True,
+        cache_key="|".join([
+            os.environ.get("RDOC_SIMPLE_EVIDENCE_ENV", ""),
+            os.environ.get("RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV", ""),
+            os.environ.get("RDOC_ELECTRON_EVIDENCE_ENV", ""),
+            os.environ.get("RDOC_MACOS_EVIDENCE_ENV", ""),
+        ]),
     )
-    goal_output = proc.stdout
-    goal_code = proc.returncode
 
 production_env = production_env_path.read_text(encoding="utf-8", errors="ignore") if production_env_path.exists() else ""
 production_status = value_of("production_gui_web_renderer_parity_status", production_env)
@@ -911,22 +926,16 @@ electron_reason = electron_capture_reason or "missing-electron-rdoc"
 electron_gate_output = ""
 electron_gate_code = 127
 if Path("scripts/check/check-renderdoc-electron-html-gate.shs").exists():
-    nested_env = os.environ.copy()
-    nested_env["RDOC_ELECTRON_HTML_EVIDENCE_ENV"] = str(electron_env_path)
-    nested_env["BUILD_DIR"] = str(AGG_BUILD / "electron-html-gate")
-    nested_env["REPORT_PATH"] = str(AGG_BUILD / "electron-html-gate/report.md")
-    proc = subprocess.run(
+    electron_gate_output, electron_gate_code = run_nested_gate(
+        "electron-html-gate",
         ["sh", "scripts/check/check-renderdoc-electron-html-gate.shs"],
-        cwd=ROOT,
-        env=nested_env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=120,
-        check=False,
+        "electron-html-gate",
+        "report.md",
+        120,
+        extra_env={"RDOC_ELECTRON_HTML_EVIDENCE_ENV": str(electron_env_path)},
+        static_cache=True,
+        cache_key=str(electron_env_path),
     )
-    electron_gate_output = proc.stdout
-    electron_gate_code = proc.returncode
 
 electron_gate_status = value_of("rdoc_electron_html_gate_status", electron_gate_output)
 electron_gate_reason = value_of("rdoc_electron_html_gate_reason", electron_gate_output)

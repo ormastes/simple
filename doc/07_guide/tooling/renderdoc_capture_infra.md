@@ -18,6 +18,13 @@ PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_
   sh scripts/check/check-production-gui-web-renderer-parity-gate.shs
 ```
 
+For repeated SSpec coverage of the aggregate audit, set
+`GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR` to a build-local cache directory.
+The aggregate copies cached nested evidence into each scenario build directory
+and keys RenderDoc-dependent gates by their evidence env paths. Leave this unset
+for operator evidence refreshes so production reports recompute from current
+host state.
+
 ## Interfaces
 
 - `scripts/tool/renderdoc-evidence.shs env` prints resolved paths.
