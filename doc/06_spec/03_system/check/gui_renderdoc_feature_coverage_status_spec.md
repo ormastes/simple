@@ -338,7 +338,7 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 720 lines folded for reproduction.
+Runnable source: 721 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1057,6 +1057,7 @@ expect(report).to_contain("- GUI/web/2D browser Vulkan backing:")
 expect(report).to_contain("- GUI/web/2D Vulkan RenderDoc blockers:")
 expect(report).to_contain("- RenderDoc evidence CLI: pass (scripts/tool/renderdoc-evidence.shs)")
 expect(report).to_contain("- Production GUI/web parity gate:")
+expect(report).to_contain("- Production GUI/web parity source env: build/production_gui_web_renderer_parity_evidence/evidence.env (missing)")
 expect(report).to_contain("- GUI/web/2D 8K retained perf:")
 expect(report).to_contain("- Production surface host:")
 expect(report).to_contain("- Production Tauri surface capture:")
