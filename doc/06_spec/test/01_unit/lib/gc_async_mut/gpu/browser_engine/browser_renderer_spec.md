@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 120 | 120 | 0 | 0 |
+| 121 | 121 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -181,6 +181,28 @@ expect(result.pixel_data[6 * TEST_WIDTH]).to_equal(0xFF16A34Au32)
 expect(result.pixel_data[6]).to_equal(0xFF16A34Au32)
 expect(_count_region_changed(result.pixel_data, TEST_WIDTH, 0, 0, 6, 6, 0xFF16A34Au32)).to_equal(36)
 expect(_count_region_changed(result.pixel_data, TEST_WIDTH, 6, 6, 6, 6, 0xFF16A34Au32)).to_equal(0)
+```
+
+</details>
+
+#### clips background-color to content-box when background-clip requests it
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val border_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 12px; height: 12px; padding: 4px; border: 2px solid #dc2626; background-color: #2563eb; }</style></head><body><div class='card'></div></body></html>"
+val content_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 12px; height: 12px; padding: 4px; border: 2px solid #dc2626; background-color: #2563eb; background-clip: content-box; }</style></head><body><div class='card'></div></body></html>"
+val border_box = render_html_to_pixels_with_viewport(border_html, 40, 32).pixel_data
+val content_box = render_html_to_pixels_with_viewport(content_html, 40, 32).pixel_data
+
+expect(border_box[3 + 3 * 40]).to_equal(0xFF2563EBu32)
+expect(content_box[3 + 3 * 40]).to_equal(WHITE_BG)
+expect(content_box[7 + 7 * 40]).to_equal(0xFF2563EBu32)
+expect(_count_color(content_box, 0xFF2563EBu32)).to_be_less_than(_count_color(border_box, 0xFF2563EBu32))
 ```
 
 </details>
@@ -2243,8 +2265,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 120 |
-| Active scenarios | 120 |
+| Total scenarios | 121 |
+| Active scenarios | 121 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
