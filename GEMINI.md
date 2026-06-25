@@ -42,7 +42,7 @@ Before starting any step, **check if prerequisite artifacts exist**:
 | UI design | `doc/05_design/<feature>_tui.md` | Create TUI/GUI mockups yourself |
 | Architecture | `doc/04_architecture/<feature>.md` | Design architecture yourself |
 | System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` | Create SPipe tests yourself |
-| Generated spec docs | `doc/06_spec/test/03_system/app/<app_name>/feature/<feature>_spec.md` | Generate from executable tests |
+| Generated spec docs | `doc/06_spec/03_system/app/<app_name>/feature/<feature>_spec.md` | Generate from executable tests |
 | Detail design | `doc/05_design/<feature>.md` | Create detail design yourself |
 | Implementation | `src/**/<feature>.spl` | Implement the feature |
 
@@ -146,7 +146,7 @@ If missing, do all:
 
 ### System Test Design
 - SPipe BDD tests: `test/03_system/app/<app_name>/feature/<feature>_spec.spl`
-- Generated/manual SPipe docs: `doc/06_spec/test/03_system/app/<app_name>/feature/<feature>_spec.md`
+- Generated/manual SPipe docs: `doc/06_spec/03_system/app/<app_name>/feature/<feature>_spec.md`
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
 - Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 - Define shared interface names and manual-facing setup/checker helper names
@@ -243,6 +243,6 @@ This repo is a registered Gemini CLI extension via `gemini-extension.json`.
 | 2 | UI design | `doc/05_design/<feature>_tui.md`, `_gui.md` |
 | 2 | Detail design | `doc/05_design/<feature>.md` |
 | 2 | System tests | `test/03_system/app/<app_name>/feature/<feature>_spec.spl` |
-| 2 | Generated spec docs | `doc/06_spec/test/03_system/app/<app_name>/feature/<feature>_spec.md` |
+| 2 | Generated spec docs | `doc/06_spec/03_system/app/<app_name>/feature/<feature>_spec.md` |
 | 3 | Source code | `src/**/<feature>.spl` |
 | 4 | Verify report | Terminal output (PASS/FAIL/WARN) |
