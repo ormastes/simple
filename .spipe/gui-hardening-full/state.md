@@ -885,3 +885,12 @@ implementation-evidence-in-progress
   aggregate report records the 8K perf gate as pass while preserving
   `focused-browser-backing-required` / `missing-focused-browser-backing` for the
   still-open browser-backing blocker.
+- continue-verify: Added an explicit `ALLOW_PATH_SIMPLE_BIN=1` escape hatch for
+  Electron production GUI/web parity evidence wrappers when the in-tree release
+  binary is absent and the caller deliberately wants the installed `simple`
+  command. With that opt-in, the generated-GUI Electron matrix reaches real
+  evidence and passes all four sizes with zero mismatches and no blur/tolerance;
+  a bounded layout-manifest probe also reaches real pass/divergent case evidence
+  instead of `missing-simple-bin`. The default production evidence path remains
+  fail-closed on missing in-tree Simple binary, and the full production parity
+  gate remains open on layout/surface/backend/font/Metal evidence.
