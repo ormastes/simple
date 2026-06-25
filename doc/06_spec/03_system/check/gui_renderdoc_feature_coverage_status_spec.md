@@ -27,7 +27,7 @@ gui_renderdoc_feature_coverage_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -133,6 +133,8 @@ The aggregate forwards these 4K fields:
 - `gui_showcase_4k_200fps_fps_x1000`
 - `gui_showcase_4k_200fps_target_fps`
 - `gui_showcase_4k_200fps_checksum`
+- `gui_showcase_4k_200fps_max_rss_kb`
+- `gui_showcase_4k_200fps_max_rss_budget_kb`
 - `gui_showcase_4k_200fps_rss_status`
 - `gui_showcase_4k_200fps_render_mode`
 - `gui_showcase_4k_200fps_redraw_frames`
@@ -326,6 +328,7 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
    - Expected: showcase_4k_width equals `3840`
    - Expected: showcase_4k_height equals `2160`
    - Expected: showcase_4k_pixels equals `8294400`
+   - Expected: showcase_4k_rss_status equals `pass`
    - Expected: showcase_4k_render_mode equals `retained-static-frame`
    - Expected: showcase_4k_redraw_frames equals `1`
    - Expected: renderdoc_blocker_reason equals `pass`
@@ -348,7 +351,7 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 765 lines folded for reproduction.
+Runnable source: 771 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -838,6 +841,9 @@ val showcase_4k_pixels = _value_of(evidence, "gui_showcase_4k_200fps_pixels")
 val showcase_4k_fps = _value_of(evidence, "gui_showcase_4k_200fps_fps_x1000")
 val showcase_4k_target = _value_of(evidence, "gui_showcase_4k_200fps_target_fps")
 val showcase_4k_checksum = _value_of(evidence, "gui_showcase_4k_200fps_checksum")
+val showcase_4k_max_rss = _value_of(evidence, "gui_showcase_4k_200fps_max_rss_kb")
+val showcase_4k_max_rss_budget = _value_of(evidence, "gui_showcase_4k_200fps_max_rss_budget_kb")
+val showcase_4k_rss_status = _value_of(evidence, "gui_showcase_4k_200fps_rss_status")
 val showcase_4k_render_mode = _value_of(evidence, "gui_showcase_4k_200fps_render_mode")
 val showcase_4k_redraw_frames = _value_of(evidence, "gui_showcase_4k_200fps_redraw_frames")
 val renderdoc_status = _value_of(evidence, "renderdoc_goal_status")
@@ -1031,6 +1037,9 @@ if showcase_4k_status == "pass":
     expect(showcase_4k_pixels).to_equal("8294400")
     expect(showcase_4k_fps.to_i64()).to_be_greater_than(showcase_4k_target.to_i64() * 1000 - 1)
     expect(showcase_4k_checksum.len()).to_be_greater_than(0)
+    expect(showcase_4k_max_rss.len()).to_be_greater_than(0)
+    expect(showcase_4k_max_rss_budget.len()).to_be_greater_than(0)
+    expect(showcase_4k_rss_status).to_equal("pass")
     expect(showcase_4k_render_mode).to_equal("retained-static-frame")
     expect(showcase_4k_redraw_frames).to_equal("1")
 if renderdoc_blocker_status == "pass":
@@ -1319,6 +1328,33 @@ step("Assert the aggregate rejects the low 4K target")
 val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-4k-low-target/out/evidence.env")
 expect(evidence).to_contain("gui_showcase_4k_200fps_status=fail")
 expect(evidence).to_contain("gui_showcase_4k_200fps_reason=below-required-4k-target-fps:60")
+```
+
+</details>
+
+#### rejects retained 4K pass rows over the RSS budget
+
+- Create an otherwise valid retained 4K row with failing RSS budget status
+   - Expected: code equals `0`
+- Assert the aggregate rejects the failing 4K RSS budget
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create an otherwise valid retained 4K row with failing RSS budget status")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-4k-rss-fail && mkdir -p build/test-gui-renderdoc-feature-coverage-status-4k-rss-fail/source && printf 'showcase retained log\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-rss-fail/source/showcase.log && printf 'elapsed_ms=597\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-rss-fail/source/time.log && printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_reason=met-target-fps\\ngui_showcase_4k_200fps_resolution=4k\\ngui_showcase_4k_200fps_width=3840\\ngui_showcase_4k_200fps_height=2160\\ngui_showcase_4k_200fps_frames=120\\ngui_showcase_4k_200fps_fps_x1000=201000\\ngui_showcase_4k_200fps_target_fps=200\\ngui_showcase_4k_200fps_max_rss_kb=524288\\ngui_showcase_4k_200fps_max_rss_budget_kb=262144\\ngui_showcase_4k_200fps_rss_status=fail\\ngui_showcase_4k_200fps_pixels=8294400\\ngui_showcase_4k_200fps_nonzero_pixels=1000\\ngui_showcase_4k_200fps_checksum=123456\\ngui_showcase_4k_200fps_render_mode=retained-static-frame\\ngui_showcase_4k_200fps_redraw_frames=1\\ngui_showcase_4k_200fps_log=build/test-gui-renderdoc-feature-coverage-status-4k-rss-fail/source/showcase.log\\ngui_showcase_4k_200fps_time_log=build/test-gui-renderdoc-feature-coverage-status-4k-rss-fail/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-rss-fail/source/status.env && GUI_SHOWCASE_4K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-4k-rss-fail/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-4k-rss-fail/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-4k-rss-fail/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate rejects the failing 4K RSS budget")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-4k-rss-fail/out/evidence.env")
+expect(evidence).to_contain("gui_showcase_4k_200fps_status=fail")
+expect(evidence).to_contain("gui_showcase_4k_200fps_reason=4k-rss-budget-not-pass:fail")
 ```
 
 </details>
@@ -1868,8 +1904,8 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-produ
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
