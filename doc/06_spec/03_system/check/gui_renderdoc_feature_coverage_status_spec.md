@@ -338,7 +338,7 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 723 lines folded for reproduction.
+Runnable source: 728 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1065,6 +1065,11 @@ expect(report).to_contain("- Production surface host:")
 expect(report).to_contain("- Production Tauri surface capture:")
 expect(report).to_contain("- Production Chrome surface capture:")
 expect(report).to_contain("- blocked completion gates:")
+expect(report).to_contain("- blocked gate list:")
+expect(report).to_contain("  - Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic")
+expect(report).to_contain("  - Electron and Chrome Vulkan-backed browser RenderDoc proof")
+expect(report).to_contain("  - production GUI/web raw Metal readback evidence")
+expect(report).to_contain("  - full CSS specification rendering coverage beyond implemented Simple Web subset")
 ```
 
 </details>
