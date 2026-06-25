@@ -43,12 +43,12 @@ REPORT_PATH=build/gui-renderdoc-feature-coverage-showcase-current/report.md \
 
 ## 8K Retained Row
 
-- Status: `pass`
-- Reason: `met-target-fps`
+- Status: `fail`
+- Reason: `below-required-8k-frame-count:120`
 - Viewport: `7680x4320`
 - Pixels: `33177600`
 - Frames: `120`
-- FPS x1000: `14524328`
+- FPS x1000: `13303769`
 - Target FPS: `200`
 - RSS: `520192 / 750000 KiB`
 - RSS status: `pass`
@@ -62,9 +62,11 @@ REPORT_PATH=build/gui-renderdoc-feature-coverage-showcase-current/report.md \
 
 ## Aggregate Status
 
-The aggregate wrapper forwarded both rows as `pass` with log and time-log file
-status `pass`.
+The aggregate wrapper forwards both rows with log and time-log file status
+`pass`, but only the 4K row is currently a performance pass. The 8K row is
+retained, nonblank, checksummed, and under RSS budget, but it is rejected because
+the measured frame count is 120 instead of the required 200.
 
-Remaining blockers are outside this retained perf proof: Simple/Electron/Chrome
+Remaining blockers include the 8K 200-frame proof, Simple/Electron/Chrome
 RenderDoc `.rdc` lanes, browser Vulkan-backed proof, native render-log platform
 matrix, production GUI/web parity evidence, and full CSS rendering coverage.

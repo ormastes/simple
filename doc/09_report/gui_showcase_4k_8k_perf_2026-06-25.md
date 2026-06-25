@@ -47,14 +47,14 @@ sh scripts/check/check-widget-showcase-4k-200fps.shs
 
 | Field | Value |
 | --- | --- |
-| status | pass |
-| reason | met-target-fps |
+| status | fail |
+| reason | below-required-8k-frame-count:120 |
 | resolution | 8k |
 | width | 7680 |
 | height | 4320 |
 | pixels | 33177600 |
 | frames | 120 |
-| fps_x1000 | 14228124 |
+| fps_x1000 | 13303769 |
 | target_fps | 200 |
 | max_rss_kb | 519936 |
 | max_rss_budget_kb | 750000 |
@@ -68,7 +68,10 @@ sh scripts/check/check-widget-showcase-4k-200fps.shs
 
 ## Remaining Non-Perf Blockers
 
-This report proves only the retained showcase perf rows. It does not prove
-Vulkan/Metal/D3D12 browser backing, RenderDoc/PIX/GPU-debugger capture, or
-production GUI/web renderer parity. Those remain governed by the platform
-render-log gates and the GUI RenderDoc feature coverage aggregate.
+This report proves the 4K retained showcase perf row. The existing 8K row is
+retained, nonblank, checksummed, and under RSS budget, but it no longer satisfies
+the 8K completion gate because it measured only 120 frames. A passing 8K row
+must provide at least 200 measured frames at a 200 FPS target. This report also
+does not prove Vulkan/Metal/D3D12 browser backing, RenderDoc/PIX/GPU-debugger
+capture, or production GUI/web renderer parity. Those remain governed by the
+platform render-log gates and the GUI RenderDoc feature coverage aggregate.
