@@ -7,11 +7,10 @@
 use app.pkg.manifest.{PackageManifest, Dependency, parse_manifest_file, parse_manifest}
 use app.pkg.version.{SemVer, VersionConstraint}
 use app.pkg.lock.{LockEntry, LockFile, parse_lock_file, write_lock_file}
+use app.io.mod.{env_get, process_run}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_get(key: text) -> text
 
 # Resolved dependency with exact version/commit info
 struct ResolvedDep:
@@ -45,10 +44,10 @@ impl ResolutionResult:
 
 # Get the global cache directory (~/.simple/packages/)
 fn get_cache_dir() -> text:
-    val home = rt_env_get("HOME")
+    val home = env_get("HOME")
     if home == "" or home == nil:
         # Fallback for Windows
-        val userprofile = rt_env_get("USERPROFILE")
+        val userprofile = env_get("USERPROFILE")
         if userprofile != "" and userprofile != nil:
             return "{userprofile}/.simple/packages"
         return ".simple/packages"
@@ -57,15 +56,15 @@ fn get_cache_dir() -> text:
 
 # Run a shell command and return (stdout, stderr, exit_code)
 fn run_shell(command: text) -> (text, text, i64):
-    val os = rt_env_get("OS")
+    val os = env_get("OS")
     var is_windows = false
     if os != nil and os != "":
         is_windows = os.lower().contains("windows")
 
     if is_windows:
-        rt_process_run("cmd.exe", ["/c", command])
+        process_run("cmd.exe", ["/c", command])
     else:
-        rt_process_run("/bin/sh", ["-c", command])
+        process_run("/bin/sh", ["-c", command])
 
 
 # Clone or fetch a git repository to the cache
@@ -180,8 +179,7 @@ fn resolve_dep(dep: Dependency, cache_dir: text, lock_entry: LockEntry?) -> Resu
 
     if dep.is_git():
         # If we have a lock entry with a commit, use it
-        if lock_entry.?:
-            val entry = lock_entry.unwrap()
+        if val Some(entry) = lock_entry:
             if entry.git_commit != "":
                 # Check if already cached at this commit
                 val cache_key = dep.cache_key()
@@ -213,8 +211,7 @@ fn check_conflicts(resolved: [ResolvedDep]) -> [text]:
 
     for dep in resolved:
         val existing = seen.get(dep.name)
-        if existing.?:
-            val prev_version = existing.unwrap()
+        if val Some(prev_version) = existing:
             if prev_version != dep.version:
                 conflicts.push("Conflict: {dep.name} required as {prev_version} and {dep.version}")
         else:
@@ -238,8 +235,8 @@ fn resolve_all(manifest: PackageManifest, lock: LockFile?, include_dev: bool) ->
     # Resolve regular dependencies
     for dep in manifest.dependencies:
         var lock_entry: LockEntry? = nil
-        if lock.?:
-            lock_entry = lock.unwrap().find_entry(dep.name)
+        if val Some(lock_file) = lock:
+            lock_entry = lock_file.find_entry(dep.name)
         val result = resolve_dep(dep, cache_dir, lock_entry)
         match result:
             case Ok(r):
@@ -251,8 +248,8 @@ fn resolve_all(manifest: PackageManifest, lock: LockFile?, include_dev: bool) ->
     if include_dev:
         for dep in manifest.dev_dependencies:
             var lock_entry: LockEntry? = nil
-            if lock.?:
-                lock_entry = lock.unwrap().find_entry(dep.name)
+            if val Some(lock_file) = lock:
+                lock_entry = lock_file.find_entry(dep.name)
             val result = resolve_dep(dep, cache_dir, lock_entry)
             match result:
                 case Ok(r):
