@@ -25,6 +25,13 @@ description: "Codex release skill. Version bump (major/minor/patch/exact), CHANG
 Run `verify` skill first — must show **STATUS: PASS**.
 
 Do NOT proceed with release if verification has any FAIL items.
+SPipe/manual evidence, lower-model sidecar review, and workflow/tooling/
+evidence/spec/verification contract docs must already be complete from verify.
+Release must not create or update SPipe specs, repair generated-manual quality,
+accept sidecar-review gaps, or repair stale `doc/07_guide`, `doc/06_spec`,
+`.codex/skills`, `.agents/skills`, `.claude/skills`, `.claude/agents/spipe`,
+or `.gemini/commands` instructions. Before proceeding, confirm
+`find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`.
 
 ## Steps
 

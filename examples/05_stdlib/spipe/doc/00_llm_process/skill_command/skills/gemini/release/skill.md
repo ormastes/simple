@@ -26,5 +26,11 @@ Steps:
 6. Tag: git tag -a vX.Y.Z
 7. Ask before push — do NOT push without user approval
 
-Prerequisite: /verify must show STATUS: PASS first.
+Prerequisite: /verify must show STATUS: PASS first. SPipe/manual evidence,
+lower-model sidecar review, and workflow/tooling/evidence/spec/verification
+contract docs must already be complete from verify. Release must not create or
+update SPipe specs, repair generated-manual quality, accept sidecar-review gaps,
+or repair stale doc/07_guide, doc/06_spec, .codex/skills, .agents/skills,
+.claude/skills, .claude/agents/spipe, or .gemini/commands instructions. Before
+proceeding, confirm `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`.
 ""
