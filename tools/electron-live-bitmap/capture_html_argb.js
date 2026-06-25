@@ -468,13 +468,6 @@ async function main() {
   }
 
   await app.whenReady();
-  const gpuFeatureStatus = app.getGPUFeatureStatus();
-  let gpuInfo = null;
-  try {
-    gpuInfo = await app.getGPUInfo("complete");
-  } catch (err) {
-    gpuInfo = { error: err && err.message ? err.message : "gpu-info-unavailable" };
-  }
   const win = new BrowserWindow({
     show: false,
     useContentSize: true,
@@ -491,7 +484,18 @@ async function main() {
   win.setContentSize(width, height);
 
   const absHtml = path.resolve(htmlPath);
-  await win.loadFile(absHtml);
+  try {
+    await win.loadFile(absHtml);
+  } catch (err) {
+    const html = fs.readFileSync(absHtml, "utf8");
+    await win.loadURL("about:blank");
+    await win.webContents.executeJavaScript(`
+      document.open();
+      document.write(${JSON.stringify(html)});
+      document.close();
+    `);
+    console.log("load_fallback=document-write");
+  }
   await applyEmulatedMediaFeatures(win, emulatedMediaFeatures);
   await new Promise(r => setTimeout(r, settleMs));
 
@@ -499,6 +503,13 @@ async function main() {
   const geometry = geometryOutputPath ? await collectGeometry(win) : null;
   const image = await win.capturePage({ x: 0, y: 0, width, height });
   const result = bitmapToLogicalArgb(image);
+  const gpuFeatureStatus = app.getGPUFeatureStatus();
+  let gpuInfo = null;
+  try {
+    gpuInfo = await app.getGPUInfo("complete");
+  } catch (err) {
+    gpuInfo = { error: err && err.message ? err.message : "gpu-info-unavailable" };
+  }
 
   const payload = {
     width,

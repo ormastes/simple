@@ -71,6 +71,38 @@ fn numeric_as_f64(value: &Value) -> Option<f64> {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // reason: mirrors the method dispatcher ABI.
+fn try_bare_some_option_method(
+    recv_val: &Value,
+    method: &str,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    let payload = Some(Box::new(recv_val.clone()));
+    let option_val = Value::Enum {
+        enum_name: "Option".to_string(),
+        variant: "Some".to_string(),
+        payload: payload.clone(),
+    };
+    special::handle_option_methods(
+        &option_val,
+        "Option",
+        "Some",
+        &payload,
+        method,
+        args,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )
+}
+
 // Re-export the with-self-update functions
 pub(crate) use special::{
     exec_function_with_self_return, find_and_exec_method_with_self, find_and_exec_method_with_self_owned,

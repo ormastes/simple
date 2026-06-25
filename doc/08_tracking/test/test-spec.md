@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-13 09:36:03*
+*Generated: 2026-06-26 00:10:06*
 
-## test/01_unit/lib/common/web
+## test/01_unit/app/ui
 
-❌ **browser_session_wasm_script_spec.spl** (5901ms)
-  - Source: `test/01_unit/lib/common/web/browser_session_wasm_script_spec.spl`
-  - Generated doc: `doc/06_spec/browser_session_wasm_script_spec.md`
+❌ **web_wm_modern_shell_spec.spl** (2658ms)
+  - Source: `test/01_unit/app/ui/web_wm_modern_shell_spec.spl`
+  - Generated doc: `doc/06_spec/web_wm_modern_shell_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 2 ✅
+- **Passed:** 4 ✅
 - **Failed:** 1 ❌
-- **Duration:** 5914ms
+- **Duration:** 2664ms

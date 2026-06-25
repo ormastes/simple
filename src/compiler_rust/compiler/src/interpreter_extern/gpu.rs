@@ -2836,12 +2836,41 @@ pub fn rt_vulkan_select_device_fn(args: &[Value]) -> Result<Value, CompileError>
     Ok(Value::Int(0))
 }
 
-/// `rt_vulkan_get_device() -> i64` — returns selected device index (0-based)
+/// `rt_vulkan_get_device() -> i64` — returns the native Vulkan logical device handle
 pub fn rt_vulkan_get_device_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::VK_STATE;
     let guard = VK_STATE.lock().unwrap();
-    let idx = guard.as_ref().map(|s| s.selected_device_index as i64).unwrap_or(0);
-    Ok(Value::Int(idx))
+    let device = guard
+        .as_ref()
+        .map(|s| s.device as usize as i64)
+        .unwrap_or(0);
+    Ok(Value::Int(device))
+}
+
+/// `rt_vulkan_get_renderdoc_device_pointer() -> i64` — returns RenderDoc's Vulkan device pointer.
+///
+/// RenderDoc's in-application API expects the dispatch table pointer stored at
+/// the start of VkInstance, not VkInstance or VkDevice itself.
+pub fn rt_vulkan_get_renderdoc_device_pointer_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::VK_STATE;
+    let guard = VK_STATE.lock().unwrap();
+    let ptr = guard
+        .as_ref()
+        .and_then(|s| unsafe {
+            let instance = s.instance as *const *const std::ffi::c_void;
+            if instance.is_null() {
+                None
+            } else {
+                let dispatch = *instance;
+                if dispatch.is_null() {
+                    None
+                } else {
+                    Some(dispatch as usize as i64)
+                }
+            }
+        })
+        .unwrap_or(0);
+    Ok(Value::Int(ptr))
 }
 
 /// `rt_vulkan_device_name(index: i64) -> text`
@@ -3835,8 +3864,12 @@ mod renderdoc_dlopen {
 
     type GetApiFn = unsafe extern "C" fn(version: c_int, out: *mut *mut c_void) -> c_int;
 
+    // Offsets in RENDERDOC_API_1_7_0 / RENDERDOC_API_1_6_0 from renderdoc_app.h.
+    // The 1.0-compatible unions each occupy one function-pointer slot.
+    const IDX_SET_CAPTURE_FILE_PATH_TEMPLATE: isize = 11;
     const IDX_GET_NUM_CAPTURES: isize = 13;
     const IDX_START_FRAME_CAPTURE: isize = 19;
+    const IDX_IS_FRAME_CAPTURING: isize = 20;
     const IDX_END_FRAME_CAPTURE: isize = 21;
     const API_VERSION_1_6_0: c_int = 10600;
 
@@ -3935,14 +3968,26 @@ mod renderdoc_dlopen {
         }
     }
 
+    fn device_ptr(device: i64) -> *const c_void {
+        if device <= 0 {
+            std::ptr::null()
+        } else {
+            device as usize as *const c_void
+        }
+    }
+
     pub fn start_capture() -> bool {
+        start_capture_for_device(0)
+    }
+
+    pub fn start_capture_for_device(device: i64) -> bool {
         if let Some(api) = api_ptr() {
             unsafe {
                 let f = *api.offset(IDX_START_FRAME_CAPTURE);
                 if !f.is_null() {
                     let func: unsafe extern "C" fn(*const c_void, *const c_void) =
                         std::mem::transmute(f);
-                    func(std::ptr::null(), std::ptr::null());
+                    func(device_ptr(device), std::ptr::null());
                     return true;
                 }
             }
@@ -3950,14 +3995,48 @@ mod renderdoc_dlopen {
         false
     }
 
+    pub fn set_capture_file_path_template(path: &str) -> bool {
+        if let Some(api) = api_ptr() {
+            unsafe {
+                let f = *api.offset(IDX_SET_CAPTURE_FILE_PATH_TEMPLATE);
+                if !f.is_null() {
+                    let Ok(c_path) = CString::new(path) else {
+                        return false;
+                    };
+                    let func: unsafe extern "C" fn(*const c_char) = std::mem::transmute(f);
+                    func(c_path.as_ptr());
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn is_frame_capturing() -> u32 {
+        if let Some(api) = api_ptr() {
+            unsafe {
+                let f = *api.offset(IDX_IS_FRAME_CAPTURING);
+                if !f.is_null() {
+                    let func: unsafe extern "C" fn() -> u32 = std::mem::transmute(f);
+                    return func();
+                }
+            }
+        }
+        0
+    }
+
     pub fn end_capture() -> u32 {
+        end_capture_for_device(0)
+    }
+
+    pub fn end_capture_for_device(device: i64) -> u32 {
         if let Some(api) = api_ptr() {
             unsafe {
                 let f = *api.offset(IDX_END_FRAME_CAPTURE);
                 if !f.is_null() {
                     let func: unsafe extern "C" fn(*const c_void, *const c_void) -> u32 =
                         std::mem::transmute(f);
-                    return func(std::ptr::null(), std::ptr::null());
+                    return func(device_ptr(device), std::ptr::null());
                 }
             }
         }
@@ -3988,9 +4067,58 @@ pub fn rt_renderdoc_start_capture_fn(_args: &[Value]) -> Result<Value, CompileEr
     Ok(Value::Int(if renderdoc_dlopen::start_capture() { 1 } else { 0 }))
 }
 
+/// `rt_renderdoc_set_capture_file_path_template(path: text) -> i64`
+pub fn rt_renderdoc_set_capture_file_path_template_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let path = arg_text(args, 0, "rt_renderdoc_set_capture_file_path_template", 1)?;
+    Ok(Value::Int(if renderdoc_dlopen::set_capture_file_path_template(&path) {
+        1
+    } else {
+        0
+    }))
+}
+
+/// `rt_renderdoc_capture_file_path_template_from_env() -> text`
+pub fn rt_renderdoc_capture_file_path_template_from_env_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Str(std::env::var("RDOC_SIMPLE_CAPTURE_PATH").unwrap_or_default()))
+}
+
+/// `rt_renderdoc_configure_capture_file_path_template_from_env() -> i64`
+pub fn rt_renderdoc_configure_capture_file_path_template_from_env_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    let path = std::env::var("RDOC_SIMPLE_CAPTURE_PATH").unwrap_or_default();
+    if path.is_empty() {
+        return Ok(Value::Int(0));
+    }
+    Ok(Value::Int(if renderdoc_dlopen::set_capture_file_path_template(&path) {
+        1
+    } else {
+        0
+    }))
+}
+
+/// `rt_renderdoc_is_frame_capturing() -> i64`
+pub fn rt_renderdoc_is_frame_capturing_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(renderdoc_dlopen::is_frame_capturing() as i64))
+}
+
+/// `rt_renderdoc_start_capture_for_device(device: i64) -> i64`
+pub fn rt_renderdoc_start_capture_for_device_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let device = arg_i64(args, 0, "rt_renderdoc_start_capture_for_device", 1)?;
+    Ok(Value::Int(if renderdoc_dlopen::start_capture_for_device(device) {
+        1
+    } else {
+        0
+    }))
+}
+
 /// `rt_renderdoc_end_capture() -> i64` (1 if the capture was written)
 pub fn rt_renderdoc_end_capture_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(renderdoc_dlopen::end_capture() as i64))
+}
+
+/// `rt_renderdoc_end_capture_for_device(device: i64) -> i64`
+pub fn rt_renderdoc_end_capture_for_device_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let device = arg_i64(args, 0, "rt_renderdoc_end_capture_for_device", 1)?;
+    Ok(Value::Int(renderdoc_dlopen::end_capture_for_device(device) as i64))
 }
 
 /// `rt_renderdoc_num_captures() -> i64`

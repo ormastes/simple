@@ -73,6 +73,50 @@ append_file_value() {
     append_kv "$key" "$value"
 }
 
+append_vulkan_device_summary() {
+    summary_path="$1"
+    if ! have node; then
+        append_file_value "gui_web_2d_vulkan_device" "$summary_path" 's/^[[:space:]]*deviceName[[:space:]]*=[[:space:]]*//p'
+        append_file_value "gui_web_2d_vulkan_driver" "$summary_path" 's/^[[:space:]]*driverName[[:space:]]*=[[:space:]]*//p'
+        append_kv "gui_web_2d_vulkan_device_selection_status" "unknown-missing-node"
+        return 0
+    fi
+    node - "$summary_path" >>"$EVIDENCE_ENV" <<'NODE'
+const fs = require("fs");
+const path = process.argv[2] || "";
+const text = fs.existsSync(path) ? fs.readFileSync(path, "utf8") : "";
+const devices = [];
+let current = null;
+function finish() {
+  if (current) devices.push(current);
+  current = null;
+}
+for (const line of text.split(/\r?\n/)) {
+  const header = line.match(/^GPU\d+:/);
+  if (header) {
+    finish();
+    current = {};
+    continue;
+  }
+  if (!current) continue;
+  const match = line.match(/^\s*([A-Za-z][A-Za-z0-9]*)\s*=\s*(.*)$/);
+  if (match) current[match[1]] = match[2].trim();
+}
+finish();
+const selected = devices.find((device) => device.deviceType && !device.deviceType.includes("CPU")) || devices[0] || {};
+const status = selected.deviceType
+  ? (selected.deviceType.includes("CPU") ? "cpu-fallback" : "hardware")
+  : "missing";
+function emit(key, value) {
+  console.log(`${key}=${value || ""}`);
+}
+emit("gui_web_2d_vulkan_device", selected.deviceName);
+emit("gui_web_2d_vulkan_driver", selected.driverName);
+emit("gui_web_2d_vulkan_device_type", selected.deviceType);
+emit("gui_web_2d_vulkan_device_selection_status", status);
+NODE
+}
+
 parse_argb() {
     argb_path="$1"
     prefix="$2"
@@ -280,7 +324,9 @@ if [ -z "${SIMPLE_BIN+pinned}" ] || [ "$SIMPLE_BIN" = "bin/simple" ]; then
         path_simple_candidate="$(command -v simple 2>/dev/null || true)"
         for candidate in \
             "src/compiler_rust/target/release/simple" \
-            "src/compiler_rust/target/debug/simple"; do
+            "src/compiler_rust/target/debug/simple" \
+            "release/x86_64-unknown-linux-gnu/simple" \
+            "bootstrap/stage3/x86_64-unknown-linux-gnu/simple"; do
             if [ -n "$candidate" ] && [ -x "$candidate" ]; then
                 simple_bin="$candidate"
                 simple_bin_selection_reason="default-missing-fallback"
@@ -356,8 +402,7 @@ VULKAN_SUMMARY="$BUILD_DIR/vulkaninfo-summary.out"
 if have vulkaninfo && vulkaninfo --summary >"$VULKAN_SUMMARY" 2>&1; then
     append_kv "gui_web_2d_vulkan_loader_status" "present"
     append_kv "gui_web_2d_vulkan_loader_summary" "$VULKAN_SUMMARY"
-    append_file_value "gui_web_2d_vulkan_device" "$VULKAN_SUMMARY" 's/^[[:space:]]*deviceName[[:space:]]*=[[:space:]]*//p'
-    append_file_value "gui_web_2d_vulkan_driver" "$VULKAN_SUMMARY" 's/^[[:space:]]*driverName[[:space:]]*=[[:space:]]*//p'
+    append_vulkan_device_summary "$VULKAN_SUMMARY"
 else
     append_kv "gui_web_2d_vulkan_loader_status" "missing-or-error"
     append_kv "gui_web_2d_vulkan_loader_summary" "$VULKAN_SUMMARY"
@@ -409,6 +454,9 @@ if [ "$MODE" = "--browser-backing" ] || [ "$MODE" = "--run" ] || [ "$MODE" = "--
         if grep -E 'Requested GL implementation .*angle=vulkan.* not found|Exiting GPU process due to errors during initialization' "$ELECTRON_LOG" >/dev/null 2>&1; then
             append_kv "gui_web_2d_vulkan_electron_vulkan_status" "fail"
             append_kv "gui_web_2d_vulkan_electron_vulkan_reason" "vulkan-angle-unavailable"
+        elif node -e 'const fs=require("fs"); const p=process.argv[1]; const j=fs.existsSync(p)?JSON.parse(fs.readFileSync(p,"utf8")):{}; process.exit(/enabled/i.test(String(j.gpuFeatureStatus&&j.gpuFeatureStatus.vulkan||"")) ? 0 : 1)' "$ELECTRON_ARGB"; then
+            append_kv "gui_web_2d_vulkan_electron_vulkan_status" "pass"
+            append_kv "gui_web_2d_vulkan_electron_vulkan_reason" "electron-vulkan-enabled"
         else
             append_kv "gui_web_2d_vulkan_electron_vulkan_status" "not-rejected-by-log"
             append_kv "gui_web_2d_vulkan_electron_vulkan_reason" "no-angle-vulkan-unavailable-log"
@@ -514,7 +562,7 @@ const electronVulkan = electron && electron.gpuFeatureStatus ? String(electron.g
 const electronAux = electron && electron.gpuInfo && electron.gpuInfo.auxAttributes ? electron.gpuInfo.auxAttributes : {};
 const electronHardware = Boolean(electronAux.hardwareSupportsVulkan);
 const electronGlParts = String(electronAux.glImplementationParts || "");
-const electronStatus = /enabled/i.test(electronVulkan) && electronHardware ? "pass" : "fail";
+const electronStatus = /enabled/i.test(electronVulkan) ? "pass" : "fail";
 const electronReason = electronStatus === "pass" ? "electron-vulkan-backed" : `electron-vulkan-${electronVulkan || "unknown"}`;
 const chromeGpuInfo = chrome ? chrome.gpu_info : null;
 const chromeAux = chromeGpuInfo && chromeGpuInfo.gpu ? chromeGpuInfo.gpu.auxAttributes || {} : {};

@@ -68,6 +68,10 @@ Common variables:
 - `RDOC_ELECTRON_WIDTH`, `RDOC_ELECTRON_HEIGHT`, `RDOC_ELECTRON_SETTLE_MS`:
   Electron capture viewport and settle controls.
 - `RDOC_SIMPLE_PROG`: Simple capture program for `capture-simple`.
+- `RDOC_SIMPLE_BIN`: optional Simple binary for `capture-simple`. Leave unset
+  for normal operator runs so the helper builds
+  `src/compiler_rust/target/release/simple`, which carries the current
+  `rt_renderdoc_*` extern table.
 
 The helper validates `.rdc` files by checking the `RDOC` magic header. If a host
 cannot provide Chrome Vulkan or a non-CPU Vulkan device, record the concrete
@@ -267,6 +271,32 @@ A blocker status of `blocked` means the GUI/web/2D comparison can still be
 useful, but at least one required Vulkan-backed `.rdc` proof or pixel-diff lane
 remains a completion blocker.
 
+As of 2026-06-25 on Linux x86_64, the prepared host state is:
+Chrome `139.0.7258.138`, repo-local Electron `30.5.1`, RenderDoc
+`/usr/local/bin/renderdoccmd` v1.44, Vulkan hardware selection
+`Intel(R) Graphics (RPL-P)`, `glslangValidator`, `spirv-as`, and a Rustup
+stable toolchain (`rustc`/`cargo` 1.96). `--check` reports RenderDoc ready from
+`PATH:renderdoccmd`; `--run` reports Simple Vulkan readback pass and
+Electron/Chrome/Simple pairwise ARGB pixel parity. `--browser-backing` still
+fails because Electron reports `electron-vulkan-disabled_off`, while Chrome
+reports ANGLE Vulkan hardware support. `--renderdoc-simple` now builds the
+Rust interpreter and resolves `rt_renderdoc_*`; the remaining blocker is that
+RenderDoc returns `renderdoc_end=0`, `renderdoc_num_captures=0`, and no `.rdc`
+for the headless Simple Engine2D frame.
+
+Linux setup commands used for this state:
+
+```sh
+sudo apt-get install -y glslang-tools spirv-tools rustup
+rustup toolchain install stable --profile minimal
+rustup default stable
+(cd tools/electron-shell && npm install)
+(cd src/compiler_rust && cargo build --release --bin simple)
+```
+
+Ubuntu's packaged Cargo 1.75 cannot parse this repo's lockfile version 4; use
+Rustup stable for the RenderDoc Simple interpreter build.
+
 ### Linux Vulkan Render-Log Compare
 
 The Linux-first comparison gate normalizes existing aggregate evidence and
@@ -385,9 +415,9 @@ If any platform compare evidence is missing or failing, the aggregate keeps
 `gui_renderdoc_feature_coverage_status` incomplete and adds the native
 render-log platform matrix to `blocked_completion_gates`.
 
-On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
-`src/compiler_rust/target/debug/simple` when that binary advertises the macOS
-Vulkan loader paths (`libvulkan.1.dylib`). The selected executable is recorded
+On Linux and macOS, the wrapper prefers `src/compiler_rust/target/release/simple`
+or `src/compiler_rust/target/debug/simple` when that binary is the required
+fresh driver for the active lane. The selected executable is recorded
 as `gui_web_2d_vulkan_simple_bin`, with the reason in
 `gui_web_2d_vulkan_simple_bin_selection_reason`. If `bin/simple` is missing in
 a linked worktree, the wrapper falls back to compiler-rust release/debug, then a
@@ -402,11 +432,11 @@ than the Rust runtime changes under test, build the driver and rerun:
 scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 ```
 
-On a prepared RenderDoc host, debug the supported macOS Simple lane first:
+On a prepared RenderDoc host, debug the Simple in-application RenderDoc lane
+first:
 
 ```sh
-SIMPLE_BIN=src/compiler_rust/target/release/simple \
-  scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple
 ```
 
 Use the all-lane capture mode only for cross-surface evidence collection:
@@ -648,6 +678,15 @@ explicit: `html_css_full_rendering_goal_html_tag_status=pass` and
 the broader goal can progress, while
 `html_css_full_rendering_goal_full_css_status=incomplete` remains the honest
 state until every W3C CSS inventory property has rendered fixture coverage.
+Animation-related CSS is also reported as its own sub-goal:
+`html_css_full_rendering_goal_animation_css_status`,
+`html_css_full_rendering_goal_animation_css_total_count`,
+`html_css_full_rendering_goal_animation_css_rendered_count`, and
+`html_css_full_rendering_goal_animation_css_unrendered_properties` cover the
+`animation-*`, `transition-*`, and `transform-*` families. The top-level GUI
+RenderDoc audit keeps `CSS animation/transition/transform rendering coverage`
+in `blocked_completion_gates` until that sub-goal reports `pass`; do not use a
+static Chrome/Electron bitmap or generic CSS inventory count as animation proof.
 Use `--strict` when a CI or release lane should fail unless the full CSS
 inventory is rendered.
 
@@ -854,6 +893,20 @@ The gate passes only when the source evidence contains:
 Missing RenderDoc, non-Simple backend evidence, wrong scene/program metadata,
 or a missing `.rdc` file all keep the gate out of `pass`.
 
+Linux note, 2026-06-26: the Simple in-application capture must pass RenderDoc's
+Vulkan device pointer, not `VkDevice`. RenderDoc documents the Vulkan pointer as
+the dispatch table pointer stored at the start of `VkInstance`; the Rust
+interpreter exposes this through `rt_vulkan_get_renderdoc_device_pointer`.
+Loose RenderDoc installs may also ship `renderdoccmd` as a symlink and an
+unregistered Vulkan layer manifest with a stale `library_path`. The helper
+resolves the real RenderDoc home, creates a per-run layer manifest pointing at
+`librenderdoc.so`, and forces `VK_LAYER_RENDERDOC_Capture` with
+`VK_INSTANCE_LAYERS`. Current focused evidence at
+`build/gui-web-2d-vulkan-env-renderdoc-simple-explicit-layer-owner-env/renderdoc/simple/evidence.env`
+passes with `rdoc_simple_renderdoc_capturing_after_start=1`,
+`rdoc_simple_renderdoc_end=1`, `rdoc_simple_renderdoc_num_captures=1`,
+`rdoc_capture_status=pass`, and `rdoc_capture_magic=RDOC`.
+
 ## Electron Chromium/Vulkan Gate
 
 Use the Electron gate when the canonical Electron capture or a CI host supplies
@@ -879,6 +932,43 @@ The gate passes only when the source evidence contains:
 Missing RenderDoc, missing Electron capture output, non-Electron backend
 evidence, or non-Vulkan Chromium request metadata all keep the gate out of
 `pass`.
+
+## Linux Browser Backing Notes
+
+On Linux, the Chromium/Electron browser-backing check is separate from the
+browser RenderDoc `.rdc` gate. Electron 42 requires X11 ozone for the Vulkan
+path; Wayland reports that it is not compatible with Vulkan. The canonical
+Electron capture flags are:
+
+```sh
+--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \
+  --ozone-platform=x11 --enable-features=Vulkan --use-angle=vulkan
+```
+
+The Electron HTML capture helper samples `app.getGPUFeatureStatus()` after
+`BrowserWindow.capturePage()`, so the recorded status reflects the active
+rendering path instead of the early startup default. Current Linux evidence
+passes the browser-backing gate with
+`gui_web_2d_vulkan_browser_backing_status=pass` and
+`gui_web_2d_vulkan_electron_browser_backing_vulkan=enabled_on` in:
+
+```sh
+build/gui-web-2d-vulkan-env-browser-backing-electron42/evidence.env
+```
+
+RenderDoc browser `.rdc` capture is still tracked separately. On Linux the
+helper now prefers an existing real `DISPLAY` and records
+`rdoc_chrome_display_mode` / `rdoc_electron_display_mode` in evidence. Xvfb is
+kept as fallback or can be forced with `RDOC_CHROME_USE_XVFB=1` and
+`RDOC_ELECTRON_USE_XVFB=1`, but Xvfb is not a strong Vulkan-present proof on
+this host because Chrome reports missing DRI3 support when child-process
+hooking is disabled.
+
+Current real-display evidence still does not satisfy the browser `.rdc` gates:
+Chrome with RenderDoc child-process hooking exits the Chromium GPU process with
+code 139, Chrome single-process reports that Vulkan is unsupported in the
+in-process GPU path, and Electron 42/X11/Vulkan captures ARGB outside RenderDoc
+but exits with `SIGTRAP` under `renderdoccmd capture` before `.rdc` output.
 
 ## macOS Notes
 
