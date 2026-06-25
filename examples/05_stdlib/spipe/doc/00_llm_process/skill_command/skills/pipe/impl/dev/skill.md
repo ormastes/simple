@@ -12,7 +12,7 @@ feature-development pipeline.
 ## Usage
 
 ```
-/dev <description of what to build or fix>
+/sp_dev <description of what to build or fix>
 ```
 
 Argument: `$ARGUMENTS`
