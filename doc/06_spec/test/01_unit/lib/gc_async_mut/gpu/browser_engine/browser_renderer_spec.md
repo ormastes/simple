@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 103 | 103 | 0 | 0 |
+| 104 | 104 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -240,6 +240,29 @@ val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .c
 val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
 
 expect(_count_color(result.pixel_data, 0xFF7C3AEDu32)).to_equal(0)
+```
+
+</details>
+
+#### renders text-transform uppercase with uppercase glyph pixels
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val lower_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; }</style></head><body><div class='label'>chrome baseline</div></body></html>"
+val upper_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; }</style></head><body><div class='label'>CHROME BASELINE</div></body></html>"
+val transform_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; text-transform: uppercase; }</style></head><body><div class='label'>chrome baseline</div></body></html>"
+val lower = render_html_to_pixels_with_viewport(lower_html, 96, 32).pixel_data
+val upper = render_html_to_pixels_with_viewport(upper_html, 96, 32).pixel_data
+val transformed = render_html_to_pixels_with_viewport(transform_html, 96, 32).pixel_data
+
+expect(_count_color(transformed, 0xFF111827u32)).to_be_greater_than(0)
+expect(_pixels_equal(lower, transformed)).to_equal(false)
+expect(_pixels_equal(upper, transformed)).to_equal(true)
 ```
 
 </details>
@@ -1882,8 +1905,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 103 |
-| Active scenarios | 103 |
+| Total scenarios | 104 |
+| Active scenarios | 104 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
