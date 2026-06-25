@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 105 | 105 | 0 | 0 |
+| 106 | 106 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -283,6 +283,27 @@ val underline = render_html_to_pixels_with_viewport(underline_html, 96, 32).pixe
 
 expect(_count_color(underline, 0xFF111827u32)).to_be_greater_than(_count_color(plain, 0xFF111827u32))
 expect(_pixels_equal(plain, underline)).to_equal(false)
+```
+
+</details>
+
+#### renders text-indent by shifting the first text line right
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plain_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; }</style></head><body><div class='label'>INDENT</div></body></html>"
+val indent_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; text-indent: 12px; }</style></head><body><div class='label'>INDENT</div></body></html>"
+val plain = render_html_to_pixels_with_viewport(plain_html, 96, 32).pixel_data
+val indented = render_html_to_pixels_with_viewport(indent_html, 96, 32).pixel_data
+
+expect(_count_color(indented, 0xFF111827u32)).to_equal(_count_color(plain, 0xFF111827u32))
+expect(_count_region_changed(plain, 96, 0, 0, 12, 12, WHITE_BG)).to_be_greater_than(_count_region_changed(indented, 96, 0, 0, 12, 12, WHITE_BG))
+expect(_pixels_equal(plain, indented)).to_equal(false)
 ```
 
 </details>
@@ -1925,8 +1946,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 105 |
-| Active scenarios | 105 |
+| Total scenarios | 106 |
+| Active scenarios | 106 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
