@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 108 | 108 | 0 | 0 |
+| 109 | 109 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -346,6 +346,27 @@ val spaced = render_html_to_pixels_with_viewport(spaced_html, 160, 32).pixel_dat
 expect(_count_color(spaced, 0xFF111827u32)).to_equal(_count_color(plain, 0xFF111827u32))
 expect(_count_region_changed(spaced, 160, 45, 0, 60, 12, WHITE_BG)).to_be_greater_than(_count_region_changed(plain, 160, 45, 0, 60, 12, WHITE_BG))
 expect(_pixels_equal(plain, spaced)).to_equal(false)
+```
+
+</details>
+
+#### renders font-style italic with skewed glyph pixels
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plain_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; }</style></head><body><div class='label'>ITALIC</div></body></html>"
+val italic_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; font-style: italic; }</style></head><body><div class='label'>ITALIC</div></body></html>"
+val plain = render_html_to_pixels_with_viewport(plain_html, 96, 32).pixel_data
+val italic = render_html_to_pixels_with_viewport(italic_html, 96, 32).pixel_data
+
+expect(_count_color(italic, 0xFF111827u32)).to_equal(_count_color(plain, 0xFF111827u32))
+expect(_count_region_changed(italic, 96, 1, 0, 40, 8, WHITE_BG)).to_be_greater_than(0)
+expect(_pixels_equal(plain, italic)).to_equal(false)
 ```
 
 </details>
@@ -1988,8 +2009,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 108 |
-| Active scenarios | 108 |
+| Total scenarios | 109 |
+| Active scenarios | 109 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
