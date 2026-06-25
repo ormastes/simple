@@ -5,6 +5,28 @@
 **Area:** Cranelift JIT codegen (`run`/`-c` path), NOT interpreter / type inference.
 **Severity:** crash (SIGSEGV) — was a wild null deref; now a defined trap.
 
+## Decision (2026-06-25): runtime guard is the enforcement layer — no compile-time check for now
+
+A compile-time check that rejects `b.n` on a non-narrowed optional `T?` (forcing
+`if b != nil:` or `b?.n`) was investigated and is **blocked**, not declined:
+
+- The only narrowing-aware place to hook is the HM inference `Field` case
+  (`src/compiler/30.types/type_infer/inference_expr.spl`, `synthesize_expr`).
+- Probing showed `synthesize_expr` fires **0 times** when checking a user file:
+  the HM engine is **dormant for user code** because `lower_and_check_impl`
+  stubs HIR lowering for non-bootstrap sources (empty HIR → no body inference).
+  Syntactic lints run; type-aware ones do not.
+- Root prerequisite is therefore un-stubbing the HIR pipeline — see
+  [[interp_aot_source_pipeline_stubbed_non_functional_2026-06-25]] — which was
+  reverted earlier as too risky (re-exposes the unbounded interpreted-compiler
+  bug chain, incl. this very crash).
+
+So the **runtime guard below is the chosen enforcement** until that pipeline work
+is scoped separately. A rough blast-radius estimate for the eventual compile-time
+check is **~40–283 sites** (heuristic; exact narrowing-aware count needs the
+un-stubbed pipeline). A prototype warn-only lint was written, confirmed
+unexercisable for the above reason, and reverted (no production-checker change).
+
 ## Resolution
 
 Root cause was misdiagnosed below. It is **not** a compile-time type-inference
