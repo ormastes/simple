@@ -645,8 +645,21 @@ fields and reports the full completion list through `blocked_completion_gates`
 and `blocked_completion_gate_count`, while retaining `blocked_completion_gate`
 as the first outstanding gate for older consumers. The top-level list is derived
 from the nested Simple/original Chrome RenderDoc lanes, Electron
-Chromium/Vulkan RenderDoc gate, and the production GUI/web core parity gate,
-so concurrent missing captures are not hidden by a single status reason.
+Chromium/Vulkan RenderDoc gate, modern Web WM Electron visual/interaction
+evidence, and the production GUI/web core parity gate, so concurrent missing
+captures are not hidden by a single status reason.
+
+For the HTML-backed GUI modernization claim, the top-level audit consumes
+`scripts/check/check-web-wm-modern-shell-evidence.shs` through
+`web_wm_modern_shell_evidence_*` keys. Completion requires
+`web_wm_modern_shell_evidence_status=pass`,
+`web_wm_modern_shell_evidence_bitmap_nonblank_status=pass`,
+`web_wm_modern_shell_evidence_audit_pass=pass`, and
+`web_wm_modern_shell_evidence_interaction_pass=pass` with focus, keyboard,
+input, pointer, and click evidence. `environment-unavailable` remains a useful
+host diagnosis but is still reported as `modern Web WM Electron visual and
+interaction evidence` in `blocked_completion_gates` until a real Electron host
+produces the pass row.
 
 For the all-GUI-item claim, use the focused wrapper
 `scripts/check/check-gui-widget-renderdoc-goal-status.shs`. It composes the
