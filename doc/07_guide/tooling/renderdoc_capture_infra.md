@@ -638,9 +638,10 @@ The current canonical evidence contract is:
   `build/production_gui_web_renderer_parity_evidence/evidence.env` must report
   the GUI/web/2D core parity components as `pass`: renderer matrix, 50-case
   layout manifest, live Tauri/Chrome surface manifest, and backend parity. The
-  parity gate emits `production_gui_web_renderer_parity_gate_source_env_status`
-  so a missing source env is a typed `missing` condition instead of only a
-  reason string.
+  parity gate emits `production_gui_web_renderer_parity_gate_source_env` and
+  `production_gui_web_renderer_parity_gate_source_env_status` so a missing
+  source env is tied to the exact checked file and typed as `missing` instead
+  of only a reason string.
   wrapper exports the resolved `SIMPLE_BIN` to nested parity checks and records
   `production_gui_web_renderer_parity_simple_bin` plus
   `production_gui_web_renderer_parity_simple_bin_source`; a clean worktree with
