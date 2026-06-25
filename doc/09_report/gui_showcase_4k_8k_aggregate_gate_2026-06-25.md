@@ -41,11 +41,11 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 
 ## 8K Row
 
-- status: `fail`
-- reason: `below-required-8k-frame-count:120`
+- status: `pass`
+- reason: `met-target-fps`
 - geometry: `7680x4320`, pixels `33177600`
-- frames: `120`
-- fps_x1000: `13303769`
+- frames: `200`
+- fps_x1000: `24218939`
 - target_fps: `200`
 - checksum: `869060580878`
 - nonzero_pixels: `203`
@@ -55,6 +55,6 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 - max_rss_budget_kb: `750000`
 - rss_status: `pass`
 
-The aggregate now forwards `gui_showcase_4k_200fps_*` and
-`gui_showcase_8k_perf_*` fields. Completion remains blocked by the 8K
-200-frame proof and the non-perf RenderDoc/browser-backing/production-parity/full-CSS gates.
+The aggregate now forwards passing `gui_showcase_4k_200fps_*` and
+`gui_showcase_8k_perf_*` fields. Completion remains blocked by the non-perf
+RenderDoc/browser-backing/production-parity/full-CSS gates.

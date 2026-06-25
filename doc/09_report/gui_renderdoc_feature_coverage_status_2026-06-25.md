@@ -47,11 +47,11 @@
 - Production GUI/web parity gate: fail (missing-production-parity-source-status)
 - Production GUI/web parity source env: build/production_gui_web_renderer_parity_evidence/evidence.env (pass)
 - GUI/web/2D 4K retained perf: pass (met-200fps; resolution 4k; size 3840x2160; pixels 8294400; frames 200; fps_x1000 56306306; target_fps 200; render_mode retained-static-frame; redraw_frames 1; nonzero_pixels 5458; checksum 23357114226484; rss 131328/262144 kB)
-- GUI/web/2D 8K retained perf: fail (below-required-8k-frame-count:120; resolution 8k; size 7680x4320; pixels 33177600; frames 120; fps_x1000 13303769; target_fps 200; render_mode retained-static-frame; redraw_frames 1; nonzero_pixels 203; checksum 869060580878; rss 519936/750000 kB)
+- GUI/web/2D 8K retained perf: pass (met-target-fps; resolution 8k; size 7680x4320; pixels 33177600; frames 200; fps_x1000 24218939; target_fps 200; render_mode retained-static-frame; redraw_frames 1; nonzero_pixels 203; checksum 869060580878; rss 520192/750000 kB)
 - Production surface host:
 - Production Tauri surface capture:
 - Production Chrome surface capture:
-- blocked completion gates: 15
+- blocked completion gates: 14
 - blocked gate list:
   - Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic
   - original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
@@ -65,7 +65,6 @@
   - production GUI/web font offload readback evidence
   - production GUI/web raw Metal readback evidence
   - production GUI/web parity evidence with live Tauri and Chrome captures
-  - retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS
   - full CSS specification rendering coverage beyond implemented Simple Web subset
   - CSS animation/transition/transform rendering coverage
 
@@ -566,15 +565,15 @@
 - gui_showcase_4k_200fps_time_log=build/widget-showcase-4k-200fps/time.log
 - gui_showcase_4k_200fps_time_log_file_status=pass
 - gui_showcase_8k_perf_env=build/widget-showcase-8k-perf/status.env
-- gui_showcase_8k_perf_status=fail
-- gui_showcase_8k_perf_reason=below-required-8k-frame-count:120
+- gui_showcase_8k_perf_status=pass
+- gui_showcase_8k_perf_reason=met-target-fps
 - gui_showcase_8k_perf_resolution=8k
 - gui_showcase_8k_perf_width=7680
 - gui_showcase_8k_perf_height=4320
-- gui_showcase_8k_perf_frames=120
-- gui_showcase_8k_perf_fps_x1000=13303769
+- gui_showcase_8k_perf_frames=200
+- gui_showcase_8k_perf_fps_x1000=24218939
 - gui_showcase_8k_perf_target_fps=200
-- gui_showcase_8k_perf_max_rss_kb=519936
+- gui_showcase_8k_perf_max_rss_kb=520192
 - gui_showcase_8k_perf_max_rss_budget_kb=750000
 - gui_showcase_8k_perf_rss_status=pass
 - gui_showcase_8k_perf_pixels=33177600
@@ -741,5 +740,5 @@
 - html_renderdoc_capture_command=RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
 - electron_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-electron-html
 - blocked_completion_gate=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic
-- blocked_completion_gate_count=15
-- blocked_completion_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic|original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Simple GUI widget RenderDoc .rdc on Vulkan Engine2D|Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof|GUI/web/2D Vulkan comparison artifacts for Electron, Chrome, and Simple|Electron, Chrome, and Simple GUI/web/2D Vulkan pairwise pixel comparison|Electron and Chrome Vulkan-backed browser RenderDoc proof|native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS|full CSS specification rendering coverage beyond implemented Simple Web subset|CSS animation/transition/transform rendering coverage
+- blocked_completion_gate_count=14
+- blocked_completion_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic|original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Simple GUI widget RenderDoc .rdc on Vulkan Engine2D|Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof|GUI/web/2D Vulkan comparison artifacts for Electron, Chrome, and Simple|Electron, Chrome, and Simple GUI/web/2D Vulkan pairwise pixel comparison|Electron and Chrome Vulkan-backed browser RenderDoc proof|native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|full CSS specification rendering coverage beyond implemented Simple Web subset|CSS animation/transition/transform rendering coverage

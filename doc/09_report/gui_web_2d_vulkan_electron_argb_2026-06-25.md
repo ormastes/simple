@@ -24,14 +24,14 @@ gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass
 gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass
 ```
 
-The aggregate gate now rejects the retained 8k showcase row until it provides
-at least 200 measured frames:
+The aggregate gate also reports the retained 8k showcase row as passing the
+200-frame target:
 
 ```text
-gui_showcase_8k_perf_status=fail
-gui_showcase_8k_perf_reason=below-required-8k-frame-count:120
-gui_showcase_8k_perf_frames=120
-gui_showcase_8k_perf_fps_x1000=13303769
+gui_showcase_8k_perf_status=pass
+gui_showcase_8k_perf_reason=met-target-fps
+gui_showcase_8k_perf_frames=200
+gui_showcase_8k_perf_fps_x1000=24218939
 gui_showcase_8k_perf_target_fps=200
 gui_showcase_8k_perf_rss_status=pass
 ```
