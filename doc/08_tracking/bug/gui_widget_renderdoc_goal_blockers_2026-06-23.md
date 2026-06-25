@@ -33,3 +33,24 @@ Completion requires:
 Use `scripts/check/check-gui-widget-renderdoc-goal-status.shs --strict` only on
 hosts with real Simple Vulkan Engine2D and Electron Chromium/Vulkan `.rdc`
 evidence.
+
+## Current Evidence
+
+As of 2026-06-25 on the Linux Vulkan host, the Simple lane is no longer a
+blocker:
+
+- `gui_widget_renderdoc_goal_simple_gate_status=pass`
+- `gui_widget_renderdoc_goal_simple_gate_runtime_backend=vulkan`
+- `gui_widget_renderdoc_goal_simple_gate_capture_file_magic=RDOC`
+
+The remaining blocker is Electron under RenderDoc:
+
+- `gui_widget_renderdoc_goal_electron_gate_status=fail`
+- `gui_widget_renderdoc_goal_electron_gate_reason=chromium-gpu-process-crashed-under-renderdoc`
+- `gui_widget_renderdoc_goal_electron_gate_vulkan_log_status=pass`
+- `gui_widget_renderdoc_goal_electron_gate_argb_file_status=missing`
+- `gui_widget_renderdoc_goal_electron_gate_capture_file_status=missing`
+
+This means the Electron wrapper requests Vulkan/ANGLE and does not hit the
+`vulkan-angle-unavailable` log gate, but Chromium's GPU process crashes under
+RenderDoc before producing either nonblank ARGB evidence or a `.rdc` capture.

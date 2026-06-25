@@ -824,6 +824,13 @@ The current canonical evidence contract is:
   evidence env, capture status/magic/file, gate status/reason, runtime metadata
   status/missing list, and required backend/scene/program/status/magic fields so
   the Simple Vulkan requirement is visible without opening the nested goal report.
+  Current Linux evidence from 2026-06-25 has this Simple gate passing with
+  `rdoc_simple_runtime_backend=vulkan` and an `RDOC` capture. The remaining
+  widget RenderDoc blocker is Electron: the canonical Electron helper uses
+  `xvfb-run -a --server-args="-screen 0 ${width}x${height}x24"` on headless
+  Linux, requests `--enable-features=Vulkan --use-angle=vulkan`, and currently
+  records `chromium-gpu-process-crashed-under-renderdoc` before ARGB or `.rdc`
+  output is produced.
 - Original Chrome HTML/CSS path:
   `build/renderdoc/canonical-probe/html/evidence.env`, or an external-host
   evidence env, must pass the original-backend gate with `rdoc_scene=html-css-chrome`,
