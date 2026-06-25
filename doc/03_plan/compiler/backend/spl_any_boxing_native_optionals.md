@@ -154,3 +154,53 @@ largest share; resolving how module `ParserModule` singletons are emitted/named
 in the self-hosted backend is the first sub-problem to attack. Then `builder_emit_*`
 (SPIR-V builder module not linked) and `BidirHirExpr_dot_*` (method-symbol
 mangling). Diagnose against `build/bootstrap/logs/.../stage4-native-build.log`.
+
+## CORRECTION 2026-06-25 — (C) was a STALE-build mirage; real gap is localized
+
+The "551-symbol self-host rewrite" framing above is **wrong** — it measured a
+stale/separate build. The self-hosted `bin/simple`
+(`bin/release/x86_64-unknown-linux-gnu/simple`, rebuilt 2026-06-25 11:09 by a
+parallel session) **runs `.spl` codegen correctly**:
+
+- `run print(1+1)` → `2`; `val a: i32 = 7` → `7`; inferred `val e = 7` → `7`.
+
+So (C) "make `.spl` codegen testable" is **already satisfied** — production
+`bin/simple run` *is* the harness. No self-host repair is needed. Do not chase
+the 551 symbols.
+
+**The real, directly-reproducible bug (production `bin/simple run`):**
+primitive payloads entering `any`/`T?` are stored **raw (untagged)**:
+
+- `val a: any = 9` → `<invalid-heap:0x9>` (raw 9; 9&7=1=TAG_HEAP misread)
+- `val b: i32? = 7` → `b={<value:0x7>}` (raw 7; 7&7=7=TAG_SPECIAL misread),
+  `b.unwrap_or(9)` → `nil`, `match b { Some(x) }` → `x=nil`. nil case
+  `c.unwrap_or(5)` → `nil`. (`b.?`/is_some ARE correct — they only test nil-vs-not.)
+- Heap-typed optionals (`text?`, struct?) already work — a heap pointer is a
+  valid tagged word. Only **primitives** (i32/i64/bool/f64) break.
+
+**Root cause — the in-tree boxing edit is DEAD.** `mir_lowering_stmts.spl:44-79`
+intends `value << 3` boxing for ints entering Any/Optional, but the raw
+(un-shifted) values above prove the `Shl` never executes — the gate
+(`type_.?` + IntLit/Int arm) doesn't match at the `Let`. Worse, the design is
+**incoherent**: `mir_lowering_part2_part2.spl:271` declares `Optional → Tuple([Bool
+has_value, inner value])`, but the de-facto runtime repr is **bare-payload single
+word** (present=value, absent=nil), and there is **no unboxing** at any consumer
+(print / unwrap_or / unwrap / match Some). Two conflicting representations, both
+half-built.
+
+**REPRESENTATION DECISION REQUIRED before coding** (the implementations diverge):
+1. **Boxed tagged value** (mirrors the seed interpreter bare-payload fix): box
+   primitives (`<<3`) on entry to any/`T?`; the boxed word is a valid tagged
+   value so `print` already renders it; unbox (`>>3`) only when materializing a
+   concrete primitive (unwrap/match binding/arithmetic). Smallest diff; boxed-0
+   (=0, TAG_INT) is distinct from nil (TAG_SPECIAL=3) so the old 0/nil collision
+   dissolves. Cost: unbox sites must be found.
+2. **Real tuple `{has_value, value}`** (what `lower_type` already declares):
+   construct the tuple at `Let`, extract `.1` at consumers. No tag games. Cost:
+   wire tuple construct/extract through unwrap_or/match/print; delete the boxing
+   branch.
+
+**Recommendation: (1) boxed tagged value** — it matches what the runtime already
+does for `any`, makes `print` work for free, and is the shorter diff; the tuple
+form duplicates machinery the tagged-value model already has. Either way, fix the
+dead gate first. Iteration cost ≈134s self-host rebuild per change (tractable).
