@@ -1,0 +1,54 @@
+use common.wine_kernel32_sync_event.{wine_kernel32_event_table_new, wine_kernel32_execute_event_sync}
+
+describe "Wine KERNEL32 sync event bridge":
+    it "executes a bounded event create, signal, wait, and reset sequence":
+        val result = wine_kernel32_execute_event_sync(
+            ["CreateEventW", "SetEvent", "WaitForSingleObject", "ResetEvent"],
+            wine_kernel32_event_table_new(),
+            "startup-ready",
+            true,
+            false,
+            1000
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.handle).to_equal(0x200)
+        expect(result.wait_status).to_equal("WAIT_OBJECT_0")
+        expect(result.table.events[0].signaled).to_equal(false)
+        expect(result.operations).to_equal("CreateEventW SetEvent WaitForSingleObject ResetEvent")
+
+    it "keeps event dispatch ordered and bounded":
+        val out_of_order = wine_kernel32_execute_event_sync(
+            ["SetEvent", "CreateEventW", "WaitForSingleObject", "ResetEvent"],
+            wine_kernel32_event_table_new(),
+            "startup-ready",
+            true,
+            false,
+            1000
+        )
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("kernel32-sync-event-sequence-expected:CreateEventW")
+
+        val wrong_family = wine_kernel32_execute_event_sync(
+            ["CreateEventW", "SetEvent", "WaitForSingleObject", "HeapAlloc"],
+            wine_kernel32_event_table_new(),
+            "startup-ready",
+            true,
+            false,
+            1000
+        )
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:HeapAlloc")
+
+    it "rejects unnamed events in the bounded startup path":
+        val result = wine_kernel32_execute_event_sync(
+            ["CreateEventW", "SetEvent", "WaitForSingleObject", "ResetEvent"],
+            wine_kernel32_event_table_new(),
+            "",
+            true,
+            false,
+            1000
+        )
+
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("CreateEventW:invalid-name")

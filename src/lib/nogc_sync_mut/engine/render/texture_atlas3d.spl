@@ -1,0 +1,124 @@
+# texture_atlas3d.spl — Atlas bin-packing + UV rect lookup
+#
+# Packs multiple sub-textures into a single large GPU texture using a
+# simple shelf/row algorithm. UVs are normalized [0.0, 1.0].
+#
+# Usage:
+#   var atlas = atlas_new(backend, 1024, 1024)
+#   val rect = atlas_pack(atlas, backend, my_id, pixels, 64, 64)
+#   val r = atlas_lookup(atlas, my_id)
+
+use std.nogc_sync_mut.engine.render.backend3d.{TextureHandle, TextureFormat3D, RenderBackend3D}
+
+# ============================================================================
+# AtlasRect — pixel coords + normalized UVs for one packed region
+# ============================================================================
+
+class AtlasRect:
+    x: i64
+    y: i64
+    width: i64
+    height: i64
+    u0: f32
+    v0: f32
+    u1: f32
+    v1: f32
+
+# ============================================================================
+# TextureAtlas3D
+# ============================================================================
+
+class TextureAtlas3D:
+    atlas_texture: TextureHandle
+    rects: [AtlasRect]
+    ids: [i64]
+    atlas_width: i64
+    atlas_height: i64
+    cursor_x: i64
+    cursor_y: i64
+    row_height: i64
+
+# ============================================================================
+# Constructors
+# ============================================================================
+
+fn atlas_new(backend: RenderBackend3D, width: i64, height: i64) -> TextureAtlas3D:
+    """Create a new atlas backed by a GPU texture of the given dimensions."""
+    val tex = backend.create_texture(width, height, TextureFormat3D.Rgba8Unorm)
+    TextureAtlas3D(
+        atlas_texture: tex,
+        rects: [],
+        ids: [],
+        atlas_width: width,
+        atlas_height: height,
+        cursor_x: 0,
+        cursor_y: 0,
+        row_height: 0
+    )
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn atlas_max_i64(a: i64, b: i64) -> i64:
+    if a > b:
+        return a
+    b
+
+# ============================================================================
+# Pack
+# ============================================================================
+
+fn atlas_pack(atlas: TextureAtlas3D, backend: RenderBackend3D, id: i64, data: [u8], w: i64, h: i64) -> AtlasRect:
+    """Pack a sub-texture into the atlas and return its AtlasRect.
+
+    Uses shelf/row algorithm: when the current row is full, advance to a
+    new row. UV coordinates are computed from pixel positions divided by
+    atlas dimensions.
+    """
+    # Advance to next row if no horizontal space remains
+    if atlas.cursor_x + w > atlas.atlas_width:
+        atlas.cursor_y = atlas.cursor_y + atlas.row_height
+        atlas.cursor_x = 0
+        atlas.row_height = 0
+
+    val px = atlas.cursor_x
+    val py = atlas.cursor_y
+
+    # Upload sub-region data to the atlas texture
+    backend.upload_texture(atlas.atlas_texture, data)
+
+    # Advance cursor
+    atlas.cursor_x = atlas.cursor_x + w
+    atlas.row_height = atlas_max_i64(atlas.row_height, h)
+
+    # Compute normalized UVs
+    val aw = atlas.atlas_width as f32
+    val ah = atlas.atlas_height as f32
+    val rect = AtlasRect(
+        x: px,
+        y: py,
+        width: w,
+        height: h,
+        u0: px as f32 / aw,
+        v0: py as f32 / ah,
+        u1: (px + w) as f32 / aw,
+        v1: (py + h) as f32 / ah
+    )
+
+    atlas.rects.push(rect)
+    atlas.ids.push(id)
+    rect
+
+# ============================================================================
+# Lookup
+# ============================================================================
+
+fn atlas_lookup(atlas: TextureAtlas3D, id: i64) -> AtlasRect:
+    """Look up an AtlasRect by id. Returns a zeroed rect if not found."""
+    var idx = 0
+    while idx < atlas.ids.len():
+        if atlas.ids[idx] == id:
+            return atlas.rects[idx]
+        idx = idx + 1
+    AtlasRect(x: 0, y: 0, width: 0, height: 0, u0: 0.0, v0: 0.0, u1: 0.0, v1: 0.0)

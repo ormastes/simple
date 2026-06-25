@@ -1,0 +1,165 @@
+# Target Spec Matching
+#
+# Resolves target-qualified `asm match` / `asm assert` specs against the
+# active build target. Used by MIR lowering (mir_lowering_part2_part3.spl)
+# to pick the correct inline-asm arm and to check exhaustiveness.
+#
+# Behavior is specified by test/01_unit/compiler/target_spec_spec.spl.
+
+# Result of matching a single target spec against the current target.
+enum MatchResult:
+    Matched                       # Spec applies to the current target
+    MatchedWithNote(text)         # Matches, but emit an advisory note (~= version)
+    NotMatched                    # Spec does not apply
+
+# Canonical architecture name, applying common aliases.
+fn normalize_arch(arch: text) -> text:
+    """Normalize architecture aliases to their canonical name."""
+    if arch == "amd64":
+        return "x86_64"
+    if arch == "x64":
+        return "x86_64"
+    if arch == "arm64":
+        return "aarch64"
+    arch
+
+# All architectures the compiler can target — used for exhaustiveness checks.
+fn all_target_archs() -> [text]:
+    """Return the canonical list of all supported target architectures."""
+    ["x86_64", "x86", "aarch64", "arm", "riscv32", "riscv64", "wasm32", "wasm64", "avr", "mcs51", "msp430"]
+
+# True if any arch in `specs` (after normalization) equals the current arch.
+fn _arch_in_group(specs: [text], target_arch: text) -> bool:
+    val target = normalize_arch(target_arch)
+    for s in specs:
+        if normalize_arch(s) == target:
+            return true
+    false
+
+# Evaluate a single version constraint (op, value) against the actual version.
+# Returns "match", "note", or "fail".
+fn _eval_version_constraint(op: text, value: i64, actual: i64) -> text:
+    if op == ">=":
+        if actual >= value:
+            return "match"
+        return "fail"
+    if op == "<=":
+        if actual <= value:
+            return "match"
+        return "fail"
+    if op == ">":
+        if actual > value:
+            return "match"
+        return "fail"
+    if op == "<":
+        if actual < value:
+            return "match"
+        return "fail"
+    if op == "==":
+        if actual == value:
+            return "match"
+        return "fail"
+    if op == "!=":
+        if actual != value:
+            return "match"
+        return "fail"
+    if op == "~=":
+        # Recommended version: matches anyway, but notes a mismatch.
+        if actual == value:
+            return "match"
+        return "note"
+    # Unknown operator: treat as satisfied.
+    "match"
+
+# Match a target spec against the active target.
+#
+# archs              : accepted architectures (pipe group); empty means any
+# has_os/os          : OS constraint; os == "_" is a wildcard
+# has_abi/abi        : ABI constraint
+# has_backend/backend: codegen backend constraint
+# ver_ops/ver_vals   : parallel arrays of version constraint ops and values
+# target_*           : the active build target
+fn match_target_spec(
+    archs: [text], has_os: bool, os: text, has_abi: bool, abi: text, has_backend: bool, backend: text,
+    ver_ops: [text], ver_vals: [i64],
+    target_arch: text, target_os: text, target_abi: text, target_backend: text,
+    target_backend_version: i64
+) -> MatchResult:
+    """Match a target spec against the active build target."""
+
+    # Architecture: empty list matches any; otherwise must contain target arch.
+    if archs.len() > 0:
+        if not _arch_in_group(archs, target_arch):
+            return MatchResult.NotMatched
+
+    # OS: omitted matches any; "_" wildcard matches any; else must equal.
+    if has_os:
+        if os != "_" and os != target_os:
+            return MatchResult.NotMatched
+
+    # ABI: omitted matches any; else must equal.
+    if has_abi:
+        if abi != "_" and abi != target_abi:
+            return MatchResult.NotMatched
+
+    # Backend: omitted matches any; else must equal.
+    if has_backend:
+        if backend != "_" and backend != target_backend:
+            return MatchResult.NotMatched
+
+    # Version constraints: all must pass; any ~= mismatch downgrades to a note.
+    var note_msg = ""
+    var have_note = false
+    var i = 0
+    while i < ver_ops.len():
+        val op = ver_ops[i]
+        val value = ver_vals[i]
+        val outcome = _eval_version_constraint(op, value, target_backend_version)
+        if outcome == "fail":
+            return MatchResult.NotMatched
+        if outcome == "note":
+            have_note = true
+            note_msg = "{target_backend} {target_backend_version} differs from recommended {value}"
+        i = i + 1
+
+    if have_note:
+        return MatchResult.MatchedWithNote(note_msg)
+    MatchResult.Matched
+
+# Exhaustiveness check for an `asm match` block.
+#
+# arms_archs       : per-arm accepted architectures (pipe group)
+# arms_is_wildcard : per-arm wildcard flag (case _)
+# all_archs        : the universe of architectures to cover
+#
+# Returns the list of architectures not covered by any arm. Empty when a
+# wildcard arm is present (a wildcard covers everything).
+fn check_exhaustiveness(arms_archs: [[text]], arms_is_wildcard: [bool], all_archs: [text]) -> [text]:
+    """Return architectures left uncovered by the asm match arms."""
+    # A wildcard arm covers every architecture.
+    # NOTE: compare `== true` explicitly — iterating a `[bool]` and testing the
+    # element for truthiness directly mis-evaluates `false` as truthy in the
+    # interpreter, so the explicit comparison is required for correctness.
+    var w = 0
+    while w < arms_is_wildcard.len():
+        if arms_is_wildcard[w] == true:
+            return []
+        w = w + 1
+
+    # Collect covered architectures (normalized).
+    var covered: [text] = []
+    for arm in arms_archs:
+        for a in arm:
+            covered.push(normalize_arch(a))
+
+    var missing: [text] = []
+    for arch in all_archs:
+        val canon = normalize_arch(arch)
+        var found = false
+        for c in covered:
+            if c == canon:
+                found = true
+                break
+        if not found:
+            missing.push(arch)
+    missing

@@ -1,0 +1,220 @@
+# doc_ops — HTML document operations for the html_ui toolchain.
+#
+# The html_parser_utils submodule SMFs expose no inspectable .spl source, so
+# this module implements a conservative text-based tokenizer. All operations
+# are designed to round-trip unrelated HTML content byte-identically.
+#
+# Exported API:
+#   html_parse_text(html_text) -> text          (identity; normalises line endings)
+#   html_serialize(dom_text)   -> text          (identity passthrough)
+#   used_tags(html_text)       -> [text]        (unique lowercase tag names present)
+#   list_elements(html_text)   -> [text]        (lines: "tag id=... class=...")
+#   add_element(html_text, parent, new_tag, id, inner_text) -> text
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+# Normalise line endings; treat the text as the opaque "DOM".
+fn html_parse_text(html_text: text) -> text:
+    html_text.replace("\r\n", "\n").replace("\r", "\n")
+
+# Serialise: passthrough (the text IS the serialised form).
+fn html_serialize(dom_text: text) -> text:
+    dom_text
+
+# Return unique lowercase tag names found in the document (sorted by first
+# occurrence, no duplicates).
+fn used_tags(html_text: text) -> [text]:
+    var tags: [text] = []
+    var pos = 0
+    val n = html_text.len()
+    while pos < n:
+        val lt = _find_char(html_text, "<", pos)
+        if lt < 0:
+            pos = n
+        else:
+            val after = lt + 1
+            if after >= n:
+                pos = n
+            else:
+                val ch = html_text.char_at(after)
+                if ch == "/" or ch == "!" or ch == "?":
+                    # closing, comment, or proc-instr — skip
+                    val gt = _find_char(html_text, ">", after)
+                    pos = if gt < 0: n else: gt + 1
+                else:
+                    val gt = _find_char(html_text, ">", after)
+                    val end = if gt < 0: n else: gt
+                    val fragment = html_text.slice(after, end)
+                    val tag = _extract_tag_name(fragment)
+                    if tag.len() > 0:
+                        if not _contains_text(tags, tag):
+                            tags = tags + [tag]
+                    pos = if gt < 0: n else: gt + 1
+    tags
+
+# Return one line per element: "tag id=X class=Y" (omits blank id/class).
+fn list_elements(html_text: text) -> [text]:
+    var lines: [text] = []
+    var pos = 0
+    val n = html_text.len()
+    while pos < n:
+        val lt = _find_char(html_text, "<", pos)
+        if lt < 0:
+            pos = n
+        else:
+            val after = lt + 1
+            if after >= n:
+                pos = n
+            else:
+                val ch = html_text.char_at(after)
+                if ch == "/" or ch == "!" or ch == "?":
+                    val gt = _find_char(html_text, ">", after)
+                    pos = if gt < 0: n else: gt + 1
+                else:
+                    val gt = _find_char(html_text, ">", after)
+                    val end = if gt < 0: n else: gt
+                    val fragment = html_text.slice(after, end)
+                    val tag = _extract_tag_name(fragment)
+                    if tag.len() > 0:
+                        val id_val = _attr_val(fragment, "id")
+                        val cls_val = _attr_val(fragment, "class")
+                        var line = tag
+                        if id_val.len() > 0:
+                            line = line + " id=" + id_val
+                        if cls_val.len() > 0:
+                            line = line + " class=" + cls_val
+                        lines = lines + [line]
+                    pos = if gt < 0: n else: gt + 1
+    lines
+
+# Append a child element inside the first occurrence of parent_tag (or <body>
+# if parent_tag is not found). Returns the modified HTML as text.
+fn add_element(html_text: text, parent_tag: text, new_tag: text, id: text, inner_text: text) -> text:
+    val target = if parent_tag.len() == 0: "body" else: parent_tag
+    # Build the new element string (no brace interpolation risk — pure concat)
+    var new_elem = "<" + new_tag
+    if id.len() > 0:
+        new_elem = new_elem + " id=" + "\"" + id + "\""
+    new_elem = new_elem + ">" + inner_text + "</" + new_tag + ">"
+    # Find opening tag of target
+    val open_tag = "<" + target
+    val pos = _index_of_str(html_text, open_tag, 0)
+    if pos < 0:
+        # Not found — fall back to body, or just append
+        val body_pos = _index_of_str(html_text, "<body", 0)
+        if body_pos < 0:
+            return html_text + "\n" + new_elem
+        else:
+            return _inject_before_close(html_text, "body", new_elem)
+    _inject_before_close(html_text, target, new_elem)
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+# Find closing tag </tag> and inject content before it.
+fn _inject_before_close(html: text, tag: text, content: text) -> text:
+    val close_tag = "</" + tag
+    val pos = _index_of_str(html, close_tag, 0)
+    if pos < 0:
+        html + "\n" + content
+    else:
+        html.slice(0, pos) + content + "\n" + html.slice(pos, html.len())
+
+# Extract lowercase tag name from a tag fragment (text between < and >
+# with the leading < removed). Stops at first space, /, or >.
+fn _extract_tag_name(fragment: text) -> text:
+    var end = 0
+    val n = fragment.len()
+    while end < n:
+        val c = fragment.char_at(end)
+        if c == " " or c == "/" or c == "\t" or c == "\n" or c == "\r":
+            return _to_lower(fragment.slice(0, end))
+        end = end + 1
+    _to_lower(fragment)
+
+# Get an attribute value by name from a tag fragment (text between < and >).
+fn _attr_val(fragment: text, attr_name: text) -> text:
+    val needle_dq = attr_name + "=" + "\""
+    val needle_sq = attr_name + "=" + "'"
+    val needle_uq = attr_name + "="
+    var pos = _index_of_str(fragment, needle_dq, 0)
+    if pos >= 0:
+        val start = pos + needle_dq.len()
+        val close = _index_of_str(fragment, "\"", start)
+        if close >= 0:
+            return fragment.slice(start, close)
+        return ""
+    pos = _index_of_str(fragment, needle_sq, 0)
+    if pos >= 0:
+        val start = pos + needle_sq.len()
+        val close = _index_of_str(fragment, "'", start)
+        if close >= 0:
+            return fragment.slice(start, close)
+        return ""
+    pos = _index_of_str(fragment, needle_uq, 0)
+    if pos >= 0:
+        val start = pos + needle_uq.len()
+        var end = start
+        val n = fragment.len()
+        while end < n:
+            val c = fragment.char_at(end)
+            if c == " " or c == ">" or c == "/":
+                return fragment.slice(start, end)
+            end = end + 1
+        return fragment.slice(start, end)
+    ""
+
+# Case-insensitive char-to-lower (ASCII only).
+fn _to_lower(s: text) -> text:
+    var out = ""
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val code = s.char_at(i) as i64
+        if code >= 65 and code <= 90:
+            out = out + (code + 32).chr()
+        else:
+            out = out + s.char_at(i)
+        i = i + 1
+    out
+
+# Find char c in s starting at pos. Returns -1 if not found.
+fn _find_char(s: text, c: text, pos: i64) -> i64:
+    val n = s.len()
+    var i = pos
+    while i < n:
+        if s.char_at(i) == c:
+            return i
+        i = i + 1
+    -1
+
+# Find needle in haystack from start_pos. Returns -1 if not found.
+fn _index_of_str(haystack: text, needle: text, start_pos: i64) -> i64:
+    val hlen = haystack.len()
+    val nlen = needle.len()
+    if nlen == 0:
+        return start_pos
+    var i = start_pos
+    while i <= hlen - nlen:
+        if haystack.slice(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    -1
+
+# Check if a text array contains value.
+fn _contains_text(arr: [text], value: text) -> bool:
+    var i = 0
+    while i < arr.len():
+        if arr[i] == value:
+            return true
+        i = i + 1
+    false
+
+export html_parse_text
+export html_serialize
+export used_tags
+export list_elements
+export add_element

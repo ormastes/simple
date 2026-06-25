@@ -1,0 +1,384 @@
+# Part 1 of src/compiler/50.mir/mir_lowering_part2.spl
+use compiler.mir.mir_lowering_part2.*
+# Part 2 of src/compiler/50.mir/mir_lowering.spl
+use compiler.mir.mir_lowering.*
+# MIR Lowering - HIR to MIR Transformation
+#
+# This module handles lowering from HIR (High-level IR) to MIR (Mid-level IR).
+# It converts:
+# - Nested expressions to SSA form
+# - Control flow to basic blocks
+# - Memory operations to explicit loads/stores
+# - Type system from HIR to MIR representation
+#
+# Split into:
+# - mir_lowering_types.spl: Struct definitions (MirLowering, MirError)
+# - mir_lowering.spl: Core coordinator, module/function/type lowering, asm/target (this file)
+# - mir_lowering_expr.spl: Expression lowering, operators, calls, literals
+# - mir_lowering_stmts.spl: Statement lowering, control flow (if/loop/for)
+# - mir_lowering_ml.spl: ML blocks, async/await, custom blocks
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
+use compiler.hir.hir.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
+use compiler.common.diagnostics.span.{Span}
+use compiler.blocks.value.BlockValue
+use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
+use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
+use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
+use compiler.core.types.{custom_primitive_underlying_type_tag_by_symbol}
+
+# Import struct definitions from types module
+use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+
+# Import split modules so their impl blocks are linked
+use compiler.mir.mir_lowering_expr.*
+use compiler.mir.mir_lowering_stmts.*
+use compiler.mir.mir_lowering_ml.*
+
+impl MirLowering:
+    static fn new(symbols: SymbolTable) -> MirLowering:
+        MirLowering(
+            builder: MirBuilder.new(),
+            symbols: symbols,
+            local_map: {},
+            loop_stack: [],
+            errors: [],
+            field_map: {},
+            bitfield_map: {},
+            current_has_vhdl_metadata: false
+        )
+
+    fn symbol_id_value(symbol: SymbolId) -> i64:
+        match symbol:
+            case SymbolId(id): id
+
+    fn hir_bitfield_fields(bitfield_def: HirBitfield) -> [HirBitfieldField]:
+        match bitfield_def:
+            case HirBitfield(_, _, _, fields, _, _, _, _, _, _):
+                fields
+
+    fn hir_module_function(module: HirModule, symbol: SymbolId) -> HirFunction:
+        module.functions[symbol]
+
+    fn hir_function_is_extern(fn_: HirFunction) -> bool:
+        match fn_:
+            case HirFunction(_, _, _, _, _, _, _, _, _, _, _, _, _, _, is_extern, _, _, _, _, _, _, _, _, _, _, _):
+                is_extern
+
+    me lower_bootstrap_stub_function(symbol: SymbolId, name: text) -> MirFunction:
+        print "[mir-lower] bootstrap-stub:start {name}"
+        val signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+        var bldr = self.builder
+        bldr.begin_function(symbol, name, signature, nil)
+        bldr.terminate_return(Some(mir_operand_const_int(0)))
+        val fn_result = bldr.end_function()
+        self.builder = bldr
+        print "[mir-lower] bootstrap-stub:done {name}"
+        fn_result
+
+    me lower_bootstrap_flat_function(symbol: SymbolId, name: text, body: HirBlock) -> MirFunction:
+        if name == "bootstrap_version":
+            print "[mir-lower] bootstrap-known:bootstrap_version"
+            val str_type = MirType(kind: MirTypeKind.Opaque("str"))
+            val signature = MirSignature(params: [], return_type: str_type, is_variadic: false)
+            var bldr_known = self.builder
+            bldr_known.begin_function(symbol, name, signature, nil)
+            val dest = bldr_known.new_temp(str_type)
+            bldr_known.emit_const(dest, MirConstValue.Str("0.9.8"), str_type)
+            bldr_known.terminate_return(Some(mir_operand_copy(dest)))
+            val fn_result = bldr_known.end_function()
+            self.builder = bldr_known
+            return fn_result
+
+        if name == "native_build_help":
+            print "[mir-lower] bootstrap-known:native_build_help"
+            val signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+            var bldr_known = self.builder
+            bldr_known.begin_function(symbol, name, signature, nil)
+            val result = bldr_known.emit_const_int(0)
+            bldr_known.terminate_return(Some(mir_operand_copy(result)))
+            val fn_result = bldr_known.end_function()
+            self.builder = bldr_known
+            return fn_result
+
+        print "[mir-lower] bootstrap-flat:start {name}"
+        self.local_map = {}
+        val signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+        var bldr = self.builder
+        bldr.begin_function(symbol, name, signature, nil)
+        self.builder = bldr
+        val result = self.lower_block(body)
+        var bldr2 = self.builder
+        if result.?:
+            bldr2.terminate_return(Some(mir_operand_copy(result.unwrap())))
+        else:
+            bldr2.terminate_return(Some(mir_operand_const_int(0)))
+        self.builder = bldr2
+        var bldr3 = self.builder
+        val fn_result = bldr3.end_function()
+        self.builder = bldr3
+        print "[mir-lower] bootstrap-flat:done {name}"
+        fn_result
+
+    fn asm_version_constraint_op(vc: AsmVersionConstraint) -> text:
+        vc.op
+
+    fn asm_version_constraint_value(vc: AsmVersionConstraint) -> i64:
+        vc.version
+
+    fn asm_target_spec_archs(spec: AsmTargetSpec) -> [text]:
+        spec.archs
+
+    fn asm_target_spec_has_os(spec: AsmTargetSpec) -> bool:
+        spec.has_os
+
+    fn asm_target_spec_os(spec: AsmTargetSpec) -> text:
+        spec.os
+
+    fn asm_target_spec_has_abi(spec: AsmTargetSpec) -> bool:
+        spec.has_abi
+
+    fn asm_target_spec_abi(spec: AsmTargetSpec) -> text:
+        spec.abi
+
+    fn asm_target_spec_has_backend(spec: AsmTargetSpec) -> bool:
+        spec.has_backend
+
+    fn asm_target_spec_backend(spec: AsmTargetSpec) -> text:
+        spec.backend
+
+    me lower_module(module: HirModule) -> MirModule:
+        """Lower HIR module to MIR."""
+        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        if bootstrap_debug:
+            print "[mir-lower] lower_module:start"
+        # Copy-modify-reassign: nested field mutations don't propagate in interpreter
+        var builder = self.builder
+        if bootstrap_debug:
+            print "[mir-lower] builder"
+        var builder_module = builder.module
+        if bootstrap_debug:
+            print "[mir-lower] builder-module"
+        if not bootstrap_debug:
+            builder_module.name = module.name
+        if bootstrap_debug:
+            print "[mir-lower] builder-name"
+        builder.module = builder_module
+        if bootstrap_debug:
+            print "[mir-lower] builder-assign"
+        self.builder = builder
+        if bootstrap_debug:
+            print "[mir-lower] builder-done"
+
+        if bootstrap_debug:
+            print "[mir-lower] fn-list:start"
+            _bootstrap_mir_functions = []
+            _bootstrap_mir_function_names = []
+            val bootstrap_function_count = 6
+            print "[mir-lower] functions:count {bootstrap_function_count}"
+            var bootstrap_fni = 0
+            while bootstrap_fni < bootstrap_function_count:
+                print "[mir-lower] function-index {bootstrap_fni}"
+                var fn_sym = SymbolId(id: 1)
+                if bootstrap_fni == 1:
+                    fn_sym = SymbolId(id: 2)
+                if bootstrap_fni == 2:
+                    fn_sym = SymbolId(id: 3)
+                if bootstrap_fni == 3:
+                    fn_sym = SymbolId(id: 4)
+                if bootstrap_fni == 4:
+                    fn_sym = SymbolId(id: 5)
+                if bootstrap_fni == 5:
+                    fn_sym = SymbolId(id: 6)
+                print "[mir-lower] function-symbol"
+                val fn_ = self.hir_module_function(module, fn_sym)
+                print "[mir-lower] function-loaded"
+                if not self.hir_function_is_extern(fn_):
+                    print "[mir-lower] function:start {fn_.name}"
+                    _bootstrap_mir_function_names.push(fn_.name)
+                    val mir_fn = self.lower_function(fn_)
+                    _bootstrap_mir_functions.push(mir_fn)
+                    var bldr = self.builder
+                    var bldr_module = bldr.module
+                    var functions = bldr_module.functions
+                    functions[mir_fn.symbol] = mir_fn
+                    bldr_module.functions = functions
+                    bldr.module = bldr_module
+                    self.builder = bldr
+                    print "[mir-lower] function:added"
+                bootstrap_fni = bootstrap_fni + 1
+            print "[mir-lower] lower_module:done"
+            return self.builder.module
+
+        # Build field map from struct and class definitions
+        # (use while loops - for-in broken in compiled native code)
+        val struct_keys = module.structs.keys()
+        var si = 0
+        while si < struct_keys.len():
+            val sym_id = struct_keys[si]
+            val struct_def = module.structs[sym_id]
+            var field_names: [text] = []
+            var fi = 0
+            while fi < struct_def.fields.len():
+                field_names.push(struct_def.fields[fi].name)
+                fi = fi + 1
+            self.field_map[self.symbol_id_value(sym_id)] = field_names
+            si = si + 1
+
+        val class_keys = module.classes.keys()
+        var ci = 0
+        while ci < class_keys.len():
+            val sym_id = class_keys[ci]
+            val class_def = module.classes[sym_id]
+            var field_names: [text] = []
+            var fi = 0
+            while fi < class_def.fields.len():
+                field_names.push(class_def.fields[fi].name)
+                fi = fi + 1
+            self.field_map[self.symbol_id_value(sym_id)] = field_names
+            ci = ci + 1
+
+        val bitfield_keys = module.bitfields.keys()
+        var bi = 0
+        while bi < bitfield_keys.len():
+            val sym_id = bitfield_keys[bi]
+            val bitfield_def = module.bitfields[sym_id]
+            self.bitfield_map[self.symbol_id_value(sym_id)] = self.hir_bitfield_fields(bitfield_def)
+            bi = bi + 1
+
+        # Lower type definitions so headers/export wrappers can consume real MIR types.
+        val struct_type_keys = module.structs.keys()
+        var sti = 0
+        while sti < struct_type_keys.len():
+            val sym_id = struct_type_keys[sti]
+            self.lower_struct_type(module.structs[sym_id])
+            sti = sti + 1
+
+        val class_type_keys = module.classes.keys()
+        var cti = 0
+        while cti < class_type_keys.len():
+            val sym_id = class_type_keys[cti]
+            self.lower_class_type(module.classes[sym_id])
+            cti = cti + 1
+
+        # Lower functions (skip extern declarations - they have no body)
+        val fn_keys = module.functions.keys()
+        if bootstrap_debug:
+            print "[mir-lower] function-keys"
+        var fni = 0
+        while fni < fn_keys.len():
+            val fn_sym = fn_keys[fni]
+            val fn_ = self.hir_module_function(module, fn_sym)
+            if self.hir_function_is_extern(fn_):
+                fni = fni + 1
+                # skip extern functions
+            else:
+                if bootstrap_debug:
+                    print "[mir-lower] function:start"
+                val mir_fn = self.lower_function(fn_)
+                # Copy-modify-reassign: nested field mutations don't propagate in the
+                # bootstrap interpreter, so update builder.module.functions explicitly.
+                var bldr = self.builder
+                var bldr_module = bldr.module
+                var functions = bldr_module.functions
+                functions[mir_fn.symbol] = mir_fn
+                bldr_module.functions = functions
+                bldr.module = bldr_module
+                self.builder = bldr
+                if bootstrap_debug:
+                    print "[mir-lower] function:added"
+                fni = fni + 1
+
+        # Lower constants
+        val const_vals = module.constants.values()
+        var coni = 0
+        while coni < const_vals.len():
+            self.lower_const(const_vals[coni])
+            coni = coni + 1
+
+        if bootstrap_debug:
+            print "[mir-lower] lower_module:done"
+        self.builder.module
+
+    me lower_struct_type(struct_def: HirStruct):
+        """Lower a HIR struct definition into MIR type metadata."""
+        val layout_attr = if struct_def.has_layout_attr:
+            struct_def.layout_attr
+        else:
+            layoutattr_default_()
+        val layout = compute_struct_layout(struct_def.fields, layout_attr)
+
+        var fields: [MirFieldDef] = []
+        var fi = 0
+        while fi < struct_def.fields.len():
+            val hir_field = struct_def.fields[fi]
+            val field_layout: FieldLayout = layout.fields[fi]
+            val field_offset: i64 = field_layout.offset
+            fields.push(MirFieldDef(
+                name: hir_field.name,
+                type_: self.lower_type(hir_field.type_),
+                offset: field_offset,
+                has_bits_attr: hir_field.has_bits_attr,
+                bits_width: hir_field.bits_width
+            ))
+            fi = fi + 1
+
+        var bldr = self.builder
+        var module = bldr.module
+        var types = module.types
+        types[struct_def.symbol] = MirTypeDef(
+            symbol: struct_def.symbol,
+            name: struct_def.name,
+            kind: MirTypeDefKind.Struct(fields),
+            is_export_c: false,
+            export_name: ""
+        )
+        module.types = types
+        bldr.module = module
+        self.builder = bldr
+
+    me lower_class_type(class_def: HirClass):
+        """Lower a HIR class definition into MIR type metadata."""
+        val layout_attr = if class_def.has_layout_attr:
+            class_def.layout_attr
+        else:
+            layoutattr_default_()
+        val layout = compute_struct_layout(class_def.fields, layout_attr)
+
+        var fields: [MirFieldDef] = []
+        var fi = 0
+        while fi < class_def.fields.len():
+            val hir_field = class_def.fields[fi]
+            val field_layout: FieldLayout = layout.fields[fi]
+            val field_offset: i64 = field_layout.offset
+            fields.push(MirFieldDef(
+                name: hir_field.name,
+                type_: self.lower_type(hir_field.type_),
+                offset: field_offset,
+                has_bits_attr: hir_field.has_bits_attr,
+                bits_width: hir_field.bits_width
+            ))
+            fi = fi + 1
+
+        var is_export_c = false
+        var export_name = ""
+        if class_def.has_export_attr:
+            is_export_c = class_def.export_attr.is_export_c
+            export_name = class_def.export_attr.export_name
+
+        var bldr = self.builder
+        var module = bldr.module
+        var types = module.types
+        types[class_def.symbol] = MirTypeDef(
+            symbol: class_def.symbol,
+            name: class_def.name,
+            kind: MirTypeDefKind.Struct(fields),
+            is_export_c: is_export_c,
+            export_name: export_name
+        )
+        module.types = types
+        bldr.module = module
+        self.builder = bldr

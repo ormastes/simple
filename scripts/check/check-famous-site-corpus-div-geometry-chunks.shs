@@ -1,0 +1,145 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/famous_site_corpus_div_geometry_chunks}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/famous_site_corpus_div_geometry_chunks_$(date -u +%F).md}"
+SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+CHUNK_SIZE="${FAMOUS_SITE_CORPUS_DIV_GEOMETRY_CHUNK_SIZE:-6}"
+WIDTH="${FAMOUS_SITE_CORPUS_DIV_GEOMETRY_WIDTH:-160}"
+HEIGHT="${FAMOUS_SITE_CORPUS_DIV_GEOMETRY_HEIGHT:-120}"
+
+SUMMARY="$BUILD_DIR/summary.env"
+ROWS="$BUILD_DIR/rows.md"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$SUMMARY" "$ROWS" "$REPORT_PATH"
+
+fail_unavailable() {
+    reason="$1"
+    {
+        echo "status=unavailable"
+        echo "reason=$reason"
+        echo "chunk_count=0"
+        echo "pass_count=0"
+        echo "fail_count=0"
+        echo "blur_or_tolerance_used=false"
+    } >"$SUMMARY"
+    {
+        echo "# Famous-Site Corpus Div Geometry Chunk Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+        echo "- blur/tolerance used: false"
+    } >"$REPORT_PATH"
+    cat "$SUMMARY"
+    exit 1
+}
+
+test -x "$SIMPLE_BIN" || fail_unavailable "simple-runtime-missing"
+if [ "$CHUNK_SIZE" -le 0 ]; then
+    fail_unavailable "invalid-chunk-size"
+fi
+
+TOTAL="$(find test/09_baselines/famous_site_corpus -name chrome_metrics.json | wc -l | tr -d ' ')"
+if [ "$TOTAL" = "0" ]; then
+    fail_unavailable "no-corpus-metrics"
+fi
+
+{
+    echo "| Offset | Limit | Expected | Status | Chunk report | Log |"
+    echo "|-------:|------:|---------:|--------|--------------|-----|"
+} >"$ROWS"
+
+offset=0
+chunk_count=0
+pass_count=0
+fail_count=0
+
+while [ "$offset" -lt "$TOTAL" ]; do
+    remaining=$((TOTAL - offset))
+    limit="$CHUNK_SIZE"
+    if [ "$remaining" -lt "$limit" ]; then
+        limit="$remaining"
+    fi
+    chunk_count=$((chunk_count + 1))
+    chunk_report="$BUILD_DIR/chunk_${offset}_${limit}.sdn"
+    chunk_log="$BUILD_DIR/chunk_${offset}_${limit}.log"
+
+    set +e
+    "$SIMPLE_BIN" run src/app/wm_compare/site_corpus_div_geometry_summary_cli.spl \
+        "$offset" "$limit" "$WIDTH" "$HEIGHT" "$chunk_report" "$limit" \
+        >"$chunk_log" 2>&1
+    code=$?
+    set -e
+
+    status="$(sed -n 's/^status=//p' "$chunk_log" | tail -n 1)"
+    if [ "$status" = "" ]; then
+        status=fail
+    fi
+    if [ "$code" -ne 0 ] && [ "$status" = "pass" ]; then
+        status=fail
+    fi
+
+    if [ "$status" = "pass" ]; then
+        pass_count=$((pass_count + 1))
+    else
+        fail_count=$((fail_count + 1))
+    fi
+
+    echo "| $offset | $limit | $limit | $status | \`$chunk_report\` | \`$chunk_log\` |" >>"$ROWS"
+    offset=$((offset + limit))
+done
+
+overall=pass
+if [ "$fail_count" -ne 0 ]; then
+    overall=fail
+fi
+
+{
+    echo "status=$overall"
+    echo "corpus_count=$TOTAL"
+    echo "chunk_size=$CHUNK_SIZE"
+    echo "chunk_count=$chunk_count"
+    echo "pass_count=$pass_count"
+    echo "fail_count=$fail_count"
+    echo "width=$WIDTH"
+    echo "height=$HEIGHT"
+    echo "build_dir=$BUILD_DIR"
+    echo "report_path=$REPORT_PATH"
+    echo "blur_or_tolerance_used=false"
+} >"$SUMMARY"
+
+{
+    echo "# Famous-Site Corpus Div Geometry Chunk Evidence"
+    echo
+    echo "- status: $overall"
+    echo "- corpus rows: $TOTAL"
+    echo "- chunk size: $CHUNK_SIZE"
+    echo "- chunks: $chunk_count"
+    echo "- pass count: $pass_count"
+    echo "- fail count: $fail_count"
+    echo "- viewport: ${WIDTH}x${HEIGHT}"
+    echo "- build dir: \`$BUILD_DIR\`"
+    echo "- blur/tolerance used: false"
+    echo
+    echo "This wrapper compares stored Chrome metrics against Pure Simple"
+    echo "Draw IR for the deterministic famous-site corpus div box in"
+    echo "bounded chunks. It checks exact border-box geometry, background"
+    echo "color, and fixture text through structural reports. It does not"
+    echo "use blur, downscaling, pixel tolerance, copied Chromium pixels, or"
+    echo "text antialiasing normalization."
+    echo
+    echo "The wrapper intentionally runs each chunk in a separate Simple"
+    echo "process because the single-process aggregate path is tracked as"
+    echo "\`doc/08_tracking/bug/famous_site_corpus_div_geometry_unbounded_summary_segfault_2026-06-11.md\`."
+    echo
+    echo "## Chunks"
+    echo
+    cat "$ROWS"
+} >"$REPORT_PATH"
+
+cat "$SUMMARY"
+[ "$overall" = "pass" ]

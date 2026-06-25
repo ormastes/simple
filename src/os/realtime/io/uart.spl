@@ -1,0 +1,79 @@
+# @platform: baremetal
+#
+# MMIO UART (16550-compatible) impl of ExternalIO.
+
+use std.baremetal.interrupt (mem_read_u8, mem_write_u8, mem_read_u32, mem_write_u32)
+
+val UART_RBR: u32 = 0x00  # Receive Buffer Register
+val UART_THR: u32 = 0x00  # Transmit Holding Register
+val UART_IER: u32 = 0x01  # Interrupt Enable Register
+val UART_FCR: u32 = 0x02  # FIFO Control Register
+val UART_LCR: u32 = 0x03  # Line Control Register
+val UART_MCR: u32 = 0x04  # Modem Control Register
+val UART_LSR: u32 = 0x05  # Line Status Register
+
+val LSR_DR: u8 = 0x01     # Data Ready
+val LSR_THRE: u8 = 0x20   # Transmit Holding Register Empty
+
+class UartIO:
+    """16550 UART ExternalIO implementation."""
+    base_addr: u32
+
+    static fn new(base_addr: u32) -> UartIO:
+        UartIO(base_addr: base_addr)
+
+    me init():
+        """Initialize UART: 8N1, FIFO enabled."""
+        mem_write_u8(self.base_addr + UART_IER, 0u8)
+        mem_write_u8(self.base_addr + UART_FCR, 0x07u8)
+        mem_write_u8(self.base_addr + UART_LCR, 0x03u8)
+        mem_write_u8(self.base_addr + UART_MCR, 0x00u8)
+
+    fn write(buf_ptr: u64, len: i32) -> i32:
+        """Write bytes to UART TX."""
+        var i = 0
+        while i < len:
+            while (mem_read_u8(self.base_addr + UART_LSR) & LSR_THRE) == 0u8:
+                pass_do_nothing
+            mem_write_u8(self.base_addr + UART_THR, (buf_ptr >> (i * 8)) & 0xFFu8)
+            i = i + 1
+        len
+
+    fn read(buf_ptr: u64, len: i32) -> i32:
+        """Read bytes from UART RX (non-blocking, returns available)."""
+        var i = 0
+        while i < len:
+            if (mem_read_u8(self.base_addr + UART_LSR) & LSR_DR) == 0u8:
+                return i
+            val byte = mem_read_u8(self.base_addr + UART_RBR)
+            i = i + 1
+        i
+
+    fn available() -> i32:
+        """Check if data is available to read."""
+        if (mem_read_u8(self.base_addr + UART_LSR) & LSR_DR) != 0u8:
+            return 1
+        0
+
+    fn flush():
+        """Wait until TX FIFO is empty."""
+        while (mem_read_u8(self.base_addr + UART_LSR) & LSR_THRE) == 0u8:
+            pass_do_nothing
+
+fn uart_write_char(uart: UartIO, ch: u8):
+    """Write a single character."""
+    while (mem_read_u8(uart.base_addr + UART_LSR) & LSR_THRE) == 0u8:
+        pass_do_nothing
+    mem_write_u8(uart.base_addr + UART_THR, ch)
+
+fn uart_write_text(uart: UartIO, msg: text):
+    """Write a text string character by character."""
+    var i = 0
+    while i < msg.length():
+        uart_write_char(uart, msg.char_at(i).to_u8())
+        i = i + 1
+
+# Default UART base addresses per platform
+val UART_BASE_ARM: u32 = 0x4000C000      # LM3S6965 UART0
+val UART_BASE_RISCV: u32 = 0x10000000    # QEMU virt ns16550
+val UART_BASE_X86_64: u32 = 0x3F8        # COM1 (I/O port, not MMIO)

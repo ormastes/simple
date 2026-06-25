@@ -1,0 +1,421 @@
+@allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
+# Regex NFA: Thompson NFA instructions, compilation, and quantifier wrappers.
+# Pure Simple — no SFFI, no extern, no Rust
+
+# ---------------------------------------------------------------------------
+# NFA instruction representation
+# ---------------------------------------------------------------------------
+# kind constants:
+#   0 = Literal         (ch field)
+#   1 = Dot
+#   2 = CharClass       (chars field, negated field)
+#   3 = Split           (out1, out2)
+#   4 = Jump            (out1)
+#   5 = Match
+#   6 = GroupStart       (group_id)
+#   7 = GroupEnd         (group_id)
+#   8 = AnchorStart      (^)
+#   9 = AnchorEnd        ($)
+
+struct _NfaOp:
+    kind: i64
+    ch: text
+    chars: text
+    negated: bool
+    out1: i64
+    out2: i64
+    group_id: i64
+
+fn _op_literal(ch: text) -> _NfaOp:
+    _NfaOp(kind: 0, ch: ch, chars: "", negated: false, out1: 0, out2: 0, group_id: 0)
+
+fn _op_dot() -> _NfaOp:
+    _NfaOp(kind: 1, ch: "", chars: "", negated: false, out1: 0, out2: 0, group_id: 0)
+
+fn _op_char_class(chars: text, negated: bool) -> _NfaOp:
+    _NfaOp(kind: 2, ch: "", chars: chars, negated: negated, out1: 0, out2: 0, group_id: 0)
+
+fn _op_split(out1: i64, out2: i64) -> _NfaOp:
+    _NfaOp(kind: 3, ch: "", chars: "", negated: false, out1: out1, out2: out2, group_id: 0)
+
+fn _op_jump(target: i64) -> _NfaOp:
+    _NfaOp(kind: 4, ch: "", chars: "", negated: false, out1: target, out2: 0, group_id: 0)
+
+fn _op_match() -> _NfaOp:
+    _NfaOp(kind: 5, ch: "", chars: "", negated: false, out1: 0, out2: 0, group_id: 0)
+
+fn _op_group_start(gid: i64) -> _NfaOp:
+    _NfaOp(kind: 6, ch: "", chars: "", negated: false, out1: 0, out2: 0, group_id: gid)
+
+fn _op_group_end(gid: i64) -> _NfaOp:
+    _NfaOp(kind: 7, ch: "", chars: "", negated: false, out1: 0, out2: 0, group_id: gid)
+
+fn _op_anchor_start() -> _NfaOp:
+    _NfaOp(kind: 8, ch: "", chars: "", negated: false, out1: 0, out2: 0, group_id: 0)
+
+fn _op_anchor_end() -> _NfaOp:
+    _NfaOp(kind: 9, ch: "", chars: "", negated: false, out1: 0, out2: 0, group_id: 0)
+
+# ---------------------------------------------------------------------------
+# Character classification helpers
+# ---------------------------------------------------------------------------
+
+fn _shorthand_chars(code: text) -> text:
+    if code == "d":
+        return "0123456789"
+    if code == "w":
+        return "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+    if code == "s":
+        return " \t\n\r"
+    return ""
+
+fn _char_in_class(c: text, class_chars: text, negated: bool) -> bool:
+    # class_chars is a set of individual characters to match against
+    var i = 0
+    while i < class_chars.len():
+        val cc = class_chars[i:i+1]
+        if cc == c:
+            return not negated
+        i = i + 1
+    return negated
+
+# ---------------------------------------------------------------------------
+# Regex compiler: pattern text -> [_NfaOp]
+# ---------------------------------------------------------------------------
+
+# Parse a single atom (literal, dot, class, group, anchor, escape)
+fn _parse_atom(pattern: text, pos: i64, depth: i64) -> ([_NfaOp], i64):
+    val c = pattern[pos:pos+1]
+
+    if c == "(":
+        return _parse_group(pattern: pattern, pos: pos, depth: depth)
+    if c == "[":
+        return _parse_char_class(pattern: pattern, pos: pos)
+    if c == ".":
+        return ([_op_dot()], pos + 1)
+    if c == "^":
+        return ([_op_anchor_start()], pos + 1)
+    if c == "$":
+        return ([_op_anchor_end()], pos + 1)
+    if c == "\\":
+        return _parse_escape(pattern: pattern, pos: pos)
+
+    # Plain literal
+    return ([_op_literal(ch: c)], pos + 1)
+
+# Parse an escape sequence
+fn _parse_escape(pattern: text, pos: i64) -> ([_NfaOp], i64):
+    if pos + 1 >= pattern.len():
+        return ([_op_literal(ch: "\\")], pos + 1)
+
+    val next = pattern[pos+1:pos+2]
+    if next == "d":
+        return ([_op_char_class(chars: _shorthand_chars("d"), negated: false)], pos + 2)
+    if next == "D":
+        return ([_op_char_class(chars: _shorthand_chars("d"), negated: true)], pos + 2)
+    if next == "w":
+        return ([_op_char_class(chars: _shorthand_chars("w"), negated: false)], pos + 2)
+    if next == "W":
+        return ([_op_char_class(chars: _shorthand_chars("w"), negated: true)], pos + 2)
+    if next == "s":
+        return ([_op_char_class(chars: _shorthand_chars("s"), negated: false)], pos + 2)
+    if next == "S":
+        return ([_op_char_class(chars: _shorthand_chars("s"), negated: true)], pos + 2)
+    # Escaped special char treated as literal
+    return ([_op_literal(ch: next)], pos + 2)
+
+# Parse a character class [...]
+fn _parse_char_class(pattern: text, pos: i64) -> ([_NfaOp], i64):
+    var cur = pos + 1  # skip [
+    var negated = false
+    var chars_parts: [text] = []
+
+    if cur < pattern.len() and pattern[cur:cur+1] == "^":
+        negated = true
+        cur = cur + 1
+
+    while cur < pattern.len():
+        val cc = pattern[cur:cur+1]
+        if cc == "]":
+            cur = cur + 1
+            break
+
+        if cc == "\\":
+            # Escape inside class
+            if cur + 1 < pattern.len():
+                val esc = pattern[cur+1:cur+2]
+                if esc == "d":
+                    chars_parts.push(_shorthand_chars("d"))
+                else if esc == "D":
+                    # For negated shorthand inside class, expand all non-digit printable ASCII
+                    chars_parts.push(_shorthand_chars("d"))
+                    # This is approximate; handle via negation logic instead
+                else if esc == "w":
+                    chars_parts.push(_shorthand_chars("w"))
+                else if esc == "s":
+                    chars_parts.push(_shorthand_chars("s"))
+                else:
+                    chars_parts.push(esc)
+                cur = cur + 2
+            else:
+                chars_parts.push(cc)
+                cur = cur + 1
+        else:
+            # Check for range a-z
+            if (cur + 2 < pattern.len() and
+                pattern[cur+1:cur+2] == "-" and
+                pattern[cur+2:cur+3] != "]"):
+                val range_end = pattern[cur+2:cur+3]
+                val start_code = cc as i64
+                val end_code = range_end as i64
+                var rc = start_code
+                while rc <= end_code:
+                    # Build character from code point
+                    chars_parts.push(_chr(rc))
+                    rc = rc + 1
+                cur = cur + 3
+            else:
+                chars_parts.push(cc)
+                cur = cur + 1
+
+    val all_chars = chars_parts.join("")
+    return ([_op_char_class(chars: all_chars, negated: negated)], cur)
+
+# Parse a group (...)
+fn _parse_group(pattern: text, pos: i64, depth: i64) -> ([_NfaOp], i64):
+    # pos points at (
+    var cur = pos + 1
+    # Allocate group id from parsing context
+    # For simplicity, count opening parens before this position
+    var gid = _count_open_parens(pattern: pattern, up_to: pos) + 1
+
+    var result: [_NfaOp] = []
+    result.push(_op_group_start(gid: gid))
+
+    # Compile inner expression at base=1 to account for the GroupStart op
+    # that we prepended (so inner Split/Jump offsets are correct within
+    # this fragment which starts at GroupStart=0, inner content at 1)
+    val inner = _nfa_compile_expr(pattern: pattern, pos: cur, depth: depth + 1, base: 1)
+    var inner_ops = inner.0
+    cur = inner.1
+
+    var ii = 0
+    while ii < inner_ops.len():
+        result.push(inner_ops[ii])
+        ii = ii + 1
+
+    result.push(_op_group_end(gid: gid))
+
+    # Skip closing )
+    if cur < pattern.len() and pattern[cur:cur+1] == ")":
+        cur = cur + 1
+
+    return (result, cur)
+
+# Count opening parens before position
+fn _count_open_parens(pattern: text, up_to: i64) -> i64:
+    var count = 0
+    var i = 0
+    while i < up_to:
+        val c = pattern[i:i+1]
+        if c == "(":
+            count = count + 1
+        else if c == "\\":
+            i = i + 1  # skip escaped char
+        i = i + 1
+    return count
+
+# Convert integer code point to single-char text
+fn _chr(code: i64) -> text:
+    # Use string building - for ASCII range
+    var i = 0
+    var result = ""
+    val ref = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 \t\n\r!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+    while i < ref.len():
+        val c = ref[i:i+1]
+        if c as i64 == code:
+            return c
+        i = i + 1
+    return ""
+
+# ---------------------------------------------------------------------------
+# Quantifier wrappers — emit fragment-relative (0-based) offsets.
+# _nfa_compile_seq rebases them to absolute program offsets on append.
+# ---------------------------------------------------------------------------
+
+# star (greedy): [split(1, alen+2)] [atom...] [jump(0)]
+fn _wrap_star(atom: [_NfaOp]) -> [_NfaOp]:
+    val alen = atom.len()
+    var result: [_NfaOp] = []
+    result.push(_op_split(out1: 1, out2: alen + 2))
+    var i = 0
+    while i < alen:
+        result.push(atom[i])
+        i = i + 1
+    result.push(_op_jump(target: 0))
+    return result
+
+# plus (greedy): [atom...] [split(0, alen+1)]
+fn _wrap_plus(atom: [_NfaOp]) -> [_NfaOp]:
+    val alen = atom.len()
+    var result: [_NfaOp] = []
+    var i = 0
+    while i < alen:
+        result.push(atom[i])
+        i = i + 1
+    result.push(_op_split(out1: 0, out2: alen + 1))
+    return result
+
+# question (greedy): [split(1, alen+1)] [atom...]
+fn _wrap_question(atom: [_NfaOp]) -> [_NfaOp]:
+    val alen = atom.len()
+    var result: [_NfaOp] = []
+    result.push(_op_split(out1: 1, out2: alen + 1))
+    var i = 0
+    while i < alen:
+        result.push(atom[i])
+        i = i + 1
+    return result
+
+# ---------------------------------------------------------------------------
+# NFA compilation — offset-aware
+# ---------------------------------------------------------------------------
+
+# Top-level compile
+fn _nfa_compile(pattern: text) -> [_NfaOp]:
+    val result = _nfa_compile_expr(pattern: pattern, pos: 0, depth: 0, base: 0)
+    var ops = result.0
+    ops.push(_op_match())
+    return ops
+
+fn _nfa_compile_expr(pattern: text, pos: i64, depth: i64, base: i64) -> ([_NfaOp], i64):
+    var branches: [[_NfaOp]] = []
+    val first = _nfa_compile_seq(pattern: pattern, pos: pos, depth: depth, base: base)
+    branches.push(first.0)
+    var cur_pos = first.1
+
+    while cur_pos < pattern.len():
+        val c = pattern[cur_pos:cur_pos+1]
+        if c == "|":
+            cur_pos = cur_pos + 1
+            # base doesn't matter for branches yet; we'll rebase
+            val branch = _nfa_compile_seq(pattern: pattern, pos: cur_pos, depth: depth, base: 0)
+            branches.push(branch.0)
+            cur_pos = branch.1
+        else:
+            break
+
+    if branches.len() == 1:
+        return (branches[0], cur_pos)
+
+    # Build alternation with absolute offsets
+    var branch_sizes: [i64] = []
+    var total_branch_code = 0
+    var bi = 0
+    while bi < branches.len():
+        branch_sizes.push(branches[bi].len())
+        total_branch_code = total_branch_code + branches[bi].len()
+        bi = bi + 1
+
+    val num_splits = branches.len() - 1
+    val branches_start = base + num_splits
+
+    var branch_offsets: [i64] = []
+    var offset = branches_start
+    var bj = 0
+    while bj < branches.len():
+        branch_offsets.push(offset)
+        offset = offset + branch_sizes[bj]
+        if bj < branches.len() - 1:
+            offset = offset + 1  # jump
+        bj = bj + 1
+    val end_offset = offset
+
+    var result: [_NfaOp] = []
+
+    # Emit splits
+    var si = 0
+    while si < num_splits:
+        val left_target = branch_offsets[si]
+        var right_target = base + si + 1
+        if si == num_splits - 1:
+            right_target = branch_offsets[si + 1]
+        result.push(_op_split(out1: left_target, out2: right_target))
+        si = si + 1
+
+    # Emit branches with jumps, rebasing internal offsets
+    var bk = 0
+    while bk < branches.len():
+        val branch = branches[bk]
+        val branch_base = branch_offsets[bk]
+        var bi2 = 0
+        while bi2 < branch.len():
+            var op = branch[bi2]
+            if op.kind == 3 or op.kind == 4:
+                # Rebase: op offsets are 0-based within the branch
+                op = _rebase_op(op: op, old_base: 0, new_base: branch_base)
+            result.push(op)
+            bi2 = bi2 + 1
+        if bk < branches.len() - 1:
+            result.push(_op_jump(target: end_offset))
+        bk = bk + 1
+
+    return (result, cur_pos)
+
+fn _rebase_op(op: _NfaOp, old_base: i64, new_base: i64) -> _NfaOp:
+    val delta = new_base - old_base
+    if op.kind == 3:
+        return _op_split(out1: op.out1 + delta, out2: op.out2 + delta)
+    if op.kind == 4:
+        return _op_jump(target: op.out1 + delta)
+    return op
+
+fn _nfa_compile_seq(pattern: text, pos: i64, depth: i64, base: i64) -> ([_NfaOp], i64):
+    var ops: [_NfaOp] = []
+    var cur_pos = pos
+
+    while cur_pos < pattern.len():
+        val c = pattern[cur_pos:cur_pos+1]
+
+        if c == "|":
+            break
+        if c == ")":
+            if depth > 0:
+                break
+            ops.push(_op_literal(ch: c))
+            cur_pos = cur_pos + 1
+            continue
+
+        val atom_result = _parse_atom(pattern: pattern, pos: cur_pos, depth: depth)
+        var atom_ops = atom_result.0
+        cur_pos = atom_result.1
+
+        # Check for quantifier
+        if cur_pos < pattern.len():
+            val qc = pattern[cur_pos:cur_pos+1]
+            if qc == "*" or qc == "+" or qc == "?":
+                val current_base = base + ops.len()
+                atom_ops = _apply_quantifier(atom: atom_ops, quantifier: qc, frag_base: current_base)
+                cur_pos = cur_pos + 1
+
+        # Compute fragment base ONCE before appending any ops
+        val frag_insert_base = base + ops.len()
+        var ai = 0
+        while ai < atom_ops.len():
+            var op = atom_ops[ai]
+            # Rebase fragment-relative offsets to absolute
+            if op.kind == 3 or op.kind == 4:
+                op = _rebase_op(op: op, old_base: 0, new_base: frag_insert_base)
+            ops.push(op)
+            ai = ai + 1
+
+    return (ops, cur_pos)
+
+fn _apply_quantifier(atom: [_NfaOp], quantifier: text, frag_base: i64) -> [_NfaOp]:
+    if quantifier == "*":
+        return _wrap_star(atom)
+    if quantifier == "+":
+        return _wrap_plus(atom)
+    if quantifier == "?":
+        return _wrap_question(atom)
+    return atom

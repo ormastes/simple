@@ -1,0 +1,181 @@
+# Proof Unit Model
+#
+# A proof unit is the atomic unit of verification: one source symbol mapped
+# to one Lean module with a set of theorem obligations and a verification state.
+#
+# Proof units are file-level for v1 (one proof unit per source file with
+# @verify annotations). Symbol-level granularity is a follow-on milestone.
+
+use verification.state.{VerificationState, aggregate_states, StateCounts}
+
+# A single proof unit tracking source-to-Lean-to-state mapping
+class ProofUnit:
+    source_file: text                # Originating .spl file
+    source_symbol: text              # Primary symbol (fn/class name, or "*" for file-level)
+    lean_module: text                # Generated Lean module path (e.g., "Verification.MyModule")
+    lean_file: text                  # Filesystem path to generated .lean file
+    obligations: List<text>          # Theorem/obligation names in this unit
+    state: VerificationState         # Current verification state
+    fingerprint: text                # Content hash of (source + lean + deps + toolchain)
+    dependencies: List<text>         # Imported proof module paths
+    last_check: Option<text>         # ISO-8601 timestamp of last successful check
+    admitted_count: i32              # Number of sorry/admit obligations
+    trusted_count: i32               # Number of assume/trusted obligations
+
+    static fn create(source_file: text, source_symbol: text, lean_module: text, lean_file: text) -> ProofUnit:
+        ProofUnit(
+            source_file=source_file,
+            source_symbol=source_symbol,
+            lean_module=lean_module,
+            lean_file=lean_file,
+            obligations=[],
+            state=VerificationState.NotChecked,
+            fingerprint="",
+            dependencies=[],
+            last_check=nil,
+            admitted_count=0,
+            trusted_count=0
+        )
+
+    me with_obligations(obligations: List<text>) -> ProofUnit:
+        self.obligations = obligations
+        self
+
+    me with_state(state: VerificationState) -> ProofUnit:
+        self.state = state
+        self
+
+    me with_fingerprint(fingerprint: text) -> ProofUnit:
+        self.fingerprint = fingerprint
+        self
+
+    me with_dependencies(deps: List<text>) -> ProofUnit:
+        self.dependencies = deps
+        self
+
+    me with_last_check(timestamp: text) -> ProofUnit:
+        self.last_check = Some(timestamp)
+        self
+
+    me with_debt(admitted: i32, trusted: i32) -> ProofUnit:
+        self.admitted_count = admitted
+        self.trusted_count = trusted
+        self
+
+    # Mark this unit as stale (inputs changed since last check)
+    me mark_stale() -> ProofUnit:
+        self.state = VerificationState.Stale
+        self
+
+    # Compute state from obligation results
+    fn compute_state(self, proven: i32, failed: i32, admitted: i32, trusted: i32) -> VerificationState:
+        if failed > 0:
+            return VerificationState.Failed
+        if admitted > 0:
+            return VerificationState.Admitted
+        if trusted > 0:
+            return VerificationState.Trusted
+        if proven > 0:
+            return VerificationState.Verified
+        VerificationState.NotChecked
+
+    # Format as a single-line summary
+    fn format_summary(self) -> text:
+        val state_str = self.state.to_display()
+        val ob_count = self.obligations.len()
+        var debt = ""
+        if self.admitted_count > 0:
+            debt = debt + " ({self.admitted_count} sorry)"
+        if self.trusted_count > 0:
+            debt = debt + " ({self.trusted_count} assume)"
+        "{state_str}  {self.source_file}::{self.source_symbol}  [{ob_count} obligations]{debt}"
+
+    # Format as detailed multi-line output
+    fn format_detail(self) -> text:
+        var out = "Proof Unit: {self.source_file}::{self.source_symbol}\n"
+        out = out + "  State:       {self.state.to_display()}\n"
+        out = out + "  Lean module: {self.lean_module}\n"
+        out = out + "  Lean file:   {self.lean_file}\n"
+        out = out + "  Obligations: {self.obligations.len()}\n"
+        if self.admitted_count > 0:
+            out = out + "  Admitted:    {self.admitted_count}\n"
+        if self.trusted_count > 0:
+            out = out + "  Trusted:     {self.trusted_count}\n"
+        if self.dependencies.len() > 0:
+            out = out + "  Dependencies: {self.dependencies.join(\", \")}\n"
+        match self.last_check:
+            case Some(ts):
+                out = out + "  Last check:  {ts}\n"
+            case nil:
+                out = out + "  Last check:  never\n"
+        out = out + "  Fingerprint: {self.fingerprint}\n"
+        out
+
+# Collection of proof units for a project or scope
+class ProofUnitSet:
+    units: List<ProofUnit>
+
+    static fn empty() -> ProofUnitSet:
+        ProofUnitSet([])
+
+    me add(unit: ProofUnit) -> ProofUnitSet:
+        self.units = self.units + [unit]
+        self
+
+    # Find a proof unit by source file
+    fn find_by_source(self, source_file: text) -> Option<ProofUnit>:
+        for u in self.units:
+            if u.source_file == source_file:
+                return Some(u)
+        nil
+
+    # Find a proof unit by Lean module
+    fn find_by_lean_module(self, lean_module: text) -> Option<ProofUnit>:
+        for u in self.units:
+            if u.lean_module == lean_module:
+                return Some(u)
+        nil
+
+    # Get all units in a given state
+    fn filter_by_state(self, state: VerificationState) -> List<ProofUnit>:
+        var result: List<ProofUnit> = []
+        for u in self.units:
+            if u.state == state:
+                result = result + [u]
+        result
+
+    # Get aggregate state across all units
+    fn aggregate_state(self) -> VerificationState:
+        var states: List<VerificationState> = []
+        for u in self.units:
+            states = states + [u.state]
+        aggregate_states(states)
+
+    # Get state counts
+    fn state_counts(self) -> StateCounts:
+        var states: List<VerificationState> = []
+        for u in self.units:
+            states = states + [u.state]
+        StateCounts.from_states(states)
+
+    # Total obligation count across all units
+    fn total_obligations(self) -> i32:
+        var total = 0
+        for u in self.units:
+            total = total + u.obligations.len()
+        total
+
+    # Mark all units depending on a changed module as stale
+    me invalidate_dependents(changed_module: text) -> ProofUnitSet:
+        for i in range(self.units.len()):
+            val unit = self.units[i]
+            if unit.dependencies.contains(changed_module):
+                self.units[i] = unit.mark_stale()
+        self
+
+    # Format project-level summary
+    fn format_summary(self) -> text:
+        val counts = self.state_counts()
+        var out = "Verification Status: {counts.total()} proof units\n"
+        out = out + "  {counts.format()}\n"
+        out

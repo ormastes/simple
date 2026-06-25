@@ -1,0 +1,614 @@
+# DWARF Parser
+# Pure-Simple DWARF debug info parser implementing DebugInfoProvider.
+# Parses .debug_info, .debug_abbrev, .debug_line, .debug_str sections.
+# Supports DWARF v2-v4 in ELF and Mach-O binaries.
+
+use std.binary_io.{BinaryReader, ByteOrder}
+use std.debug.formats.debug_types.{
+    SourceLocation, DebugLineEntry, DebugFunction, DebugVariable,
+    DebugCompilationUnit, DebugFormatKind,
+}
+use std.debug.formats.debug_provider.{DebugInfoProvider}
+use std.debug.formats.dwarf_constants.{
+    DW_TAG_compile_unit, DW_TAG_subprogram, DW_TAG_variable,
+    DW_TAG_formal_parameter, DW_TAG_inlined_subroutine,
+    DW_AT_name, DW_AT_low_pc, DW_AT_high_pc, DW_AT_language,
+    DW_AT_comp_dir, DW_AT_stmt_list, DW_AT_linkage_name,
+    DW_AT_type, DW_AT_location, DW_AT_frame_base,
+    DW_FORM_addr, DW_FORM_data1, DW_FORM_data2, DW_FORM_data4,
+    DW_FORM_data8, DW_FORM_string, DW_FORM_strp, DW_FORM_udata,
+    DW_FORM_sdata, DW_FORM_flag, DW_FORM_flag_present,
+    DW_FORM_block1, DW_FORM_block2, DW_FORM_block4, DW_FORM_block,
+    DW_FORM_ref1, DW_FORM_ref2, DW_FORM_ref4, DW_FORM_ref8,
+    DW_FORM_ref_udata, DW_FORM_ref_addr, DW_FORM_sec_offset,
+    DW_FORM_exprloc, DW_FORM_indirect, DW_FORM_implicit_const,
+    DW_FORM_line_strp, DW_FORM_data16,
+}
+use std.debug.formats.dwarf_abbrev.{
+    DwarfAbbrevEntry, DwarfAbbrevTable, DwarfAttrSpec,
+    dwarf_parse_abbrev_table, dwarf_find_abbrev,
+    read_uleb128, read_sleb128,
+}
+use std.debug.formats.dwarf_line_program.{
+    DwarfLineHeader, dwarf_parse_line_header, dwarf_decode_line_program,
+}
+
+# ============================================================================
+# Section Locator Types
+# ============================================================================
+
+struct DwarfSections:
+    debug_info: [u8]
+    debug_abbrev: [u8]
+    debug_line: [u8]
+    debug_str: [u8]
+    debug_line_str: [u8]
+    addr_size: i64
+
+# ============================================================================
+# Attribute Value
+# ============================================================================
+
+struct DwarfAttrValue:
+    as_u64: i64
+    as_string: text
+    as_bytes: [u8]
+    form: i64
+
+# ============================================================================
+# Internal: read .debug_str string
+# ============================================================================
+
+fn _read_debug_str(debug_str: [u8], offset: i64) -> text:
+    if offset < 0 or offset >= debug_str.len():
+        return ""
+    var result = ""
+    var pos = offset
+    while pos < debug_str.len():
+        val b = debug_str[pos]
+        if b == 0:
+            break
+        result = result + text.from_char_code(b)
+        pos = pos + 1
+    result
+
+fn _read_inline_string(data: [u8], offset: i64) -> (text, i64):
+    var result = ""
+    var pos = offset
+    while pos < data.len():
+        val b = data[pos]
+        pos = pos + 1
+        if b == 0:
+            break
+        result = result + text.from_char_code(b)
+    (result, pos)
+
+# ============================================================================
+# Form Size / Skip
+# ============================================================================
+
+fn _read_attr_value(data: [u8], pos: i64, form: i64, addr_size: i64, debug_str: [u8], implicit_value: i64) -> (DwarfAttrValue, i64):
+    val order = ByteOrder.LittleEndian
+    var cur = pos
+
+    if form == DW_FORM_addr:
+        if addr_size == 8:
+            var r = BinaryReader.new(data)
+            r.skip(cur)
+            val v = r.read_u64(order) ?? 0
+            return (DwarfAttrValue(as_u64: v, as_string: "", as_bytes: [], form: form), cur + 8)
+        else:
+            var r = BinaryReader.new(data)
+            r.skip(cur)
+            val v = r.read_u32(order) ?? 0
+            return (DwarfAttrValue(as_u64: v, as_string: "", as_bytes: [], form: form), cur + 4)
+
+    if form == DW_FORM_data1 or form == DW_FORM_ref1 or form == DW_FORM_flag:
+        val v = data[cur] as i64
+        return (DwarfAttrValue(as_u64: v, as_string: "", as_bytes: [], form: form), cur + 1)
+
+    if form == DW_FORM_data2 or form == DW_FORM_ref2:
+        var r = BinaryReader.new(data)
+        r.skip(cur)
+        val v = r.read_u16(order) ?? 0
+        return (DwarfAttrValue(as_u64: v, as_string: "", as_bytes: [], form: form), cur + 2)
+
+    if form == DW_FORM_data4 or form == DW_FORM_ref4 or form == DW_FORM_sec_offset:
+        var r = BinaryReader.new(data)
+        r.skip(cur)
+        val v = r.read_u32(order) ?? 0
+        return (DwarfAttrValue(as_u64: v, as_string: "", as_bytes: [], form: form), cur + 4)
+
+    if form == DW_FORM_data8 or form == DW_FORM_ref8 or form == DW_FORM_ref_addr:
+        var r = BinaryReader.new(data)
+        r.skip(cur)
+        val v = r.read_u64(order) ?? 0
+        return (DwarfAttrValue(as_u64: v, as_string: "", as_bytes: [], form: form), cur + 8)
+
+    if form == DW_FORM_string:
+        val sr = _read_inline_string(data, cur)
+        return (DwarfAttrValue(as_u64: 0, as_string: sr.0, as_bytes: [], form: form), sr.1)
+
+    if form == DW_FORM_strp or form == DW_FORM_line_strp:
+        var r = BinaryReader.new(data)
+        r.skip(cur)
+        val str_offset = r.read_u32(order) ?? 0
+        val s = _read_debug_str(debug_str, str_offset)
+        return (DwarfAttrValue(as_u64: str_offset, as_string: s, as_bytes: [], form: form), cur + 4)
+
+    if form == DW_FORM_udata or form == DW_FORM_ref_udata:
+        val uleb = read_uleb128(data, cur)
+        return (DwarfAttrValue(as_u64: uleb.0, as_string: "", as_bytes: [], form: form), uleb.1)
+
+    if form == DW_FORM_sdata:
+        val sleb = read_sleb128(data, cur)
+        return (DwarfAttrValue(as_u64: sleb.0, as_string: "", as_bytes: [], form: form), sleb.1)
+
+    if form == DW_FORM_flag_present:
+        return (DwarfAttrValue(as_u64: 1, as_string: "", as_bytes: [], form: form), cur)
+
+    if form == DW_FORM_implicit_const:
+        return (DwarfAttrValue(as_u64: implicit_value, as_string: "", as_bytes: [], form: form), cur)
+
+    if form == DW_FORM_block1:
+        val blen = data[cur] as i64
+        cur = cur + 1
+        var bytes: [u8] = []
+        var bi = 0
+        while bi < blen and cur + bi < data.len():
+            bytes = bytes.push(data[cur + bi])
+            bi = bi + 1
+        return (DwarfAttrValue(as_u64: 0, as_string: "", as_bytes: bytes, form: form), cur + blen)
+
+    if form == DW_FORM_block2:
+        var r = BinaryReader.new(data)
+        r.skip(cur)
+        val blen = r.read_u16(order) ?? 0
+        cur = cur + 2
+        return (DwarfAttrValue(as_u64: 0, as_string: "", as_bytes: [], form: form), cur + blen)
+
+    if form == DW_FORM_block4:
+        var r = BinaryReader.new(data)
+        r.skip(cur)
+        val blen = r.read_u32(order) ?? 0
+        cur = cur + 4
+        return (DwarfAttrValue(as_u64: 0, as_string: "", as_bytes: [], form: form), cur + blen)
+
+    if form == DW_FORM_block or form == DW_FORM_exprloc:
+        val blen_r = read_uleb128(data, cur)
+        val blen = blen_r.0
+        cur = blen_r.1
+        var bytes: [u8] = []
+        var bi = 0
+        while bi < blen and cur + bi < data.len():
+            bytes = bytes.push(data[cur + bi])
+            bi = bi + 1
+        return (DwarfAttrValue(as_u64: 0, as_string: "", as_bytes: bytes, form: form), cur + blen)
+
+    if form == DW_FORM_data16:
+        return (DwarfAttrValue(as_u64: 0, as_string: "", as_bytes: [], form: form), cur + 16)
+
+    if form == DW_FORM_indirect:
+        val form_r = read_uleb128(data, cur)
+        return _read_attr_value(data, form_r.1, form_r.0, addr_size, debug_str, 0)
+
+    (DwarfAttrValue(as_u64: 0, as_string: "", as_bytes: [], form: form), cur + 1)
+
+# ============================================================================
+# Compilation Unit + DIE Parsing
+# ============================================================================
+
+fn _parse_compilation_units(sections: DwarfSections) -> [DebugCompilationUnit]:
+    val data = sections.debug_info
+    val order = ByteOrder.LittleEndian
+    var units: [DebugCompilationUnit] = []
+    var offset = 0
+
+    while offset < data.len():
+        if offset + 11 > data.len():
+            break
+
+        var reader = BinaryReader.new(data)
+        reader.skip(offset)
+        val unit_length = reader.read_u32(order) ?? 0
+        if unit_length == 0:
+            break
+        val unit_end = offset + 4 + unit_length
+
+        val version = reader.read_u16(order) ?? 0
+        val abbrev_offset = reader.read_u32(order) ?? 0
+        val addr_size = reader.read_u8() ?? 8
+
+        val die_start = offset + 11
+
+        val abbrev_table = dwarf_parse_abbrev_table(sections.debug_abbrev, abbrev_offset)
+
+        val cu = _parse_cu_die(data, die_start, unit_end, abbrev_table, addr_size, sections)
+        units = units.push(cu)
+
+        offset = unit_end
+
+    units
+
+fn _parse_cu_die(data: [u8], start: i64, unit_end: i64, abbrev_table: DwarfAbbrevTable, addr_size: i64, sections: DwarfSections) -> DebugCompilationUnit:
+    var pos = start
+    val code_result = read_uleb128(data, pos)
+    val abbrev_code = code_result.0
+    pos = code_result.1
+
+    var cu_name = ""
+    var cu_comp_dir = ""
+    var cu_language: i64 = 0
+    var cu_low_pc: i64 = 0
+    var cu_high_pc: i64 = 0
+    var cu_stmt_list: i64 = -1
+    var high_pc_is_offset = false
+
+    val abbrev = dwarf_find_abbrev(abbrev_table, abbrev_code)
+    if abbrev.?:
+        val entry = abbrev!
+        for attr_spec in entry.attrs:
+            val av_result = _read_attr_value(data, pos, attr_spec.form, addr_size, sections.debug_str, attr_spec.implicit_value)
+            val av = av_result.0
+            pos = av_result.1
+
+            if attr_spec.attr == DW_AT_name:
+                cu_name = av.as_string
+            else if attr_spec.attr == DW_AT_comp_dir:
+                cu_comp_dir = av.as_string
+            else if attr_spec.attr == DW_AT_language:
+                cu_language = av.as_u64
+            else if attr_spec.attr == DW_AT_low_pc:
+                cu_low_pc = av.as_u64
+            else if attr_spec.attr == DW_AT_high_pc:
+                cu_high_pc = av.as_u64
+                if av.form == DW_FORM_data4 or av.form == DW_FORM_data8 or av.form == DW_FORM_udata or av.form == DW_FORM_data2 or av.form == DW_FORM_data1:
+                    high_pc_is_offset = true
+            else if attr_spec.attr == DW_AT_stmt_list:
+                cu_stmt_list = av.as_u64
+
+    if high_pc_is_offset:
+        cu_high_pc = cu_low_pc + cu_high_pc
+
+    var line_entries: [DebugLineEntry] = []
+    if cu_stmt_list >= 0 and sections.debug_line.len() > 0:
+        val lh_result = dwarf_parse_line_header(sections.debug_line, cu_stmt_list, addr_size)
+        if lh_result.is_ok():
+            val lh = lh_result.ok()!
+            line_entries = dwarf_decode_line_program(sections.debug_line, lh, addr_size)
+
+    var functions: [DebugFunction] = []
+    val unit_idx = 0
+    functions = _parse_functions(data, pos, unit_end, abbrev_table, addr_size, sections, unit_idx)
+
+    DebugCompilationUnit(
+        name: cu_name,
+        comp_dir: cu_comp_dir,
+        language: cu_language,
+        low_pc: cu_low_pc,
+        high_pc: cu_high_pc,
+        line_entries: line_entries,
+        functions: functions,
+    )
+
+fn _parse_functions(data: [u8], start: i64, end_offset: i64, abbrev_table: DwarfAbbrevTable, addr_size: i64, sections: DwarfSections, unit_idx: i64) -> [DebugFunction]:
+    var functions: [DebugFunction] = []
+    var pos = start
+    var depth = 0
+
+    while pos < end_offset and pos < data.len():
+        val code_result = read_uleb128(data, pos)
+        val code = code_result.0
+        pos = code_result.1
+
+        if code == 0:
+            if depth > 0:
+                depth = depth - 1
+            continue
+
+        val abbrev = dwarf_find_abbrev(abbrev_table, code)
+        if abbrev.? == false:
+            break
+
+        val entry = abbrev!
+        var fn_name = ""
+        var fn_low_pc: i64 = 0
+        var fn_high_pc: i64 = 0
+        var hp_is_offset = false
+
+        for attr_spec in entry.attrs:
+            val av_result = _read_attr_value(data, pos, attr_spec.form, addr_size, sections.debug_str, attr_spec.implicit_value)
+            val av = av_result.0
+            pos = av_result.1
+
+            if entry.tag == DW_TAG_subprogram or entry.tag == DW_TAG_inlined_subroutine:
+                if attr_spec.attr == DW_AT_name:
+                    fn_name = av.as_string
+                else if attr_spec.attr == DW_AT_linkage_name:
+                    if fn_name.len() == 0:
+                        fn_name = av.as_string
+                else if attr_spec.attr == DW_AT_low_pc:
+                    fn_low_pc = av.as_u64
+                else if attr_spec.attr == DW_AT_high_pc:
+                    fn_high_pc = av.as_u64
+                    if av.form == DW_FORM_data4 or av.form == DW_FORM_data8 or av.form == DW_FORM_udata:
+                        hp_is_offset = true
+
+        if (entry.tag == DW_TAG_subprogram or entry.tag == DW_TAG_inlined_subroutine) and fn_low_pc > 0:
+            if hp_is_offset:
+                fn_high_pc = fn_low_pc + fn_high_pc
+            functions = functions.push(DebugFunction(
+                name: fn_name,
+                low_pc: fn_low_pc,
+                high_pc: fn_high_pc,
+                comp_unit_index: unit_idx,
+            ))
+
+        if entry.has_children:
+            depth = depth + 1
+
+    functions
+
+# ============================================================================
+# ELF Section Extraction
+# ============================================================================
+
+fn _elf_section_by_name(data: [u8], name: text) -> [u8]:
+    val order = ByteOrder.LittleEndian
+    if data.len() < 64:
+        return []
+
+    var r = BinaryReader.new(data)
+    r.skip(40)
+    val e_shoff = r.read_u64(order) ?? 0
+    r.skip(8)
+    val e_shnum_r = BinaryReader.new(data)
+    e_shnum_r.skip(60)
+    val e_shnum = e_shnum_r.read_u16(order) ?? 0
+    val e_shstrndx_r = BinaryReader.new(data)
+    e_shstrndx_r.skip(62)
+    val e_shstrndx = e_shstrndx_r.read_u16(order) ?? 0
+
+    if e_shoff == 0 or e_shnum == 0:
+        return []
+
+    val shstr_hdr_off = e_shoff + (e_shstrndx * 64)
+    if shstr_hdr_off + 64 > data.len():
+        return []
+
+    val shstr_off_r = BinaryReader.new(data)
+    shstr_off_r.skip(shstr_hdr_off + 24)
+    val shstr_offset = shstr_off_r.read_u64(order) ?? 0
+    val shstr_size_r = BinaryReader.new(data)
+    shstr_size_r.skip(shstr_hdr_off + 32)
+    val shstr_size = shstr_size_r.read_u64(order) ?? 0
+
+    var i = 0
+    while i < e_shnum:
+        val hdr_off = e_shoff + (i * 64)
+        if hdr_off + 64 > data.len():
+            break
+
+        val name_idx_r = BinaryReader.new(data)
+        name_idx_r.skip(hdr_off)
+        val sh_name_idx = name_idx_r.read_u32(order) ?? 0
+
+        val str_start = shstr_offset + sh_name_idx
+        var sec_name = ""
+        var sp = str_start
+        while sp < data.len() and sp < shstr_offset + shstr_size:
+            val b = data[sp]
+            if b == 0:
+                break
+            sec_name = sec_name + text.from_char_code(b)
+            sp = sp + 1
+
+        if sec_name == name:
+            val off_r = BinaryReader.new(data)
+            off_r.skip(hdr_off + 24)
+            val sh_offset = off_r.read_u64(order) ?? 0
+            val size_r = BinaryReader.new(data)
+            size_r.skip(hdr_off + 32)
+            val sh_size = size_r.read_u64(order) ?? 0
+
+            if sh_offset + sh_size > data.len():
+                return []
+
+            var result: [u8] = []
+            var j: i64 = 0
+            while j < sh_size:
+                result = result.push(data[sh_offset + j])
+                j = j + 1
+            return result
+
+        i = i + 1
+    []
+
+fn _extract_elf_sections(data: [u8]) -> DwarfSections:
+    DwarfSections(
+        debug_info: _elf_section_by_name(data, ".debug_info"),
+        debug_abbrev: _elf_section_by_name(data, ".debug_abbrev"),
+        debug_line: _elf_section_by_name(data, ".debug_line"),
+        debug_str: _elf_section_by_name(data, ".debug_str"),
+        debug_line_str: _elf_section_by_name(data, ".debug_line_str"),
+        addr_size: 8,
+    )
+
+# ============================================================================
+# Mach-O Section Extraction
+# ============================================================================
+
+fn _macho_section_by_name(data: [u8], sectname: text) -> [u8]:
+    val order = ByteOrder.LittleEndian
+    if data.len() < 32:
+        return []
+
+    var header_r = BinaryReader.new(data)
+    val magic = header_r.read_u32(order) ?? 0
+    if magic != 0xfeedfacf:
+        return []
+
+    header_r.skip(12)
+    val ncmds = header_r.read_u32(order) ?? 0
+
+    var pos = 32
+    var cmd_i = 0
+    while cmd_i < ncmds and pos < data.len():
+        var cmd_r = BinaryReader.new(data)
+        cmd_r.skip(pos)
+        val cmd = cmd_r.read_u32(order) ?? 0
+        val cmdsize = cmd_r.read_u32(order) ?? 0
+
+        if cmd == 0x19:
+            var seg_name = ""
+            var sn_i = 0
+            while sn_i < 16 and pos + 8 + sn_i < data.len():
+                val b = data[pos + 8 + sn_i]
+                if b == 0: break
+                seg_name = seg_name + text.from_char_code(b)
+                sn_i = sn_i + 1
+
+            if seg_name == "__DWARF":
+                var nsects_r = BinaryReader.new(data)
+                nsects_r.skip(pos + 64)
+                val nsects = nsects_r.read_u32(order) ?? 0
+
+                var s = 0
+                while s < nsects:
+                    val sec_base = pos + 72 + (s * 80)
+                    var sn = ""
+                    var k = 0
+                    while k < 16 and sec_base + k < data.len():
+                        val b = data[sec_base + k]
+                        if b == 0: break
+                        sn = sn + text.from_char_code(b)
+                        k = k + 1
+
+                    if sn == sectname:
+                        var off_r = BinaryReader.new(data)
+                        off_r.skip(sec_base + 48)
+                        val sec_offset = off_r.read_u32(order) ?? 0
+                        var sz_r = BinaryReader.new(data)
+                        sz_r.skip(sec_base + 40)
+                        val sec_size = sz_r.read_u64(order) ?? 0
+
+                        if sec_offset + sec_size > data.len():
+                            return []
+
+                        var result: [u8] = []
+                        var j: i64 = 0
+                        while j < sec_size:
+                            result = result.push(data[sec_offset + j])
+                            j = j + 1
+                        return result
+
+                    s = s + 1
+
+        pos = pos + cmdsize
+        cmd_i = cmd_i + 1
+    []
+
+fn _extract_macho_sections(data: [u8]) -> DwarfSections:
+    DwarfSections(
+        debug_info: _macho_section_by_name(data, "__debug_info"),
+        debug_abbrev: _macho_section_by_name(data, "__debug_abbrev"),
+        debug_line: _macho_section_by_name(data, "__debug_line"),
+        debug_str: _macho_section_by_name(data, "__debug_str"),
+        debug_line_str: _macho_section_by_name(data, "__debug_line_str"),
+        addr_size: 8,
+    )
+
+# ============================================================================
+# DwarfParser Class
+# ============================================================================
+
+class DwarfParser:
+    sections: DwarfSections
+    units: [DebugCompilationUnit]
+    all_line_entries: [DebugLineEntry]
+    all_functions: [DebugFunction]
+    parsed: bool
+
+    static fn from_elf(data: [u8]) -> Result<DwarfParser, text>:
+        val sections = _extract_elf_sections(data)
+        if sections.debug_info.len() == 0:
+            return Err("no .debug_info section found")
+        _build_parser(sections)
+
+    static fn from_macho(data: [u8]) -> Result<DwarfParser, text>:
+        val sections = _extract_macho_sections(data)
+        if sections.debug_info.len() == 0:
+            return Err("no __debug_info section found")
+        _build_parser(sections)
+
+    static fn from_sections(sections: DwarfSections) -> Result<DwarfParser, text>:
+        if sections.debug_info.len() == 0:
+            return Err("empty debug_info")
+        _build_parser(sections)
+
+    fn format_kind() -> DebugFormatKind:
+        DebugFormatKind.Dwarf
+
+    fn addr_to_source(addr: i64) -> SourceLocation?:
+        var best: DebugLineEntry? = nil
+        for entry in self.all_line_entries:
+            if entry.end_sequence:
+                continue
+            if entry.address <= addr:
+                if best.?:
+                    if entry.address > best!.address:
+                        best = entry
+                else:
+                    best = entry
+        if best.?:
+            return best!.location
+        return nil
+
+    fn source_to_addr(file: text, line: i64) -> i64?:
+        for entry in self.all_line_entries:
+            if entry.end_sequence:
+                continue
+            if entry.location.line == line and entry.location.file.ends_with(file):
+                return entry.address
+        return nil
+
+    fn function_at(addr: i64) -> DebugFunction?:
+        for func in self.all_functions:
+            if func.contains_address(addr):
+                return func
+        return nil
+
+    fn functions_in_range(low: i64, high: i64) -> [DebugFunction]:
+        var result: [DebugFunction] = []
+        for func in self.all_functions:
+            if func.low_pc < high and func.high_pc > low:
+                result = result.push(func)
+        result
+
+    fn locals_at(addr: i64) -> [DebugVariable]:
+        []
+
+    fn compilation_units() -> [DebugCompilationUnit]:
+        self.units
+
+    fn line_entries() -> [DebugLineEntry]:
+        self.all_line_entries
+
+fn _build_parser(sections: DwarfSections) -> Result<DwarfParser, text>:
+    val units = _parse_compilation_units(sections)
+
+    var all_lines: [DebugLineEntry] = []
+    var all_funcs: [DebugFunction] = []
+    for cu in units:
+        for entry in cu.line_entries:
+            all_lines = all_lines.push(entry)
+        for func in cu.functions:
+            all_funcs = all_funcs.push(func)
+
+    Ok(DwarfParser(
+        sections: sections,
+        units: units,
+        all_line_entries: all_lines,
+        all_functions: all_funcs,
+        parsed: true,
+    ))

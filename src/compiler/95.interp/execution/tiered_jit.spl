@@ -1,0 +1,1013 @@
+# Tiered JIT Manager — Java-style adaptive compilation in pure Simple
+#
+# Tier 0: Interpreted (default)
+# Tier 1: Cranelift-compiled (fast compile, moderate runtime perf)
+# Tier 2: LLVM-compiled (slow compile, fully optimized runtime)
+#
+# Policy, profiling, and tier decisions live here in Simple.
+# Actual machine code emission uses Cranelift via rt_jit_* externs (Rust bridge).
+
+use compiler.mir_opt.mir_opt.pattern.rules_clib_parity.{CLibParityRule, clib_parity_rule_table}
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{get_eligible_rules_for_function}
+use compiler.mir_opt.mir_opt.mod.{
+    OptLevel, optlevel_name,
+    MirPassBackendDecision,
+    optimizationpipeline_backend_plan_for_budget
+}
+use compiler.mir_opt.general_patterns.{
+    BackendOptimizationDecision,
+    backend_optimization_plan_for_budget_with_facts
+}
+
+# Native JIT externs — bridge to Rust LocalExecutionManager (Cranelift)
+extern fn rt_jit_create() -> i64
+extern fn rt_jit_compile_source(handle: i64, source: text) -> text
+extern fn rt_jit_call_i64(handle: i64, name: text, arg: i64) -> i64
+extern fn rt_jit_call_void(handle: i64, name: text) -> i64
+extern fn rt_jit_call_i64_i64(handle: i64, name: text, arg0: i64, arg1: i64) -> i64
+extern fn rt_jit_has_function(handle: i64, name: text) -> bool
+extern fn rt_jit_cleanup(handle: i64) -> i64
+extern fn rt_time_now_seconds() -> f64
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct TieredJitConfig:
+    tier1_threshold: i64
+    tier2_threshold: i64
+    debug_mode: bool
+
+# ============================================================================
+# Tier State
+# ============================================================================
+
+enum JitTier:
+    Interpreted
+    Fast
+    Optimized
+
+struct FunctionProfile:
+    name: text
+    call_count: i64
+    tier: JitTier
+    compile_time_ms: f64
+    source: text
+    typed_mir: bool
+    safe_deopt: bool
+    hotspot_specialized_source: text
+    hotspot_semantic_proof: bool
+    var_facts: JitVarOptimizationFacts
+
+struct JitStats:
+    tier1_compilations: i64
+    tier2_compilations: i64
+    total_compile_time_ms: f64
+    hotspot_plans: i64
+
+struct JitHotspotPlan:
+    function_name: text
+    call_count: i64
+    threshold: i64
+    eligible: bool
+    invalidated: bool
+    reason: text
+    facts: [text]
+
+struct JitHotspotCompileDecision:
+    plan: JitHotspotPlan
+    compile_source: text
+    provider_used: bool
+    reason: text
+
+struct JitHotspotRebuildPlan:
+    function_name: text
+    backend: text
+    eligible: bool
+    reason: text
+    cost_class: text
+    required_count: i64
+
+struct JitHotspotRebuildChoice:
+    function_name: text
+    selected_backend: text
+    eligible: bool
+    reason: text
+    cost_class: text
+    required_count: i64
+    attempted_backends: [text]
+
+struct JitHotspotOptimizationPlan:
+    function_name: text
+    backend: text
+    eligible: bool
+    reason: text
+    cost_class: text
+    max_cost_class: text
+    opt_level: text
+    passes: [text]
+    skipped_passes: [MirPassBackendDecision]
+    plugin_recommendations: [text]
+    skipped_plugin_recommendations: [BackendOptimizationDecision]
+
+struct JitHotspotSpecializationProvider:
+    name: text
+    enabled: bool
+    specialized_source: text
+    semantic_proof: bool
+    eligible_rules: [CLibParityRule]
+
+struct JitVarOptimizationFacts:
+    has_var_reassignment: bool
+    reassignment_count: i64
+    ssa_transform: bool
+    escape_analyzed: bool
+    no_escape: bool
+    borrow_reassign_safe: bool
+
+# ============================================================================
+# Hotspot optimization facts
+# ============================================================================
+
+fn jit_hotspot_profile_facts(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    typed_mir: bool,
+    safe_deopt: bool
+) -> [text]:
+    var facts: [text] = []
+    if profile.call_count >= config.tier1_threshold:
+        facts = facts.push("profile.hot_count")
+    if typed_mir:
+        facts = facts.push("typed_mir")
+    if safe_deopt:
+        facts = facts.push("safe_deopt")
+    facts
+
+fn jit_hotspot_plan_reason(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    typed_mir: bool,
+    safe_deopt: bool
+) -> text:
+    if profile.source == "":
+        return "missing source"
+    if profile.call_count < config.tier1_threshold:
+        return "missing profile.hot_count"
+    if not typed_mir:
+        return "missing typed_mir"
+    if not safe_deopt:
+        return "missing safe_deopt"
+    "ready"
+
+fn jit_hotspot_plan_from_profile(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    typed_mir: bool,
+    safe_deopt: bool
+) -> JitHotspotPlan:
+    val facts = jit_hotspot_profile_facts(profile, config, typed_mir, safe_deopt)
+    val reason = jit_hotspot_plan_reason(profile, config, typed_mir, safe_deopt)
+    JitHotspotPlan(
+        function_name: profile.name,
+        call_count: profile.call_count,
+        threshold: config.tier1_threshold,
+        eligible: reason == "ready",
+        invalidated: false,
+        reason: reason,
+        facts: facts
+    )
+
+fn jit_var_optimization_facts(
+    has_var_reassignment: bool,
+    reassignment_count: i64,
+    ssa_transform: bool,
+    escape_analyzed: bool,
+    no_escape: bool,
+    borrow_reassign_safe: bool
+) -> JitVarOptimizationFacts:
+    JitVarOptimizationFacts(
+        has_var_reassignment: has_var_reassignment,
+        reassignment_count: reassignment_count,
+        ssa_transform: ssa_transform,
+        escape_analyzed: escape_analyzed,
+        no_escape: no_escape,
+        borrow_reassign_safe: borrow_reassign_safe
+    )
+
+fn jit_var_optimization_facts_none() -> JitVarOptimizationFacts:
+    jit_var_optimization_facts(false, 0, false, false, true, true)
+
+fn jit_var_optimization_fact_list(var_facts: JitVarOptimizationFacts) -> [text]:
+    var facts: [text] = []
+    if var_facts.has_var_reassignment and var_facts.reassignment_count > 0:
+        facts = facts.push("var.reassignment")
+    if var_facts.ssa_transform:
+        facts = facts.push("ssa.var_transform")
+    if var_facts.escape_analyzed:
+        facts = facts.push("escape.analyzed")
+    if var_facts.no_escape:
+        facts = facts.push("escape.no_escape")
+    if var_facts.borrow_reassign_safe:
+        facts = facts.push("borrow.reassign_safe")
+    facts
+
+fn jit_var_optimization_implies_scalar_cleanup(var_facts: JitVarOptimizationFacts) -> bool:
+    var_facts.has_var_reassignment and var_facts.reassignment_count > 0 and var_facts.ssa_transform and var_facts.escape_analyzed and var_facts.no_escape and var_facts.borrow_reassign_safe
+
+fn jit_var_optimization_reason(var_facts: JitVarOptimizationFacts) -> text:
+    if not var_facts.has_var_reassignment or var_facts.reassignment_count == 0:
+        return "ready"
+    if not var_facts.ssa_transform:
+        return "missing ssa.var_transform"
+    if not var_facts.escape_analyzed:
+        return "missing escape.analyzed"
+    if not var_facts.no_escape:
+        return "missing escape.no_escape"
+    if not var_facts.borrow_reassign_safe:
+        return "missing borrow.reassign_safe"
+    "ready"
+
+fn jit_hotspot_plan_with_var_facts(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    typed_mir: bool,
+    safe_deopt: bool,
+    var_facts: JitVarOptimizationFacts
+) -> JitHotspotPlan:
+    val base = jit_hotspot_plan_from_profile(profile, config, typed_mir, safe_deopt)
+    val var_reason = jit_var_optimization_reason(var_facts)
+    var merged_facts = base.facts
+    for fact in jit_var_optimization_fact_list(var_facts):
+        merged_facts = merged_facts.push(fact)
+    if not base.eligible:
+        return JitHotspotPlan(
+            function_name: base.function_name,
+            call_count: base.call_count,
+            threshold: base.threshold,
+            eligible: false,
+            invalidated: base.invalidated,
+            reason: base.reason,
+            facts: merged_facts
+        )
+    if var_reason != "ready":
+        return JitHotspotPlan(
+            function_name: base.function_name,
+            call_count: base.call_count,
+            threshold: base.threshold,
+            eligible: false,
+            invalidated: base.invalidated,
+            reason: var_reason,
+            facts: merged_facts
+        )
+    JitHotspotPlan(
+        function_name: base.function_name,
+        call_count: base.call_count,
+        threshold: base.threshold,
+        eligible: true,
+        invalidated: base.invalidated,
+        reason: base.reason,
+        facts: merged_facts
+    )
+
+fn jit_hotspot_plan_from_profile_var_facts(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    typed_mir: bool,
+    safe_deopt: bool
+) -> JitHotspotPlan:
+    jit_hotspot_plan_with_var_facts(profile, config, typed_mir, safe_deopt, profile.var_facts)
+
+fn jit_hotspot_rebuild_backend_name(backend: text) -> text:
+    if backend == "cranlift":
+        "cranelift"
+    elif backend == "llvm-lib" or backend == "llvmlib":
+        "llvm"
+    else:
+        backend
+
+fn jit_hotspot_cost_rank(cost_class: text) -> i64:
+    match cost_class:
+        case "free": 0
+        case "low": 1
+        case "medium": 2
+        case "high": 3
+        case _: 99
+
+fn jit_hotspot_cost_allowed(cost_class: text, max_cost_class: text) -> bool:
+    jit_hotspot_cost_rank(cost_class) <= jit_hotspot_cost_rank(max_cost_class)
+
+fn jit_hotspot_rebuild_plan(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    backend: text,
+    backend_available: bool
+) -> JitHotspotRebuildPlan:
+    val normalized = jit_hotspot_rebuild_backend_name(backend)
+    if not backend_available:
+        return JitHotspotRebuildPlan(
+            function_name: profile.name,
+            backend: normalized,
+            eligible: false,
+            reason: "backend unavailable",
+            cost_class: "unavailable",
+            required_count: 0
+        )
+    if normalized == "cranelift":
+        val ready = profile.call_count >= config.tier1_threshold
+        JitHotspotRebuildPlan(
+            function_name: profile.name,
+            backend: normalized,
+            eligible: ready,
+            reason: if ready: "ready" else: "missing tier1 hot_count",
+            cost_class: "medium",
+            required_count: config.tier1_threshold
+        )
+    elif normalized == "llvm":
+        val ready = profile.call_count >= config.tier2_threshold
+        JitHotspotRebuildPlan(
+            function_name: profile.name,
+            backend: normalized,
+            eligible: ready,
+            reason: if ready: "ready" else: "missing tier2 hot_count",
+            cost_class: "high",
+            required_count: config.tier2_threshold
+        )
+    else:
+        JitHotspotRebuildPlan(
+            function_name: profile.name,
+            backend: normalized,
+            eligible: false,
+            reason: "unsupported backend",
+            cost_class: "unknown",
+            required_count: 0
+        )
+
+fn jit_hotspot_rebuild_plan_with_cost_budget(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    backend: text,
+    backend_available: bool,
+    max_cost_class: text
+) -> JitHotspotRebuildPlan:
+    val plan = jit_hotspot_rebuild_plan(profile, config, backend, backend_available)
+    if not plan.eligible:
+        return plan
+    if not jit_hotspot_cost_allowed(plan.cost_class, max_cost_class):
+        return JitHotspotRebuildPlan(
+            function_name: plan.function_name,
+            backend: plan.backend,
+            eligible: false,
+            reason: "cost budget exceeded",
+            cost_class: plan.cost_class,
+            required_count: plan.required_count
+        )
+    plan
+
+fn jit_hotspot_llvm_preference_threshold(config: TieredJitConfig) -> i64:
+    config.tier2_threshold * 2
+
+fn jit_hotspot_var_rebuild_reason(profile: FunctionProfile) -> text:
+    jit_var_optimization_reason(profile.var_facts)
+
+fn jit_hotspot_source_has_strength_reduce_candidate(source: text) -> bool:
+    if source.contains("* 2"):
+        return true
+    if source.contains("* 4"):
+        return true
+    if source.contains("* 8"):
+        return true
+    if source.contains("* 16"):
+        return true
+    if source.contains("<<"):
+        return true
+    if source.contains("+= 2"):
+        return true
+    if source.contains("+= 4"):
+        return true
+    if source.contains("+= 8"):
+        return true
+    source.contains("+= 16")
+
+fn jit_hotspot_source_has_bounded_byte_scan(source: text) -> bool:
+    val has_loop = source.contains("while") or source.contains("for ")
+    val has_indexed_access = source.contains("[") and source.contains("]")
+    val has_scan_terminator = source.contains("break") or source.contains("return")
+    val advances_index = source.contains("+ 1") or source.contains("+= 1")
+    has_loop and has_indexed_access and has_scan_terminator and advances_index
+
+fn jit_hotspot_source_has_checksum_reducer(source: text) -> bool:
+    val has_loop = source.contains("while") or source.contains("for ")
+    val has_indexed_access = source.contains("[") and source.contains("]")
+    val has_accumulator_update = source.contains("^=") or source.contains("+=") or source.contains("acc =") or source.contains("checksum =")
+    val has_checksum_op = source.contains("xor") or source.contains("^") or source.contains("<<") or source.contains(">>") or source.contains("+")
+    has_loop and has_indexed_access and has_accumulator_update and has_checksum_op
+
+fn jit_hotspot_source_has_structured_loop(source: text) -> bool:
+    source.contains("while") or source.contains("for ")
+
+fn jit_hotspot_source_has_small_fixed_trip_loop(source: text) -> bool:
+    val has_loop = jit_hotspot_source_has_structured_loop(source)
+    val has_small_bound = source.contains("< 2") or source.contains("< 3") or source.contains("< 4") or source.contains("< 8") or source.contains("< 16")
+    val increments_by_one = source.contains("+ 1") or source.contains("+= 1")
+    has_loop and has_small_bound and increments_by_one
+
+fn jit_hotspot_source_has_predication_candidate(source: text) -> bool:
+    val has_branch = source.contains("if ") or source.contains("else")
+    val has_select_shape = source.contains("?") or source.contains("select") or source.contains("else")
+    val has_scalar_compare = source.contains(" < ") or source.contains(" > ") or source.contains(" == ") or source.contains(" != ")
+    val has_safe_result_shape = source.contains("return") or source.contains(" = ")
+    has_branch and has_select_shape and has_scalar_compare and has_safe_result_shape
+
+fn jit_hotspot_source_has_vectorization_candidate(source: text) -> bool:
+    val has_loop = jit_hotspot_source_has_structured_loop(source)
+    val has_indexed_access = source.contains("[") and source.contains("]")
+    val advances_index = source.contains("+ 1") or source.contains("+= 1")
+    val has_vector_op = source.contains("+") or source.contains("-") or source.contains("*") or source.contains("^")
+    val no_early_exit = not source.contains("break") and not source.contains("return -1")
+    has_loop and has_indexed_access and advances_index and has_vector_op and no_early_exit
+
+fn jit_hotspot_source_has_range_facts(source: text) -> bool:
+    val has_loop = jit_hotspot_source_has_structured_loop(source)
+    val has_indexed_access = source.contains("[") and source.contains("]")
+    val has_upper_bound = source.contains(" < n") or source.contains(" < len") or source.contains(" < length") or source.contains(".len")
+    val starts_at_zero = source.contains("= 0")
+    val advances_index = source.contains("+ 1") or source.contains("+= 1")
+    has_loop and has_indexed_access and has_upper_bound and starts_at_zero and advances_index
+
+fn jit_hotspot_source_has_hot_call_candidate(source: text) -> bool:
+    val has_direct_call = source.contains("helper(") or source.contains("callee(") or source.contains("leaf(") or source.contains("inline_target(") or source.contains("hot_call(")
+    val has_scalar_site = source.contains("return ") or source.contains(" = ")
+    val avoids_indexed_or_method_dispatch = not source.contains("[") and not source.contains(".")
+    has_direct_call and has_scalar_site and avoids_indexed_or_method_dispatch
+
+fn jit_hotspot_backend_plugin_facts(profile: FunctionProfile, config: TieredJitConfig, backend_name: text) -> [text]:
+    var facts = jit_hotspot_profile_facts(profile, config, profile.typed_mir, profile.safe_deopt)
+    for fact in jit_var_optimization_fact_list(profile.var_facts):
+        facts = facts.push(fact)
+    if profile.typed_mir and profile.safe_deopt and jit_var_optimization_implies_scalar_cleanup(profile.var_facts):
+        facts = facts.push("ssa.canonical")
+        facts = facts.push("alias_stable")
+    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_structured_loop(profile.source):
+        facts = facts.push("loop_preheader")
+    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_small_fixed_trip_loop(profile.source):
+        facts = facts.push("loop_canonical")
+        facts = facts.push("loop_trip_count")
+        facts = facts.push("unroll_budget")
+    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_predication_candidate(profile.source):
+        facts = facts.push("predication_candidate")
+        facts = facts.push("predicate_safe")
+    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_vectorization_candidate(profile.source):
+        facts = facts.push("vectorization_candidate")
+    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_range_facts(profile.source):
+        facts = facts.push("range_facts")
+    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_hot_call_candidate(profile.source):
+        facts = facts.push("profile.hot_call")
+        facts = facts.push("inline_budget")
+    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_strength_reduce_candidate(profile.source):
+        facts = facts.push("strength_reduce_candidate")
+        facts = facts.push("induction_safe")
+    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_bounded_byte_scan(profile.source):
+        facts = facts.push("bounded_scan_terminates")
+    if profile.typed_mir and profile.safe_deopt and jit_hotspot_source_has_checksum_reducer(profile.source):
+        facts = facts.push("checksum_associative")
+    if backend_name == "llvm":
+        facts = facts.push("llvm_backend_available")
+    if backend_name == "cranelift":
+        facts = facts.push("cranelift_backend_available")
+    facts
+
+fn jit_hotspot_rebuild_choice(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    cranelift_available: bool,
+    llvm_available: bool,
+    max_cost_class: text
+) -> JitHotspotRebuildChoice:
+    val var_reason = jit_hotspot_var_rebuild_reason(profile)
+    if var_reason != "ready":
+        return JitHotspotRebuildChoice(
+            function_name: profile.name,
+            selected_backend: "",
+            eligible: false,
+            reason: var_reason,
+            cost_class: "none",
+            required_count: config.tier1_threshold,
+            attempted_backends: []
+        )
+    val llvm_heat_preferred = profile.call_count >= jit_hotspot_llvm_preference_threshold(config)
+    if cranelift_available and profile.call_count >= config.tier1_threshold and jit_hotspot_cost_allowed("medium", max_cost_class):
+        if llvm_available and llvm_heat_preferred and jit_hotspot_cost_allowed("high", max_cost_class):
+            return JitHotspotRebuildChoice(
+                function_name: profile.name,
+                selected_backend: "llvm",
+                eligible: true,
+                reason: "ready",
+                cost_class: "high",
+                required_count: config.tier2_threshold,
+                attempted_backends: ["llvm"]
+            )
+        return JitHotspotRebuildChoice(
+            function_name: profile.name,
+            selected_backend: "cranelift",
+            eligible: true,
+            reason: "ready",
+            cost_class: "medium",
+            required_count: config.tier1_threshold,
+            attempted_backends: ["llvm", "cranelift"]
+        )
+
+    var attempted: [text] = []
+    val llvm_plan = jit_hotspot_rebuild_plan_with_cost_budget(profile, config, "llvm", llvm_available and ((not cranelift_available) or llvm_heat_preferred), max_cost_class)
+    attempted = attempted.push("llvm")
+    if llvm_plan.eligible:
+        return JitHotspotRebuildChoice(
+            function_name: profile.name,
+            selected_backend: "llvm",
+            eligible: true,
+            reason: "ready",
+            cost_class: llvm_plan.cost_class,
+            required_count: llvm_plan.required_count,
+            attempted_backends: attempted
+        )
+
+    val cranelift_plan = jit_hotspot_rebuild_plan_with_cost_budget(profile, config, "cranelift", cranelift_available, max_cost_class)
+    attempted = attempted.push("cranelift")
+    if cranelift_plan.eligible:
+        return JitHotspotRebuildChoice(
+            function_name: profile.name,
+            selected_backend: "cranelift",
+            eligible: true,
+            reason: "ready",
+            cost_class: cranelift_plan.cost_class,
+            required_count: cranelift_plan.required_count,
+            attempted_backends: attempted
+        )
+
+    var reason = llvm_plan.reason
+    if not cranelift_available and not llvm_available:
+        reason = "no backend available"
+    elif llvm_plan.reason == "cost budget exceeded":
+        reason = "llvm cost budget exceeded"
+    elif llvm_available and cranelift_available and profile.call_count >= config.tier2_threshold and not llvm_heat_preferred:
+        reason = "llvm heat margin not reached"
+    elif profile.call_count < config.tier1_threshold:
+        reason = "missing tier1 hot_count"
+    JitHotspotRebuildChoice(
+        function_name: profile.name,
+        selected_backend: "",
+        eligible: false,
+        reason: reason,
+        cost_class: "none",
+        required_count: config.tier1_threshold,
+        attempted_backends: attempted
+    )
+
+fn jit_hotspot_rebuild_opt_level(choice: JitHotspotRebuildChoice) -> OptLevel:
+    OptLevel.Aggressive
+
+fn jit_hotspot_ready_optimization_plan(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    backend: text,
+    reason: text,
+    cost_class: text,
+    max_cost_class: text
+) -> JitHotspotOptimizationPlan:
+    val mir_plan = optimizationpipeline_backend_plan_for_budget(OptLevel.Aggressive, backend, max_cost_class)
+    val plugin_plan = backend_optimization_plan_for_budget_with_facts(backend, max_cost_class, jit_hotspot_backend_plugin_facts(profile, config, backend))
+    JitHotspotOptimizationPlan(
+        function_name: profile.name,
+        backend: backend,
+        eligible: true,
+        reason: reason,
+        cost_class: cost_class,
+        max_cost_class: max_cost_class,
+        opt_level: "aggressive",
+        passes: mir_plan.passes,
+        skipped_passes: mir_plan.skipped_passes,
+        plugin_recommendations: plugin_plan.recommendation_names,
+        skipped_plugin_recommendations: plugin_plan.skipped_decisions
+    )
+
+fn jit_hotspot_optimization_plan(
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    cranelift_available: bool,
+    llvm_available: bool,
+    max_cost_class: text
+) -> JitHotspotOptimizationPlan:
+    val var_reason = jit_hotspot_var_rebuild_reason(profile)
+    if var_reason != "ready":
+        return JitHotspotOptimizationPlan(
+            function_name: profile.name,
+            backend: "",
+            eligible: false,
+            reason: var_reason,
+            cost_class: "none",
+            max_cost_class: max_cost_class,
+            opt_level: "",
+            passes: [],
+            skipped_passes: [],
+            plugin_recommendations: [],
+            skipped_plugin_recommendations: []
+        )
+    val llvm_heat_preferred = profile.call_count >= jit_hotspot_llvm_preference_threshold(config)
+    if cranelift_available and profile.call_count >= config.tier1_threshold and max_cost_class == "medium":
+        return jit_hotspot_ready_optimization_plan(profile, config, "cranelift", "ready", "medium", max_cost_class)
+    if llvm_available and llvm_heat_preferred and jit_hotspot_cost_allowed("high", max_cost_class):
+        return jit_hotspot_ready_optimization_plan(profile, config, "llvm", "ready", "high", max_cost_class)
+    val choice = jit_hotspot_rebuild_choice(profile, config, cranelift_available, llvm_available, max_cost_class)
+    if not choice.eligible:
+        return JitHotspotOptimizationPlan(
+            function_name: choice.function_name,
+            backend: choice.selected_backend,
+            eligible: false,
+            reason: choice.reason,
+            cost_class: choice.cost_class,
+            max_cost_class: max_cost_class,
+            opt_level: "",
+            passes: [],
+            skipped_passes: [],
+            plugin_recommendations: [],
+            skipped_plugin_recommendations: []
+        )
+    val opt_level = jit_hotspot_rebuild_opt_level(choice)
+    if opt_level == OptLevel.Aggressive:
+        return jit_hotspot_ready_optimization_plan(profile, config, choice.selected_backend, choice.reason, choice.cost_class, max_cost_class)
+    val mir_plan = optimizationpipeline_backend_plan_for_budget(opt_level, choice.selected_backend, max_cost_class)
+    val plugin_facts = jit_hotspot_backend_plugin_facts(profile, config, choice.selected_backend)
+    val plugin_plan = backend_optimization_plan_for_budget_with_facts(choice.selected_backend, max_cost_class, plugin_facts)
+    JitHotspotOptimizationPlan(
+        function_name: choice.function_name,
+        backend: choice.selected_backend,
+        eligible: true,
+        reason: choice.reason,
+        cost_class: choice.cost_class,
+        max_cost_class: max_cost_class,
+        opt_level: optlevel_name(opt_level),
+        passes: mir_plan.passes,
+        skipped_passes: mir_plan.skipped_passes,
+        plugin_recommendations: plugin_plan.recommendation_names,
+        skipped_plugin_recommendations: plugin_plan.skipped_decisions
+    )
+
+fn jit_hotspot_plan_invalidate(plan: JitHotspotPlan, reason: text) -> JitHotspotPlan:
+    JitHotspotPlan(
+        function_name: plan.function_name,
+        call_count: plan.call_count,
+        threshold: plan.threshold,
+        eligible: false,
+        invalidated: true,
+        reason: reason,
+        facts: plan.facts
+    )
+
+fn jit_hotspot_consume_plan(
+    plan: JitHotspotPlan,
+    source: text,
+    provider_enabled: bool
+) -> JitHotspotCompileDecision:
+    if not provider_enabled:
+        return JitHotspotCompileDecision(
+            plan: plan,
+            compile_source: source,
+            provider_used: false,
+            reason: "provider disabled"
+        )
+    if not plan.eligible:
+        return JitHotspotCompileDecision(
+            plan: plan,
+            compile_source: source,
+            provider_used: false,
+            reason: plan.reason
+        )
+    JitHotspotCompileDecision(
+        plan: plan,
+        compile_source: source,
+        provider_used: true,
+        reason: "jit.hotspot_plan accepted"
+    )
+
+fn jit_hotspot_specialization_provider(
+    name: text,
+    specialized_source: text,
+    semantic_proof: bool
+) -> JitHotspotSpecializationProvider:
+    JitHotspotSpecializationProvider(
+        name: name,
+        enabled: true,
+        specialized_source: specialized_source,
+        semantic_proof: semantic_proof,
+        eligible_rules: []
+    )
+
+fn jit_hotspot_specialization_provider_with_rules(
+    name: text,
+    specialized_source: text,
+    semantic_proof: bool,
+    fn_name: text,
+    facts: [text],
+    proofs: [text]
+) -> JitHotspotSpecializationProvider:
+    val rules = get_eligible_rules_for_function(fn_name, clib_parity_rule_table(), facts, proofs)
+    JitHotspotSpecializationProvider(
+        name: name,
+        enabled: true,
+        specialized_source: specialized_source,
+        semantic_proof: semantic_proof,
+        eligible_rules: rules
+    )
+
+fn jit_hotspot_analysis_has_semantic_proof(facts: [text]) -> bool:
+    if not facts.contains("typed_mir"):
+        return false
+    if not facts.contains("safe_deopt"):
+        return false
+    if not facts.contains("ssa.var_transform"):
+        return false
+    if not facts.contains("escape.analyzed"):
+        return false
+    if not facts.contains("escape.no_escape"):
+        return false
+    facts.contains("borrow.reassign_safe")
+
+fn jit_hotspot_specialization_provider_from_analysis(
+    name: text,
+    specialized_source: text,
+    facts: [text]
+) -> JitHotspotSpecializationProvider:
+    jit_hotspot_specialization_provider(
+        name,
+        specialized_source,
+        jit_hotspot_analysis_has_semantic_proof(facts)
+    )
+
+fn jit_hotspot_specialization_provider_from_profile_analysis(
+    name: text,
+    profile: FunctionProfile,
+    config: TieredJitConfig,
+    typed_mir: bool,
+    safe_deopt: bool
+) -> JitHotspotSpecializationProvider:
+    val plan = jit_hotspot_plan_from_profile_var_facts(profile, config, typed_mir, safe_deopt)
+    jit_hotspot_specialization_provider_from_analysis(name, profile.hotspot_specialized_source, plan.facts)
+
+fn jit_hotspot_provider_get_eligible_rules(provider: JitHotspotSpecializationProvider) -> [CLibParityRule]:
+    provider.eligible_rules
+
+fn jit_hotspot_consume_plan_with_provider(
+    plan: JitHotspotPlan,
+    source: text,
+    provider: JitHotspotSpecializationProvider
+) -> JitHotspotCompileDecision:
+    if not provider.enabled:
+        return JitHotspotCompileDecision(
+            plan: plan,
+            compile_source: source,
+            provider_used: false,
+            reason: "provider disabled"
+        )
+    if not plan.eligible:
+        return JitHotspotCompileDecision(
+            plan: plan,
+            compile_source: source,
+            provider_used: false,
+            reason: plan.reason
+        )
+    if not provider.semantic_proof:
+        return JitHotspotCompileDecision(
+            plan: plan,
+            compile_source: source,
+            provider_used: false,
+            reason: "missing semantic proof"
+        )
+    if provider.specialized_source == "":
+        return JitHotspotCompileDecision(
+            plan: plan,
+            compile_source: source,
+            provider_used: false,
+            reason: "missing specialized source"
+        )
+    JitHotspotCompileDecision(
+        plan: plan,
+        compile_source: provider.specialized_source,
+        provider_used: true,
+        reason: "jit.hotspot_specialized_source accepted"
+    )
+
+fn jit_hotspot_compile_decision_allows_compile(decision: JitHotspotCompileDecision) -> bool:
+    decision.plan.eligible and decision.compile_source != ""
+
+# ============================================================================
+# TieredJitManager
+# ============================================================================
+
+class TieredJitManager:
+    config: TieredJitConfig
+    profiles: Dict<text, FunctionProfile>
+    jit_handle: i64
+    tier1_compilations: i64
+    tier2_compilations: i64
+    total_compile_time_ms: f64
+    hotspot_plans: i64
+
+    static fn create(config: TieredJitConfig) -> TieredJitManager:
+        var handle = rt_jit_create()
+        TieredJitManager(config: config, profiles: {}, jit_handle: handle, tier1_compilations: 0, tier2_compilations: 0, total_compile_time_ms: 0.0, hotspot_plans: 0)
+
+    me register_function(name: text, source: text):
+        if not self.profiles.has(name):
+            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source, typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false, var_facts: jit_var_optimization_facts_none())
+            self.profiles[name] = p
+
+    me register_function_with_hotspot_facts(name: text, source: text, typed_mir: bool, safe_deopt: bool):
+        if not self.profiles.has(name):
+            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source, typed_mir: typed_mir, safe_deopt: safe_deopt, hotspot_specialized_source: "", hotspot_semantic_proof: false, var_facts: jit_var_optimization_facts_none())
+            self.profiles[name] = p
+
+    me register_function_with_var_hotspot_facts(name: text, source: text, typed_mir: bool, safe_deopt: bool, var_facts: JitVarOptimizationFacts):
+        if not self.profiles.has(name):
+            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source, typed_mir: typed_mir, safe_deopt: safe_deopt, hotspot_specialized_source: "", hotspot_semantic_proof: false, var_facts: var_facts)
+            self.profiles[name] = p
+
+    me register_function_with_hotspot_specialization(
+        name: text,
+        source: text,
+        typed_mir: bool,
+        safe_deopt: bool,
+        specialized_source: text,
+        semantic_proof: bool
+    ):
+        if not self.profiles.has(name):
+            var p = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: source, typed_mir: typed_mir, safe_deopt: safe_deopt, hotspot_specialized_source: specialized_source, hotspot_semantic_proof: semantic_proof, var_facts: jit_var_optimization_facts_none())
+            self.profiles[name] = p
+
+    me record_call(name: text) -> JitTier:
+        if self.profiles.has(name):
+            var p = self.profiles[name]
+            var new_count = p.call_count + 1
+            var new_tier = p.tier
+            var compile_ms = p.compile_time_ms
+            var updated = FunctionProfile(name: name, call_count: new_count, tier: new_tier, compile_time_ms: compile_ms, source: p.source, typed_mir: p.typed_mir, safe_deopt: p.safe_deopt, hotspot_specialized_source: p.hotspot_specialized_source, hotspot_semantic_proof: p.hotspot_semantic_proof, var_facts: p.var_facts)
+            if p.tier == JitTier.Interpreted:
+                if new_count >= self.config.tier1_threshold:
+                    val plan = jit_hotspot_plan_from_profile_var_facts(updated, self.config, p.typed_mir, p.safe_deopt)
+                    val provider = if p.hotspot_semantic_proof:
+                        jit_hotspot_specialization_provider("tiered-jit-profile-specialization", p.hotspot_specialized_source, true)
+                    else:
+                        jit_hotspot_specialization_provider_from_analysis("tiered-jit-profile-analysis-specialization", p.hotspot_specialized_source, plan.facts)
+                    val decision = jit_hotspot_consume_plan_with_provider(plan, p.source, provider)
+                    if decision.provider_used:
+                        self.hotspot_plans = self.hotspot_plans + 1
+                    if jit_hotspot_compile_decision_allows_compile(decision):
+                        compile_ms = self._compile_function(decision.compile_source)
+                        if rt_jit_has_function(self.jit_handle, p.name):
+                            new_tier = JitTier.Fast
+                            self.tier1_compilations = self.tier1_compilations + 1
+            else if p.tier == JitTier.Fast:
+                if new_count >= self.config.tier2_threshold:
+                    new_tier = JitTier.Optimized
+                    self.tier2_compilations = self.tier2_compilations + 1
+            updated = FunctionProfile(name: name, call_count: new_count, tier: new_tier, compile_time_ms: compile_ms, source: p.source, typed_mir: p.typed_mir, safe_deopt: p.safe_deopt, hotspot_specialized_source: p.hotspot_specialized_source, hotspot_semantic_proof: p.hotspot_semantic_proof, var_facts: p.var_facts)
+            self.profiles[name] = updated
+            new_tier
+        else:
+            var p = FunctionProfile(name: name, call_count: 1, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false, var_facts: jit_var_optimization_facts_none())
+            self.profiles[name] = p
+            JitTier.Interpreted
+
+    me _compile_function(source: text) -> f64:
+        if source == "":
+            return 0.0
+        var t0 = rt_time_now_seconds()
+        var err = rt_jit_compile_source(self.jit_handle, source)
+        var t1 = rt_time_now_seconds()
+        var ms = (t1 - t0) * 1000.0
+        self.total_compile_time_ms = self.total_compile_time_ms + ms
+        if err != "":
+            if self.config.debug_mode:
+                print("  [JIT] compile error: " + err)
+        else:
+            if self.config.debug_mode:
+                print("  [JIT] compiled in " + ms.to_string() + " ms")
+        ms
+
+    fn call_i64(name: text, arg: i64) -> i64:
+        if rt_jit_has_function(self.jit_handle, name):
+            rt_jit_call_i64(self.jit_handle, name, arg)
+        else:
+            -1
+
+    fn call_void(name: text) -> i64:
+        if rt_jit_has_function(self.jit_handle, name):
+            rt_jit_call_void(self.jit_handle, name)
+        else:
+            -1
+
+    fn is_native(name: text) -> bool:
+        rt_jit_has_function(self.jit_handle, name)
+
+    fn get_tier(name: text) -> JitTier:
+        if self.profiles.has(name):
+            self.profiles[name].tier
+        else:
+            JitTier.Interpreted
+
+    fn is_compiled(name: text) -> bool:
+        var tier = self.get_tier(name)
+        tier != JitTier.Interpreted
+
+    fn get_hotspot_plan(name: text, typed_mir: bool, safe_deopt: bool) -> JitHotspotPlan:
+        if self.profiles.has(name):
+            jit_hotspot_plan_from_profile_var_facts(self.profiles[name], self.config, typed_mir, safe_deopt)
+        else:
+            val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false, var_facts: jit_var_optimization_facts_none())
+            jit_hotspot_plan_from_profile_var_facts(profile, self.config, typed_mir, safe_deopt)
+
+    fn get_hotspot_rebuild_choice(
+        name: text,
+        cranelift_available: bool,
+        llvm_available: bool,
+        max_cost_class: text
+    ) -> JitHotspotRebuildChoice:
+        if self.profiles.has(name):
+            jit_hotspot_rebuild_choice(self.profiles[name], self.config, cranelift_available, llvm_available, max_cost_class)
+        else:
+            val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false, var_facts: jit_var_optimization_facts_none())
+            jit_hotspot_rebuild_choice(profile, self.config, cranelift_available, llvm_available, max_cost_class)
+
+    fn get_hotspot_optimization_plan(
+        name: text,
+        cranelift_available: bool,
+        llvm_available: bool,
+        max_cost_class: text
+    ) -> JitHotspotOptimizationPlan:
+        if self.profiles.has(name):
+            jit_hotspot_optimization_plan(self.profiles[name], self.config, cranelift_available, llvm_available, max_cost_class)
+        else:
+            val profile = FunctionProfile(name: name, call_count: 0, tier: JitTier.Interpreted, compile_time_ms: 0.0, source: "", typed_mir: true, safe_deopt: true, hotspot_specialized_source: "", hotspot_semantic_proof: false, var_facts: jit_var_optimization_facts_none())
+            jit_hotspot_optimization_plan(profile, self.config, cranelift_available, llvm_available, max_cost_class)
+
+    fn get_hotspot_plan_with_rules(
+        name: text,
+        typed_mir: bool,
+        safe_deopt: bool,
+        facts: [text],
+        proofs: [text]
+    ) -> JitHotspotPlan:
+        val plan = self.get_hotspot_plan(name, typed_mir, safe_deopt)
+        val extended_facts = get_eligible_rules_for_function(name, clib_parity_rule_table(), facts, proofs)
+        val extra_count = extended_facts.len()
+        if extra_count > 0:
+            val enriched_facts = plan.facts.push("clib_parity_eligible")
+            JitHotspotPlan(
+                function_name: plan.function_name,
+                call_count: plan.call_count,
+                threshold: plan.threshold,
+                eligible: plan.eligible,
+                invalidated: plan.invalidated,
+                reason: plan.reason,
+                facts: enriched_facts
+            )
+        else:
+            plan
+
+    fn get_stats() -> JitStats:
+        JitStats(tier1_compilations: self.tier1_compilations, tier2_compilations: self.tier2_compilations, total_compile_time_ms: self.total_compile_time_ms, hotspot_plans: self.hotspot_plans)
+
+    fn print_stats():
+        print("=== Tiered JIT Statistics ===")
+        print("  Functions tracked: " + self.profiles.keys().len().to_string())
+        print("  Tier 1 (Cranelift) compilations: " + self.tier1_compilations.to_string())
+        print("  Tier 2 (LLVM) compilations: " + self.tier2_compilations.to_string())
+        print("  Hotspot plans accepted: " + self.hotspot_plans.to_string())
+        print("  Total compile time: " + self.total_compile_time_ms.to_string() + " ms")
+        var interpreted = 0
+        var fast = 0
+        var optimized = 0
+        for name in self.profiles.keys():
+            var p = self.profiles[name]
+            if p.tier == JitTier.Interpreted:
+                interpreted = interpreted + 1
+            else if p.tier == JitTier.Fast:
+                fast = fast + 1
+            else:
+                optimized = optimized + 1
+        print("  Current tiers: " + interpreted.to_string() + " interpreted, " + fast.to_string() + " fast, " + optimized.to_string() + " optimized")
+
+    me cleanup():
+        rt_jit_cleanup(self.jit_handle)
+
+# ============================================================================
+# Factory functions
+# ============================================================================
+
+fn default_config() -> TieredJitConfig:
+    TieredJitConfig(tier1_threshold: 64, tier2_threshold: 1024, debug_mode: true)
+
+fn release_config() -> TieredJitConfig:
+    TieredJitConfig(tier1_threshold: 64, tier2_threshold: 1024, debug_mode: false)
+
+fn eager_config() -> TieredJitConfig:
+    TieredJitConfig(tier1_threshold: 8, tier2_threshold: 128, debug_mode: true)

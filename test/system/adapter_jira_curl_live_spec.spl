@@ -1,0 +1,66 @@
+# Live system spec for adapter_jira_curl.
+#
+# Skips cleanly when JIRA_URL / JIRA_USER / JIRA_TOKEN are not all set.
+# When credentials ARE set, runs view + search smoke tests against the
+# configured Jira instance. Optional JIRA_TEST_KEY narrows the test
+# project; default JQL is "project = TEST".
+#
+# Required env vars:
+#   JIRA_URL    e.g. https://yourorg.atlassian.net   (required, must start https)
+#   JIRA_USER   account email used as Basic-auth username
+#   JIRA_TOKEN  Atlassian API token (created at id.atlassian.com)
+# Optional:
+#   JIRA_TEST_KEY  project key for the search smoke test (default: TEST)
+
+extern fn rt_env_get(key: text) -> text
+
+use std.spec.{describe, it, expect}
+use app.itf.adapter_jira_curl.{JiraClient, jira_curl_view_issue, jira_curl_search}
+
+
+val _jira_url   = rt_env_get("JIRA_URL")   ?? ""
+val _jira_user  = rt_env_get("JIRA_USER")  ?? ""
+val _jira_token = rt_env_get("JIRA_TOKEN") ?? ""
+val _test_key   = rt_env_get("JIRA_TEST_KEY") ?? ""
+
+val _have_creds = _jira_url != "" and _jira_user != "" and _jira_token != ""
+val _project_jql = if _test_key != "": "project = {_test_key}" else: "project = TEST"
+
+
+describe("adapter_jira_curl - live Jira Cloud", fn():
+    if not _have_creds:
+        it("skipped (no creds: set JIRA_URL, JIRA_USER, JIRA_TOKEN)", fn():
+            expect(true).to_equal(true)
+        )
+    else:
+        it("search returns >= 0 issues for the configured project", fn():
+            val client = JiraClient(
+                base_url: _jira_url,
+                email: _jira_user,
+                api_token: _jira_token,
+                curl_path: "curl",
+            )
+            val (ok, issues, _raw) = jira_curl_search(client, _project_jql, "summary,status", 5)
+            expect(ok).to_equal(true)
+            expect(issues.len() >= 0).to_equal(true)
+        )
+
+        it("view of the first search hit succeeds", fn():
+            val client = JiraClient(
+                base_url: _jira_url,
+                email: _jira_user,
+                api_token: _jira_token,
+                curl_path: "curl",
+            )
+            val (ok, issues, _raw) = jira_curl_search(client, _project_jql, "summary", 1)
+            expect(ok).to_equal(true)
+            if issues.len() > 0:
+                val (vok, issue, _vraw) = jira_curl_view_issue(client, issues[0].key)
+                expect(vok).to_equal(true)
+                expect(issue.key).to_equal(issues[0].key)
+            else:
+                # Empty project is still a passing live smoke - the search
+                # itself returned 200; we have nothing to view.
+                expect(true).to_equal(true)
+        )
+)

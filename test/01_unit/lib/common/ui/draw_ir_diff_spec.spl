@@ -1,0 +1,91 @@
+# @cover src/lib/common/ui/draw_ir_diff.spl 80%
+# @tag: unit, ui, draw_ir, diff
+
+use std.spec
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    draw_ir_batch,
+    draw_ir_box_with_style,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect_bounds,
+    draw_ir_style_prop,
+    draw_ir_text
+}
+use common.ui.draw_ir_diff.{draw_ir_diff_compositions, draw_ir_diff_report_to_json}
+
+fn _embedding():
+    draw_ir_embedding_config("surface", "root", 0, 0, 400, 160, 0, 1000, false)
+
+describe "Draw IR baseline diff":
+
+    it "reports geometry style color border and text-bound deltas by stable id":
+        val baseline = draw_ir_composition("baseline", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                draw_ir_box_with_style(
+                    "box",
+                    10,
+                    20,
+                    100,
+                    40,
+                    1u32,
+                    draw_ir_rect_bounds(10, 20, 100, 40),
+                    draw_ir_rect_bounds(12, 22, 96, 36),
+                    draw_ir_rect_bounds(10, 20, 100, 40),
+                    draw_ir_rect_bounds(0, 0, 200, 100),
+                    [draw_ir_style_prop("fill", "blue")]
+                ),
+                draw_ir_text("label", 20, 30, "Old", 2u32)
+            ])
+        ])
+        val current = draw_ir_composition("current", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                draw_ir_box_with_style(
+                    "box",
+                    15,
+                    25,
+                    120,
+                    50,
+                    3u32,
+                    draw_ir_rect_bounds(15, 25, 120, 50),
+                    draw_ir_rect_bounds(17, 27, 116, 46),
+                    draw_ir_rect_bounds(15, 25, 120, 50),
+                    draw_ir_rect_bounds(0, 0, 200, 100),
+                    [draw_ir_style_prop("fill", "red")]
+                ),
+                draw_ir_text("label", 22, 33, "New", 2u32)
+            ])
+        ])
+
+        val report = draw_ir_diff_compositions(baseline, current)
+
+        expect(report.node_count).to_equal(2)
+        expect(report.changed_count).to_equal(2)
+        expect(report.diffs[0].component_id).to_equal("box")
+        expect(report.diffs[0].dx).to_equal(5)
+        expect(report.diffs[0].dwidth).to_equal(20)
+        expect(report.diffs[0].color_changed).to_equal(true)
+        expect(report.diffs[0].style_changed).to_equal(true)
+        expect(report.diffs[0].border_changed).to_equal(true)
+        expect(report.diffs[1].text_changed).to_equal(true)
+        expect(report.diffs[1].text_bounds_changed).to_equal(true)
+
+    it "reports added and removed nodes":
+        val baseline = draw_ir_composition("baseline", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                draw_ir_text("removed", 5, 6, "Gone", 1u32)
+            ])
+        ])
+        val current = draw_ir_composition("current", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                draw_ir_text("added", 7, 8, "New", 1u32)
+            ])
+        ])
+
+        val report = draw_ir_diff_compositions(baseline, current)
+        val json = draw_ir_diff_report_to_json(report)
+
+        expect(report.added_count).to_equal(1)
+        expect(report.removed_count).to_equal(1)
+        expect(json).to_contain("\"state\":\"added\"")
+        expect(json).to_contain("\"state\":\"removed\"")

@@ -1,0 +1,82 @@
+# @cover src/lib/nogc_async_mut/compute/compute_ops.spl
+use std.spec.*
+use std.nogc_async_mut.compute.exec_target.{
+    DeviceClass, ComputeBackend, EnforceMode, BackendCaps, ExecTarget, resolve_exec_target
+}
+use std.nogc_async_mut.compute.compute_ops.{
+    compute_reduce, compute_transform, compute_inclusive_scan,
+    compute_count, compute_filter, compute_find, compute_sort
+}
+
+fn add_i64(a: i64, b: i64) -> i64:
+    a + b
+
+fn max_i64(a: i64, b: i64) -> i64:
+    if a > b:
+        return a
+    return b
+
+fn double_i64(x: i64) -> i64:
+    x * 2
+
+fn is_even(x: i64) -> bool:
+    x % 2 == 0
+
+fn equals_30(x: i64) -> bool:
+    x == 30
+
+fn less_i64(a: i64, b: i64) -> bool:
+    a < b
+
+fn cpu_target() -> ExecTarget:
+    resolve_exec_target(DeviceClass.Cpu, ComputeBackend.NoneBackend, EnforceMode.Suggest, BackendCaps.none())
+
+describe "compute_ops generic algorithm surface (CPU reference)":
+
+    it "reduce sums an i64 array":
+        val t = cpu_target()
+        val data = [10, 20, 30, 40]
+        expect(compute_reduce(data, 0, add_i64, t)).to_equal(100)
+
+    it "reduce computes a max":
+        val t = cpu_target()
+        val data = [3, 99, 7, 42, 1]
+        expect(compute_reduce(data, 0, max_i64, t)).to_equal(99)
+
+    it "transform doubles each element":
+        val t = cpu_target()
+        val out = compute_transform([1, 2, 3], double_i64, t)
+        expect(out[0]).to_equal(2)
+        expect(out[1]).to_equal(4)
+        expect(out[2]).to_equal(6)
+
+    it "inclusive_scan yields running prefix sums":
+        val t = cpu_target()
+        val out = compute_inclusive_scan([1, 2, 3, 4], 0, add_i64, t)
+        expect(out[0]).to_equal(1)
+        expect(out[1]).to_equal(3)
+        expect(out[2]).to_equal(6)
+        expect(out[3]).to_equal(10)
+
+    it "count tallies a predicate":
+        val t = cpu_target()
+        expect(compute_count([1, 2, 3, 4, 5, 6], is_even, t)).to_equal(3)
+
+    it "filter keeps matching elements":
+        val t = cpu_target()
+        val out = compute_filter([1, 2, 3, 4, 5, 6], is_even, t)
+        expect(out.len()).to_equal(3)
+        expect(out[0]).to_equal(2)
+        expect(out[2]).to_equal(6)
+
+    it "find returns first matching index or -1":
+        val t = cpu_target()
+        expect(compute_find([10, 20, 30, 40], equals_30, t)).to_equal(2)
+        expect(compute_find([10, 20], equals_30, t)).to_equal(-1)
+
+    it "sort orders ascending via comparator":
+        val t = cpu_target()
+        val out = compute_sort([5, 3, 8, 1, 9, 2], less_i64, t)
+        expect(out[0]).to_equal(1)
+        expect(out[1]).to_equal(2)
+        expect(out[5]).to_equal(9)

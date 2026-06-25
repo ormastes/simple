@@ -1,0 +1,111 @@
+# Kernel Process Table — scheduler-owned PID registry (M1, REQ-1/REQ-4).
+#
+# Real PID allocation with monotonic counter.
+# Process records are stored in parallel module-level arrays (tombstone removal).
+#
+# @cover process_table
+
+# ============================================================================
+# Process record
+# ============================================================================
+
+struct ProcessEntry:
+    """A single process table entry."""
+    pid:   i64
+    asid:  u64
+    ns_id: u64
+    state: text
+
+# ============================================================================
+# Option wrapper for ProcessEntry
+# ============================================================================
+
+struct ProcessOption:
+    """Option wrapper for ProcessEntry. is_some=false means no entry."""
+    is_some: bool
+    value:   ProcessEntry
+
+fn _process_option_none() -> ProcessOption:
+    ProcessOption(
+        is_some: false,
+        value: ProcessEntry(pid: 0, asid: 0, ns_id: 0, state: "")
+    )
+
+fn _process_option_some(e: ProcessEntry) -> ProcessOption:
+    ProcessOption(is_some: true, value: e)
+
+# ============================================================================
+# Table storage (tombstone-based: reaped entries have pid = -1)
+# ============================================================================
+
+var _pt_pid_list:    [i64]  = []
+var _pt_asid_list:   [u64]  = []
+var _pt_ns_id_list:  [u64]  = []
+var _pt_state_list:  [text] = []
+var _pt_alive_list:  [bool] = []
+var _pt_pid_counter: i64    = 0
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn process_table_alloc_pid() -> i64:
+    """Allocate a new unique PID.
+
+    PID 0 is reserved. Returned PIDs are always > 0.
+
+    Returns:
+        Positive PID value.
+    """
+    _pt_pid_counter = _pt_pid_counter + 1
+    _pt_pid_counter
+
+fn process_table_register(pid: i64, asid: u64, ns_id: u64):
+    """Register a new process entry in the table.
+
+    Args:
+        pid:   PID allocated via process_table_alloc_pid()
+        asid:  Address Space Identifier
+        ns_id: Namespace reference ID
+    """
+    _pt_pid_list.push(pid)
+    _pt_asid_list.push(asid)
+    _pt_ns_id_list.push(ns_id)
+    _pt_state_list.push("running")
+    _pt_alive_list.push(true)
+
+fn process_table_lookup(pid: i64) -> ProcessOption:
+    """Look up a process entry by PID.
+
+    Returns:
+        ProcessOption with is_some=true if found, is_some=false otherwise.
+    """
+    val n = _pt_pid_list.len()
+    var i: i64 = 0
+    while i < n:
+        if _pt_alive_list[i] and _pt_pid_list[i] == pid:
+            val e = ProcessEntry(
+                pid:   _pt_pid_list[i],
+                asid:  _pt_asid_list[i],
+                ns_id: _pt_ns_id_list[i],
+                state: _pt_state_list[i]
+            )
+            return _process_option_some(e)
+        i = i + 1
+    _process_option_none()
+
+fn process_table_reap(pid: i64):
+    """Remove a process entry from the table (process has exited).
+
+    Uses tombstone: marks entry as dead without shifting array elements.
+
+    Args:
+        pid: PID to reap
+    """
+    val n = _pt_pid_list.len()
+    var i: i64 = 0
+    while i < n:
+        if _pt_alive_list[i] and _pt_pid_list[i] == pid:
+            _pt_alive_list[i] = false
+            return
+        i = i + 1

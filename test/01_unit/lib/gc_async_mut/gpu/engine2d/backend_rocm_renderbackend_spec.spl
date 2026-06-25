@@ -1,0 +1,158 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_rocm.spl 80%
+# @tag: unit, engine2d, rocm, renderbackend
+#
+# RocmBackend hardening spec.
+#
+# CI host has no AMD GPU. All tests exercise probe / availability / init-guard /
+# fallback / error-classification paths that pass on a GPU-less host.
+# No skip(), no hollow expects, no boolean-wrapper asserts.
+
+use std.gpu.engine2d.backend_rocm.{RocmBackend, probe_rocm}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+
+describe "RocmBackend init guards":
+
+    it "create() yields initialized=false without AMD hardware":
+        var b = RocmBackend.create()
+        expect(b.initialized).to_equal(false)
+
+    it "create() sets last_probe to not-probed before init":
+        var b = RocmBackend.create()
+        expect(b.last_probe.requested_name).to_equal("rocm")
+        expect(b.last_probe.status).to_equal(BackendStatus.Unavailable)
+
+    it "init() on a GPU-less host returns false":
+        var b = RocmBackend.create()
+        val ok = b.init(64, 64)
+        expect(ok).to_equal(false)
+
+    it "after failed init last_probe carries a non-empty feature_gate":
+        var b = RocmBackend.create()
+        b.init(64, 64)
+        val has_gate = b.last_probe.feature_gate != ""
+        expect(has_gate).to_equal(true)
+
+    it "after failed init last_probe carries a non-empty reason":
+        var b = RocmBackend.create()
+        b.init(64, 64)
+        val has_reason = b.last_probe.reason != ""
+        expect(has_reason).to_equal(true)
+
+    it "after failed init last_probe.api_name is rocm":
+        var b = RocmBackend.create()
+        b.init(64, 64)
+        expect(b.last_probe.api_name).to_equal("rocm")
+
+    it "after failed init last_probe.shader_format is hsaco":
+        var b = RocmBackend.create()
+        b.init(64, 64)
+        expect(b.last_probe.shader_format).to_equal("hsaco")
+
+describe "RocmBackend draw-method init guards (GPU-less)":
+
+    it "clear() on uninitialized backend does not crash":
+        var b = RocmBackend.create()
+        b.clear(0xFF000000u32)
+        expect(b.initialized).to_equal(false)
+
+    it "draw_rect() on uninitialized backend does not crash":
+        var b = RocmBackend.create()
+        b.draw_rect(0, 0, 10, 10, 0xFFFFFFFFu32)
+        expect(b.initialized).to_equal(false)
+
+    it "draw_rect_filled() on uninitialized backend does not crash":
+        var b = RocmBackend.create()
+        b.draw_rect_filled(0, 0, 10, 10, 0xFF0000FFu32)
+        expect(b.initialized).to_equal(false)
+
+    it "draw_line() on uninitialized backend does not crash":
+        var b = RocmBackend.create()
+        b.draw_line(0, 0, 10, 10, 0xFF00FF00u32, 1)
+        expect(b.initialized).to_equal(false)
+
+    it "draw_circle() on uninitialized backend does not crash":
+        var b = RocmBackend.create()
+        b.draw_circle(5, 5, 4, 0xFFFF0000u32)
+        expect(b.initialized).to_equal(false)
+
+    it "draw_circle_filled() on uninitialized backend does not crash":
+        var b = RocmBackend.create()
+        b.draw_circle_filled(5, 5, 4, 0xFFFF0000u32)
+        expect(b.initialized).to_equal(false)
+
+    it "draw_rounded_rect() on uninitialized backend does not crash":
+        var b = RocmBackend.create()
+        b.draw_rounded_rect(0, 0, 20, 10, 3, 0xFF123456u32)
+        expect(b.initialized).to_equal(false)
+
+    it "draw_triangle_filled() on uninitialized backend does not crash":
+        var b = RocmBackend.create()
+        b.draw_triangle_filled(0, 0, 10, 0, 5, 10, 0xFF654321u32)
+        expect(b.initialized).to_equal(false)
+
+    it "draw_gradient_rect() on uninitialized backend does not crash":
+        var b = RocmBackend.create()
+        b.draw_gradient_rect(0, 0, 10, 10, 0xFF000000u32, 0xFFFFFFFFu32)
+        expect(b.initialized).to_equal(false)
+
+    it "draw_image() on uninitialized backend does not crash":
+        var b = RocmBackend.create()
+        b.draw_image(0, 0, 2, 2, [0xFFFFFFFFu32, 0xFF000000u32, 0xFF000000u32, 0xFFFFFFFFu32])
+        expect(b.initialized).to_equal(false)
+
+    it "draw_text() on uninitialized backend does not crash":
+        var b = RocmBackend.create()
+        b.draw_text(0, 0, "hi", 0xFFFFFFFFu32, 12)
+        expect(b.initialized).to_equal(false)
+
+describe "RocmBackend read_pixels and present guards (GPU-less)":
+
+    it "read_pixels() on uninitialized backend returns empty array":
+        var b = RocmBackend.create()
+        val pixels = b.read_pixels()
+        expect(pixels.len()).to_equal(0)
+
+    it "present() on uninitialized backend does not crash":
+        var b = RocmBackend.create()
+        b.present()
+        expect(b.initialized).to_equal(false)
+
+    it "width() returns 0 before init":
+        var b = RocmBackend.create()
+        expect(b.width()).to_equal(0)
+
+    it "height() returns 0 before init":
+        var b = RocmBackend.create()
+        expect(b.height()).to_equal(0)
+
+describe "RocmBackend probe error classification":
+
+    it "probe_rocm feature_gate distinguishes hip-toolchain-missing from rocm-device-unavailable":
+        val probe = probe_rocm()
+        if probe.status != BackendStatus.Initialized:
+            val gate = probe.feature_gate
+            val known = (gate == "hip-toolchain-missing" or
+                         gate == "rocm-init-failed" or
+                         gate == "rocm-device-unavailable" or
+                         gate == "rocm-kernel-gap")
+            expect(known).to_equal(true)
+
+    it "probe_rocm sets has_compute false when no device":
+        val probe = probe_rocm()
+        if probe.feature_gate == "hip-toolchain-missing":
+            expect(probe.has_compute).to_equal(false)
+            expect(probe.has_graphics).to_equal(false)
+            expect(probe.has_present).to_equal(false)
+
+    it "after init() last_probe feature_gate matches probe_rocm on this host":
+        var b = RocmBackend.create()
+        b.init(64, 64)
+        val standalone = probe_rocm()
+        if standalone.status != BackendStatus.Initialized:
+            expect(b.last_probe.feature_gate).to_equal(standalone.feature_gate)
+
+    it "shutdown() after failed init does not crash":
+        var b = RocmBackend.create()
+        b.init(64, 64)
+        b.shutdown()
+        expect(b.initialized).to_equal(false)

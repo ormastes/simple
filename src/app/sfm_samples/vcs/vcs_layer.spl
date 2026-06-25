@@ -1,0 +1,43 @@
+# AC-10: version-control support exposed as an SFM back-end layer.
+#
+# A minimal VCS layer consumed through the SFM infra. `vcs_status` reports the
+# branch and working-tree cleanliness for a path; `vcs_commit` records a commit
+# and returns a content hash. The data is synthesized (no live repo dependency)
+# so the sample stays deterministic under the interpreter.
+
+use std.sfm.manifest.{FeatureManifest, LayerDescriptor, LayerKind, SfmSecurityLevel}
+
+# A tiny deterministic hash over a text payload (FNV-1a style, 32-bit).
+fn _vcs_hash(payload: text) -> text:
+    var h: i64 = 2166136261
+    var i: i32 = 0
+    val n: i32 = payload.len() as i32
+    while i < n:
+        val c: i64 = payload.char_code_at(i) as i64
+        h = (h ^ c) & 4294967295
+        h = (h * 16777619) & 4294967295
+        i = i + 1
+    return h.to_text()
+
+# AC-10: report VCS status for a path. Surfaces the branch and clean state.
+fn vcs_status(path: text) -> text:
+    return "branch=main clean=true path=" + path
+
+# AC-10: record a commit and return its hash.
+fn vcs_commit(path: text, message: text) -> text:
+    return _vcs_hash(path + ":" + message)
+
+# AC-10: feature manifest declaring the VCS support as a back-end layer.
+fn vcs_manifest() -> FeatureManifest:
+    val store = LayerDescriptor(
+        role: "vcs",
+        kind: LayerKind.BackDb,
+        entry_symbol: "vcs_status",
+        privileged: false
+    )
+    return FeatureManifest(
+        name: "sfm-vcs",
+        version: "0.1.0",
+        security_level: SfmSecurityLevel.Ordinary,
+        layers: [store]
+    )

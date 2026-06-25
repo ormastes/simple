@@ -1,0 +1,118 @@
+"""
+RV64 Pipeline Types Unit Specification
+
+Tests the register file, memory model, and latch constructors.
+
+**Feature IDs:** #HW-RV64-PIPE-TYPES
+**Category:** Testing
+**Status:** Implemented
+"""
+
+use std.spec.{describe, it, expect}
+
+use std.hardware.rv64.pipeline.types.{
+    Rv64RegisterFile, create_rv64_register_file,
+    Rv64Memory, create_rv64_memory,
+    Rv64AluOp, RV64_NUM_REGS,
+    create_if_id_latch, create_id_ex_latch, create_ex_mem_latch, create_mem_wb_latch
+}
+
+# ============================================================================
+# Register File
+# ============================================================================
+
+describe "Rv64RegisterFile":
+    it "initializes all 32 registers to zero":
+        var rf = create_rv64_register_file()
+        expect(rf.read(0)).to_equal(0)
+        expect(rf.read(1)).to_equal(0)
+        expect(rf.read(31)).to_equal(0)
+
+    it "x0 always reads as zero even after write":
+        var rf = create_rv64_register_file()
+        rf.write(0, 42)
+        expect(rf.read(0)).to_equal(0)
+
+    it "reads and writes general purpose registers":
+        var rf = create_rv64_register_file()
+        rf.write(1, 100)
+        rf.write(31, -1)
+        expect(rf.read(1)).to_equal(100)
+        expect(rf.read(31)).to_equal(-1)
+
+    it "handles 64-bit values":
+        var rf = create_rv64_register_file()
+        val large_val = 0x7FFFFFFFFFFFFFFF
+        rf.write(10, large_val)
+        expect(rf.read(10)).to_equal(large_val)
+
+    it "ignores out-of-range reads and writes":
+        var rf = create_rv64_register_file()
+        expect(rf.read(32)).to_equal(0)
+        expect(rf.read(-1)).to_equal(0)
+
+# ============================================================================
+# Memory Model
+# ============================================================================
+
+describe "Rv64Memory":
+    it "initializes to zero":
+        var mem = create_rv64_memory(256)
+        expect(mem.read_byte(0)).to_equal(0)
+        expect(mem.read_byte(255)).to_equal(0)
+
+    it "reads and writes individual bytes":
+        var mem = create_rv64_memory(256)
+        mem.write_byte(10, 0xAB)
+        expect(mem.read_byte(10)).to_equal(0xAB)
+
+    it "reads and writes 32-bit words little-endian":
+        var mem = create_rv64_memory(256)
+        mem.write_word32(0, 0x12345678)
+        expect(mem.read_byte(0)).to_equal(0x78)
+        expect(mem.read_byte(1)).to_equal(0x56)
+        expect(mem.read_byte(2)).to_equal(0x34)
+        expect(mem.read_byte(3)).to_equal(0x12)
+        expect(mem.read_word32(0)).to_equal(0x12345678)
+
+    it "reads and writes 64-bit words little-endian":
+        var mem = create_rv64_memory(256)
+        mem.write_word64(0, 0x0102030405060708)
+        expect(mem.read_word64(0)).to_equal(0x0102030405060708)
+
+    it "handles out-of-range access gracefully":
+        var mem = create_rv64_memory(16)
+        expect(mem.read_byte(100)).to_equal(0)
+
+# ============================================================================
+# Latch Defaults
+# ============================================================================
+
+describe "Pipeline Latch Constructors":
+    it "creates invalid IF/ID latch by default":
+        val latch = create_if_id_latch()
+        expect(latch.valid).to_equal(false)
+        expect(latch.pc).to_equal(0)
+
+    it "creates invalid ID/EX latch by default":
+        val latch = create_id_ex_latch()
+        expect(latch.valid).to_equal(false)
+        expect(latch.reg_write).to_equal(false)
+
+    it "creates invalid EX/MEM latch by default":
+        val latch = create_ex_mem_latch()
+        expect(latch.valid).to_equal(false)
+
+    it "creates invalid MEM/WB latch by default":
+        val latch = create_mem_wb_latch()
+        expect(latch.valid).to_equal(false)
+
+# ============================================================================
+# AluOp
+# ============================================================================
+
+describe "Rv64AluOp":
+    it "converts to readable text":
+        expect(Rv64AluOp.Add.to_text()).to_equal("add")
+        expect(Rv64AluOp.Addw.to_text()).to_equal("addw")
+        expect(Rv64AluOp.PassB.to_text()).to_equal("passb")

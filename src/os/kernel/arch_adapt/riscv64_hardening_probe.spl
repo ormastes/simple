@@ -1,0 +1,45 @@
+# RISC-V 64 hardening evidence adapter for boot-time serial probes.
+
+use os.kernel.arch.riscv64.canary.{canary_init, canary_value}
+use os.kernel.arch_adapt.hardening_types.{HardeningReport}
+
+extern fn rt_riscv_read_sstatus() -> u64
+
+fn riscv64_hardening_boot_canary_marker() -> text:
+    canary_init(0)
+    "[harden] canary arch=riscv64 value=" + canary_value().to_text()
+
+pub fn riscv64_hardening_probe_full() -> HardeningReport:
+    """Probe RISC-V 64 hardening features at boot time.
+
+    Reads sstatus to derive NX (MXSTATUS / PMP-based no-exec approximation)
+    and WP (write-protect via PMP lock bit).  SMEP / SMAP have no direct
+    RISC-V equivalent — mapped to false.
+
+    All bit-position constants are function-local (baremetal BSS-zero safety).
+    """
+    val sstatus = rt_riscv_read_sstatus()
+
+    # sstatus.MXR (bit 19) — Make eXecutable Readable: if clear, NX is enforced.
+    # sstatus.SUM (bit 18) — Supervisor User Memory access: if clear, SMAP-like.
+    val mxr_bit: u64 = 19
+    val sum_bit: u64 = 18
+    val bit_one: u64 = 1
+
+    # NX is active when MXR == 0 (execute-only pages are not readable as data).
+    val nx = (sstatus >> mxr_bit) & bit_one == 0
+    # WP approximation: SUM == 0 means S-mode cannot access U-mode pages freely.
+    val wp = (sstatus >> sum_bit) & bit_one == 0
+
+    canary_init(0)
+    val canary_val = canary_value()
+
+    HardeningReport(
+        nx: nx,
+        smep: false,
+        smap: wp,
+        wp: wp,
+        aslr_seed: sstatus,
+        canary: canary_val,
+        arch: "riscv64"
+    )

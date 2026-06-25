@@ -1,0 +1,35 @@
+# os_harden_runtime_evidence_spec
+#
+# Verifies runtime hardening evidence ingestion runs as Simple code and remains
+# fail-closed when logs do not contain runtime markers.
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+describe "OS hardening runtime evidence":
+
+    it "requires canary variation and text-write trap markers before writing green evidence":
+        val root = "/tmp/simple_os_harden_runtime_evidence_spec"
+        val (_clean_out, _clean_err, _clean_code) = rt_process_run("/bin/sh", ["-c", "rm -rf " + root + " && mkdir -p " + root])
+        val bad_log = root + "/bad.log"
+        expect(rt_file_write_text(bad_log, "[harden] canary arch=x86_64 value=111\n")).to_equal(true)
+        val bad = rt_process_run("bin/simple", ["run", "scripts/audit/os_harden_runtime_evidence.spl", "--", "--arch", "x86_64", "--out-root", root + "/out_bad", bad_log])
+        expect(bad.2).to_equal(1)
+
+        val good_log = root + "/good.log"
+        val body =
+            "[harden] canary arch=x86_64 value=111\n" +
+            "[harden] canary arch=x86_64 value=222\n" +
+            "[harden] text_write_trap=pass\n"
+        expect(rt_file_write_text(good_log, body)).to_equal(true)
+        val good = rt_process_run("bin/simple", ["run", "scripts/audit/os_harden_runtime_evidence.spl", "--", "--arch", "x86_64", "--out-root", root + "/out_good", good_log])
+        expect(good.2).to_equal(0)
+
+        val canary = rt_file_read_text(root + "/out_good/x86_64/canary_runtime.json")
+        expect(canary).to_contain("\"differs_across_reboots\": true")
+        expect(canary).to_contain("\"distinct_sample_count\": 2")
+        val trap = rt_file_read_text(root + "/out_good/x86_64/text_write_trap.json")
+        expect(trap).to_contain("\"trap_observed\": true")

@@ -1,0 +1,133 @@
+# Tests for link_deps.spl - Dependency resolution and SDN merge logic
+# No imports - uses module-level helper functions to replicate merge logic.
+
+# ============================================================================
+# Module-level helpers (replicate merge logic without file I/O)
+# ============================================================================
+
+fn helper_merge_lists(base: [text], extra: [text]) -> [text]:
+    var result: [text] = []
+    for item in base:
+        result.push(item)
+    for item in extra:
+        val trimmed = item.trim()
+        if trimmed != "":
+            result.push(trimmed)
+    result
+
+fn helper_default_linux_libs() -> [text]:
+    ["c", "pthread", "dl", "m"]
+
+fn helper_default_lib_dirs() -> [text]:
+    ["/usr/lib/simple", "/usr/local/lib/simple"]
+
+fn helper_resolve_no_default_libs(no_default: bool, defaults: [text], extras: [text]) -> [text]:
+    if no_default:
+        # Only extras, no defaults
+        var result: [text] = []
+        for item in extras:
+            val trimmed = item.trim()
+            if trimmed != "":
+                result.push(trimmed)
+        return result
+    helper_merge_lists(defaults, extras)
+
+fn helper_parse_csv(csv: text) -> [text]:
+    var result: [text] = []
+    val parts = csv.split(",")
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed != "":
+            result.push(trimmed)
+    result
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "link_deps":
+
+    describe "default resolution":
+        it "linux_defaults: Linux defaults include c, pthread, dl, m":
+            val libs = helper_default_linux_libs()
+            expect(libs.len()).to_equal(4)
+            expect(libs[0]).to_equal("c")
+            expect(libs[3]).to_equal("m")
+
+        it "default_lib_dirs: defaults include simple lib dirs":
+            val dirs = helper_default_lib_dirs()
+            expect(dirs.len()).to_equal(2)
+            expect(dirs[0]).to_equal("/usr/lib/simple")
+
+    describe "SDN merge":
+        it "merge_empty_extras: merging with empty extras returns defaults":
+            val result = helper_merge_lists(helper_default_linux_libs(), [])
+            expect(result.len()).to_equal(4)
+            expect(result[0]).to_equal("c")
+
+        it "merge_adds_extra_libs: extra libs are appended":
+            val result = helper_merge_lists(helper_default_linux_libs(), ["extra_lib"])
+            expect(result.len()).to_equal(5)
+            expect(result[4]).to_equal("extra_lib")
+
+        it "merge_multiple_extras: multiple extras all appended":
+            val result = helper_merge_lists(helper_default_linux_libs(), ["rt", "util"])
+            expect(result.len()).to_equal(6)
+            expect(result[4]).to_equal("rt")
+            expect(result[5]).to_equal("util")
+
+        it "merge_trims_whitespace: whitespace in extras is trimmed":
+            val result = helper_merge_lists([], [" foo ", " bar "])
+            expect(result.len()).to_equal(2)
+            expect(result[0]).to_equal("foo")
+            expect(result[1]).to_equal("bar")
+
+        it "merge_skips_empty: empty strings in extras are skipped":
+            val result = helper_merge_lists([], ["", "valid", ""])
+            expect(result.len()).to_equal(1)
+            expect(result[0]).to_equal("valid")
+
+    describe "no-default-libs":
+        it "no_default_includes_only_extras: no-default-libs skips defaults":
+            val result = helper_resolve_no_default_libs(true, helper_default_linux_libs(), ["custom_lib"])
+            expect(result.len()).to_equal(1)
+            expect(result[0]).to_equal("custom_lib")
+
+        it "no_default_empty_when_no_extras: no-default-libs with no extras gives empty":
+            val result = helper_resolve_no_default_libs(true, helper_default_linux_libs(), [])
+            expect(result.len()).to_equal(0)
+
+        it "with_default_includes_both: with defaults, both are included":
+            val result = helper_resolve_no_default_libs(false, helper_default_linux_libs(), ["extra"])
+            expect(result.len()).to_equal(5)
+            expect(result[0]).to_equal("c")
+            expect(result[4]).to_equal("extra")
+
+    describe "platform/arch overrides":
+        it "multi_layer_merge: base + os + arch layers all merge":
+            # Simulates: defaults + [links] + [links.linux] + [links.linux.riscv64]
+            var libs = helper_default_linux_libs()
+            libs = helper_merge_lists(libs, ["project_lib"])
+            libs = helper_merge_lists(libs, ["rt"])
+            libs = helper_merge_lists(libs, ["atomic"])
+            expect(libs.len()).to_equal(7)
+            expect(libs[4]).to_equal("project_lib")
+            expect(libs[5]).to_equal("rt")
+            expect(libs[6]).to_equal("atomic")
+
+    describe "CSV parsing":
+        it "parse_csv_single: single value parsed":
+            val result = helper_parse_csv("foo")
+            expect(result.len()).to_equal(1)
+            expect(result[0]).to_equal("foo")
+
+        it "parse_csv_multiple: comma-separated values parsed":
+            val result = helper_parse_csv("foo, bar, baz")
+            expect(result.len()).to_equal(3)
+            expect(result[0]).to_equal("foo")
+            expect(result[1]).to_equal("bar")
+            expect(result[2]).to_equal("baz")
+
+        it "parse_csv_empty: empty string gives empty result":
+            val result = helper_parse_csv("")
+            expect(result.len()).to_equal(0)

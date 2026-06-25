@@ -1,0 +1,150 @@
+"""
+Route Types
+
+Core types for the web router: RouteMethod, RouteEntry, RouteMatch.
+Also provides helper functions for pattern matching and resource route generation.
+
+These types are consumed by WebRouter (nogc_async_mut/web_framework/router.spl)
+and AppDispatcher (dispatcher.spl).
+"""
+
+use std.http_server.types.{LocationConfig}
+
+# ============================================================================
+# RouteMethod
+# ============================================================================
+
+enum RouteMethod:
+    """HTTP method discriminant for route matching."""
+    GET
+    POST
+    PUT
+    PATCH
+    DELETE
+    HEAD
+    OPTIONS
+    ANY
+
+fn text_to_method(s: text) -> RouteMethod:
+    """Parse an HTTP method string into RouteMethod."""
+    if s == "GET": return RouteMethod.GET
+    if s == "POST": return RouteMethod.POST
+    if s == "PUT": return RouteMethod.PUT
+    if s == "PATCH": return RouteMethod.PATCH
+    if s == "DELETE": return RouteMethod.DELETE
+    if s == "HEAD": return RouteMethod.HEAD
+    if s == "OPTIONS": return RouteMethod.OPTIONS
+    RouteMethod.ANY
+
+fn method_to_text(m: RouteMethod) -> text:
+    """Convert RouteMethod to its HTTP string representation."""
+    match m:
+        RouteMethod.GET: "GET"
+        RouteMethod.POST: "POST"
+        RouteMethod.PUT: "PUT"
+        RouteMethod.PATCH: "PATCH"
+        RouteMethod.DELETE: "DELETE"
+        RouteMethod.HEAD: "HEAD"
+        RouteMethod.OPTIONS: "OPTIONS"
+        RouteMethod.ANY: "*"
+
+fn methods_match(route_method: RouteMethod, request_method: text) -> bool:
+    """Return true if route_method accepts the given HTTP method string."""
+    match route_method:
+        RouteMethod.ANY: true
+        _: method_to_text(route_method) == request_method
+
+# ============================================================================
+# RouteEntry
+# ============================================================================
+
+struct RouteEntry:
+    """A single registered route with pattern, method, and target action."""
+    method: RouteMethod
+    pattern: text            # e.g. "/posts/:id"
+    controller_name: text    # e.g. "posts"
+    action_name: text        # e.g. "show"
+    middlewares: [text]      # middleware names to apply
+
+# ============================================================================
+# RouteMatch
+# ============================================================================
+
+struct RouteMatch:
+    """Result of a successful route match."""
+    route: RouteEntry
+    params: Dict<text, text>   # extracted dynamic segments, e.g. {"id": "42"}
+
+# ============================================================================
+# Pattern matching
+# ============================================================================
+
+fn match_pattern(pattern: text, path: text) -> Dict<text, text>?:
+    """Match a URL pattern against a concrete path.
+
+    Dynamic segments start with ':' and capture the corresponding
+    path segment into the returned dict.
+
+    Returns nil if the pattern does not match.
+    """
+    val pattern_parts = pattern.split("/")
+    val path_parts = path.split("/")
+
+    if pattern_parts.len() != path_parts.len():
+        return nil
+
+    var params: Dict<text, text> = {}
+    var i = 0
+    while i < pattern_parts.len():
+        val pp = pattern_parts[i]
+        val cp = path_parts[i]
+        if pp.len() > 0 and pp.char_at(0) == ':':
+            val key = pp.substring(1, pp.len())
+            params[key] = cp
+        else:
+            if pp != cp:
+                return nil
+        i = i + 1
+
+    Some(params)
+
+# ============================================================================
+# Resource route generation
+# ============================================================================
+
+fn resource_routes(controller: text) -> [RouteEntry]:
+    """Generate the 7 standard RESTful routes for a resource.
+
+    Pattern: /<controller> -> index, create
+             /<controller>/new -> new_form
+             /<controller>/:id -> show
+             /<controller>/:id/edit -> edit_form
+             /<controller>/:id (PUT) -> update
+             /<controller>/:id (DELETE) -> destroy
+    """
+    val base = "/" + controller
+    [
+        RouteEntry(method: RouteMethod.GET,    pattern: base,           controller_name: controller, action_name: "index",     middlewares: []),
+        RouteEntry(method: RouteMethod.POST,   pattern: base,           controller_name: controller, action_name: "create",    middlewares: []),
+        RouteEntry(method: RouteMethod.GET,    pattern: base + "/new",  controller_name: controller, action_name: "new_form",  middlewares: []),
+        RouteEntry(method: RouteMethod.GET,    pattern: base + "/:id",  controller_name: controller, action_name: "show",      middlewares: []),
+        RouteEntry(method: RouteMethod.GET,    pattern: base + "/:id/edit", controller_name: controller, action_name: "edit_form", middlewares: []),
+        RouteEntry(method: RouteMethod.PUT,    pattern: base + "/:id",  controller_name: controller, action_name: "update",    middlewares: []),
+        RouteEntry(method: RouteMethod.DELETE, pattern: base + "/:id",  controller_name: controller, action_name: "destroy",   middlewares: [])
+    ]
+
+fn prefix_routes(prefix: text, routes: [RouteEntry]) -> [RouteEntry]:
+    """Prepend a URL prefix to all patterns in a list of routes."""
+    var result: [RouteEntry] = []
+    var i = 0
+    while i < routes.len():
+        val r = routes[i]
+        result.push(RouteEntry(
+            method: r.method,
+            pattern: prefix + r.pattern,
+            controller_name: r.controller_name,
+            action_name: r.action_name,
+            middlewares: r.middlewares
+        ))
+        i = i + 1
+    result

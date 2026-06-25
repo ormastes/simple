@@ -1,0 +1,96 @@
+use std.spec
+use os.kernel.arch.arm.per_cpu.{
+    simulate_tpidr_el1_write_baremetal,
+    read_tpidr_el1_test,
+    simulate_tpidr_write_hosted,
+    simulate_tpidr_el0_write,
+    read_tpidr_el0_test
+}
+
+# AArch64 per-CPU TPIDR_EL1/EL0 register wiring — interpreter-mode tests
+#
+# SA-2 scope: TPIDR_EL1 register convention — written at boot per CPU core;
+# AArch64 system registers survive exception entry, no trap-frame save needed.
+#
+# AC: Per-CPU base via TPIDR_EL1 on AArch64 (Cortex-A);
+#     per-core isolation (no aliasing between cores).
+# Production module: src/os/kernel/arch/arm/per_cpu.spl
+#
+# The spec imports all helpers directly from the production module.
+# simulate_tpidr_el1_write_baremetal, read_tpidr_el1_test etc. are the
+# production simulated-TPIDR API — the same functions used in production test paths.
+
+# ---------------------------------------------------------------------------
+# Specs
+# ---------------------------------------------------------------------------
+
+describe "AArch64 Per-CPU TPIDR_EL1 Register Convention":
+
+    describe "TPIDR_EL1 write at boot — baremetal path":
+        it "AC: TPIDR_EL1 is set to per_cpu_base + core_id * per_cpu_slot_size for core 0":
+            val core_id = 0u32
+            val per_cpu_base = 0x81000000u64
+            val per_cpu_shift = 12u32
+            simulate_tpidr_el1_write_baremetal(core_id, per_cpu_base, per_cpu_shift)
+            val tpidr_value = read_tpidr_el1_test()
+            val expected = per_cpu_base + (0u64 << per_cpu_shift)
+            expect(tpidr_value).to_equal(expected)
+
+        it "AC: TPIDR_EL1 is set correctly for secondary core (core 1)":
+            val core_id = 1u32
+            val per_cpu_base = 0x81000000u64
+            val per_cpu_shift = 12u32
+            simulate_tpidr_el1_write_baremetal(core_id, per_cpu_base, per_cpu_shift)
+            val tpidr_value = read_tpidr_el1_test()
+            val expected = per_cpu_base + (1u64 << per_cpu_shift)
+            expect(tpidr_value).to_equal(expected)
+
+        it "AC: TPIDR_EL1 differs across core IDs — no aliasing":
+            val base = 0x81000000u64
+            val shift = 12u32
+            simulate_tpidr_el1_write_baremetal(0u32, base, shift)
+            val tpidr_core0 = read_tpidr_el1_test()
+            simulate_tpidr_el1_write_baremetal(1u32, base, shift)
+            val tpidr_core1 = read_tpidr_el1_test()
+            expect(tpidr_core0).to_equal(base)
+            expect(tpidr_core1).to_equal(base + 4096u64)
+
+        it "AC: shift=0 gives per_cpu_base + core_id (one-byte stride)":
+            val base = 0xC0000000u64
+            simulate_tpidr_el1_write_baremetal(3u32, base, 0u32)
+            val tpidr_value = read_tpidr_el1_test()
+            expect(tpidr_value).to_equal(base + 3u64)
+
+        it "AC: large shift (16) produces 64 KiB per-CPU slots":
+            val base = 0x80000000u64
+            val shift = 16u32
+            simulate_tpidr_el1_write_baremetal(2u32, base, shift)
+            val tpidr_value = read_tpidr_el1_test()
+            val expected = base + (2u64 << 16u64)
+            expect(tpidr_value).to_equal(expected)
+
+    describe "TPIDR_EL1 NOT written in hosted (non-baremetal) build":
+        it "AC: simulate_tpidr_write_hosted does NOT modify TPIDR_EL1":
+            simulate_tpidr_el1_write_baremetal(0u32, 0x81000000u64, 12u32)
+            val before = read_tpidr_el1_test()
+            simulate_tpidr_write_hosted()
+            val after = read_tpidr_el1_test()
+            expect(after).to_equal(before)
+
+    describe "TPIDR_EL0 — userspace thread pointer simulation":
+        it "AC: TPIDR_EL0 write stores the value independently from TPIDR_EL1":
+            simulate_tpidr_el1_write_baremetal(0u32, 0x81000000u64, 12u32)
+            val el1_before = read_tpidr_el1_test()
+            simulate_tpidr_el0_write(0xDEADBEEF00000000u64)
+            val el0_value = read_tpidr_el0_test()
+            val el1_after = read_tpidr_el1_test()
+            expect(el0_value).to_equal(0xDEADBEEF00000000u64)
+            expect(el1_after).to_equal(el1_before)
+
+        it "AC: TPIDR_EL0 can be updated independently (thread migration simulation)":
+            simulate_tpidr_el0_write(0x1000u64)
+            val first = read_tpidr_el0_test()
+            simulate_tpidr_el0_write(0x2000u64)
+            val second = read_tpidr_el0_test()
+            expect(first).to_equal(0x1000u64)
+            expect(second).to_equal(0x2000u64)

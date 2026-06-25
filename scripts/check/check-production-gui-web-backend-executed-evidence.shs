@@ -1,0 +1,255 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/production_gui_web_backend_executed_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/production_gui_web_backend_executed_evidence_$(date -u +%F).md}"
+SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+EVIDENCE_SRC="$BUILD_DIR/backend_executed_gui_scene_evidence.spl"
+EVIDENCE_LOG="$BUILD_DIR/evidence.log"
+ENV_PATH="$BUILD_DIR/evidence.env"
+WIDTH="${PRODUCTION_GUI_BACKEND_WIDTH:-16}"
+HEIGHT="${PRODUCTION_GUI_BACKEND_HEIGHT:-16}"
+TIMEOUT_SECS="${PRODUCTION_GUI_BACKEND_TIMEOUT_SECS:-120}"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+run_with_timeout() {
+    if have timeout; then
+        timeout "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+field_of() {
+    key="$1"
+    sed -n "s/^${key}=//p" "$EVIDENCE_LOG" | tail -n 1
+}
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$EVIDENCE_SRC" "$EVIDENCE_LOG" "$ENV_PATH" "$REPORT_PATH"
+
+cat >"$EVIDENCE_SRC" <<'SIMPLE'
+use app.wm_compare.production_gui_web_renderer_parity.{run_backend_executed_gui_widget_scene_parity}
+
+fn main():
+    val sample_count: i64 = 3
+    val report = run_backend_executed_gui_widget_scene_parity(16, 16)
+    val metal_ok = if report.metal_resolved_backend == "metal": report.metal_gpu_frame_complete and report.metal_gpu_readback_pixel_count == 16 * 16 else: true
+    var all_samples_pass = report.exact_backend_parity and report.cpu_simd_total_hits > 0 and metal_ok and report.timing_budget_status == "pass"
+    var min_total_elapsed_us = report.total_elapsed_us
+    var max_total_elapsed_us = report.total_elapsed_us
+    var sum_total_elapsed_us = report.total_elapsed_us
+    var min_total_pixels_per_second = report.total_pixels_per_second
+    var max_total_pixels_per_second = report.total_pixels_per_second
+    var sum_total_pixels_per_second = report.total_pixels_per_second
+    var sample_idx: i64 = 1
+    while sample_idx < sample_count:
+        val sample = run_backend_executed_gui_widget_scene_parity(16, 16)
+        val sample_metal_ok = if sample.metal_resolved_backend == "metal": sample.metal_gpu_frame_complete and sample.metal_gpu_readback_pixel_count == 16 * 16 else: true
+        if not (sample.exact_backend_parity and sample.cpu_simd_total_hits > 0 and sample_metal_ok and sample.timing_budget_status == "pass"):
+            all_samples_pass = false
+        if sample.total_elapsed_us < min_total_elapsed_us:
+            min_total_elapsed_us = sample.total_elapsed_us
+        if sample.total_elapsed_us > max_total_elapsed_us:
+            max_total_elapsed_us = sample.total_elapsed_us
+        if sample.total_pixels_per_second < min_total_pixels_per_second:
+            min_total_pixels_per_second = sample.total_pixels_per_second
+        if sample.total_pixels_per_second > max_total_pixels_per_second:
+            max_total_pixels_per_second = sample.total_pixels_per_second
+        sum_total_elapsed_us = sum_total_elapsed_us + sample.total_elapsed_us
+        sum_total_pixels_per_second = sum_total_pixels_per_second + sample.total_pixels_per_second
+        sample_idx = sample_idx + 1
+    print "production_gui_backend_status=" + (if all_samples_pass: "pass" else: "fail")
+    print "production_gui_backend_width=" + report.width.to_text()
+    print "production_gui_backend_height=" + report.height.to_text()
+    print "production_gui_backend_software_resolved=" + report.software_resolved_backend
+    print "production_gui_backend_cpu_simd_resolved=" + report.cpu_simd_resolved_backend
+    print "production_gui_backend_metal_resolved=" + report.metal_resolved_backend
+    print "production_gui_backend_software_pixel_count=" + report.software_pixel_count.to_text()
+    print "production_gui_backend_cpu_simd_pixel_count=" + report.cpu_simd_pixel_count.to_text()
+    print "production_gui_backend_metal_pixel_count=" + report.metal_pixel_count.to_text()
+    print "production_gui_backend_cpu_simd_different_pixels=" + report.cpu_simd_different_pixels.to_text()
+    print "production_gui_backend_cpu_simd_max_channel_diff=" + report.cpu_simd_max_channel_diff.to_text()
+    print "production_gui_backend_cpu_simd_total_hits=" + report.cpu_simd_total_hits.to_text()
+    print "production_gui_backend_cpu_simd_fill_hits=" + report.cpu_simd_fill_hits.to_text()
+    print "production_gui_backend_cpu_simd_copy_hits=" + report.cpu_simd_copy_hits.to_text()
+    print "production_gui_backend_cpu_simd_alpha_hits=" + report.cpu_simd_alpha_hits.to_text()
+    print "production_gui_backend_cpu_simd_blit_hits=" + report.cpu_simd_blit_hits.to_text()
+    print "production_gui_backend_cpu_simd_scroll_hits=" + report.cpu_simd_scroll_hits.to_text()
+    print "production_gui_backend_metal_different_pixels=" + report.metal_different_pixels.to_text()
+    print "production_gui_backend_metal_max_channel_diff=" + report.metal_max_channel_diff.to_text()
+    print "production_gui_backend_metal_gpu_frame_complete=" + report.metal_gpu_frame_complete.to_text()
+    print "production_gui_backend_metal_gpu_readback_pixel_count=" + report.metal_gpu_readback_pixel_count.to_text()
+    print "production_gui_backend_metal_gpu_readback_checksum=" + report.metal_gpu_readback_checksum.to_text()
+    print "production_gui_backend_software_first_pixel=" + report.software_first_pixel.to_text()
+    print "production_gui_backend_cpu_simd_first_pixel=" + report.cpu_simd_first_pixel.to_text()
+    print "production_gui_backend_metal_first_pixel=" + report.metal_first_pixel.to_text()
+    print "production_gui_backend_metal_gpu_first_pixel=" + report.metal_gpu_first_pixel.to_text()
+    print "production_gui_backend_software_rect_pixel=" + report.software_rect_pixel.to_text()
+    print "production_gui_backend_cpu_simd_rect_pixel=" + report.cpu_simd_rect_pixel.to_text()
+    print "production_gui_backend_metal_rect_pixel=" + report.metal_rect_pixel.to_text()
+    print "production_gui_backend_metal_gpu_rect_pixel=" + report.metal_gpu_rect_pixel.to_text()
+    print "production_gui_backend_tolerance_used=" + report.tolerance_used.to_text()
+    print "production_gui_backend_exact_backend_parity=" + report.exact_backend_parity.to_text()
+    print "production_gui_backend_software_render_elapsed_us=" + report.software_render_elapsed_us.to_text()
+    print "production_gui_backend_cpu_simd_render_elapsed_us=" + report.cpu_simd_render_elapsed_us.to_text()
+    print "production_gui_backend_metal_render_elapsed_us=" + report.metal_render_elapsed_us.to_text()
+    print "production_gui_backend_total_elapsed_us=" + report.total_elapsed_us.to_text()
+    print "production_gui_backend_software_pixels_per_second=" + report.software_pixels_per_second.to_text()
+    print "production_gui_backend_cpu_simd_pixels_per_second=" + report.cpu_simd_pixels_per_second.to_text()
+    print "production_gui_backend_metal_pixels_per_second=" + report.metal_pixels_per_second.to_text()
+    print "production_gui_backend_total_pixels_per_second=" + report.total_pixels_per_second.to_text()
+    print "production_gui_backend_timing_budget_us=" + report.timing_budget_us.to_text()
+    print "production_gui_backend_timing_budget_status=" + report.timing_budget_status
+    print "production_gui_backend_timing_budget_reason=" + report.timing_budget_reason
+    print "production_gui_backend_sample_count=" + sample_count.to_text()
+    print "production_gui_backend_total_elapsed_us_min=" + min_total_elapsed_us.to_text()
+    print "production_gui_backend_total_elapsed_us_avg=" + (sum_total_elapsed_us / sample_count).to_text()
+    print "production_gui_backend_total_elapsed_us_max=" + max_total_elapsed_us.to_text()
+    print "production_gui_backend_total_pixels_per_second_min=" + min_total_pixels_per_second.to_text()
+    print "production_gui_backend_total_pixels_per_second_avg=" + (sum_total_pixels_per_second / sample_count).to_text()
+    print "production_gui_backend_total_pixels_per_second_max=" + max_total_pixels_per_second.to_text()
+SIMPLE
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    {
+        echo "production_gui_backend_status=unavailable"
+        echo "production_gui_backend_reason=missing-simple-bin"
+    } >"$ENV_PATH"
+    cp "$ENV_PATH" "$EVIDENCE_LOG"
+else
+    set +e
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" run "$EVIDENCE_SRC" --mode=interpreter --clean >"$EVIDENCE_LOG" 2>&1
+    code=$?
+    set -e
+    if [ "$code" -ne 0 ]; then
+        {
+            echo "production_gui_backend_status=fail"
+            echo "production_gui_backend_reason=simple-evidence-run-failed"
+            echo "production_gui_backend_exit_code=$code"
+        } >"$ENV_PATH"
+    else
+        status="$(field_of production_gui_backend_status)"
+        reason="pass"
+        if [ "$status" != "pass" ]; then
+            reason="backend-executed-parity-failed"
+        fi
+        {
+            echo "production_gui_backend_status=$status"
+            echo "production_gui_backend_reason=$reason"
+            for key in \
+                production_gui_backend_width \
+                production_gui_backend_height \
+                production_gui_backend_software_resolved \
+                production_gui_backend_cpu_simd_resolved \
+                production_gui_backend_metal_resolved \
+                production_gui_backend_software_pixel_count \
+                production_gui_backend_cpu_simd_pixel_count \
+                production_gui_backend_metal_pixel_count \
+                production_gui_backend_cpu_simd_different_pixels \
+                production_gui_backend_cpu_simd_max_channel_diff \
+                production_gui_backend_cpu_simd_total_hits \
+                production_gui_backend_cpu_simd_fill_hits \
+                production_gui_backend_cpu_simd_copy_hits \
+                production_gui_backend_cpu_simd_alpha_hits \
+                production_gui_backend_cpu_simd_blit_hits \
+                production_gui_backend_cpu_simd_scroll_hits \
+                production_gui_backend_metal_different_pixels \
+                production_gui_backend_metal_max_channel_diff \
+                production_gui_backend_metal_gpu_frame_complete \
+                production_gui_backend_metal_gpu_readback_pixel_count \
+                production_gui_backend_metal_gpu_readback_checksum \
+                production_gui_backend_software_first_pixel \
+                production_gui_backend_cpu_simd_first_pixel \
+                production_gui_backend_metal_first_pixel \
+                production_gui_backend_metal_gpu_first_pixel \
+                production_gui_backend_software_rect_pixel \
+                production_gui_backend_cpu_simd_rect_pixel \
+                production_gui_backend_metal_rect_pixel \
+                production_gui_backend_metal_gpu_rect_pixel \
+                production_gui_backend_tolerance_used \
+                production_gui_backend_exact_backend_parity \
+                production_gui_backend_software_render_elapsed_us \
+                production_gui_backend_cpu_simd_render_elapsed_us \
+                production_gui_backend_metal_render_elapsed_us \
+                production_gui_backend_total_elapsed_us \
+                production_gui_backend_software_pixels_per_second \
+                production_gui_backend_cpu_simd_pixels_per_second \
+                production_gui_backend_metal_pixels_per_second \
+                production_gui_backend_total_pixels_per_second \
+                production_gui_backend_timing_budget_us \
+                production_gui_backend_timing_budget_status \
+                production_gui_backend_timing_budget_reason \
+                production_gui_backend_sample_count \
+                production_gui_backend_total_elapsed_us_min \
+                production_gui_backend_total_elapsed_us_avg \
+                production_gui_backend_total_elapsed_us_max \
+                production_gui_backend_total_pixels_per_second_min \
+                production_gui_backend_total_pixels_per_second_avg \
+                production_gui_backend_total_pixels_per_second_max
+            do
+                echo "$key=$(field_of "$key")"
+            done
+            echo "production_gui_backend_blur_or_tolerance_used=false"
+            echo "production_gui_backend_evidence_log=$EVIDENCE_LOG"
+        } >"$ENV_PATH"
+    fi
+fi
+
+status="$(field_of production_gui_backend_status "$ENV_PATH" 2>/dev/null || sed -n 's/^production_gui_backend_status=//p' "$ENV_PATH" | tail -n 1)"
+{
+    echo "# Production GUI Web Backend-Executed Evidence"
+    echo
+    echo "- status: $(sed -n 's/^production_gui_backend_status=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- reason: $(sed -n 's/^production_gui_backend_reason=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- scene: backend-executed Engine2D clear/fill primitive proof"
+    echo "- dimensions: ${WIDTH}x${HEIGHT}"
+    echo "- CPU SIMD resolved: $(sed -n 's/^production_gui_backend_cpu_simd_resolved=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- CPU SIMD total hits: $(sed -n 's/^production_gui_backend_cpu_simd_total_hits=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- CPU SIMD different pixels: $(sed -n 's/^production_gui_backend_cpu_simd_different_pixels=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Metal resolved: $(sed -n 's/^production_gui_backend_metal_resolved=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Metal gpu frame complete: $(sed -n 's/^production_gui_backend_metal_gpu_frame_complete=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Metal gpu readback pixel count: $(sed -n 's/^production_gui_backend_metal_gpu_readback_pixel_count=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Metal different pixels: $(sed -n 's/^production_gui_backend_metal_different_pixels=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Software render elapsed us: $(sed -n 's/^production_gui_backend_software_render_elapsed_us=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- CPU SIMD render elapsed us: $(sed -n 's/^production_gui_backend_cpu_simd_render_elapsed_us=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Metal render elapsed us: $(sed -n 's/^production_gui_backend_metal_render_elapsed_us=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Total render elapsed us: $(sed -n 's/^production_gui_backend_total_elapsed_us=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Software pixels/s: $(sed -n 's/^production_gui_backend_software_pixels_per_second=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- CPU SIMD pixels/s: $(sed -n 's/^production_gui_backend_cpu_simd_pixels_per_second=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Metal pixels/s: $(sed -n 's/^production_gui_backend_metal_pixels_per_second=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Total pixels/s: $(sed -n 's/^production_gui_backend_total_pixels_per_second=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Timing budget us: $(sed -n 's/^production_gui_backend_timing_budget_us=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Timing budget status: $(sed -n 's/^production_gui_backend_timing_budget_status=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Timing budget reason: $(sed -n 's/^production_gui_backend_timing_budget_reason=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Sample count: $(sed -n 's/^production_gui_backend_sample_count=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Total elapsed us min/avg/max: $(sed -n 's/^production_gui_backend_total_elapsed_us_min=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_total_elapsed_us_avg=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_total_elapsed_us_max=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Total pixels/s min/avg/max: $(sed -n 's/^production_gui_backend_total_pixels_per_second_min=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_total_pixels_per_second_avg=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_total_pixels_per_second_max=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- First pixels (software/cpu_simd/metal/gpu): $(sed -n 's/^production_gui_backend_software_first_pixel=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_cpu_simd_first_pixel=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_metal_first_pixel=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_metal_gpu_first_pixel=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Rect pixels (software/cpu_simd/metal/gpu): $(sed -n 's/^production_gui_backend_software_rect_pixel=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_cpu_simd_rect_pixel=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_metal_rect_pixel=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_metal_gpu_rect_pixel=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- blur/tolerance used: false"
+    echo
+    echo "This evidence intentionally exercises the currently proven Metal GPU"
+    echo "readback subset (clear + filled rectangle) through Engine2D. It proves"
+    echo "backend execution separately from the HTML layout fast path, which"
+    echo "currently renders through a pure framebuffer renderer. Larger generated"
+    echo "GUI scenes remain tracked as open Metal coverage."
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$ENV_PATH"
+    echo
+    echo "## Evidence Log"
+    sed 's/^/- /' "$EVIDENCE_LOG" 2>/dev/null || true
+} >"$REPORT_PATH"
+
+cat "$ENV_PATH"
+echo "report_path=$REPORT_PATH"
+
+final_status="$(sed -n 's/^production_gui_backend_status=//p' "$ENV_PATH" | tail -n 1)"
+[ "$final_status" = "pass" ]

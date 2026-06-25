@@ -1,0 +1,61 @@
+# @platform: baremetal
+#
+# RTOS test harness — extends baremetal test_harness with replay awareness.
+# Reports replay event count + divergences alongside pass/fail.
+
+use std.baremetal.common.test_harness (
+    test_harness_init, test_start, test_pass, test_fail, test_end, output
+)
+
+var g_rtos_test_total: i32 = 0
+var g_rtos_test_passed: i32 = 0
+var g_rtos_test_failed: i32 = 0
+
+fn rtos_test_init(profile: i32):
+    """Initialize RTOS test harness with given profile."""
+    test_harness_init()
+    rtos_replay_set_mode(RtosTestDefaults.for_profile(profile).replay_mode)
+    g_rtos_test_total = 0
+    g_rtos_test_passed = 0
+    g_rtos_test_failed = 0
+    output("[RTOS-TEST] profile={profile} replay={rtos_replay_mode_text()}")
+
+fn rtos_test_run(name: text, test_fn: fn() -> bool):
+    """Run a single RTOS test with replay hooks active."""
+    test_start(name)
+    g_rtos_test_total = g_rtos_test_total + 1
+
+    rr_reset_divergences()
+    val passed = test_fn()
+    val events = rr_event_count()
+    val divs = rr_divergence_count()
+
+    if passed:
+        g_rtos_test_passed = g_rtos_test_passed + 1
+        test_pass(name)
+        if events > 0:
+            output("  replay: {events} events, {divs} divergences")
+    else:
+        g_rtos_test_failed = g_rtos_test_failed + 1
+        test_fail(name, "test returned false")
+
+fn rtos_test_end():
+    """Finalize test run, output summary with replay stats."""
+    val mode = rtos_replay_mode_text()
+    output("[RTOS-TEST END] mode={mode} passed={g_rtos_test_passed} failed={g_rtos_test_failed}")
+    test_end()
+
+fn rtos_test_checkpoint(id: i32):
+    """Save a checkpoint within a test for later restore."""
+    rtos_checkpoint_save(id)
+    rr_hook_checkpoint(id)
+    output("[CHECKPOINT] id={id} tick={sched_get_tick()}")
+
+fn rtos_test_restore(id: i32) -> bool:
+    """Restore a checkpoint within a test."""
+    val ok = rtos_checkpoint_restore(id)
+    if ok:
+        output("[RESTORE] id={id} tick={sched_get_tick()}")
+    else:
+        output("[RESTORE FAIL] id={id}")
+    ok

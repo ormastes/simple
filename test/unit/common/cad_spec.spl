@@ -1,0 +1,77 @@
+use std.spec
+use std.common.cad.{
+    cad_assembly,
+    cad_assembly_add_constraint,
+    cad_assembly_add_ref,
+    cad_assembly_complete,
+    cad_assembly_ref,
+    cad_assembly_to_step_ap242_fixture,
+    cad_box,
+    cad_constraint,
+    cad_fillet,
+    cad_hole,
+    cad_identity_transform,
+    cad_parameter,
+    cad_part,
+    cad_part_add_feature,
+    cad_part_add_parameter,
+    cad_part_add_primitive,
+    cad_part_complete,
+    cad_part_to_step_ap242_fixture,
+    cad_part_with_transform,
+    cad_transform,
+    step_ap242_fixture_valid
+}
+
+fn sample_part() -> any:
+    var part = cad_part("bracket")
+    part = cad_part_add_parameter(part, cad_parameter("width", 80.0, "mm"))
+    part = cad_part_add_primitive(part, cad_box("body", 80.0, 20.0, 8.0))
+    part = cad_part_add_feature(part, cad_hole("body", 3.0, 8.0))
+    part = cad_part_add_feature(part, cad_fillet("body", 2.0))
+    cad_part_with_transform(part, cad_transform(1.0, 2.0, 3.0, 0.0, 0.0, 90.0))
+
+describe "cad{} parametric part authoring":
+    it "supports primitives, transforms, holes, fillets, and parameters":
+        val part = sample_part()
+
+        expect(part.name).to_equal("bracket")
+        expect(part.parameters.len()).to_equal(1)
+        expect(part.primitives.len()).to_equal(1)
+        expect(part.features.len()).to_equal(2)
+        expect(part.features[0].kind).to_equal("hole")
+        expect(part.features[1].kind).to_equal("fillet")
+        expect(part.transform.tz).to_equal(3.0)
+        expect(cad_part_complete(part)).to_equal(true)
+
+describe "cad{} assembly authoring":
+    it "expresses references and constraints":
+        var assembly = cad_assembly("fixture")
+        assembly = cad_assembly_add_ref(assembly, cad_assembly_ref("left_bracket", "bracket", cad_identity_transform()))
+        assembly = cad_assembly_add_ref(assembly, cad_assembly_ref("right_bracket", "bracket", cad_transform(100.0, 0.0, 0.0, 0.0, 0.0, 0.0)))
+        assembly = cad_assembly_add_constraint(assembly, cad_constraint("distance", "left_bracket", "right_bracket", 100.0))
+
+        expect(cad_assembly_complete(assembly)).to_equal(true)
+        expect(assembly.references.len()).to_equal(2)
+        expect(assembly.constraints.len()).to_equal(1)
+        expect(assembly.constraints[0].kind).to_equal("distance")
+
+describe "STEP AP242 fixture export":
+    it "exports representative part fixtures":
+        val step = cad_part_to_step_ap242_fixture(sample_part())
+
+        expect(step_ap242_fixture_valid(step)).to_equal(true)
+        expect(step).to_contain("PRODUCT('bracket'")
+        expect(step).to_contain("GEOMETRIC_REPRESENTATION_ITEM('box:body")
+        expect(step).to_contain("FEATURE_DEFINITION('hole:body")
+        expect(step).to_contain("FEATURE_DEFINITION('fillet:body")
+
+    it "exports representative assembly fixtures":
+        var assembly = cad_assembly("fixture")
+        assembly = cad_assembly_add_ref(assembly, cad_assembly_ref("left_bracket", "bracket", cad_identity_transform()))
+        assembly = cad_assembly_add_constraint(assembly, cad_constraint("fixed", "left_bracket", "origin", 0.0))
+        val step = cad_assembly_to_step_ap242_fixture(assembly)
+
+        expect(step_ap242_fixture_valid(step)).to_equal(true)
+        expect(step).to_contain("NEXT_ASSEMBLY_USAGE_OCCURRENCE('left_bracket'")
+        expect(step).to_contain("GEOMETRIC_CONSTRAINT('fixed:left_bracket:origin:0")

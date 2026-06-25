@@ -1,0 +1,166 @@
+# HKDF-SHA-384 Reference Vectors
+#
+# Tests the pure-Simple HKDF-SHA-384 implementation in
+# src/lib/common/crypto/hkdf.spl against well-attested external vectors.
+#
+# RFC 5869 Appendix A only specifies SHA-256 vectors, so this spec sources
+# SHA-384 vectors from two attested places:
+#
+#   1. RFC 4231 §4.2 Test Case 1 — HMAC-SHA-384 reference value.
+#      HKDF Extract is literally HMAC, so RFC 4231 doubles as a PRK vector
+#      for hkdf_extract_sha384 with salt=key, ikm=data.
+#
+#   2. Project Wycheproof (Google) — testvectors_v1/hkdf_sha384_test.json,
+#      tcIds 1, 11, 12. These cover the empty-salt path, a typical
+#      RFC 5869 §A.1-style salt+info path with L=42, and an L=64 case.
+#      URL: https://raw.githubusercontent.com/google/wycheproof/master/
+#           testvectors_v1/hkdf_sha384_test.json
+#
+# Boundary tests cover L=0 (empty), L=1, L>max (255*48=12240) returns empty,
+# and the Extract→Expand round-trip is deterministic across two calls.
+#
+# NOTE: interpreter-mode test runner verifies file loading, NOT it-block
+# execution. MAC assertions only fire under compiled/native mode (see
+# .claude/memory/feedback_compile_mode_false_greens.md).
+
+use std.spipe.*
+use std.crypto.hkdf.{hkdf_extract_sha384, hkdf_expand_sha384, hkdf_sha384}
+use std.crypto.types.{bytes_to_hex}
+
+# ============================================================================
+# Helpers — input builders
+# ============================================================================
+
+fn _bytes_repeat(b: i64, n: i64) -> list:
+    var out = []
+    var i = 0
+    while i < n:
+        out.push(b)
+        i = i + 1
+    out
+
+# RFC 4231 TC1: K = 20 × 0x0b
+fn _rfc4231_tc1_key() -> list:
+    _bytes_repeat(0x0b, 20)
+
+# RFC 4231 TC1: Data = "Hi There" → 4869205468657265
+fn _rfc4231_tc1_data() -> list:
+    [0x48, 0x69, 0x20, 0x54, 0x68, 0x65, 0x72, 0x65]
+
+# Wycheproof tcId 1: ikm = 24aeff2645e3e0f5494a9a102778c43a
+fn _wp_tc1_ikm() -> list:
+    [0x24, 0xae, 0xff, 0x26, 0x45, 0xe3, 0xe0, 0xf5,
+     0x49, 0x4a, 0x9a, 0x10, 0x27, 0x78, 0xc4, 0x3a]
+
+# Wycheproof tcId 11: ikm = 0cbd136d66d15a4ffefde1303b430821
+fn _wp_tc11_ikm() -> list:
+    [0x0c, 0xbd, 0x13, 0x6d, 0x66, 0xd1, 0x5a, 0x4f,
+     0xfe, 0xfd, 0xe1, 0x30, 0x3b, 0x43, 0x08, 0x21]
+
+# Wycheproof tcId 11: salt = 2614d80275b08a1cf90bae0eb607d4d5
+fn _wp_tc11_salt() -> list:
+    [0x26, 0x14, 0xd8, 0x02, 0x75, 0xb0, 0x8a, 0x1c,
+     0xf9, 0x0b, 0xae, 0x0e, 0xb6, 0x07, 0xd4, 0xd5]
+
+# Wycheproof tcId 11: info = ee991de21aeb6baa6a5f683dbb755e6f80db1c1d
+fn _wp_tc11_info() -> list:
+    [0xee, 0x99, 0x1d, 0xe2, 0x1a, 0xeb, 0x6b, 0xaa,
+     0x6a, 0x5f, 0x68, 0x3d, 0xbb, 0x75, 0x5e, 0x6f,
+     0x80, 0xdb, 0x1c, 0x1d]
+
+# Wycheproof tcId 12: ikm = 7a00817689a3d79001825a864c69c120
+fn _wp_tc12_ikm() -> list:
+    [0x7a, 0x00, 0x81, 0x76, 0x89, 0xa3, 0xd7, 0x90,
+     0x01, 0x82, 0x5a, 0x86, 0x4c, 0x69, 0xc1, 0x20]
+
+# Wycheproof tcId 12: salt = 08bc01c053a6406c7c4a667c9b9b3894
+fn _wp_tc12_salt() -> list:
+    [0x08, 0xbc, 0x01, 0xc0, 0x53, 0xa6, 0x40, 0x6c,
+     0x7c, 0x4a, 0x66, 0x7c, 0x9b, 0x9b, 0x38, 0x94]
+
+# Wycheproof tcId 12: info = 967ccd75395be6e96a67759f070487c9e2107791
+fn _wp_tc12_info() -> list:
+    [0x96, 0x7c, 0xcd, 0x75, 0x39, 0x5b, 0xe6, 0xe9,
+     0x6a, 0x67, 0x75, 0x9f, 0x07, 0x04, 0x87, 0xc9,
+     0xe2, 0x10, 0x77, 0x91]
+
+# ============================================================================
+# RFC 4231 §4.2 Test Case 1 — HMAC-SHA-384 doubles as Extract PRK
+# ============================================================================
+
+describe "HKDF-SHA-384 Extract — RFC 4231 alignment":
+
+    it "Extract(salt=20*0x0b, ikm='Hi There') matches RFC 4231 TC1 HMAC-SHA-384":
+        # RFC 4231 §4.2 TC1 HMAC-SHA-384 =
+        #   afd03944d84895626b0825f4ab46907f
+        #   15f9dadbe4101ec682aa034c7cebc59c
+        #   faea9ea9076ede7f4af152e8b2fa9cb6
+        # HKDF Extract(salt, ikm) = HMAC-SHA-384(salt, ikm), so this
+        # exercises hkdf_extract_sha384 against an attested HMAC vector.
+        expect(bytes_to_hex(hkdf_extract_sha384(_rfc4231_tc1_key(), _rfc4231_tc1_data()))).to_equal(
+            "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6"
+        )
+
+# ============================================================================
+# Project Wycheproof HKDF-SHA-384 valid vectors
+#   testvectors_v1/hkdf_sha384_test.json
+# ============================================================================
+
+describe "HKDF-SHA-384 — Project Wycheproof reference vectors":
+
+    it "Wycheproof tcId 1 — empty salt, empty info, L=20":
+        # ikm  = 24aeff2645e3e0f5494a9a102778c43a
+        # salt = (empty) → HashLen=48 zero-byte effective salt
+        # info = (empty)
+        # OKM  = 4b7045423d9156424b0b85d95a7d602fba3924b1
+        expect(bytes_to_hex(hkdf_sha384([], _wp_tc1_ikm(), [], 20))).to_equal(
+            "4b7045423d9156424b0b85d95a7d602fba3924b1"
+        )
+
+    it "Wycheproof tcId 11 — 16-byte salt, 20-byte info, L=42":
+        # OKM = e618b91d9f3d10c007958d025841a3347947eb41
+        #       b23ec35a3d7927aad74f293c50405a56911d8158e74f
+        expect(bytes_to_hex(hkdf_sha384(_wp_tc11_salt(), _wp_tc11_ikm(), _wp_tc11_info(), 42))).to_equal(
+            "e618b91d9f3d10c007958d025841a3347947eb41b23ec35a3d7927aad74f293c50405a56911d8158e74f"
+        )
+
+    it "Wycheproof tcId 12 — 16-byte salt, 20-byte info, L=64":
+        # OKM = bd02e16b6024f2c3b752d1c1d3047583
+        #       697731915fbbb34418f479b0c9bf84a8
+        #       6bd8e715eca198da8f9b39b25a1229c3
+        #       11853f862340cdefe46ddf41dcf256d9
+        expect(bytes_to_hex(hkdf_sha384(_wp_tc12_salt(), _wp_tc12_ikm(), _wp_tc12_info(), 64))).to_equal(
+            "bd02e16b6024f2c3b752d1c1d3047583697731915fbbb34418f479b0c9bf84a86bd8e715eca198da8f9b39b25a1229c311853f862340cdefe46ddf41dcf256d9"
+        )
+
+# ============================================================================
+# Extract → Expand round-trip determinism + boundary cases
+# ============================================================================
+
+describe "HKDF-SHA-384 round-trip and boundaries":
+
+    it "Extract→Expand round-trip is deterministic across two invocations":
+        # Two independent invocations with identical (salt, IKM, info, L)
+        # must produce byte-identical OKM bytes.
+        val first = hkdf_sha384(_wp_tc11_salt(), _wp_tc11_ikm(), _wp_tc11_info(), 42)
+        val second = hkdf_sha384(_wp_tc11_salt(), _wp_tc11_ikm(), _wp_tc11_info(), 42)
+        expect(bytes_to_hex(first)).to_equal(bytes_to_hex(second))
+
+    it "Two-step (Extract then Expand) equals combined hkdf_sha384":
+        # Verifies the convenience wrapper composes the two steps correctly.
+        val prk = hkdf_extract_sha384(_wp_tc12_salt(), _wp_tc12_ikm())
+        val two_step = hkdf_expand_sha384(prk, _wp_tc12_info(), 64)
+        val combined = hkdf_sha384(_wp_tc12_salt(), _wp_tc12_ikm(), _wp_tc12_info(), 64)
+        expect(bytes_to_hex(two_step)).to_equal(bytes_to_hex(combined))
+
+    it "Extract PRK is exactly 48 bytes (SHA-384 HashLen)":
+        expect(hkdf_extract_sha384([], _wp_tc1_ikm()).len()).to_equal(48)
+
+    it "L=0 returns empty list":
+        expect(hkdf_sha384(_wp_tc11_salt(), _wp_tc11_ikm(), _wp_tc11_info(), 0).len()).to_equal(0)
+
+    it "L=1 returns exactly 1 byte":
+        expect(hkdf_sha384(_wp_tc11_salt(), _wp_tc11_ikm(), _wp_tc11_info(), 1).len()).to_equal(1)
+
+    it "L exceeding 255*48 (12240) returns empty list":
+        expect(hkdf_sha384(_wp_tc11_salt(), _wp_tc11_ikm(), _wp_tc11_info(), 12241).len()).to_equal(0)

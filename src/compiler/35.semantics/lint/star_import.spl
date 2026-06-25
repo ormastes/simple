@@ -1,0 +1,140 @@
+# Star Wildcard Lint
+#
+# Detects wildcard imports (`use module.*`) and exports (`export module.*`).
+# Wildcards make it hard to track where symbols come from and can cause
+# unexpected name collisions.
+#
+# W0406: Wildcard import — prefer explicit named imports               WARNING
+# W0407: Wildcard export — prefer explicit named exports               WARNING
+#
+# Does NOT flag:
+# - Named imports/exports (use module.{a, b, c})
+# - Facade modules (__init__.spl, mod.spl) when using file-aware check
+# - Pure facade files (only wildcard use+export declarations)
+#
+# Works with the arena-based core AST (integer-tagged nodes).
+
+use compiler.core.ast.{
+    DECL_USE, DECL_EXPORT,
+    decl_tag, decl_name, decl_imports
+}
+
+# ============================================================================
+# Shared
+# ============================================================================
+
+struct StarWildcardWarning:
+    code: text
+    severity: text
+    message: text
+    module_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message} — '{self.module_path}.*'"
+
+fn _is_facade_file(file_path: text) -> bool:
+    if file_path.ends_with("__init__.spl"):
+        return true
+    if file_path.ends_with("mod.spl"):
+        return true
+    false
+
+# ============================================================================
+# Star Import (W0406)
+# ============================================================================
+
+fn check_star_import(decl_indices: [i64]) -> [StarWildcardWarning]:
+    var warnings: [StarWildcardWarning] = []
+    var all_decl_use = decl_indices.len() > 0
+    var all_use_star = decl_indices.len() > 0
+
+    for idx in decl_indices:
+        if decl_tag[idx] != DECL_USE:
+            all_decl_use = false
+            all_use_star = false
+            break
+        if decl_imports[idx].len() != 0:
+            all_use_star = false
+        endif
+
+    if all_decl_use and all_use_star:
+        return []
+
+    for idx in decl_indices:
+        val tag = decl_tag[idx]
+        if tag != DECL_USE:
+            continue
+
+        val imported = decl_imports[idx]
+        if imported.len() == 0:
+            val mod_path = decl_name[idx]
+            warnings.push(StarWildcardWarning(
+                code: "W0406",
+                severity: "WARNING",
+                message: "wildcard import — prefer explicit named imports",
+                module_path: mod_path
+            ))
+
+    warnings
+
+fn check_star_import_file(decl_indices: [i64], file_path: text) -> [StarWildcardWarning]:
+    if _is_facade_file(file_path):
+        return []
+    check_star_import(decl_indices)
+
+# ============================================================================
+# Star Export (W0407)
+# ============================================================================
+
+fn check_star_export(decl_indices: [i64]) -> [StarWildcardWarning]:
+    var warnings: [StarWildcardWarning] = []
+    var all_facade = decl_indices.len() > 0
+    var has_any_export = false
+
+    for idx in decl_indices:
+        val tag = decl_tag[idx]
+        if tag != DECL_USE and tag != DECL_EXPORT:
+            all_facade = false
+        if tag == DECL_EXPORT:
+            has_any_export = true
+            val names = decl_imports[idx]
+            var all_star = true
+            for n in names:
+                if not n.ends_with(".*"):
+                    all_star = false
+                    break
+            if not all_star:
+                all_facade = false
+
+    if all_facade and has_any_export:
+        return []
+
+    for idx in decl_indices:
+        val tag = decl_tag[idx]
+        if tag != DECL_EXPORT:
+            continue
+
+        val names = decl_imports[idx]
+        for n in names:
+            if n.ends_with(".*"):
+                val mod_path = n.slice(0, n.len() - 2)
+                warnings.push(StarWildcardWarning(
+                    code: "W0407",
+                    severity: "WARNING",
+                    message: "wildcard export — prefer explicit named exports",
+                    module_path: mod_path
+                ))
+
+    warnings
+
+fn check_star_export_file(decl_indices: [i64], file_path: text) -> [StarWildcardWarning]:
+    if _is_facade_file(file_path):
+        return []
+    check_star_export(decl_indices)
+
+# ============================================================================
+# Backwards-compatible type aliases
+# ============================================================================
+
+val StarImportWarning = StarWildcardWarning
+val StarExportWarning = StarWildcardWarning

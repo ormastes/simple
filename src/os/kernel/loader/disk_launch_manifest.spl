@@ -1,0 +1,71 @@
+# Disk Launch Manifest — Transitional disk-backed app launch metadata
+#
+# Resolves a small set of packaged app manifests from the QEMU FAT32 image.
+# This is a bridge away from path->builtin kernel embedding on x86_64 baremetal
+# while the full filesystem-backed user ELF exec path is still under
+# construction.
+#
+# NOTE: do NOT import os.apps.* or os.services.vfs.vfs_init here.  Those
+# imports drag the entire userspace closure (shell, vfs_service, netstack,
+# fat32, UI session, …) into the freestanding kernel ELF and produce hundreds
+# of unresolved class-metadata symbols at link time.
+#
+# All entries now return None — callers fall through to loader_exec (VFS-free)
+# from loader_api.spl which reads bytes via rt_file_read_bytes and dispatches
+# through elf64_load / smf_load.  The builtin_binary_registry resident-task
+# placeholder is no longer used here.
+
+fn disk_manifest_filename_for_path(path: text) -> text:
+    """Map canonical app paths to the packaged FAT32 manifest filename."""
+    if path.starts_with("/media/"):
+        return path
+    if path == "/usr/local/bin/browser-demo" or path == "/sys/apps/browser_demo" or path == "/sys/apps/browser_demo.smf":
+        return "BROWSER.APP"
+    if path == "/usr/bin/hello-world" or path == "/sys/apps/hello_world" or path == "/sys/apps/hello_world.smf":
+        return "HELLO.APP"
+    if path == "/usr/bin/file-manager" or path == "/sys/apps/file_manager" or path == "/sys/apps/file_manager.smf":
+        return "FILEMAN.APP"
+    if path == "/bin/shell" or path == "/sys/apps/shell" or path == "/sys/apps/shell.smf":
+        return "SHELL.APP"
+    if path == "/usr/bin/editor" or path == "/sys/apps/editor" or path == "/sys/apps/editor.smf":
+        return "EDITOR.APP"
+    if path == "/usr/bin/smux" or path == "/sys/apps/smux" or path == "/sys/apps/smux.smf":
+        return "SMUX.APP"
+    if path == "/usr/bin/codex" or path == "/sys/apps/codex" or path == "/sys/apps/codex.smf":
+        return "CODEX.APP"
+    if path == "/usr/bin/claude" or path == "/sys/apps/claude" or path == "/sys/apps/claude.smf":
+        return "CLAUDE.APP"
+    if path == "/usr/bin/gemini" or path == "/sys/apps/gemini" or path == "/sys/apps/gemini.smf":
+        return "GEMINI.APP"
+    ""
+
+fn parse_disk_launch_entry_name(content: text) -> text:
+    """Extract `entry=<symbol>` from a simple line-oriented manifest."""
+    val terminated = "{content}\n"
+    var current = ""
+    for ch in terminated:
+        if ch == "\n":
+            val line = current.trim()
+            if not line.starts_with("#") and line != "":
+                if line.starts_with("entry="):
+                    return line.slice(6, line.len()).trim()
+            current = ""
+        else:
+            current = "{current}{ch}"
+    ""
+
+pub fn resolve_disk_launch_entry(path: text) -> u64?:
+    """Resolve a disk-backed app entry for a known FAT32 manifest path.
+
+    Returns None for all paths so the caller falls through to loader_exec
+    (from loader_api.spl), which reads bytes via rt_file_read_bytes and
+    dispatches through elf64_load / smf_load.  The manifest filename check
+    is preserved to distinguish known vs unknown paths for future use.
+    """
+    val manifest_name = disk_manifest_filename_for_path(path)
+    if manifest_name == "":
+        return nil
+    # Known path — fall through to loader_exec (ELF/SMF dispatch).
+    # Do NOT return a resident-task placeholder here; that would bypass
+    # real ELF loading.
+    nil

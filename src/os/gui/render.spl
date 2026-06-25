@@ -1,0 +1,345 @@
+# Pure Simple Rendering Library — Cross-Platform WM Rendering Primitives
+#
+# Replaces C glass_render.c with pure Simple code so the WM can run on
+# ANY architecture (x86_64, ARM64, RISC-V, ARM32, x86_32).
+#
+# Architecture:
+#   Shadow buffer (normal RAM) for fast pixel read/write, then bulk-copy
+#   to the real MMIO framebuffer on present(). All pixel operations go
+#   through px_read/px_write on the shadow buffer.
+#
+# Extern dependencies (arch-independent, available in all baremetal stubs):
+#   rt_alloc          — heap allocation
+#   rt_mmio_read_u32  — volatile 32-bit read (works on RAM and MMIO)
+#   rt_mmio_write_u32 — volatile 32-bit write (works on RAM and MMIO)
+
+# Architecture-independent runtime externs
+extern fn rt_alloc(size: u64) -> u64
+extern fn rt_mmio_read_u32(addr: u64) -> u32
+extern fn rt_mmio_write_u32(addr: u64, value: u32)
+
+# ============================================================================
+# Global State
+# ============================================================================
+
+var g_shadow_buf: u64 = 0       # Shadow buffer base address (RAM)
+var g_fb_addr: u64 = 0          # Real MMIO framebuffer address
+var g_width: u64 = 0            # Framebuffer width in pixels
+var g_height: u64 = 0           # Framebuffer height in pixels
+var g_ready: u64 = 0            # 1 when shadow buffer is allocated
+var g_dirty_valid: u64 = 0
+var g_dirty_x1: u64 = 0
+var g_dirty_y1: u64 = 0
+var g_dirty_x2: u64 = 0
+var g_dirty_y2: u64 = 0
+
+# ============================================================================
+# Frame Lifecycle
+# ============================================================================
+
+fn render_init(fb_addr: u64, width: u64, height: u64):
+    """Initialize renderer with framebuffer address and dimensions.
+
+    Allocates a shadow buffer in RAM for fast pixel operations.
+    Must be called before any drawing functions.
+    """
+    g_fb_addr = fb_addr
+    g_width = width
+    g_height = height
+    g_shadow_buf = rt_alloc(width * height * 4)
+    if g_shadow_buf != 0:
+        g_ready = 1
+        # Clear shadow buffer to black
+        var i: u64 = 0
+        val total = width * height
+        while i < total:
+            rt_mmio_write_u32(g_shadow_buf + i * 4, 0xFF000000)
+            i = i + 1
+        render_mark_dirty_rect(0, 0, width, height)
+
+fn render_present():
+    """Copy tracked damage from the shadow buffer to the MMIO framebuffer.
+
+    Call after all drawing for the current frame is complete.
+    """
+    if g_ready == 0:
+        return
+    if g_dirty_valid != 0:
+        render_present_rect(g_dirty_x1, g_dirty_y1, g_dirty_x2 - g_dirty_x1, g_dirty_y2 - g_dirty_y1)
+        render_clear_dirty()
+        return
+    render_present_full()
+
+fn render_present_full():
+    """Copy entire shadow buffer to real MMIO framebuffer."""
+    if g_ready == 0:
+        return
+    var i: u64 = 0
+    val total = g_width * g_height
+    while i < total:
+        val offset = i * 4
+        val pixel = rt_mmio_read_u32(g_shadow_buf + offset)
+        rt_mmio_write_u32(g_fb_addr + offset, pixel)
+        i = i + 1
+    render_clear_dirty()
+
+fn render_present_rect(rx: u64, ry: u64, rw: u64, rh: u64):
+    """Copy a rectangular region from shadow buffer to MMIO framebuffer.
+
+    More efficient than full present() when only a small area changed.
+    """
+    if g_ready == 0:
+        return
+    var row: u64 = 0
+    while row < rh:
+        val py = ry + row
+        if py >= g_height:
+            return
+        var col: u64 = 0
+        while col < rw:
+            val px = rx + col
+            if px < g_width:
+                val offset = (py * g_width + px) * 4
+                val pixel = rt_mmio_read_u32(g_shadow_buf + offset)
+                rt_mmio_write_u32(g_fb_addr + offset, pixel)
+            col = col + 1
+        row = row + 1
+
+fn render_mark_dirty_rect(x: u64, y: u64, w: u64, h: u64):
+    """Record shadow-buffer damage using exclusive-end coordinates."""
+    if w == 0 or h == 0 or g_width == 0 or g_height == 0:
+        return
+    if x >= g_width or y >= g_height:
+        return
+    var x2 = x + w
+    var y2 = y + h
+    if x2 > g_width:
+        x2 = g_width
+    if y2 > g_height:
+        y2 = g_height
+    if x2 <= x or y2 <= y:
+        return
+    if g_dirty_valid == 0:
+        g_dirty_x1 = x
+        g_dirty_y1 = y
+        g_dirty_x2 = x2
+        g_dirty_y2 = y2
+        g_dirty_valid = 1
+        return
+    if x < g_dirty_x1:
+        g_dirty_x1 = x
+    if y < g_dirty_y1:
+        g_dirty_y1 = y
+    if x2 > g_dirty_x2:
+        g_dirty_x2 = x2
+    if y2 > g_dirty_y2:
+        g_dirty_y2 = y2
+
+fn render_clear_dirty():
+    g_dirty_valid = 0
+    g_dirty_x1 = 0
+    g_dirty_y1 = 0
+    g_dirty_x2 = 0
+    g_dirty_y2 = 0
+
+fn render_dirty_valid() -> u64:
+    g_dirty_valid
+
+fn render_dirty_x1() -> u64:
+    g_dirty_x1
+
+fn render_dirty_y1() -> u64:
+    g_dirty_y1
+
+fn render_dirty_x2() -> u64:
+    g_dirty_x2
+
+fn render_dirty_y2() -> u64:
+    g_dirty_y2
+
+fn render_width() -> u64:
+    """Return framebuffer width."""
+    g_width
+
+fn render_height() -> u64:
+    """Return framebuffer height."""
+    g_height
+
+fn render_shadow_buf() -> u64:
+    """Return shadow buffer base address (for render_effects use)."""
+    g_shadow_buf
+
+# ============================================================================
+# Pixel Operations (on shadow buffer)
+# ============================================================================
+
+fn px_read(x: u64, y: u64) -> u64:
+    """Read a pixel from the shadow buffer. Returns 0xAARRGGBB."""
+    if g_ready == 0:
+        return 0
+    if x >= g_width:
+        return 0
+    if y >= g_height:
+        return 0
+    val offset = (y * g_width + x) * 4
+    rt_mmio_read_u32(g_shadow_buf + offset).to_u64()
+
+fn px_write(x: u64, y: u64, color: u64):
+    """Write a pixel to the shadow buffer. Color is 0xAARRGGBB."""
+    if g_ready == 0:
+        return
+    if x >= g_width:
+        return
+    if y >= g_height:
+        return
+    val offset = (y * g_width + x) * 4
+    rt_mmio_write_u32(g_shadow_buf + offset, (color & 0xFFFFFFFF).to_u32())
+    render_mark_dirty_rect(x, y, 1, 1)
+
+# ============================================================================
+# Color Math
+# ============================================================================
+
+fn alpha_blend(dst: u64, src: u64, alpha: u64) -> u64:
+    """Blend src over dst with alpha (0-255).
+
+    Uses (x + 128) >> 8 approximation matching the C glass_render.c.
+    Returns 0xFFRRGGBB (fully opaque result).
+    """
+    if alpha >= 255:
+        return 0xFF000000 | (src & 0x00FFFFFF)
+    if alpha == 0:
+        return dst
+    val inv = 255 - alpha
+    val sr = (src >> 16) & 0xFF
+    val sg = (src >> 8) & 0xFF
+    val sb = src & 0xFF
+    val dr = (dst >> 16) & 0xFF
+    val dg = (dst >> 8) & 0xFF
+    val db = dst & 0xFF
+    val rr = (sr * alpha + dr * inv + 128) >> 8
+    val rg = (sg * alpha + dg * inv + 128) >> 8
+    val rb = (sb * alpha + db * inv + 128) >> 8
+    0xFF000000 | (rr << 16) | (rg << 8) | rb
+
+fn lerp_color(c1: u64, c2: u64, t: u64, max: u64) -> u64:
+    """Linearly interpolate between two colors.
+
+    Uses signed math internally to handle cases where c2 channel < c1 channel
+    (prevents unsigned underflow). t ranges from 0 to max.
+    Returns 0xFFRRGGBB.
+    """
+    if max == 0:
+        return 0xFF000000 | (c1 & 0x00FFFFFF)
+    val r1 = (c1 >> 16) & 0xFF
+    val g1 = (c1 >> 8) & 0xFF
+    val b1 = c1 & 0xFF
+    val r2 = (c2 >> 16) & 0xFF
+    val g2 = (c2 >> 8) & 0xFF
+    val b2 = c2 & 0xFF
+    # Signed arithmetic: r = r1 + (r2 - r1) * t / max
+    # To avoid underflow when r2 < r1, compute as:
+    #   if r2 >= r1: r1 + (r2 - r1) * t / max
+    #   else:        r1 - (r1 - r2) * t / max
+    val r = _lerp_channel(r1, r2, t, max)
+    val g = _lerp_channel(g1, g2, t, max)
+    val b = _lerp_channel(b1, b2, t, max)
+    0xFF000000 | (r << 16) | (g << 8) | b
+
+fn _lerp_channel(a: u64, b: u64, t: u64, max: u64) -> u64:
+    """Interpolate a single color channel (0-255) without underflow."""
+    if b >= a:
+        val diff = b - a
+        val result = a + (diff * t) / max
+        if result > 255:
+            return 255
+        return result
+    # b < a: interpolate downward
+    val diff = a - b
+    val sub = (diff * t) / max
+    if sub > a:
+        return 0
+    a - sub
+
+fn color_rgb(r: u64, g: u64, b: u64) -> u64:
+    """Pack r, g, b (each 0-255) into 0x00RRGGBB."""
+    (r << 16) | (g << 8) | b
+
+fn color_argb(a: u64, r: u64, g: u64, b: u64) -> u64:
+    """Pack a, r, g, b (each 0-255) into 0xAARRGGBB."""
+    (a << 24) | (r << 16) | (g << 8) | b
+
+# ============================================================================
+# Rectangle Operations
+# ============================================================================
+
+fn solid_fill(x: u64, y: u64, w: u64, h: u64, color: u64):
+    """Fill a rectangle with a solid color (no blending).
+
+    Color is 0x00RRGGBB — alpha is forced to 0xFF.
+    """
+    val c = 0xFF000000 | (color & 0x00FFFFFF)
+    var row: u64 = 0
+    while row < h:
+        val py = y + row
+        if py >= g_height:
+            return
+        var col: u64 = 0
+        while col < w:
+            val px = x + col
+            if px < g_width:
+                px_write(px, py, c)
+            col = col + 1
+        row = row + 1
+
+fn blend_fill(x: u64, y: u64, w: u64, h: u64, color: u64, alpha: u64):
+    """Alpha-blended rectangle fill.
+
+    Reads each destination pixel, blends with color at given alpha,
+    writes result back. Color is 0x00RRGGBB, alpha is 0-255.
+    """
+    if alpha == 0:
+        return
+    if alpha >= 255:
+        solid_fill(x, y, w, h, color)
+        return
+    var row: u64 = 0
+    while row < h:
+        val py = y + row
+        if py >= g_height:
+            return
+        var col: u64 = 0
+        while col < w:
+            val px = x + col
+            if px < g_width:
+                val dst = px_read(px, py)
+                px_write(px, py, alpha_blend(dst, color, alpha))
+            col = col + 1
+        row = row + 1
+
+# ============================================================================
+# Convenience: Clear
+# ============================================================================
+
+fn render_clear(color: u64):
+    """Clear entire shadow buffer to a solid color."""
+    val c = 0xFF000000 | (color & 0x00FFFFFF)
+    var i: u64 = 0
+    val total = g_width * g_height
+    while i < total:
+        rt_mmio_write_u32(g_shadow_buf + i * 4, (c & 0xFFFFFFFF).to_u32())
+        i = i + 1
+
+# ============================================================================
+# Blend Pixel (single pixel alpha blend)
+# ============================================================================
+
+fn blend_pixel(x: u64, y: u64, color: u64, alpha: u64):
+    """Alpha-blend a single pixel."""
+    if x >= g_width or y >= g_height:
+        return
+    val dst = px_read(x, y)
+    px_write(x, y, alpha_blend(dst, color, alpha))
+
+# Shapes (gradients, blur, rounded rects, circle, ring, line): see render_shapes.spl
+# Effects (shadow, noise, border): see render_effects.spl

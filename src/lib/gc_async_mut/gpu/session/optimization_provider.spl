@@ -1,0 +1,110 @@
+# Graphics Optimization Provider
+#
+# Persistent metadata provider for graphics backend optimization.
+# Stores shader specialization keys, SIMD width facts, pipeline cache
+# compatibility, etc. keyed by provider_id + target + backend + session_mode.
+#
+# Usage:
+#   use std.gpu.session.optimization_provider.{GraphicsOptProvider}
+
+use std.io
+
+class GraphicsOptProvider:
+    provider_id: text
+    provider_kind: text
+    backend_kind: text
+    target_arch: text
+    target_bits: i64
+    session_mode: text
+    policy_hash: i64
+    fact_count: i64
+    active: bool
+    persistent: bool
+    fact_keys: text
+    fact_values: text
+
+    static fn create(provider_id: text, kind: text, backend: text) -> GraphicsOptProvider:
+        GraphicsOptProvider(
+            provider_id: provider_id,
+            provider_kind: kind,
+            backend_kind: backend,
+            target_arch: "host",
+            target_bits: 64,
+            session_mode: "managed_shared",
+            policy_hash: 0,
+            fact_count: 0,
+            active: true,
+            persistent: true,
+            fact_keys: "",
+            fact_values: ""
+        )
+
+    static fn shader_specialization(backend: text, arch: text) -> GraphicsOptProvider:
+        val p = GraphicsOptProvider.create("shader_spec_" + backend + "_" + arch, "shader_specialization", backend)
+        p.target_arch = arch
+        return p
+
+    static fn pipeline_cache(backend: text, arch: text) -> GraphicsOptProvider:
+        val p = GraphicsOptProvider.create("pipeline_cache_" + backend + "_" + arch, "pipeline_cache", backend)
+        p.target_arch = arch
+        return p
+
+    static fn cpu_simd(arch: text, bits: i64) -> GraphicsOptProvider:
+        val p = GraphicsOptProvider.create("cpu_simd_" + arch, "cpu_simd_vectorization", "cpu")
+        p.target_arch = arch
+        p.target_bits = bits
+        return p
+
+    static fn cuda_kernel(arch: text) -> GraphicsOptProvider:
+        val p = GraphicsOptProvider.create("cuda_kernel_" + arch, "cuda_kernel_specialization", "cuda")
+        p.target_arch = arch
+        return p
+
+    static fn webgpu_layout(arch: text) -> GraphicsOptProvider:
+        val p = GraphicsOptProvider.create("webgpu_layout_" + arch, "webgpu_layout_specialization", "webgpu")
+        p.target_arch = arch
+        return p
+
+    me set_target(arch: text, bits: i64):
+        self.target_arch = arch
+        self.target_bits = bits
+
+    me add_fact(key: text, value: text) -> i64:
+        if self.fact_keys == "":
+            self.fact_keys = key
+            self.fact_values = value
+        else:
+            self.fact_keys = self.fact_keys + ";" + key
+            self.fact_values = self.fact_values + ";" + value
+        self.fact_count = self.fact_count + 1
+        return self.fact_count
+
+    me get_fact(key: text) -> text:
+        if self.fact_keys.contains(key):
+            return key + "=present"
+        return ""
+
+    me invalidate() -> text:
+        self.active = false
+        return ""
+
+    me is_valid_for(backend: text, arch: text, mode: text) -> bool:
+        if self.active == false:
+            return false
+        if self.backend_kind != backend:
+            return false
+        if self.target_arch != arch:
+            return false
+        if self.session_mode != mode:
+            return false
+        return true
+
+    me info() -> text:
+        var msg = "OptProvider[" + self.provider_id + "]"
+        msg = msg + " kind=" + self.provider_kind
+        msg = msg + " backend=" + self.backend_kind
+        msg = msg + " arch=" + self.target_arch + "/" + self.target_bits.to_text()
+        msg = msg + " mode=" + self.session_mode
+        msg = msg + " facts=" + self.fact_count.to_text()
+        msg = msg + " active=" + self.active.to_text()
+        return msg

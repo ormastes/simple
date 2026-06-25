@@ -1,0 +1,49 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+RTL_DIR="${RTL_DIR:-$ROOT_DIR/examples/09_embedded/fpga_riscv/rtl}"
+CORE_VHDL="${RV32I_CORE_VHDL:-$RTL_DIR/rv32i_core.vhd}"
+REQUIRE_RVFI="${REQUIRE_RVFI:-0}"
+
+if [ ! -f "$CORE_VHDL" ]; then
+    echo "ERROR: RV32I core VHDL not found: $CORE_VHDL" >&2
+    exit 1
+fi
+
+missing=""
+for port in \
+    rvfi_valid rvfi_order rvfi_insn rvfi_trap \
+    rvfi_rs1_addr rvfi_rs2_addr rvfi_rs1_rdata rvfi_rs2_rdata \
+    rvfi_rd_addr rvfi_rd_wdata rvfi_pc_rdata rvfi_pc_wdata \
+    rvfi_mem_addr rvfi_mem_rmask rvfi_mem_wmask rvfi_mem_rdata rvfi_mem_wdata
+do
+    if ! grep -q "$port" "$CORE_VHDL"; then
+        missing="${missing}${port}
+"
+    fi
+done
+
+if [ -n "$missing" ]; then
+    echo "RVFI readiness: missing RVFI ports in $CORE_VHDL"
+    printf '%s' "$missing" | sed 's/^/  - /'
+    if [ "$REQUIRE_RVFI" = "1" ]; then
+        echo "ERROR: RVFI formal flow requires all RVFI ports" >&2
+        exit 1
+    fi
+    echo "SKIP: RVFI formal checks require an RVFI-enabled core"
+    exit 0
+fi
+
+echo "PASS: RVFI port manifest present in $CORE_VHDL"
+
+if ! command -v sby >/dev/null 2>&1; then
+    if [ "$REQUIRE_RVFI" = "1" ]; then
+        echo "ERROR: sby not found" >&2
+        exit 1
+    fi
+    echo "SKIP: sby not found"
+    exit 0
+fi
+
+echo "READY: riscv-formal SymbiYosys runner can be wired for RV32I instruction checks"

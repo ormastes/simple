@@ -1,0 +1,38 @@
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn _source() -> text:
+    rt_file_read_text("src/compiler/10.frontend/core/interpreter/module_loader.spl")
+
+describe "interpreter gc family boundary hook wiring":
+    it "extracts noalloc before async mutable families":
+        val source = _source()
+        val noalloc_pos = source.index_of("contains(\"/nogc_async_mut_noalloc/\")") ?? -1
+        val async_pos = source.index_of("contains(\"/nogc_async_mut/\")") ?? -1
+        expect(noalloc_pos).to_be_greater_than(-1)
+        expect(async_pos).to_be_greater_than(-1)
+        expect(noalloc_pos).to_be_less_than(async_pos)
+
+    it "skips unknown and common families before warning":
+        val source = _source()
+        expect(source).to_contain("if importer_family == \"\" or imported_family == \"\":")
+        expect(source).to_contain("if importer_family == \"common\" or imported_family == \"common\":")
+
+    it "warns for no-gc importing gc":
+        val source = _source()
+        expect(source).to_contain("if is_nogc_family(importer_family) and is_gc_family(imported_family):")
+        expect(source).to_contain("GC module")
+        expect(source).to_contain("eval_warnings.push(msg)")
+        expect(source).to_contain("print msg")
+
+    it "warns for noalloc importing allocating family":
+        val source = _source()
+        expect(source).to_contain("if is_noalloc_family(importer_family) and is_allocating_family(imported_family):")
+        expect(source).to_contain("Allocating module")
+        expect(source).to_contain("print msg")
+
+    it "deduplicates warning keys":
+        val source = _source()
+        expect(source).to_contain("val warn_key = importer_family + \">\" + imported_family + \":\" + module_name")
+        expect(source).to_contain("_gc_warn_emitted.has(warn_key)")

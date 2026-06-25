@@ -1,0 +1,180 @@
+# UI wire-protocol golden-byte fixture.
+#
+# Phase 0 deliverable for the UI Typed Core RFC
+# (doc/05_design/ui_typed_core_rfc.md).
+#
+# Purpose: lock the byte-exact JSON output of `ui_access_snapshot_to_json`.
+# Phases 1-8 of the typed-core migration must keep these literals byte-identical.
+# A diff here means the wire contract drifted — investigate before merging.
+#
+# When the wire format intentionally changes (separate RFC), update the
+# literal AND bump UI_ACCESS_PROTOCOL_VERSION in lockstep.
+#
+# Build the same fixture cases via UISession + access.spl in later phases
+# once typed kinds land — the golden literal does NOT change because
+# `to_wire()` returns the same canonical strings as today.
+
+use std.spec.*
+
+use common.ui.access.{
+    UiAccessSnapshot,
+    UiAccessSurface,
+    UiAccessNode,
+    UiAccessProp,
+    UiAccessEvent,
+    ui_access_snapshot_to_json,
+    UI_ACCESS_PROTOCOL_VERSION
+}
+
+# -------------------------------------------------------------------------
+# Case A — empty snapshot envelope
+# -------------------------------------------------------------------------
+
+fn _empty_snapshot() -> UiAccessSnapshot:
+    return UiAccessSnapshot(
+        protocol_version: UI_ACCESS_PROTOCOL_VERSION,
+        snapshot_revision: 0,
+        mode: "normal",
+        active_surface: "",
+        surfaces: [],
+        nodes: [],
+        recent_events: []
+    )
+
+val GOLDEN_EMPTY = "{\"protocol_version\":1,\"snapshot_revision\":0,\"mode\":\"normal\",\"active_surface\":\"\",\"surfaces\":[],\"nodes\":[],\"recent_events\":[]}"
+
+# -------------------------------------------------------------------------
+# Case B — one surface + one root panel node
+# -------------------------------------------------------------------------
+
+fn _single_panel_snapshot() -> UiAccessSnapshot:
+    val surface = UiAccessSurface(
+        surface_id: "main",
+        title: "Main",
+        active: true,
+        window_id: "w1",
+        app_id: "app1",
+        root_canonical_id: "main#root"
+    )
+    val node = UiAccessNode(
+        canonical_id: "main#root",
+        surface_id: "main",
+        widget_id: "root",
+        kind: "panel",
+        visible: true,
+        focused: false,
+        enabled: true,
+        selected: false,
+        text: "",
+        props: [],
+        child_ids: [],
+        action_names: []
+    )
+    return UiAccessSnapshot(
+        protocol_version: UI_ACCESS_PROTOCOL_VERSION,
+        snapshot_revision: 42,
+        mode: "normal",
+        active_surface: "main",
+        surfaces: [surface],
+        nodes: [node],
+        recent_events: []
+    )
+
+val GOLDEN_SINGLE_PANEL = "{\"protocol_version\":1,\"snapshot_revision\":42,\"mode\":\"normal\",\"active_surface\":\"main\",\"surfaces\":[{\"surface_id\":\"main\",\"title\":\"Main\",\"active\":true,\"window_id\":\"w1\",\"app_id\":\"app1\",\"root_canonical_id\":\"main#root\"}],\"nodes\":[{\"canonical_id\":\"main#root\",\"surface_id\":\"main\",\"widget_id\":\"root\",\"kind\":\"panel\",\"visible\":true,\"focused\":false,\"enabled\":true,\"selected\":false,\"text\":\"\",\"props\":{},\"child_ids\":[],\"action_names\":[]}],\"recent_events\":[]}"
+
+# -------------------------------------------------------------------------
+# Case C — panel parent + button child + dialog sibling, with props,
+# child_ids, action_names, and a recent event. Exercises every encoder branch.
+# -------------------------------------------------------------------------
+
+fn _multi_widget_snapshot() -> UiAccessSnapshot:
+    val surface = UiAccessSurface(
+        surface_id: "main",
+        title: "Editor",
+        active: true,
+        window_id: "w1",
+        app_id: "editor",
+        root_canonical_id: "main#root"
+    )
+    val root = UiAccessNode(
+        canonical_id: "main#root",
+        surface_id: "main",
+        widget_id: "root",
+        kind: "panel",
+        visible: true,
+        focused: false,
+        enabled: true,
+        selected: false,
+        text: "",
+        props: [],
+        child_ids: ["main#save", "main#confirm"],
+        action_names: []
+    )
+    val save = UiAccessNode(
+        canonical_id: "main#save",
+        surface_id: "main",
+        widget_id: "save",
+        kind: "button",
+        visible: true,
+        focused: true,
+        enabled: true,
+        selected: false,
+        text: "Save",
+        props: [UiAccessProp(key: "variant", value: "primary")],
+        child_ids: [],
+        action_names: ["save"]
+    )
+    val confirm = UiAccessNode(
+        canonical_id: "main#confirm",
+        surface_id: "main",
+        widget_id: "confirm",
+        kind: "dialog",
+        visible: false,
+        focused: false,
+        enabled: true,
+        selected: false,
+        text: "Are you sure?",
+        props: [],
+        child_ids: [],
+        action_names: ["confirm", "cancel"]
+    )
+    val event = UiAccessEvent(
+        surface_id: "main",
+        widget_id: "save",
+        canonical_id: "main#save",
+        event_kind: "action",
+        payload: "save",
+        sequence: 7
+    )
+    return UiAccessSnapshot(
+        protocol_version: UI_ACCESS_PROTOCOL_VERSION,
+        snapshot_revision: 100,
+        mode: "normal",
+        active_surface: "main",
+        surfaces: [surface],
+        nodes: [root, save, confirm],
+        recent_events: [event]
+    )
+
+val GOLDEN_MULTI_WIDGET = "{\"protocol_version\":1,\"snapshot_revision\":100,\"mode\":\"normal\",\"active_surface\":\"main\",\"surfaces\":[{\"surface_id\":\"main\",\"title\":\"Editor\",\"active\":true,\"window_id\":\"w1\",\"app_id\":\"editor\",\"root_canonical_id\":\"main#root\"}],\"nodes\":[{\"canonical_id\":\"main#root\",\"surface_id\":\"main\",\"widget_id\":\"root\",\"kind\":\"panel\",\"visible\":true,\"focused\":false,\"enabled\":true,\"selected\":false,\"text\":\"\",\"props\":{},\"child_ids\":[\"main#save\",\"main#confirm\"],\"action_names\":[]},{\"canonical_id\":\"main#save\",\"surface_id\":\"main\",\"widget_id\":\"save\",\"kind\":\"button\",\"visible\":true,\"focused\":true,\"enabled\":true,\"selected\":false,\"text\":\"Save\",\"props\":{\"variant\":\"primary\"},\"child_ids\":[],\"action_names\":[\"save\"]},{\"canonical_id\":\"main#confirm\",\"surface_id\":\"main\",\"widget_id\":\"confirm\",\"kind\":\"dialog\",\"visible\":false,\"focused\":false,\"enabled\":true,\"selected\":false,\"text\":\"Are you sure?\",\"props\":{},\"child_ids\":[],\"action_names\":[\"confirm\",\"cancel\"]}],\"recent_events\":[{\"surface_id\":\"main\",\"widget_id\":\"save\",\"canonical_id\":\"main#save\",\"event_kind\":\"action\",\"payload\":\"save\",\"sequence\":7}]}"
+
+# -------------------------------------------------------------------------
+# Specs
+# -------------------------------------------------------------------------
+
+describe "UI wire-protocol golden bytes":
+
+    it "encodes empty snapshot byte-identically":
+        val out = ui_access_snapshot_to_json(_empty_snapshot())
+        expect(out).to_equal(GOLDEN_EMPTY)
+
+    it "encodes single-panel snapshot byte-identically":
+        val out = ui_access_snapshot_to_json(_single_panel_snapshot())
+        expect(out).to_equal(GOLDEN_SINGLE_PANEL)
+
+    it "encodes multi-widget snapshot byte-identically":
+        val out = ui_access_snapshot_to_json(_multi_widget_snapshot())
+        expect(out).to_equal(GOLDEN_MULTI_WIDGET)
+
+    it "freezes UI_ACCESS_PROTOCOL_VERSION at v1":
+        expect(UI_ACCESS_PROTOCOL_VERSION).to_equal(1)

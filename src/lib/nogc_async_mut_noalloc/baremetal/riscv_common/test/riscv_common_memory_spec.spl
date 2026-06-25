@@ -1,0 +1,100 @@
+# ============================================================================
+# Spec: RISC-V Common — Memory Interface
+# ============================================================================
+
+use std.nogc_async_mut_noalloc.baremetal.riscv_common.xlen.XlenConfig
+use std.nogc_async_mut_noalloc.baremetal.riscv_common.memory.{FlatMemory, load_signed_byte, load_signed_half, load_signed_word}
+
+describe "FlatMemory":
+    val base = 0x80000000
+
+    it "creates zeroed memory":
+        val mem = FlatMemory.create(base, 256)
+        expect mem.read_byte(base) == 0
+        expect mem.read_word(base) == 0
+
+    it "reads and writes bytes":
+        var mem = FlatMemory.create(base, 256)
+        mem.write_byte(base, 0xAB)
+        expect mem.read_byte(base) == 0xAB
+        mem.write_byte(base + 1, 0xCD)
+        expect mem.read_byte(base + 1) == 0xCD
+
+    it "reads and writes half-words little-endian":
+        var mem = FlatMemory.create(base, 256)
+        mem.write_half(base, 0x1234)
+        expect mem.read_half(base) == 0x1234
+        # Verify byte order
+        expect mem.read_byte(base) == 0x34
+        expect mem.read_byte(base + 1) == 0x12
+
+    it "reads and writes words little-endian":
+        var mem = FlatMemory.create(base, 256)
+        mem.write_word(base, 0xDEADBEEF)
+        expect mem.read_word(base) == 0xDEADBEEF
+        expect mem.read_byte(base) == 0xEF
+        expect mem.read_byte(base + 1) == 0xBE
+        expect mem.read_byte(base + 2) == 0xAD
+        expect mem.read_byte(base + 3) == 0xDE
+
+    it "reads and writes double-words":
+        var mem = FlatMemory.create(base, 256)
+        mem.write_dword(base, 0x123456789ABCDEF0)
+        expect mem.read_dword(base) == 0x123456789ABCDEF0
+        # Low word
+        expect mem.read_word(base) == 0x9ABCDEF0
+        # High word
+        expect mem.read_word(base + 4) == 0x12345678
+
+    it "checks range correctly":
+        val mem = FlatMemory.create(base, 256)
+        expect mem.in_range(base) == true
+        expect mem.in_range(base + 255) == true
+        expect mem.in_range(base + 256) == false
+        expect mem.in_range(base - 1) == false
+
+    it "returns zero for out-of-range reads":
+        val mem = FlatMemory.create(base, 256)
+        expect mem.read_byte(base - 1) == 0
+        expect mem.read_byte(base + 256) == 0
+
+    it "bulk-loads bytes":
+        var mem = FlatMemory.create(base, 256)
+        val data = [0x01, 0x02, 0x03, 0x04]
+        mem.load_bytes(base, data)
+        expect mem.read_byte(base) == 0x01
+        expect mem.read_byte(base + 1) == 0x02
+        expect mem.read_byte(base + 2) == 0x03
+        expect mem.read_byte(base + 3) == 0x04
+
+describe "Signed load helpers":
+    val base = 0x80000000
+
+    it "sign-extends negative byte":
+        val cfg = XlenConfig.rv32()
+        var mem = FlatMemory.create(base, 256)
+        mem.write_byte(base, 0x80)
+        val result = load_signed_byte(cfg, mem, base)
+        # 0x80 sign-extended to 32-bit should be 0xFFFFFF80
+        expect result & 0xFFFFFF80 == 0xFFFFFF80
+
+    it "does not sign-extend positive byte":
+        val cfg = XlenConfig.rv32()
+        var mem = FlatMemory.create(base, 256)
+        mem.write_byte(base, 0x7F)
+        val result = load_signed_byte(cfg, mem, base)
+        expect result == 0x7F
+
+    it "sign-extends negative half-word":
+        val cfg = XlenConfig.rv32()
+        var mem = FlatMemory.create(base, 256)
+        mem.write_half(base, 0x8000)
+        val result = load_signed_half(cfg, mem, base)
+        expect result & 0xFFFF8000 == 0xFFFF8000
+
+    it "sign-extends negative word for RV64":
+        val cfg = XlenConfig.rv64()
+        var mem = FlatMemory.create(base, 256)
+        mem.write_word(base, 0x80000000)
+        val result = load_signed_word(cfg, mem, base)
+        expect result & 0x80000000 != 0

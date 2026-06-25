@@ -1,0 +1,91 @@
+# ACPI FADT PM Timer Port — FR-SIMPLEOS-ACPI-001
+#
+# Extracts the PM timer I/O port from the Fixed ACPI Description Table (FADT).
+#
+# FADT layout (ACPI spec §5.2.9, Table 5-34):
+#   Offset  0 : Signature  (4 bytes, "FACP")
+#   Offset  4 : Length     (4 bytes)
+#   Offset  8 : Revision   (1 byte)
+#   Offset 76 : PM_TMR_BLK (u32) — legacy PM timer I/O port base
+#   Offset 112: IAPC_BOOT_ARCH (u16) — NOT X_PM_TMR_BLK (stub comment was wrong)
+#   Offset 208: X_PM_TMR_BLK (GAS, 12 bytes) — extended PM timer (ACPI 2.0+)
+#     GAS layout:
+#       +0  address_space_id (u8) — 0=SystemMemory, 1=SystemIO
+#       +1  bit_width        (u8)
+#       +2  bit_offset       (u8)
+#       +3  access_size      (u8)
+#       +4  address          (u64) — the actual I/O port (when space_id==1)
+#
+# Prefer X_PM_TMR_BLK when: revision >= 3, length >= 244, address != 0,
+#   and address_space_id == 1 (SystemIO).
+# Fall back to PM_TMR_BLK (u32 at offset 76) otherwise.
+#
+# All input addresses are PHYSICAL; converted to virtual via HHDM internally.
+
+use os.kernel.boot.mmio.{mmio_read8, mmio_read32}
+use os.kernel.boot.limine_boot.{phys_to_virt}
+
+# ============================================================================
+# FADT field offsets
+# ============================================================================
+
+val FADT_OFF_REVISION:      u64 = 8    # u8
+val FADT_OFF_LENGTH:        u64 = 4    # u32
+val FADT_OFF_PM_TMR_BLK:    u64 = 76   # u32 — legacy PM timer port
+val FADT_OFF_X_PM_TMR_BLK:  u64 = 208  # GAS (12 bytes) — ACPI 2.0+
+
+# GAS sub-field offsets (relative to start of GAS struct)
+val GAS_OFF_SPACE_ID:  u64 = 0
+val GAS_OFF_ADDRESS:   u64 = 4    # u64 at GAS+4
+
+val GAS_SPACE_SYSTEM_IO: u8 = 1
+
+# Minimum FADT length to safely read X_PM_TMR_BLK (208 + 12 = 220 bytes)
+val FADT_MIN_LEN_EXTENDED: u32 = 244
+
+# ============================================================================
+# Pure parser — injectable reader for unit tests
+# ============================================================================
+
+fn acpi_fadt_pm_tmr_port_raw(read8: fn(u64) -> u8, read32: fn(u64) -> u32, base: u64) -> u32?:
+    """Extract PM timer port using caller-supplied byte readers.
+
+    base is an opaque offset added to all field accesses — in production this
+    is the HHDM virtual address of the FADT; in tests it is 0 and read8/read32
+    index into a fixture byte array.
+
+    This pure form is used by unit tests that supply closure-based readers
+    over a [u8] fixture rather than real MMIO.
+    """
+    val rev    = read8(base + FADT_OFF_REVISION)
+    val length = read32(base + FADT_OFF_LENGTH)
+
+    if (rev >= 3) and (length >= FADT_MIN_LEN_EXTENDED):
+        val gas_base = base + FADT_OFF_X_PM_TMR_BLK
+        val space_id = read8(gas_base + GAS_OFF_SPACE_ID)
+        val addr_lo  = read32(gas_base + GAS_OFF_ADDRESS) as u64
+        val addr_hi  = read32(gas_base + GAS_OFF_ADDRESS + 4) as u64
+        val gas_addr = (addr_hi << 32) | addr_lo
+        if (space_id == GAS_SPACE_SYSTEM_IO) and (gas_addr != 0):
+            return gas_addr as u32
+
+    val port = read32(base + FADT_OFF_PM_TMR_BLK)
+    if port == 0:
+        return nil
+    port
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn acpi_fadt_pm_tmr_port(fadt_phys: u64) -> u32?:
+    """Extract PM timer I/O port from a FADT physical address.
+
+    Returns the port as u32, or nil if PM_TMR_BLK is zero (timer absent).
+
+    Reads X_PM_TMR_BLK (GAS at offset 208) when the FADT is large enough
+    and the GAS specifies SystemIO space with a non-zero address.
+    Falls back to the legacy PM_TMR_BLK field at offset 76.
+    """
+    val virt = phys_to_virt(fadt_phys)
+    acpi_fadt_pm_tmr_port_raw(mmio_read8, mmio_read32, virt)

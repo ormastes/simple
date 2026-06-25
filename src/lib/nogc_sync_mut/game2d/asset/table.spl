@@ -1,0 +1,161 @@
+# std.game2d.asset.table — AssetTable + lookups + load_assets (Wave B, AC-6)
+#
+# Public surface for the typed asset registry. SDN-walking helpers live in
+# `asset/loader.spl`; this module's `fn load_assets(path)` dispatches to
+# them so the AC-6 spec greps `fn load_assets(` in this file.
+
+use std.common.sdn.parser.{parse_with_spans}
+use std.common.sdn.value.{SdnValue, Span}
+use std.nogc_sync_mut.game2d.render.image.{Image}
+use std.nogc_sync_mut.game2d.render.font.{Font}
+use std.nogc_sync_mut.game2d.audio.{Sound}
+use std.nogc_sync_mut.game2d.asset.diagnostic.{AssetError}
+use std.nogc_sync_mut.game2d.asset.asset_id.{AssetId}
+use std.nogc_sync_mut.game2d.asset.loader.{_walk_images_dict, _walk_sounds_dict, _check_atlas_dict, _to_i}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+
+class Atlas:
+    image_key: text
+    image_width: i64
+    image_height: i64
+    regions: Dict<text, [i64]>
+
+    static fn new(image_key: text, w: i64, h: i64) -> Atlas:
+        Atlas(
+            image_key: image_key,
+            image_width: w,
+            image_height: h,
+            regions: {}
+        )
+
+
+class AssetTable:
+    images: Dict<text, Image>
+    sounds: Dict<text, Sound>
+    fonts: Dict<text, Font>
+    atlases: Dict<text, Atlas>
+
+    static fn empty() -> AssetTable:
+        AssetTable(images: {}, sounds: {}, fonts: {}, atlases: {})
+
+    fn lookup_image(self, key: text) -> Result<Image, AssetError>:
+        if self.images.contains(key):
+            Ok(self.images[key])
+        else:
+            Err(AssetError(
+                code: "GAME-ASSET-001", file: "", line: 0, column: 0,
+                key: key, msg: "image '{key}' not declared"
+            ))
+
+    fn lookup_sound(self, key: text) -> Result<Sound, AssetError>:
+        if self.sounds.contains(key):
+            Ok(self.sounds[key])
+        else:
+            Err(AssetError(
+                code: "GAME-ASSET-001", file: "", line: 0, column: 0,
+                key: key, msg: "sound '{key}' not declared"
+            ))
+
+    fn lookup_font(self, key: text) -> Result<Font, AssetError>:
+        if self.fonts.contains(key):
+            Ok(self.fonts[key])
+        else:
+            Err(AssetError(
+                code: "GAME-ASSET-001", file: "", line: 0, column: 0,
+                key: key, msg: "font '{key}' not declared"
+            ))
+
+    fn image(self, key: text) -> Result<Image, AssetError>:
+        self.lookup_image(key)
+
+    fn sound(self, key: text) -> Result<Sound, AssetError>:
+        self.lookup_sound(key)
+
+    fn font(self, key: text) -> Result<Font, AssetError>:
+        self.lookup_font(key)
+
+    fn image_id(self, key: text) -> AssetId<Image>:
+        if self.images.contains(key): AssetId.new(key, 1) else: AssetId.invalid()
+
+    fn sound_id(self, key: text) -> AssetId<Sound>:
+        if self.sounds.contains(key): AssetId.new(key, 1) else: AssetId.invalid()
+
+
+fn _build_atlases(table: AssetTable, d: Dict<text, SdnValue>):
+    for entry in d.entries():
+        val name = entry.key
+        match entry.value:
+            case Dict(inner):
+                var iw: i64 = 0
+                var ih: i64 = 0
+                if inner.contains("image_width"): iw = _to_i(inner["image_width"])
+                if inner.contains("image_height"): ih = _to_i(inner["image_height"])
+                val atlas = Atlas.new(name, iw, ih)
+                if inner.contains("regions"):
+                    match inner["regions"]:
+                        case Dict(rmap):
+                            for re in rmap.entries():
+                                match re.value:
+                                    case Array(coords):
+                                        if coords.len() == 4:
+                                            atlas.regions[re.key] = [
+                                                _to_i(coords[0]),
+                                                _to_i(coords[1]),
+                                                _to_i(coords[2]),
+                                                _to_i(coords[3])
+                                            ]
+                                    case _: pass_do_nothing
+                        case _: pass_do_nothing
+                table.atlases[name] = atlas
+            case _: pass_do_nothing
+
+
+fn load_assets(path: text) -> Result<AssetTable, AssetError>:
+    """Parse an assets.sdn file and produce an AssetTable."""
+    if not rt_file_exists(path):
+        return Err(AssetError.missing(Span.empty(), path, path))
+    val source = rt_file_read_text(path)
+    val parsed = parse_with_spans(source)
+    match parsed:
+        case Ok(pair):
+            val root = pair.0
+            val spans = pair.1
+            val table = AssetTable.empty()
+            var assets_dict: Dict<text, SdnValue> = {}
+            match root:
+                case Dict(top):
+                    if top.contains("assets"):
+                        match top["assets"]:
+                            case Dict(d): assets_dict = d
+                            case _: pass_do_nothing
+                    else:
+                        assets_dict = top
+                case _: pass_do_nothing
+            if assets_dict.contains("images"):
+                match assets_dict["images"]:
+                    case Dict(d):
+                        match _walk_images_dict(d, spans, path, table.images):
+                            case Err(e): return Err(e)
+                            case _: pass_do_nothing
+                    case _: pass_do_nothing
+            if assets_dict.contains("sounds"):
+                match assets_dict["sounds"]:
+                    case Dict(d):
+                        match _walk_sounds_dict(d, spans, path, table.sounds):
+                            case Err(e): return Err(e)
+                            case _: pass_do_nothing
+                    case _: pass_do_nothing
+            if assets_dict.contains("atlases"):
+                match assets_dict["atlases"]:
+                    case Dict(d):
+                        match _check_atlas_dict(d, spans, path):
+                            case Err(e): return Err(e)
+                            case _: pass_do_nothing
+                        _build_atlases(table, d)
+                    case _: pass_do_nothing
+            Ok(table)
+        case Err(e):
+            Err(AssetError.parse_error(path, e.message()))

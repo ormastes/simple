@@ -1,0 +1,116 @@
+# @cover src/os/realtime/timer.spl 70%
+"""
+# RTOS Timer Configuration Specification
+
+**Category:** Infrastructure  **Difficulty:** 2/5  **Status:** Implemented
+
+Verifies RTOS timer arch constants, register addresses, and TimerConfig
+construction. Hardware calls cannot run in interpreter mode.
+"""
+
+use std.spipe.*
+
+# Inline arch constants (mirrors src/os/realtime/timer.spl)
+val TIMER_ARCH_ARM: i64 = 0
+val TIMER_ARCH_RISCV: i64 = 1
+val TIMER_ARCH_X86_64: i64 = 2
+
+# ARM SysTick register addresses
+val SYSTICK_CSR: i64 = 0xE000E010
+val SYSTICK_RVR: i64 = 0xE000E014
+val SYSTICK_CVR: i64 = 0xE000E018
+
+# RISC-V CLINT register addresses
+val CLINT_BASE: i64 = 0x02000000
+val CLINT_MTIMECMP: i64 = 0x02004000
+val CLINT_MTIME: i64 = 0x0200BFF8
+
+# x86_64 APIC register addresses
+val APIC_BASE_ADDR: i64 = 0xFEE00000
+val APIC_TIMER_LVT: i64 = 0x320
+val APIC_TIMER_INIT: i64 = 0x380
+val APIC_TIMER_DIV: i64 = 0x3E0
+
+class TimerConfig:
+    arch: i64
+    tick_hz: i64
+    initialized: bool
+
+fn make_timer_config(arch: i64, tick_hz: i64) -> TimerConfig:
+    TimerConfig(arch: arch, tick_hz: tick_hz, initialized: true)
+
+fn timer_base_addr_for(arch: i64) -> i64:
+    if arch == TIMER_ARCH_ARM:
+        return SYSTICK_CSR
+    if arch == TIMER_ARCH_RISCV:
+        return CLINT_BASE
+    if arch == TIMER_ARCH_X86_64:
+        return APIC_BASE_ADDR
+    return 0
+
+fn arm_reload(cpu_hz: i64, tick_hz: i64) -> i64:
+    cpu_hz / tick_hz - 1
+
+# ============================================================================
+# Tests: Architecture Constants
+# ============================================================================
+
+describe "Timer Architecture Constants":
+    it "defines ARM as arch 0":
+        expect(TIMER_ARCH_ARM).to_equal(0)
+
+    it "defines RISC-V as arch 1":
+        expect(TIMER_ARCH_RISCV).to_equal(1)
+
+    it "defines x86_64 as arch 2":
+        expect(TIMER_ARCH_X86_64).to_equal(2)
+
+# ============================================================================
+# Tests: Register Addresses
+# ============================================================================
+
+describe "Timer Register Addresses":
+    it "ARM SysTick CSR is at 0xE000E010":
+        expect(SYSTICK_CSR).to_equal(0xE000E010)
+
+    it "ARM SysTick RVR follows CSR by 4":
+        expect(SYSTICK_RVR - SYSTICK_CSR).to_equal(4)
+
+    it "ARM SysTick CVR follows RVR by 4":
+        expect(SYSTICK_CVR - SYSTICK_RVR).to_equal(4)
+
+    it "RISC-V CLINT base is 0x02000000":
+        expect(CLINT_BASE).to_equal(0x02000000)
+
+    it "RISC-V CLINT mtimecmp offset from base is 0x4000":
+        expect(CLINT_MTIMECMP - CLINT_BASE).to_equal(0x4000)
+
+    it "x86_64 APIC base is 0xFEE00000":
+        expect(APIC_BASE_ADDR).to_equal(0xFEE00000)
+
+# ============================================================================
+# Tests: Timer Config
+# ============================================================================
+
+describe "TimerConfig":
+    it "stores arch and tick_hz":
+        val cfg = make_timer_config(TIMER_ARCH_ARM, 1000)
+        expect(cfg.arch).to_equal(0)
+        expect(cfg.tick_hz).to_equal(1000)
+        expect(cfg.initialized).to_equal(true)
+
+    it "selects SysTick base for ARM":
+        expect(timer_base_addr_for(TIMER_ARCH_ARM)).to_equal(SYSTICK_CSR)
+
+    it "selects CLINT base for RISC-V":
+        expect(timer_base_addr_for(TIMER_ARCH_RISCV)).to_equal(CLINT_BASE)
+
+    it "selects APIC base for x86_64":
+        expect(timer_base_addr_for(TIMER_ARCH_X86_64)).to_equal(APIC_BASE_ADDR)
+
+    it "returns 0 for unknown arch":
+        expect(timer_base_addr_for(99)).to_equal(0)
+
+    it "computes ARM reload value for 16 MHz / 1 kHz":
+        val reload = arm_reload(16000000, 1000)
+        expect(reload).to_equal(15999)

@@ -1,0 +1,62 @@
+# TUI Adapter — demonstrates how svim/TUI shell consumes the unified backend.
+#
+# Thin wrapper: delegates all editing to UnifiedEditorBackend, adds
+# terminal-specific rendering concerns (ANSI, cursor escape codes).
+#
+# Provides: TuiEditorAdapter.
+
+use std.editor.unified.unified_backend.{UnifiedEditorBackend}
+use std.editor.unified.backend_trait.{EditorResult, editor_ok}
+
+class TuiEditorAdapter:
+    """TUI shell adapter over the unified editor backend."""
+    backend: UnifiedEditorBackend
+    terminal_rows: i64
+    terminal_cols: i64
+    scroll_offset: i64
+
+    static fn new(backend: UnifiedEditorBackend) -> TuiEditorAdapter:
+        TuiEditorAdapter(
+            backend: backend,
+            terminal_rows: 24,
+            terminal_cols: 80,
+            scroll_offset: 0
+        )
+
+    me resize(rows: i64, cols: i64):
+        me.terminal_rows = rows
+        me.terminal_cols = cols
+
+    me handle_key(key: text) -> EditorResult:
+        """Dispatch a key press to the backend; TUI-specific bindings here."""
+        if key == "q":
+            return editor_ok("quit")
+        if key == "s":
+            return me.backend.save_active()
+        if key == "u":
+            return me.backend.undo()
+        if key == "r":
+            return me.backend.redo()
+        editor_ok("key: " + key)
+
+    me ensure_cursor_visible():
+        """Adjust scroll_offset so the cursor line is visible in the viewport."""
+        val pos = me.backend.cursor_position()
+        val cursor_line = pos.line
+        val visible_lines = me.terminal_rows - 2  # status + command line
+        if cursor_line < me.scroll_offset:
+            me.scroll_offset = cursor_line
+        if cursor_line >= me.scroll_offset + visible_lines:
+            me.scroll_offset = cursor_line - visible_lines + 1
+
+    fn visible_lines() -> [text]:
+        """Return the lines currently visible in the viewport."""
+        var result: [text] = []
+        val total = me.backend.line_count()
+        val visible_count = me.terminal_rows - 2
+        var i = me.scroll_offset
+        while i < me.scroll_offset + visible_count and i < total:
+            val buf = me.backend.get_session().active_buffer()
+            result.push(buf.line_at(i))
+            i = i + 1
+        result

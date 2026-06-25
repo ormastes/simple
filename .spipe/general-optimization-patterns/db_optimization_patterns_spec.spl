@@ -1,0 +1,275 @@
+# @cover src/compiler/60.mir_opt/mir_opt/pattern/rules_clib_parity.spl 40%
+"""
+# DB Optimization Patterns Specification
+
+**Feature IDs:** #db-hardening-optimization
+**Category:** Optimization Patterns
+**Difficulty:** 2/5
+**Status:** Draft
+**Plan:** doc/03_plan/db_hardening_optimization_plan_2026-05-26.md
+
+## Overview
+
+Validates the 5 DB-domain optimization patterns registered in the
+clib-parity rule engine. Each pattern has a CLibPatternKind variant,
+a named rule with intrinsic/requires/required_proof, and specific
+cost_delta and software_cost values calibrated to the DB workload.
+
+## Behavior
+
+- FtsMatch pattern: FTS via inverted index + BM25
+- ContainsSearch pattern: substring/trigram contains search
+- PageSummaryScan pattern: page-level min/max summary for range skip
+- CacheInvalidation pattern: dirty-flag invalidation on mutation paths
+- ReopenRecovery pattern: WAL replay + FTS rebuild on DB reopen
+"""
+
+use std.spec
+use compiler.mir_opt.mir_opt.pattern.rules_clib_parity.{
+    CLibPatternKind, clib_parity_rule_by_name,
+    clib_parity_rule_rewrite_decision, clib_parity_domain_rule_count
+}
+
+
+# ============================================================================
+# AC-7: DB optimization patterns in general-optimization-patterns
+# ============================================================================
+
+describe "DB Optimization Patterns (AC-7)":
+    describe "FtsMatch pattern":
+        it "AC-7: match_db_fts_match rule registered with FtsMatch kind":
+            val maybe_rule = clib_parity_rule_by_name("match_db_fts_match")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val is_fts = rule.pattern_kind == CLibPatternKind.FtsMatch
+                expect(is_fts).to_equal(true)
+                expect(rule.domain).to_equal("database")
+                expect(rule.intrinsic).to_equal("db_fts_match")
+                expect(rule.cost_delta).to_equal(-6)
+                expect(rule.software_cost).to_equal(1600)
+
+        it "AC-7: FtsMatch proof gate rejects without fts_index_consistency":
+            val maybe_rule = clib_parity_rule_by_name("match_db_fts_match")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val rejected = clib_parity_rule_rewrite_decision(rule, ["fts_index"], [])
+                expect(rejected.eligible).to_equal(false)
+                val accepted = clib_parity_rule_rewrite_decision(rule, ["fts_index"], ["fts_index_consistency"])
+                expect(accepted.eligible).to_equal(true)
+
+    describe "ContainsSearch pattern":
+        it "AC-7: match_db_contains_search rule registered with ContainsSearch kind":
+            val maybe_rule = clib_parity_rule_by_name("match_db_contains_search")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val is_contains = rule.pattern_kind == CLibPatternKind.ContainsSearch
+                expect(is_contains).to_equal(true)
+                expect(rule.domain).to_equal("database")
+                expect(rule.intrinsic).to_equal("db_contains_search")
+                expect(rule.cost_delta).to_equal(-5)
+                expect(rule.software_cost).to_equal(1400)
+
+        it "AC-7: ContainsSearch proof gate rejects without text_index_consistency":
+            val maybe_rule = clib_parity_rule_by_name("match_db_contains_search")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val rejected = clib_parity_rule_rewrite_decision(rule, ["text_index"], [])
+                expect(rejected.eligible).to_equal(false)
+                val accepted = clib_parity_rule_rewrite_decision(rule, ["text_index"], ["text_index_consistency"])
+                expect(accepted.eligible).to_equal(true)
+
+    describe "PageSummaryScan pattern":
+        it "AC-7: match_db_page_summary_scan rule registered with PageSummaryScan kind":
+            val maybe_rule = clib_parity_rule_by_name("match_db_page_summary_scan")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val is_page = rule.pattern_kind == CLibPatternKind.PageSummaryScan
+                expect(is_page).to_equal(true)
+                expect(rule.domain).to_equal("database")
+                expect(rule.intrinsic).to_equal("db_page_summary_scan")
+                expect(rule.cost_delta).to_equal(-4)
+                expect(rule.software_cost).to_equal(1300)
+
+        it "AC-7: PageSummaryScan proof gate rejects without summary_range_soundness":
+            val maybe_rule = clib_parity_rule_by_name("match_db_page_summary_scan")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val rejected = clib_parity_rule_rewrite_decision(rule, ["page_summary_index"], [])
+                expect(rejected.eligible).to_equal(false)
+                val accepted = clib_parity_rule_rewrite_decision(rule, ["page_summary_index"], ["summary_range_soundness"])
+                expect(accepted.eligible).to_equal(true)
+
+    describe "CacheInvalidation pattern":
+        it "AC-7: match_db_cache_invalidate rule registered with CacheInvalidation kind":
+            val maybe_rule = clib_parity_rule_by_name("match_db_cache_invalidate")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val is_cache = rule.pattern_kind == CLibPatternKind.CacheInvalidation
+                expect(is_cache).to_equal(true)
+                expect(rule.domain).to_equal("database")
+                expect(rule.intrinsic).to_equal("db_cache_invalidate")
+                expect(rule.cost_delta).to_equal(-5)
+                expect(rule.software_cost).to_equal(1200)
+
+        it "AC-7: CacheInvalidation proof gate rejects without mutation_invalidation_complete":
+            val maybe_rule = clib_parity_rule_by_name("match_db_cache_invalidate")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val rejected = clib_parity_rule_rewrite_decision(rule, ["fts_dirty_flag"], [])
+                expect(rejected.eligible).to_equal(false)
+                val accepted = clib_parity_rule_rewrite_decision(rule, ["fts_dirty_flag"], ["mutation_invalidation_complete"])
+                expect(accepted.eligible).to_equal(true)
+
+    describe "ReopenRecovery pattern":
+        it "AC-7: match_db_reopen_recovery rule registered with ReopenRecovery kind":
+            val maybe_rule = clib_parity_rule_by_name("match_db_reopen_recovery")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val is_reopen = rule.pattern_kind == CLibPatternKind.ReopenRecovery
+                expect(is_reopen).to_equal(true)
+                expect(rule.domain).to_equal("database")
+                expect(rule.intrinsic).to_equal("db_reopen_recovery")
+                expect(rule.cost_delta).to_equal(-7)
+                expect(rule.software_cost).to_equal(1800)
+
+        it "AC-7: ReopenRecovery proof gate rejects without wal_replay_idempotent":
+            val maybe_rule = clib_parity_rule_by_name("match_db_reopen_recovery")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val rejected = clib_parity_rule_rewrite_decision(rule, ["wal_log"], [])
+                expect(rejected.eligible).to_equal(false)
+                val accepted = clib_parity_rule_rewrite_decision(rule, ["wal_log"], ["wal_replay_idempotent"])
+                expect(accepted.eligible).to_equal(true)
+
+    describe "DB domain coverage":
+        it "AC-7: database domain has at least 12 rules total":
+            expect(clib_parity_domain_rule_count("database")).to_be_greater_than(11)
+
+    # ========================================================================
+    # AC-8: New DB-beneficial optimization patterns
+    # ========================================================================
+
+    describe "DictLookupFusion pattern":
+        it "AC-8: match_db_dict_lookup_fusion rule registered with DictLookupFusion kind":
+            val maybe_rule = clib_parity_rule_by_name("match_db_dict_lookup_fusion")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val is_dict = rule.pattern_kind == CLibPatternKind.DictLookupFusion
+                expect(is_dict).to_equal(true)
+                expect(rule.domain).to_equal("database")
+                expect(rule.intrinsic).to_equal("db_dict_lookup_fused")
+                expect(rule.cost_delta).to_equal(-5)
+                expect(rule.software_cost).to_equal(1400)
+
+        it "AC-8: DictLookupFusion proof gate rejects without key_immutable_in_sequence":
+            val maybe_rule = clib_parity_rule_by_name("match_db_dict_lookup_fusion")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val rejected = clib_parity_rule_rewrite_decision(rule, ["hash_index"], [])
+                expect(rejected.eligible).to_equal(false)
+                val accepted = clib_parity_rule_rewrite_decision(rule, ["hash_index"], ["key_immutable_in_sequence"])
+                expect(accepted.eligible).to_equal(true)
+
+    describe "ArrayLenHoist pattern":
+        it "AC-8: match_db_array_len_hoist rule registered with ArrayLenHoist kind":
+            val maybe_rule = clib_parity_rule_by_name("match_db_array_len_hoist")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val is_hoist = rule.pattern_kind == CLibPatternKind.ArrayLenHoist
+                expect(is_hoist).to_equal(true)
+                expect(rule.domain).to_equal("database")
+                expect(rule.intrinsic).to_equal("db_array_len_hoisted")
+                expect(rule.cost_delta).to_equal(-4)
+                expect(rule.software_cost).to_equal(1200)
+
+        it "AC-8: ArrayLenHoist proof gate rejects without array_no_mutation_in_loop":
+            val maybe_rule = clib_parity_rule_by_name("match_db_array_len_hoist")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val rejected = clib_parity_rule_rewrite_decision(rule, ["loop_invariant"], [])
+                expect(rejected.eligible).to_equal(false)
+                val accepted = clib_parity_rule_rewrite_decision(rule, ["loop_invariant"], ["array_no_mutation_in_loop"])
+                expect(accepted.eligible).to_equal(true)
+
+    describe "DeadBranchElim pattern":
+        it "AC-8: match_db_dead_branch_elim rule registered with DeadBranchElim kind":
+            val maybe_rule = clib_parity_rule_by_name("match_db_dead_branch_elim")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val is_dead = rule.pattern_kind == CLibPatternKind.DeadBranchElim
+                expect(is_dead).to_equal(true)
+                expect(rule.domain).to_equal("database")
+                expect(rule.intrinsic).to_equal("db_dead_branch_removed")
+                expect(rule.cost_delta).to_equal(-3)
+                expect(rule.software_cost).to_equal(900)
+
+        it "AC-8: DeadBranchElim proof gate rejects without branch_condition_is_const":
+            val maybe_rule = clib_parity_rule_by_name("match_db_dead_branch_elim")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val rejected = clib_parity_rule_rewrite_decision(rule, ["const_condition"], [])
+                expect(rejected.eligible).to_equal(false)
+                val accepted = clib_parity_rule_rewrite_decision(rule, ["const_condition"], ["branch_condition_is_const"])
+                expect(accepted.eligible).to_equal(true)
+
+    describe "StringConcatReduce pattern":
+        it "AC-8: match_db_string_concat_reduce rule registered with StringConcatReduce kind":
+            val maybe_rule = clib_parity_rule_by_name("match_db_string_concat_reduce")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val is_concat = rule.pattern_kind == CLibPatternKind.StringConcatReduce
+                expect(is_concat).to_equal(true)
+                expect(rule.domain).to_equal("database")
+                expect(rule.intrinsic).to_equal("db_string_concat_batch")
+                expect(rule.cost_delta).to_equal(-6)
+                expect(rule.software_cost).to_equal(1500)
+
+        it "AC-8: StringConcatReduce proof gate rejects without concat_order_preserved":
+            val maybe_rule = clib_parity_rule_by_name("match_db_string_concat_reduce")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val rejected = clib_parity_rule_rewrite_decision(rule, ["string_builder"], [])
+                expect(rejected.eligible).to_equal(false)
+                val accepted = clib_parity_rule_rewrite_decision(rule, ["string_builder"], ["concat_order_preserved"])
+                expect(accepted.eligible).to_equal(true)
+
+    describe "IntCmpStrengthReduce pattern":
+        it "AC-8: match_db_int_cmp_strength rule registered with IntCmpStrengthReduce kind":
+            val maybe_rule = clib_parity_rule_by_name("match_db_int_cmp_strength")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val is_cmp = rule.pattern_kind == CLibPatternKind.IntCmpStrengthReduce
+                expect(is_cmp).to_equal(true)
+                expect(rule.domain).to_equal("database")
+                expect(rule.intrinsic).to_equal("db_int_cmp_reduced")
+                expect(rule.cost_delta).to_equal(-3)
+                expect(rule.software_cost).to_equal(800)
+
+        it "AC-8: IntCmpStrengthReduce needs only proof (requires=none)":
+            val maybe_rule = clib_parity_rule_by_name("match_db_int_cmp_strength")
+            expect(maybe_rule.?).to_equal(true)
+            if maybe_rule:
+                val rule = maybe_rule.unwrap()
+                val no_proof = clib_parity_rule_rewrite_decision(rule, [], [])
+                expect(no_proof.eligible).to_equal(false)
+                val ok = clib_parity_rule_rewrite_decision(rule, [], ["comparison_semantics_preserved"])
+                expect(ok.eligible).to_equal(true)

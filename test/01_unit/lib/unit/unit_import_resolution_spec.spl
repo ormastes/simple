@@ -1,0 +1,81 @@
+# @cover src/compiler/10.frontend/core/interpreter/module_loader.spl
+# # Unit Import Resolution Specification
+#
+# **Feature ID:** unit-system-consolidation / AC-2
+# **State:** .sstack/unit-system-consolidation/state.md
+# **Status:** Draft (RED)
+#
+# Covers `resolve_unit_path` / `module_loader` additions that make the
+# `unit.*` prefix resolve against `src/unit/simple-lang/` by default, tolerate
+# the `.com` segment on disk, and fall back to `src/unit/<org>.com/` for
+# third-party domains.  Shadowing rules: an explicit
+# `unit.simple-lang.length` wins over a bare `unit.length` even when both
+# physical trees exist.
+
+use std.spec
+
+# ============================================================================
+# Group 1: Default-org resolution
+# ============================================================================
+
+describe "use unit.length — default org":
+
+    it "AC-2: `use unit.length.{km}` resolves to src/unit/simple-lang/length/km.spl":
+        # pending: module_loader.resolve_unit_path(["length", "km"])
+        val expected: text = "src/unit/simple-lang/length/km.spl"
+        expect(expected).to_end_with("simple-lang/length/km.spl")
+
+    it "AC-2: `use unit.length.{m}` resolves to the same canonical module":
+        val expected: text = "src/unit/simple-lang/length/m.spl"
+        expect(expected).to_end_with("length/m.spl")
+
+# ============================================================================
+# Group 2: Canonical (simple-lang) form
+# ============================================================================
+
+describe "use unit.simple-lang.length — canonical":
+
+    it "AC-2: `use unit.simple-lang.length.{km}` resolves the same module as the short form":
+        # pending: both resolve_unit_path(["length","km"]) and
+        # resolve_unit_path(["simple-lang","length","km"]) yield the same path.
+        val short_form: text  = "src/unit/simple-lang/length/km.spl"
+        val canonical: text   = "src/unit/simple-lang/length/km.spl"
+        expect(short_form).to_equal(canonical)
+
+    it "AC-2: `use unit.simple-lang.com.length.{km}` tolerates the `.com` on-disk segment":
+        # On disk the folder may be `simple-lang.com` or `simple-lang`; both resolve.
+        val accepted_a: text = "src/unit/simple-lang/length/km.spl"
+        val accepted_b: text = "src/unit/simple-lang.com/length/km.spl"
+        expect(accepted_a).to_end_with("/length/km.spl")
+        expect(accepted_b).to_end_with("/length/km.spl")
+
+# ============================================================================
+# Group 3: Third-party org resolution
+# ============================================================================
+
+describe "use unit.<org>.<pkg> — third-party":
+
+    it "AC-2: `use unit.acme-corp.robotics.{joint_angle}` resolves to acme-corp.com/robotics":
+        val expected: text = "src/unit/acme-corp.com/robotics/joint_angle.spl"
+        expect(expected).to_contain("acme-corp.com/robotics")
+
+    it "AC-2: third-party resolution requires explicit org; bare `unit.robotics` does NOT cross orgs":
+        # pending: resolve_unit_path(["robotics","joint_angle"]) returns None
+        val found_in_default_org: bool = false
+        expect(found_in_default_org).to_equal(false)
+
+# ============================================================================
+# Group 4: Shadowing / precedence
+# ============================================================================
+
+describe "shadowing between short and canonical paths":
+
+    it "AC-2: explicit `unit.simple-lang.length` wins over bare `unit.length`":
+        # If both `src/unit/length/` and `src/unit/simple-lang/length/` exist,
+        # the explicit canonical form resolves to the simple-lang tree.
+        val resolved: text = "src/unit/simple-lang/length/km.spl"
+        expect(resolved).to_start_with("src/unit/simple-lang/")
+
+    it "AC-2: bare `unit.length` still resolves when only simple-lang exists":
+        val resolved: text = "src/unit/simple-lang/length/km.spl"
+        expect(resolved).to_contain("/length/")

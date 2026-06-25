@@ -1,0 +1,152 @@
+# LibreOffice Branding
+#
+# Names the office suite "LibreOffice" and maps each component to its LibreOffice
+# application identity (Writer / Calc / Impress / Draw / Base / Math), layered on
+# the shared markdown + CSS substrate. The `implemented` flag is honest about
+# which components render/compute through the substrate today versus which are
+# still planned, so the branding never overstates what exists.
+
+use app.plugin.registry.{PluginEntry, plugin_entry_new}
+
+struct LibreOfficeApp:
+    libre_name: text      # LibreOffice application name, e.g. "Writer"
+    component: text       # internal component key, e.g. "word"
+    module: text          # implementing module path
+    description: text
+    implemented: bool     # true when the component renders/computes today
+
+struct OfficeAppRoute:
+    requested: text
+    component: text
+    status: text
+    valid: bool
+
+fn libreoffice_suite_name() -> text:
+    """The branded suite name."""
+    "LibreOffice"
+
+fn libreoffice_apps() -> [LibreOfficeApp]:
+    """All six LibreOffice applications and their backing components."""
+    var apps: [LibreOfficeApp] = []
+    apps.push(LibreOfficeApp(
+        libre_name: "Writer", component: "word",
+        module: "app.office.word.html_render",
+        description: "Word processor", implemented: true))
+    apps.push(LibreOfficeApp(
+        libre_name: "Calc", component: "excel",
+        module: "app.office.sheets.formula",
+        description: "Spreadsheet", implemented: true))
+    apps.push(LibreOfficeApp(
+        libre_name: "Impress", component: "ppt",
+        module: "app.office.slides.html_render",
+        description: "Presentations", implemented: true))
+    apps.push(LibreOfficeApp(
+        libre_name: "Draw", component: "draw",
+        module: "common.drawing.vector_shapes",
+        description: "Vector graphics", implemented: true))
+    apps.push(LibreOfficeApp(
+        libre_name: "Base", component: "db",
+        module: "app.office.base_db",
+        description: "Database", implemented: true))
+    apps.push(LibreOfficeApp(
+        libre_name: "Math", component: "math",
+        module: "app.office.math_editor",
+        description: "Formula editor", implemented: true))
+    apps
+
+fn is_office_component(component: text) -> bool:
+    """True when the value matches a valid office component, CLI app, or launcher."""
+    if component == "launcher":
+        return true
+    if component == "sheets" or component == "slides" or component == "mail" or component == "planner" or component == "counter":
+        return true
+    for app in libreoffice_apps():
+        if app.component == component:
+            return true
+    false
+
+fn office_component_for_action(action: text) -> text?:
+    """Translate a launcher action like `open_word` into a component name."""
+    if not action.starts_with("open_"):
+        return nil
+    val component = action.substring(5, action.len())
+    if component == "launcher":
+        return nil
+    if is_office_component(component):
+        return Some(component)
+    nil
+
+fn lookup_office_component(requested: text) -> OfficeAppRoute:
+    """Resolve a CLI command into an office routing result."""
+    if requested == "":
+        return OfficeAppRoute(
+            requested: requested,
+            component: "",
+            status: "empty",
+            valid: false
+        )
+
+    if requested == "launcher":
+        return OfficeAppRoute(
+            requested: requested,
+            component: "launcher",
+            status: "launcher",
+            valid: true
+        )
+
+    if is_office_component(requested):
+        return OfficeAppRoute(
+            requested: requested,
+            component: requested,
+            status: "component",
+            valid: true
+        )
+
+    if val Some(component) = office_component_for_action(requested):
+        return OfficeAppRoute(
+            requested: requested,
+            component: component,
+            status: "action",
+            valid: true
+        )
+
+    return OfficeAppRoute(
+        requested: requested,
+        component: "",
+        status: "unsupported",
+        valid: false
+    )
+
+fn libreoffice_app_name(component: text) -> text:
+    """The LibreOffice application name for an internal component key, or ""."""
+    if component == "counter":
+        return "Counter"
+    for a in libreoffice_apps():
+        if a.component == component:
+            return a.libre_name
+    ""
+
+fn libreoffice_app_name_checked(component: text) -> text:
+    """The LibreOffice application name, or a deterministic fail-closed error."""
+    if component == "counter":
+        return "Counter"
+    for a in libreoffice_apps():
+        if a.component == component:
+            return a.libre_name
+    "error: unknown LibreOffice component: " + component
+
+fn libreoffice_implemented_apps() -> [text]:
+    """LibreOffice names of the apps that render/compute through the substrate."""
+    var names: [text] = []
+    for a in libreoffice_apps():
+        if a.implemented:
+            names.push(a.libre_name)
+    names
+
+fn libreoffice_plugin_entries() -> [PluginEntry]:
+    """The LibreOffice-branded plugin manifest: one entry per application."""
+    var entries: [PluginEntry] = []
+    for a in libreoffice_apps():
+        val name = "libreoffice-" + a.libre_name.lower()
+        entries.push(plugin_entry_new(name, a.module, "0.1.0", []))
+    entries
