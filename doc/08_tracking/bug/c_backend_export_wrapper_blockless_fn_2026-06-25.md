@@ -49,15 +49,17 @@ bitfield layout path.
   and bitfield struct. The Lua `luaopen_*` ABI symbol the SFFI goal needs is
   emitted correctly.
 
-## Residual (separate, smaller)
+## Residual (resolved + follow-up)
 
-- `c_backend_export_spec`: 0/4 → 1/4. The codegen is correct (capture output
-  satisfies tests 1–3's assertions), but running `translate_module` on the
-  export fixtures *inside a `std.spec` `it`-block* intermittently exits 1 where
-  the identical call in `fn main()` succeeds — a spec-harness/interpreter
-  execution-context issue, not a codegen bug. Test 4's bitfield assertions
-  expect `uint8_t mode : 4;`-style output that the export path emits in a
-  different form (stale assertion or export-path bitfield gap).
-- Same `HirType.named` bug still latent in `header_gen/cpp_header.spl`
+- `c_backend_export_spec`: 0/4 → **4/4 green** (2026-06-25). Two further fixes:
+  1. The "it-block crash" was the `to_not_contain` matcher being unimplemented
+     in the Rust seed (only `to_not_equal` existed) — added `to_not_contain`/
+     `to_not_be_nil` to `interpreter_method/mod.rs` and generic `to_not_<x>`
+     negation to `test_runner/execution.rs` (origin `0c9fdde`).
+  2. Test 4 (bitfield): named type defs are emitted to the HEADER, not the impl
+     `translate_module` returns — the test now reads `build_header()`. And `Bool`
+     bitfields now emit C `bool` instead of `int64_t` (`int64_t x : 1` is a
+     signed 1-bit field that cannot hold true and breaks 1-byte packing).
+- Same `HirType.named` pattern still latent in `header_gen/cpp_header.spl`
   (`_mir_type_to_hir_type`) — now resolvable via the new `HirType.named`; left
   for a focused follow-up.
