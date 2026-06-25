@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 104 | 104 | 0 | 0 |
+| 105 | 105 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -263,6 +263,26 @@ val transformed = render_html_to_pixels_with_viewport(transform_html, 96, 32).pi
 expect(_count_color(transformed, 0xFF111827u32)).to_be_greater_than(0)
 expect(_pixels_equal(lower, transformed)).to_equal(false)
 expect(_pixels_equal(upper, transformed)).to_equal(true)
+```
+
+</details>
+
+#### renders text-decoration underline below text glyphs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plain_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; }</style></head><body><div class='label'>UNDERLINE</div></body></html>"
+val underline_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; text-decoration: underline; }</style></head><body><div class='label'>UNDERLINE</div></body></html>"
+val plain = render_html_to_pixels_with_viewport(plain_html, 96, 32).pixel_data
+val underline = render_html_to_pixels_with_viewport(underline_html, 96, 32).pixel_data
+
+expect(_count_color(underline, 0xFF111827u32)).to_be_greater_than(_count_color(plain, 0xFF111827u32))
+expect(_pixels_equal(plain, underline)).to_equal(false)
 ```
 
 </details>
@@ -1905,8 +1925,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 104 |
-| Active scenarios | 104 |
+| Total scenarios | 105 |
+| Active scenarios | 105 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
