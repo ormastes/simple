@@ -349,6 +349,27 @@ windows_d3d12_render_log_compare_pairwise_status=pass
 The gate rejects D3D11-only evidence, missing PIX/GPU-debugger proof in strict
 mode, browser fallback, and non-pairwise comparisons.
 
+The GUI RenderDoc aggregate consumes these normalized render-log compare
+outputs without launching them:
+
+```sh
+LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/linux-vulkan-render-log-compare/evidence.env
+MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/macos-metal-render-log-compare/evidence.env
+WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/windows-d3d12-render-log-compare/evidence.env
+```
+
+Completion keys are:
+
+```text
+native_render_log_platform_matrix_status=pass
+native_render_log_platform_matrix_required_platforms=linux-vulkan,macos-metal,windows-d3d12
+native_render_log_platform_matrix_missing_platforms=
+```
+
+If any platform compare evidence is missing or failing, the aggregate keeps
+`gui_renderdoc_feature_coverage_status` incomplete and adds the native
+render-log platform matrix to `blocked_completion_gates`.
+
 On macOS, the wrapper prefers `src/compiler_rust/target/release/simple` or
 `src/compiler_rust/target/debug/simple` when that binary advertises the macOS
 Vulkan loader paths (`libvulkan.1.dylib`). The selected executable is recorded
