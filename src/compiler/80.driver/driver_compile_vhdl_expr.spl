@@ -108,23 +108,17 @@ fn _simple_expr_to_vhdl(expr: text, result_type: text, param_names: [text], para
 fn _simple_binary_arith_to_vhdl(left: text, right: text, op: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
     if _simple_integer_width(result_type) == "":
         return Err("VHDL subset fallback arithmetic requires an integer result type: {result_type}")
-    val left_result = _simple_operand_to_vhdl(left, result_type, param_names, param_types)
-    if left_result.is_err():
-        return Err(left_result.unwrap_err())
-    val right_result = _simple_operand_to_vhdl(right, result_type, param_names, param_types)
-    if right_result.is_err():
-        return Err(right_result.unwrap_err())
-    Ok("{left_result.unwrap()} {op} {right_result.unwrap()}")
+    val left_vhdl = _simple_operand_to_vhdl(left, result_type, param_names, param_types)?
+    val right_vhdl = _simple_operand_to_vhdl(right, result_type, param_names, param_types)?
+    Ok("{left_vhdl} {op} {right_vhdl}")
 
 fn _simple_shift_to_vhdl(left: text, right: text, op: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
     if _simple_integer_width(result_type) == "":
         return Err("VHDL subset fallback shift requires an integer result type: {result_type}")
     if not _is_decimal_literal(right):
         return Err("VHDL subset fallback shift count must be a decimal literal")
-    val left_result = _simple_operand_to_vhdl(left, result_type, param_names, param_types)
-    if left_result.is_err():
-        return Err(left_result.unwrap_err())
-    Ok("{op}({left_result.unwrap()}, {right})")
+    val left_vhdl = _simple_operand_to_vhdl(left, result_type, param_names, param_types)?
+    Ok("{op}({left_vhdl}, {right})")
 
 fn _simple_slice_to_vhdl(expr: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
     if not expr.ends_with("]"):
@@ -132,13 +126,17 @@ fn _simple_slice_to_vhdl(expr: text, result_type: text, param_names: [text], par
     val open_opt = expr.find("[")
     if not open_opt.?:
         return Err("not a bit slice expression")
-    val open_index = open_opt.unwrap()
+    val open_index = match open_opt:
+        case Some(value): value
+        case nil: return Err("not a bit slice expression")
     val base_text = expr.substring(0, open_index).trim()
     val range_text = expr.substring(open_index + 1, expr.len() - 1).trim()
     val colon_opt = range_text.find(":")
     if base_text == "" or not colon_opt.?:
         return Err("not a bit slice expression")
-    val colon_index = colon_opt.unwrap()
+    val colon_index = match colon_opt:
+        case Some(value): value
+        case nil: return Err("not a bit slice expression")
     val hi_text = range_text.substring(0, colon_index).trim()
     val lo_text = range_text.substring(colon_index + 1, range_text.len()).trim()
     if not _is_decimal_literal(hi_text) or not _is_decimal_literal(lo_text):
@@ -160,10 +158,8 @@ fn _simple_slice_to_vhdl(expr: text, result_type: text, param_names: [text], par
     val slice_width = hi - lo + 1
     if _simple_decimal_to_i64(result_width_text) != slice_width:
         return Err("VHDL subset fallback bit slice width does not match result type")
-    val base_result = _simple_expr_to_vhdl(base_text, source_type, param_names, param_types)
-    if base_result.is_err():
-        return Err(base_result.unwrap_err())
-    Ok("{base_result.unwrap()}({hi_text} downto {lo_text})")
+    val base_vhdl = _simple_expr_to_vhdl(base_text, source_type, param_names, param_types)?
+    Ok("{base_vhdl}({hi_text} downto {lo_text})")
 
 fn _simple_concat_to_vhdl(expr: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
     if not expr.starts_with("concat(") or not expr.ends_with(")"):
@@ -185,13 +181,9 @@ fn _simple_concat_to_vhdl(expr: text, result_type: text, param_names: [text], pa
         return Err("VHDL subset fallback concat requires integer arguments")
     if _simple_decimal_to_i64(left_width_text) + _simple_decimal_to_i64(right_width_text) != _simple_decimal_to_i64(result_width_text):
         return Err("VHDL subset fallback concat width does not match result type")
-    val left_result = _simple_expr_to_vhdl(left_text, left_type, param_names, param_types)
-    if left_result.is_err():
-        return Err(left_result.unwrap_err())
-    val right_result = _simple_expr_to_vhdl(right_text, right_type, param_names, param_types)
-    if right_result.is_err():
-        return Err(right_result.unwrap_err())
-    Ok("{left_result.unwrap()} & {right_result.unwrap()}")
+    val left_vhdl = _simple_expr_to_vhdl(left_text, left_type, param_names, param_types)?
+    val right_vhdl = _simple_expr_to_vhdl(right_text, right_type, param_names, param_types)?
+    Ok("{left_vhdl} & {right_vhdl}")
 
 fn _simple_unary_to_vhdl(expr: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
     if expr.starts_with("-"):
@@ -200,16 +192,12 @@ fn _simple_unary_to_vhdl(expr: text, result_type: text, param_names: [text], par
         val operand = expr.substring(1, expr.len()).trim()
         if operand == "":
             return Err("VHDL subset fallback unary negation requires an operand")
-        val operand_result = _simple_operand_to_vhdl(operand, result_type, param_names, param_types)
-        if operand_result.is_err():
-            return Err(operand_result.unwrap_err())
-        return Ok("-({operand_result.unwrap()})")
+        val operand_vhdl = _simple_operand_to_vhdl(operand, result_type, param_names, param_types)?
+        return Ok("-({operand_vhdl})")
     if expr.starts_with("not "):
         val operand = expr.substring(4, expr.len()).trim()
-        val operand_result = _simple_operand_to_vhdl(operand, "bool", param_names, param_types)
-        if operand_result.is_err():
-            return Err(operand_result.unwrap_err())
-        return Ok("not {operand_result.unwrap()}")
+        val operand_vhdl = _simple_operand_to_vhdl(operand, "bool", param_names, param_types)?
+        return Ok("not {operand_vhdl}")
     Err("not a unary expression")
 
 fn _simple_comparison_to_vhdl(expr: text, param_names: [text], param_types: [text]) -> Result<text, text>:
@@ -230,16 +218,12 @@ fn _simple_comparison_to_vhdl(expr: text, param_names: [text], param_types: [tex
                 compare_type = right_type
             if compare_type == "":
                 return Err("VHDL subset fallback could not infer comparison type")
-            val left_result = _simple_operand_to_vhdl(left_text, compare_type, param_names, param_types)
-            if left_result.is_err():
-                return Err(left_result.unwrap_err())
-            val right_result = _simple_operand_to_vhdl(right_text, compare_type, param_names, param_types)
-            if right_result.is_err():
-                return Err(right_result.unwrap_err())
+            val left_vhdl = _simple_operand_to_vhdl(left_text, compare_type, param_names, param_types)?
+            val right_vhdl = _simple_operand_to_vhdl(right_text, compare_type, param_names, param_types)?
             val vhdl_op = _simple_comparison_op_to_vhdl(op.trim())
             if vhdl_op == "":
                 return Err("VHDL subset fallback unsupported comparison operator: {op}")
-            return Ok("'1' when {left_result.unwrap()} {vhdl_op} {right_result.unwrap()} else '0'")
+            return Ok("'1' when {left_vhdl} {vhdl_op} {right_vhdl} else '0'")
         i = i + 1
     Err("not a comparison")
 
@@ -261,10 +245,8 @@ fn _simple_bool_logic_to_vhdl(expr: text, param_names: [text], param_types: [tex
         if parts.len() > 2:
             var rendered: [text] = []
             for part in parts:
-                val part_result = _simple_expr_to_vhdl(part.trim(), "bool", param_names, param_types)
-                if part_result.is_err():
-                    return Err(part_result.unwrap_err())
-                rendered = rendered.push("({part_result.unwrap()})")
+                val part_vhdl = _simple_expr_to_vhdl(part.trim(), "bool", param_names, param_types)?
+                rendered = rendered.push("({part_vhdl})")
             return Ok(_simple_join_text(rendered, " or "))
     if expr.contains(" and "):
         val parts = expr.split(" and ")
@@ -273,10 +255,8 @@ fn _simple_bool_logic_to_vhdl(expr: text, param_names: [text], param_types: [tex
         if parts.len() > 2:
             var rendered: [text] = []
             for part in parts:
-                val part_result = _simple_expr_to_vhdl(part.trim(), "bool", param_names, param_types)
-                if part_result.is_err():
-                    return Err(part_result.unwrap_err())
-                rendered = rendered.push(part_result.unwrap())
+                val part_vhdl = _simple_expr_to_vhdl(part.trim(), "bool", param_names, param_types)?
+                rendered = rendered.push(part_vhdl)
             return Ok(_simple_join_text(rendered, " and "))
     if expr.contains(" xor "):
         val parts = expr.split(" xor ")
@@ -285,21 +265,15 @@ fn _simple_bool_logic_to_vhdl(expr: text, param_names: [text], param_types: [tex
         if parts.len() > 2:
             var rendered: [text] = []
             for part in parts:
-                val part_result = _simple_expr_to_vhdl(part.trim(), "bool", param_names, param_types)
-                if part_result.is_err():
-                    return Err(part_result.unwrap_err())
-                rendered = rendered.push(part_result.unwrap())
+                val part_vhdl = _simple_expr_to_vhdl(part.trim(), "bool", param_names, param_types)?
+                rendered = rendered.push(part_vhdl)
             return Ok(_simple_join_text(rendered, " xor "))
     Err("not a boolean logic expression")
 
 fn _simple_binary_bool_to_vhdl(left: text, right: text, op: text, param_names: [text], param_types: [text]) -> Result<text, text>:
-    val left_result = _simple_expr_to_vhdl(left, "bool", param_names, param_types)
-    if left_result.is_err():
-        return Err(left_result.unwrap_err())
-    val right_result = _simple_expr_to_vhdl(right, "bool", param_names, param_types)
-    if right_result.is_err():
-        return Err(right_result.unwrap_err())
-    Ok("{left_result.unwrap()} {op} {right_result.unwrap()}")
+    val left_vhdl = _simple_expr_to_vhdl(left, "bool", param_names, param_types)?
+    val right_vhdl = _simple_expr_to_vhdl(right, "bool", param_names, param_types)?
+    Ok("{left_vhdl} {op} {right_vhdl}")
 
 fn _simple_inline_if_to_vhdl(expr: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
     if not expr.starts_with("if "):
@@ -307,33 +281,33 @@ fn _simple_inline_if_to_vhdl(expr: text, result_type: text, param_names: [text],
     val else_opt = expr.find(" else:")
     if not else_opt.?:
         return Err("not an inline if")
-    val else_index = else_opt.unwrap()
+    val else_index = match else_opt:
+        case Some(value): value
+        case nil: return Err("not an inline if")
     val head = expr.substring(3, else_index).trim()
     val colon_opt = head.find(":")
     if not colon_opt.?:
         return Err("inline if is missing ':'")
-    val colon_index = colon_opt.unwrap()
+    val colon_index = match colon_opt:
+        case Some(value): value
+        case nil: return Err("inline if is missing ':'")
     val cond_text = head.substring(0, colon_index).trim()
     val then_text = head.substring(colon_index + 1, head.len()).trim()
     val else_text = expr.substring(else_index + 6, expr.len()).trim()
     if then_text == "" or else_text == "":
         return Err("inline if must have both then and else expressions")
-    val cond_result = _simple_expr_to_vhdl(cond_text, "bool", param_names, param_types)
-    if cond_result.is_err():
-        return Err(cond_result.unwrap_err())
-    val then_result = _simple_expr_to_vhdl(_simple_strip_return(then_text), result_type, param_names, param_types)
-    if then_result.is_err():
-        return Err(then_result.unwrap_err())
-    val else_result = _simple_expr_to_vhdl(_simple_strip_return(else_text), result_type, param_names, param_types)
-    if else_result.is_err():
-        return Err(else_result.unwrap_err())
-    Ok("{then_result.unwrap()} when {cond_result.unwrap()} = '1' else {else_result.unwrap()}")
+    val cond_vhdl = _simple_expr_to_vhdl(cond_text, "bool", param_names, param_types)?
+    val then_vhdl = _simple_expr_to_vhdl(_simple_strip_return(then_text), result_type, param_names, param_types)?
+    val else_vhdl = _simple_expr_to_vhdl(_simple_strip_return(else_text), result_type, param_names, param_types)?
+    Ok("{then_vhdl} when {cond_vhdl} = '1' else {else_vhdl}")
 
 fn _simple_cast_to_vhdl(expr: text, result_type: text, param_names: [text], param_types: [text]) -> Result<text, text>:
     val as_opt = expr.find(" as ")
     if not as_opt.?:
         return Err("not a cast expression")
-    val as_index = as_opt.unwrap()
+    val as_index = match as_opt:
+        case Some(value): value
+        case nil: return Err("not a cast expression")
     val source_text = expr.substring(0, as_index).trim()
     val target_type = expr.substring(as_index + 4, expr.len()).trim()
     if source_text == "" or target_type == "":
@@ -432,13 +406,17 @@ fn _simple_slice_expr_type(expr: text, param_names: [text], param_types: [text])
     val open_opt = expr.find("[")
     if not open_opt.?:
         return ""
-    val open_index = open_opt.unwrap()
+    val open_index = match open_opt:
+        case Some(value): value
+        case nil: return ""
     val base_text = expr.substring(0, open_index).trim()
     val range_text = expr.substring(open_index + 1, expr.len() - 1).trim()
     val colon_opt = range_text.find(":")
     if not colon_opt.?:
         return ""
-    val colon_index = colon_opt.unwrap()
+    val colon_index = match colon_opt:
+        case Some(value): value
+        case nil: return ""
     val hi_text = range_text.substring(0, colon_index).trim()
     val lo_text = range_text.substring(colon_index + 1, range_text.len()).trim()
     if not _is_decimal_literal(hi_text) or not _is_decimal_literal(lo_text):
@@ -488,15 +466,14 @@ fn _simple_param_context(params_text: text, alias_names: [text], alias_types: [t
             val type_sep_opt = _simple_find_top_level(param, ":")
             if not type_sep_opt.?:
                 return Err("VHDL subset fallback could not parse parameter: {param}")
-            val type_sep = type_sep_opt.unwrap()
+            val type_sep = match type_sep_opt:
+                case Some(value): value
+                case nil: return Err("VHDL subset fallback could not parse parameter: {param}")
             val param_name = param.substring(0, type_sep).trim()
             val param_type = param.substring(type_sep + 1, param.len()).trim()
             val resolved_param_type = _simple_resolve_type_alias(param_type, alias_names, alias_types)
             if _simple_is_labeled_tuple_type_alias(param_type, alias_names, alias_types):
-                val flatten_result = _simple_flatten_tuple_param(param_name, param_type, alias_names, alias_types)
-                if flatten_result.is_err():
-                    return Err(flatten_result.unwrap_err())
-                val flattened = flatten_result.unwrap()
+                val flattened = _simple_flatten_tuple_param(param_name, param_type, alias_names, alias_types)?
                 val names = flattened[0].split("\n")
                 val types = flattened[1].split("\n")
                 var i = 0
@@ -543,10 +520,7 @@ fn _simple_flatten_tuple_param(prefix: text, tuple_type: text, alias_names: [tex
         val field_type = types[i]
         val resolved_field_type = _simple_resolve_type_alias(field_type, alias_names, alias_types)
         if _simple_is_labeled_tuple_type_alias(field_type, alias_names, alias_types):
-            val child_result = _simple_flatten_tuple_param(source_name, field_type, alias_names, alias_types)
-            if child_result.is_err():
-                return Err(child_result.unwrap_err())
-            val child = child_result.unwrap()
+            val child = _simple_flatten_tuple_param(source_name, field_type, alias_names, alias_types)?
             val child_names = child[0].split("\n")
             val child_types = child[1].split("\n")
             var child_i = 0
@@ -606,8 +580,11 @@ fn _simple_entity_type_declaration_block(entity_name: text, alias_names: [text],
                     val payload_sep = trimmed_payload.find(":")
                     if not payload_sep.?:
                         return Err("VHDL subset fallback enum `{alias_names[i]}` has malformed payload field `{trimmed_payload}`")
-                    val payload_name = trimmed_payload.substring(0, payload_sep.unwrap()).trim()
-                    val payload_type = trimmed_payload.substring(payload_sep.unwrap() + 1, trimmed_payload.len()).trim()
+                    val payload_sep_index = match payload_sep:
+                        case Some(value): value
+                        case nil: return Err("VHDL subset fallback enum `{alias_names[i]}` has malformed payload field `{trimmed_payload}`")
+                    val payload_name = trimmed_payload.substring(0, payload_sep_index).trim()
+                    val payload_type = trimmed_payload.substring(payload_sep_index + 1, trimmed_payload.len()).trim()
                     if _text_list_contains(payload_seen, payload_name):
                         return Err("VHDL subset fallback duplicate enum payload field after VHDL sanitization: {payload_name}")
                     val payload_vhdl_type = _simple_type_to_vhdl(_simple_resolve_type_alias(payload_type, alias_names, alias_types))
