@@ -17,29 +17,29 @@
 - HTML/CSS full rendering goal: incomplete (full-css-rendering-incomplete; full CSS 63/394)
 - RenderDoc goal: fail (missing-source-evidence)
 - Simple RenderDoc: fail (missing-source-evidence)
-- External Chrome/Vulkan RenderDoc: unavailable (missing-renderdoccmd-in-search-paths)
+- External Chrome/Vulkan RenderDoc: unavailable (capture-not-requested)
 - Electron Chromium/Vulkan RenderDoc: unavailable (missing-electron-rdoc)
 - Electron Chromium/Vulkan gate: unavailable (missing-source-evidence)
-- GUI/web/2D Vulkan setup source: existing-evidence
-- GUI/web/2D Vulkan setup mode: --run
+- GUI/web/2D Vulkan setup source: generated-check
+- GUI/web/2D Vulkan setup mode: --check
 - GUI/web/2D Vulkan direct-run source: missing
 - GUI/web/2D comparison artifact blocker: doc/08_tracking/bug/gui_web_2d_vulkan_pairwise_aggregate_2026-06-22.md
 - GUI/web/2D pixel comparison blocker: doc/08_tracking/bug/gui_web_2d_vulkan_pairwise_aggregate_2026-06-22.md
 - GUI/web/2D browser Vulkan backing: fail (focused-browser-backing-required; missing-focused-browser-backing)
 - GUI/web/2D browser backing blocker: doc/08_tracking/bug/gui_web_2d_vulkan_browser_backing_2026-06-23.md
-- GUI/web/2D Vulkan RenderDoc blockers: blocked (8; renderdoc-command-unavailable-missing-renderdoccmd-in-search-paths;simple-direct-vulkan-fail-evidence-program-failed;simple-renderdoc-gate-unavailable-missing-source-evidence;electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run;pairwise-pixel-comparison-incomplete-comparison-artifacts-incomplete)
+- GUI/web/2D Vulkan RenderDoc blockers: blocked (8; renderdoc-command-unavailable-missing-renderdoccmd-in-search-paths;simple-direct-vulkan-unavailable-missing-simple-direct-vulkan-evidence;simple-renderdoc-gate-unavailable-missing-source-evidence;electron-angle-vulkan-unavailable-missing-electron-angle-vulkan-evidence;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-unavailable-missing-chrome-angle-vulkan-evidence;chrome-renderdoc-gate-not-run-not-run;pairwise-pixel-comparison-incomplete-comparison-artifacts-incomplete;chrome-argb-file-unavailable;chrome-argb-viewport-unavailable;chrome-argb-nonblank-unavailable;simple-argb-file-unavailable;simple-argb-viewport-unavailable;simple-argb-nonblank-unavailable;electron-chrome-diff-unavailable;electron-simple-diff-unavailable;chrome-simple-diff-unavailable)
 - GUI/web/2D RenderDoc blocker: doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
 - GUI/web/2D Vulkan loader: present (llvmpipe (LLVM 20.1.2, 256 bits) / llvmpipe)
 - GUI/web/2D Vulkan RenderDoc: unavailable (missing-renderdoccmd-in-search-paths)
 - GUI/web/2D Vulkan RenderDoc macOS package: not-applicable (not-applicable)
-- GUI/web/2D Electron direct Vulkan: not-rejected-by-log (no-angle-vulkan-unavailable-log; ARGB pass)
-- GUI/web/2D Chrome direct Vulkan: not-rejected-by-log (no-angle-vulkan-unavailable-log; bitmap not-run)
-- GUI/web/2D Simple Vulkan: fail (evidence-program-failed)
+- GUI/web/2D Electron direct Vulkan:
+- GUI/web/2D Chrome direct Vulkan:
+- GUI/web/2D Simple Vulkan:
 - macOS Vulkan:
 - macOS RenderDoc:
-- Production GUI/web core parity: fail (core-gui-web-parity-missing:matrix:fail!=pass,layout_manifest:<missing>!=pass,layout_manifest_case_count:<missing>!=50,layout_manifest_pass_count:<missing>!=36,layout_manifest_tracked_count:<missing>!=14,layout_manifest_fail_count:<missing>!=0,surface_manifest:<missing>!=pass,surface_manifest_electron_capture:<missing>!=pass,surface_manifest_tauri_capture:<missing>!=pass,surface_manifest_chrome_capture:<missing>!=pass,surface_manifest_tauri_live_capture:<missing>!=true,surface_manifest_chrome_live_capture:<missing>!=true,surface_manifest_tauri_case_count:<missing>!=50,surface_manifest_tauri_pass_count:<missing>!=36,surface_manifest_tauri_tracked_count:<missing>!=14,surface_manifest_tauri_fail_count:<missing>!=0,surface_manifest_chrome_case_count:<missing>!=50,surface_manifest_chrome_pass_count:<missing>!=36,surface_manifest_chrome_tracked_count:<missing>!=14,surface_manifest_chrome_fail_count:<missing>!=0,surface_manifest_tauri_mismatch_count:<missing>!=0,surface_manifest_chrome_mismatch_count:<missing>!=0,surface_manifest_no_fake_capture:<missing>!=true,surface_manifest_blur_or_tolerance_used:<missing>!=false,backend:<missing>!=pass)
-- Production GUI/web parity gate: fail (electron-generated-gui-matrix-failed)
-- GUI/web/2D 8K retained perf: pass (met-target-fps; fps_x1000 13175230; rss 520192/750000 kB)
+- Production GUI/web core parity: fail (missing-production-parity-evidence)
+- Production GUI/web parity gate: unavailable (missing-production-parity-evidence)
+- GUI/web/2D 8K retained perf: pass (met-target-fps; fps_x1000 14228124; rss 519936/750000 kB)
 - Production surface host:
 - Production Tauri surface capture:
 - Production Chrome surface capture:
@@ -189,19 +189,19 @@
 - html_css_full_rendering_goal_full_css_unrendered_count=331
 - html_css_full_rendering_goal_full_css_unrendered_properties=accent-color,all,animation,animation-delay,animation-direction,animation-duration,animation-fill-mode,animation-iteration-count,animation-name,animation-play-state,animation-timing-function,aspect-ratio,azimuth,backface-visibility,background-attachment,background-blend-mode,background-clip,background-image,background-origin,background-position,background-repeat,background-size,block-size,border-block,border-block-color,border-block-end,border-block-end-color,border-block-end-style,border-block-end-width,border-block-start,border-block-start-color,border-block-start-style,border-block-start-width,border-block-style,border-block-width,border-bottom-left-radius,border-bottom-right-radius,border-bottom-style,border-collapse,border-end-end-radius,border-end-start-radius,border-image,border-image-outset,border-image-repeat,border-image-slice,border-image-source,border-image-width,border-inline,border-inline-color,border-inline-end,border-inline-end-color,border-inline-end-style,border-inline-end-width,border-inline-start,border-inline-start-color,border-inline-start-style,border-inline-start-width,border-inline-style,border-inline-width,border-left-style,border-radius,border-right-style,border-spacing,border-start-end-radius,border-start-start-radius,border-top-left-radius,border-top-right-radius,border-top-style,bottom,box-decoration-break,box-shadow,break-after,break-before,break-inside,caption-side,caret-color,clear,clip,clip-path,clip-rule,color-adjust,color-interpolation-filters,color-scheme,column-count,column-fill,column-rule,column-rule-color,column-rule-style,column-rule-width,column-span,column-width,columns,contain,content,content-visibility,counter-increment,counter-reset,counter-set,cursor,direction,elevation,empty-cells,filter,flex-flow,float,flood-color,flood-opacity,font,font-family,font-feature-settings,font-kerning,font-language-override,font-optical-sizing,font-palette,font-size-adjust,font-stretch,font-style,font-synthesis,font-synthesis-position,font-synthesis-small-caps,font-synthesis-style,font-synthesis-weight,font-variant,font-variant-alternates,font-variant-caps,font-variant-east-asian,font-variant-emoji,font-variant-ligatures,font-variant-numeric,font-variant-position,font-variation-settings,font-width,forced-color-adjust,glyph-orientation-vertical,grid,grid-area,grid-auto-columns,grid-auto-flow,grid-auto-rows,grid-column,grid-column-end,grid-column-gap,grid-column-start,grid-gap,grid-row,grid-row-end,grid-row-gap,grid-row-start,grid-template,grid-template-areas,grid-template-columns,grid-template-rows,hanging-punctuation,hyphenate-character,hyphens,image-orientation,image-rendering,inline-size,inset,inset-block,inset-block-end,inset-block-start,inset-inline,inset-inline-end,inset-inline-start,isolation,justify-items,justify-self,letter-spacing,lighting-color,line-break,list-style,list-style-image,list-style-position,list-style-type,margin-block,margin-block-end,margin-block-start,margin-inline,margin-inline-end,margin-inline-start,marker-side,mask,mask-border,mask-border-mode,mask-border-outset,mask-border-repeat,mask-border-slice,mask-border-source,mask-border-width,mask-clip,mask-composite,mask-image,mask-mode,mask-origin,mask-position,mask-repeat,mask-size,mask-type,max-block-size,max-inline-size,min-block-size,min-inline-size,mix-blend-mode,object-fit,object-position,offset,offset-anchor,offset-distance,offset-path,offset-position,offset-rotate,orphans,outline,outline-color,outline-offset,outline-style,outline-width,overflow-anchor,overflow-wrap,padding-block,padding-block-end,padding-block-start,padding-inline,padding-inline-end,padding-inline-start,page-break-after,page-break-before,page-break-inside,perspective,perspective-origin,pitch,pitch-range,place-content,place-items,place-self,play-during,print-color-adjust,property-name,quotes,resize,rest,rest-after,rest-before,richness,rotate,scale,scroll-margin,scroll-margin-block,scroll-margin-block-end,scroll-margin-block-start,scroll-margin-bottom,scroll-margin-inline,scroll-margin-inline-end,scroll-margin-inline-start,scroll-margin-left,scroll-margin-right,scroll-margin-top,scroll-padding,scroll-padding-block,scroll-padding-block-end,scroll-padding-block-start,scroll-padding-bottom,scroll-padding-inline,scroll-padding-inline-end,scroll-padding-inline-start,scroll-padding-left,scroll-padding-right,scroll-padding-top,scroll-snap-align,scroll-snap-stop,scroll-snap-type,scrollbar-color,scrollbar-width,shape-image-threshold,shape-margin,shape-outside,speak-as,speak-header,speak-numeral,speak-punctuation,speech-rate,stress,tab-size,table-layout,text-align-all,text-align-last,text-box,text-box-edge,text-box-trim,text-combine-upright,text-decoration,text-decoration-color,text-decoration-line,text-decoration-style,text-decoration-thickness,text-emphasis,text-emphasis-color,text-emphasis-position,text-emphasis-style,text-indent,text-justify,text-orientation,text-overflow,text-shadow,text-transform,text-underline-offset,text-underline-position,transform,transform-box,transform-origin,transform-style,transition,transition-delay,transition-duration,transition-property,transition-timing-function,translate,unicode-bidi,vertical-align,view-transition-name,voice-balance,voice-duration,voice-pitch,voice-range,voice-rate,voice-stress,voice-volume,volume,widows,will-change,word-break,word-spacing,word-wrap,writing-mode
 - gui_web_2d_vulkan_setup_command=sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
-- gui_web_2d_vulkan_setup_source=existing-evidence
-- gui_web_2d_vulkan_setup_exit_code=
+- gui_web_2d_vulkan_setup_source=generated-check
+- gui_web_2d_vulkan_setup_exit_code=0
 - gui_web_2d_vulkan_evidence_env=build/gui-web-2d-vulkan-env/evidence.env
-- gui_web_2d_vulkan_mode=--run
+- gui_web_2d_vulkan_mode=--check
 - gui_web_2d_vulkan_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 - gui_web_2d_vulkan_width=1280
 - gui_web_2d_vulkan_height=720
 - gui_web_2d_vulkan_comparison_fixture_status=pass
 - gui_web_2d_vulkan_comparison_artifact_status=incomplete
-- gui_web_2d_vulkan_comparison_artifact_reason=simple-backend-fail
+- gui_web_2d_vulkan_comparison_artifact_reason=electron-argb-file-unavailable;electron-argb-viewport-unavailable;electron-argb-nonblank-unavailable;chrome-screenshot-unavailable;chrome-screenshot-png-unavailable;simple-evidence-unavailable;simple-backend-unavailable
 - gui_web_2d_vulkan_comparison_artifact_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_pairwise_aggregate_2026-06-22.md
 - gui_web_2d_vulkan_pixel_comparison_status=incomplete
-- gui_web_2d_vulkan_pixel_comparison_reason=comparison-artifacts-incomplete
+- gui_web_2d_vulkan_pixel_comparison_reason=comparison-artifacts-incomplete;chrome-argb-file-unavailable;chrome-argb-viewport-unavailable;chrome-argb-nonblank-unavailable;simple-argb-file-unavailable;simple-argb-viewport-unavailable;simple-argb-nonblank-unavailable;electron-chrome-diff-unavailable;electron-simple-diff-unavailable;chrome-simple-diff-unavailable
 - gui_web_2d_vulkan_pixel_comparison_mode=artifact-only-no-pairwise-diff
 - gui_web_2d_vulkan_pixel_comparison_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_pairwise_aggregate_2026-06-22.md
 - gui_web_2d_vulkan_browser_backing_status=fail
@@ -209,9 +209,9 @@
 - gui_web_2d_vulkan_browser_backing_mode=focused-browser-backing-required
 - gui_web_2d_vulkan_browser_backing_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_browser_backing_2026-06-23.md
 - gui_web_2d_vulkan_renderdoc_blocker_status=blocked
-- gui_web_2d_vulkan_renderdoc_blocker_reason=renderdoc-command-unavailable-missing-renderdoccmd-in-search-paths;simple-direct-vulkan-fail-evidence-program-failed;simple-renderdoc-gate-unavailable-missing-source-evidence;electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run;pairwise-pixel-comparison-incomplete-comparison-artifacts-incomplete
+- gui_web_2d_vulkan_renderdoc_blocker_reason=renderdoc-command-unavailable-missing-renderdoccmd-in-search-paths;simple-direct-vulkan-unavailable-missing-simple-direct-vulkan-evidence;simple-renderdoc-gate-unavailable-missing-source-evidence;electron-angle-vulkan-unavailable-missing-electron-angle-vulkan-evidence;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-unavailable-missing-chrome-angle-vulkan-evidence;chrome-renderdoc-gate-not-run-not-run;pairwise-pixel-comparison-incomplete-comparison-artifacts-incomplete;chrome-argb-file-unavailable;chrome-argb-viewport-unavailable;chrome-argb-nonblank-unavailable;simple-argb-file-unavailable;simple-argb-viewport-unavailable;simple-argb-nonblank-unavailable;electron-chrome-diff-unavailable;electron-simple-diff-unavailable;chrome-simple-diff-unavailable
 - gui_web_2d_vulkan_renderdoc_blocker_gate_count=8
-- gui_web_2d_vulkan_renderdoc_blocker_gates=renderdoc-command-unavailable-missing-renderdoccmd-in-search-paths|simple-direct-vulkan-fail-evidence-program-failed|simple-renderdoc-gate-unavailable-missing-source-evidence|electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|electron-renderdoc-gate-unavailable-missing-source-evidence|chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|chrome-renderdoc-gate-not-run-not-run|pairwise-pixel-comparison-incomplete-comparison-artifacts-incomplete
+- gui_web_2d_vulkan_renderdoc_blocker_gates=renderdoc-command-unavailable-missing-renderdoccmd-in-search-paths|simple-direct-vulkan-unavailable-missing-simple-direct-vulkan-evidence|simple-renderdoc-gate-unavailable-missing-source-evidence|electron-angle-vulkan-unavailable-missing-electron-angle-vulkan-evidence|electron-renderdoc-gate-unavailable-missing-source-evidence|chrome-angle-vulkan-unavailable-missing-chrome-angle-vulkan-evidence|chrome-renderdoc-gate-not-run-not-run|pairwise-pixel-comparison-incomplete-comparison-artifacts-incomplete;chrome-argb-file-unavailable;chrome-argb-viewport-unavailable;chrome-argb-nonblank-unavailable;simple-argb-file-unavailable;simple-argb-viewport-unavailable;simple-argb-nonblank-unavailable;electron-chrome-diff-unavailable;electron-simple-diff-unavailable;chrome-simple-diff-unavailable
 - gui_web_2d_vulkan_renderdoc_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
 - gui_web_2d_vulkan_direct_run_evidence_env=
 - gui_web_2d_vulkan_direct_run_source=missing
@@ -225,7 +225,7 @@
 - gui_web_2d_vulkan_device=llvmpipe (LLVM 20.1.2, 256 bits)
 - gui_web_2d_vulkan_driver=llvmpipe
 - gui_web_2d_vulkan_chrome=/home/ormastes/.cache/ms-playwright/chromium-1223/chrome-linux64/chrome
-- gui_web_2d_vulkan_electron=tools/electron-shell/node_modules/.bin/electron
+- gui_web_2d_vulkan_electron=
 - gui_web_2d_vulkan_electron_requested_api=vulkan
 - gui_web_2d_vulkan_electron_requested_angle=vulkan
 - gui_web_2d_vulkan_electron_requested_features=Vulkan
@@ -240,93 +240,93 @@
 - gui_web_2d_vulkan_renderdoc_reason=missing-renderdoccmd-in-search-paths
 - gui_web_2d_vulkan_renderdoc_setup_reason=missing-renderdoccmd-in-search-paths
 - gui_web_2d_vulkan_renderdoc_cmd=
-- gui_web_2d_vulkan_renderdoc_search_paths=RDOC_HOME_UNSET|/tmp/simple-browser-file-ops-push3/build/tools/renderdoc|/tmp/simple-browser-file-ops-push3/build/tools/renderdoc-*|/Applications/RenderDoc.app|/home/ormastes/Applications/RenderDoc.app|/tmp/simple-browser-file-ops-push3/build/tools/RenderDoc.app|/tmp/simple-browser-file-ops-push3/build/tools/renderdoc/RenderDoc.app
+- gui_web_2d_vulkan_renderdoc_search_paths=RDOC_HOME_UNSET|/tmp/simple-renderlog-sync/build/tools/renderdoc|/tmp/simple-renderlog-sync/build/tools/renderdoc-*|/Applications/RenderDoc.app|/home/ormastes/Applications/RenderDoc.app|/tmp/simple-renderlog-sync/build/tools/RenderDoc.app|/tmp/simple-renderlog-sync/build/tools/renderdoc/RenderDoc.app
 - gui_web_2d_vulkan_renderdoc_install_hint=Install RenderDoc from the distro package, vendor package, or official AppImage/tree, then set RDOC_HOME if renderdoccmd is not on the standard search path.
 - gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status=not-applicable
 - gui_web_2d_vulkan_renderdoc_macos_upstream_support_status=not-applicable
 - gui_web_2d_vulkan_renderdoc_setup_macos_homebrew_package_status=not-applicable
 - gui_web_2d_vulkan_renderdoc_setup_macos_upstream_support_status=not-applicable
-- gui_web_2d_vulkan_electron_argb_status=pass
-- gui_web_2d_vulkan_electron_argb_path=build/gui-web-2d-vulkan-env/electron_argb.json
-- gui_web_2d_vulkan_electron_argb_file_status=pass
-- gui_web_2d_vulkan_electron_argb_width=1280
-- gui_web_2d_vulkan_electron_argb_height=720
-- gui_web_2d_vulkan_electron_argb_viewport_match_status=pass
-- gui_web_2d_vulkan_electron_argb_nonblank_pixel_count=403594
-- gui_web_2d_vulkan_electron_argb_nonblank_status=pass
-- gui_web_2d_vulkan_electron_argb_checksum=3956812989604346
-- gui_web_2d_vulkan_electron_argb_weighted_checksum=1823529669080970897482
-- gui_web_2d_vulkan_electron_vulkan_status=not-rejected-by-log
-- gui_web_2d_vulkan_electron_vulkan_reason=no-angle-vulkan-unavailable-log
-- gui_web_2d_vulkan_chrome_bitmap_status=not-run
-- gui_web_2d_vulkan_chrome_screenshot=build/gui-web-2d-vulkan-env/chrome.png
-- gui_web_2d_vulkan_chrome_screenshot_file_status=missing
-- gui_web_2d_vulkan_chrome_screenshot_png_status=missing
+- gui_web_2d_vulkan_electron_argb_status=
+- gui_web_2d_vulkan_electron_argb_path=
+- gui_web_2d_vulkan_electron_argb_file_status=unavailable
+- gui_web_2d_vulkan_electron_argb_width=
+- gui_web_2d_vulkan_electron_argb_height=
+- gui_web_2d_vulkan_electron_argb_viewport_match_status=unavailable
+- gui_web_2d_vulkan_electron_argb_nonblank_pixel_count=
+- gui_web_2d_vulkan_electron_argb_nonblank_status=unavailable
+- gui_web_2d_vulkan_electron_argb_checksum=
+- gui_web_2d_vulkan_electron_argb_weighted_checksum=
+- gui_web_2d_vulkan_electron_vulkan_status=
+- gui_web_2d_vulkan_electron_vulkan_reason=
+- gui_web_2d_vulkan_chrome_bitmap_status=
+- gui_web_2d_vulkan_chrome_screenshot=
+- gui_web_2d_vulkan_chrome_screenshot_file_status=unavailable
+- gui_web_2d_vulkan_chrome_screenshot_png_status=unavailable
 - gui_web_2d_vulkan_chrome_screenshot_png_width=
 - gui_web_2d_vulkan_chrome_screenshot_png_height=
-- gui_web_2d_vulkan_chrome_argb_status=pass
-- gui_web_2d_vulkan_chrome_argb_path=build/gui-web-2d-vulkan-env/chrome_argb.json
-- gui_web_2d_vulkan_chrome_argb_file_status=pass
-- gui_web_2d_vulkan_chrome_argb_width=1280
-- gui_web_2d_vulkan_chrome_argb_height=720
-- gui_web_2d_vulkan_chrome_argb_viewport_match_status=pass
-- gui_web_2d_vulkan_chrome_argb_nonblank_pixel_count=403594
-- gui_web_2d_vulkan_chrome_argb_nonblank_status=pass
-- gui_web_2d_vulkan_chrome_argb_checksum=3956812989604346
-- gui_web_2d_vulkan_chrome_argb_weighted_checksum=1823529669080970897482
-- gui_web_2d_vulkan_chrome_vulkan_status=not-rejected-by-log
-- gui_web_2d_vulkan_chrome_vulkan_reason=no-angle-vulkan-unavailable-log
-- gui_web_2d_vulkan_simple_status=fail
-- gui_web_2d_vulkan_simple_reason=evidence-program-failed
-- gui_web_2d_vulkan_simple_evidence_env=build/gui-web-2d-vulkan-env/simple-vulkan-readback/evidence.env
-- gui_web_2d_vulkan_simple_evidence_file_status=pass
+- gui_web_2d_vulkan_chrome_argb_status=
+- gui_web_2d_vulkan_chrome_argb_path=
+- gui_web_2d_vulkan_chrome_argb_file_status=unavailable
+- gui_web_2d_vulkan_chrome_argb_width=
+- gui_web_2d_vulkan_chrome_argb_height=
+- gui_web_2d_vulkan_chrome_argb_viewport_match_status=unavailable
+- gui_web_2d_vulkan_chrome_argb_nonblank_pixel_count=
+- gui_web_2d_vulkan_chrome_argb_nonblank_status=unavailable
+- gui_web_2d_vulkan_chrome_argb_checksum=
+- gui_web_2d_vulkan_chrome_argb_weighted_checksum=
+- gui_web_2d_vulkan_chrome_vulkan_status=
+- gui_web_2d_vulkan_chrome_vulkan_reason=
+- gui_web_2d_vulkan_simple_status=
+- gui_web_2d_vulkan_simple_reason=
+- gui_web_2d_vulkan_simple_evidence_env=
+- gui_web_2d_vulkan_simple_evidence_file_status=unavailable
 - gui_web_2d_vulkan_simple_probe_status=
 - gui_web_2d_vulkan_simple_backend_name=
-- gui_web_2d_vulkan_simple_backend_status=fail
-- gui_web_2d_vulkan_simple_argb_status=pass
-- gui_web_2d_vulkan_simple_argb_path=build/gui-web-2d-vulkan-env/simple_argb.json
-- gui_web_2d_vulkan_simple_argb_file_status=pass
-- gui_web_2d_vulkan_simple_argb_width=1280
-- gui_web_2d_vulkan_simple_argb_height=720
-- gui_web_2d_vulkan_simple_argb_viewport_match_status=pass
-- gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=403594
-- gui_web_2d_vulkan_simple_argb_nonblank_status=pass
-- gui_web_2d_vulkan_simple_argb_checksum=3956812989604346
-- gui_web_2d_vulkan_simple_argb_weighted_checksum=1823529669080970897482
-- gui_web_2d_vulkan_electron_chrome_diff_status=pass
-- gui_web_2d_vulkan_electron_chrome_diff_reason=pass
-- gui_web_2d_vulkan_electron_chrome_mismatch_count=0
-- gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass
-- gui_web_2d_vulkan_electron_chrome_diff_path=build/gui-web-2d-vulkan-env/electron_chrome_diff.ppm
-- gui_web_2d_vulkan_electron_simple_diff_status=pass
-- gui_web_2d_vulkan_electron_simple_diff_reason=pass
-- gui_web_2d_vulkan_electron_simple_mismatch_count=0
-- gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass
-- gui_web_2d_vulkan_electron_simple_diff_path=build/gui-web-2d-vulkan-env/electron_simple_diff.ppm
-- gui_web_2d_vulkan_chrome_simple_diff_status=pass
-- gui_web_2d_vulkan_chrome_simple_diff_reason=pass
-- gui_web_2d_vulkan_chrome_simple_mismatch_count=0
-- gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass
-- gui_web_2d_vulkan_chrome_simple_diff_path=build/gui-web-2d-vulkan-env/chrome_simple_diff.ppm
+- gui_web_2d_vulkan_simple_backend_status=unavailable
+- gui_web_2d_vulkan_simple_argb_status=
+- gui_web_2d_vulkan_simple_argb_path=
+- gui_web_2d_vulkan_simple_argb_file_status=unavailable
+- gui_web_2d_vulkan_simple_argb_width=
+- gui_web_2d_vulkan_simple_argb_height=
+- gui_web_2d_vulkan_simple_argb_viewport_match_status=unavailable
+- gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=
+- gui_web_2d_vulkan_simple_argb_nonblank_status=unavailable
+- gui_web_2d_vulkan_simple_argb_checksum=
+- gui_web_2d_vulkan_simple_argb_weighted_checksum=
+- gui_web_2d_vulkan_electron_chrome_diff_status=
+- gui_web_2d_vulkan_electron_chrome_diff_reason=
+- gui_web_2d_vulkan_electron_chrome_mismatch_count=
+- gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=unavailable
+- gui_web_2d_vulkan_electron_chrome_diff_path=
+- gui_web_2d_vulkan_electron_simple_diff_status=
+- gui_web_2d_vulkan_electron_simple_diff_reason=
+- gui_web_2d_vulkan_electron_simple_mismatch_count=
+- gui_web_2d_vulkan_electron_simple_pairwise_diff_status=unavailable
+- gui_web_2d_vulkan_electron_simple_diff_path=
+- gui_web_2d_vulkan_chrome_simple_diff_status=
+- gui_web_2d_vulkan_chrome_simple_diff_reason=
+- gui_web_2d_vulkan_chrome_simple_mismatch_count=
+- gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=unavailable
+- gui_web_2d_vulkan_chrome_simple_diff_path=
 - gui_web_2d_vulkan_renderdoc_simple_exit_code=
 - gui_web_2d_vulkan_renderdoc_html_exit_code=
 - gui_web_2d_vulkan_renderdoc_electron_exit_code=
 - production_gui_web_renderer_parity_command=ELECTRON_BITMAP_TIMEOUT_SECS=20 sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
-- production_gui_web_renderer_parity_existing_env=build/production_gui_web_renderer_parity_evidence/evidence.env
-- production_gui_web_renderer_parity_existing_status=fail
-- production_gui_web_renderer_parity_existing_reason=electron-generated-gui-matrix-failed
+- production_gui_web_renderer_parity_existing_env=
+- production_gui_web_renderer_parity_existing_status=
+- production_gui_web_renderer_parity_existing_reason=
 - production_gui_web_renderer_parity_existing_layout_case_count=
 - production_gui_web_renderer_parity_existing_layout_pass_count=
 - production_gui_web_renderer_parity_existing_layout_tracked_count=
 - production_gui_web_renderer_parity_existing_layout_fail_count=
 - production_gui_web_renderer_parity_gate_command=PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_evidence/evidence.env sh scripts/check/check-production-gui-web-renderer-parity-gate.shs
 - production_gui_web_renderer_parity_gate_exit_code=1
-- production_gui_web_renderer_parity_gate_status=fail
-- production_gui_web_renderer_parity_gate_reason=electron-generated-gui-matrix-failed
-- production_gui_web_renderer_parity_gate_source_status=fail
-- production_gui_web_renderer_parity_gate_matrix_exit_code=1
-- production_gui_web_renderer_parity_gate_matrix_status=fail
-- production_gui_web_renderer_parity_gate_matrix_reason=case-80x64-failed
+- production_gui_web_renderer_parity_gate_status=unavailable
+- production_gui_web_renderer_parity_gate_reason=missing-production-parity-evidence
+- production_gui_web_renderer_parity_gate_source_status=
+- production_gui_web_renderer_parity_gate_matrix_exit_code=
+- production_gui_web_renderer_parity_gate_matrix_status=
+- production_gui_web_renderer_parity_gate_matrix_reason=
 - production_gui_web_renderer_parity_gate_matrix_timed_out=
 - production_gui_web_renderer_parity_gate_matrix_timeout_secs=
 - production_gui_web_renderer_parity_gate_layout_manifest_exit_code=
@@ -413,8 +413,8 @@
 - production_gui_web_renderer_parity_gate_required_font_offload_status=pass
 - production_gui_web_renderer_parity_gate_required_metal_readback_status=pass
 - production_gui_web_renderer_parity_core_status=fail
-- production_gui_web_renderer_parity_core_reason=core-gui-web-parity-missing:matrix:fail!=pass,layout_manifest:<missing>!=pass,layout_manifest_case_count:<missing>!=50,layout_manifest_pass_count:<missing>!=36,layout_manifest_tracked_count:<missing>!=14,layout_manifest_fail_count:<missing>!=0,surface_manifest:<missing>!=pass,surface_manifest_electron_capture:<missing>!=pass,surface_manifest_tauri_capture:<missing>!=pass,surface_manifest_chrome_capture:<missing>!=pass,surface_manifest_tauri_live_capture:<missing>!=true,surface_manifest_chrome_live_capture:<missing>!=true,surface_manifest_tauri_case_count:<missing>!=50,surface_manifest_tauri_pass_count:<missing>!=36,surface_manifest_tauri_tracked_count:<missing>!=14,surface_manifest_tauri_fail_count:<missing>!=0,surface_manifest_chrome_case_count:<missing>!=50,surface_manifest_chrome_pass_count:<missing>!=36,surface_manifest_chrome_tracked_count:<missing>!=14,surface_manifest_chrome_fail_count:<missing>!=0,surface_manifest_tauri_mismatch_count:<missing>!=0,surface_manifest_chrome_mismatch_count:<missing>!=0,surface_manifest_no_fake_capture:<missing>!=true,surface_manifest_blur_or_tolerance_used:<missing>!=false,backend:<missing>!=pass
-- production_gui_web_renderer_parity_core_missing=matrix:fail!=pass|layout_manifest:<missing>!=pass|layout_manifest_case_count:<missing>!=50|layout_manifest_pass_count:<missing>!=36|layout_manifest_tracked_count:<missing>!=14|layout_manifest_fail_count:<missing>!=0|surface_manifest:<missing>!=pass|surface_manifest_electron_capture:<missing>!=pass|surface_manifest_tauri_capture:<missing>!=pass|surface_manifest_chrome_capture:<missing>!=pass|surface_manifest_tauri_live_capture:<missing>!=true|surface_manifest_chrome_live_capture:<missing>!=true|surface_manifest_tauri_case_count:<missing>!=50|surface_manifest_tauri_pass_count:<missing>!=36|surface_manifest_tauri_tracked_count:<missing>!=14|surface_manifest_tauri_fail_count:<missing>!=0|surface_manifest_chrome_case_count:<missing>!=50|surface_manifest_chrome_pass_count:<missing>!=36|surface_manifest_chrome_tracked_count:<missing>!=14|surface_manifest_chrome_fail_count:<missing>!=0|surface_manifest_tauri_mismatch_count:<missing>!=0|surface_manifest_chrome_mismatch_count:<missing>!=0|surface_manifest_no_fake_capture:<missing>!=true|surface_manifest_blur_or_tolerance_used:<missing>!=false|backend:<missing>!=pass
+- production_gui_web_renderer_parity_core_reason=missing-production-parity-evidence
+- production_gui_web_renderer_parity_core_missing=matrix:<missing>!=pass|layout_manifest:<missing>!=pass|layout_manifest_case_count:<missing>!=50|layout_manifest_pass_count:<missing>!=36|layout_manifest_tracked_count:<missing>!=14|layout_manifest_fail_count:<missing>!=0|surface_manifest:<missing>!=pass|surface_manifest_electron_capture:<missing>!=pass|surface_manifest_tauri_capture:<missing>!=pass|surface_manifest_chrome_capture:<missing>!=pass|surface_manifest_tauri_live_capture:<missing>!=true|surface_manifest_chrome_live_capture:<missing>!=true|surface_manifest_tauri_case_count:<missing>!=50|surface_manifest_tauri_pass_count:<missing>!=36|surface_manifest_tauri_tracked_count:<missing>!=14|surface_manifest_tauri_fail_count:<missing>!=0|surface_manifest_chrome_case_count:<missing>!=50|surface_manifest_chrome_pass_count:<missing>!=36|surface_manifest_chrome_tracked_count:<missing>!=14|surface_manifest_chrome_fail_count:<missing>!=0|surface_manifest_tauri_mismatch_count:<missing>!=0|surface_manifest_chrome_mismatch_count:<missing>!=0|surface_manifest_no_fake_capture:<missing>!=true|surface_manifest_blur_or_tolerance_used:<missing>!=false|backend:<missing>!=pass
 - gui_showcase_8k_perf_env=build/widget-showcase-8k-perf/status.env
 - gui_showcase_8k_perf_status=pass
 - gui_showcase_8k_perf_reason=met-target-fps
@@ -422,9 +422,9 @@
 - gui_showcase_8k_perf_width=7680
 - gui_showcase_8k_perf_height=4320
 - gui_showcase_8k_perf_frames=120
-- gui_showcase_8k_perf_fps_x1000=13175230
+- gui_showcase_8k_perf_fps_x1000=14228124
 - gui_showcase_8k_perf_target_fps=200
-- gui_showcase_8k_perf_max_rss_kb=520192
+- gui_showcase_8k_perf_max_rss_kb=519936
 - gui_showcase_8k_perf_max_rss_budget_kb=750000
 - gui_showcase_8k_perf_rss_status=pass
 - gui_showcase_8k_perf_pixels=33177600
@@ -470,11 +470,11 @@
 - simple_renderdoc_gate_required_num_captures_min=1
 - simple_renderdoc_gate_required_pixel_count_min=1
 - external_renderdoc_status=unavailable
-- external_renderdoc_reason=missing-renderdoccmd-in-search-paths
-- external_renderdoc_evidence_env=build/renderdoc/html-external-host-capture/evidence.env
-- external_renderdoc_capture_env=build/renderdoc/html-external-host-capture/capture/html/evidence.env
-- external_renderdoc_capture_status=unavailable
-- external_renderdoc_capture_reason=missing-renderdoccmd-in-search-paths
+- external_renderdoc_reason=capture-not-requested
+- external_renderdoc_evidence_env=build/gui_renderdoc_feature_coverage_status/renderdoc-goal-status/external-readiness/evidence.env
+- external_renderdoc_capture_env=build/gui_renderdoc_feature_coverage_status/renderdoc-goal-status/external-readiness/capture/html/evidence.env
+- external_renderdoc_capture_status=not-run
+- external_renderdoc_capture_reason=not-run
 - external_renderdoc_capture_file=
 - external_renderdoc_capture_magic=
 - external_renderdoc_capture_file_magic=
