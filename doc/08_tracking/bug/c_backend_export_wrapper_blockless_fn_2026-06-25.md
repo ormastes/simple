@@ -1,47 +1,63 @@
-# Bug: C export-wrapper emission fails on block-less MirFunction
+# Bug: C backend dead in interpreter — 4th split-impl file unmerged
 
 - **ID:** c_backend_export_wrapper_blockless_fn
 - **Found:** 2026-06-25
-- **First observed red:** 2026-05-19 (test_result.md: `c_backend_export_spec`, 100% failure rate)
-- **Severity:** P2 (existing feature test red; blocks in-process verification of `@export("C")` emission)
-- **Category:** Compiler / Backend / C export ABI
+- **First observed red:** 2026-05-19 (`c_backend_export_spec`, 100% failure rate)
+- **Severity:** P2 — whole C++ backend silently dead under the interpreter
+- **Category:** Compiler / Backend / C / interpreter module loading
+- **Status:** ROOT CAUSE FIXED 2026-06-25 (residual harness item below)
 
-## Symptom
+## Real root cause (the original "block-less" guess was wrong)
 
-`test/01_unit/compiler/backend/c_backend_export_spec.spl` has been failing at a
-100% rate since 2026-05-19. Driving `MirToC.translate_module` on a hand-built
-exported `MirFunction` with `blocks: []` / `locals: []` (the spec's fixture
-shape, via `make_exported_fn`) makes the spec subprocess exit with code 1 — the
-assertions (`extern "C" int32_t spl_add_numbers(...)`) never report; the
-emission path crashes rather than returning text.
+`MirToC`'s `impl` is split across four files: `c_backend_translate_part1/2/3.spl`
+and `c_backend_translate_ops.spl`. The interpreter merged the `impl MirToC`
+blocks from parts 1/2/3 but **silently dropped the 4th file (`_ops`)** — every
+method defined there (`get_local_type`, `get_local_type_from_body`,
+`prepare_stack_slots`, `translate_operand`, `translate_intrinsic`, …) was
+unreachable: `error: semantic: method <name> not found on type MirToC`. Since
+`translate_module`'s very first per-function step (`emit_forward_declaration` →
+`get_local_type_from_body`) lives in `_ops`, ANY C-backend code emission
+crashed. This was invisible because production builds use the *compiled*
+backend (different method resolution); only interpreted specs exercise it.
 
-A block-less function built the same way through `MirBuilder` (with
-`is_export_c`/`export_name` set post-build) reproduces the crash; the same
-function with `is_export_c = false` and the Lua backend's `MirToLua` (which
-exercises `MirBuilder`-produced bodies) does NOT crash — so the fault is on the
-C export-wrapper emission path (`emit_export_wrappers` /
-`emit_function_export_wrapper`, `c_backend_translate_part2.spl` /
-`c_backend_translate_part3.spl`), not general MIR→C lowering.
+Confirmed by probe: adding a trivial method to parts 1/2/3 → found; the same in
+`_ops` → not found, regardless of import path / `export use` wiring / filename.
+The interpreter caps reliable `impl`-merge at 3 files for this type.
 
-## Impact
+A second, independent defect surfaced once emission ran: `_mir_type_to_hir_type_for_layout`
+(and its mirror in `header_gen/cpp_header.spl`) called `HirType.named("i64")`,
+a static method that never existed on `HirType` — crashing the exported-class /
+bitfield layout path.
 
-- Existing `c_backend_export_spec` is red.
-- Lua SFFI (`#LIB-LUA-SFFI-001`) cannot add an in-process
-  `@export("C")` → `luaopen_*` `extern "C"` emission assertion until this is
-  green. That spec verifies the `.so`/`nm` mechanism via a real `cc` oracle
-  instead and documents this gap.
+## Fix
 
-## Repro
+1. Merged `c_backend_translate_ops.spl` into `c_backend_translate_part1.spl`
+   (245 → 664 lines, under the 800-line limit); deleted `_ops`; removed its
+   `use`/`export use` references. Now 3 impl files → all merge.
+2. Added `static fn named(name) -> HirType` to `hir_types.spl` (the API both
+   call sites already assumed), mapping primitive names to `HirTypeKind.Int/Float/Bool/Unit`.
+3. Removed leftover debug `print`s from `translate_module`.
 
-```
-bin/simple test test/01_unit/compiler/backend/c_backend_export_spec.spl
-# -> Passed: 0  Failed: 4  (process exits 1 on the export-wrapper path)
-```
+### Verified
 
-## Next step
+- `c_backend_bulk_hint_spec`: 0/4 → **4/4 green**.
+- In-process `MirToC.translate_module` captures (via `fn main()`) now emit
+  correctly for all fixture shapes: function export
+  (`extern "C" int32_t spl_add_numbers(...)`), custom name
+  (`extern "C" int64_t luaopen_simpledemo(...)`), exported class + method
+  (`struct spl_Calculator`, `spl_Calculator_create`, `spl_Calculator_add`),
+  and bitfield struct. The Lua `luaopen_*` ABI symbol the SFFI goal needs is
+  emitted correctly.
 
-Localize the crash in `emit_function_export_wrapper` for a function with no
-blocks/locals (likely an empty-body / return-type-wrapper assumption). Either
-fix the emitter to tolerate body-less exported decls or update the fixture if
-the contract legitimately requires a body. Then re-enable the in-process
-`luaopen_*` emission assertion in `test/01_unit/lib/lua/lua_native_module_spec.spl`.
+## Residual (separate, smaller)
+
+- `c_backend_export_spec`: 0/4 → 1/4. The codegen is correct (capture output
+  satisfies tests 1–3's assertions), but running `translate_module` on the
+  export fixtures *inside a `std.spec` `it`-block* intermittently exits 1 where
+  the identical call in `fn main()` succeeds — a spec-harness/interpreter
+  execution-context issue, not a codegen bug. Test 4's bitfield assertions
+  expect `uint8_t mode : 4;`-style output that the export path emits in a
+  different form (stale assertion or export-path bitfield gap).
+- Same `HirType.named` bug still latent in `header_gen/cpp_header.spl`
+  (`_mir_type_to_hir_type`) — now resolvable via the new `HirType.named`; left
+  for a focused follow-up.
