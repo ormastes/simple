@@ -46,7 +46,8 @@ For recent unfinished-plan cleanup lanes, use
 reviewer, keep SPipe state under `.spipe/<cleanup-name>/`,
 classify every candidate as `mark-done`, `needs-evidence`,
 `needs-requirement-selection`, `needs-implementation`, or `superseded/merge`,
-and run normal LLM review before accepting done marks or broad exclusions.
+and run normal LLM review before accepting generated-manual quality, done marks,
+or broad exclusions.
 
 When implementation changes add or replace evidence wrappers, refresh the
 matching guide/process documentation in the same lane. For GPU, Engine2D, Simple
