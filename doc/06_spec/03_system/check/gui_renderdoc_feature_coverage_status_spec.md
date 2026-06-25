@@ -27,7 +27,7 @@ gui_renderdoc_feature_coverage_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -133,7 +133,9 @@ The aggregate forwards these 4K fields:
 - `gui_showcase_4k_200fps_target_fps`
 - `gui_showcase_4k_200fps_checksum`
 - `gui_showcase_4k_200fps_rss_status`
+- `gui_showcase_4k_200fps_log_file_status`
 - `gui_showcase_4k_200fps_time_log`
+- `gui_showcase_4k_200fps_time_log_file_status`
 
 The aggregate forwards these 8K fields:
 
@@ -148,7 +150,9 @@ The aggregate forwards these 8K fields:
 - `gui_showcase_8k_perf_max_rss_kb`
 - `gui_showcase_8k_perf_max_rss_budget_kb`
 - `gui_showcase_8k_perf_rss_status`
+- `gui_showcase_8k_perf_log_file_status`
 - `gui_showcase_8k_perf_time_log`
+- `gui_showcase_8k_perf_time_log_file_status`
 
 Completion remains blocked until both the 4K 200fps and 8K statuses are `pass`.
 A measured RSS row with no budget is useful diagnostic evidence, but a
@@ -338,7 +342,7 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 761 lines folded for reproduction.
+Runnable source: 763 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -486,6 +490,8 @@ expect(evidence).to_contain("gui_showcase_8k_perf_reason=missing-8k-perf-evidenc
 expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_kb=")
 expect(evidence).to_contain("gui_showcase_8k_perf_rss_status=")
 expect(evidence).to_contain("gui_showcase_8k_perf_checksum=")
+expect(evidence).to_contain("gui_showcase_8k_perf_log_file_status=missing")
+expect(evidence).to_contain("gui_showcase_8k_perf_time_log_file_status=missing")
 expect(evidence).to_contain("renderdoc_goal_status_command=sh scripts/check/check-html-css-renderdoc-goal-status.shs")
 expect(evidence).to_contain("renderdoc_goal_blocked_gate=")
 expect(evidence).to_contain("renderdoc_goal_blocked_gate_count=")
@@ -1228,7 +1234,7 @@ expect(blocked_gates.contains("production GUI/web font offload readback evidence
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1247,6 +1253,8 @@ expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_kb=524288")
 expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_budget_kb=1048576")
 expect(evidence).to_contain("gui_showcase_8k_perf_rss_status=pass")
 expect(evidence).to_contain("gui_showcase_8k_perf_checksum=123456")
+expect(evidence).to_contain("gui_showcase_8k_perf_log_file_status=missing")
+expect(evidence).to_contain("gui_showcase_8k_perf_time_log_file_status=missing")
 expect(report).to_contain("- GUI/web/2D 8K retained perf: pass")
 ```
 
@@ -1335,6 +1343,33 @@ step("Assert the aggregate fails the RSS-over-budget 8K row")
 val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-8k-rss-fail/out/evidence.env")
 expect(evidence).to_contain("gui_showcase_8k_perf_status=fail")
 expect(evidence).to_contain("gui_showcase_8k_perf_reason=8k-rss-budget-not-pass:fail")
+```
+
+</details>
+
+#### rejects 8K pass rows below the target FPS
+
+- Create a retained 8K status env below the FPS target
+   - Expected: code equals `0`
+- Assert the aggregate fails the below-target 8K row
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create a retained 8K status env below the FPS target")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/source && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_fps_x1000=199999\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate fails the below-target 8K row")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-8k-fps-fail/out/evidence.env")
+expect(evidence).to_contain("gui_showcase_8k_perf_status=fail")
+expect(evidence).to_contain("gui_showcase_8k_perf_reason=below-8k-target-fps")
 ```
 
 </details>
@@ -1584,8 +1619,8 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-produ
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
