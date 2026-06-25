@@ -73,23 +73,27 @@ impl SshSession:
                 continue
 
             val r_user = _read_text_field_fast(payload, 1)
-            if r_user.is_err():
-                attempts = attempts + 1
-                serial_println("[sshd-session] auth fast user err")
-                val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
-                self.send_packet(disc)
-                self.state = SessionState.Closed
-                return false
-            val user = r_user.unwrap()
+            val user = match r_user:
+                Ok(parsed_user):
+                    parsed_user
+                Err(_):
+                    attempts = attempts + 1
+                    serial_println("[sshd-session] auth fast user err")
+                    val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
+                    self.send_packet(disc)
+                    self.state = SessionState.Closed
+                    return false
             val r_service = _read_text_field_fast(payload, user.next_offset)
-            if r_service.is_err():
-                attempts = attempts + 1
-                serial_println("[sshd-session] auth fast service err")
-                val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
-                self.send_packet(disc)
-                self.state = SessionState.Closed
-                return false
-            val service = r_service.unwrap()
+            val service = match r_service:
+                Ok(parsed_service):
+                    parsed_service
+                Err(_):
+                    attempts = attempts + 1
+                    serial_println("[sshd-session] auth fast service err")
+                    val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
+                    self.send_packet(disc)
+                    self.state = SessionState.Closed
+                    return false
             if not _payload_field_is_ssh_connection(payload, user.next_offset):
                 attempts = attempts + 1
                 serial_println("[sshd-session] auth fast bad service branch")
@@ -115,13 +119,15 @@ impl SshSession:
                     return false
                 var off = service.next_offset + 4 + 8 + 1
                 val r_password = _read_text_field_fast(payload, off)
-                if r_password.is_err():
-                    attempts = attempts + 1
-                    val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
-                    self.send_packet(disc)
-                    self.state = SessionState.Closed
-                    return false
-                val password = r_password.unwrap().value
+                val password = match r_password:
+                    Ok(parsed_password):
+                        parsed_password.value
+                    Err(_):
+                        attempts = attempts + 1
+                        val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
+                        self.send_packet(disc)
+                        self.state = SessionState.Closed
+                        return false
                 if self.user_db.authenticate_password(user.value, password):
                     self.authenticated_user = user.value
                     val success = ssh_build_auth_success()
