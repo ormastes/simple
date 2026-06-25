@@ -110,6 +110,55 @@ returns `!special || payload!=NIL` so it works on the boxed value.
 `is_some`/`is_none` correct; `i32?=3` not nil; enum `Some`/`None`, plain
 pointers, and non-optional methods unaffected.
 
+### Workflow outcome 2026-06-25 (3-phase implement→verify→synthesize)
+
+A multi-agent workflow implemented + adversarially verified the SEED design.
+Outcome: **seed approach VALIDATED for the common case, but NOT complete; .spl
+port structurally blocked.** Seed-only has **zero production value** (production
+`bin/simple` is the self-hosted `.spl` compiler; the seed only affects bootstrap),
+so nothing was landed or deployed.
+
+**Seed — verified green (let-bound primitive optionals), non-regressive:**
+`print` present (`i32?/f64?/text?`) → value (no `<value:0xN>`); `unwrap`/
+`unwrap_or`/`is_some`/`is_none` correct; `i32?=3` no longer collides with nil
+(payload boxed to `24`). No regression to enums, plain methods, `-c` smoke.
+Implementation shape that worked (diffs captured in the workflow run
+`wf_81e1ad20-5aa` output; touched `hir/lower/expr/mod.rs`,
+`mir/lower/lowering_stmt.rs`, `mir/lower/lowering_expr_builtin.rs`):
+`optional_inner_for_builtin_method` (Pointer→inner) gates is_some/is_none/unwrap/
+unwrap_or; `unwrap_or` lowered to `HirExprKind::If{is_some, payload, default}`;
+`box_for_optional_coercion` BoxInts the primitive payload at `HirStmt::Let`.
+
+**Correctness lens FAILED — remaining gaps (must-fix before "optionals work"):**
+1. **Sentinel collision on `0`/`false`**: nil is represented as `0` in this path,
+   so `i32?=0` / `bool?=false` (BoxInt(0)=0) still read as nil (`is_some=false`,
+   `unwrap_or`→default). Needs a nil representation distinct from a `0` payload
+   (unify on tagged sentinel `3`, not `0`).
+2. **Coercion wired ONLY at `HirStmt::Let`** — reassignment (`x = 7`), `T?`
+   params/returns, and struct-field init flow the primitive RAW → re-trigger
+   `<value:..>` + collision. (`fn f() -> i32?` literal-return miscompiles in BOTH
+   backends.)
+3. **`Some(99)` constructor form** prints `<enum@0x..>` / unwrap garbage (the
+   boxed-enum Option path, distinct from primitive `T?`).
+4. `bool?` bare `print` shows `1`/`0` (cosmetic; Option semantics correct).
+   All four reproduce identically in the interpreter → language-level
+   representation issues the native path mirrors, not native regressions.
+
+**`.spl` port — BLOCKED (the real production blocker, larger than this bug):**
+the self-hosted MIR has **no `BoxInt` / no primitive value-tagging at coercion at
+all** — `val a: any = 9; print a` already prints `<invalid-heap:0x9>` on
+production `bin/simple`. A faithful port = implement the tagging primitive
+(MIR `Shl`+`BitOr` or a runtime call) + symmetric unbox, wired at every `T→any`
+and `T→T?` coercion site, then a stage-2/3 bootstrap verification. Dispatch site
+for the method half: `src/compiler/50.mir/mir_lowering_expr_part3.spl`
+`lower_method_call`, intercept `Optional(inner)` before `match resolution` (~L151).
+
+**Conclusion:** native typed-optional support is a representation/infra *feature*
+(unify nil sentinel → fix zero/false; cover all coercion sites; build `.spl`
+`any`-boxing), not a localized fix, and the production half can't ship without
+the `.spl` boxing infrastructure + a bootstrap deploy. Tracked here for a
+dedicated effort; deploy stays human-gated.
+
 ---
 
 > The analysis below is the ORIGINAL report; its "compile-time recursion" theory
