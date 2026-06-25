@@ -70,3 +70,55 @@ interpreter for `any` and `i32?/f64?/bool?/text?`.
   restore-on-break afterward.
 - Land seed + `.spl` together (a seed-only change has zero production value —
   `bin/simple` is the self-hosted `.spl` compiler).
+
+## Findings 2026-06-25 (implementation attempt) — design re-scoped
+
+A first implementation attempt (let-site integer boxing) was reverted unbuilt:
+the seed-derived model does NOT map to the `.spl` backend. Four findings:
+
+1. **`.spl` optionals are a TUPLE, not a tagged word.** `Type::Optional(inner)`
+   lowers to `MirType.Tuple([Bool has_value, inner value])`
+   (`src/compiler/50.mir/mir_lowering_part2_part2.spl:272`, "Optional is enum
+   {nil, Some(T)}"). So the seed's "box payload `<<3` + nil sentinel `3`" model is
+   **wrong for `.spl`** — `<<3` into a tuple slot is corruption. The correct `.spl`
+   work is to lower the Option API against the tuple: `is_some`→read `has_value`;
+   `is_none`→`!has_value`; `unwrap`→read `value` (+ guard on `has_value`);
+   `unwrap_or(d)`→`select(has_value, value, d)`. This is cleaner than the seed and
+   has NO nil-sentinel/zero-collision problem. **The optional half is independent
+   of the `any`-boxing half.**
+
+2. **The `any`-display bug is a SEPARATE problem from optionals.** `val a: any = 9;
+   print a` → `<invalid-heap:0x9>` is about the `any` (type-erased) representation,
+   not optionals. And the `any` keyword **never reaches `HirTypeKind.Any`**:
+   `lower_type`'s `case Named(...)` (`src/compiler/20.hir/hir_lowering/types.spl`)
+   has no `"any"` arm, so `: any` resolves via symbol-lookup default. Adding
+   `case "any": HirTypeKind.Any` is a **broad, risky** change — `: any` is used
+   pervasively as a function-pointer param/field type (`tokenize_fn`/`parse_fn`/…
+   in `src/compiler/00.common/compiler_services.spl`, many backend `*_fn: any`);
+   flipping their resolution could break bootstrap. Must be done deliberately with
+   a full `: any`-site audit, not as a side effect.
+
+3. **`compile` delegates to the Rust seed.** The full CLI's `compile` subcommand
+   shells out to `SIMPLE_BOOTSTRAP_DRIVER` (`cli_sffi.rs:201`, refuses
+   self-delegation), so `.spl` MIR edits are NOT exercised via `compile` — only via
+   the stage-4 `run` path. Test `.spl` codegen with `<stage4>/simple run`, never
+   `compile`.
+
+4. **Self-hosted MIR-emit is stubbed in current builds.** Stage-3 self-host fails
+   (pre-existing baseline → "using seed for stage 4"), and the stage-4 log lists
+   ~551 stub functions for unresolved symbols **including `builder_emit_const_int`**
+   — the self-hosted compiler's own MIR builder path is non-functional, so even a
+   correct `.spl` codegen edit can't be exercised end-to-end until self-host is
+   repaired or an in-process (non-delegating) compile path exists.
+
+### Revised sequencing
+- **(A) Optionals (tuple-based, tractable first):** lower `is_some`/`is_none`/
+  `unwrap`/`unwrap_or` against the `{has_value, value}` tuple in
+  `src/compiler/50.mir/mir_lowering_expr_part3.spl` `lower_method_call`. No boxing,
+  no sentinel. Blocked end-to-end only by (3)/(4) testability.
+- **(B) `any` display:** deliberately add the `"any"` → `HirTypeKind.Any` arm +
+  audit every `: any` fn-pointer site; then box primitive payloads entering `any`.
+  Independent of (A).
+- **(C) Infra prerequisite:** fix stage-3 self-host stubs (esp. `builder_emit_*`)
+  or provide an in-process `compile`, so `.spl` codegen is testable without the
+  seed. (A)/(B) cannot be verified end-to-end until this lands.
