@@ -50,6 +50,16 @@ Skip if exist. See `design` skill for details.
 - If design introduced shared interface or manual setup/checker helper
   placeholders, implement them or keep them failing explicitly with
   `assert(false)` or `fail(...)`. Silent no-op helpers are not valid coverage.
+- For broad lanes, preserve the cooperative review plan from design: lower-model
+  sidecars such as Codex Spark, Claude Haiku, or Claude Sonnet must be merged or
+  explicitly `N/A`, then a normal/highest-capability reviewer must accept broad
+  findings, generated-manual quality, coverage claims, exclusions, and done
+  marks before implementation handoff.
+- When implementation changes workflow/tooling, evidence wrappers, generated
+  specs, or verification contracts, update the matching `doc/07_guide`,
+  `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
+  `.claude/agents/spipe/`, and `.gemini/commands/` instructions before
+  `verify`; stale process docs are implementation work, not release cleanup.
 - Do not leave primary manual output dominated by raw test code. Executable
   SPipe should be folded detail; visible content should be scenario steps and
   typed evidence.

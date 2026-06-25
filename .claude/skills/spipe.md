@@ -25,6 +25,13 @@ interface names, manual `step("...")` flow helper names, and setup/checker
 helper names; placeholder helpers must fail explicitly (`assert(false)` or
 `fail(...)`).
 
+Final verification must fail stale workflow/tooling documentation instead of
+deferring cleanup to release. If a lane changed workflow, evidence wrappers,
+generated-manual shape, or verification contracts, refresh the matching
+`doc/07_guide`, `doc/06_spec`, `.codex/skills`, `.agents/skills`,
+`.claude/skills`, `.claude/agents/spipe`, and `.gemini/commands` instructions
+before accepting PASS.
+
 Check or install that wiring with:
 
 ```bash

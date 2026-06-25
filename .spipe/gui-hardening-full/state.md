@@ -870,3 +870,9 @@ implementation-evidence-in-progress
   `missing-focused-browser-backing`; bitmap comparison and pixel parity remain
   fallback evidence only, not browser Vulkan proof. The GUI/Web/2D Vulkan
   browser-backing blocker remains open.
+- continue-docs: Mirrored the cooperative SPipe implementation/final-verify
+  rules into the Codex implementation skill and Claude SPipe skill. Broad lanes
+  must preserve lower-model sidecar plans, require normal/highest review before
+  accepting generated-manual quality or done marks, and fail final verification
+  on stale workflow/guide/skill docs. This is process alignment only; the
+  GUI/Web/2D Vulkan browser-backing blocker remains open.
