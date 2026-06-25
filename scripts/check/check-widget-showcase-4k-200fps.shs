@@ -14,6 +14,7 @@ case "$RESOLUTION" in
         PROBE_FN=run_4k_perf_probe
         PROBE_PREFIX=gui_showcase_4k_perf
         STATUS_PREFIX=gui_showcase_4k_200fps
+        PERF_ENV_FLAG=SHOWCASE_4K_PERF
         PASS_REASON=met-200fps
         BELOW_REASON=below-200fps
         : "${TARGET_FPS:=200}"
@@ -28,6 +29,7 @@ case "$RESOLUTION" in
         PROBE_FN=run_8k_perf_probe
         PROBE_PREFIX=gui_showcase_8k_perf
         STATUS_PREFIX=gui_showcase_8k_perf
+        PERF_ENV_FLAG=SHOWCASE_8K_PERF
         PASS_REASON=met-target-fps
         BELOW_REASON=below-target-fps
         : "${TARGET_FPS:=200}"
@@ -50,8 +52,47 @@ APP="examples/06_io/ui/widget_showcase_gui.spl"
 TIMEOUT_SECS="${TIMEOUT_SECS:-20}"
 USE_NATIVE="${USE_NATIVE:-1}"
 MAX_RSS_KB="${MAX_RSS_KB:-0}"
+PLAN_ONLY="${PLAN_ONLY:-0}"
 
 mkdir -p "$BUILD_DIR"
+
+write_alias_source() {
+    awk '
+        /^fn main\(\) -> i64:/ { stop=1 }
+        !stop { print }
+        END {
+            print "fn main() -> i64:"
+            print "    '"$PROBE_FN"'()"
+        }
+    ' "$APP" >"$ALIAS_SRC"
+}
+
+if [ "$PLAN_ONLY" = "1" ]; then
+    if [ "$USE_NATIVE" = "1" ]; then
+        write_alias_source
+    fi
+    {
+        echo "${STATUS_PREFIX}_status=plan-only"
+        echo "${STATUS_PREFIX}_reason=plan-only"
+        echo "${STATUS_PREFIX}_resolution=$RESOLUTION"
+        echo "${STATUS_PREFIX}_probe_fn=$PROBE_FN"
+        echo "${STATUS_PREFIX}_probe_prefix=$PROBE_PREFIX"
+        echo "${STATUS_PREFIX}_perf_env_flag=$PERF_ENV_FLAG"
+        echo "${STATUS_PREFIX}_use_native=$USE_NATIVE"
+        echo "${STATUS_PREFIX}_native_bin=$NATIVE_BIN"
+        echo "${STATUS_PREFIX}_alias_src=$ALIAS_SRC"
+        echo "${STATUS_PREFIX}_width=$WIDTH"
+        echo "${STATUS_PREFIX}_height=$HEIGHT"
+        echo "${STATUS_PREFIX}_frames=$FRAMES"
+        echo "${STATUS_PREFIX}_target_fps=$TARGET_FPS"
+        echo "${STATUS_PREFIX}_pixels=$EXPECTED_PIXELS"
+        echo "${STATUS_PREFIX}_max_rss_budget_kb=$MAX_RSS_KB"
+        echo "${STATUS_PREFIX}_log=$LOG"
+        echo "${STATUS_PREFIX}_time_log=$TIME_LOG"
+    } >"$STATUS_ENV"
+    cat "$STATUS_ENV"
+    exit 0
+fi
 
 if [ ! -x "$SIMPLE_BIN" ]; then
     {
@@ -64,18 +105,15 @@ fi
 
 RUN_CMD=
 if [ "$USE_NATIVE" = "1" ]; then
-    awk '
-        /^fn main\(\) -> i64:/ { stop=1 }
-        !stop { print }
-        END {
-            print "fn main() -> i64:"
-            print "    '"$PROBE_FN"'()"
-        }
-    ' "$APP" >"$ALIAS_SRC"
+    write_alias_source
     if ! "$SIMPLE_BIN" native-build --source src --source examples --entry "$ALIAS_SRC" --entry-closure --opt-level=aggressive --strip --output "$NATIVE_BIN" >"$BUILD_LOG" 2>&1; then
         {
             echo "${STATUS_PREFIX}_status=fail"
             echo "${STATUS_PREFIX}_reason=native-build-failed"
+            echo "${STATUS_PREFIX}_probe_fn=$PROBE_FN"
+            echo "${STATUS_PREFIX}_probe_prefix=$PROBE_PREFIX"
+            echo "${STATUS_PREFIX}_perf_env_flag=$PERF_ENV_FLAG"
+            echo "${STATUS_PREFIX}_alias_src=$ALIAS_SRC"
             echo "${STATUS_PREFIX}_native_build_log=$BUILD_LOG"
         } >"$STATUS_ENV"
         tail -30 "$BUILD_LOG"
@@ -97,10 +135,10 @@ fi
 start_ns="$(date +%s%N)"
 set +e
 if [ -x /usr/bin/time ]; then
-    timeout "$TIMEOUT_SECS" env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_LIB=src SHOWCASE_4K_PERF=1 /usr/bin/time -v -o "$TIME_LOG" sh -c "$RUN_CMD" >"$LOG" 2>&1
+    timeout "$TIMEOUT_SECS" env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_LIB=src "$PERF_ENV_FLAG=1" /usr/bin/time -v -o "$TIME_LOG" sh -c "$RUN_CMD" >"$LOG" 2>&1
 else
     : >"$TIME_LOG"
-    timeout "$TIMEOUT_SECS" env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_LIB=src SHOWCASE_4K_PERF=1 sh -c "$RUN_CMD" >"$LOG" 2>&1
+    timeout "$TIMEOUT_SECS" env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_LIB=src "$PERF_ENV_FLAG=1" sh -c "$RUN_CMD" >"$LOG" 2>&1
 fi
 probe_rc=$?
 set -e
@@ -132,6 +170,9 @@ if [ "$probe_rc" -ne 0 ] && ! grep -q "^${PROBE_PREFIX}_width=" "$LOG"; then
         echo "${STATUS_PREFIX}_use_native=$USE_NATIVE"
         echo "${STATUS_PREFIX}_native_bin=$NATIVE_BIN"
         echo "${STATUS_PREFIX}_alias_src=$ALIAS_SRC"
+        echo "${STATUS_PREFIX}_probe_fn=$PROBE_FN"
+        echo "${STATUS_PREFIX}_probe_prefix=$PROBE_PREFIX"
+        echo "${STATUS_PREFIX}_perf_env_flag=$PERF_ENV_FLAG"
         echo "${STATUS_PREFIX}_native_build_log=$BUILD_LOG"
         echo "${STATUS_PREFIX}_max_rss_kb=${max_rss_kb:-}"
         echo "${STATUS_PREFIX}_max_rss_budget_kb=$MAX_RSS_KB"
@@ -186,6 +227,9 @@ if [ "$width" != "$WIDTH" ] || [ "$height" != "$HEIGHT" ] || [ "$pixels" != "$EX
         echo "${STATUS_PREFIX}_max_rss_budget_kb=$MAX_RSS_KB"
         echo "${STATUS_PREFIX}_rss_status=$rss_status"
         echo "${STATUS_PREFIX}_time_log=$TIME_LOG"
+        echo "${STATUS_PREFIX}_probe_fn=$PROBE_FN"
+        echo "${STATUS_PREFIX}_probe_prefix=$PROBE_PREFIX"
+        echo "${STATUS_PREFIX}_perf_env_flag=$PERF_ENV_FLAG"
         echo "${STATUS_PREFIX}_pixels=${pixels:-}"
         echo "${STATUS_PREFIX}_nonzero_pixels=${nonzero:-}"
         echo "${STATUS_PREFIX}_checksum=${checksum:-}"
@@ -215,6 +259,9 @@ fi
     echo "${STATUS_PREFIX}_use_native=$USE_NATIVE"
     echo "${STATUS_PREFIX}_native_bin=$NATIVE_BIN"
     echo "${STATUS_PREFIX}_alias_src=$ALIAS_SRC"
+    echo "${STATUS_PREFIX}_probe_fn=$PROBE_FN"
+    echo "${STATUS_PREFIX}_probe_prefix=$PROBE_PREFIX"
+    echo "${STATUS_PREFIX}_perf_env_flag=$PERF_ENV_FLAG"
     echo "${STATUS_PREFIX}_native_build_log=$BUILD_LOG"
     echo "${STATUS_PREFIX}_width=$width"
     echo "${STATUS_PREFIX}_height=$height"

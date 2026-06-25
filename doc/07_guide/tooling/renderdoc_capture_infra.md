@@ -204,6 +204,12 @@ completion evidence. The 8K row must likewise prove
 200, positive measured frame count, checksum,
 `gui_showcase_8k_perf_log_file_status=pass`,
 `gui_showcase_8k_perf_time_log_file_status=pass`, and RSS budget status.
+Use `PLAN_ONLY=1 RESOLUTION=4k|8k
+scripts/check/check-widget-showcase-4k-200fps.shs` to verify wrapper routing
+without launching the expensive native perf run. Plan-only evidence is not
+completion evidence; it proves only that the wrapper selects the expected
+`*_probe_fn`, `*_probe_prefix`, and `*_perf_env_flag`, and that native alias
+generation points at the selected probe.
 The browser Vulkan-backed proof is a separate rollup:
 `gui_web_2d_vulkan_browser_backing_status`,
 `gui_web_2d_vulkan_browser_backing_reason`, and
