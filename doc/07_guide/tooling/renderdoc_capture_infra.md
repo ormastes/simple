@@ -199,7 +199,7 @@ requires the 4K row to prove `3840x2160`, `8294400` pixels, nonzero readback
 pixels, target FPS met, nonempty checksum,
 `gui_showcase_4k_200fps_log_file_status=pass`,
 `gui_showcase_4k_200fps_time_log_file_status=pass`,
-`retained-static-frame`, one redraw frame, positive measured frame count, and
+`retained-static-frame`, one redraw frame, at least 200 measured frames, and
 `target_fps >= 200`, plus RSS budget status with `max_rss_kb` and
 `max_rss_budget_kb`. The default wrapper budget is 262144 KiB for 4K and
 750000 KiB for 8K; rows with `rss_status=measured` are diagnostics, not
