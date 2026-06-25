@@ -1,0 +1,341 @@
+use std.spec
+use std.nogc_sync_mut.engine.render.webgpu_commands.{
+    WebGpuCommand3D, WebGpuCommand3DKind,
+    wgpu_cmd3d_begin_render_pass, wgpu_cmd3d_set_pipeline,
+    wgpu_cmd3d_bind_vertex_buffer, wgpu_cmd3d_bind_index_buffer,
+    wgpu_cmd3d_bind_texture, wgpu_cmd3d_bind_uniform_buffer,
+    wgpu_cmd3d_draw_indexed, wgpu_cmd3d_end_render_pass
+}
+use std.nogc_sync_mut.engine.render.webgpu_backend3d.{WebGpuRenderBackend3D}
+use std.nogc_sync_mut.engine.render.backend3d.{
+    PipelineHandle, BufferHandle, TextureHandle, RenderPassHandle, PipelineDesc3D, TextureFormat3D
+}
+use std.nogc_sync_mut.engine.render.capability3d.{RenderBackendKind3D}
+
+# ============================================================================
+# Module-level helpers
+# ============================================================================
+
+fn make_wgpu_begin_render_pass_cmd() -> WebGpuCommand3D:
+    wgpu_cmd3d_begin_render_pass(10, 20)
+
+fn make_wgpu_set_pipeline_cmd() -> WebGpuCommand3D:
+    wgpu_cmd3d_set_pipeline(5)
+
+fn make_wgpu_bind_vertex_buffer_cmd() -> WebGpuCommand3D:
+    wgpu_cmd3d_bind_vertex_buffer(1, 0)
+
+fn make_wgpu_bind_index_buffer_cmd() -> WebGpuCommand3D:
+    wgpu_cmd3d_bind_index_buffer(2)
+
+fn make_wgpu_bind_texture_cmd() -> WebGpuCommand3D:
+    wgpu_cmd3d_bind_texture(3, 0)
+
+fn make_wgpu_bind_uniform_buffer_cmd() -> WebGpuCommand3D:
+    wgpu_cmd3d_bind_uniform_buffer(4, 0)
+
+fn make_wgpu_draw_indexed_cmd() -> WebGpuCommand3D:
+    wgpu_cmd3d_draw_indexed(36, 0)
+
+fn make_wgpu_end_render_pass_cmd() -> WebGpuCommand3D:
+    wgpu_cmd3d_end_render_pass()
+
+fn make_wgpu_pipeline_desc() -> PipelineDesc3D:
+    PipelineDesc3D(
+        vertex_shader_spirv: [],
+        fragment_shader_spirv: [],
+        vertex_shader_wgsl: "fn vs_main() {}",
+        fragment_shader_wgsl: "fn fs_main() {}",
+        vertex_stride: 32,
+        cull_back_faces: true,
+        depth_write: true,
+        depth_test: true
+    )
+
+# ============================================================================
+# Stream C — webgpu_commands.spl + webgpu_backend3d.spl specs
+# AC-1 (WebGPU impl), AC-6, AC-10
+# ============================================================================
+
+describe "Stream C: WebGpuCommand3D kind-tag construction":
+
+    describe "BeginRenderPass":
+        it "AC-6: kind is BeginRenderPass":
+            val cmd = make_wgpu_begin_render_pass_cmd()
+            val matches = cmd.kind == WebGpuCommand3DKind.BeginRenderPass
+            expect(matches).to_equal(true)
+
+        it "AC-6: stores color_tex_id":
+            val cmd = make_wgpu_begin_render_pass_cmd()
+            expect(cmd.color_tex_id).to_equal(10)
+
+        it "AC-6: stores depth_tex_id":
+            val cmd = make_wgpu_begin_render_pass_cmd()
+            expect(cmd.depth_tex_id).to_equal(20)
+
+    describe "SetPipeline":
+        it "AC-6: kind is SetPipeline":
+            val cmd = make_wgpu_set_pipeline_cmd()
+            val matches = cmd.kind == WebGpuCommand3DKind.SetPipeline
+            expect(matches).to_equal(true)
+
+        it "AC-6: stores pipeline_id":
+            val cmd = make_wgpu_set_pipeline_cmd()
+            expect(cmd.pipeline_id).to_equal(5)
+
+    describe "BindVertexBuffer":
+        it "AC-6: kind is BindVertexBuffer":
+            val cmd = make_wgpu_bind_vertex_buffer_cmd()
+            val matches = cmd.kind == WebGpuCommand3DKind.BindVertexBuffer
+            expect(matches).to_equal(true)
+
+        it "AC-6: stores buffer_id and slot":
+            val cmd = make_wgpu_bind_vertex_buffer_cmd()
+            val ok = cmd.buffer_id == 1 and cmd.slot == 0
+            expect(ok).to_equal(true)
+
+    describe "BindIndexBuffer":
+        it "AC-6: kind is BindIndexBuffer":
+            val cmd = make_wgpu_bind_index_buffer_cmd()
+            val matches = cmd.kind == WebGpuCommand3DKind.BindIndexBuffer
+            expect(matches).to_equal(true)
+
+        it "AC-6: stores buffer_id":
+            val cmd = make_wgpu_bind_index_buffer_cmd()
+            expect(cmd.buffer_id).to_equal(2)
+
+    describe "BindTexture":
+        it "AC-6: kind is BindTexture":
+            val cmd = make_wgpu_bind_texture_cmd()
+            val matches = cmd.kind == WebGpuCommand3DKind.BindTexture
+            expect(matches).to_equal(true)
+
+        it "AC-6: stores texture_id and slot":
+            val cmd = make_wgpu_bind_texture_cmd()
+            val ok = cmd.texture_id == 3 and cmd.slot == 0
+            expect(ok).to_equal(true)
+
+    describe "BindUniformBuffer":
+        it "AC-6: kind is BindUniformBuffer":
+            val cmd = make_wgpu_bind_uniform_buffer_cmd()
+            val matches = cmd.kind == WebGpuCommand3DKind.BindUniformBuffer
+            expect(matches).to_equal(true)
+
+        it "AC-6: stores buffer_id and slot":
+            val cmd = make_wgpu_bind_uniform_buffer_cmd()
+            val ok = cmd.buffer_id == 4 and cmd.slot == 0
+            expect(ok).to_equal(true)
+
+    describe "DrawIndexed":
+        it "AC-6: kind is DrawIndexed":
+            val cmd = make_wgpu_draw_indexed_cmd()
+            val matches = cmd.kind == WebGpuCommand3DKind.DrawIndexed
+            expect(matches).to_equal(true)
+
+        it "AC-6: stores index_count and base_vertex":
+            val cmd = make_wgpu_draw_indexed_cmd()
+            val ok = cmd.index_count == 36 and cmd.base_vertex == 0
+            expect(ok).to_equal(true)
+
+    describe "EndRenderPass":
+        it "AC-6: kind is EndRenderPass":
+            val cmd = make_wgpu_end_render_pass_cmd()
+            val matches = cmd.kind == WebGpuCommand3DKind.EndRenderPass
+            expect(matches).to_equal(true)
+
+describe "Stream C: WebGpuRenderBackend3D command recording":
+
+    describe "capabilities":
+        it "AC-1: backend kind is WebGpu":
+            var backend = WebGpuRenderBackend3D.create()
+            val cap = backend.capabilities()
+            val is_webgpu = cap.backend == RenderBackendKind3D.WebGpu
+            expect(is_webgpu).to_equal(true)
+
+        it "AC-6: supports_wgsl is true for WebGpu":
+            var backend = WebGpuRenderBackend3D.create()
+            val cap = backend.capabilities()
+            expect(cap.supports_wgsl).to_equal(true)
+
+    describe "create_vertex_buffer":
+        it "AC-6: returns non-invalid handle":
+            var backend = WebGpuRenderBackend3D.create()
+            val buf = backend.create_vertex_buffer(256)
+            expect(buf.id).to_be_greater_than(-1)
+
+    describe "create_index_buffer":
+        it "AC-6: returns non-invalid handle":
+            var backend = WebGpuRenderBackend3D.create()
+            val buf = backend.create_index_buffer(64)
+            expect(buf.id).to_be_greater_than(-1)
+
+    describe "create_uniform_buffer":
+        it "AC-6: returns non-invalid handle":
+            var backend = WebGpuRenderBackend3D.create()
+            val buf = backend.create_uniform_buffer(64)
+            expect(buf.id).to_be_greater_than(-1)
+
+    describe "create_texture":
+        it "AC-6: returns non-invalid TextureHandle":
+            var backend = WebGpuRenderBackend3D.create()
+            val tex = backend.create_texture(128, 128, TextureFormat3D.Rgba8Unorm)
+            expect(tex.id).to_be_greater_than(-1)
+
+    describe "create_pipeline":
+        it "AC-6: returns non-invalid PipelineHandle for WGSL desc":
+            var backend = WebGpuRenderBackend3D.create()
+            val desc = make_wgpu_pipeline_desc()
+            val pip = backend.create_pipeline(desc)
+            expect(pip.id).to_be_greater_than(-1)
+
+    describe "frame + render pass recording sequence":
+        it "AC-6: begin_frame does not crash":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            expect(true).to_equal(true)
+
+        it "AC-6: begin_render_pass returns non-invalid RenderPassHandle":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            expect(rph.id).to_be_greater_than(-1)
+
+        it "AC-6: full recording sequence does not crash":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            val desc = make_wgpu_pipeline_desc()
+            val pip = backend.create_pipeline(desc)
+            val vbuf = backend.create_vertex_buffer(128)
+            val ibuf = backend.create_index_buffer(48)
+            backend.set_pipeline(rph, pip)
+            backend.bind_vertex_buffer(rph, vbuf, 0)
+            backend.bind_index_buffer(rph, ibuf)
+            backend.draw_indexed(rph, 12, 0)
+            backend.end_render_pass(rph)
+            backend.end_frame()
+            expect(true).to_equal(true)
+
+        it "AC-6: full recording sequence records commands before end_frame":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            val desc = make_wgpu_pipeline_desc()
+            val pip = backend.create_pipeline(desc)
+            val vbuf = backend.create_vertex_buffer(128)
+            val ibuf = backend.create_index_buffer(48)
+            backend.set_pipeline(rph, pip)
+            backend.bind_vertex_buffer(rph, vbuf, 0)
+            backend.bind_index_buffer(rph, ibuf)
+            backend.draw_indexed(rph, 12, 0)
+            backend.end_render_pass(rph)
+            expect(backend.cmds.len()).to_equal(6)
+
+    describe "recording validation":
+        it "AC-10: invalid color attachment rejects begin_render_pass":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(TextureHandle.invalid(), depth_tex)
+            val rejected = rph.id == -1 and backend.cmds.len() == 0
+            expect(rejected).to_equal(true)
+
+        it "AC-10: invalid depth attachment rejects begin_render_pass":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val rph = backend.begin_render_pass(color_tex, TextureHandle.invalid())
+            val rejected = rph.id == -1 and backend.cmds.len() == 0
+            expect(rejected).to_equal(true)
+
+        it "AC-10: nested render pass is rejected":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val first = backend.begin_render_pass(color_tex, depth_tex)
+            val second = backend.begin_render_pass(color_tex, depth_tex)
+            val rejected = first.id >= 0 and second.id == -1 and backend.cmds.len() == 1
+            expect(rejected).to_equal(true)
+
+        it "AC-10: invalid pass handle rejects set_pipeline":
+            var backend = WebGpuRenderBackend3D.create()
+            val pip = backend.create_pipeline(make_wgpu_pipeline_desc())
+            backend.set_pipeline(RenderPassHandle.invalid(), pip)
+            expect(backend.cmds.len()).to_equal(0)
+
+        it "AC-10: invalid pipeline handle is not recorded":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            backend.set_pipeline(rph, PipelineHandle.invalid())
+            expect(backend.cmds.len()).to_equal(1)
+
+        it "AC-10: invalid vertex buffer handle is not recorded":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            backend.bind_vertex_buffer(rph, BufferHandle.invalid(), 0)
+            expect(backend.cmds.len()).to_equal(1)
+
+        it "AC-10: invalid index buffer handle is not recorded":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            backend.bind_index_buffer(rph, BufferHandle.invalid())
+            expect(backend.cmds.len()).to_equal(1)
+
+        it "AC-10: invalid texture handle is not recorded":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            backend.bind_texture(rph, TextureHandle.invalid(), 0)
+            expect(backend.cmds.len()).to_equal(1)
+
+        it "AC-10: negative slots are not recorded":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            val vbuf = backend.create_vertex_buffer(128)
+            val ubuf = backend.create_uniform_buffer(64)
+            backend.bind_vertex_buffer(rph, vbuf, -1)
+            backend.bind_texture(rph, color_tex, -1)
+            backend.bind_uniform_buffer(rph, ubuf, -1)
+            expect(backend.cmds.len()).to_equal(1)
+
+        it "AC-10: non-positive draw counts are not recorded":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            backend.draw_indexed(rph, 0, 0)
+            backend.draw_indexed(rph, -1, 0)
+            expect(backend.cmds.len()).to_equal(1)
+
+        it "AC-10: pass-scoped commands after end_render_pass are rejected":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            val pip = backend.create_pipeline(make_wgpu_pipeline_desc())
+            backend.end_render_pass(rph)
+            backend.set_pipeline(rph, pip)
+            expect(backend.cmds.len()).to_equal(2)

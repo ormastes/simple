@@ -1,0 +1,416 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SSH Key Exchange — Cryptographic operations: keygen, ECDH, exchange hash,
+# key derivation (RFC 4253 §7.2), host key blob builders, DER/PKCS8 parsing,
+# and multi-algorithm signing.
+# Split from ssh_kex.spl to keep file sizes manageable.
+
+use os.crypto.sha256.{sha256}
+use os.crypto.random.{random_bytes}
+use os.crypto.curve25519.{x25519, x25519_base}
+use os.crypto.rsa_fallback.{rsa_sha256_sign_fallback, rsa_sha512_sign_fallback}
+use os.crypto.ecdsa_p256.{ecdsa_p256_sign_fixed, fixed64_to_ssh_mpint_pair}
+use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
+use os.apps.sshd.ssh_packet.{ssh_put_string}
+use os.apps.sshd.ssh_kex_primitives.{
+    SshSessionKeys, HostKeySet,
+    _u8_at, _append_byte, _concat_bytes, _push_bytes,
+    _push_u32_literal, _u32_be_bytes, _push_string_bytes, _push_string_32, _push_string_64,
+    _concat_ssh_string_field, _concat_mpint_field, _push_mpint_bytes,
+    curve25519_shared_secret_mpint_bytes,
+    _push_ascii_text, _push_ssh_ed25519, _push_ssh_ed25519_bytes,
+    _slice_bytes, _zeroed_32_bytes
+}
+
+# ============================================================================
+# SHA-256 stability guard
+# ============================================================================
+
+fn _looks_like_baremetal_sha256_truncation(digest: [u8]) -> bool:
+    if digest.len() != 32:
+        return false
+    var i: u64 = 4
+    while i < digest.len():
+        if digest[i] != 0:
+            return false
+        i = i + 1
+    true
+
+fn _sha256_stable(data: [u8]) -> [u8]:
+    val digest = sha256(data)
+    if not _looks_like_baremetal_sha256_truncation(digest):
+        return digest
+    digest
+
+# ============================================================================
+# Key Generation
+# ============================================================================
+
+fn ssh_kex_generate_private_key() -> [u8]:
+    """Generate a 32-byte ephemeral Curve25519 private key."""
+    val secret = random_bytes(32)
+    _push_bytes([], secret)
+
+fn ssh_kex_generate_keypair() -> ([u8], [u8]):
+    """Generate a hosted-test-friendly Curve25519 keypair."""
+    val private = _push_bytes([], random_bytes(32))
+    (private, x25519_base(private))
+
+fn ssh_kex_public_from_private(private: [u8]) -> [u8]:
+    """Derive the Curve25519 public key from a private scalar."""
+    val stable_private = _push_bytes([], private)
+    val public = x25519_base(stable_private)
+    if public.len() == 32:
+        return _push_bytes([], public)
+    []
+
+fn ssh_kex_compute_shared(our_private: [u8], their_public: [u8]) -> [u8]:
+    """Compute DH shared secret via X25519.
+
+    Returns: 32-byte shared secret.
+    """
+    val stable_private = _push_bytes([], our_private)
+    val stable_public = _push_bytes([], their_public)
+    val pure_shared = x25519(stable_private, stable_public)
+    if pure_shared.len() == 32:
+        return _push_bytes([], pure_shared)
+    []
+
+# ============================================================================
+# Exchange Hash
+# ============================================================================
+
+fn ssh_kex_compute_exchange_hash(
+    client_version: [u8],
+    server_version: [u8],
+    client_kexinit: [u8],
+    server_kexinit: [u8],
+    host_key_blob: [u8],
+    client_public: [u8],
+    server_public: [u8],
+    shared_secret: [u8]
+) -> [u8]:
+    """Compute exchange hash H = SHA-256(V_C || V_S || I_C || I_S || K_S || Q_C || Q_S || K).
+
+    Each field is encoded as an SSH string (uint32 length + data),
+    except the shared secret K which is encoded as an SSH mpint.
+    """
+    var hash_input: [u8] = []
+    val shared_secret_mpint = curve25519_shared_secret_mpint_bytes(shared_secret)
+
+    hash_input = _push_string_bytes(hash_input, client_version)
+    hash_input = _push_string_bytes(hash_input, server_version)
+    hash_input = _push_string_bytes(hash_input, client_kexinit)
+    hash_input = _push_string_bytes(hash_input, server_kexinit)
+    hash_input = _push_string_bytes(hash_input, host_key_blob)
+    hash_input = _push_string_bytes(hash_input, client_public)
+    hash_input = _push_string_bytes(hash_input, server_public)
+    hash_input = _push_mpint_bytes(hash_input, shared_secret_mpint)
+
+    _sha256_stable(hash_input)
+
+# ============================================================================
+# Key Derivation (RFC 4253 Section 7.2)
+# ============================================================================
+
+fn _derive_key(shared_secret: [u8], exchange_hash: [u8], letter: u8, session_id: [u8], needed: u64) -> [u8]:
+    """Derive a session key per RFC 4253 section 7.2.
+
+    K1 = SHA-256(K || H || letter || session_id)
+    K2 = SHA-256(K || H || K1)
+    K3 = SHA-256(K || H || K1 || K2)
+    ...
+    Key = K1 || K2 || ... (truncated to needed bytes)
+
+    K is encoded as mpint, H and session_id as raw bytes.
+    """
+    # Build the initial hash input: mpint(K) || H || letter || session_id
+    var input: [u8] = []
+    val shared_secret_mpint = curve25519_shared_secret_mpint_bytes(shared_secret)
+    input = _push_mpint_bytes(input, shared_secret_mpint)
+    input = _push_bytes(input, exchange_hash)
+    input = _append_byte(input, letter)
+    input = _push_bytes(input, session_id)
+
+    val k1 = _sha256_stable(input)
+
+    var key_material: [u8] = _push_bytes([], k1)
+
+    # If we need more than 32 bytes, extend
+    while key_material.len() < needed:
+        # next = SHA-256(K || H || K1 || K2 || ...)
+        var ext_input: [u8] = []
+        ext_input = _push_mpint_bytes(ext_input, shared_secret_mpint)
+        ext_input = _push_bytes(ext_input, exchange_hash)
+        ext_input = _push_bytes(ext_input, key_material)
+
+        val next = _sha256_stable(ext_input)
+        key_material = _push_bytes(key_material, next)
+
+    # Truncate to needed length
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < needed:
+        result = _append_byte(result, _u8_at(key_material, i))
+        i = i + 1
+    result
+
+fn ssh_derive_keys(shared_secret: [u8], exchange_hash: [u8], session_id: [u8]) -> SshSessionKeys:
+    """Derive all session keys from shared secret per RFC 4253 section 7.2.
+
+    Letters A-F correspond to:
+      A = IV client->server         (12 bytes for GCM nonce)
+      B = IV server->client         (12 bytes for GCM nonce)
+      C = encryption key c->s       (32 bytes for AES-256)
+      D = encryption key s->c       (32 bytes for AES-256)
+      E = integrity key c->s        (32 bytes)
+      F = integrity key s->c        (32 bytes)
+    """
+    val iv_c2s = _derive_key(shared_secret, exchange_hash, 0x41, session_id, 12)   # 'A'
+    val iv_s2c = _derive_key(shared_secret, exchange_hash, 0x42, session_id, 12)   # 'B'
+    val enc_key_c2s = _derive_key(shared_secret, exchange_hash, 0x43, session_id, 32) # 'C'
+    val enc_key_s2c = _derive_key(shared_secret, exchange_hash, 0x44, session_id, 32) # 'D'
+    val mac_key_c2s = _derive_key(shared_secret, exchange_hash, 0x45, session_id, 32) # 'E'
+    val mac_key_s2c = _derive_key(shared_secret, exchange_hash, 0x46, session_id, 32) # 'F'
+
+    SshSessionKeys(
+        iv_c2s: iv_c2s,
+        iv_s2c: iv_s2c,
+        enc_key_c2s: enc_key_c2s,
+        enc_key_s2c: enc_key_s2c,
+        mac_key_c2s: mac_key_c2s,
+        mac_key_s2c: mac_key_s2c
+    )
+
+# ============================================================================
+# Host Key Blob Builders
+# ============================================================================
+
+fn ssh_build_ed25519_host_key_blob(public_key: [u8]) -> [u8]:
+    """Build SSH host key blob for ssh-ed25519 (RFC 8709).
+
+    Format: string "ssh-ed25519" + string public_key (32 bytes).
+    """
+    var blob = _push_ssh_ed25519([])
+    blob = _push_string_32(blob, public_key)
+    blob
+
+fn ssh_build_rsa_host_key_blob(e_bytes: [u8], n_bytes: [u8]) -> [u8]:
+    """Build SSH host key blob for ssh-rsa / rsa-sha2-256 / rsa-sha2-512.
+
+    Format (RFC 4253 §6.6): string "ssh-rsa" + string e + string n.
+    e and n are the big-endian public exponent and modulus respectively.
+    """
+    var blob: [u8] = []
+    blob = _push_ascii_text(blob, [0x73u8, 0x73, 0x68, 0x2D, 0x72, 0x73, 0x61])
+    blob = ssh_put_string(blob, e_bytes)
+    blob = ssh_put_string(blob, n_bytes)
+    blob
+
+fn ssh_build_ecdsa_p256_host_key_blob(q_bytes: [u8]) -> [u8]:
+    """Build SSH host key blob for ecdsa-sha2-nistp256 (RFC 5656).
+
+    Format: string "ecdsa-sha2-nistp256" + string "nistp256" + string Q.
+    Q is the uncompressed EC point (0x04 || x || y, 65 bytes).
+    """
+    var blob: [u8] = []
+    blob = _push_ascii_text(blob, [0x65u8, 0x63, 0x64, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x6E, 0x69, 0x73, 0x74, 0x70, 0x32, 0x35, 0x36])
+    blob = _push_ascii_text(blob, [0x6Eu8, 0x69, 0x73, 0x74, 0x70, 0x32, 0x35, 0x36])
+    blob = ssh_put_string(blob, q_bytes)
+    blob
+
+# ============================================================================
+# DER/PKCS#8 Parsing
+# ============================================================================
+
+struct DerTlv:
+    value_offset: u64
+    value_length: u64
+    next_offset: u64
+
+fn _read_der_tlv(data: [u8], offset: u64, expected_tag: u8) -> Result<DerTlv, text>:
+    if offset + 2 > data.len():
+        return Err("der truncated")
+    if data[offset] != expected_tag:
+        return Err("der unexpected tag")
+    val len0 = data[offset + 1]
+    if (len0 & 0x80) == 0:
+        val value_offset = offset + 2
+        val value_length = len0.to_u64()
+        val next_offset = value_offset + value_length
+        if next_offset > data.len():
+            return Err("der value past end")
+        return Ok(DerTlv(value_offset: value_offset, value_length: value_length, next_offset: next_offset))
+    val count = (len0 & 0x7F).to_u64()
+    if count == 0 or count > 4 or offset + 2 + count > data.len():
+        return Err("der bad length")
+    var value_length: u64 = 0
+    var i: u64 = 0
+    while i < count:
+        value_length = (value_length << 8) | data[offset + 2 + i].to_u64()
+        i = i + 1
+    val value_offset = offset + 2 + count
+    val next_offset = value_offset + value_length
+    if next_offset > data.len():
+        return Err("der value past end")
+    Ok(DerTlv(value_offset: value_offset, value_length: value_length, next_offset: next_offset))
+
+fn ecdsa_p256_public_point_from_pkcs8(pkcs8: [u8]) -> [u8]:
+    """Extract 65-byte uncompressed public point Q from ECDSA P-256 PKCS#8."""
+    val outer = _read_der_tlv(pkcs8, 0, 0x30)
+    val outer_tlv = match outer:
+        Ok(parsed):
+            parsed
+        Err(_):
+            return []
+    var pos = outer_tlv.value_offset
+
+    val version = _read_der_tlv(pkcs8, pos, 0x02)
+    val version_tlv = match version:
+        Ok(parsed):
+            parsed
+        Err(_):
+            return []
+    pos = version_tlv.next_offset
+
+    val algorithm = _read_der_tlv(pkcs8, pos, 0x30)
+    val algorithm_tlv = match algorithm:
+        Ok(parsed):
+            parsed
+        Err(_):
+            return []
+    pos = algorithm_tlv.next_offset
+
+    val private_octets = _read_der_tlv(pkcs8, pos, 0x04)
+    val private_octets_tlv = match private_octets:
+        Ok(parsed):
+            parsed
+        Err(_):
+            return []
+    val ec_private = _slice_bytes(pkcs8, private_octets_tlv.value_offset, private_octets_tlv.value_length)
+    if ec_private.len() == 0:
+        return []
+
+    val ec_seq = _read_der_tlv(ec_private, 0, 0x30)
+    val ec_seq_tlv = match ec_seq:
+        Ok(parsed):
+            parsed
+        Err(_):
+            return []
+    var ec_pos = ec_seq_tlv.value_offset
+
+    val ec_version = _read_der_tlv(ec_private, ec_pos, 0x02)
+    val ec_version_tlv = match ec_version:
+        Ok(parsed):
+            parsed
+        Err(_):
+            return []
+    ec_pos = ec_version_tlv.next_offset
+
+    val ec_key = _read_der_tlv(ec_private, ec_pos, 0x04)
+    val ec_key_tlv = match ec_key:
+        Ok(parsed):
+            parsed
+        Err(_):
+            return []
+    ec_pos = ec_key_tlv.next_offset
+
+    while ec_pos < ec_private.len():
+        val tag = ec_private[ec_pos]
+        if tag == 0xA0:
+            val parameters = _read_der_tlv(ec_private, ec_pos, 0xA0)
+            val parameters_tlv = match parameters:
+                Ok(parsed):
+                    parsed
+                Err(_):
+                    return []
+            ec_pos = parameters_tlv.next_offset
+        elif tag == 0xA1:
+            val public_key = _read_der_tlv(ec_private, ec_pos, 0xA1)
+            val public_key_tlv = match public_key:
+                Ok(parsed):
+                    parsed
+                Err(_):
+                    return []
+            val bit_string = _read_der_tlv(ec_private, public_key_tlv.value_offset, 0x03)
+            val bit_string_tlv = match bit_string:
+                Ok(parsed):
+                    parsed
+                Err(_):
+                    return []
+            val bit_bytes = _slice_bytes(ec_private, bit_string_tlv.value_offset, bit_string_tlv.value_length)
+            if bit_bytes.len() != 66 or bit_bytes[0] != 0 or bit_bytes[1] != 0x04:
+                return []
+            return _slice_bytes(bit_bytes, 1, 65)
+        else:
+            return []
+    []
+
+# ============================================================================
+# Multi-Algorithm Signing
+# ============================================================================
+
+fn ssh_sign_exchange_hash(algo: text, host_keys: HostKeySet, exchange_hash: [u8]) -> Result<[u8], text>:
+    """Sign exchange_hash with the algorithm-appropriate host key.
+
+    Returns the complete SSH signature blob:
+      string <algo-name> + string <raw-signature-bytes>
+
+    For ecdsa-sha2-nistp256 the inner raw-sig is the SSH wire-format
+    mpint pair (mpint r + mpint s) wrapped as a string per RFC 5656 §3.
+
+    Returns Err if the required host key is absent or signing produces
+    an empty result (indicating a key/runtime error).
+    """
+    if algo == "ssh-ed25519" or algo == "ssh-ed25519-cert-v01@openssh.com":
+        if host_keys.ed25519_seed == nil:
+            return Err("ssh-ed25519: no ed25519 seed configured")
+        val seed = _push_bytes([], host_keys.ed25519_seed)
+        val stable_hash = _push_bytes([], exchange_hash)
+        val pubkey = ed25519_keypair_from_seed(seed).1
+        if pubkey.len() != 32:
+            return Err("ssh-ed25519: keypair derive failed")
+        val sig_raw = ed25519_sign(seed, pubkey, stable_hash)
+        if sig_raw.len() != 64:
+            return Err("ssh-ed25519: signing failed")
+        var blob = _push_ssh_ed25519([])
+        blob = _push_string_64(blob, sig_raw)
+        return Ok(blob)
+
+    elif algo == "rsa-sha2-256" or algo == "rsa-sha2-256-cert-v01@openssh.com":
+        if host_keys.rsa_pkcs8 == nil:
+            return Err("rsa-sha2-256: no RSA key configured")
+        val sig_raw = rsa_sha256_sign_fallback(host_keys.rsa_pkcs8, exchange_hash)
+        if sig_raw.len() == 0:
+            return Err("rsa-sha2-256: signing failed")
+        var blob: [u8] = []
+        blob = _push_ascii_text(blob, [0x72u8, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x32, 0x35, 0x36])
+        blob = ssh_put_string(blob, sig_raw)
+        return Ok(blob)
+
+    elif algo == "rsa-sha2-512" or algo == "rsa-sha2-512-cert-v01@openssh.com":
+        if host_keys.rsa_pkcs8 == nil:
+            return Err("rsa-sha2-512: no RSA key configured")
+        val sig_raw = rsa_sha512_sign_fallback(host_keys.rsa_pkcs8, exchange_hash)
+        if sig_raw.len() == 0:
+            return Err("rsa-sha2-512: signing failed")
+        var blob: [u8] = []
+        blob = _push_ascii_text(blob, [0x72u8, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x35, 0x31, 0x32])
+        blob = ssh_put_string(blob, sig_raw)
+        return Ok(blob)
+
+    elif algo == "ecdsa-sha2-nistp256":
+        if host_keys.ecdsa_p256_pkcs8 == nil:
+            return Err("ecdsa-sha2-nistp256: no ECDSA key configured")
+        val sig_fixed = ecdsa_p256_sign_fixed(host_keys.ecdsa_p256_pkcs8, exchange_hash)
+        if sig_fixed.len() == 0:
+            return Err("ecdsa-sha2-nistp256: signing failed")
+        val mpint_pair = fixed64_to_ssh_mpint_pair(sig_fixed)
+        if mpint_pair.len() == 0:
+            return Err("ecdsa-sha2-nistp256: mpint conversion failed")
+        var blob: [u8] = []
+        blob = _push_ascii_text(blob, [0x65u8, 0x63, 0x64, 0x73, 0x61, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x2D, 0x6E, 0x69, 0x73, 0x74, 0x70, 0x32, 0x35, 0x36])
+        blob = ssh_put_string(blob, mpint_pair)
+        return Ok(blob)
+
+    else:
+        Err("unsupported host key algorithm: {algo}")

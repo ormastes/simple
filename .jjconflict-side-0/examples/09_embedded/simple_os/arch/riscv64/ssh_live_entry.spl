@@ -1,0 +1,75 @@
+use os.kernel.boot.riscv_noalloc_handoff.{riscv_noalloc_handoff, riscv_noalloc_boot_idle}
+use os.kernel.boot.riscv_noalloc_heap.{riscv_noalloc_heap_init}
+use os.kernel.boot.riscv_noalloc_log.{riscv_noalloc_log_init, riscv_noalloc_log_boot_ok}
+use os.kernel.boot.riscv_noalloc_services.{riscv_noalloc_services_init}
+use os.rv64_probe.{rv64_network_init}
+use os.apps.sshd.sshd.{SshDaemon}
+use os.crypto.dual_backend.{dual_backend_alpha_default_mode, dual_backend_set_default_config}
+
+extern fn serial_println(msg: text)
+extern fn rt_riscv_qemu_ram_base() -> u64
+extern fn rt_riscv_qemu_ram_size() -> u64
+extern fn rt_riscv_qemu_reserved_end() -> u64
+extern fn rt_riscv_qemu_heap_start() -> u64
+extern fn rt_riscv_qemu_heap_size() -> u64
+extern fn rt_riscv_noalloc_pmm_init(ram_base: u64, ram_size: u64, reserved_end: u64, heap_start: u64) -> bool
+
+@section(".text.entry")
+@naked
+fn _start():
+    asm volatile:
+        "mv      s0, a0"
+        "mv      s1, a1"
+        "bnez    s0, .Lrv64_ssh_halt"
+        "la      sp, _stack_top"
+        "la      t0, _sbss"
+        "la      t1, _ebss"
+        ".Lrv64_ssh_bss_loop:"
+        "bgeu    t0, t1, .Lrv64_ssh_bss_done"
+        "sd      zero, 0(t0)"
+        "addi    t0, t0, 8"
+        "j       .Lrv64_ssh_bss_loop"
+        ".Lrv64_ssh_bss_done:"
+        "mv      a0, s0"
+        "mv      a1, s1"
+        "call    m_09_embedded__simple_os__arch__riscv64__ssh_live_entry__rv64_ssh_boot_main"
+        ".Lrv64_ssh_halt:"
+        "wfi"
+        "j       .Lrv64_ssh_halt"
+
+fn rv64_ssh_boot_main(hart_id: u64, dtb_addr: u64):
+    riscv_noalloc_log_init()
+    riscv_noalloc_handoff(hart_id, dtb_addr)
+    rt_riscv_noalloc_pmm_init(
+        rt_riscv_qemu_ram_base(),
+        rt_riscv_qemu_ram_size(),
+        rt_riscv_qemu_reserved_end(),
+        rt_riscv_qemu_heap_start()
+    )
+    riscv_noalloc_heap_init(rt_riscv_qemu_heap_start(), rt_riscv_qemu_heap_size())
+    riscv_noalloc_services_init(true)
+    riscv_noalloc_log_boot_ok()
+    spl_start()
+    riscv_noalloc_boot_idle()
+
+@export("C")
+fn spl_start():
+    serial_println("")
+    serial_println("=== SimpleOS RV64 SSH Live Boot ===")
+    serial_println("")
+    serial_println("[boot] Initializing RV64 VirtIO network runtime")
+    val init_rc = rv64_network_init()
+    serial_println("[boot] rv64_network_init rc={init_rc}")
+    if init_rc != 1:
+        serial_println("[FATAL] SSH network init failed rc={init_rc}")
+        return
+    dual_backend_set_default_config(dual_backend_alpha_default_mode())
+    serial_println("[boot] Live host key policy: Ed25519 enabled; RV64 live dual-backend mode=alpha runtime-first")
+    serial_println("[boot] Starting production SSH daemon on port 22")
+    serial_println("[ssh-live] production-daemon-starting arch=riscv64 port=22 hostfwd=2222")
+    var daemon = SshDaemon.new(22)
+    match daemon.start():
+        Ok(_):
+            serial_println("[ssh-live] daemon exited")
+        Err(err):
+            serial_println("[FATAL] SSH daemon start failed: {err}")

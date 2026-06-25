@@ -1,0 +1,85 @@
+# Builtin Binary Registry — freestanding-safe, no heap allocation.
+#
+# Maps compile-time names to embedded binary blobs (pointer + length pairs).
+# Uses a fixed-size static array with linear scan.  The registry is populated
+# at boot before memory management is online, so all storage is in BSS.
+#
+# MDSOC: feature dimension, kernel boot layer.
+
+val MAX_BUILTIN_BINARIES: u64 = 32
+
+struct BuiltinBinaryEntry:
+    """One registered binary blob."""
+    name: text
+    data_addr: u64    # Physical address of the binary data
+    data_len: u64     # Length in bytes
+
+var g_builtin_entries: [BuiltinBinaryEntry] = []
+var g_builtin_count: u64 = 0
+
+# ============================================================================
+# Registration
+# ============================================================================
+
+fn builtin_binary_register(name: text, data_addr: u64, data_len: u64) -> bool:
+    """Register a named binary blob.
+
+    Returns false if the registry is full or the name is already registered.
+    Safe to call before heap/PMM are online.
+    """
+    if g_builtin_count >= MAX_BUILTIN_BINARIES:
+        return false
+
+    # Reject duplicate names
+    var i: u64 = 0
+    while i < g_builtin_count:
+        if g_builtin_entries[i as i64].name == name:
+            return false
+        i = i + 1
+
+    val entry = BuiltinBinaryEntry(name: name, data_addr: data_addr, data_len: data_len)
+    g_builtin_entries = g_builtin_entries + [entry]
+    g_builtin_count = g_builtin_count + 1
+    true
+
+# ============================================================================
+# Lookup
+# ============================================================================
+
+fn builtin_binary_lookup(name: text) -> BuiltinBinaryEntry?:
+    """Look up a registered binary by name.  Returns nil if not found."""
+    var i: u64 = 0
+    while i < g_builtin_count:
+        val entry = g_builtin_entries[i as i64]
+        if entry.name == name:
+            return entry
+        i = i + 1
+    nil
+
+fn builtin_binary_addr(name: text) -> u64:
+    """Return the data address for a named binary, or 0 if not found."""
+    val found = builtin_binary_lookup(name)
+    if found.?:
+        return found!.data_addr
+    0
+
+fn builtin_binary_len(name: text) -> u64:
+    """Return the byte length for a named binary, or 0 if not found."""
+    val found = builtin_binary_lookup(name)
+    if found.?:
+        return found!.data_len
+    0
+
+# ============================================================================
+# Iteration
+# ============================================================================
+
+fn builtin_binary_count() -> u64:
+    """Return the number of registered binaries."""
+    g_builtin_count
+
+fn builtin_binary_get(index: u64) -> BuiltinBinaryEntry?:
+    """Return the entry at the given index, or nil if out of range."""
+    if index >= g_builtin_count:
+        return nil
+    g_builtin_entries[index as i64]

@@ -1,0 +1,112 @@
+"""Steamworks IPC bridge: Unix socket channel to the Steam client (M5, REQ-10).
+
+Wraps ISteamClient/ISteamUser messages over a Unix domain socket.
+In interpreter mode: connection and message exchange are modeled without
+a real Steam process.
+"""
+
+# ============================================================================
+# Types
+# ============================================================================
+
+class SteamworksConnection:
+    is_ok:    bool
+    error:    text
+    conn_id:  i64
+
+class SteamworksAppOwnership:
+    is_ok:     bool
+    app_id:    text
+    owned:     bool
+
+class SteamworksAchievement:
+    is_ok:     bool
+    api_name:  text
+    unlocked:  bool
+
+# ============================================================================
+# Private helpers
+# ============================================================================
+
+fn _sw_conn_ok(cid: i64) -> SteamworksConnection:
+    SteamworksConnection(is_ok: true, error: "", conn_id: cid)
+
+fn _sw_conn_err(msg: text) -> SteamworksConnection:
+    SteamworksConnection(is_ok: false, error: msg, conn_id: 0)
+
+# ============================================================================
+# Storage
+# ============================================================================
+
+var _sw_ctr:      i64    = 0
+var _sw_conn_ids: [i64]  = []
+var _sw_alive:    [bool] = []
+
+fn _sw_find(conn_id: i64) -> i64:
+    val n = _sw_conn_ids.len()
+    var i: i64 = 0
+    while i < n:
+        if _sw_alive[i] and _sw_conn_ids[i] == conn_id:
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn steamworks_connect(socket_path: text) -> SteamworksConnection:
+    """Connect to the Steam client via a Unix domain socket.
+
+    Args:
+        socket_path: path to the Steam client socket (e.g. /tmp/.steam/steam.sock)
+
+    Returns:
+        SteamworksConnection with is_ok=true and a positive conn_id.
+    """
+    if socket_path == "":
+        return _sw_conn_err("missing-socket-path")
+    _sw_ctr = _sw_ctr + 1
+    val cid = _sw_ctr
+    _sw_conn_ids.push(cid)
+    _sw_alive.push(true)
+    _sw_conn_ok(cid)
+
+pub fn steamworks_validate_app(conn_id: i64, app_id: text) -> SteamworksAppOwnership:
+    """Validate that the user owns the given app.
+
+    Args:
+        conn_id: connection handle from steamworks_connect
+        app_id:  Steam app ID string
+
+    Returns:
+        SteamworksAppOwnership with owned=true when the app is confirmed.
+    """
+    if _sw_find(conn_id) == -1:
+        return SteamworksAppOwnership(is_ok: false, app_id: app_id, owned: false)
+    # Interpreter mode: any non-empty app_id is treated as owned
+    SteamworksAppOwnership(is_ok: true, app_id: app_id, owned: app_id != "")
+
+pub fn steamworks_unlock_achievement(conn_id: i64, api_name: text) -> SteamworksAchievement:
+    """Unlock a Steam achievement.
+
+    Args:
+        conn_id:  connection handle from steamworks_connect
+        api_name: achievement API name
+
+    Returns:
+        SteamworksAchievement with unlocked=true on success.
+    """
+    if _sw_find(conn_id) == -1:
+        return SteamworksAchievement(is_ok: false, api_name: api_name, unlocked: false)
+    SteamworksAchievement(is_ok: true, api_name: api_name, unlocked: api_name != "")
+
+pub fn steamworks_disconnect(conn_id: i64):
+    """Close the Steamworks IPC connection.
+
+    Args:
+        conn_id: connection handle from steamworks_connect
+    """
+    val row = _sw_find(conn_id)
+    if row != -1:
+        _sw_alive[row] = false

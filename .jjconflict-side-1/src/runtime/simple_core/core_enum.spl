@@ -1,0 +1,51 @@
+# Pure-Simple enum ABI helpers.
+
+extern fn calloc(count: i64, size: i64) -> i64
+extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
+extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
+extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+
+fn store_u32_le(ptr: i64, offset: i64, value: i64):
+    spl_store_u8(ptr, offset, value & 255)
+    spl_store_u8(ptr, offset + 1, (value >> 8) & 255)
+    spl_store_u8(ptr, offset + 2, (value >> 16) & 255)
+    spl_store_u8(ptr, offset + 3, (value >> 24) & 255)
+
+fn load_u32_le(ptr: i64, offset: i64) -> i64:
+    return spl_load_u8(ptr, offset) |
+        (spl_load_u8(ptr, offset + 1) << 8) |
+        (spl_load_u8(ptr, offset + 2) << 16) |
+        (spl_load_u8(ptr, offset + 3) << 24)
+
+fn enum_ptr(value: i64) -> i64:
+    if value < 4096:
+        return 0
+    if (value & 7) != 1:
+        return 0
+    val ptr = value & -8
+    if spl_load_u8(ptr, 0) != 4:
+        return 0
+    return ptr
+
+pub fn rt_enum_new(enum_id: i32, discriminant: i32, payload: i64) -> i64:
+    val value = calloc(1, 24)
+    if value < 1:
+        return 3
+    spl_store_u8(value, 0, 4)
+    store_u32_le(value, 4, enum_id)
+    store_u32_le(value, 8, discriminant)
+    spl_store_i64(value, 16, payload)
+    return value | 1
+
+pub fn rt_enum_discriminant(value: i64) -> i64:
+    val ptr = enum_ptr(value)
+    if ptr < 1:
+        return -1
+    return load_u32_le(ptr, 8)
+
+pub fn rt_enum_payload(value: i64) -> i64:
+    val ptr = enum_ptr(value)
+    if ptr < 1:
+        return 3
+    return spl_load_i64(ptr, 16)

@@ -1,0 +1,70 @@
+# Unit test: Symbol.defining_module is populated from HirLowering.module_filename
+#
+# **Feature:** FR-COMPILER-003 infrastructure (A1)
+# **Status:** Active
+#
+# Verifies that when `lower_module` is called with a non-empty `module_filename`,
+# every top-level symbol declared in that module has its `defining_module` set
+# to that filename.  Two separate lowering contexts are used so the test
+# confirms isolation: each context produces symbols stamped with its own path.
+
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+
+fn make_logger() -> Logger:
+    Logger(level: 0)
+
+describe "Symbol.defining_module populated from module_filename":
+    it "single module: symbols carry the source path":
+        val src = "fn greet() -> text:\n    \"hello\""
+        val path = "src/greet.spl"
+        val log = make_logger()
+        val module = parse_full_frontend(src, path, "greet", log)
+        var lowering = HirLowering.with_filename(path)
+        val hir = lowering.lower_module(module)
+
+        # Every symbol defined in the HIR must reference the source path
+        var all_match = true
+        for sym in hir.symbols.symbols.values():
+            if sym.defining_module.?:
+                if sym.defining_module.unwrap() != path:
+                    all_match = false
+            else:
+                all_match = false
+        expect(all_match).to_equal(true)
+
+    it "two modules: symbols carry distinct source paths":
+        val log = make_logger()
+
+        val src_a = "fn alpha() -> i64:\n    1"
+        val path_a = "src/mod_a.spl"
+        val module_a = parse_full_frontend(src_a, path_a, "mod_a", log)
+        var lowering_a = HirLowering.with_filename(path_a)
+        val hir_a = lowering_a.lower_module(module_a)
+
+        val src_b = "fn beta() -> i64:\n    2"
+        val path_b = "src/mod_b.spl"
+        val module_b = parse_full_frontend(src_b, path_b, "mod_b", log)
+        var lowering_b = HirLowering.with_filename(path_b)
+        val hir_b = lowering_b.lower_module(module_b)
+
+        # All symbols in hir_a must reference path_a
+        var a_ok = true
+        for sym in hir_a.symbols.symbols.values():
+            if sym.defining_module.?:
+                if sym.defining_module.unwrap() != path_a:
+                    a_ok = false
+            else:
+                a_ok = false
+        expect(a_ok).to_equal(true)
+
+        # All symbols in hir_b must reference path_b
+        var b_ok = true
+        for sym in hir_b.symbols.symbols.values():
+            if sym.defining_module.?:
+                if sym.defining_module.unwrap() != path_b:
+                    b_ok = false
+            else:
+                b_ok = false
+        expect(b_ok).to_equal(true)

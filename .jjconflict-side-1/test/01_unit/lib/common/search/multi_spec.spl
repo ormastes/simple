@@ -1,0 +1,181 @@
+# multi_spec.spl — Aho-Corasick multi-pattern matcher (AC-3)
+#
+# ABSOLUTE-ORACLE assertions: hand fixtures with KNOWN match positions, plus a
+# cross-check against an INDEPENDENT per-pattern naive scan implemented inline
+# here. AC emits in scan order (by end position); the naive oracle emits grouped
+# by pattern. So both sides are reduced to a SORTED SET of (pattern_id,start,end)
+# triples encoded as a single composite i64 key, and the encoded sets are
+# compared for equality — never AC-against-itself, never order-dependent.
+#
+# A triple is encoded as pid * 1_000_000 + start * 1_000 + end (positions and
+# ids in these fixtures are < 1000), giving a totally-ordered integer key we can
+# sort numerically and join into a canonical string for set equality.
+use std.spec
+use lib.common.search.types.{Haystack, Pattern, MatchSpan}
+use lib.common.search.multi.{AhoCorasick, AcMatch, find_multi}
+
+# --- helpers (module-level fns) ---------------------------------------------
+
+fn pat_of(s: text) -> Pattern:
+    Pattern.new(s.bytes())
+
+fn triple_key(pid: i64, start: i64, end_i: i64) -> i64:
+    pid * 1000000 + start * 1000 + end_i
+
+# Independent naive oracle: for each pattern id, scan every start offset and
+# record (id, start, end) when the pattern occurs there. Completely separate
+# code path from the automaton.
+fn naive_keys(text_s: text, pats: [text]) -> [i64]:
+    val hb = text_s.bytes()
+    val n = hb.len()
+    var keys: [i64] = []
+    var pid = 0
+    while pid < pats.len():
+        val pb = pats[pid].bytes()
+        val plen = pb.len()
+        if plen > 0:
+            var start = 0
+            while start + plen <= n:
+                var j = 0
+                var ok = true
+                while j < plen:
+                    if hb[start + j] != pb[j]:
+                        ok = false
+                        j = plen
+                    else:
+                        j = j + 1
+                if ok:
+                    keys.push(triple_key(pid, start, start + plen))
+                start = start + 1
+        pid = pid + 1
+    keys
+
+fn ac_keys(matches: [AcMatch]) -> [i64]:
+    var keys: [i64] = []
+    var i = 0
+    while i < matches.len():
+        val m = matches[i]
+        keys.push(triple_key(m.pattern(), m.start(), m.end()))
+        i = i + 1
+    keys
+
+# Numeric insertion sort + join into a canonical, order-independent encoding.
+fn canon(keys: [i64]) -> text:
+    var arr: [i64] = []
+    var i = 0
+    while i < keys.len():
+        arr.push(keys[i])
+        i = i + 1
+    var a = 1
+    while a < arr.len():
+        val key = arr[a]
+        var b = a - 1
+        var placing = true
+        while placing:
+            if b < 0:
+                placing = false
+            else:
+                if arr[b] > key:
+                    arr[b + 1] = arr[b]
+                    b = b - 1
+                else:
+                    placing = false
+        arr[b + 1] = key
+        a = a + 1
+    var joined = ""
+    var k = 0
+    while k < arr.len():
+        joined = joined + arr[k].to_text()
+        joined = joined + "|"
+        k = k + 1
+    joined
+
+fn build_patterns(pats: [text]) -> [Pattern]:
+    var plist: [Pattern] = []
+    var i = 0
+    while i < pats.len():
+        plist.push(pat_of(pats[i]))
+        i = i + 1
+    plist
+
+fn run_ac(text_s: text, pats: [text]) -> text:
+    val plist = build_patterns(pats)
+    val h = Haystack.new(text_s.bytes())
+    val matches = find_multi(h, plist)
+    canon(ac_keys(matches))
+
+fn run_oracle(text_s: text, pats: [text]) -> text:
+    canon(naive_keys(text_s, pats))
+
+describe "AhoCorasick canonical fixture {he,she,his,hers} over ushers":
+    it "finds she[1,4), he[2,4), hers[2,6) and not his — exact positions":
+        # ushers = u(0) s(1) h(2) e(3) r(4) s(5)
+        # she : s1 h2 e3 -> [1,4)   he : h2 e3 -> [2,4)
+        # hers: h2 e3 r4 s5 -> [2,6)   his: absent
+        # ids: he=0, she=1, his=2, hers=3
+        val pats = ["he", "she", "his", "hers"]
+        val plist = build_patterns(pats)
+        val h = Haystack.new("ushers".bytes())
+        val ms = find_multi(h, plist)
+        expect(ms.len()).to_equal(3)
+        var expected: [i64] = []
+        expected.push(triple_key(1, 1, 4))
+        expected.push(triple_key(0, 2, 4))
+        expected.push(triple_key(3, 2, 6))
+        expect(canon(ac_keys(ms))).to_equal(canon(expected))
+
+    it "agrees with the independent naive per-pattern oracle":
+        val pats = ["he", "she", "his", "hers"]
+        expect(run_ac("ushers", pats)).to_equal(run_oracle("ushers", pats))
+
+describe "AhoCorasick suffix-overlap fixture":
+    it "emits both a pattern and its suffix pattern at the same end":
+        # {hers, ers, rs} over hers -> hers[0,4), ers[1,4), rs[2,4)
+        val pats = ["hers", "ers", "rs"]
+        val plist = build_patterns(pats)
+        val h = Haystack.new("hers".bytes())
+        val ms = find_multi(h, plist)
+        expect(ms.len()).to_equal(3)
+        expect(run_ac("hers", pats)).to_equal(run_oracle("hers", pats))
+
+    it "one pattern is a strict suffix of another (oracle parity)":
+        # {abc, bc, c} over xabcabc
+        val pats = ["abc", "bc", "c"]
+        expect(run_ac("xabcabc", pats)).to_equal(run_oracle("xabcabc", pats))
+
+describe "AhoCorasick overlapping + repeated patterns":
+    it "repeated needle, multiple non-overlapping & overlapping hits":
+        # {aa, a} over aaaa : a at 0,1,2,3 ; aa at 0,1,2
+        val pats = ["aa", "a"]
+        expect(run_ac("aaaa", pats)).to_equal(run_oracle("aaaa", pats))
+
+    it "overlapping distinct patterns share characters":
+        # {abab, bab, ab} over ababab
+        val pats = ["abab", "bab", "ab"]
+        expect(run_ac("ababab", pats)).to_equal(run_oracle("ababab", pats))
+
+describe "AhoCorasick edge cases":
+    it "no matches when patterns absent":
+        val pats = ["xyz", "qqq"]
+        val res = run_ac("abcdef", pats)
+        expect(res).to_equal(run_oracle("abcdef", pats))
+        # naive oracle finds nothing -> canonical empty encoding
+        expect(res).to_equal("")
+
+    it "pattern equal to whole haystack":
+        val plist = build_patterns(["hello"])
+        val h = Haystack.new("hello".bytes())
+        val ms = find_multi(h, plist)
+        expect(ms.len()).to_equal(1)
+        expect(ms[0].start()).to_equal(0)
+        expect(ms[0].end()).to_equal(5)
+        expect(ms[0].pattern()).to_equal(0)
+
+    it "single-char patterns across the text":
+        val pats = ["a", "e", "i"]
+        expect(run_ac("aeiouaei", pats)).to_equal(run_oracle("aeiouaei", pats))
+
+    it "empty pattern in set is skipped, others still match":
+        # "" should produce no spans; "ab" still matches in "xabyab"
+        val pats = ["", "ab"]
+        expect(run_ac("xabyab", pats)).to_equal(run_oracle("xabyab", pats))

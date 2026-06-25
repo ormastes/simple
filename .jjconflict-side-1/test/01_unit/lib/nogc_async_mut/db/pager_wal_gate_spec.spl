@@ -1,0 +1,164 @@
+# @covers src/lib/nogc_sync_mut/db/dbfs_engine/pager.spl 80%
+# @covers src/lib/nogc_sync_mut/storage/shared/wal.spl 60%
+"""
+# Pager WAL-before-data Gate Specification
+
+**Feature IDs:** #DB-WAL-GATE
+**Category:** Testing
+**Status:** Implemented
+
+## Overview
+
+Tests that pager.write_page enforces WAL-before-data at the pager layer (E5).
+
+Rules:
+- write_page with page_lsn > wal_flushed_lsn → Err (WAL not flushed)
+- write_page after WAL flush advancing flushed_lsn ≥ page_lsn → Ok
+- write_page with page_lsn = 0 → Ok regardless (raw pager use, no WAL)
+"""
+
+use std.db.dbfs_engine.pager.{DbfsPager, PageId, PageData, PAGE_SIZE_BYTES}
+use std.storage.shared.wal.{SharedWal, WalRecord, WAL_RECORD_DATA}
+
+describe "Pager WAL-before-data gate":
+    """
+    ## WAL gate in write_page
+
+    Verifies the pager enforces WAL-before-data at the pager layer.
+    page_lsn=0 skips the gate (raw pager use without WAL).
+    """
+
+    context "page_lsn = 0 (no WAL context)":
+        """write_page with page_lsn=0 always succeeds regardless of wal_flushed_lsn."""
+
+        it "succeeds when page_lsn is 0 and wal_flushed_lsn is 0":
+            var p = DbfsPager.new(4)
+            val pid_r = p.alloc_page()
+            val pid = pid_r.unwrap()
+            val data = PageData.zeroed()
+            val result = p.write_page(pid, data, 0, 0)
+            expect(result.is_ok()).to_equal(true)
+
+        it "succeeds when page_lsn is 0 even if wal_flushed_lsn is behind":
+            var p = DbfsPager.new(4)
+            val pid_r = p.alloc_page()
+            val pid = pid_r.unwrap()
+            val data = PageData.zeroed()
+            # wal_flushed_lsn=0, page_lsn=0 — gate skipped
+            val result = p.write_page(pid, data, 0, 0)
+            expect(result.is_ok()).to_equal(true)
+
+    context "page_lsn > 0 with unflushed WAL":
+        """write_page with page_lsn > wal_flushed_lsn returns Err."""
+
+        it "returns Err when WAL not yet flushed for this page":
+            var p = DbfsPager.new(4)
+            val pid_r = p.alloc_page()
+            val pid = pid_r.unwrap()
+            val data = PageData.zeroed()
+            # page_lsn=5, wal_flushed_lsn=3 → WAL behind → Err
+            val result = p.write_page(pid, data, 5, 3)
+            expect(result.is_err()).to_equal(true)
+
+        it "returns Err when wal_flushed_lsn is zero and page_lsn is positive":
+            var p = DbfsPager.new(4)
+            val pid_r = p.alloc_page()
+            val pid = pid_r.unwrap()
+            val data = PageData.zeroed()
+            val result = p.write_page(pid, data, 1, 0)
+            expect(result.is_err()).to_equal(true)
+
+        it "returns Err when page_lsn is one ahead of flushed_lsn":
+            var p = DbfsPager.new(4)
+            val pid_r = p.alloc_page()
+            val pid = pid_r.unwrap()
+            val data = PageData.zeroed()
+            # flushed=9, page_lsn=10 → still blocked
+            val result = p.write_page(pid, data, 10, 9)
+            expect(result.is_err()).to_equal(true)
+
+    context "page_lsn > 0 after WAL flush":
+        """write_page succeeds when wal_flushed_lsn >= page_lsn."""
+
+        it "succeeds when wal_flushed_lsn equals page_lsn":
+            var p = DbfsPager.new(4)
+            val pid_r = p.alloc_page()
+            val pid = pid_r.unwrap()
+            val data = PageData.zeroed()
+            # flushed=5, page_lsn=5 → exact match → Ok
+            val result = p.write_page(pid, data, 5, 5)
+            expect(result.is_ok()).to_equal(true)
+
+        it "succeeds when wal_flushed_lsn exceeds page_lsn":
+            var p = DbfsPager.new(4)
+            val pid_r = p.alloc_page()
+            val pid = pid_r.unwrap()
+            val data = PageData.zeroed()
+            # flushed=10, page_lsn=3 → flushed ahead → Ok
+            val result = p.write_page(pid, data, 3, 10)
+            expect(result.is_ok()).to_equal(true)
+
+        it "write marks page dirty after successful gated write":
+            var p = DbfsPager.new(4)
+            val pid_r = p.alloc_page()
+            val pid = pid_r.unwrap()
+            val data = PageData.zeroed()
+            val wr = p.write_page(pid, data, 2, 2)
+            expect(wr.is_ok()).to_equal(true)
+            expect(p.is_dirty(pid)).to_equal(true)
+
+    context "WAL flushed_lsn accessor":
+        """SharedWal.flushed_lsn() returns durable_lsn."""
+
+        it "flushed_lsn is 0 on fresh WAL":
+            var w = SharedWal.new()
+            expect(w.flushed_lsn()).to_equal(0)
+
+        it "flushed_lsn advances after flush_wal":
+            var w = SharedWal.new()
+            val rec = WalRecord(txn_id: 1, record_type: WAL_RECORD_DATA, payload: "d")
+            val lsn_r = w.append(rec)
+            val lsn = lsn_r.unwrap()
+            val _ = w.flush_wal()
+            expect(w.flushed_lsn()).to_equal(lsn.value)
+
+        it "flushed_lsn matches durable_lsn":
+            var w = SharedWal.new()
+            val rec = WalRecord(txn_id: 1, record_type: WAL_RECORD_DATA, payload: "x")
+            val _ = w.append(rec)
+            val _ = w.flush_wal()
+            expect(w.flushed_lsn()).to_equal(w.durable_lsn())
+
+    context "end-to-end: WAL flush then pager write":
+        """Simulates the D4 protocol: append WAL, flush WAL, then write page."""
+
+        it "page write succeeds after WAL flush":
+            var w = SharedWal.new()
+            var p = DbfsPager.new(4)
+            val pid_r = p.alloc_page()
+            val pid = pid_r.unwrap()
+            # Step 3: WAL append
+            val rec = WalRecord(txn_id: 1, record_type: WAL_RECORD_DATA, payload: "data")
+            val lsn_r = w.append(rec)
+            val lsn = lsn_r.unwrap()
+            # Step 4: WAL flush
+            val _ = w.flush_wal()
+            val flushed = w.flushed_lsn()
+            # Step: write page with real LSNs
+            val data = PageData.zeroed()
+            val wr = p.write_page(pid, data, lsn.value, flushed)
+            expect(wr.is_ok()).to_equal(true)
+
+        it "page write fails before WAL flush":
+            var w = SharedWal.new()
+            var p = DbfsPager.new(4)
+            val pid_r = p.alloc_page()
+            val pid = pid_r.unwrap()
+            # Append WAL but do NOT flush
+            val rec = WalRecord(txn_id: 1, record_type: WAL_RECORD_DATA, payload: "data")
+            val lsn_r = w.append(rec)
+            val lsn = lsn_r.unwrap()
+            val flushed = w.flushed_lsn()   # still 0
+            val data = PageData.zeroed()
+            val wr = p.write_page(pid, data, lsn.value, flushed)
+            expect(wr.is_err()).to_equal(true)

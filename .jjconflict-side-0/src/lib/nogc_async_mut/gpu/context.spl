@@ -1,0 +1,255 @@
+# GPU Context API (NoGC)
+#
+# Unified interface for GPU operations across backends.
+# Uses Stream from nogc_async_mut.torch (unique ownership, unconditional drop).
+
+use std.nogc_async_mut.gpu.device.{GpuBackend, Gpu, detect_backends, preferred_backend, gpu_cuda, gpu_none}
+use std.nogc_async_mut.gpu.memory.{GpuArray, gpu_alloc, gpu_alloc_upload, gpu_alloc_zeros}
+use std.nogc_async_mut.torch.{Stream}
+
+# ============================================================================
+# Context Type
+# ============================================================================
+
+class Context:
+    """Unified GPU context managing device, memory, and streams (NoGC).
+
+    Automatically selects best available backend and provides
+    backend-agnostic API for all operations.
+
+    NoGC: Stream? field uses unique ownership — no owns_handle.
+
+    Example:
+        # Auto-detect best GPU
+        val ctx = Context.default()
+
+        # Allocate and upload
+        val a = ctx.alloc_upload([1.0, 2.0, 3.0, 4.0])
+
+        # Download results
+        val result = a.download()
+
+        # Memory auto-freed when ctx goes out of scope
+    """
+
+    backend: GpuBackend
+    device: Gpu
+    default_stream: Stream?
+
+    # ========================================================================
+    # Constructors
+    # ========================================================================
+
+    static fn default() -> Context:
+        """Auto-detect best backend and device.
+
+        Checks in order:
+        1. CUDA (via PyTorch) - device 0
+        2. CPU fallback
+
+        Returns:
+            Context with best available backend
+        """
+        val backend = preferred_backend()
+        match backend:
+            case GpuBackend.Cuda:
+                Context.new(backend: GpuBackend.Cuda, device: 0)
+            case GpuBackend.Vulkan:
+                Context.new(backend: GpuBackend.Vulkan, device: 0)
+            case GpuBackend.None_:
+                Context.new(backend: GpuBackend.None_, device: -1)
+
+    static fn new(backend: GpuBackend, device: i64) -> Context:
+        """Create context for specific backend and device.
+
+        Args:
+            backend: GPU backend type
+            device: Device ID (0=1st GPU, 1=2nd GPU, -1=CPU fallback)
+
+        Returns:
+            Context for specified backend
+
+        Example:
+            # Explicit CUDA on 2nd GPU
+            val ctx = Context.new(backend: GpuBackend.Cuda, device: 1)
+        """
+        val gpu = match backend:
+            case GpuBackend.Cuda: gpu_cuda(device)
+            case GpuBackend.Vulkan: gpu_vulkan(device)
+            case GpuBackend.None_: gpu_none()
+
+        val stream = match backend:
+            case GpuBackend.Cuda:
+                Some(Stream.create(device))
+            case _:
+                nil
+
+        Context(backend: backend, device: gpu, default_stream: stream)
+
+    # ========================================================================
+    # Memory Allocation
+    # ========================================================================
+
+    fn alloc[T](count: i64) -> GpuArray[T]:
+        """Allocate uninitialized array on device.
+
+        Args:
+            count: Number of elements
+
+        Returns:
+            GPU array (uninitialized)
+
+        Example:
+            val arr = ctx.alloc[f32](1024)
+        """
+        gpu_alloc[T](self.device, count)
+
+    fn alloc_upload[T](data: [T]) -> GpuArray[T]:
+        """Allocate and upload data to device (async).
+
+        Args:
+            data: Host array to upload
+
+        Returns:
+            GPU array with uploaded data
+
+        Example:
+            val arr = ctx.alloc_upload([1.0, 2.0, 3.0, 4.0])
+        """
+        gpu_alloc_upload[T](self.device, data)
+
+    fn alloc_zeros[T](count: i64) -> GpuArray[T]:
+        """Allocate zero-initialized array.
+
+        Args:
+            count: Number of elements
+
+        Returns:
+            GPU array filled with zeros
+
+        Example:
+            val arr = ctx.alloc_zeros[f32](1024)
+        """
+        gpu_alloc_zeros[T](self.device, count)
+
+    # ========================================================================
+    # Synchronization
+    # ========================================================================
+
+    fn sync():
+        """Wait for all operations to complete (blocking).
+
+        Example:
+            ctx.launch_named("example_gpu_job")
+            ctx.sync()  # Wait for the submitted GPU job to finish
+        """
+        match self.default_stream:
+            case Some(s):
+                s.synchronize()
+            case nil:
+                self.device.sync()
+
+    # ========================================================================
+    # Stream Management
+    # ========================================================================
+
+    fn is_cuda() -> bool:
+        """Return true if this context is backed by a CUDA device."""
+        match self.backend:
+            case GpuBackend.Cuda: true
+            case _: false
+
+    fn create_stream() -> Stream:
+        """Create new stream for async operations.
+
+        Only valid on CUDA backends. Calling on CPU/None_ backend will
+        print a warning and call rt_torch_stream_create(0) which is a
+        no-op on GPU-less hosts where the torch runtime is absent.
+        Callers should guard with ctx.is_cuda() before calling.
+
+        Returns:
+            New CUDA stream (unique ownership). Caller must drop to avoid leak.
+
+        Example:
+            if ctx.is_cuda():
+                val stream1 = ctx.create_stream()
+                val stream2 = ctx.create_stream()
+        """
+        val device_i64 = self.device.device_id * 1
+        match self.backend:
+            case GpuBackend.Cuda:
+                Stream.create(device_i64)
+            case _:
+                # BUG(gpu_context_stream_cpu_fallback): Stream.create() calls
+                # rt_torch_stream_create CUDA extern even on CPU backend.
+                # Workaround: callers must guard with is_cuda(). This path is
+                # only reached if caller ignores the guard. We call with 0
+                # and the extern is a no-op when torch is unavailable.
+                eprint("Warning: create_stream() called on non-CUDA backend — guard with is_cuda() first")
+                Stream.create(0)
+
+    # ========================================================================
+    # Device Info
+    # ========================================================================
+
+    fn backend_name() -> text:
+        """Get backend name.
+
+        Returns:
+            Backend name ("CUDA", "Vulkan", "CPU")
+        """
+        match self.backend:
+            case GpuBackend.Cuda: "CUDA"
+            case GpuBackend.Vulkan: "Vulkan"
+            case GpuBackend.None_: "CPU"
+
+    fn device_id() -> i64:
+        """Get device ID.
+
+        Returns:
+            Device ID, or -1 for CPU
+        """
+        self.device.device_id
+
+    # ========================================================================
+    # Cleanup
+    # ========================================================================
+
+    fn drop():
+        """Automatically free all resources when context goes out of scope."""
+        # Stream? field: if Some(s), s.drop() is called unconditionally (NoGC)
+        ()
+
+# ============================================================================
+# Config Integration
+# ============================================================================
+
+fn create_context_from_config() -> Context:
+    """Create GPU context from global DL config.
+
+    Reads device from `dl.default_device` and creates appropriate context.
+
+    Returns:
+        Context matching config settings
+
+    Example:
+        use std.src.dl.config.{load_local_config}
+        use std.nogc_async_mut.gpu.{create_context_from_config}
+
+        load_local_config()  # Loads dl.config.sdn
+        val ctx = create_context_from_config()  # Uses config device
+    """
+    use std.src.dl.config.{dl, Device}
+
+    match dl.default_device:
+        case Device.CPU:
+            Context.new(backend: GpuBackend.None_, device: -1)
+        case Device.CUDA(id):
+            Context.new(backend: GpuBackend.Cuda, device: id)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Context
+export create_context_from_config

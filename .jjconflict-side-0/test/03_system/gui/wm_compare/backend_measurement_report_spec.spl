@@ -1,0 +1,316 @@
+# @tag: sys, wm_compare, backend, measurement, performance
+
+use std.spec.{describe, it, expect}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus, StrictBackendFactory}
+use app.wm_compare.backend_measurement_report.{
+    BackendComparisonSample,
+    BackendMeasurementRecord,
+    backend_comparison_from_measurement,
+    backend_comparison_from_measurement_with_runtime_metadata,
+    backend_comparison_initialized_valid,
+    backend_comparison_sample_sdn,
+    backend_comparison_sample_valid,
+    backend_comparison_unavailable_valid,
+    backend_measurement_from_probe,
+    backend_measurement_initialized_valid,
+    backend_measurement_unavailable_valid,
+    backend_measurement_satisfies_lane,
+    backend_measurement_binary_size_delta_bytes,
+    backend_measurement_binary_size_delta_valid,
+    backend_measurement_record_sdn,
+    backend_measurement_matrix_valid,
+    backend_measurement_matrix_sdn}
+
+fn _initialized_record(backend: text) -> BackendMeasurementRecord:
+    var probe = BackendProbeResult.success(backend, "initialized for measurement")
+    probe.requested_name = backend
+    probe.selected_name = backend
+    backend_measurement_from_probe(
+        probe,
+        "simple test representative comparison",
+        "local-linux",
+        1,
+        5,
+        1000,
+        1200,
+        64000,
+        1000000,
+        990000,
+        "render+readback",
+        true
+    )
+
+fn _initialized_sample() -> BackendComparisonSample:
+    backend_comparison_from_measurement_with_runtime_metadata(
+        _initialized_record("cuda"),
+        "wm_compare:button_grid:64",
+        "cuda",
+        "simple-web",
+        42000,
+        9000,
+        1250000,
+        1800,
+        310,
+        75,
+        140,
+        25,
+        110,
+        "sha256:1234",
+        "nonzero_pixels:4096",
+        "cuda:0",
+        "@gpu",
+        "text_blit",
+        "simple_2d_copy_u32",
+        "simple_2d_copy_u32",
+        "cuda-c",
+        "ptx",
+        "simple_2d_optimization.ptx",
+        "cuda",
+        "generated_2d_kernel",
+        "cuda_launch_api",
+        "simple_2d_copy_u32",
+        "simple_2d_optimization.ptx",
+        "ready"
+    )
+
+describe "wm_compare backend measurement evidence":
+
+    it "accepts initialized accelerated lanes with timings, RSS, size, and scalar baseline":
+        val record = _initialized_record("cpu_simd")
+        expect(backend_measurement_initialized_valid(record)).to_equal(true)
+        expect(backend_measurement_satisfies_lane(record)).to_equal(true)
+
+    it "records binary size delta for initialized measurement evidence":
+        val record = _initialized_record("cpu_simd")
+        expect(backend_measurement_binary_size_delta_valid(record)).to_equal(true)
+        expect(backend_measurement_binary_size_delta_bytes(record)).to_equal(10000)
+        val sdn = backend_measurement_record_sdn(record)
+        expect(sdn).to_contain("binary_size_bytes: 1000000")
+        expect(sdn).to_contain("baseline_binary_size_bytes: 990000")
+        expect(sdn).to_contain("binary_size_delta_bytes: 10000")
+
+    it "normalizes initialized backend comparison samples for shared UI and GPU reports":
+        val sample = _initialized_sample()
+        expect(backend_comparison_initialized_valid(sample)).to_equal(true)
+        expect(backend_comparison_sample_valid(sample)).to_equal(true)
+        val sdn = backend_comparison_sample_sdn(sample)
+        expect(sdn).to_contain("fixture_id: \"wm_compare:button_grid:64\"")
+        expect(sdn).to_contain("backend_family: \"cuda\"")
+        expect(sdn).to_contain("shell: \"simple-web\"")
+        expect(sdn).to_contain("cold_start_us: 42000")
+        expect(sdn).to_contain("warm_start_us: 9000")
+        expect(sdn).to_contain("package_size_bytes: 1250000")
+        expect(sdn).to_contain("artifact_build_us: 310")
+        expect(sdn).to_contain("offload_tag_kind: \"@gpu\"")
+        expect(sdn).to_contain("operation_family: \"text_blit\"")
+        expect(sdn).to_contain("generated_entry_symbol: \"simple_2d_copy_u32\"")
+        expect(sdn).to_contain("generated_binary_format: \"ptx\"")
+        expect(sdn).to_contain("generated_artifact_path_suffix: \"simple_2d_optimization.ptx\"")
+        expect(sdn).to_contain("runtime_compute_target: \"cuda\"")
+        expect(sdn).to_contain("runtime_execution_path: \"generated_2d_kernel\"")
+        expect(sdn).to_contain("runtime_launch_api: \"cuda_launch_api\"")
+        expect(sdn).to_contain("runtime_status: \"ready\"")
+        expect(sdn).to_contain("checksum: \"sha256:1234\"")
+        expect(sdn).to_contain("pixel_proof: \"nonzero_pixels:4096\"")
+
+    it "rejects initialized comparison samples without pixel proof fallback reason compiler metadata or runtime provenance":
+        var missing_proof = _initialized_sample()
+        missing_proof.pixel_proof = ""
+        expect(backend_comparison_sample_valid(missing_proof)).to_equal(false)
+
+        var missing_reason = _initialized_sample()
+        missing_reason.fallback_used = true
+        missing_reason.fallback_reason = ""
+        expect(backend_comparison_sample_valid(missing_reason)).to_equal(false)
+
+        var missing_metadata = _initialized_sample()
+        missing_metadata.generated_entry_symbol = ""
+        expect(backend_comparison_sample_valid(missing_metadata)).to_equal(false)
+
+        var missing_runtime = _initialized_sample()
+        missing_runtime.runtime_status = ""
+        expect(backend_comparison_sample_valid(missing_runtime)).to_equal(false)
+
+    it "rejects initialized accelerated lane evidence without scalar baseline comparison":
+        val probe = BackendProbeResult.success("cuda", "initialized for measurement")
+        val record = backend_measurement_from_probe(
+            probe,
+            "simple test representative comparison",
+            "local-linux",
+            1,
+            5,
+            1000,
+            1200,
+            64000,
+            1000000,
+            990000,
+            "render+readback",
+            false
+        )
+        expect(backend_measurement_initialized_valid(record)).to_equal(false)
+        expect(backend_measurement_satisfies_lane(record)).to_equal(false)
+
+    it "rejects initialized OpenCL lane evidence without scalar baseline comparison":
+        val probe = BackendProbeResult.success("opencl", "initialized for measurement")
+        val record = backend_measurement_from_probe(
+            probe,
+            "simple test representative comparison",
+            "local-linux",
+            1,
+            5,
+            1000,
+            1200,
+            64000,
+            1000000,
+            990000,
+            "render+readback",
+            false
+        )
+        expect(backend_measurement_initialized_valid(record)).to_equal(false)
+        expect(backend_measurement_satisfies_lane(record)).to_equal(false)
+
+    it "accepts unavailable backend lanes only with explicit reason":
+        val probe = StrictBackendFactory.strict().create_backend("metal")
+        val record = backend_measurement_from_probe(
+            probe, "", "local-linux", 0, 0, 0, 0, 0, 0, 0, "", false
+        )
+        expect(record.requested_backend).to_equal("metal")
+        expect(record.status).to_equal("Unavailable")
+        expect(backend_measurement_unavailable_valid(record)).to_equal(true)
+        expect(backend_measurement_satisfies_lane(record)).to_equal(true)
+
+    it "normalizes unavailable backend comparison samples with explicit reason":
+        val record = backend_measurement_from_probe(
+            StrictBackendFactory.strict().create_backend("hip"),
+            "simple test representative comparison",
+            "local-linux",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "",
+            false
+        )
+        val sample = backend_comparison_from_measurement(
+            record,
+            "wm_compare:button_grid:64",
+            "hip",
+            "tauri",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "",
+            "",
+            ""
+        )
+        expect(backend_comparison_unavailable_valid(sample)).to_equal(true)
+        expect(backend_comparison_sample_valid(sample)).to_equal(true)
+        val sdn = backend_comparison_sample_sdn(sample)
+        expect(sdn).to_contain("backend_family: \"hip\"")
+        expect(sdn).to_contain("unavailable_reason:")
+
+    it "rejects fallback evidence for an accelerated lane":
+        val record = BackendMeasurementRecord(
+            requested_backend: "vulkan",
+            selected_backend: "cpu",
+            status: "Initialized",
+            command: "simple test representative comparison",
+            host: "local-linux",
+            warmup_count: 1,
+            sample_count: 5,
+            p50_us: 1000,
+            p95_us: 1200,
+            max_rss_kb: 64000,
+            binary_size_bytes: 1000000,
+            baseline_binary_size_bytes: 990000,
+            render_readback_scope: "render+readback",
+            scalar_baseline_compared: true,
+            fallback_used: true,
+            unavailable_reason: "fallback to CPU"
+        )
+        expect(backend_measurement_satisfies_lane(record)).to_equal(false)
+
+    it "rejects fallback evidence for OpenCL like CUDA and Vulkan":
+        val record = BackendMeasurementRecord(
+            requested_backend: "opencl",
+            selected_backend: "cpu",
+            status: "Initialized",
+            command: "simple test representative comparison",
+            host: "local-linux",
+            warmup_count: 1,
+            sample_count: 5,
+            p50_us: 1000,
+            p95_us: 1200,
+            max_rss_kb: 64000,
+            binary_size_bytes: 1000000,
+            baseline_binary_size_bytes: 990000,
+            render_readback_scope: "render+readback",
+            scalar_baseline_compared: true,
+            fallback_used: true,
+            unavailable_reason: "fallback to CPU"
+        )
+        expect(backend_measurement_satisfies_lane(record)).to_equal(false)
+
+    it "requires OpenCL initialized samples to carry GPU artifact timings":
+        val sample = backend_comparison_from_measurement(
+            _initialized_record("opencl"),
+            "wm_compare:button_grid:64",
+            "opencl",
+            "simple-web",
+            42000,
+            9000,
+            1250000,
+            1800,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "sha256:opencl",
+            "nonzero_pixels:4096",
+            "opencl:0"
+        )
+        expect(backend_comparison_sample_valid(sample)).to_equal(false)
+
+    it "requires Metal Vulkan CUDA OpenCL HIP and CPU SIMD lanes in the matrix":
+        val metal = backend_measurement_from_probe(
+            StrictBackendFactory.strict().create_backend("metal"),
+            "", "local-linux", 0, 0, 0, 0, 0, 0, 0, "", false
+        )
+        val vulkan = backend_measurement_from_probe(
+            StrictBackendFactory.strict().create_backend("vulkan"),
+            "", "local-linux", 0, 0, 0, 0, 0, 0, 0, "", false
+        )
+        val cuda = backend_measurement_from_probe(
+            StrictBackendFactory.strict().create_backend("cuda"),
+            "", "local-linux", 0, 0, 0, 0, 0, 0, 0, "", false
+        )
+        val opencl = backend_measurement_from_probe(
+            StrictBackendFactory.strict().create_backend("opencl"),
+            "", "local-linux", 0, 0, 0, 0, 0, 0, 0, "", false
+        )
+        val rocm = backend_measurement_from_probe(
+            StrictBackendFactory.strict().create_backend("rocm"),
+            "", "local-linux", 0, 0, 0, 0, 0, 0, 0, "", false
+        )
+        val cpu_simd = _initialized_record("cpu_simd")
+        val records = [metal, vulkan, cuda, opencl, rocm, cpu_simd]
+        expect(backend_measurement_matrix_valid(records)).to_equal(true)
+        val sdn = backend_measurement_matrix_sdn(records)
+        expect(sdn).to_contain("metal_status:")
+        expect(sdn).to_contain("vulkan_status:")
+        expect(sdn).to_contain("cuda_status:")
+        expect(sdn).to_contain("opencl_status:")
+        expect(sdn).to_contain("hip_status:")
+        expect(sdn).to_contain("cpu_simd_status:")
+        expect(sdn).to_contain("p50_us:")
+        expect(sdn).to_contain("p95_us:")

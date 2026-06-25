@@ -1,0 +1,88 @@
+# ============================================================================
+# RV32I RTL Register File — 2R1W, 32 x 32-bit
+# ============================================================================
+#
+# Translates regfile.vhd into Simple.  x0 is hardwired to zero.
+# Combinational reads (async), clocked writes (sync).
+# Includes direct a0/a1 read ports for semihosting.
+#
+# Initial values: x2 (sp) = 0x00000FFC (top of 4 KB DMEM).
+# ============================================================================
+
+# ============================================================================
+# Initial SP value
+# ============================================================================
+
+val INIT_SP: u32 = 0x00000FFC   # Top of 4 KB data memory
+
+# ============================================================================
+# Register file struct
+# ============================================================================
+
+struct RegFile:
+    """32 x 32-bit integer register file (VHDL synthesizable).
+    NOTE: uses dynamic [u32] for initialization compatibility;
+    VHDL backend maps this to reg_array_t (array 0 to 31 of std_logic_vector)."""
+    regs: [u32]
+
+# ============================================================================
+# Read result bundle
+# ============================================================================
+
+struct RegReadResult:
+    """Combinational read port outputs."""
+    rs1_data: u32
+    rs2_data: u32
+    a0_val: u32    # Direct read of x10 (a0) for semihosting
+    a1_val: u32    # Direct read of x11 (a1) for semihosting
+
+# ============================================================================
+# Register file initialization
+# ============================================================================
+
+fn regfile_create() -> RegFile:
+    """Create a register file with initial values.
+    x0 = 0 (hardwired), x2 (sp) = INIT_SP, all others = 0."""
+    var regs: [u32] = []
+    var i = 0
+    while i < 32:
+        regs = regs + [0]
+        i = i + 1
+    var rf = RegFile(regs: regs)
+    rf.regs[2] = INIT_SP
+    rf
+
+# ============================================================================
+# Combinational read (async — mirrors VHDL concurrent assignments)
+# ============================================================================
+
+fn regfile_read(rf: RegFile, rs1_addr: u32, rs2_addr: u32) -> RegReadResult:
+    """Read two registers plus a0/a1 direct ports.
+    x0 always reads as zero (hardwired)."""
+
+    var rs1_data: u32 = 0
+    if rs1_addr != 0:
+        rs1_data = rf.regs[rs1_addr]
+
+    var rs2_data: u32 = 0
+    if rs2_addr != 0:
+        rs2_data = rf.regs[rs2_addr]
+
+    RegReadResult(
+        rs1_data: rs1_data,
+        rs2_data: rs2_data,
+        a0_val: rf.regs[10],
+        a1_val: rf.regs[11]
+    )
+
+# ============================================================================
+# Clocked write (sync — mirrors VHDL rising_edge process)
+# ============================================================================
+
+fn regfile_write(rf: RegFile, rd_addr: u32, rd_data: u32, we: bool) -> RegFile:
+    """Write to register file. Writes to x0 are silently discarded.
+    Returns the updated register file (functional style for RTL)."""
+    var new_rf = rf
+    if we and rd_addr != 0:
+        new_rf.regs[rd_addr] = rd_data
+    new_rf

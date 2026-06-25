@@ -1,0 +1,187 @@
+# Symbol Resolution Engine
+#
+# Resolves symbols across multiple ELF object files following standard
+# ELF linking rules: strong > weak, duplicate strong = error, locals
+# are per-object and never enter the global table.
+
+use compiler.backend.linker.elf_parser.{
+    ElfObject, ElfSymbol, elf_symbol_binding,
+    elf_defined_symbols, elf_undefined_symbols,
+    SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK
+}
+
+# ============================================================================
+# Types
+# ============================================================================
+
+enum SymBinding:
+    Local
+    Global
+    Weak
+
+struct SymEntry:
+    name: text
+    section_idx: i64
+    offset: i64
+    size: i64
+    binding: SymBinding
+    obj_idx: i64
+    is_defined: bool
+
+struct SymResolution:
+    defined: {text: SymEntry}
+    undefined: [text]
+    errors: [text]
+    local_tables: [[SymEntry]]
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn elf_binding_to_sym(b: i64) -> SymBinding:
+    if b == STB_WEAK:
+        SymBinding.Weak
+    else if b == STB_GLOBAL:
+        SymBinding.Global
+    else:
+        SymBinding.Local
+
+fn sym_entry_from_elf(sym: ElfSymbol, obj_idx: i64) -> SymEntry:
+    SymEntry(
+        name: sym.name,
+        section_idx: sym.st_shndx,
+        offset: sym.st_value,
+        size: sym.st_size,
+        binding: elf_binding_to_sym(elf_symbol_binding(sym)),
+        obj_idx: obj_idx,
+        is_defined: sym.st_shndx != SHN_UNDEF
+    )
+
+fn is_strong(entry: SymEntry) -> bool:
+    match entry.binding:
+        case Global: true
+        case _: false
+
+fn is_weak(entry: SymEntry) -> bool:
+    match entry.binding:
+        case Weak: true
+        case _: false
+
+# ============================================================================
+# Resolution
+# ============================================================================
+
+fn sym_resolution_new() -> SymResolution:
+    SymResolution(
+        defined: {},
+        undefined: [],
+        errors: [],
+        local_tables: []
+    )
+
+# reason: positional linker sym_resolver API
+fn sym_add_object(res: SymResolution, obj: ElfObject, obj_idx: i64) -> SymResolution:
+    var defined = res.defined
+    var errors = res.errors
+    var locals: [SymEntry] = []
+    var local_tables = res.local_tables
+
+    for sym in obj.symbols:
+        if sym.name == "":
+            continue
+
+        val entry = sym_entry_from_elf(sym, obj_idx)
+
+        if entry.binding == SymBinding.Local:
+            locals = locals.push(entry)
+            continue
+
+        if not entry.is_defined:
+            continue
+
+        if defined.has(sym.name):
+            val existing = defined[sym.name]
+            if is_strong(existing) and is_strong(entry):
+                errors = errors.push("duplicate symbol: {sym.name} (object {existing.obj_idx} and {obj_idx})")
+            else if is_strong(entry) and is_weak(existing):
+                defined = defined.set(sym.name, entry)
+        else:
+            defined = defined.set(sym.name, entry)
+
+    local_tables = local_tables.push(locals)
+
+    SymResolution(
+        defined: defined,
+        undefined: res.undefined,
+        errors: errors,
+        local_tables: local_tables
+    )
+
+fn sym_collect_undefined(res: SymResolution, objects: [ElfObject]) -> SymResolution:
+    var undef: [text] = []
+    var seen: {text: bool} = {}
+
+    for obj in objects:
+        val undefs = elf_undefined_symbols(obj)
+        for sym in undefs:
+            if sym.name == "":
+                continue
+            if sym.name == "_GLOBAL_OFFSET_TABLE_":
+                continue
+            if not res.defined.has(sym.name) and not seen.has(sym.name):
+                undef = undef.push(sym.name)
+                seen = seen.set(sym.name, true)
+
+    SymResolution(
+        defined: res.defined,
+        undefined: undef,
+        errors: res.errors,
+        local_tables: res.local_tables
+    )
+
+# reason: positional linker sym_resolver API
+fn sym_resolve_objects(objects: [ElfObject]) -> SymResolution:
+    var res = sym_resolution_new()
+    var idx: i64 = 0
+    for obj in objects:
+        res = sym_add_object(res, obj, idx)
+        idx = idx + 1
+    res = sym_collect_undefined(res, objects)
+    res
+
+fn sym_get(res: SymResolution, name: text) -> SymEntry?:
+    if res.defined.has(name):
+        Some(res.defined[name])
+    else:
+        nil
+
+fn sym_is_resolved(res: SymResolution) -> bool:
+    res.undefined.len() == 0 and res.errors.len() == 0
+
+fn sym_defined_count(res: SymResolution) -> i64:
+    res.defined.len()
+
+fn sym_undefined_count(res: SymResolution) -> i64:
+    res.undefined.len()
+
+fn sym_error_count(res: SymResolution) -> i64:
+    res.errors.len()
+
+fn sym_has_symbol(res: SymResolution, name: text) -> bool:
+    res.defined.has(name)
+
+fn sym_local_count(res: SymResolution, obj_idx: i64) -> i64:
+    if obj_idx < 0 or obj_idx >= res.local_tables.len():
+        return 0
+    res.local_tables[obj_idx].len()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export SymBinding, SymEntry, SymResolution
+export sym_resolution_new, sym_add_object, sym_collect_undefined
+export sym_resolve_objects, sym_get, sym_is_resolved
+export sym_defined_count, sym_undefined_count, sym_error_count
+export sym_has_symbol, sym_local_count
+export elf_binding_to_sym, sym_entry_from_elf, is_strong, is_weak

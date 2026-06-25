@@ -1,0 +1,119 @@
+# @cover src/lib/nogc_async_mut/compute/backend_dispatch.spl
+#
+# Env-agnostic: green with or without SIMPLE_COMPUTE_GPU_PAYLOAD. The env-driven
+# require tests bind the REAL library function to the REAL payload gate, so both
+# sides move together regardless of env state.
+#
+# NOTE: `expect(x).to_be(true/false)` does NOT discriminate on bools in this
+# runner (passes for either argument), and `to_be_true`/`to_be_false` are not
+# methods on bool. Every bool check is therefore mapped to i64 via bool_to_i and
+# compared with to_equal, which is verified to discriminate (a wrong int goes RED).
+use std.spec.*
+use std.nogc_async_mut.compute.backend_dispatch.{
+    DispatchOutcome, gpu_payload_present, dispatch_is_device,
+    dispatch_reduce_i64, dispatch_reduce_i64_forced, dispatch_requirement_met,
+    dispatch_backend_name
+}
+use std.nogc_async_mut.compute.exec_target.{
+    DeviceClass, ComputeBackend, EnforceMode, BackendCaps, ExecTarget,
+    resolve_exec_target
+}
+
+fn add_i64(a: i64, b: i64) -> i64:
+    return a + b
+
+# Map a bool to i64 so to_equal (proven discriminating) can compare dynamic bools.
+fn bool_to_i(b: bool) -> i64:
+    if b:
+        return 1
+    return 0
+
+fn caps_cuda_only() -> BackendCaps:
+    var c = BackendCaps.none()
+    c.has_cuda = true
+    return c
+
+fn caps_metal_only() -> BackendCaps:
+    var c = BackendCaps.none()
+    c.has_metal = true
+    return c
+
+# A cpu-resolved target (scalar, non-device).
+fn cpu_target() -> ExecTarget:
+    return resolve_exec_target(DeviceClass.Cpu, ComputeBackend.NoneBackend, EnforceMode.Suggest, BackendCaps.none())
+
+# A gpu-resolved target on a cuda-only machine (backend == cuda, resolved == true).
+fn cuda_target() -> ExecTarget:
+    return resolve_exec_target(DeviceClass.Gpu, ComputeBackend.NoneBackend, EnforceMode.Require, caps_cuda_only())
+
+# A gpu-resolved target on a metal-only machine (backend == metal, resolved == true).
+fn metal_target() -> ExecTarget:
+    return resolve_exec_target(DeviceClass.Gpu, ComputeBackend.NoneBackend, EnforceMode.Require, caps_metal_only())
+
+describe "backend_dispatch honest GPU/CPU routing":
+
+    it "cpu target runs the reduce on the CPU reference (ran_on_cpu=true)":
+        step("Dispatch reduce on a cpu-scalar target")
+        val data = [10, 20, 30]
+        val outcome = dispatch_reduce_i64(data, 0, add_i64, cpu_target())
+        expect(outcome.value).to_equal(60)
+        expect(bool_to_i(outcome.stats.ran_on_cpu)).to_equal(1)
+
+    it "gpu-resolved target WITHOUT payload falls back to CPU (no false gpu claim)":
+        step("cuda target resolved=true, but no real payload present (forced gate false)")
+        val data = [10, 20, 30]
+        val outcome = dispatch_reduce_i64_forced(data, 0, add_i64, cuda_target(), false)
+        # Discriminator: backend is named cuda, target IS a device, yet the CPU ran.
+        expect(dispatch_backend_name(cuda_target().backend)).to_equal("cuda")
+        expect(bool_to_i(dispatch_is_device(cuda_target()))).to_equal(1)
+        expect(outcome.stats.backend).to_equal("cuda")
+        expect(bool_to_i(outcome.stats.ran_on_cpu)).to_equal(1)
+        expect(outcome.value).to_equal(60)
+
+    it "gpu-resolved target WITH payload runs on GPU and matches the reference":
+        step("cuda target with a real payload present (forced gate true)")
+        val data = [10, 20, 30]
+        val gpu_out = dispatch_reduce_i64_forced(data, 0, add_i64, cuda_target(), true)
+        expect(gpu_out.stats.backend).to_equal("cuda")
+        # Core discriminator: WITH payload, ran_on_cpu flips to false (real GPU-ran claim).
+        expect(bool_to_i(gpu_out.stats.ran_on_cpu)).to_equal(0)
+        # Differential correctness: GPU value EQUALS the CPU reference value.
+        val cpu_out = dispatch_reduce_i64_forced(data, 0, add_i64, cuda_target(), false)
+        expect(gpu_out.value).to_equal(cpu_out.value)
+        expect(gpu_out.value).to_equal(60)
+
+    it "ran_on_cpu DIFFERS between the with-payload and without-payload branches":
+        step("Same target, only the payload gate changes")
+        val data = [10, 20, 30]
+        val with_payload = dispatch_reduce_i64_forced(data, 0, add_i64, cuda_target(), true)
+        val without_payload = dispatch_reduce_i64_forced(data, 0, add_i64, cuda_target(), false)
+        expect(with_payload.value).to_equal(without_payload.value)
+        expect(bool_to_i(with_payload.stats.ran_on_cpu)).to_equal(0)
+        expect(bool_to_i(without_payload.stats.ran_on_cpu)).to_equal(1)
+
+    it "gpu_payload_present is exclusive: cuda and metal cannot both be present":
+        step("Whatever the env, at most one backend name can match the single payload")
+        # Env-agnostic invariant: the gate keys on an exact backend-name match, so
+        # two distinct names can never both be present.
+        val both = gpu_payload_present("cuda") and gpu_payload_present("metal")
+        expect(bool_to_i(both)).to_equal(0)
+
+    it "require-mode: real dispatch_requirement_met TRACKS the real payload gate (env-driven)":
+        step("dispatch_requirement_met(cuda) must equal gpu_payload_present(cuda) for a resolved device")
+        # Binds the REAL library function to the REAL env path: whatever the env
+        # says, the requirement signal must agree with the payload gate. With
+        # SIMPLE_COMPUTE_GPU_PAYLOAD=cuda both are true; without it both are false.
+        expect(bool_to_i(dispatch_requirement_met(cuda_target()))).to_equal(bool_to_i(gpu_payload_present("cuda")))
+
+    it "require-mode: real dispatch_requirement_met tracks the metal gate":
+        step("metal target is a resolved device; its requirement equals the metal gate")
+        expect(bool_to_i(dispatch_requirement_met(metal_target()))).to_equal(bool_to_i(gpu_payload_present("metal")))
+
+    it "require-mode: an unresolved target is never met":
+        step("require gpu on a bare machine fails to resolve")
+        val unresolved = resolve_exec_target(DeviceClass.Gpu, ComputeBackend.NoneBackend, EnforceMode.Require, BackendCaps.none())
+        expect(unresolved.backend).to_equal(ComputeBackend.NoneBackend)
+        expect(bool_to_i(dispatch_requirement_met(unresolved))).to_equal(0)
+
+    it "cpu target requirement is always met (non-device, no payload needed)":
+        expect(bool_to_i(dispatch_requirement_met(cpu_target()))).to_equal(1)

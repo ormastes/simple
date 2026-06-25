@@ -1,0 +1,311 @@
+# SkSL tokenizer — lexical analyzer for Skia's Shading Language.
+#
+# First stage of a future SkRuntimeEffect SkSL frontend. Produces a token
+# stream; parser/codegen are out of scope for this module.
+#
+# SkSL is a C-like GLSL dialect — this tokenizer handles:
+#   - keywords (uniform, in, out, vec2/3/4, float, int, bool, if, else, for, return, void)
+#   - identifiers
+#   - number literals (int and float)
+#   - string literals (for asserts)
+#   - operators (+, -, *, /, %, =, ==, !=, <=, >=, <, >, &&, ||, !, &, |, ^, <<, >>)
+#   - punctuation ({ } ( ) [ ] , ; .)
+#   - comments (// single-line, /* block */)
+#   - whitespace (skipped)
+
+# ============================================================================
+# TokenKind — variant tag for each lexeme class
+# ============================================================================
+
+enum TokenKind:
+    Keyword
+    Identifier
+    IntLiteral
+    FloatLiteral
+    StringLiteral
+    Operator
+    Punctuation
+    Comment
+    Eof
+    Invalid
+
+# ============================================================================
+# Token — one lexeme with source location
+# ============================================================================
+
+class Token:
+    kind: TokenKind
+    text: String
+    line: i64
+    column: i64
+
+# ============================================================================
+# SKSL_KEYWORDS — SkSL reserved words recognized by this tokenizer.
+#
+# WHY this list: mirrors the minimum subset needed for uniform/shader-main
+# declarations. The future SkSL parser can extend this (e.g. `const`,
+# `highp`, `mediump`, `discard`) without altering tokenizer semantics.
+# ============================================================================
+
+const SKSL_KEYWORDS: [String] = [
+    "uniform", "in", "out",
+    "vec2", "vec3", "vec4",
+    "float", "int", "bool",
+    "if", "else", "for", "return", "void"
+]
+
+# ============================================================================
+# Character classification — ASCII-only. SkSL source is ASCII by
+# specification, so UTF-8 bytes above 0x7F are never valid in identifiers.
+# ============================================================================
+
+fn _is_alpha(c: i64) -> bool:
+    # a-z, A-Z, or underscore
+    val lower = c >= 97 and c <= 122
+    val upper = c >= 65 and c <= 90
+    val under = c == 95
+    lower or upper or under
+
+fn _is_digit(c: i64) -> bool:
+    c >= 48 and c <= 57
+
+fn _is_alnum(c: i64) -> bool:
+    _is_alpha(c) or _is_digit(c)
+
+fn _is_whitespace(c: i64) -> bool:
+    # space, tab, CR, LF
+    c == 32 or c == 9 or c == 13 or c == 10
+
+# ============================================================================
+# _byte_at — safe byte fetch, returns -1 on out-of-range.
+#
+# WHY -1 sentinel: `Option<u8>` match-nesting at every call site would bury
+# the scanner logic. -1 is outside the u8 range so it cannot collide with
+# any real byte, and all classification helpers treat it as "not a match".
+# ============================================================================
+
+fn _byte_at(bytes: [u8], i: i64) -> i64:
+    if i < 0 or i >= bytes.length():
+        return -1
+    val opt = bytes.at(i)
+    match opt:
+        Some(v):
+            v as i64
+        None:
+            -1
+
+# ============================================================================
+# _slice_text — copy bytes[start..end) back into a String.
+#
+# WHY per-scan copy: SkSL source is small (runtime effects are typically
+# a few hundred bytes), so copying each lexeme is cheap. A zero-copy
+# string-view type would complicate downstream parser consumption with
+# no measurable win here.
+# ============================================================================
+
+fn _slice_text(source: String, start: i64, end: i64) -> String:
+    source[start:end]
+
+# ============================================================================
+# _is_keyword — linear scan over SKSL_KEYWORDS.
+#
+# WHY O(N) and not a hash set: SKSL_KEYWORDS has ~14 entries. A hash
+# lookup would cost more in hashing overhead than the 14 equality checks.
+# ============================================================================
+
+fn _is_keyword(text: String) -> bool:
+    val n = SKSL_KEYWORDS.len()
+    var i = 0
+    while i < n:
+        if SKSL_KEYWORDS[i] == text:
+            return true
+        i = i + 1
+    false
+
+# ============================================================================
+# tokenize_sksl — main entry point.
+#
+# Produces a token list terminated by a single Token(Eof, "", line, col).
+# Whitespace and comments are skipped (not emitted). On an unrecognized
+# byte, emits Token(Invalid, <char>, line, col) and advances one byte so
+# the scanner can make progress on malformed input.
+# ============================================================================
+
+fn tokenize_sksl(source: String) -> [Token]:
+    var tokens: [Token] = []
+    val bytes = source.bytes()
+    val n = bytes.length()
+    var i = 0
+    var line = 1
+    var col = 1
+
+    while i < n:
+        val c = _byte_at(bytes, i)
+
+        # --- whitespace ---
+        if _is_whitespace(c):
+            if c == 10:
+                line = line + 1
+                col = 1
+            else:
+                col = col + 1
+            i = i + 1
+            continue
+
+        # --- line comment `// ... \n` ---
+        if c == 47 and _byte_at(bytes, i + 1) == 47:
+            while i < n and _byte_at(bytes, i) != 10:
+                i = i + 1
+                col = col + 1
+            continue
+
+        # --- block comment `/* ... */` ---
+        if c == 47 and _byte_at(bytes, i + 1) == 42:
+            i = i + 2
+            col = col + 2
+            while i < n:
+                val bc = _byte_at(bytes, i)
+                if bc == 42 and _byte_at(bytes, i + 1) == 47:
+                    i = i + 2
+                    col = col + 2
+                    break
+                if bc == 10:
+                    line = line + 1
+                    col = 1
+                else:
+                    col = col + 1
+                i = i + 1
+            continue
+
+        val start_col = col
+
+        # --- identifier or keyword ---
+        if _is_alpha(c):
+            val start = i
+            while i < n and _is_alnum(_byte_at(bytes, i)):
+                i = i + 1
+                col = col + 1
+            val text = _slice_text(source, start, i)
+            val kind = if _is_keyword(text): TokenKind.Keyword else: TokenKind.Identifier
+            tokens.push(Token(kind: kind, text: text, line: line, column: start_col))
+            continue
+
+        # --- number literal (int or float) ---
+        if _is_digit(c):
+            val start = i
+            while i < n and _is_digit(_byte_at(bytes, i)):
+                i = i + 1
+                col = col + 1
+            var is_float = false
+            if i < n and _byte_at(bytes, i) == 46 and _is_digit(_byte_at(bytes, i + 1)):
+                # consume `.` and fractional digits
+                is_float = true
+                i = i + 1
+                col = col + 1
+                while i < n and _is_digit(_byte_at(bytes, i)):
+                    i = i + 1
+                    col = col + 1
+            val text = _slice_text(source, start, i)
+            val kind = if is_float: TokenKind.FloatLiteral else: TokenKind.IntLiteral
+            tokens.push(Token(kind: kind, text: text, line: line, column: start_col))
+            continue
+
+        # --- string literal `"..."` (no escape handling) ---
+        if c == 34:
+            val start = i
+            i = i + 1
+            col = col + 1
+            while i < n and _byte_at(bytes, i) != 34:
+                if _byte_at(bytes, i) == 10:
+                    line = line + 1
+                    col = 1
+                else:
+                    col = col + 1
+                i = i + 1
+            if i < n:
+                # consume closing quote
+                i = i + 1
+                col = col + 1
+            val text = _slice_text(source, start, i)
+            tokens.push(Token(kind: TokenKind.StringLiteral, text: text, line: line, column: start_col))
+            continue
+
+        # --- multi-char operators ---
+        val c1 = _byte_at(bytes, i + 1)
+        # `==`
+        if c == 61 and c1 == 61:
+            tokens.push(Token(kind: TokenKind.Operator, text: "==", line: line, column: start_col))
+            i = i + 2
+            col = col + 2
+            continue
+        # `!=`
+        if c == 33 and c1 == 61:
+            tokens.push(Token(kind: TokenKind.Operator, text: "!=", line: line, column: start_col))
+            i = i + 2
+            col = col + 2
+            continue
+        # `<=`
+        if c == 60 and c1 == 61:
+            tokens.push(Token(kind: TokenKind.Operator, text: "<=", line: line, column: start_col))
+            i = i + 2
+            col = col + 2
+            continue
+        # `>=`
+        if c == 62 and c1 == 61:
+            tokens.push(Token(kind: TokenKind.Operator, text: ">=", line: line, column: start_col))
+            i = i + 2
+            col = col + 2
+            continue
+        # `&&`
+        if c == 38 and c1 == 38:
+            tokens.push(Token(kind: TokenKind.Operator, text: "&&", line: line, column: start_col))
+            i = i + 2
+            col = col + 2
+            continue
+        # `||`
+        if c == 124 and c1 == 124:
+            tokens.push(Token(kind: TokenKind.Operator, text: "||", line: line, column: start_col))
+            i = i + 2
+            col = col + 2
+            continue
+        # `<<`
+        if c == 60 and c1 == 60:
+            tokens.push(Token(kind: TokenKind.Operator, text: "<<", line: line, column: start_col))
+            i = i + 2
+            col = col + 2
+            continue
+        # `>>`
+        if c == 62 and c1 == 62:
+            tokens.push(Token(kind: TokenKind.Operator, text: ">>", line: line, column: start_col))
+            i = i + 2
+            col = col + 2
+            continue
+
+        # --- single-char operators ---
+        # + - * / % = < > ! & | ^
+        val is_op = c == 43 or c == 45 or c == 42 or c == 47 or c == 37 or c == 61 or c == 60 or c == 62 or c == 33 or c == 38 or c == 124 or c == 94
+        if is_op:
+            val text = _slice_text(source, i, i + 1)
+            tokens.push(Token(kind: TokenKind.Operator, text: text, line: line, column: start_col))
+            i = i + 1
+            col = col + 1
+            continue
+
+        # --- punctuation ---
+        # { } ( ) [ ] , ; .
+        val is_punct = c == 123 or c == 125 or c == 40 or c == 41 or c == 91 or c == 93 or c == 44 or c == 59 or c == 46
+        if is_punct:
+            val text = _slice_text(source, i, i + 1)
+            tokens.push(Token(kind: TokenKind.Punctuation, text: text, line: line, column: start_col))
+            i = i + 1
+            col = col + 1
+            continue
+
+        # --- unrecognized byte ---
+        val text = _slice_text(source, i, i + 1)
+        tokens.push(Token(kind: TokenKind.Invalid, text: text, line: line, column: start_col))
+        i = i + 1
+        col = col + 1
+
+    tokens.push(Token(kind: TokenKind.Eof, text: "", line: line, column: col))
+    tokens

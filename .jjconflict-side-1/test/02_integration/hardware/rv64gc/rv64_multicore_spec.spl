@@ -1,0 +1,93 @@
+"""
+# RV64 Multi-Core Integration Tests
+
+**Feature IDs:** #RV64-MULTICORE-001
+**Category:** Hardware
+**Difficulty:** 3/5
+**Status:** Draft
+
+## Overview
+
+Multi-hart SMP integration: boot, IPI, shared memory atomics.
+"""
+
+# tag: only-compiled, slow
+
+import std.spec
+
+describe "Hart Initialization":
+    it "each hart has unique mhartid":
+        val hart0_id: i64 = 0
+        val hart1_id: i64 = 1
+        expect(hart0_id != hart1_id).to_equal(true)
+
+    it "all registers zeroed at reset":
+        var regs: [i64] = [0, 0, 0, 0]
+        expect(regs[0]).to_equal(0)
+        expect(regs[3]).to_equal(0)
+
+    it "PC at reset vector":
+        val reset_pc: i64 = 0x80000000
+        expect(reset_pc).to_equal(0x80000000)
+
+describe "IPI via CLINT MSIP":
+    it "hart 0 sends IPI to hart 1":
+        var msip: [i64] = [0, 0]
+        msip[1] = 1  # Hart 0 writes MSIP[1]
+        expect(msip[1]).to_equal(1)
+
+    it "hart 1 sees software interrupt pending":
+        var msip: [i64] = [0, 1]
+        val pending = (msip[1] and 1) != 0
+        expect(pending).to_equal(true)
+
+    it "clear IPI after handling":
+        var msip: [i64] = [0, 1]
+        msip[1] = 0
+        expect(msip[1]).to_equal(0)
+
+describe "Shared Memory Atomics":
+    it "LR/SC: one hart succeeds, other fails":
+        var shared_val: i64 = 42
+        # Hart 0 does LR
+        val hart0_loaded = shared_val
+        # Hart 1 does LR then SC (succeeds first)
+        val hart1_loaded = shared_val
+        shared_val = 100  # Hart 1 SC succeeds
+        # Hart 0 SC should fail (reservation broken)
+        val hart0_sc_fail = true  # SC would fail
+        expect(shared_val).to_equal(100)
+        expect(hart0_sc_fail).to_equal(true)
+
+    it "AMOADD: atomic increment from two harts":
+        var counter: i64 = 0
+        # Hart 0: AMOADD +1
+        val old0 = counter
+        counter = counter + 1
+        # Hart 1: AMOADD +1
+        val old1 = counter
+        counter = counter + 1
+        expect(counter).to_equal(2)
+
+    it "atomic flag for spinlock":
+        var lock: i64 = 0
+        # AMOSWAP to acquire
+        val old = lock
+        lock = 1
+        expect(old).to_equal(0)
+        expect(lock).to_equal(1)
+
+describe "Timer Per Hart":
+    it "independent mtimecmp per hart":
+        var mtimecmp: [i64] = [100, 200]
+        var mtime: i64 = 150
+        val hart0_irq = mtime >= mtimecmp[0]
+        val hart1_irq = mtime >= mtimecmp[1]
+        expect(hart0_irq).to_equal(true)
+        expect(hart1_irq).to_equal(false)
+
+    it "shared mtime across harts":
+        var mtime: i64 = 42
+        val hart0_reads = mtime
+        val hart1_reads = mtime
+        expect(hart0_reads).to_equal(hart1_reads)

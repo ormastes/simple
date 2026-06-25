@@ -1,0 +1,151 @@
+"""AppLoaderWorld — ECS-based world for filesystem-loaded tool app management.
+
+Owns entity allocation and component stores for tool apps discovered from
+the FAT32 filesystem on x86_64 SimpleOS. Follows the WmWorld pattern from
+os.services.wm.wm_world.
+MDSOC: feature dimension, fs_apps layer. ECS business layer for userland.
+"""
+
+use std.ecs.entity.{Entity, EntityAllocator}
+use std.ecs.component_store.{ComponentStore}
+use std.ecs.world.{WorldBase}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# ECS component types
+# ============================================================================
+
+pub struct AppIdentity:
+    """ECS component: canonical app name and filesystem path."""
+    name: text
+    path: text
+    short_name: text
+
+pub struct AppDiskState:
+    """ECS component: on-disk presence tracking for a tool app."""
+    on_disk: bool
+    smf_present: bool
+    fat32_alias: text
+
+pub struct AppRunState:
+    """ECS component: runtime execution state of a tool app."""
+    pid: i64
+    status: text
+
+# Maximum tool apps the loader will track
+val APP_LOADER_MAX_APPS: i32 = 64
+
+# ============================================================================
+# AppLoaderWorld — ECS container for tool app state
+# ============================================================================
+
+pub class AppLoaderWorld:
+    """ECS-based world owning all tool app component stores."""
+    base: WorldBase
+    identities: ComponentStore<AppIdentity>
+    disk_states: ComponentStore<AppDiskState>
+    run_states: ComponentStore<AppRunState>
+
+impl AppLoaderWorld:
+    static fn new() -> AppLoaderWorld:
+        AppLoaderWorld(
+            base: WorldBase.with_capacity(APP_LOADER_MAX_APPS),
+            identities: ComponentStore.new(),
+            disk_states: ComponentStore.new(),
+            run_states: ComponentStore.new()
+        )
+
+    me spawn_app(name: text, path: text, short_name: text, fat32_alias: text) -> Entity:
+        """Create a new app entity with identity and disk state components."""
+        val e = self.base.spawn()
+        val tick = self.base.now()
+        self.identities.insert(e, AppIdentity(name: name, path: path, short_name: short_name), tick)
+        self.disk_states.insert(e, AppDiskState(on_disk: false, smf_present: false, fat32_alias: fat32_alias), tick)
+        self.run_states.insert(e, AppRunState(pid: 0, status: "idle"), tick)
+        self.base.advance()
+        serial_println("[app-loader] spawn entity name={name} path={path}")
+        e
+
+    me mark_on_disk(e: Entity):
+        """Mark an app entity as present on disk."""
+        val slot = self.disk_states.get_slot(e)
+        if slot >= 0:
+            self.disk_states.dense[slot].on_disk = true
+            self.disk_states.touch(e, self.base.now())
+
+    me mark_smf_present(e: Entity):
+        """Mark an app entity as having an SMF companion on disk."""
+        val slot = self.disk_states.get_slot(e)
+        if slot >= 0:
+            self.disk_states.dense[slot].smf_present = true
+            self.disk_states.touch(e, self.base.now())
+
+    me set_run_state(e: Entity, pid: i64, status: text):
+        """Update the run state of an app entity."""
+        val slot = self.run_states.get_slot(e)
+        if slot >= 0:
+            self.run_states.dense[slot].pid = pid
+            self.run_states.dense[slot].status = status
+            self.run_states.touch(e, self.base.now())
+
+    fn app_count(self) -> i32:
+        """Return the number of registered app entities."""
+        self.identities.len()
+
+    fn find_by_name(self, name: text) -> Entity?:
+        """Look up an app entity by canonical name."""
+        var i: i32 = 0
+        val n = self.identities.len()
+        while i < n:
+            if self.identities.dense[i].name == name:
+                val eid = self.identities.entity_at(i)
+                return Some(Entity(id: eid, generation: 0))
+            i = i + 1
+        nil
+
+    fn find_by_path(self, path: text) -> Entity?:
+        """Look up an app entity by filesystem path."""
+        var i: i32 = 0
+        val n = self.identities.len()
+        while i < n:
+            if self.identities.dense[i].path == path:
+                val eid = self.identities.entity_at(i)
+                return Some(Entity(id: eid, generation: 0))
+            i = i + 1
+        nil
+
+    fn get_identity(self, e: Entity) -> AppIdentity?:
+        """Get the identity component of an app entity."""
+        val slot = self.identities.get_slot(e)
+        if slot < 0:
+            return nil
+        Some(self.identities.dense[slot])
+
+    fn get_disk_state(self, e: Entity) -> AppDiskState?:
+        """Get the disk state component of an app entity."""
+        val slot = self.disk_states.get_slot(e)
+        if slot < 0:
+            return nil
+        Some(self.disk_states.dense[slot])
+
+    fn get_run_state(self, e: Entity) -> AppRunState?:
+        """Get the run state component of an app entity."""
+        val slot = self.run_states.get_slot(e)
+        if slot < 0:
+            return nil
+        Some(self.run_states.dense[slot])
+
+    fn is_app_on_disk(self, e: Entity) -> bool:
+        """Check whether an app entity is marked as present on disk."""
+        val slot = self.disk_states.get_slot(e)
+        if slot < 0:
+            return false
+        self.disk_states.dense[slot].on_disk
+
+    fn is_app_running(self, e: Entity) -> bool:
+        """Check whether an app entity is currently running."""
+        val slot = self.run_states.get_slot(e)
+        if slot < 0:
+            return false
+        self.run_states.dense[slot].status == "running"

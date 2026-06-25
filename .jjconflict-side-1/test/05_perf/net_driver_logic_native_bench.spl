@@ -1,0 +1,143 @@
+use test.perf.bench.lib.timing.{bench_now_ns}
+
+@inline
+fn nd_desc_size(queue_size: u64) -> u64:
+    queue_size * 16
+
+@inline
+fn nd_avail_size(queue_size: u64) -> u64:
+    4 + queue_size * 2
+
+@inline
+fn nd_used_size(queue_size: u64) -> u64:
+    4 + queue_size * 8
+
+@inline
+fn nd_total_size(queue_size: u64) -> u64:
+    val desc_avail = nd_desc_size(queue_size) + nd_avail_size(queue_size)
+    ((desc_avail + 4095) & ~4095) + nd_used_size(queue_size)
+
+fn print_row(label: text, iters: i64, total_ns: i64, checksum: u64):
+    print "{label},{iters},{total_ns},{checksum}"
+
+fn bench_desc(iters: i64):
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        checksum = checksum + nd_desc_size(((i % 128) + 1).to_u64())
+        i = i + 1
+    print_row("desc", iters, bench_now_ns() - t0, checksum)
+
+fn bench_avail(iters: i64):
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        checksum = checksum + nd_avail_size(((i % 128) + 1).to_u64())
+        i = i + 1
+    print_row("avail", iters, bench_now_ns() - t0, checksum)
+
+fn bench_used(iters: i64):
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        checksum = checksum + nd_used_size(((i % 128) + 1).to_u64())
+        i = i + 1
+    print_row("used", iters, bench_now_ns() - t0, checksum)
+
+fn bench_total(iters: i64):
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        checksum = checksum + nd_total_size(((i % 128) + 1).to_u64())
+        i = i + 1
+    print_row("total", iters, bench_now_ns() - t0, checksum)
+
+fn bench_ring(iters: i64):
+    var checksum: u64 = 0
+    val base: u64 = 0x1000
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        checksum = checksum + base + 4 + ((i.to_u64() % 128) * 2)
+        i = i + 1
+    print_row("ring", iters, bench_now_ns() - t0, checksum)
+
+fn bench_used_align(iters: i64):
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val q = ((i % 128) + 1).to_u64()
+        val desc_avail = nd_desc_size(q) + nd_avail_size(q)
+        checksum = checksum + ((desc_avail + 4095) & ~4095)
+        i = i + 1
+    print_row("used_align", iters, bench_now_ns() - t0, checksum)
+
+fn bench_pfn(iters: i64):
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        checksum = checksum + ((0x80000000 + i.to_u64() * 4096) >> 12)
+        i = i + 1
+    print_row("pfn", iters, bench_now_ns() - t0, checksum)
+
+fn bench_descriptor(iters: i64):
+    var checksum: u64 = 0
+    val base: u64 = 0x100000
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        checksum = checksum + base + ((i.to_u64() % 128) * 16)
+        i = i + 1
+    print_row("descriptor", iters, bench_now_ns() - t0, checksum)
+
+fn bench_buffer(iters: i64):
+    var checksum: u64 = 0
+    val base: u64 = 0x200000
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        checksum = checksum + base + ((i.to_u64() % 128) * 2048) + 10
+        i = i + 1
+    print_row("buffer", iters, bench_now_ns() - t0, checksum)
+
+fn bench_tx_pair(iters: i64):
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val head = i.to_u64() % 128
+        val payload = (head + 1) % 128
+        checksum = checksum + (head * 16) + (payload * 16)
+        i = i + 1
+    print_row("tx_pair", iters, bench_now_ns() - t0, checksum)
+
+fn bench_phys_split(iters: i64):
+    var checksum: u64 = 0
+    val t0 = bench_now_ns()
+    var i: i64 = 0
+    while i < iters:
+        val phys = 0x100000000 + i.to_u64() * 2048
+        checksum = checksum + (phys & 0xFFFFFFFF) + (phys >> 32)
+        i = i + 1
+    print_row("phys_split", iters, bench_now_ns() - t0, checksum)
+
+fn main():
+    val iters: i64 = 200000
+    print "label,iters,total_ns,checksum"
+    bench_desc(iters)
+    bench_avail(iters)
+    bench_used(iters)
+    bench_total(iters)
+    bench_ring(iters)
+    bench_used_align(iters)
+    bench_pfn(iters)
+    bench_descriptor(iters)
+    bench_buffer(iters)
+    bench_tx_pair(iters)
+    bench_phys_split(iters)

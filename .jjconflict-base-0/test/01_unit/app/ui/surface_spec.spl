@@ -1,0 +1,176 @@
+# Surface Manager Specification
+#
+# Tests SurfaceManager creation, open/close lifecycle, handle validation
+# with generation counters, active surface tracking, and multi-surface
+# coexistence.
+
+use std.spec.{describe, it, expect}
+use common.ui.widget.{WidgetNode, UITree}
+use common.ui.builder.{column, panel, text_widget}
+use common.ui.surface.{SurfaceHandle, SurfaceManager, new_surface_manager}
+
+
+# ============================================================================
+# Manager Creation
+# ============================================================================
+
+describe "SurfaceManager creation":
+    it "creates empty manager":
+        val sm = new_surface_manager()
+        expect sm.surface_count() to_equal 0
+        expect sm.active() to_equal "main"
+
+
+# ============================================================================
+# Open Surface
+# ============================================================================
+
+describe "SurfaceManager open":
+    it "opens a surface and increments count":
+        var sm = new_surface_manager()
+        val root = text_widget("sm_open_root", "Hello")
+        val tree = UITree.new(root)
+        val handle = sm.open("window1", tree)
+        expect sm.surface_count() to_equal 1
+        expect handle.id to_equal "window1"
+        expect handle.generation to_equal 1
+
+    it "opens multiple surfaces":
+        var sm = new_surface_manager()
+        val root1 = text_widget("sm_multi_r1", "One")
+        val root2 = text_widget("sm_multi_r2", "Two")
+        val tree1 = UITree.new(root1)
+        val tree2 = UITree.new(root2)
+        sm.open("win_a", tree1)
+        sm.open("win_b", tree2)
+        expect sm.surface_count() to_equal 2
+        expect sm.has("win_a") to_equal true
+        expect sm.has("win_b") to_equal true
+
+
+# ============================================================================
+# Get Surface Tree
+# ============================================================================
+
+describe "SurfaceManager get":
+    it "gets tree for an existing surface":
+        var sm = new_surface_manager()
+        val root = text_widget("sm_get_root", "Content")
+        val tree = UITree.new(root)
+        sm.open("panel1", tree)
+        val found = sm.get("panel1")
+        expect found != nil to_equal true
+
+    it "returns nil for nonexistent surface":
+        val sm = new_surface_manager()
+        val found = sm.get("sm_get_missing")
+        expect found to_be_nil
+
+
+# ============================================================================
+# Close Surface
+# ============================================================================
+
+describe "SurfaceManager close":
+    it "closes a surface and decrements count":
+        var sm = new_surface_manager()
+        val root = text_widget("sm_close_root", "Bye")
+        val tree = UITree.new(root)
+        val handle = sm.open("temp_win", tree)
+        expect sm.surface_count() to_equal 1
+        val result = sm.close(handle)
+        expect result to_equal true
+        expect sm.surface_count() to_equal 0
+        expect sm.has("temp_win") to_equal false
+
+    it "resets active to main when closing active surface":
+        var sm = new_surface_manager()
+        val root = text_widget("sm_close_active_r", "Active")
+        val tree = UITree.new(root)
+        val handle = sm.open("popup", tree)
+        sm.set_active("popup")
+        expect sm.active() to_equal "popup"
+        sm.close(handle)
+        expect sm.active() to_equal "main"
+
+
+# ============================================================================
+# Handle Validation (Generation Counter)
+# ============================================================================
+
+describe "SurfaceManager handle validation":
+    it "validates a fresh handle":
+        var sm = new_surface_manager()
+        val root = text_widget("sm_valid_root", "Test")
+        val tree = UITree.new(root)
+        val handle = sm.open("validated", tree)
+        expect sm.validate_handle(handle) to_equal true
+
+    it "invalidates handle after close":
+        var sm = new_surface_manager()
+        val root = text_widget("sm_stale_root", "Stale")
+        val tree = UITree.new(root)
+        val handle = sm.open("stale_win", tree)
+        sm.close(handle)
+        expect sm.validate_handle(handle) to_equal false
+
+    it "invalidates old handle when surface is re-opened":
+        var sm = new_surface_manager()
+        val root1 = text_widget("sm_reopen_r1", "V1")
+        val root2 = text_widget("sm_reopen_r2", "V2")
+        val tree1 = UITree.new(root1)
+        val tree2 = UITree.new(root2)
+        val old_handle = sm.open("reopen_win", tree1)
+        val new_handle = sm.open("reopen_win", tree2)
+        expect sm.validate_handle(old_handle) to_equal false
+        expect sm.validate_handle(new_handle) to_equal true
+
+    it "rejects close with stale handle":
+        var sm = new_surface_manager()
+        val root = text_widget("sm_reject_root", "Reject")
+        val tree = UITree.new(root)
+        val handle = sm.open("reject_win", tree)
+        sm.close(handle)
+        # Try to close again with stale handle
+        val result = sm.close(handle)
+        expect result to_equal false
+
+
+# ============================================================================
+# Active Surface Tracking
+# ============================================================================
+
+describe "SurfaceManager active surface":
+    it "defaults to main":
+        val sm = new_surface_manager()
+        expect sm.active() to_equal "main"
+
+    it "switches active to existing surface":
+        var sm = new_surface_manager()
+        val root = text_widget("sm_active_root", "Active")
+        val tree = UITree.new(root)
+        sm.open("dialog", tree)
+        sm.set_active("dialog")
+        expect sm.active() to_equal "dialog"
+
+    it "does not switch to nonexistent surface":
+        var sm = new_surface_manager()
+        sm.set_active("sm_active_ghost")
+        expect sm.active() to_equal "main"
+
+
+# ============================================================================
+# Surface IDs
+# ============================================================================
+
+describe "SurfaceManager surface_ids":
+    it "returns all surface ids":
+        var sm = new_surface_manager()
+        val r1 = text_widget("sm_ids_r1", "A")
+        val r2 = text_widget("sm_ids_r2", "B")
+        val r3 = text_widget("sm_ids_r3", "C")
+        sm.open("alpha", UITree.new(r1))
+        sm.open("beta", UITree.new(r2))
+        sm.open("gamma", UITree.new(r3))
+        val ids = sm.surface_ids()
+        expect ids.len() to_equal 3

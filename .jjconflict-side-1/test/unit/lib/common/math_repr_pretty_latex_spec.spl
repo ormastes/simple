@@ -1,0 +1,592 @@
+# @covers src/lib/common/math_repr.spl 85%
+"""
+# Math Repr Pretty, LaTeX, and Renderer Symbols
+
+**Feature IDs:** #LIB-MATH-COV
+**Category:** Stdlib
+**Status:** Implemented
+
+## Overview
+
+Tests for to_pretty, to_md, render_latex_raw, empty fallbacks,
+int_expr paths, renderer edge cases, superscript/subscript chars, and greek symbols.
+"""
+
+use std.math_repr.{to_text, to_debug, to_pretty, to_md, render_latex_raw}
+
+# ============================================================================
+# 3. math_repr — to_pretty (Unicode renderer)
+# ============================================================================
+
+describe "math_repr to_pretty":
+    """
+    ## Unicode Pretty Rendering
+
+    Tests the pretty renderer which uses Greek letters and Unicode superscripts.
+    """
+
+    context "number literals":
+        it "renders number unchanged":
+            expect(to_pretty("42")).to_equal("42")
+
+    context "identifiers with greek resolution":
+        it "renders plain identifier":
+            expect(to_pretty("x")).to_equal("x")
+
+        it "resolves lowercase greek":
+            val result = to_pretty("alpha")
+            expect(result).to_equal("\u03B1")
+
+        it "resolves uppercase greek":
+            val result = to_pretty("Gamma")
+            expect(result).to_equal("\u0393")
+
+        it "leaves non-greek identifier unchanged":
+            expect(to_pretty("foo")).to_equal("foo")
+
+    context "arithmetic operations":
+        it "renders addition":
+            expect(to_pretty("a + b")).to_contain("+")
+
+        it "renders subtraction":
+            expect(to_pretty("a - b")).to_contain("-")
+
+        it "renders explicit multiplication":
+            expect(to_pretty("a * b")).to_contain("*")
+
+        it "renders implicit multiplication without operator":
+            val result = to_pretty("2x")
+            expect(result).to_contain("2")
+            expect(result).to_contain("x")
+
+        it "renders division":
+            expect(to_pretty("a / b")).to_contain("/")
+
+    context "power rendering":
+        it "renders power with pretty_power":
+            val result = to_pretty("x^2")
+            expect(result).to_contain("x")
+
+    context "negation":
+        it "renders negation with minus":
+            expect(to_pretty("-x")).to_start_with("-")
+
+    context "grouping":
+        it "renders parentheses":
+            val result = to_pretty("(x + 1)")
+            expect(result).to_start_with("(")
+            expect(result).to_end_with(")")
+
+    context "subscript rendering":
+        it "renders subscript with pretty_sub":
+            val result = to_pretty("x[i]")
+            expect(result).to_contain("x")
+
+    context "transpose rendering":
+        it "renders transpose with Unicode T suffix":
+            val result = to_pretty("A'")
+            expect(result).to_contain("A")
+            expect(result).to_contain("ᵀ")
+
+    context "function calls":
+        it "renders sqrt with pretty_sqrt":
+            val result = to_pretty("sqrt(x)")
+            expect(result).to_contain("x")
+
+        it "renders non-sqrt function normally":
+            val result = to_pretty("sin(x)")
+            expect(result).to_contain("sin")
+            expect(result).to_contain("x")
+
+    context "frac rendering":
+        it "renders fraction with pretty_fraction":
+            val result = to_pretty("frac(a, b)")
+            expect(result).to_contain("a")
+            expect(result).to_contain("b")
+
+    context "sum and integral rendering":
+        it "renders sum expression":
+            val result = to_pretty("sum(i, 1..n) i")
+            expect(result).to_contain("i")
+
+        it "renders integral expression":
+            val result = to_pretty("int(x, 0..1) x")
+            expect(result).to_contain("x")
+
+
+# ============================================================================
+# 4. math_repr — to_md and render_latex_raw (LaTeX / Markdown renderer)
+# ============================================================================
+
+describe "math_repr to_md":
+    """
+    ## Markdown LaTeX Rendering
+
+    Tests the markdown renderer which wraps LaTeX in dollar signs.
+    """
+
+    context "markdown wrapping and identifiers":
+        it "wraps output in dollar signs":
+            val result = to_md("x")
+            expect(result).to_start_with("$")
+            expect(result).to_end_with("$")
+
+        it "renders number and plain identifier":
+            expect(to_md("42")).to_equal("$42$")
+            expect(to_md("x")).to_equal("$x$")
+
+        it "renders greek and uppercase greek":
+            expect(to_md("alpha")).to_contain("\\alpha")
+            expect(to_md("Gamma")).to_contain("\\Gamma")
+
+    context "binary operations and unary":
+        it "renders add, sub, mul, div":
+            expect(to_md("a + b")).to_contain("+")
+            expect(to_md("a - b")).to_contain("-")
+            expect(to_md("a * b")).to_contain("\\cdot")
+            expect(to_md("a / b")).to_contain("/")
+
+        it "renders implicit mul, power, negation":
+            expect(to_md("2x")).to_contain("x")
+            expect(to_md("x^2")).to_contain("x")
+            expect(to_md("-x")).to_contain("-")
+
+    context "grouping, subscript, transpose":
+        it "renders grouped expression":
+            expect(to_md("(a + b)")).to_contain("(")
+
+        it "renders subscript and transpose":
+            expect(to_md("x[i]")).to_contain("x")
+            expect(to_md("A'")).to_contain('^{T}')
+
+    context "function calls":
+        it "renders unknown function with operatorname":
+            expect(to_md("foo(x)")).to_contain('\operatorname{foo}')
+
+        it "renders sqrt, known, and multi-arg functions":
+            expect(to_md("sqrt(x)")).to_contain("x")
+            expect(to_md("sin(x)")).to_contain("\\sin")
+            expect(to_md("max(a, b)")).to_contain("\\max")
+
+    context "frac, sum, integral rendering":
+        it "renders frac with latex_fraction":
+            expect(to_md("frac(a, b)")).to_contain("a")
+
+        it "renders sum and integral":
+            expect(to_md("sum(i, 1..n) i")).to_contain("i")
+            expect(to_md("int(x, 0..1) x")).to_contain("x")
+
+
+describe "math_repr render_latex_raw":
+    """
+    ## Raw LaTeX Rendering
+
+    Tests render_latex_raw which returns LaTeX without dollar sign wrapping.
+    """
+
+    context "raw latex output":
+        it "does not wrap in dollar signs":
+            val result = render_latex_raw("x")
+            expect(result).to_equal("x")
+
+        it "renders expression without wrapping":
+            val result = render_latex_raw("x + 1")
+            expect(result).to_contain("+")
+
+
+# ============================================================================
+# 7. Empty input fallback paths for all public API functions
+# ============================================================================
+
+describe "math_repr empty input fallbacks":
+    """
+    ## Empty Input Coverage
+
+    Each public API function has an early return when tags.len() == 0.
+    We need to hit the empty-input path for to_debug, to_pretty, to_md,
+    and render_latex_raw (to_text already tested above).
+    """
+
+    context "empty string fallback for each API function":
+        it "to_debug handles empty string":
+            val result = to_debug("")
+            expect(result).to_contain("?")
+
+        it "to_pretty handles empty string":
+            val result = to_pretty("")
+            expect(result).to_contain("?")
+
+        it "to_md handles empty string":
+            val result = to_md("")
+            expect(result).to_start_with("$")
+
+        it "render_latex_raw handles empty string":
+            val result = render_latex_raw("")
+            expect(result).to_contain("?")
+
+
+# ============================================================================
+# 8. int_expr through all four renderers
+# ============================================================================
+
+describe "math_repr int_expr all renderers":
+    """
+    ## Integral Expression Coverage
+
+    Exercises the int_expr branch in each renderer: text, debug, pretty, latex.
+    """
+
+    context "integral through text renderer":
+        it "renders integral via to_text":
+            val result = to_text("int(t, 0..1) t")
+            expect(result).to_contain("int")
+            expect(result).to_contain("t")
+
+    context "integral through debug renderer":
+        it "renders integral via to_debug":
+            val result = to_debug("int(t, 0..1) t")
+            expect(result).to_contain("Int")
+
+    context "integral through pretty renderer":
+        it "renders integral via to_pretty":
+            val result = to_pretty("int(t, 0..1) t")
+            expect(result).to_contain("t")
+
+    context "integral through latex renderer":
+        it "renders integral via render_latex_raw":
+            val result = render_latex_raw("int(t, 0..1) t")
+            expect(result).to_contain("\\int")
+
+    context "integral through markdown renderer":
+        it "renders integral via to_md":
+            val result = to_md("int(t, 0..1) t")
+            expect(result).to_start_with("$")
+            expect(result).to_contain("t")
+
+
+# ============================================================================
+# 9. Negative idx paths and renderer edge cases
+# ============================================================================
+
+describe "math_repr renderer edge cases":
+    """
+    ## Renderer Edge Cases
+
+    Tests for negative index paths (idx < 0) which occur when
+    nodes have -1 for left/right children (e.g. leaf nodes).
+    Also exercises tag fallthrough paths.
+    """
+
+    context "negative idx through render paths":
+        it "neg of number exercises right=-1 path in text":
+            # Neg node has right=-1, when rendering text it calls _render_text(left) only
+            val result = to_text("-42")
+            expect(result).to_equal("-42")
+
+        it "neg of expr exercises render in debug":
+            val result = to_debug("-42")
+            expect(result).to_equal("Neg(Num(42))")
+
+        it "neg exercises render in pretty":
+            val result = to_pretty("-42")
+            expect(result).to_equal("-42")
+
+        it "neg exercises render in latex":
+            val result = render_latex_raw("-42")
+            expect(result).to_equal("-42")
+
+    context "transpose exercises right=-1 in all renderers":
+        it "transpose in text":
+            val result = to_text("x'")
+            expect(result).to_equal("x'")
+
+        it "transpose in debug":
+            val result = to_debug("x'")
+            expect(result).to_contain("Transpose")
+
+        it "transpose in pretty":
+            val result = to_pretty("x'")
+            expect(result).to_contain("ᵀ")
+
+        it "transpose in latex":
+            val result = render_latex_raw("A'")
+            expect(result).to_contain("T")
+
+
+# ============================================================================
+# 10. Superscript and subscript operator characters
+# ============================================================================
+
+describe "math_repr superscript operator chars":
+    """
+    ## Superscript Operator Characters
+
+    Exercises superscript_char branches for +, -, =, (, ) which are hit
+    when pretty_power processes multi-character exponents containing operators.
+    """
+
+    context "superscript plus minus equals parens":
+        it "exercises superscript + via power":
+            val result = to_pretty("x^(n+1)")
+            expect(result).to_contain("x")
+
+        it "exercises superscript - via power":
+            val result = to_pretty("x^(n-1)")
+            expect(result).to_contain("x")
+
+        it "exercises superscript = via power":
+            # Use grouped exponent with equals-like expression
+            val result = to_pretty("x^(a=b)")
+            expect(result).to_contain("x")
+
+    context "subscript plus minus":
+        it "exercises subscript + via subscript":
+            val result = to_pretty("x[i+1]")
+            expect(result).to_contain("x")
+
+        it "exercises subscript - via subscript":
+            val result = to_pretty("x[i-1]")
+            expect(result).to_contain("x")
+
+
+# ============================================================================
+# 13. All node types through all renderers for full branch coverage
+# ============================================================================
+
+describe "math_repr full renderer node coverage":
+    """
+    ## Full Renderer Node Coverage
+
+    Each renderer (text, debug, pretty, latex) has if/elif chains for every
+    node type. We must hit every node type through every renderer.
+    """
+
+    context "add through all renderers":
+        it "add via pretty":
+            val result = to_pretty("a + b")
+            expect(result).to_equal("a + b")
+
+        it "add via latex":
+            val result = render_latex_raw("a + b")
+            expect(result).to_equal("a + b")
+
+    context "sub through all renderers":
+        it "sub via text":
+            val result = to_text("a - b")
+            expect(result).to_equal("a - b")
+
+        it "sub via debug":
+            val result = to_debug("a - b")
+            expect(result).to_equal("Sub(Id(a), Id(b))")
+
+        it "sub via pretty":
+            val result = to_pretty("a - b")
+            expect(result).to_equal("a - b")
+
+        it "sub via latex":
+            val result = render_latex_raw("a - b")
+            expect(result).to_equal("a - b")
+
+    context "mul explicit through all renderers":
+        it "mul via text":
+            val result = to_text("a * b")
+            expect(result).to_equal("a * b")
+
+        it "mul via debug":
+            val result = to_debug("a * b")
+            expect(result).to_equal("Mul(Id(a), Id(b))")
+
+        it "mul via pretty":
+            val result = to_pretty("a * b")
+            expect(result).to_contain("*")
+
+    context "mul implicit through all renderers":
+        it "implicit mul via text":
+            val result = to_text("2x")
+            expect(result).to_equal("2x")
+
+        it "implicit mul via pretty":
+            val result = to_pretty("2x")
+            expect(result).to_contain("2")
+
+        it "implicit mul via latex":
+            val result = render_latex_raw("2x")
+            expect(result).to_contain("x")
+
+    context "div through all renderers":
+        it "div via text":
+            val result = to_text("a / b")
+            expect(result).to_equal("a / b")
+
+        it "div via debug":
+            val result = to_debug("a / b")
+            expect(result).to_equal("Div(Id(a), Id(b))")
+
+    context "pow through all renderers":
+        it "pow via text":
+            val result = to_text("a^b")
+            expect(result).to_equal("a^b")
+
+        it "pow via debug":
+            val result = to_debug("a^b")
+            expect(result).to_equal("Pow(Id(a), Id(b))")
+
+        it "pow via pretty":
+            val result = to_pretty("a^b")
+            expect(result).to_contain("a")
+
+        it "pow via latex":
+            val result = render_latex_raw("a^b")
+            expect(result).to_contain("a")
+
+    context "neg through all renderers":
+        it "neg via text":
+            val result = to_text("-a")
+            expect(result).to_equal("-a")
+
+        it "neg via debug":
+            val result = to_debug("-a")
+            expect(result).to_equal("Neg(Id(a))")
+
+        it "neg via pretty":
+            val result = to_pretty("-a")
+            expect(result).to_equal("-a")
+
+        it "neg via latex":
+            val result = render_latex_raw("-a")
+            expect(result).to_equal("-a")
+
+    context "frac through all renderers":
+        it "frac via text":
+            val result = to_text("frac(a, b)")
+            expect(result).to_equal("a / b")
+
+        it "frac via debug":
+            val result = to_debug("frac(a, b)")
+            expect(result).to_equal("Frac(Id(a), Id(b))")
+
+    context "group through all renderers":
+        it "group via text":
+            val result = to_text("(a)")
+            expect(result).to_equal("(a)")
+
+        it "group via latex":
+            val result = render_latex_raw("(a)")
+            expect(result).to_contain("(")
+
+    context "subscript through all renderers":
+        it "subscript via text":
+            val result = to_text("a[i]")
+            expect(result).to_equal("a[i]")
+
+        it "subscript via pretty":
+            val result = to_pretty("a[i]")
+            expect(result).to_contain("a")
+
+        it "subscript via latex":
+            val result = render_latex_raw("a[i]")
+            expect(result).to_contain("a")
+
+    context "transpose through all renderers":
+        it "transpose via text":
+            val result = to_text("A'")
+            expect(result).to_equal("A'")
+
+        it "transpose via debug":
+            val result = to_debug("A'")
+            expect(result).to_contain("Transpose")
+
+    context "call through all renderers":
+        it "call via text":
+            val result = to_text("f(x)")
+            expect(result).to_equal("f(x)")
+
+        it "call via pretty":
+            val result = to_pretty("f(x)")
+            expect(result).to_contain("f")
+
+        it "call via latex known fn":
+            val result = render_latex_raw("sin(x)")
+            expect(result).to_contain("\\sin")
+
+        it "call via latex unknown fn":
+            val result = render_latex_raw("foo(x)")
+            expect(result).to_contain("foo")
+
+    context "sum_expr through all renderers":
+        it "sum via text":
+            val result = to_text("sum(i, 1..n) i")
+            expect(result).to_contain("sum")
+
+        it "sum via debug":
+            val result = to_debug("sum(i, 1..n) i")
+            expect(result).to_contain("Sum")
+
+        it "sum via pretty":
+            val result = to_pretty("sum(i, 1..n) i")
+            expect(result).to_contain("i")
+
+        it "sum via latex":
+            val result = render_latex_raw("sum(i, 1..n) i")
+            expect(result).to_contain("\\sum")
+
+        it "sum via md":
+            val result = to_md("sum(i, 1..n) i")
+            expect(result).to_start_with("$")
+
+    context "int_expr through all renderers":
+        it "int via text":
+            val result = to_text("int(x, 0..1) x")
+            expect(result).to_contain("int")
+
+        it "int via debug":
+            val result = to_debug("int(x, 0..1) x")
+            expect(result).to_contain("Int")
+
+        it "int via pretty":
+            val result = to_pretty("int(x, 0..1) x")
+            expect(result).to_contain("x")
+
+        it "int via latex":
+            val result = render_latex_raw("int(x, 0..1) x")
+            expect(result).to_contain("x")
+
+    context "sqrt call special case":
+        it "sqrt via pretty":
+            val result = to_pretty("sqrt(x)")
+            expect(result).to_contain("x")
+
+        it "sqrt via latex":
+            val result = render_latex_raw("sqrt(x)")
+            expect(result).to_contain("\\sqrt")
+
+        it "sqrt via text":
+            val result = to_text("sqrt(x)")
+            expect(result).to_contain("sqrt")
+
+        it "sqrt via debug":
+            val result = to_debug("sqrt(x)")
+            expect(result).to_contain("Call")
+
+
+# ============================================================================
+# 14. _is_greek and _latex_greek false paths
+# ============================================================================
+
+describe "math_repr greek function false paths":
+    """
+    ## Greek Function False Paths
+
+    Exercises the false return paths of _is_greek and _latex_greek when
+    a non-greek name is passed through pretty and latex renderers.
+    """
+
+    context "non-greek through pretty":
+        it "non-greek name passes through _resolve_greek unchanged":
+            val result = to_pretty("myvar")
+            expect(result).to_equal("myvar")
+
+    context "non-greek through latex":
+        it "non-greek name passes through _latex_greek unchanged":
+            val result = render_latex_raw("myvar")
+            expect(result).to_equal("myvar")

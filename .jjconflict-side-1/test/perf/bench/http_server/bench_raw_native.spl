@@ -1,0 +1,55 @@
+"""Raw TCP native benchmark - minimal extern calls only."""
+
+extern fn rt_io_tcp_socket_create(family: i64) -> i64
+extern fn rt_io_tcp_set_reuseaddr(fd: i64, enabled: bool) -> bool
+extern fn rt_io_tcp_set_reuseport(fd: i64, enabled: bool) -> bool
+extern fn rt_io_tcp_set_nonblocking(fd: i64, enabled: bool) -> bool
+extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
+extern fn rt_io_tcp_bind_fd(fd: i64, addr: text) -> bool
+extern fn rt_io_tcp_listen(fd: i64, backlog: i64) -> bool
+extern fn rt_io_tcp_accept(fd: i64) -> i64
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_close(fd: i64) -> bool
+extern fn rt_event_loop_create() -> i64
+extern fn rt_event_loop_register(epfd: i64, fd: i64, interest: i64, token: i64, edge: bool) -> bool
+extern fn rt_event_loop_poll(epfd: i64, max_events: i64, timeout_ms: i64) -> [i64]
+
+fn main():
+    print "Raw TCP Native Server"
+    val fd = rt_io_tcp_socket_create(4)
+    rt_io_tcp_set_reuseaddr(fd, true)
+    rt_io_tcp_set_reuseport(fd, true)
+    rt_io_tcp_bind_fd(fd, "0.0.0.0:9090")
+    rt_io_tcp_set_nonblocking(fd, true)
+    rt_io_tcp_listen(fd, 1024)
+
+    val epfd = rt_event_loop_create()
+    rt_event_loop_register(epfd, fd, 0, fd, false)
+
+    val resp = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: keep-alive\r\n\r\nHello, World!"
+    print "Listening on :9090"
+
+    while true:
+        val ready = rt_event_loop_poll(epfd, 256, 1000)
+        var i: i64 = 0
+        while i < ready.len():
+            val efd = ready[i]
+            if efd == fd:
+                var j = 0
+                while j < 64:
+                    val cfd = rt_io_tcp_accept(fd)
+                    if cfd < 0:
+                        j = 64
+                    else:
+                        rt_io_tcp_set_nonblocking(cfd, true)
+                        rt_io_tcp_set_nodelay(cfd, true)
+                        rt_event_loop_register(epfd, cfd, 0, cfd, false)
+                    j = j + 1
+            else:
+                val data = rt_io_tcp_read(efd, 4096)
+                if data.len() > 0:
+                    rt_io_tcp_write_text(efd, resp)
+                else:
+                    rt_io_tcp_close(efd)
+            i = i + 1

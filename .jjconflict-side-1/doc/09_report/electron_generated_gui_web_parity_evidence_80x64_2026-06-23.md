@@ -1,0 +1,53 @@
+# Electron Generated GUI Web Parity Evidence
+
+- status: pass
+- reason: pass
+- scene: generated-gui-widget-html
+- dimensions: 80x64
+- generated HTML has style: true
+- generated HTML has app shell: true
+- Simple distinct colors: 7
+- mismatch count: 0
+- missing antialias pixels: 0
+- Simple text overpaint pixels: 0
+- other mismatch pixels: 0
+- blur/tolerance used: false
+- Electron frame us: 20233
+- capture native dimensions: 80x64
+- capture downsampled: false
+- watchdog teardown: false
+- text normalization pixels: 209
+- generated HTML path: build/electron_generated_gui_web_parity_evidence_80x64_after_import_fix/generated-gui.html
+- Simple expected ARGB path: build/electron_generated_gui_web_parity_evidence_80x64_after_import_fix/simple-cpu-simd-expected-argb.json
+- Electron captured ARGB path: build/electron_generated_gui_web_parity_evidence_80x64_after_import_fix/electron-captured-argb.json
+
+## Raw Evidence
+- electron_generated_gui_web_status=pass
+- electron_generated_gui_web_reason=pass
+- electron_generated_gui_web_scene=generated-gui-widget-html
+- electron_generated_gui_web_width=80
+- electron_generated_gui_web_height=64
+- electron_generated_gui_web_iterations=3
+- electron_generated_gui_web_html_has_style=true
+- electron_generated_gui_web_html_has_app_shell=true
+- electron_generated_gui_web_distinct_simple_colors=7
+- electron_generated_gui_web_simple_checksum=21975307291434
+- electron_generated_gui_web_electron_checksum=21975307291434
+- electron_generated_gui_web_simple_weighted_checksum=56260852535746445
+- electron_generated_gui_web_electron_weighted_checksum=56260852535746445
+- electron_generated_gui_web_mismatch_count=0
+- electron_generated_gui_web_missing_antialias_pixels=0
+- electron_generated_gui_web_simple_text_overpaint_pixels=0
+- electron_generated_gui_web_other_mismatch_pixels=0
+- electron_generated_gui_web_blur_or_tolerance_used=false
+- electron_generated_gui_web_electron_frame_us=20233
+- electron_generated_gui_web_capture_native_width=80
+- electron_generated_gui_web_capture_native_height=64
+- electron_generated_gui_web_capture_downsampled=false
+- electron_generated_gui_web_watchdog_teardown=false
+- electron_generated_gui_web_text_normalization_pixels=209
+- electron_generated_gui_web_html_path=build/electron_generated_gui_web_parity_evidence_80x64_after_import_fix/generated-gui.html
+- electron_generated_gui_web_expected_argb_path=build/electron_generated_gui_web_parity_evidence_80x64_after_import_fix/simple-cpu-simd-expected-argb.json
+- electron_generated_gui_web_captured_argb_path=build/electron_generated_gui_web_parity_evidence_80x64_after_import_fix/electron-captured-argb.json
+- electron_generated_gui_web_captured_argb_written=true
+- electron_generated_gui_web_exit_code=0

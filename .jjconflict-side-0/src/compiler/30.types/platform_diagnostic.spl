@@ -1,0 +1,172 @@
+use std.io_runtime
+
+class PlatformDiagnostic:
+    severity: text
+    code: text
+    message: text
+    type_name: text
+    field_name: text
+
+    static fn missing_platform_attr(type_name: text) -> PlatformDiagnostic:
+        return PlatformDiagnostic(
+            severity: "error",
+            code: "E_PLATFORM_MISSING",
+            message: "ABI-facing type has platform-varying layout but no @platform annotation",
+            type_name: type_name,
+            field_name: "")
+
+    static fn field_varying_layout(type_name: text, field_name: text) -> PlatformDiagnostic:
+        return PlatformDiagnostic(
+            severity: "error",
+            code: "E_FIELD_VARYING_LAYOUT",
+            message: "field has platform-varying layout and neither field nor enclosing type is tagged @platform",
+            type_name: type_name,
+            field_name: field_name)
+
+    static fn platform_without_hint(type_name: text) -> PlatformDiagnostic:
+        return PlatformDiagnostic(
+            severity: "warning",
+            code: "W_PLATFORM_NO_HINT",
+            message: "@platform present but without explicit bit/size/align hint",
+            type_name: type_name,
+            field_name: "")
+
+    me is_error() -> bool:
+        return self.severity == "error"
+
+    me is_warning() -> bool:
+        return self.severity == "warning"
+
+    me formatted() -> text:
+        return self.severity + ": " + self.code + " — " + self.message + " on " + self.type_name
+
+
+class TypePlatformCheck:
+    type_name: text
+    is_abi_facing: bool
+    has_platform_attr: bool
+    layout_varies: bool
+    has_layout_hint: bool
+
+    static fn create(name: text, abi: bool, has_attr: bool, varies: bool, has_hint: bool) -> TypePlatformCheck:
+        return TypePlatformCheck(
+            type_name: name,
+            is_abi_facing: abi,
+            has_platform_attr: has_attr,
+            layout_varies: varies,
+            has_layout_hint: has_hint)
+
+    me needs_attr() -> bool:
+        return self.is_abi_facing and self.layout_varies and self.has_platform_attr == false
+
+    me needs_hint() -> bool:
+        return self.has_platform_attr and self.has_layout_hint == false
+
+    me diagnose() -> PlatformDiagnostic:
+        if self.needs_attr():
+            return PlatformDiagnostic.missing_platform_attr(self.type_name)
+        if self.needs_hint():
+            return PlatformDiagnostic.platform_without_hint(self.type_name)
+        return PlatformDiagnostic(
+            severity: "warning",
+            code: "none",
+            message: "no issues detected",
+            type_name: self.type_name,
+            field_name: "")
+
+
+class MigrationCandidate:
+    type_name: text
+    module_path: text
+    category: text
+    suggested_bit: text
+    current_size_32: i32
+    current_size_64: i32
+
+    static fn create(name: text, path: text, cat: text, bit: text, s32: i32, s64: i32) -> MigrationCandidate:
+        return MigrationCandidate(
+            type_name: name,
+            module_path: path,
+            category: cat,
+            suggested_bit: bit,
+            current_size_32: s32,
+            current_size_64: s64)
+
+    me varies() -> bool:
+        return self.current_size_32 != self.current_size_64
+
+    me annotation() -> text:
+        if self.suggested_bit == "":
+            return "@platform"
+        return "@platform(bit=" + self.suggested_bit + ")"
+
+
+class MigrationReport:
+    total_candidates: i32
+    sffi_count: i32
+    hal_count: i32
+    os_count: i32
+    c0_name: text
+    c0_category: text
+    c0_varies: bool
+    c1_name: text
+    c1_category: text
+    c1_varies: bool
+    c2_name: text
+    c2_category: text
+    c2_varies: bool
+    c3_name: text
+    c3_category: text
+    c3_varies: bool
+
+    static fn from_four(c0: MigrationCandidate, c1: MigrationCandidate, c2: MigrationCandidate, c3: MigrationCandidate) -> MigrationReport:
+        var sffi = 0
+        var hal = 0
+        var os = 0
+        if c0.category == "sffi":
+            sffi = sffi + 1
+        if c0.category == "hal":
+            hal = hal + 1
+        if c0.category == "os":
+            os = os + 1
+        if c1.category == "sffi":
+            sffi = sffi + 1
+        if c1.category == "hal":
+            hal = hal + 1
+        if c1.category == "os":
+            os = os + 1
+        if c2.category == "sffi":
+            sffi = sffi + 1
+        if c2.category == "hal":
+            hal = hal + 1
+        if c2.category == "os":
+            os = os + 1
+        if c3.category == "sffi":
+            sffi = sffi + 1
+        if c3.category == "hal":
+            hal = hal + 1
+        if c3.category == "os":
+            os = os + 1
+        return MigrationReport(
+            total_candidates: 4,
+            sffi_count: sffi,
+            hal_count: hal,
+            os_count: os,
+            c0_name: c0.type_name,
+            c0_category: c0.category,
+            c0_varies: c0.varies(),
+            c1_name: c1.type_name,
+            c1_category: c1.category,
+            c1_varies: c1.varies(),
+            c2_name: c2.type_name,
+            c2_category: c2.category,
+            c2_varies: c2.varies(),
+            c3_name: c3.type_name,
+            c3_category: c3.category,
+            c3_varies: c3.varies())
+
+    me all_vary() -> bool:
+        return self.c0_varies and self.c1_varies and self.c2_varies and self.c3_varies
+
+    me summary() -> text:
+        return "total=" + self.total_candidates.to_text() + " sffi=" + self.sffi_count.to_text() + " hal=" + self.hal_count.to_text() + " os=" + self.os_count.to_text()

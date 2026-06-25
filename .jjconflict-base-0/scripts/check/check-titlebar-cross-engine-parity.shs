@@ -1,0 +1,91 @@
+#!/bin/sh
+# Hardened titlebar base rendering — cross-engine parity check.
+#
+# Renders the shared MDI titlebar HTML fragment (src/lib/common/ui/html_window.spl)
+# through TWO real browser engines and asserts the visible box-model / interaction
+# styles agree:
+#   * Electron  -> Chromium  (the engine the Electron backend embeds)
+#   * WKWebView -> WebKit    (the engine the Tauri backend embeds on macOS)
+#
+# This is the "actually launch and compare with electron/tauri" gate for the
+# titlebar: both captures load the fixture in a live, offscreen browser engine
+# and read getBoundingClientRect + getComputedStyle. macOS only (WKWebView).
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+OUT_DIR="$ROOT_DIR/build/titlebar_compare"
+FIXTURE="$OUT_DIR/titlebar_fixture.html"
+ELECTRON_JSON="$OUT_DIR/electron_cs.json"
+WEBKIT_JSON="$OUT_DIR/webkit_geometry.json"
+SELECTORS=".simple-app-title,.simple-titlebar-label,.simple-titlebar-widgets,.simple-titlebar-widget"
+ELECTRON_BIN="$ROOT_DIR/tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+
+fail() { echo "status=fail"; echo "reason=$1"; exit 1; }
+
+[ "$(uname -s)" = "Darwin" ] || fail "WebKit capture requires macOS (uname=$(uname -s))"
+command -v node >/dev/null 2>&1 || fail "node not found"
+command -v swift >/dev/null 2>&1 || fail "swift not found"
+test -x "$ELECTRON_BIN" || fail "Electron binary missing: $ELECTRON_BIN"
+
+mkdir -p "$OUT_DIR"
+
+# 1. Render the fixture from the shared renderer source (pure helper, JIT-safe).
+"$ROOT_DIR/bin/simple" run "$ROOT_DIR/src/app/ui_shared_mdi/titlebar_fixture_emit.spl" \
+    > "$FIXTURE" 2>/dev/null
+test -s "$FIXTURE" || fail "fixture not generated: $FIXTURE"
+
+# 2. Chromium (Electron) computed style.
+ELECTRON_CS_HTML="$FIXTURE" ELECTRON_CS_WIDTH=600 ELECTRON_CS_HEIGHT=120 \
+ELECTRON_CS_SELECTORS="$SELECTORS" ELECTRON_CS_OUTPUT="$ELECTRON_JSON" \
+    "$ELECTRON_BIN" --no-sandbox --disable-gpu \
+    "$ROOT_DIR/tools/electron-live-bitmap/electron_computed_style.js" >/dev/null 2>&1 \
+    || fail "Electron computed-style capture failed"
+test -s "$ELECTRON_JSON" || fail "Electron capture missing: $ELECTRON_JSON"
+
+# 3. WebKit (WKWebView) computed style.
+WEBKIT_CAPTURE_HTML="$FIXTURE" WEBKIT_CAPTURE_WIDTH=600 WEBKIT_CAPTURE_HEIGHT=120 \
+WEBKIT_CAPTURE_SELECTORS="$SELECTORS" WEBKIT_CAPTURE_OUTPUT="$WEBKIT_JSON" \
+    swift "$ROOT_DIR/tools/tauri-live-bitmap/capture_geometry.swift" >/dev/null 2>&1 \
+    || fail "WebKit computed-style capture failed"
+test -s "$WEBKIT_JSON" || fail "WebKit capture missing: $WEBKIT_JSON"
+
+# 4. Assert cross-engine parity on the hardened, visible fields.
+node - "$ELECTRON_JSON" "$WEBKIT_JSON" <<'NODE'
+const fs = require("fs");
+const [ePath, wPath] = process.argv.slice(2);
+const idx = p => Object.fromEntries(
+  JSON.parse(fs.readFileSync(p, "utf8")).items.map(i => [i.selector, i]));
+const ch = idx(ePath), wk = idx(wPath);
+// Fields hardened to be engine-stable. Label height (line-height:normal) is a
+// known benign sub-pixel residual and is intentionally NOT gated.
+const PARITY = ["boxSizing", "appearance", "userSelect", "cursor", "display"];
+const RECT_PARITY = [".simple-app-title", ".simple-titlebar-widgets", ".simple-titlebar-widget"];
+const EXPECT = {
+  ".simple-app-title":      { userSelect: "none", boxSizing: "border-box" },
+  ".simple-titlebar-widget":{ appearance: "none", cursor: "pointer", userSelect: "none", boxSizing: "border-box" },
+};
+const fails = [];
+for (const sel of Object.keys(ch)) {
+  const c = ch[sel], w = wk[sel] || {};
+  for (const f of PARITY)
+    if (c[f] !== w[f]) fails.push(`${sel}.${f}: chromium=${c[f]} webkit=${w[f]}`);
+  if (RECT_PARITY.includes(sel)) {
+    const a = c.rect, b = w.rect || {};
+    if (a.width !== b.width || a.height !== b.height)
+      fails.push(`${sel}.rect: chromium=${a.width}x${a.height} webkit=${b.width}x${b.height}`);
+  }
+  const exp = EXPECT[sel];
+  if (exp) for (const f of Object.keys(exp)) {
+    if (c[f] !== exp[f]) fails.push(`${sel}.${f}: chromium=${c[f]} expected=${exp[f]}`);
+    if (w[f] !== exp[f]) fails.push(`${sel}.${f}: webkit=${w[f]} expected=${exp[f]}`);
+  }
+}
+if (fails.length) { console.error("titlebar parity failures:\n  " + fails.join("\n  ")); process.exit(1); }
+console.log("titlebar_cross_engine_parity=pass");
+console.log("engines=chromium(electron),webkit(wkwebview)");
+NODE
+
+echo "titlebar_fixture=$FIXTURE"
+echo "chromium_capture=$ELECTRON_JSON"
+echo "webkit_capture=$WEBKIT_JSON"
+echo "status=pass"

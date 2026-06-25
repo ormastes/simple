@@ -1,0 +1,186 @@
+# HTTP/2 Connection State Machine — RFC 9113 §6.5, §6.7, §6.8, §6.9
+#
+# Connection-level state: SETTINGS exchange, GOAWAY, connection-level flow
+# control, stream registry. Multiplexes incoming frames to H2Stream instances.
+#
+# Scope:
+#   - H2Settings struct and defaults
+#   - H2Connection struct (stream registry, window accounting)
+#   - SETTINGS frame emit/ack
+#   - GOAWAY frame emit
+#   - Connection-level WINDOW_UPDATE
+#   - Stream creation on client HEADERS
+#
+# Depends on: h2_stream.spl, h2_frame.spl, h2_writer.spl
+
+# ============================================================================
+# Settings struct
+# ============================================================================
+
+class H2Settings:
+    """HTTP/2 SETTINGS parameters (RFC 9113 §6.5.2)."""
+    max_concurrent_streams: i64   # default: effectively unlimited (use 100 as practical default)
+    initial_window_size: i64      # default: 65535
+    max_frame_size: i64           # default: 16384, range 16384..16777215
+    header_table_size: i64        # default: 4096
+    enable_push: bool             # default: true (server push enabled)
+
+pub fn h2_settings_default() -> H2Settings:
+    """Return RFC 9113 default SETTINGS values."""
+    return H2Settings(
+        max_concurrent_streams: 100,
+        initial_window_size: 65535,
+        max_frame_size: 16384,
+        header_table_size: 4096,
+        enable_push: true
+    )
+
+# ============================================================================
+# Connection struct
+# ============================================================================
+
+class H2Connection:
+    """HTTP/2 connection state: streams, settings, flow control."""
+    streams: [H2Stream]
+    settings: H2Settings
+    next_stream_id: i64        # server-initiated streams use even IDs; start at 2
+    connection_window: i64     # connection-level send flow-control window
+    max_concurrent_streams: i64
+    goaway_sent: bool
+    last_stream_id: i64        # highest stream_id seen from client (for GOAWAY)
+
+# ============================================================================
+# Constructor
+# ============================================================================
+
+pub fn h2_connection_new(settings: H2Settings) -> H2Connection:
+    """Create a new server-side H2Connection with given local settings."""
+    var streams: [H2Stream] = []
+    return H2Connection(
+        streams: streams,
+        settings: settings,
+        next_stream_id: 2,
+        connection_window: 65535,
+        max_concurrent_streams: settings.max_concurrent_streams,
+        goaway_sent: false,
+        last_stream_id: 0
+    )
+
+# ============================================================================
+# Stream registry helpers
+# ============================================================================
+
+pub fn h2_connection_get_stream(conn: H2Connection, stream_id: i64) -> H2Stream:
+    """Return the stream with the given id, or a new Idle stream if not found."""
+    var i = 0
+    while i < conn.streams.len():
+        val s = conn.streams[i]
+        if s.id == stream_id:
+            return s
+        i = i + 1
+    return h2_stream_new(stream_id, conn.settings.initial_window_size)
+
+fn _conn_upsert_stream(conn: H2Connection, updated: H2Stream) -> H2Connection:
+    """Return a new H2Connection with the stream list updated (replace or append)."""
+    var new_streams: [H2Stream] = []
+    var found = false
+    var i = 0
+    while i < conn.streams.len():
+        val s = conn.streams[i]
+        if s.id == updated.id:
+            new_streams.push(updated)
+            found = true
+        else:
+            new_streams.push(s)
+        i = i + 1
+    if not found:
+        new_streams.push(updated)
+    return H2Connection(
+        streams: new_streams,
+        settings: conn.settings,
+        next_stream_id: conn.next_stream_id,
+        connection_window: conn.connection_window,
+        max_concurrent_streams: conn.max_concurrent_streams,
+        goaway_sent: conn.goaway_sent,
+        last_stream_id: conn.last_stream_id
+    )
+
+# ============================================================================
+# Public connection operations
+# ============================================================================
+
+pub fn h2_connection_accept_stream(conn: H2Connection, stream_id: i64) -> H2Connection:
+    """Register a new client-initiated stream (HEADERS received).
+    Transitions it from Idle to Open and records the highest stream id seen.
+    """
+    val stream = h2_stream_new(stream_id, conn.settings.initial_window_size)
+    val open_stream = h2_stream_transition(stream, H2StreamEvent.RecvHeaders)
+    val new_last = if stream_id > conn.last_stream_id: stream_id else: conn.last_stream_id
+    val updated = _conn_upsert_stream(conn, open_stream)
+    return H2Connection(
+        streams: updated.streams,
+        settings: updated.settings,
+        next_stream_id: updated.next_stream_id,
+        connection_window: updated.connection_window,
+        max_concurrent_streams: updated.max_concurrent_streams,
+        goaway_sent: updated.goaway_sent,
+        last_stream_id: new_last
+    )
+
+pub fn h2_connection_send_settings(conn: H2Connection) -> (H2Connection, [u8]):
+    """Emit a SETTINGS frame reflecting current local settings.
+    Returns (updated_conn, frame_bytes).
+    """
+    var params: [H2Setting] = []
+    params.push(H2Setting(identifier: H2_SETTINGS_MAX_CONCURRENT_STREAMS, value: conn.settings.max_concurrent_streams))
+    params.push(H2Setting(identifier: H2_SETTINGS_INITIAL_WINDOW_SIZE, value: conn.settings.initial_window_size))
+    params.push(H2Setting(identifier: H2_SETTINGS_MAX_FRAME_SIZE, value: conn.settings.max_frame_size))
+    params.push(H2Setting(identifier: H2_SETTINGS_HEADER_TABLE_SIZE, value: conn.settings.header_table_size))
+    val enable_push_val = if conn.settings.enable_push: 1 else: 0
+    params.push(H2Setting(identifier: H2_SETTINGS_ENABLE_PUSH, value: enable_push_val))
+    val frame = H2Frame.Settings(H2SettingsFrame(flags: 0, settings: params))
+    val bytes = h2_write_frame(frame)
+    return (conn, bytes)
+
+pub fn h2_connection_handle_settings_ack(conn: H2Connection) -> H2Connection:
+    """Process receipt of a SETTINGS ACK — no state change needed for static settings."""
+    return conn
+
+pub fn h2_connection_send_goaway(conn: H2Connection, error_code: i64) -> (H2Connection, [u8]):
+    """Emit a GOAWAY frame. Marks the connection as goaway_sent.
+    Returns (updated_conn, frame_bytes).
+    """
+    val frame = H2Frame.Goaway(H2GoawayFrame(
+        last_stream_id: conn.last_stream_id,
+        error_code: error_code,
+        debug_data: []
+    ))
+    val bytes = h2_write_frame(frame)
+    val new_conn = H2Connection(
+        streams: conn.streams,
+        settings: conn.settings,
+        next_stream_id: conn.next_stream_id,
+        connection_window: conn.connection_window,
+        max_concurrent_streams: conn.max_concurrent_streams,
+        goaway_sent: true,
+        last_stream_id: conn.last_stream_id
+    )
+    return (new_conn, bytes)
+
+pub fn h2_connection_update_window(conn: H2Connection, stream_id: i64, increment: i64) -> H2Connection:
+    """Apply a WINDOW_UPDATE. If stream_id == 0 update connection window;
+    otherwise update the per-stream window.
+    """
+    if stream_id == 0:
+        return H2Connection(
+            streams: conn.streams,
+            settings: conn.settings,
+            next_stream_id: conn.next_stream_id,
+            connection_window: conn.connection_window + increment,
+            max_concurrent_streams: conn.max_concurrent_streams,
+            goaway_sent: conn.goaway_sent,
+            last_stream_id: conn.last_stream_id
+        )
+    val stream = h2_connection_get_stream(conn, stream_id)
+    val updated_stream = h2_stream_update_recv_window(stream, increment)
+    return _conn_upsert_stream(conn, updated_stream)

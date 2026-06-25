@@ -1,0 +1,46 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val FIXTURE_DIR = "/tmp/simple_feature_doc_log_mode_fixture"
+
+fn _setup_fixture():
+    val (_out, _err, _code) = rt_process_run("/bin/sh", [
+        "-c",
+        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR + "/test/feature/app " + FIXTURE_DIR + "/test/feature/usage && cat > " + FIXTURE_DIR + "/test/feature/app/tool_spec.spl <<'EOF'\ndescribe \"tool\":\n    it \"works\":\n        assert true\nEOF\ncat > " + FIXTURE_DIR + "/test/feature/usage/lang_spec.spl <<'EOF'\ndescribe \"language\":\n    it \"works\":\n        assert true\nEOF"
+    ])
+
+fn _run_feature_doc(args: [text]) -> (text, text, i64):
+    val joined = args.join(" ")
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); cd " + FIXTURE_DIR + " && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/feature_doc/main.spl\" " + joined
+    ])
+
+describe "feature-doc log mode CLI options":
+    it "shows shared log options in help":
+        _setup_fixture()
+        val (out, err, code) = _run_feature_doc(["--help"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("--log-mode")
+        expect(out).to_contain("--progress")
+
+    it "supports list log-mode json":
+        _setup_fixture()
+        val (out, err, code) = _run_feature_doc(["--list", "--log-mode=json"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("\"command\":\"feature-doc\"")
+        expect(out).to_contain("\"app\":1")
+        expect(out).to_contain("\"usage\":1")
+
+    it "supports dot progress":
+        _setup_fixture()
+        val (out, err, code) = _run_feature_doc(["--list", "--progress=dot"])
+        expect(code).to_equal(0)
+        expect(out).to_start_with(".")
+        expect(out).to_contain("Feature Test Classification")
+
+    it "rejects invalid log mode":
+        _setup_fixture()
+        val (out, err, code) = _run_feature_doc(["--list", "--log-mode=noisy"])
+        expect(code).to_equal(1)

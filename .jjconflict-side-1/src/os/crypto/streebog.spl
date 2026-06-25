@@ -1,0 +1,301 @@
+"""Streebog (GOST R 34.11-2012) Hash Function.
+
+Implements Streebog-256 and Streebog-512 as specified in
+GOST R 34.11-2012 / RFC 6986.
+
+Design:
+  - 512-bit (64-byte) internal state represented as 8 little-endian u64 words.
+  - Substitution π: 256-byte S-box applied to every byte of the state.
+  - Permutation τ: reorders 64 bytes of state.
+  - Linear transform A (L in the spec): MDS over GF(2^8), polynomial x^8+x^7+x^6+x+1 (0x1C3).
+  - Combined LPS = L(τ(π(state))).
+  - Compression function g_N(h, m): 12-round substitution-permutation network.
+  - Padding: append 0x01, then zero bytes to 64-byte boundary.
+  - Three running values: h (chaining), N (512-bit bit-count), Σ (checksum).
+  - IV: 512 zero bytes for Streebog-512; 0x01 repeated 64 times for Streebog-256.
+  - Output: full 64-byte h for -512; bytes h[32..64] for -256 (most significant half).
+
+References:
+  RFC 6986 — GOST R 34.11-2012 (Streebog hash function).
+  GOST R 34.11-2012 standard text.
+"""
+
+use os.crypto.streebog_sbox.{_sb_u8_at, _pi_sbox, _tau}
+use os.crypto.streebog_tables.{_streebog_a_rows, _round_key_byte, _get_round_constant}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+# ---------------------------------------------------------------------------
+# State is a flat list of 64 bytes (i64 values).
+# ---------------------------------------------------------------------------
+
+fn _make_zero_state() -> list:
+    var s = []
+    var i = 0
+    while i < 64:
+        s.push(0)
+        i = i + 1
+    s
+
+fn _state_xor(a: list, b: list) -> list:
+    var out = []
+    var i = 0
+    while i < 64:
+        out.push((a.get(i) ^ b.get(i)) & 0xFF)
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# S — apply π S-box to every byte of state
+# ---------------------------------------------------------------------------
+
+fn _apply_s(state: list) -> list:
+    var out = []
+    var i = 0
+    while i < 64:
+        out.push(_pi_sbox(state.get(i) & 0xFF))
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# P — apply τ permutation to state bytes
+# ---------------------------------------------------------------------------
+
+fn _apply_p(state: list) -> list:
+    var out = []
+    var i = 0
+    while i < 64:
+        out.push(state.get(63 - _tau(63 - i)))
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# L — apply MDS linear transform, row by row (8 rows x 8 bytes)
+# Each output byte out_row of row r:
+#   result[r*8 + out_row] = XOR_{in_col=0}^{7} MDS[in_col][out_row] * state[r*8 + in_col]
+# ---------------------------------------------------------------------------
+
+fn _streebog_l_word(word: list) -> list:
+    # The A-rows table was built for little-endian u64 words.
+    # Reverse the input word bytes (big-endian → little-endian) before
+    # processing, then reverse the output bytes back.
+    val rows = _streebog_a_rows()
+    var rev = []
+    var ri = 7
+    while ri >= 0:
+        rev.push(word.get(ri) & 0xFF)
+        ri = ri - 1
+    var out = [0, 0, 0, 0, 0, 0, 0, 0]
+    var bit_idx = 0
+    while bit_idx < 64:
+        val byte_idx = bit_idx / 8
+        val bit_in_byte = 7 - (bit_idx % 8)
+        if (((rev.get(byte_idx) & 0xFF) >> bit_in_byte) & 1) != 0:
+            val row = rows[bit_idx]
+            var j = 0
+            while j < 8:
+                out[j] = (out.get(j) ^ row[j]) & 0xFF
+                j = j + 1
+        bit_idx = bit_idx + 1
+    # Reverse output back to match the state byte order
+    var result = []
+    var oi = 7
+    while oi >= 0:
+        result.push(out.get(oi) & 0xFF)
+        oi = oi - 1
+    result
+
+fn _apply_l(state: list) -> list:
+    var out = _make_zero_state()
+    var word_idx = 0
+    while word_idx < 8:
+        var word = []
+        var i = 0
+        while i < 8:
+            word.push(state.get(word_idx * 8 + i) & 0xFF)
+            i = i + 1
+        val transformed = _streebog_l_word(word)
+        i = 0
+        while i < 8:
+            out[word_idx * 8 + i] = transformed.get(i) & 0xFF
+            i = i + 1
+        word_idx = word_idx + 1
+    out
+
+# ---------------------------------------------------------------------------
+# LPS = L(P(S(state))) — the combined round transform
+# ---------------------------------------------------------------------------
+
+fn _lps(state: list) -> list:
+    var s1 = _apply_s(state)
+    var s2 = _apply_p(s1)
+    _apply_l(s2)
+
+# ---------------------------------------------------------------------------
+# E — encryption (key schedule + 12 rounds) — used inside g_N.
+# Matches gostcrypto _hash_e / _hash_get_key:
+#   state = k XOR m
+#   for i in 0..11:
+#     state = LPS(state)
+#     k = LPS(k XOR C[i])
+#     state = state XOR k
+# ---------------------------------------------------------------------------
+
+fn _streebog_encrypt(key: list, msg: list) -> list:
+    var k = key
+    var state = _state_xor(k, msg)
+    var round = 0
+    while round < 12:
+        state = _lps(state)
+        var ci = _get_round_constant(round)
+        k = _lps(_state_xor(k, ci))
+        state = _state_xor(state, k)
+        round = round + 1
+    state
+
+# ---------------------------------------------------------------------------
+# g_N — compression function
+# g_N(h, m, N) = E_{LPS(h XOR N)}(m) XOR h XOR m
+# h, m, N are all 64-byte states.
+# Matches gostcrypto _hash_g:
+#   k = LPS(h XOR N)
+#   result = E(k, m) XOR h XOR m
+# ---------------------------------------------------------------------------
+
+fn _g_N(h: list, m: list, N: list) -> list:
+    # Initial key = LPS(h XOR N)
+    var key = _lps(_state_xor(h, N))
+    var enc = _streebog_encrypt(key, m)
+    var tmp = _state_xor(enc, h)
+    _state_xor(tmp, m)
+
+# ---------------------------------------------------------------------------
+# 512-bit modular addition (mod 2^512) for the N accumulator.
+# Both operands are 64-byte big-endian states.
+# ---------------------------------------------------------------------------
+
+fn _add512(a: list, b: list) -> list:
+    # Little-endian 512-bit addition: byte 0 is the least-significant byte.
+    var out = _make_zero_state()
+    var carry = 0
+    var i = 0
+    while i < 64:
+        var sum = (a.get(i) & 0xFF) + (b.get(i) & 0xFF) + carry
+        out[i] = sum & 0xFF
+        carry = (sum >> 8) & 0xFF
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Build a 512-bit integer from a single i64 value (big-endian).
+# Used to represent the 512-bit message-length counter.
+# ---------------------------------------------------------------------------
+
+fn _u64_to_state(v: i64) -> list:
+    # Little-endian: byte 0 = LSB.
+    var s = _make_zero_state()
+    s[0] = v & 0xFF
+    s[1] = (v >> 8) & 0xFF
+    s[2] = (v >> 16) & 0xFF
+    s[3] = (v >> 24) & 0xFF
+    s[4] = (v >> 32) & 0xFF
+    s[5] = (v >> 40) & 0xFF
+    s[6] = (v >> 48) & 0xFF
+    s[7] = (v >> 56) & 0xFF
+    s
+
+# ---------------------------------------------------------------------------
+# Copy a 64-byte block from a [u8] buffer at given offset into a state list.
+# ---------------------------------------------------------------------------
+
+fn _block_to_state(data: [u8], offset: u64) -> list:
+    var s = []
+    var i: u64 = 0
+    while i < 64:
+        s.push(_sb_u8_at(data, offset + i).to_i64())
+        i = i + 1
+    s
+
+fn _state_to_bytes(state: list) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 64:
+        out.push((state.get(i) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Build the final padded block 0^(511-|M|) || 1 || M for the remaining prefix.
+# ---------------------------------------------------------------------------
+
+fn _final_padded_block(data: [u8], prefix_len: u64) -> list:
+    # Pad: message bytes at [0..prefix_len), then 0x01 at [prefix_len], then zeros.
+    # Matches gostcrypto: buf + b'\x01' + b'\x00' * (63 - len(buf)).
+    var block = _make_zero_state()
+    var i: u64 = 0
+    while i < prefix_len:
+        block[i.to_i64()] = _sb_u8_at(data, i).to_i64()
+        i = i + 1
+    block[prefix_len.to_i64()] = 0x01
+    block
+
+# ---------------------------------------------------------------------------
+# Core Streebog hash (parametrized by IV and output length)
+# ---------------------------------------------------------------------------
+
+fn _streebog_hash(data: [u8], iv: list, out_len: u64) -> [u8]:
+    var h = iv
+    var N = _make_zero_state()
+    var sigma = _make_zero_state()
+
+    # RFC 6986 consumes complete 512-bit blocks from the message tail.
+    var remaining = data.len().to_u64()
+    while remaining >= 64:
+        val offset = remaining - 64
+        val m = _block_to_state(data, offset)
+        h = _g_N(h, m, N)
+        N = _add512(N, _u64_to_state(512))
+        sigma = _add512(sigma, m)
+        remaining = offset
+
+    val final_block = _final_padded_block(data, remaining)
+    h = _g_N(h, final_block, N)
+    N = _add512(N, _u64_to_state((remaining * 8).to_i64()))
+    sigma = _add512(sigma, final_block)
+
+    var zero_n = _make_zero_state()
+    h = _g_N(h, N, zero_n)
+    h = _g_N(h, sigma, zero_n)
+
+    # Extract output: bytes [0..out_len) of h (state is little-endian).
+    var result: [u8] = []
+    var j: u64 = 0
+    while j < out_len:
+        result.push((h.get(j.to_i64()) & 0xFF).to_u8())
+        j = j + 1
+    result
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+fn streebog_512(data: [u8]) -> [u8]:
+    """Compute Streebog-512 (GOST R 34.11-2012) hash. Returns 64-byte digest."""
+    var iv = _make_zero_state()
+    _streebog_hash(data, iv, 64)
+
+fn streebog_256(data: [u8]) -> [u8]:
+    """Compute Streebog-256 (GOST R 34.11-2012) hash. Returns 32-byte digest."""
+    # IV for -256: all bytes = 0x01
+    var iv = []
+    var i = 0
+    while i < 64:
+        iv.push(0x01)
+        i = i + 1
+    val full = _streebog_hash(data, iv, 64)
+    var out: [u8] = []
+    var j: u64 = 32
+    while j < 64:
+        out.push(full[j])
+        j = j + 1
+    out

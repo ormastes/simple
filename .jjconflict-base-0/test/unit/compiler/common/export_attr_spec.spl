@@ -1,0 +1,174 @@
+"""
+# ExportAttr Parsing Specification
+
+**Feature IDs:** #SFFI-EXPORT-001
+**Category:** Compiler / Attributes
+**Difficulty:** 2/5
+**Status:** Implemented
+**Requirements:** SFFI bidirectional class interop
+**Plan:** parsed-questing-goose.md
+**Design:** sffi_external_library_pattern.md
+
+## Overview
+
+Tests the `ExportAttr` struct and `parse_export_attrs()` function which
+parses `@export("C")` and `@export("C", name: "custom")` annotations.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| ExportAttr | Struct holding is_export_c and export_name |
+| parse_export_attrs | Scans [Attribute] for @export("C") |
+| Custom name | Optional name: kwarg for C symbol override |
+"""
+
+use compiler.common.attributes.{ExportAttr, parse_export_attrs}
+use compiler.frontend.parser_types.{Attribute, Expr, ExprKind}
+from lexer import {Span}
+
+# ============================================================================
+# Helpers: Build Attribute objects for testing
+# ============================================================================
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn make_string_expr(value: text) -> Expr:
+    """Create a StringLit expression."""
+    Expr(kind: ExprKind.StringLit(value, nil), span: empty_span())
+
+fn make_ident_expr(name: text) -> Expr:
+    """Create an Ident expression."""
+    Expr(kind: ExprKind.Ident(name), span: empty_span())
+
+fn make_assign_expr(name: text, value: Expr) -> Expr:
+    """Create an Assign expression (name = value)."""
+    val left = make_ident_expr(name)
+    Expr(kind: ExprKind.Assign(left, nil, value), span: empty_span())
+
+fn make_export_c_attr() -> Attribute:
+    """Create @export("C") attribute."""
+    Attribute(
+        name: "export",
+        args: [make_string_expr("C")],
+        span: empty_span()
+    )
+
+fn make_export_c_named_attr(custom_name: text) -> Attribute:
+    """Create @export("C", name: "custom") attribute."""
+    Attribute(
+        name: "export",
+        args: [make_string_expr("C"), make_assign_expr("name", make_string_expr(custom_name))],
+        span: empty_span()
+    )
+
+fn make_export_no_args_attr() -> Attribute:
+    """Create @export() attribute with no arguments."""
+    Attribute(
+        name: "export",
+        args: [],
+        span: empty_span()
+    )
+
+fn make_export_python_attr() -> Attribute:
+    """Create @export("Python") attribute (non-C target)."""
+    Attribute(
+        name: "export",
+        args: [make_string_expr("Python")],
+        span: empty_span()
+    )
+
+fn make_unrelated_attr() -> Attribute:
+    """Create an unrelated @repr("C") attribute."""
+    Attribute(
+        name: "repr",
+        args: [make_string_expr("C")],
+        span: empty_span()
+    )
+
+# ============================================================================
+# Test Group 1: parse_export_attrs — Basic Parsing
+# ============================================================================
+
+describe "ExportAttr":
+    """
+    ## Attribute Parsing
+
+    Tests parsing of @export attributes from declaration annotations.
+    """
+
+    describe "parse_export_attrs":
+        """
+        ## Parsing @export Annotations
+
+        Scans a list of Attribute for @export("C") with optional name kwarg.
+        """
+
+        it "returns nil when no @export attribute":
+            val attrs: [Attribute] = [make_unrelated_attr()]
+            val result = parse_export_attrs(attrs)
+            expect(result).to_be_nil()
+
+        it "returns nil for empty attribute list":
+            val attrs: [Attribute] = []
+            val result = parse_export_attrs(attrs)
+            expect(result).to_be_nil()
+
+        it "parses @export('C') correctly":
+            val attrs: [Attribute] = [make_export_c_attr()]
+            val result = parse_export_attrs(attrs)
+            expect(result.?).to_equal(true)
+            val ea = result.unwrap()
+            expect(ea.is_export_c).to_equal(true)
+            expect(ea.export_name).to_equal("")
+
+        it "parses @export('C', name: 'custom') with custom name":
+            val attrs: [Attribute] = [make_export_c_named_attr("my_calc")]
+            val result = parse_export_attrs(attrs)
+            expect(result.?).to_equal(true)
+            val ea = result.unwrap()
+            expect(ea.is_export_c).to_equal(true)
+            expect(ea.export_name).to_equal("my_calc")
+
+        it "returns nil for @export without arguments":
+            val attrs: [Attribute] = [make_export_no_args_attr()]
+            val result = parse_export_attrs(attrs)
+            expect(result).to_be_nil()
+
+        it "returns nil for @export with non-C target":
+            val attrs: [Attribute] = [make_export_python_attr()]
+            val result = parse_export_attrs(attrs)
+            expect(result).to_be_nil()
+
+        it "finds @export among multiple attributes":
+            val attrs: [Attribute] = [
+                make_unrelated_attr(),
+                make_export_c_attr(),
+                make_unrelated_attr()
+            ]
+            val result = parse_export_attrs(attrs)
+            expect(result.?).to_equal(true)
+            val ea = result.unwrap()
+            expect(ea.is_export_c).to_equal(true)
+
+# ============================================================================
+# Test Group 2: ExportAttr Struct
+# ============================================================================
+
+describe "ExportAttr struct":
+    """
+    ## Struct Construction
+
+    Tests direct construction and field access of ExportAttr.
+    """
+
+    it "can be constructed with default values":
+        val ea = ExportAttr(is_export_c: false, export_name: "")
+        expect(ea.is_export_c).to_equal(false)
+        expect(ea.export_name).to_equal("")
+
+    it "can be constructed with export enabled":
+        val ea = ExportAttr(is_export_c: true, export_name: "my_fn")
+        expect(ea.is_export_c).to_equal(true)
+        expect(ea.export_name).to_equal("my_fn")

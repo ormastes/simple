@@ -1,0 +1,242 @@
+---
+name: verify
+description: "Codex verification skill (primary verifier in cooperative mode). 6-phase production readiness verification: scope, SPipe quality, implementation stubs, requirements tracing, NFR, docs. STATUS: PASS/FAIL/WARN output. Must PASS before release."
+---
+
+# Verify — Codex (Primary Verifier)
+
+**Cooperative Phase:** Verification (final gate before release)
+**Self-sufficient.** Any LLM can run verify independently. Codex is the primary verifier in cooperative mode.
+
+## Tools
+
+- **Simple MCP** — query codebase structure, find stubs
+- **Simple LSP MCP** — symbol lookup, dead code detection
+
+## Usage
+
+- No args: verify current changes
+- File path: verify specific feature
+- `--all`: full project verification
+
+## 6-Phase Verification
+
+### Phase 1: Scope Analysis
+
+- Identify all files changed/added for the feature
+- Map changes to requirements (REQ-NNN)
+- Verify no unrelated changes sneaked in
+- Run `sh scripts/audit/numbered-artifact-guard.shs --working` and
+  `sh scripts/audit/numbered-artifact-guard.shs --staged`, then fail any
+  newly added or renamed `*_1`, `*_2`, `part1`, `ver1`, `v1`, or equivalent
+  numbered copy/version artifact. Existing files must be updated or split into
+  meaningful domain/module names instead.
+
+### Phase 2: SPipe Quality and Coverage
+
+SPipe is owned by **design/implementation for creation** and by
+**verify for acceptance**. Release must only consume a completed verify result;
+release must not create, rewrite, or weaken SPipe evidence after verification.
+
+- Every `it` block has real assertions (not `pass_todo`, not `expect(true).to_equal(true)`)
+- Edge cases and error paths tested
+- Every REQ-NNN has at least one test
+- Every required SPipe generated/manual spec exists under `doc/06_spec/` at the
+  path mirrored from the executable `test/...` spec
+- For changed specs, `simple spipe-docgen <spec> --output doc/06_spec --no-index`
+  reports complete documentation with `0 stubs`; a generated manual marked as a
+  stub is a FAIL even when the `.md` file exists.
+- Scenario-oriented generated docs read as manuals: primary scenario steps are
+  visible first, `@inline`/`@prev` setup expands without redundant metadata,
+  executable SPipe is folded by default, and advanced/edge/matrix/stress
+  scenarios are folded or skipped according to policy.
+- Shared interface names and manual-facing setup/checker helper names match the
+  accepted architecture/design/spec/manual references.
+- Placeholder helpers for shared interfaces or manual setup/checker flow fail
+  explicitly with `assert(false)` or `fail(...)` until implemented; silent
+  placeholder passes are a FAIL.
+- For broad SPipe lanes, the recorded cooperative review plan is complete or
+  explicitly `N/A`: lower-model sidecars such as Codex Spark, Claude Haiku, or
+  Claude Sonnet were merged/reviewed when used, and the best available
+  normal/highest-capability model accepted broad findings,
+  generated-manual quality, coverage claims, exclusions, and done marks before
+  PASS.
+- UI-facing specs include visible-state evidence when practical: TUI text/ANSI
+  captures under `build/test-artifacts/<spec-relative-path>/`, GUI screenshots
+  or goldens under `doc/06_spec/image/<spec-relative-path>/`, and embedded
+  `**Screenshots:**` / `**TUI Captures:**` entries in generated docs
+- Non-UI environmental specs include meaningful typed evidence when practical:
+  `api`, `protocol`, `exec`, `binary`, `text`, `log`, or `artifact` captures
+  attached to the relevant scenario step.
+- Every BDD scenario has an executable or intentionally skipped SPipe `it` block with a concrete reason
+- SPipe files are current with the final requirements/design; stale specs are a FAIL, not a release task
+- Canonical matchers in new specs: `to_equal`, `to_be`, `to_be_nil`,
+  `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`,
+  `to_be_less_than`
+- Do not replace compatibility helpers with boolean-wrapper assertions. Assert
+  concrete values, or use `to_be(true/false)` only when the boolean itself is
+  the behavior under test.
+- For short grammar features, require runtime-specific evidence:
+  - Interpreter specs for pipe-forward, composition, placeholder lambdas, method references, optional access, and compact DSL forms.
+  - Native specs for only the compact forms intended to work in native mode.
+  - Native evidence is invalid if the run reports codegen stub fallback; rerun with `SIMPLE_NO_STUB_FALLBACK=1`.
+  - Specs that claim `:=` support must use the actual `:=` token, not equivalent `val` declarations.
+
+### Phase 3: Implementation Stubs
+
+Scan for stub patterns — any match is a **FAIL**:
+
+- `pass_todo` — unimplemented placeholder
+- `pass_do_nothing("why no-op is correct")` / `pass_dn("why no-op is correct")` with weak or missing rationale
+- `todo("what remains", "hint or issue")` with weak or missing rationale
+- Hardcoded returns without logic
+- Empty function bodies
+- Commented-out code blocks
+- `# TODO` / `# FIXME` converted to `# NOTE` — hidden work
+- Generated GPU backend source containing unsupported-operation placeholder
+  comments or marker text instead of a diagnostic
+
+**STUB001 = HARD FAIL.** No stubs in production code.
+
+### Phase 4: Requirements Tracing
+
+- Every REQ-NNN in `doc/02_requirements/feature/<feature>.md` traced to source code
+- Every BDD scenario in `doc/06_spec/` has a matching `it` block in the mirrored
+  executable `test/.../*_spec.spl` file
+- `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`; executable specs
+  under `doc/06_spec` are a hard layout failure
+- Requirement, research, architecture/design, generated spec, plan,
+  implementation, guide, and executable test links use the same feature slug or
+  an explicit documented alias
+- Any `doc/08_tracking/feature/feature_db.sdn` row with `status=done` fills
+  `requirement`, `research`, `plan`, `architecture`, `design`, `system_spec`,
+  `spec_doc`, `implementation`, `unit_tests`, `integration_tests`, and `guide`;
+  confirm with `<runtime> lint doc/08_tracking/feature/feature_db.sdn`
+- No orphan requirements (REQ without implementation)
+- No orphan tests (tests without corresponding REQ)
+
+### Phase 5: NFR Verification
+
+- **Performance:** benchmarks exist for performance-critical paths
+- **Security:** input validation present, no hardcoded secrets
+- **Reliability:** error handling complete, `Result<T, E>` + `?` used consistently
+- **Maintainability:** files under 800 lines, no duplication
+- **Runtime facade boundary:** new env reads or process calls in app leaf
+  code or `src/lib/gc_async_mut` outside owner modules such as `app/io/*.spl`
+  must use the stdlib/app/gc env/process facades, not local `rt_env_get`,
+  `rt_process_run`, `rt_process_run_timeout`, `rt_process_spawn_async`,
+  `rt_process_wait`, `rt_process_is_running`, `rt_process_is_alive`, or
+  `rt_process_kill`
+  declarations/calls.
+  Check with `sh scripts/audit/direct-env-runtime-guard.shs --working` and
+  `sh scripts/audit/direct-env-runtime-guard.shs --staged`.
+- **Artifact naming:** no newly added/renamed numbered copy/version/part files
+- **Runtime boundary:** new direct `rt_*` extern use in Simple code is a FAIL
+  unless it is an infrastructure/provider boundary or has a linked
+  compiler/runtime performance or baremetal/direct-hardware blocker explaining
+  why generated/native Simple cannot handle the path yet. Prefer stdlib,
+  generated Simple, capability records, traits, or direct hardware backends over
+  runtime bypasses.
+- **GUI/MDI evidence gates:** wrappers that claim live visual/event proof must
+  fail when requested evidence is unavailable, times out, or only proves file
+  existence. For Electron, Tauri mobile/iOS, hosted WM, QEMU/GTK WM, and pure WM
+  evidence, require non-dummy event routing plus semantic screenshot/pixel
+  checks for rendered windows and taskbar/dock icon or label regions. Explicit
+  environment-based skips may pass only when the report says `skipped`, not when
+  it claims live proof.
+- **GUI/web queue proof:** runtime queue/drain receipts are necessary evidence,
+  not sufficient production proof. A GUI/web production pass requires same-frame
+  backend `device_readback`, a positive backend handle, and matching checksum;
+  runtime-only, synthetic-handle, upload-only, or CPU-mirror evidence is a FAIL.
+- **GUI/web/2D RenderDoc+Vulkan gates:** start from
+  `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc`
+  on POSIX hosts or `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check` on
+  Windows. Require host Vulkan readiness, Simple Vulkan/Engine2D readback or
+  RenderDoc proof, original Chrome RenderDoc proof, Electron RenderDoc proof,
+  and production GUI/web parity evidence. If Chrome or Electron logs show
+  `angle=vulkan` unavailable, report
+  `vulkan-angle-unavailable` and fail the Vulkan proof even when pixels render.
+- **Metal/Vulkan/8K claims:** native Metal proof is macOS-only and must include
+  raw Metal readback; Linux Metal is only `metal-requires-macos`. Vulkan claims
+  need the readback/RenderDoc gate above. Any 8K performance claim needs a
+  retained 8K row or an explicit blocker in `doc/09_report` / `doc/10_metrics`.
+- **Core/MCP regression gate:** when compiler/core/lib or MCP/LSP files changed, require passing:
+  - `<runtime> check src/compiler`
+  - `<runtime> check src/lib`
+  - `<runtime> check src/app/mcp`
+  - `<runtime> check src/app/simple_lsp_mcp`
+  - `SIMPLE_LIB=src <runtime> test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter`
+  - If npm packaging/release flow changed:
+  - `<runtime> native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server`
+  - `<runtime> native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server`
+
+### Phase 6: Documentation Freshness
+
+- `doc/04_architecture/` updated for new modules
+- `doc/05_design/` updated for new features
+- `doc/06_spec/` generated/manual docs follow the mirrored `test/` layout
+- Every final verification audits whether the lane changed `doc/07_guide`,
+  generated/manual SPipe docs, or process skills, and fails stale or missing
+  updates instead of deferring them to release cleanup.
+- Scenario manual guidance is followed for scenario-oriented specs; if not,
+  return to design/implementation to improve the SPipe source and regenerate.
+- Workflow, tool-contract, evidence-wrapper, or verification-contract changes
+  updated the matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
+  `.agents/skills/`, `.claude/skills/`, `.claude/agents/spipe/`, and `.gemini/commands/`
+  process docs before final verification.
+- Cooperative lower-model sidecar review, if required by the SPipe state or
+  plan, is complete before final verification; otherwise the verifier records
+  why the lane is narrow enough for `N/A`.
+- Cross-references between docs intact
+- CHANGELOG updated for user-facing changes
+
+## Report Format
+
+```
+=== Verification Report: <feature> ===
+
+[PASS] src/lib/feature.spl:42 — REQ-001 implemented with error handling
+[PASS] test/lib/feature_spec.spl:15 — REQ-001 has 3 test cases
+[FAIL] src/lib/feature.spl:87 — pass_todo found (STUB001)
+[FAIL] test/lib/feature_spec.spl:30 — expect(true).to_equal(true) is not a real assertion
+[FAIL] doc/06_spec/03_system/app/feature/feature_spec.md — generated manual lacks readable scenario steps
+[WARN] doc/04_architecture/feature.md — not updated for new module
+
+STATUS: FAIL (3 failures, 1 warning)
+```
+
+## Pass Criteria
+
+- **Zero FAIL items** — any FAIL blocks release
+- **WARN items reviewed** — warnings must be acknowledged
+- **STATUS: PASS** required before release
+
+## Artifacts Produced
+
+| Artifact | Path |
+|----------|------|
+| Verification report | Printed to stdout / saved to `doc/09_report/verify_<feature>.md` |
+
+## Rules
+
+- NEVER downgrade a FAIL to WARN — fix the issue
+- NEVER defer SPipe creation, cleanup, or requirement coverage updates to release
+- NEVER mark final verification PASS when workflow/tooling changes left stale
+  `doc/07_guide`, `doc/06_spec`, `.codex/skills/`, `.agents/skills/`,
+  `.claude/skills/`, `.claude/agents/spipe/`, or `.gemini/commands/` instructions behind
+- NEVER skip stub detection — STUB001 is non-negotiable
+- NEVER mark STATUS: PASS with outstanding FAILs
+- If verification finds issues, report them — do not auto-fix without user approval
+- Fail production wrapper verification if an MCP or LSP launcher executes a source entrypoint directly instead of a cached compiled artifact
+- Audit hot request paths for repeated full scans, repeated file rereads, and per-request subprocesses; flag uncached patterns as FAIL or WARN based on impact
+- Audit new `rt_*` use and fail runtime bypasses outside infrastructure/provider
+  code unless a concrete direct-hardware or Simple-codegen/performance blocker
+  is recorded.
+- Verify cache invalidation exists for write flows that affect cached or indexed data
+- Require startup and representative request performance evidence for performance-sensitive tooling changes
+- For `simple run` script-startup changes, require evidence from
+  `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` and confirm CLI
+  argument scripts still avoid unnecessary compile/JIT startup unless
+  `SIMPLE_EXECUTION_MODE` is explicitly set.
+- Do not mark STATUS: PASS for compiler/core/lib or MCP/LSP work unless the matching runtime and MCP smoke checks passed
+- Do not mark short grammar verification PASS when docs list a counterpart but executable tests only cover a longer equivalent form.

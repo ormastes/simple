@@ -1,0 +1,428 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_ROOT="${BUILD_ROOT:-build/production_gui_web_renderer_parity_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/production_gui_web_renderer_parity_evidence_$(date -u +%F).md}"
+TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-20}"
+CHROME_SURFACE_TIMEOUT_SECS="${CHROME_LAYOUT_TIMEOUT_SECS:-60}"
+
+mkdir -p "$BUILD_ROOT" "$(dirname -- "$REPORT_PATH")"
+rm -f "$BUILD_ROOT/evidence.env" "$REPORT_PATH"
+
+field_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+append_prefixed_env() {
+    prefix="$1"
+    file="$2"
+    if [ -s "$file" ]; then
+        sed "s/^/${prefix}/" "$file" >>"$BUILD_ROOT/evidence.env"
+    fi
+}
+
+run_matrix() {
+    case_dir="$BUILD_ROOT/electron_matrix"
+    mkdir -p "$case_dir"
+    set +e
+    BUILD_ROOT="$case_dir" REPORT_PATH="$case_dir/report.md" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" \
+        sh scripts/check/check-electron-generated-gui-web-parity-matrix-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    code=$?
+    set -e
+    env_file="$case_dir/evidence.env"
+    status=""
+    reason=""
+    if [ -s "$env_file" ]; then
+        status="$(field_of electron_generated_gui_web_matrix_status "$env_file")"
+        reason="$(field_of electron_generated_gui_web_matrix_reason "$env_file")"
+    fi
+    {
+        echo "production_gui_web_renderer_parity_matrix_exit_code=$code"
+        echo "production_gui_web_renderer_parity_matrix_status=$status"
+        echo "production_gui_web_renderer_parity_matrix_reason=$reason"
+        echo "production_gui_web_renderer_parity_matrix_report=$case_dir/report.md"
+    } >>"$BUILD_ROOT/evidence.env"
+    append_prefixed_env "matrix_" "$env_file"
+    [ "$code" -eq 0 ] && [ "$status" = "pass" ]
+}
+
+run_layout_manifest() {
+    case_dir="$BUILD_ROOT/layout_manifest"
+    mkdir -p "$case_dir"
+    set +e
+    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" \
+        sh scripts/check/check-electron-simple-web-layout-manifest-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    code=$?
+    set -e
+    env_file="$case_dir/evidence.env"
+    status=""
+    reason=""
+    case_count=""
+    pass_count=""
+    tracked_count=""
+    fail_count=""
+    if [ -s "$env_file" ]; then
+        status="$(field_of electron_simple_web_layout_manifest_status "$env_file")"
+        reason="$(field_of electron_simple_web_layout_manifest_reason "$env_file")"
+        case_count="$(field_of electron_simple_web_layout_manifest_case_count "$env_file")"
+        pass_count="$(field_of electron_simple_web_layout_manifest_pass_count "$env_file")"
+        tracked_count="$(field_of electron_simple_web_layout_manifest_tracked_count "$env_file")"
+        fail_count="$(field_of electron_simple_web_layout_manifest_fail_count "$env_file")"
+    fi
+    {
+        echo "production_gui_web_renderer_parity_layout_manifest_exit_code=$code"
+        echo "production_gui_web_renderer_parity_layout_manifest_status=$status"
+        echo "production_gui_web_renderer_parity_layout_manifest_reason=$reason"
+        echo "production_gui_web_renderer_parity_layout_manifest_case_count=$case_count"
+        echo "production_gui_web_renderer_parity_layout_manifest_pass_count=$pass_count"
+        echo "production_gui_web_renderer_parity_layout_manifest_tracked_count=$tracked_count"
+        echo "production_gui_web_renderer_parity_layout_manifest_fail_count=$fail_count"
+        echo "production_gui_web_renderer_parity_layout_manifest_report=$case_dir/report.md"
+    } >>"$BUILD_ROOT/evidence.env"
+    append_prefixed_env "layout_" "$env_file"
+    [ "$code" -eq 0 ] && [ "$status" = "pass" ] && [ "$fail_count" = "0" ]
+}
+
+run_surface_manifest() {
+    case_dir="$BUILD_ROOT/tauri_chrome_manifest"
+    mkdir -p "$case_dir"
+    layout_env="$BUILD_ROOT/layout_manifest/evidence.env"
+    set +e
+    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" LAYOUT_ENV="$layout_env" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" CHROME_LAYOUT_TIMEOUT_SECS="$CHROME_SURFACE_TIMEOUT_SECS" \
+        sh scripts/check/check-tauri-chrome-simple-web-layout-manifest-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    code=$?
+    set -e
+    env_file="$case_dir/evidence.env"
+    font_status=""
+    font_reason=""
+    electron_status=""
+    tauri_status=""
+    chrome_status=""
+    tauri_live=""
+    chrome_live=""
+    tauri_mismatch=""
+    chrome_mismatch=""
+    tauri_case_count=""
+    tauri_pass_count=""
+    tauri_tracked_count=""
+    tauri_fail_count=""
+    tauri_accepted_count=""
+    chrome_case_count=""
+    chrome_pass_count=""
+    chrome_tracked_count=""
+    chrome_fail_count=""
+    chrome_accepted_count=""
+    fake_capture=""
+    tolerance=""
+    if [ -s "$env_file" ]; then
+        status="$(field_of tauri_chrome_simple_web_layout_manifest_status "$env_file")"
+        reason="$(field_of tauri_chrome_simple_web_layout_manifest_reason "$env_file")"
+        electron_status="$(field_of tauri_chrome_simple_web_layout_manifest_electron_capture_status "$env_file")"
+        tauri_status="$(field_of tauri_chrome_simple_web_layout_manifest_tauri_capture_status "$env_file")"
+        chrome_status="$(field_of tauri_chrome_simple_web_layout_manifest_chrome_capture_status "$env_file")"
+        tauri_live="$(field_of tauri_chrome_simple_web_layout_manifest_tauri_live_capture "$env_file")"
+        chrome_live="$(field_of tauri_chrome_simple_web_layout_manifest_chrome_live_capture "$env_file")"
+        tauri_mismatch="$(field_of tauri_chrome_simple_web_layout_manifest_tauri_mismatch_count "$env_file")"
+        chrome_mismatch="$(field_of tauri_chrome_simple_web_layout_manifest_chrome_mismatch_count "$env_file")"
+        tauri_case_count="$(field_of tauri_chrome_simple_web_layout_manifest_tauri_case_count "$env_file")"
+        tauri_pass_count="$(field_of tauri_chrome_simple_web_layout_manifest_tauri_pass_count "$env_file")"
+        tauri_tracked_count="$(field_of tauri_chrome_simple_web_layout_manifest_tauri_tracked_count "$env_file")"
+        tauri_fail_count="$(field_of tauri_chrome_simple_web_layout_manifest_tauri_fail_count "$env_file")"
+        chrome_case_count="$(field_of tauri_chrome_simple_web_layout_manifest_chrome_case_count "$env_file")"
+        chrome_pass_count="$(field_of tauri_chrome_simple_web_layout_manifest_chrome_pass_count "$env_file")"
+        chrome_tracked_count="$(field_of tauri_chrome_simple_web_layout_manifest_chrome_tracked_count "$env_file")"
+        chrome_fail_count="$(field_of tauri_chrome_simple_web_layout_manifest_chrome_fail_count "$env_file")"
+        fake_capture="$(field_of tauri_chrome_simple_web_layout_manifest_no_fake_capture "$env_file")"
+        tolerance="$(field_of tauri_chrome_simple_web_layout_manifest_blur_or_tolerance_used "$env_file")"
+    fi
+    tauri_tracked_count="${tauri_tracked_count:-0}"
+    chrome_tracked_count="${chrome_tracked_count:-0}"
+    if [ -n "$tauri_case_count" ] && [ -n "$tauri_pass_count" ]; then
+        tauri_accepted_count=$((tauri_pass_count + tauri_tracked_count))
+    fi
+    if [ -n "$chrome_case_count" ] && [ -n "$chrome_pass_count" ]; then
+        chrome_accepted_count=$((chrome_pass_count + chrome_tracked_count))
+    fi
+    {
+        echo "production_gui_web_renderer_parity_surface_manifest_exit_code=$code"
+        echo "production_gui_web_renderer_parity_surface_manifest_status=$status"
+        echo "production_gui_web_renderer_parity_surface_manifest_reason=$reason"
+        echo "production_gui_web_renderer_parity_surface_manifest_electron_capture_status=$electron_status"
+        echo "production_gui_web_renderer_parity_surface_manifest_tauri_capture_status=$tauri_status"
+        echo "production_gui_web_renderer_parity_surface_manifest_chrome_capture_status=$chrome_status"
+        echo "production_gui_web_renderer_parity_surface_manifest_tauri_live_capture=$tauri_live"
+        echo "production_gui_web_renderer_parity_surface_manifest_chrome_live_capture=$chrome_live"
+        echo "production_gui_web_renderer_parity_surface_manifest_tauri_case_count=$tauri_case_count"
+        echo "production_gui_web_renderer_parity_surface_manifest_tauri_pass_count=$tauri_pass_count"
+        echo "production_gui_web_renderer_parity_surface_manifest_tauri_tracked_count=$tauri_tracked_count"
+        echo "production_gui_web_renderer_parity_surface_manifest_tauri_fail_count=$tauri_fail_count"
+        echo "production_gui_web_renderer_parity_surface_manifest_chrome_case_count=$chrome_case_count"
+        echo "production_gui_web_renderer_parity_surface_manifest_chrome_pass_count=$chrome_pass_count"
+        echo "production_gui_web_renderer_parity_surface_manifest_chrome_tracked_count=$chrome_tracked_count"
+        echo "production_gui_web_renderer_parity_surface_manifest_chrome_fail_count=$chrome_fail_count"
+        echo "production_gui_web_renderer_parity_surface_manifest_tauri_mismatch_count=$tauri_mismatch"
+        echo "production_gui_web_renderer_parity_surface_manifest_chrome_mismatch_count=$chrome_mismatch"
+        echo "production_gui_web_renderer_parity_surface_manifest_no_fake_capture=$fake_capture"
+        echo "production_gui_web_renderer_parity_surface_manifest_blur_or_tolerance_used=$tolerance"
+        echo "production_gui_web_renderer_parity_surface_manifest_report=$case_dir/report.md"
+    } >>"$BUILD_ROOT/evidence.env"
+    append_prefixed_env "surface_" "$env_file"
+    [ "$code" -eq 0 ] && [ "$status" = "pass" ] && [ "$electron_status" = "pass" ] && \
+        [ "$tauri_status" = "pass" ] && [ "$tauri_live" = "true" ] && [ "$tauri_mismatch" = "0" ] && [ "$tauri_accepted_count" = "$tauri_case_count" ] && [ "$tauri_fail_count" = "0" ] && \
+        [ "$chrome_status" = "pass" ] && [ "$chrome_live" = "true" ] && [ "$chrome_mismatch" = "0" ] && [ "$chrome_accepted_count" = "$chrome_case_count" ] && [ "$chrome_fail_count" = "0" ] && \
+        [ "$fake_capture" = "true" ] && [ "$tolerance" = "false" ]
+}
+
+run_backend() {
+    case_dir="$BUILD_ROOT/backend_executed"
+    mkdir -p "$case_dir"
+    set +e
+    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" \
+        sh scripts/check/check-production-gui-web-backend-executed-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    code=$?
+    set -e
+    env_file="$case_dir/evidence.env"
+    status=""
+    reason=""
+    exact=""
+    cpu_diff=""
+    metal_resolved=""
+    metal_diff=""
+    metal_frame=""
+    tolerance=""
+    sample_count=""
+    elapsed_min=""
+    elapsed_avg=""
+    elapsed_max=""
+    throughput_min=""
+    throughput_avg=""
+    throughput_max=""
+    if [ -s "$env_file" ]; then
+        status="$(field_of production_gui_backend_status "$env_file")"
+        reason="$(field_of production_gui_backend_reason "$env_file")"
+        exact="$(field_of production_gui_backend_exact_backend_parity "$env_file")"
+        cpu_diff="$(field_of production_gui_backend_cpu_simd_different_pixels "$env_file")"
+        metal_resolved="$(field_of production_gui_backend_metal_resolved "$env_file")"
+        metal_diff="$(field_of production_gui_backend_metal_different_pixels "$env_file")"
+        metal_frame="$(field_of production_gui_backend_metal_gpu_frame_complete "$env_file")"
+        tolerance="$(field_of production_gui_backend_blur_or_tolerance_used "$env_file")"
+        sample_count="$(field_of production_gui_backend_sample_count "$env_file")"
+        elapsed_min="$(field_of production_gui_backend_total_elapsed_us_min "$env_file")"
+        elapsed_avg="$(field_of production_gui_backend_total_elapsed_us_avg "$env_file")"
+        elapsed_max="$(field_of production_gui_backend_total_elapsed_us_max "$env_file")"
+        throughput_min="$(field_of production_gui_backend_total_pixels_per_second_min "$env_file")"
+        throughput_avg="$(field_of production_gui_backend_total_pixels_per_second_avg "$env_file")"
+        throughput_max="$(field_of production_gui_backend_total_pixels_per_second_max "$env_file")"
+    fi
+    {
+        echo "production_gui_web_renderer_parity_backend_exit_code=$code"
+        echo "production_gui_web_renderer_parity_backend_status=$status"
+        echo "production_gui_web_renderer_parity_backend_reason=$reason"
+        echo "production_gui_web_renderer_parity_backend_exact=$exact"
+        echo "production_gui_web_renderer_parity_backend_cpu_simd_different_pixels=$cpu_diff"
+        echo "production_gui_web_renderer_parity_backend_metal_resolved=$metal_resolved"
+        echo "production_gui_web_renderer_parity_backend_metal_different_pixels=$metal_diff"
+        echo "production_gui_web_renderer_parity_backend_metal_gpu_frame_complete=$metal_frame"
+        echo "production_gui_web_renderer_parity_backend_blur_or_tolerance_used=$tolerance"
+        echo "production_gui_web_renderer_parity_backend_sample_count=$sample_count"
+        echo "production_gui_web_renderer_parity_backend_total_elapsed_us_min=$elapsed_min"
+        echo "production_gui_web_renderer_parity_backend_total_elapsed_us_avg=$elapsed_avg"
+        echo "production_gui_web_renderer_parity_backend_total_elapsed_us_max=$elapsed_max"
+        echo "production_gui_web_renderer_parity_backend_total_pixels_per_second_min=$throughput_min"
+        echo "production_gui_web_renderer_parity_backend_total_pixels_per_second_avg=$throughput_avg"
+        echo "production_gui_web_renderer_parity_backend_total_pixels_per_second_max=$throughput_max"
+        echo "production_gui_web_renderer_parity_backend_report=$case_dir/report.md"
+    } >>"$BUILD_ROOT/evidence.env"
+    append_prefixed_env "backend_" "$env_file"
+    [ "$code" -eq 0 ] && [ "$status" = "pass" ] && [ "$exact" = "true" ] && [ "$cpu_diff" = "0" ] && [ "$metal_diff" = "0" ] && { [ "$metal_frame" = "true" ] || [ "$metal_resolved" != "metal" ]; } && [ "$tolerance" = "false" ]
+}
+
+run_font_offload() {
+    case_dir="$BUILD_ROOT/font_offload"
+    mkdir -p "$case_dir"
+    set +e
+    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" \
+        sh scripts/check/check-production-gui-font-offload-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    code=$?
+    set -e
+    env_file="$case_dir/evidence.env"
+    font_status=""
+    font_reason=""
+    vector_backend=""
+    vector_status=""
+    vector_reason=""
+    vector_readback_status=""
+    vector_readback_reason=""
+    vector_ready=""
+    vector_expected_checksum=""
+    vector_actual_checksum=""
+    bitmap_backend=""
+    bitmap_status=""
+    bitmap_reason=""
+    bitmap_readback_status=""
+    bitmap_readback_reason=""
+    bitmap_ready=""
+    bitmap_expected_checksum=""
+    bitmap_actual_checksum=""
+    blocker_doc=""
+    if [ -s "$env_file" ]; then
+        font_status="$(field_of production_gui_font_offload_status "$env_file")"
+        font_reason="$(field_of production_gui_font_offload_reason "$env_file")"
+        vector_backend="$(field_of production_gui_font_offload_vector_backend "$env_file")"
+        vector_status="$(field_of production_gui_font_offload_vector_status "$env_file")"
+        vector_reason="$(field_of production_gui_font_offload_vector_reason "$env_file")"
+        vector_readback_status="$(field_of production_gui_font_offload_vector_readback_status "$env_file")"
+        vector_readback_reason="$(field_of production_gui_font_offload_vector_readback_reason "$env_file")"
+        vector_ready="$(field_of production_gui_font_offload_vector_production_ready "$env_file")"
+        vector_expected_checksum="$(field_of production_gui_font_offload_vector_expected_checksum "$env_file")"
+        vector_actual_checksum="$(field_of production_gui_font_offload_vector_actual_checksum "$env_file")"
+        bitmap_backend="$(field_of production_gui_font_offload_bitmap_backend "$env_file")"
+        bitmap_status="$(field_of production_gui_font_offload_bitmap_status "$env_file")"
+        bitmap_reason="$(field_of production_gui_font_offload_bitmap_reason "$env_file")"
+        bitmap_readback_status="$(field_of production_gui_font_offload_bitmap_readback_status "$env_file")"
+        bitmap_readback_reason="$(field_of production_gui_font_offload_bitmap_readback_reason "$env_file")"
+        bitmap_ready="$(field_of production_gui_font_offload_bitmap_production_ready "$env_file")"
+        bitmap_expected_checksum="$(field_of production_gui_font_offload_bitmap_expected_checksum "$env_file")"
+        bitmap_actual_checksum="$(field_of production_gui_font_offload_bitmap_actual_checksum "$env_file")"
+        blocker_doc="$(field_of production_gui_font_offload_blocker_doc "$env_file")"
+    fi
+    {
+        echo "production_gui_web_renderer_parity_font_offload_exit_code=$code"
+        echo "production_gui_web_renderer_parity_font_offload_status=$font_status"
+        echo "production_gui_web_renderer_parity_font_offload_reason=$font_reason"
+        echo "production_gui_web_renderer_parity_font_offload_vector_backend=$vector_backend"
+        echo "production_gui_web_renderer_parity_font_offload_vector_status=$vector_status"
+        echo "production_gui_web_renderer_parity_font_offload_vector_reason=$vector_reason"
+        echo "production_gui_web_renderer_parity_font_offload_vector_readback_status=$vector_readback_status"
+        echo "production_gui_web_renderer_parity_font_offload_vector_readback_reason=$vector_readback_reason"
+        echo "production_gui_web_renderer_parity_font_offload_vector_production_ready=$vector_ready"
+        echo "production_gui_web_renderer_parity_font_offload_vector_expected_checksum=$vector_expected_checksum"
+        echo "production_gui_web_renderer_parity_font_offload_vector_actual_checksum=$vector_actual_checksum"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_backend=$bitmap_backend"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_status=$bitmap_status"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_reason=$bitmap_reason"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_readback_status=$bitmap_readback_status"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_readback_reason=$bitmap_readback_reason"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_production_ready=$bitmap_ready"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_expected_checksum=$bitmap_expected_checksum"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_actual_checksum=$bitmap_actual_checksum"
+        echo "production_gui_web_renderer_parity_font_offload_report=$case_dir/report.md"
+        echo "production_gui_web_renderer_parity_font_offload_blocker_doc=$blocker_doc"
+    } >>"$BUILD_ROOT/evidence.env"
+    append_prefixed_env "font_" "$env_file"
+    [ "$code" -eq 0 ] && { [ "$font_status" = "pass" ] || [ "$font_status" = "unavailable" ]; }
+}
+
+run_metal_readback() {
+    case_dir="$BUILD_ROOT/metal_readback"
+    mkdir -p "$case_dir"
+    set +e
+    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" \
+        sh scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    code=$?
+    set -e
+    env_file="$case_dir/evidence.env"
+    metal_status=""
+    metal_reason=""
+    spec_status=""
+    download=""
+    tolerance=""
+    if [ -s "$env_file" ]; then
+        metal_status="$(field_of metal_engine2d_framebuffer_readback_status "$env_file")"
+        metal_reason="$(field_of metal_engine2d_framebuffer_readback_reason "$env_file")"
+        spec_status="$(field_of metal_engine2d_framebuffer_readback_spec_status "$env_file")"
+        download="$(field_of metal_engine2d_framebuffer_gpu_readback_available "$env_file")"
+        tolerance="$(field_of metal_engine2d_framebuffer_blur_or_tolerance_used "$env_file")"
+    fi
+    {
+        echo "production_gui_web_renderer_parity_metal_readback_exit_code=$code"
+        echo "production_gui_web_renderer_parity_metal_readback_status=$metal_status"
+        echo "production_gui_web_renderer_parity_metal_readback_reason=$metal_reason"
+        echo "production_gui_web_renderer_parity_metal_readback_spec_status=$spec_status"
+        echo "production_gui_web_renderer_parity_metal_readback_available=$download"
+        echo "production_gui_web_renderer_parity_metal_readback_blur_or_tolerance_used=$tolerance"
+        echo "production_gui_web_renderer_parity_metal_readback_report=$case_dir/report.md"
+    } >>"$BUILD_ROOT/evidence.env"
+    append_prefixed_env "metal_" "$env_file"
+    { [ "$code" -eq 0 ] && [ "$metal_status" = "pass" ] && [ "$spec_status" = "pass" ] && [ "$download" = "true" ] && [ "$tolerance" = "false" ]; } || \
+        { [ "$code" -eq 0 ] && [ "$metal_status" = "unavailable" ] && [ "$metal_reason" = "metal-requires-macos" ] && [ "$tolerance" = "false" ]; }
+}
+
+status=pass
+reason=pass
+
+run_matrix || {
+    status=fail
+    reason=electron-generated-gui-matrix-failed
+}
+if [ "$status" = "pass" ]; then
+    run_layout_manifest || {
+        status=fail
+        reason=electron-layout-manifest-failed
+    }
+fi
+if [ "$status" = "pass" ]; then
+    run_surface_manifest || {
+        status=fail
+        reason=tauri-chrome-layout-manifest-failed
+    }
+fi
+if [ "$status" = "pass" ]; then
+    run_backend || {
+        status=fail
+        reason=backend-executed-parity-failed
+    }
+fi
+if [ "$status" = "pass" ]; then
+    run_font_offload || {
+        status=fail
+        reason=font-offload-evidence-failed
+    }
+fi
+if [ "$status" = "pass" ] || [ "$reason" = "font-offload-evidence-failed" ]; then
+    run_metal_readback || {
+        if [ "$reason" = "font-offload-evidence-failed" ]; then
+            reason=font-offload-and-metal-framebuffer-readback-failed
+        else
+            status=fail
+            reason=metal-framebuffer-readback-failed
+        fi
+    }
+fi
+
+{
+    echo "production_gui_web_renderer_parity_status=$status"
+    echo "production_gui_web_renderer_parity_reason=$reason"
+    cat "$BUILD_ROOT/evidence.env"
+} >"$BUILD_ROOT/evidence.final.env"
+mv "$BUILD_ROOT/evidence.final.env" "$BUILD_ROOT/evidence.env"
+
+{
+    echo "# Production GUI Web Renderer Parity Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- electron matrix: $(field_of production_gui_web_renderer_parity_matrix_status "$BUILD_ROOT/evidence.env")"
+    echo "- electron CSS/layout manifest: $(field_of production_gui_web_renderer_parity_layout_manifest_status "$BUILD_ROOT/evidence.env")"
+    echo "- Tauri/Chrome surface manifest: $(field_of production_gui_web_renderer_parity_surface_manifest_status "$BUILD_ROOT/evidence.env")"
+    echo "- backend-executed CPU SIMD/Metal parity: $(field_of production_gui_web_renderer_parity_backend_status "$BUILD_ROOT/evidence.env")"
+    echo "- backend sample count: $(field_of production_gui_web_renderer_parity_backend_sample_count "$BUILD_ROOT/evidence.env")"
+    echo "- backend total elapsed us min/avg/max: $(field_of production_gui_web_renderer_parity_backend_total_elapsed_us_min "$BUILD_ROOT/evidence.env") / $(field_of production_gui_web_renderer_parity_backend_total_elapsed_us_avg "$BUILD_ROOT/evidence.env") / $(field_of production_gui_web_renderer_parity_backend_total_elapsed_us_max "$BUILD_ROOT/evidence.env")"
+    echo "- backend total pixels/s min/avg/max: $(field_of production_gui_web_renderer_parity_backend_total_pixels_per_second_min "$BUILD_ROOT/evidence.env") / $(field_of production_gui_web_renderer_parity_backend_total_pixels_per_second_avg "$BUILD_ROOT/evidence.env") / $(field_of production_gui_web_renderer_parity_backend_total_pixels_per_second_max "$BUILD_ROOT/evidence.env")"
+    echo "- font offload/readback: $(field_of production_gui_web_renderer_parity_font_offload_status "$BUILD_ROOT/evidence.env")"
+    echo "- vector font readback: $(field_of production_gui_web_renderer_parity_font_offload_vector_readback_status "$BUILD_ROOT/evidence.env")"
+    echo "- bitmap font readback: $(field_of production_gui_web_renderer_parity_font_offload_bitmap_readback_status "$BUILD_ROOT/evidence.env")"
+    echo "- raw Metal framebuffer readback: $(field_of production_gui_web_renderer_parity_metal_readback_status "$BUILD_ROOT/evidence.env")"
+    echo "- blur/tolerance used: false"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_ROOT/evidence.env"
+} >"$REPORT_PATH"
+
+cat "$BUILD_ROOT/evidence.env"
+[ "$status" = "pass" ]

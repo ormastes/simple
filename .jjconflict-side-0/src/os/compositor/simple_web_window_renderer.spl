@@ -1,0 +1,85 @@
+# Simple Web Window Renderer Adapter
+#
+# SimpleOS compositor adapter for rendering app client areas through the
+# canonical Simple Web renderer and then blitting pixels to CompositorBackend.
+
+use os.compositor.display_backend.{CompositorBackend}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderArtifact, WebRenderRequest, web_render_full_html}
+use nogc_sync_mut.ui.theme_package.{default_theme_id}
+use os.compositor.web_render_surface.{compositor_default_web_page_html, compositor_render_html_artifact, compositor_render_request_artifact}
+
+fn _is_simple_browser_title(title: text) -> bool:
+    title == "Browser" or title == "Simple Browser"
+
+fn _simple_web_window_css(theme: text) -> text:
+    var accent = "#2563eb"
+    var success = "#22c55e"
+    var warning = "#f59e0b"
+    var muted = "#94a3b8"
+    var title_bg = "#2050a0"
+    var content_bg = "#182230"
+    if theme == "glass_light" or theme == "ios_light":
+        accent = "#0066cc"
+        success = "#16803c"
+        warning = "#a05a00"
+        muted = "#64748b"
+        title_bg = "#dbeafe"
+        content_bg = "#f8fafc"
+    ":root { --glass-accent: " + accent + "; --glass-success: " + success + "; --glass-warning: " + warning + "; --glass-text-secondary: " + muted + "; } .wm-app-container { min-height: 100vh; background: " + content_bg + "; } .wm-app-titlebar { height: 24px; background: " + title_bg + "; color: #fff; } .wm-app-content { min-height: calc(100vh - 24px); background: " + content_bg + "; color: #e5e7eb; } "
+
+fn themed_simple_web_html_with_theme(theme: text, title: text, body_html: text) -> text:
+    web_render_full_html(simple_web_themed_render_request_with_theme(theme, title, body_html, 0, 0))
+
+fn simple_web_themed_render_request_with_theme(theme: text, title: text, body_html: text, viewport_w: i32, viewport_h: i32) -> WebRenderRequest:
+    val css = _simple_web_window_css(theme)
+    val app_css = css + "body { margin: 0; overflow: hidden; } #app { min-height: 100vh; padding: 0; } .simple-web-line { height: 22px; padding: 0 10px; } .simple-web-accent { color: var(--glass-accent); } .simple-web-success { color: var(--glass-success); } .simple-web-warning { color: var(--glass-warning); } .simple-web-muted { color: var(--glass-text-secondary); }"
+    val app_body = "<div class='wm-app-container'><div class='wm-app-titlebar'>" + title + "</div><div class='wm-app-content'>" + body_html + "</div></div>"
+    WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, title, app_body, app_css, "", viewport_w, viewport_h)
+
+fn themed_simple_web_html(title: text, body_html: text) -> text:
+    themed_simple_web_html_with_theme(default_theme_id(), title, body_html)
+
+fn simple_web_app_html_with_theme(theme: text, title: text, state_text: text) -> text:
+    web_render_full_html(simple_web_app_render_request_with_theme(theme, title, state_text, 0, 0))
+
+fn simple_web_app_render_request_with_theme(theme: text, title: text, state_text: text, viewport_w: i32, viewport_h: i32) -> WebRenderRequest:
+    if title == "Terminal":
+        return simple_web_themed_render_request_with_theme(theme, title, "<div class='simple-web-line simple-web-success'>$ " + state_text + "</div><div class='simple-web-line simple-web-accent'>src/ test/ main.spl</div><div class='simple-web-line simple-web-success'>SimpleOS shell via Simple Web</div>", viewport_w, viewport_h)
+    if title == "Editor" or title == "Hello World":
+        return simple_web_themed_render_request_with_theme(theme, title, "<div class='simple-web-line simple-web-muted'>main.spl</div><div class='simple-web-line simple-web-warning'>fn main():</div><div class='simple-web-line simple-web-accent'>    print \"Hello SimpleOS\"</div><div class='simple-web-line simple-web-success'># rendered by Simple Web</div>", viewport_w, viewport_h)
+    if title == "File Manager" or title == "Finder":
+        return simple_web_themed_render_request_with_theme(theme, title, "<div class='simple-web-line simple-web-accent'>/home/simple</div><div class='simple-web-line'>Desktop</div><div class='simple-web-line'>Documents</div><div class='simple-web-line'>Downloads</div><div class='simple-web-line simple-web-muted'>state: " + state_text + "</div>", viewport_w, viewport_h)
+    if title == "Calculator":
+        return simple_web_themed_render_request_with_theme(theme, title, "<div class='simple-web-line simple-web-accent'>0</div><div class='simple-web-line'>7 8 9 /</div><div class='simple-web-line'>4 5 6 *</div><div class='simple-web-line'>1 2 3 -</div>", viewport_w, viewport_h)
+    if _is_simple_browser_title(title):
+        return WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, title, compositor_default_web_page_html("about:network"), "", "", viewport_w, viewport_h)
+    simple_web_themed_render_request_with_theme(theme, title, "<div class='simple-web-line'>Simple Web app surface</div>", viewport_w, viewport_h)
+
+fn simple_web_app_html(title: text, state_text: text) -> text:
+    simple_web_app_html_with_theme(default_theme_id(), title, state_text)
+
+fn simple_web_html_pixel_artifact(html: text, cw: i32, ch: i32) -> WebRenderArtifact:
+    val req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "", html, "", "", cw, ch).with_pixel_output()
+    compositor_render_html_artifact(req, html)
+
+fn simple_web_app_pixel_artifact_with_theme(theme: text, title: text, cw: i32, ch: i32, state_text: text) -> WebRenderArtifact:
+    val req = simple_web_app_render_request_with_theme(theme, title, state_text, cw, ch).with_pixel_output()
+    compositor_render_request_artifact(req)
+
+fn render_simple_web_html_content(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, ch: i32, html: text):
+    if cw <= 0 or ch <= 0:
+        return
+    val artifact = simple_web_html_pixel_artifact(html, cw, ch)
+    blit_simple_web_pixels(backend, cx, cy, cw, ch, artifact.pixels)
+
+fn render_simple_web_app_content(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text):
+    render_simple_web_app_content_with_theme(backend, default_theme_id(), title, cx, cy, cw, ch, state_text)
+
+fn render_simple_web_app_content_with_theme(backend: CompositorBackend, theme: text, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text):
+    if cw <= 0 or ch <= 0:
+        return
+    val artifact = simple_web_app_pixel_artifact_with_theme(theme, title, cw, ch, state_text)
+    blit_simple_web_pixels(backend, cx, cy, cw, ch, artifact.pixels)
+
+fn blit_simple_web_pixels(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, ch: i32, pixels: [u32]):
+    backend.blit_pixels(cx, cy, cw, ch, pixels)

@@ -1,0 +1,173 @@
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+
+extern fn rt_sdl2_init() -> i64
+extern fn rt_sdl2_quit()
+extern fn rt_sdl2_create_window(title: text, width: i64, height: i64) -> i64
+extern fn rt_sdl2_destroy_window(handle: i64)
+extern fn rt_sdl2_clear(handle: i64, color: i64)
+extern fn rt_sdl2_fill_rect(handle: i64, x: i64, y: i64, w: i64, h: i64, color: i64)
+extern fn rt_sdl2_present(handle: i64)
+extern fn rt_sdl2_poll_event(handle: i64) -> i64
+extern fn rt_sdl2_get_event_type() -> i64
+extern fn rt_sdl2_get_mouse_x() -> i64
+extern fn rt_sdl2_get_mouse_y() -> i64
+extern fn rt_sdl2_get_key_code() -> i64
+extern fn rt_sdl2_get_mouse_button() -> i64
+extern fn rt_sdl2_resize_window(handle: i64, w: i64, h: i64) -> bool
+
+var _sdl2_initialized: bool = false
+
+class HostedSdl2Backend:
+    window_handle: i64
+    w: i32
+    h: i32
+    pixels: [u32]
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+    static fn implementation_name() -> text:
+        "sdl2-native"
+
+    static fn try_create(w: i32, h: i32, title: text) -> HostedSdl2Backend?:
+        if w <= 0 or h <= 0:
+            return nil
+        if not _sdl2_initialized:
+            val ok = rt_sdl2_init()
+            if ok == 0:
+                return nil
+            _sdl2_initialized = true
+        val handle = rt_sdl2_create_window(title, w.to_i64(), h.to_i64())
+        if handle == 0:
+            return nil
+        val total = w * h
+        HostedSdl2Backend(
+            window_handle: handle,
+            w: w,
+            h: h,
+            pixels: [0u32; total]
+        )
+
+    me clear(color: u32):
+        rt_sdl2_clear(self.window_handle, color.to_i64())
+        var i = 0
+        while i < self.pixels.len():
+            self.pixels[i] = color
+            i = i + 1
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        rt_sdl2_fill_rect(self.window_handle, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64(), color.to_i64())
+        var yy = y
+        while yy < y + h and yy < self.h:
+            if yy >= 0:
+                var xx = x
+                while xx < x + w and xx < self.w:
+                    if xx >= 0:
+                        val idx = yy * self.w + xx
+                        if idx >= 0 and idx < self.pixels.len():
+                            self.pixels[idx] = color
+                    xx = xx + 1
+            yy = yy + 1
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        if text_str.len() > 0:
+            self.fill_rect(x, y, text_str.len().to_i32() * 8, 16, bg)
+            self.put_pixel(x, y, fg)
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        self.fill_rect(x, y, 8, 16, bg)
+        self.put_pixel(x, y, fg)
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        if x < 0 or y < 0 or x >= self.w or y >= self.h:
+            return
+        val idx = y * self.w + x
+        if idx >= 0 and idx < self.pixels.len():
+            self.pixels[idx] = color
+        rt_sdl2_fill_rect(self.window_handle, x.to_i64(), y.to_i64(), 1, 1, color.to_i64())
+
+    me present():
+        rt_sdl2_present(self.window_handle)
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        rt_sdl2_present(self.window_handle)
+
+    fn read_pixel(x: i32, y: i32) -> u32:
+        if x < 0 or y < 0 or x >= self.w or y >= self.h:
+            return 0u32
+        val idx = y * self.w + x
+        if idx >= 0 and idx < self.pixels.len():
+            return self.pixels[idx]
+        0u32
+
+    me resize(w: i32, h: i32) -> bool:
+        if not rt_sdl2_resize_window(self.window_handle, w.to_i64(), h.to_i64()):
+            return false
+        self.w = w
+        self.h = h
+        val total = w * h
+        self.pixels = [0u32; total]
+        true
+
+    me free():
+        if self.window_handle != 0:
+            rt_sdl2_destroy_window(self.window_handle)
+            self.window_handle = 0
+
+impl CompositorBackend for HostedSdl2Backend:
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        rt_sdl2_clear(self.window_handle, color.to_i64())
+        var i = 0
+        while i < self.pixels.len():
+            self.pixels[i] = color
+            i = i + 1
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        rt_sdl2_fill_rect(self.window_handle, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64(), color.to_i64())
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        if text_str.len() > 0:
+            self.fill_rect(x, y, text_str.len().to_i32() * 8, 16, bg)
+            self.put_pixel(x, y, fg)
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        self.fill_rect(x, y, 8, 16, bg)
+        self.put_pixel(x, y, fg)
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        if x < 0 or y < 0 or x >= self.w or y >= self.h:
+            return
+        rt_sdl2_fill_rect(self.window_handle, x.to_i64(), y.to_i64(), 1, 1, color.to_i64())
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        var row: i32 = 0
+        while row < h:
+            var col: i32 = 0
+            while col < w:
+                val src_idx = row * w + col
+                if src_idx >= 0 and src_idx < pixels.len():
+                    self.put_pixel(x + col, y + row, pixels[src_idx])
+                col = col + 1
+            row = row + 1
+
+    me present():
+        rt_sdl2_present(self.window_handle)
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        rt_sdl2_present(self.window_handle)
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil

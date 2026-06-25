@@ -1,0 +1,133 @@
+#!/bin/sh
+# QEMU Storage Audit Script
+# Reports per-category disk usage and reclaimable bytes.
+# Default: DRY RUN (print only)
+# With --clean: delete stale QMP logs, .ppm screendumps, and serial/probe
+# logs older than 7 days (build/os/systest/ evidence is never touched).
+
+set -e
+
+CLEAN_MODE=0
+BUILD_OS_DIR="build/os"
+
+if [ "$1" = "--clean" ]; then
+    CLEAN_MODE=1
+fi
+
+echo "=== QEMU Storage Audit (DRY RUN$([ $CLEAN_MODE -eq 1 ] && echo " - CLEANUP MODE" || echo "")) ==="
+echo
+
+# Sum sizes (bytes) of a newline-separated file list.
+_bytes_of() {
+    if [ -n "$1" ]; then
+        echo "$1" | xargs -d '\n' du -cb 2>/dev/null | tail -1 | awk '{print $1}'
+    else
+        echo 0
+    fi
+}
+
+RECLAIMABLE_BYTES=0
+
+# FAT32 images (kept — never deleted)
+echo "FAT32 Images (kept):"
+if [ -d "$BUILD_OS_DIR" ]; then
+    du -ch "$BUILD_OS_DIR"/*.img 2>/dev/null | tail -1 || echo "  (none found)"
+else
+    echo "  (build/os not found)"
+fi
+echo
+
+# Kernel ELFs (kept — never deleted)
+echo "Kernel ELFs (kept):"
+if [ -d "$BUILD_OS_DIR" ]; then
+    du -ch "$BUILD_OS_DIR"/simpleos_*.elf 2>/dev/null | tail -1 || echo "  (none found)"
+else
+    echo "  (build/os not found)"
+fi
+echo
+
+# QMP logs (stale debris, >7 days old for cleaning)
+echo "QMP Logs (reclaimable):"
+if [ -d "$BUILD_OS_DIR" ]; then
+    QMP_LOGS=$(find "$BUILD_OS_DIR" -name '*qmp*.log*' -type f 2>/dev/null)
+    if [ -n "$QMP_LOGS" ]; then
+        QMP_BYTES=$(_bytes_of "$QMP_LOGS")
+        echo "  $QMP_BYTES bytes"
+        RECLAIMABLE_BYTES=$(expr "$RECLAIMABLE_BYTES" + "$QMP_BYTES")
+        if [ $CLEAN_MODE -eq 1 ]; then
+            echo "  [DELETING QMP logs >7 days]"
+            find "$BUILD_OS_DIR" -name '*qmp*.log*' -type f -mtime +7 -delete 2>/dev/null || true
+        fi
+    else
+        echo "  (none found)"
+    fi
+else
+    echo "  (build/os not found)"
+fi
+echo
+
+# Serial/Probe logs (stale debris; systest evidence excluded)
+echo "Serial/Probe Logs (reclaimable, excludes systest/):"
+if [ -d "$BUILD_OS_DIR" ]; then
+    SERIAL_LOGS=$(find "$BUILD_OS_DIR" \( -name '*serial*.log' -o -name '*probe*.log' \) -type f -not -path "*/systest/*" 2>/dev/null)
+    if [ -n "$SERIAL_LOGS" ]; then
+        SERIAL_BYTES=$(_bytes_of "$SERIAL_LOGS")
+        echo "  $SERIAL_BYTES bytes"
+        RECLAIMABLE_BYTES=$(expr "$RECLAIMABLE_BYTES" + "$SERIAL_BYTES")
+        if [ $CLEAN_MODE -eq 1 ]; then
+            echo "  [DELETING serial/probe logs >7 days (systest/ excluded)]"
+            find "$BUILD_OS_DIR" \( -name '*serial*.log' -o -name '*probe*.log' \) -type f -not -path "*/systest/*" -mtime +7 -delete 2>/dev/null || true
+        fi
+    else
+        echo "  (none found)"
+    fi
+else
+    echo "  (build/os not found)"
+fi
+echo
+
+# PPM screendumps (stale debris)
+echo "PPM Screendumps (reclaimable):"
+if [ -d "$BUILD_OS_DIR" ]; then
+    PPM_FILES=$(find "$BUILD_OS_DIR" -name "*.ppm" -type f 2>/dev/null)
+    if [ -n "$PPM_FILES" ]; then
+        PPM_BYTES=$(_bytes_of "$PPM_FILES")
+        echo "  $PPM_BYTES bytes"
+        RECLAIMABLE_BYTES=$(expr "$RECLAIMABLE_BYTES" + "$PPM_BYTES")
+        if [ $CLEAN_MODE -eq 1 ]; then
+            echo "  [DELETING .ppm files >7 days]"
+            find "$BUILD_OS_DIR" -name "*.ppm" -type f -mtime +7 -delete 2>/dev/null || true
+        fi
+    else
+        echo "  (none found)"
+    fi
+else
+    echo "  (build/os not found)"
+fi
+echo
+
+# FreeBSD VM overlay (large; recreated on demand by check-freebsd-bootstrap-qemu — manual decision, never auto-deleted)
+echo "FreeBSD VM Overlay (manual cleanup only):"
+if [ -d "build/freebsd" ]; then
+    du -sh build/freebsd 2>/dev/null || echo "  (error reading)"
+else
+    echo "  (not present)"
+fi
+echo
+
+# SysTest logs (live evidence — kept)
+echo "System Test Logs (kept):"
+if [ -d "$BUILD_OS_DIR/systest" ]; then
+    du -sh "$BUILD_OS_DIR/systest" 2>/dev/null || echo "  (error reading)"
+else
+    echo "  (not present)"
+fi
+echo
+
+echo "=== Audit Complete ==="
+echo "reclaimable now: $RECLAIMABLE_BYTES bytes"
+if [ $CLEAN_MODE -eq 1 ]; then
+    echo "Cleanup mode: deleted QMP/serial/probe logs and .ppm screendumps >7 days old (systest/ untouched)"
+else
+    echo "Dry run mode. Use --clean to delete stale QMP/serial/probe logs and .ppm files >7 days old."
+fi

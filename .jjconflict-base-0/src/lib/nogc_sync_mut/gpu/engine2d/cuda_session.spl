@@ -1,0 +1,204 @@
+"""CUDA Session — Primary Context, PTX Module Cache, Kernel Launch
+
+@tag:stdlib
+@tag:gpu
+
+Retains the CUDA primary context for a device, caches loaded PTX modules
+and kernel handles, and tracks allocation/launch statistics.
+
+Usage:
+    val session = CudaSession.create(0, "managed")
+    val err = session.init_context()
+    val mod = session.load_ptx("fill", ptx_src)
+    val kern = session.get_kernel(mod, "fill_kernel")
+    val launch_err = session.launch(kern, 16, 16, 16, 16)
+"""
+
+# ============================================================================
+# Extern declarations
+# ============================================================================
+
+extern fn rt_cuda_primary_ctx_retain(device_id: i64) -> i64
+extern fn rt_cuda_primary_ctx_release(device_id: i64) -> i64
+extern fn rt_cuda_module_load(ctx: i64, ptx_source: text) -> i64
+extern fn rt_cuda_kernel_get(module: i64, name: text) -> i64
+extern fn rt_cuda_kernel_launch(kernel: i64, grid_x: i64, grid_y: i64, block_x: i64, block_y: i64) -> text
+extern fn rt_cuda_alloc_device(ctx: i64, size_bytes: i64) -> i64
+extern fn rt_cuda_memcpy_d2h(dst_offset: i64, src_ptr: i64, size: i64) -> text
+extern fn rt_cuda_stream_sync(ctx: i64) -> text
+extern fn rt_cuda_device_name(device_id: i64) -> text
+
+fn cuda_session_primary_ctx_retain(device_id: i64) -> i64:
+    rt_cuda_primary_ctx_retain(device_id)
+
+fn cuda_session_primary_ctx_release(device_id: i64) -> i64:
+    rt_cuda_primary_ctx_release(device_id)
+
+fn cuda_session_module_load(ctx: i64, ptx_source: text) -> i64:
+    rt_cuda_module_load(ctx, ptx_source)
+
+fn cuda_session_kernel_get(module: i64, name: text) -> i64:
+    rt_cuda_kernel_get(module, name)
+
+fn cuda_session_kernel_launch(kernel: i64, grid_x: i64, grid_y: i64, block_x: i64, block_y: i64) -> text:
+    rt_cuda_kernel_launch(kernel, grid_x, grid_y, block_x, block_y)
+
+fn cuda_session_alloc_device(ctx: i64, size_bytes: i64) -> i64:
+    rt_cuda_alloc_device(ctx, size_bytes)
+
+fn cuda_session_memcpy_d2h(dst_offset: i64, src_ptr: i64, size: i64) -> text:
+    rt_cuda_memcpy_d2h(dst_offset, src_ptr, size)
+
+fn cuda_session_stream_sync(ctx: i64) -> text:
+    rt_cuda_stream_sync(ctx)
+
+fn cuda_session_device_name(device_id: i64) -> text:
+    rt_cuda_device_name(device_id)
+
+# ============================================================================
+# CudaModuleCache — flat fields for up to 4 cached modules
+# ============================================================================
+
+class CudaModuleCache:
+    m0_name: text
+    m0_handle: i64
+    m1_name: text
+    m1_handle: i64
+    m2_name: text
+    m2_handle: i64
+    m3_name: text
+    m3_handle: i64
+    count: i64
+
+impl CudaModuleCache:
+    static fn create() -> CudaModuleCache:
+        CudaModuleCache(
+            m0_name: "", m0_handle: 0,
+            m1_name: "", m1_handle: 0,
+            m2_name: "", m2_handle: 0,
+            m3_name: "", m3_handle: 0,
+            count: 0
+        )
+
+    me cache_module(name: text, handle: i64) -> text:
+        if self.count == 0:
+            self.m0_name = name
+            self.m0_handle = handle
+            self.count = self.count + 1
+            return "ok"
+        if self.count == 1:
+            self.m1_name = name
+            self.m1_handle = handle
+            self.count = self.count + 1
+            return "ok"
+        if self.count == 2:
+            self.m2_name = name
+            self.m2_handle = handle
+            self.count = self.count + 1
+            return "ok"
+        if self.count == 3:
+            self.m3_name = name
+            self.m3_handle = handle
+            self.count = self.count + 1
+            return "ok"
+        "cache_full"
+
+    me find_module(name: text) -> i64:
+        if self.m0_name == name:
+            return self.m0_handle
+        if self.m1_name == name:
+            return self.m1_handle
+        if self.m2_name == name:
+            return self.m2_handle
+        if self.m3_name == name:
+            return self.m3_handle
+        0
+
+# ============================================================================
+# CudaSession
+# ============================================================================
+
+class CudaSession:
+    device_id: i64
+    ctx_handle: i64
+    device_name: text
+    mode: text
+    module_cache: CudaModuleCache
+    kernel_count: i64
+    launch_count: i64
+    alloc_bytes: i64
+    initialized: bool
+    generation: i64
+
+impl CudaSession:
+    static fn create(device_id: i64, mode: text) -> CudaSession:
+        CudaSession(
+            device_id: device_id,
+            ctx_handle: 0,
+            device_name: "",
+            mode: mode,
+            module_cache: CudaModuleCache.create(),
+            kernel_count: 0,
+            launch_count: 0,
+            alloc_bytes: 0,
+            initialized: false,
+            generation: 0
+        )
+
+    me init_context() -> text:
+        val ctx = cuda_session_primary_ctx_retain(self.device_id)
+        if ctx == 0:
+            return "error:ctx_retain_failed"
+        self.ctx_handle = ctx
+        self.device_name = cuda_session_device_name(self.device_id)
+        self.initialized = true
+        self.generation = self.generation + 1
+        "ok"
+
+    me load_ptx(name: text, source: text) -> i64:
+        val cached = self.module_cache.find_module(name)
+        if cached != 0:
+            return cached
+        val handle = cuda_session_module_load(self.ctx_handle, source)
+        if handle == 0:
+            return 0
+        self.module_cache.cache_module(name, handle)
+        handle
+
+    me get_kernel(module_handle: i64, name: text) -> i64:
+        val kern = cuda_session_kernel_get(module_handle, name)
+        if kern != 0:
+            self.kernel_count = self.kernel_count + 1
+        kern
+
+    me launch(kernel: i64, grid_x: i64, grid_y: i64, block_x: i64, block_y: i64) -> text:
+        val result = cuda_session_kernel_launch(kernel, grid_x, grid_y, block_x, block_y)
+        self.launch_count = self.launch_count + 1
+        result
+
+    me alloc_framebuffer(width: i64, height: i64, bpp: i64) -> i64:
+        val size = width * height * bpp
+        val ptr = cuda_session_alloc_device(self.ctx_handle, size)
+        if ptr != 0:
+            self.alloc_bytes = self.alloc_bytes + size
+        ptr
+
+    me readback(ptr: i64, size: i64) -> text:
+        cuda_session_memcpy_d2h(0, ptr, size)
+
+    me sync() -> text:
+        cuda_session_stream_sync(self.ctx_handle)
+
+    me release_context() -> text:
+        if self.initialized == false:
+            return "not_initialized"
+        val result = cuda_session_primary_ctx_release(self.device_id)
+        self.ctx_handle = 0
+        self.initialized = false
+        if result == 0:
+            "ok"
+        else:
+            "error:ctx_release_failed"
+
+    me stats() -> text:
+        "device={self.device_id} name={self.device_name} mode={self.mode} gen={self.generation} kernels={self.kernel_count} launches={self.launch_count} alloc_bytes={self.alloc_bytes}"

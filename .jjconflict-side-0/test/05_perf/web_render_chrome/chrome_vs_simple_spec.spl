@@ -1,0 +1,146 @@
+# test/perf/web_render_chrome/chrome_vs_simple_spec.spl
+#
+# **Feature IDs:** AC-10 — Chrome-equivalent benchmark: input→style/layout→paint/raster→composite
+# **Category:** Performance | Web Rendering | Chrome
+# **Status:** Pending implementation (Phase 5)
+#
+# Verifies that the Chrome-equivalent benchmark:
+#   - Runs all pipeline phases: input, script, style/layout, paint/raster, composite
+#   - Reports normalized INP-style timing per phase
+#   - Fixture results include pixel output hash or diff status
+#   - Report records reference_kind = "chrome"
+#
+# @cover test/perf/web_render_chrome/chrome_runner.spl
+# @cover test/perf/web_render_chrome/report_spec.spl
+# @cover test/perf/web_render_chrome/trace_normalizer.spl
+
+val REF_KIND_CHROME: text = "chrome"
+val PHASE_INPUT:     text = "input"
+val PHASE_SCRIPT:    text = "script"
+val PHASE_STYLE:     text = "style_layout"
+val PHASE_PAINT:     text = "paint_raster"
+val PHASE_COMPOSITE: text = "composite"
+
+struct ChromePhaseSentinel:
+    phase:        text
+    us_p50:       i64
+    us_p95:       i64
+    us_p99:       i64
+
+struct ChromeBenchSentinel:
+    reference_kind:   text
+    simple_mode:      text
+    fixture:          text
+    sample_count:     i64
+    warmup_count:     i64
+    pixel_hash:       i64
+    diff_status:      text   # "match" | "diff" | "unavailable"
+    inp_us:           i64    # INP-style total (p75 of worst interaction)
+    phases:           [ChromePhaseSentinel]
+
+fn make_phase(ph: text, p50: i64, p95: i64, p99: i64) -> ChromePhaseSentinel:
+    ChromePhaseSentinel(phase: ph, us_p50: p50, us_p95: p95, us_p99: p99)
+
+fn make_chrome_bench_ok() -> ChromeBenchSentinel:
+    val ph: [ChromePhaseSentinel] = [
+        make_phase(PHASE_INPUT,     100, 200, 400),
+        make_phase(PHASE_SCRIPT,    300, 600, 900),
+        make_phase(PHASE_STYLE,     500, 800, 1200),
+        make_phase(PHASE_PAINT,     700, 1100, 1600),
+        make_phase(PHASE_COMPOSITE, 200, 350, 500)
+    ]
+    ChromeBenchSentinel(
+        reference_kind: REF_KIND_CHROME,
+        simple_mode:    "native",
+        fixture:        "scroll",
+        sample_count:   30,
+        warmup_count:   5,
+        pixel_hash:     0xABCDEF01,
+        diff_status:    "match",
+        inp_us:         1800,
+        phases:         ph
+    )
+
+describe "chrome_vs_simple — AC-10: Chrome pipeline benchmark":
+
+    describe "record schema":
+
+        it "AC-10: report reference_kind is chrome":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.reference_kind).to_equal(REF_KIND_CHROME)
+
+        it "AC-10: sample_count is greater than zero":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.sample_count > 0).to_equal(true)
+
+        it "AC-10: warmup_count is greater than zero":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.warmup_count > 0).to_equal(true)
+
+        it "AC-10: pixel_hash is non-zero":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.pixel_hash != 0).to_equal(true)
+
+        it "AC-10: diff_status is match for equivalent rendering":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.diff_status).to_equal("match")
+
+        it "AC-10: inp_us is greater than zero":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.inp_us > 0).to_equal(true)
+
+    describe "pipeline phases":
+
+        it "AC-10: five pipeline phases are recorded":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.phases.len()).to_equal(5)
+
+        it "AC-10: first phase is input":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.phases[0].phase).to_equal(PHASE_INPUT)
+
+        it "AC-10: second phase is script":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.phases[1].phase).to_equal(PHASE_SCRIPT)
+
+        it "AC-10: third phase is style_layout":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.phases[2].phase).to_equal(PHASE_STYLE)
+
+        it "AC-10: fourth phase is paint_raster":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.phases[3].phase).to_equal(PHASE_PAINT)
+
+        it "AC-10: fifth phase is composite":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.phases[4].phase).to_equal(PHASE_COMPOSITE)
+
+    describe "INP-style timing":
+
+        it "AC-10: each phase p95 is greater than or equal to p50":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.phases[0].us_p95 >= b.phases[0].us_p50).to_equal(true)
+            expect(b.phases[1].us_p95 >= b.phases[1].us_p50).to_equal(true)
+            expect(b.phases[2].us_p95 >= b.phases[2].us_p50).to_equal(true)
+            expect(b.phases[3].us_p95 >= b.phases[3].us_p50).to_equal(true)
+            expect(b.phases[4].us_p95 >= b.phases[4].us_p50).to_equal(true)
+
+        it "AC-10: each phase p99 is greater than or equal to p95":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.phases[0].us_p99 >= b.phases[0].us_p95).to_equal(true)
+            expect(b.phases[2].us_p99 >= b.phases[2].us_p95).to_equal(true)
+
+        it "AC-10: inp_us is sum-compatible with phase timings (sanity)":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            val total: i64 = b.phases[0].us_p50 + b.phases[1].us_p50 + b.phases[2].us_p50 + b.phases[3].us_p50 + b.phases[4].us_p50
+            expect(total > 0).to_equal(true)
+
+    describe "fixture coverage":
+
+        it "AC-10: fixture name is non-empty":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.fixture).to_equal("scroll")
+
+        it "AC-10: simple_mode field is present":
+            val b: ChromeBenchSentinel = make_chrome_bench_ok()
+            expect(b.simple_mode).to_equal("native")

@@ -1,0 +1,204 @@
+# Box-Drawing Border Styles
+#
+# Reusable border style definitions and rendering helpers for TUI panels.
+# Separates border *style* (which characters to use) from border *drawing*
+# (producing lines of text), so callers can mix-and-match styles freely.
+
+use app.ui.render.layout.{LayoutRect, text_width, pad_to_width, truncate_to_width}
+
+# =========================================================================
+# BorderStyle
+# =========================================================================
+
+class BorderStyle:
+    """Characters for drawing a rectangular border."""
+    top_left: text
+    top_right: text
+    bottom_left: text
+    bottom_right: text
+    horizontal: text
+    vertical: text
+    t_left: text      # ├
+    t_right: text     # ┤
+    t_top: text       # ┬
+    t_bottom: text    # ┴
+    cross: text       # ┼
+
+# =========================================================================
+# Preset Styles
+# =========================================================================
+
+fn border_single() -> BorderStyle:
+    """Single-line border: ┌─┐│└─┘"""
+    return BorderStyle(
+        top_left: "\u{250c}",
+        top_right: "\u{2510}",
+        bottom_left: "\u{2514}",
+        bottom_right: "\u{2518}",
+        horizontal: "\u{2500}",
+        vertical: "\u{2502}",
+        t_left: "\u{251c}",
+        t_right: "\u{2524}",
+        t_top: "\u{252c}",
+        t_bottom: "\u{2534}",
+        cross: "\u{253c}"
+    )
+
+fn border_double() -> BorderStyle:
+    """Double-line border: ╔═╗║╚═╝"""
+    return BorderStyle(
+        top_left: "\u{2554}",
+        top_right: "\u{2557}",
+        bottom_left: "\u{255a}",
+        bottom_right: "\u{255d}",
+        horizontal: "\u{2550}",
+        vertical: "\u{2551}",
+        t_left: "\u{2560}",
+        t_right: "\u{2563}",
+        t_top: "\u{2566}",
+        t_bottom: "\u{2569}",
+        cross: "\u{256c}"
+    )
+
+fn border_rounded() -> BorderStyle:
+    """Rounded-corner border: ╭─╮│╰─╯"""
+    return BorderStyle(
+        top_left: "\u{256d}",
+        top_right: "\u{256e}",
+        bottom_left: "\u{2570}",
+        bottom_right: "\u{256f}",
+        horizontal: "\u{2500}",
+        vertical: "\u{2502}",
+        t_left: "\u{251c}",
+        t_right: "\u{2524}",
+        t_top: "\u{252c}",
+        t_bottom: "\u{2534}",
+        cross: "\u{253c}"
+    )
+
+fn border_heavy() -> BorderStyle:
+    """Heavy-line border: ┏━┓┃┗━┛"""
+    return BorderStyle(
+        top_left: "\u{250f}",
+        top_right: "\u{2513}",
+        bottom_left: "\u{2517}",
+        bottom_right: "\u{251b}",
+        horizontal: "\u{2501}",
+        vertical: "\u{2503}",
+        t_left: "\u{2523}",
+        t_right: "\u{252b}",
+        t_top: "\u{2533}",
+        t_bottom: "\u{253b}",
+        cross: "\u{254b}"
+    )
+
+fn border_ascii() -> BorderStyle:
+    """ASCII border: +-+|+-+"""
+    return BorderStyle(
+        top_left: "+",
+        top_right: "+",
+        bottom_left: "+",
+        bottom_right: "+",
+        horizontal: "-",
+        vertical: "|",
+        t_left: "+",
+        t_right: "+",
+        t_top: "+",
+        t_bottom: "+",
+        cross: "+"
+    )
+
+# =========================================================================
+# Border Rendering
+# =========================================================================
+
+fn make_horizontal(ch: text, count: i32) -> text:
+    """Repeat `ch` `count` times."""
+    var result = ""
+    var i = 0
+    while i < count:
+        result = "{result}{ch}"
+        i = i + 1
+    return result
+
+fn draw_border(area: LayoutRect, style: BorderStyle, title: text) -> [text]:
+    """Render a border as a list of text lines (one per row of `area`).
+
+    The border occupies the full area. If `title` is non-empty it is placed
+    on the top edge after the top-left corner.
+    """
+    if area.width < 2 or area.height < 2:
+        return []
+
+    val inner_w = area.width - 2
+    var lines: [text] = []
+
+    # Top edge
+    var top = "{style.top_left}{make_horizontal(style.horizontal, inner_w)}{style.top_right}"
+    if title != "" and inner_w > 0:
+        val max_title_w = inner_w - 2  # space before and after title
+        if max_title_w > 0:
+            val display_title = if title.len() > max_title_w:
+                truncate_to_width(title, max_title_w)
+            else:
+                title
+            # Overlay title: ┌─ Title ─┐
+            val after = inner_w - display_title.len() - 2
+            val after_w = if after > 0: after else: 0
+            top = "{style.top_left}{style.horizontal} {display_title} {make_horizontal(style.horizontal, after_w)}{style.top_right}"
+    lines.push(top)
+
+    # Middle rows
+    val empty_inner = make_horizontal(" ", inner_w)
+    var r = 1
+    while r < area.height - 1:
+        lines.push("{style.vertical}{empty_inner}{style.vertical}")
+        r = r + 1
+
+    # Bottom edge
+    val bottom = "{style.bottom_left}{make_horizontal(style.horizontal, inner_w)}{style.bottom_right}"
+    lines.push(bottom)
+
+    return lines
+
+fn draw_box(content: [text], style: BorderStyle, title: text) -> [text]:
+    """Wrap `content` lines in a border.
+
+    The width is determined by the widest content line + 2 (for the side
+    borders). Each content line is padded/truncated to fit.
+    """
+    # Find max visible width
+    var max_w = 0
+    for line in content:
+        val w = text_width(line)
+        if w > max_w:
+            max_w = w
+
+    val inner_w = max_w
+    val total_w = inner_w + 2
+
+    var lines: [text] = []
+
+    # Top edge with optional title
+    var top = "{style.top_left}{make_horizontal(style.horizontal, inner_w)}{style.top_right}"
+    if title != "" and inner_w > 2:
+        val max_title_w = inner_w - 2
+        val display_title = if title.len() > max_title_w:
+            truncate_to_width(title, max_title_w)
+        else:
+            title
+        val after = inner_w - display_title.len() - 2
+        val after_w = if after > 0: after else: 0
+        top = "{style.top_left}{style.horizontal} {display_title} {make_horizontal(style.horizontal, after_w)}{style.top_right}"
+    lines.push(top)
+
+    # Content lines
+    for line in content:
+        val padded = pad_to_width(line, inner_w)
+        lines.push("{style.vertical}{padded}{style.vertical}")
+
+    # Bottom edge
+    val bottom = "{style.bottom_left}{make_horizontal(style.horizontal, inner_w)}{style.bottom_right}"
+    lines.push(bottom)
+
+    return lines

@@ -1,0 +1,118 @@
+"""Windows PE Dynamic Loading System Test.
+
+Exercises the Wine PE loader pipeline with synthetic PE64 fixtures:
+relocation, image mapping, export lookup, and DllMain lifecycle.
+Uses wine_* APIs directly (not dynlib_open) because PE support in
+dynlib.spl is stubbed pending WS3.
+
+PE byte manipulation is pure Simple -- runs on all platforms.
+Windows-specific tests are gated by is_windows().
+
+# TODO(dynload-system-tests): switch to gcc -shared + file_read_bytes
+# once interpreter FFI [u8] wrapping bug is fixed (see D-1 in state.md).
+# TODO(dynload-system-tests): switch to dynlib_open once WS3 lands
+# PE support in dynlib.spl (see D-3).
+
+**Feature IDs:** #DYNLOAD-SYS-013 to #DYNLOAD-SYS-018
+**Category:** Infrastructure / System Test
+"""
+
+# @cover src/lib/common/pe_coff_header.spl 80%
+# @cover src/lib/common/wine_dll_image_loader.spl 70%
+# @cover src/lib/common/wine_dll_entrypoint_lifecycle.spl 70%
+
+use std.spec
+use std.env.platform.{is_windows}
+use common.pe_coff_header.{pe_export_lookup_by_name, pe_image_base, pe_size_of_image}
+use common.wine_pe_loader_runtime.{wine_pe_apply_all_relocations}
+use common.wine_dll_image_loader.{wine_dll_map_pe_image}
+use common.wine_dll_entrypoint_lifecycle.{wine_dll_invoke_dllmain}
+use test.system.dynload.dynload_fixture_helpers.{
+    make_pe64_reloc_image,
+    make_pe64_export_image
+}
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Dynload Windows PE System":
+    describe "PE image parsing":
+        it "reads PE image base and size":
+            val img = make_pe64_reloc_image()
+            val base = pe_image_base(img)
+            expect(base).to_equal(0x400000)
+            val size = pe_size_of_image(img)
+            expect(size).to_equal(0x5000)
+
+    describe "relocation":
+        it "applies DIR64 relocations with correct delta":
+            val img = make_pe64_reloc_image()
+            val result = wine_pe_apply_all_relocations(img, 0x400000, 0x500000)
+            expect(result.ok).to_equal(true)
+            expect(result.relocation_count).to_equal(2)
+
+        it "handles zero-delta relocations":
+            val img = make_pe64_reloc_image()
+            val result = wine_pe_apply_all_relocations(img, 0x400000, 0x400000)
+            expect(result.ok).to_equal(true)
+            expect(result.relocation_count).to_equal(0)
+            expect(result.operations).to_contain("relocation-delta-zero")
+
+    describe "export resolution":
+        it "resolves named exports from PE export directory":
+            val img = make_pe64_export_image()
+            val alpha = pe_export_lookup_by_name(img, "Alpha")
+            expect(alpha).to_equal(0x2010)
+            val beta = pe_export_lookup_by_name(img, "Beta")
+            expect(beta).to_equal(0x2030)
+
+        it "returns -1 for unknown export name":
+            val img = make_pe64_export_image()
+            val missing = pe_export_lookup_by_name(img, "NonExistent")
+            expect(missing).to_equal(-1)
+
+    describe "image mapping":
+        it "maps PE image with correct size and sections":
+            val img = make_pe64_reloc_image()
+            val mapped = wine_dll_map_pe_image(img, 0x400000)
+            expect(mapped.ok).to_equal(true)
+            expect(mapped.image_size).to_equal(0x5000)
+            expect(mapped.section_count).to_equal(1)
+            expect(mapped.entry_point_rva).to_equal(0x2010)
+
+        it "maps PE image at different base and applies relocations":
+            val img = make_pe64_reloc_image()
+            val mapped = wine_dll_map_pe_image(img, 0x500000)
+            expect(mapped.ok).to_equal(true)
+            expect(mapped.preferred_base).to_equal(0x400000)
+            expect(mapped.load_base).to_equal(0x500000)
+            expect(mapped.relocation_count).to_equal(2)
+
+    describe "DllMain lifecycle":
+        it "records DllMain invocation for DLL_PROCESS_ATTACH":
+            val record = wine_dll_invoke_dllmain("test.dll", 0x400000, 0x2010, 0, 1, 0, "system-test")
+            expect(record.ok).to_equal(true)
+            expect(record.dll_name).to_equal("test.dll")
+            expect(record.reason).to_equal(1)
+            expect(record.invoked).to_equal(false)
+            expect(record.evidence).to_contain("DllMain-invocation-recorded")
+            expect(record.evidence).to_contain("DLL_PROCESS_ATTACH")
+
+        it "rejects DllMain with invalid parameters":
+            val no_name = wine_dll_invoke_dllmain("", 0x400000, 0x2010, 0, 1, 0, "")
+            expect(no_name.ok).to_equal(false)
+            expect(no_name.error).to_equal("missing-dll-name")
+            val no_base = wine_dll_invoke_dllmain("test.dll", 0, 0x2010, 0, 1, 0, "")
+            expect(no_base.ok).to_equal(false)
+            expect(no_base.error).to_equal("invalid-image-base")
+
+    describe "windows-only tests":
+        it "verifies PE loading on native Windows":
+            if is_windows():
+                val img = make_pe64_reloc_image()
+                val mapped = wine_dll_map_pe_image(img, 0x400000)
+                expect(mapped.ok).to_equal(true)
+                expect(mapped.image_size).to_equal(0x5000)
+            else:
+                print("SKIP: Windows-native PE load (not on Windows)")

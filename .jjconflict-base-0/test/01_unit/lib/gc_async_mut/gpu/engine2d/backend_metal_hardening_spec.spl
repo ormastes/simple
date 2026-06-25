@@ -1,0 +1,206 @@
+# Metal 2D Backend — Hardening Spec
+#
+# Tests the Metal 2D backend hardening paths:
+#   - probe_metal returns unavailable on Linux (Metal not available)
+#   - init() returns false on non-macOS
+#   - draw methods are no-ops when not initialized (gpu_frame_complete stays false)
+#   - last_error is set on init failure
+#   - metal_classify_error covers all MetalErrorKind variants
+#   - MetalSession.error_message() returns correct strings for all codes
+#   - read_pixels() falls back to CPU mirror when gpu_frame_complete=false
+#
+# All tests run in interpreter mode (no Metal device required).
+#
+# Run: bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_metal_hardening_spec.spl
+
+use std.spec.{describe, it, expect, assert_true, assert_false, assert_equal}
+use std.gc_async_mut.gpu.engine2d.backend_metal.{
+    MetalBackend, MetalErrorKind, metal_classify_error,
+    probe_metal, make_metal_backend
+}
+use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
+
+describe "Metal 2D backend — probe unavailable on non-macOS":
+
+    it "probe_metal returns available=false on Linux":
+        val probe = probe_metal()
+        assert_false(probe.available)
+
+    it "probe_metal sets api_name to metal":
+        val probe = probe_metal()
+        assert_equal(probe.api_name, "metal")
+
+    it "probe_metal sets shader_format to msl":
+        val probe = probe_metal()
+        assert_equal(probe.shader_format, "msl")
+
+    it "probe_metal fallback_reason is non-empty":
+        val probe = probe_metal()
+        assert_true(probe.fallback_reason.len() > 0)
+
+describe "Metal 2D backend — init guard on Linux":
+
+    it "init() returns false on non-macOS":
+        var b = make_metal_backend()
+        val result = b.init(64, 64)
+        assert_false(result)
+
+    it "initialized is false after failed init":
+        var b = make_metal_backend()
+        b.init(64, 64)
+        assert_false(b.initialized)
+
+    it "last_error is non-empty after failed init on Linux":
+        var b = make_metal_backend()
+        b.init(64, 64)
+        assert_true(b.last_error.len() > 0)
+
+    it "last_error contains Metal on Linux init failure":
+        var b = make_metal_backend()
+        b.init(64, 64)
+        assert_true(b.last_error.contains("Metal"))
+
+describe "Metal 2D backend — draw methods are no-ops when not initialized":
+
+    it "clear() leaves gpu_frame_complete false when not initialized":
+        var b = make_metal_backend()
+        b.clear(0xFF0000FF)
+        assert_false(b.gpu_frame_complete)
+
+    it "draw_rect() leaves gpu_frame_complete false when not initialized":
+        var b = make_metal_backend()
+        b.draw_rect(0, 0, 10, 10, 0xFF0000FF)
+        assert_false(b.gpu_frame_complete)
+
+    it "draw_rect_filled() leaves gpu_frame_complete false when not initialized":
+        var b = make_metal_backend()
+        b.draw_rect_filled(0, 0, 10, 10, 0xFF0000FF)
+        assert_false(b.gpu_frame_complete)
+
+    it "draw_line() leaves gpu_frame_complete false when not initialized":
+        var b = make_metal_backend()
+        b.draw_line(0, 0, 10, 10, 0xFF0000FF, 1)
+        assert_false(b.gpu_frame_complete)
+
+    it "draw_circle() leaves gpu_frame_complete false when not initialized":
+        var b = make_metal_backend()
+        b.draw_circle(5, 5, 4, 0xFF0000FF)
+        assert_false(b.gpu_frame_complete)
+
+    it "draw_triangle_filled() leaves gpu_frame_complete false when not initialized":
+        var b = make_metal_backend()
+        b.draw_triangle_filled(0, 0, 10, 0, 5, 10, 0xFF0000FF)
+        assert_false(b.gpu_frame_complete)
+
+    it "clear() sets last_error when not initialized":
+        var b = make_metal_backend()
+        b.clear(0xFF0000FF)
+        assert_true(b.last_error.len() > 0)
+
+describe "Metal 2D backend — read_pixels falls back to CPU mirror":
+
+    it "read_pixels returns non-empty array after init failure (mirror fallback)":
+        var b = make_metal_backend()
+        b.init(8, 8)
+        # Mirror is always initialized (SoftwareBackend)
+        b.mirror.init(8, 8)
+        b.mirror.clear(0xFF112233)
+        val pixels = b.read_pixels()
+        # Falls back to mirror since gpu_frame_complete=false
+        assert_true(pixels.len() > 0)
+
+    it "width() delegates to mirror when uninitialized":
+        var b = make_metal_backend()
+        b.mirror.init(16, 32)
+        val w = b.width()
+        assert_equal(w, 16)
+
+    it "height() delegates to mirror when uninitialized":
+        var b = make_metal_backend()
+        b.mirror.init(16, 32)
+        val h = b.height()
+        assert_equal(h, 32)
+
+describe "Metal 2D backend — metal_classify_error all variants":
+
+    it "classifies not-available message as NotAvailable":
+        val kind = metal_classify_error("Metal SFFI not available")
+        assert_equal(kind, MetalErrorKind.NotAvailable)
+
+    it "classifies device creation message as DeviceLost":
+        val kind = metal_classify_error("Metal device creation failed")
+        assert_equal(kind, MetalErrorKind.DeviceLost)
+
+    it "classifies shader compilation message as ShaderCompile":
+        val kind = metal_classify_error("Metal shader compilation failed")
+        assert_equal(kind, MetalErrorKind.ShaderCompile)
+
+    it "classifies no devices message as NoDevice":
+        val kind = metal_classify_error("No Metal devices found")
+        assert_equal(kind, MetalErrorKind.NoDevice)
+
+    it "classifies pipeline message as PipelineCreate":
+        val kind = metal_classify_error("Metal compute pipeline creation failed")
+        assert_equal(kind, MetalErrorKind.PipelineCreate)
+
+    it "classifies alloc message as AllocFailed":
+        val kind = metal_classify_error("Metal framebuffer allocation failed")
+        assert_equal(kind, MetalErrorKind.AllocFailed)
+
+    it "classifies mirror message as AllocFailed":
+        val kind = metal_classify_error("Metal mirror surface allocation failed")
+        assert_equal(kind, MetalErrorKind.AllocFailed)
+
+    it "classifies unknown message as Other":
+        val kind = metal_classify_error("unexpected gpu error XYZ")
+        assert_equal(kind, MetalErrorKind.Other)
+
+    it "classifies empty string as None":
+        val kind = metal_classify_error("")
+        assert_equal(kind, MetalErrorKind.None)
+
+describe "MetalSession — error_message codes":
+
+    it "error_message returns empty string for code 0 (success)":
+        var s = MetalSession.create("test")
+        s.last_error = 0
+        assert_equal(s.error_message(), "")
+
+    it "error_message returns non-empty for code 1 (SFFI unavailable)":
+        var s = MetalSession.create("test")
+        s.last_error = 1
+        assert_true(s.error_message().len() > 0)
+
+    it "error_message returns non-empty for code 2 (runtime init failed)":
+        var s = MetalSession.create("test")
+        s.last_error = 2
+        assert_true(s.error_message().len() > 0)
+
+    it "error_message returns non-empty for code 3 (no devices)":
+        var s = MetalSession.create("test")
+        s.last_error = 3
+        assert_true(s.error_message().len() > 0)
+
+    it "error_message returns non-empty for code 4 (device create)":
+        var s = MetalSession.create("test")
+        s.last_error = 4
+        assert_true(s.error_message().len() > 0)
+
+    it "error_message returns non-empty for code 5 (queue create)":
+        var s = MetalSession.create("test")
+        s.last_error = 5
+        assert_true(s.error_message().len() > 0)
+
+    it "error_message returns non-empty for code 6 (shader compile)":
+        var s = MetalSession.create("test")
+        s.last_error = 6
+        assert_true(s.error_message().len() > 0)
+
+    it "error_message returns non-empty for code 7 (pipeline create)":
+        var s = MetalSession.create("test")
+        s.last_error = 7
+        assert_true(s.error_message().len() > 0)
+
+    it "error_code() returns 0 on fresh session":
+        var s = MetalSession.create("test")
+        assert_equal(s.error_code(), 0)

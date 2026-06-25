@@ -1,0 +1,136 @@
+# Network Syscall Handlers — split from syscall.spl.
+# Contains _handle_net_socket through _handle_net_if_config
+# and _forward_net_ipc helper.
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.types.ipc_types.{IpcMessage}
+
+# ============================================================================
+# Network Syscall Handlers (70-77)
+#
+# Exokernel design: applications use the POSIX socket layer
+# (src/os/posix/socket_compat.spl) which talks directly to the netstack
+# service via IPC (port 2). The kernel does NOT mediate network operations.
+#
+# These syscall handlers exist as a convenience for callers that bypass the
+# POSIX layer (e.g., os.userlib.net). They forward to the netstack service
+# by building an IPC message and sending it on the caller's behalf.
+# ============================================================================
+
+fn _handle_net_socket(args: SyscallArgs) -> SyscallResult:
+    """Create a network socket by forwarding to netstack (IPC port 2).
+
+    Args:
+      arg0: domain (AF_INET=2, AF_INET6=10)
+      arg1: type (SOCK_STREAM=1, SOCK_DGRAM=2)
+      arg2: protocol
+    """
+    if args.arg0 != 2:
+        return SyscallResult(value: -22)
+
+    var proto: u64 = 0
+    if args.arg1 == 1:
+        proto = 1
+    elif args.arg1 == 2:
+        proto = 2
+    else:
+        return SyscallResult(value: -22)
+
+    val ipc_result = _forward_net_ipc(1, proto, 0, 0, 0)
+    SyscallResult(value: ipc_result)
+
+fn _handle_net_bind(args: SyscallArgs) -> SyscallResult:
+    """Bind a socket to an address by forwarding to netstack (IPC port 2).
+
+    Args:
+      arg0: socket fd (from netstack)
+      arg1: packed IPv4 address (a | b<<8 | c<<16 | d<<24)
+      arg2: port number
+    """
+    val ipc_result = _forward_net_ipc(2, args.arg0, args.arg1, args.arg2, 0)
+    SyscallResult(value: ipc_result)
+
+fn _handle_net_listen(args: SyscallArgs) -> SyscallResult:
+    """Listen on a socket by forwarding to netstack (IPC port 2).
+
+    Args:
+      arg0: socket fd
+      arg1: backlog
+    """
+    val ipc_result = _forward_net_ipc(3, args.arg0, args.arg1, 0, 0)
+    SyscallResult(value: ipc_result)
+
+fn _handle_net_connect(args: SyscallArgs) -> SyscallResult:
+    """Connect a socket by forwarding to netstack (IPC port 2).
+
+    Args:
+      arg0: socket fd
+      arg1: packed IPv4 address
+      arg2: port number
+    """
+    val ipc_result = _forward_net_ipc(4, args.arg0, args.arg1, args.arg2, 0)
+    SyscallResult(value: ipc_result)
+
+fn _handle_net_accept(args: SyscallArgs) -> SyscallResult:
+    """Accept a connection by forwarding to netstack (IPC port 2).
+
+    Args:
+      arg0: listening socket fd
+    """
+    val ipc_result = _forward_net_ipc(5, args.arg0, 0, 0, 0)
+    SyscallResult(value: ipc_result)
+
+fn _handle_net_send_to(args: SyscallArgs) -> SyscallResult:
+    """Send data on a socket by forwarding to netstack (IPC port 2).
+
+    Args:
+      arg0: socket fd
+      arg1: data pointer (userspace)
+      arg2: data length
+      arg3: flags
+    """
+    val ipc_result = _forward_net_ipc(6, args.arg0, args.arg1, args.arg2, args.arg3)
+    SyscallResult(value: ipc_result)
+
+fn _handle_net_recv_from(args: SyscallArgs) -> SyscallResult:
+    """Receive data from a socket by forwarding to netstack (IPC port 2).
+
+    Args:
+      arg0: socket fd
+      arg1: buffer pointer (userspace)
+      arg2: max length
+      arg3: flags
+    """
+    val ipc_result = _forward_net_ipc(7, args.arg0, args.arg1, args.arg2, args.arg3)
+    SyscallResult(value: ipc_result)
+
+fn _handle_net_if_config(args: SyscallArgs) -> SyscallResult:
+    """Get/set network interface configuration via netstack (IPC port 2).
+
+    Args:
+      arg0: interface index
+      arg1: info buffer pointer (userspace)
+    """
+    val ipc_result = _forward_net_ipc(9, args.arg0, args.arg1, 0, 0)
+    SyscallResult(value: ipc_result)
+
+fn _forward_net_ipc(method: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> i64:
+    """Forward a network syscall to the netstack service via IPC (port 2).
+
+    For best performance, user applications should use posix_socket() API
+    in socket_compat.spl which builds proper IPC payloads in user-space.
+    """
+    val NETSTACK_PORT: u64 = 2
+    val msg = IpcMessage(
+        src_port: 0,  # kernel
+        dst_port: NETSTACK_PORT,
+        method: method as u32,
+        flags: 0,
+        payload_addr: arg0,
+        payload_len: 0,
+        cap_count: 0
+    )
+
+    # For now, return -ENOSYS to indicate that the kernel forwarding path
+    # is not fully wired. Callers should use socket_compat.spl instead.
+    -38  # ENOSYS — use posix_socket() API in socket_compat.spl

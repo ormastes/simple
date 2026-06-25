@@ -1,0 +1,380 @@
+"""
+# T32 LSP MCP Server -- CMM Intelligence Tests
+
+**Feature IDs:** #T32-LSP-001
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Tests for the T32 LSP MCP server: text utility functions (split, extract),
+CLI validation helpers (GUI keyword detection, command check),
+and JSON encoding/extraction from the LSP JSON helpers module.
+
+## Source
+
+`examples/10_tooling/trace32_tools/t32_lsp_mcp/tools.spl`
+`examples/10_tooling/trace32_tools/t32_lsp_mcp/json_helpers.spl`
+"""
+
+use app.io.mod.{shell}
+use app.t32_lsp_mcp.json_helpers.{lsp_Q, lsp_LB, lsp_RB, lsp_escape_json, lsp_js, lsp_jp, lsp_jo1, lsp_jo2, lsp_extract_field}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+# ============================================================================
+# Inlined helpers from tools.spl (cannot import tools.spl due to cmm_lsp deps)
+# ============================================================================
+
+fn split_to_lines(content: text) -> [text]:
+    var lines: [text] = []
+    var start = 0
+    var i = 0
+    while i < content.len():
+        if content[i:i + 1] == "\n":
+            lines.push(content[start:i])
+            start = i + 1
+        i = i + 1
+    if start <= content.len():
+        lines.push(content[start:content.len()])
+    lines
+
+fn extract_word_at(line: text, char_offset: i64) -> text:
+    if char_offset < 0 or char_offset > line.len():
+        return ""
+    var ws = char_offset
+    while ws > 0:
+        val ch = line[ws - 1:ws]
+        if ch == " " or ch == "\t" or ch == "(" or ch == ")" or ch == "," or ch == "=":
+            break
+        ws = ws - 1
+    var we = char_offset
+    while we < line.len():
+        val ch = line[we:we + 1]
+        if ch == " " or ch == "\t" or ch == "(" or ch == ")" or ch == "," or ch == "=" or ch == "\n":
+            break
+        we = we + 1
+    if ws >= we:
+        return ""
+    line[ws:we]
+
+fn to_lower_char_cli(ch: text) -> text:
+    if ch == "A": return "a"
+    if ch == "B": return "b"
+    if ch == "C": return "c"
+    if ch == "D": return "d"
+    if ch == "E": return "e"
+    if ch == "F": return "f"
+    if ch == "G": return "g"
+    if ch == "H": return "h"
+    if ch == "I": return "i"
+    if ch == "J": return "j"
+    if ch == "K": return "k"
+    if ch == "L": return "l"
+    if ch == "M": return "m"
+    if ch == "N": return "n"
+    if ch == "O": return "o"
+    if ch == "P": return "p"
+    if ch == "Q": return "q"
+    if ch == "R": return "r"
+    if ch == "S": return "s"
+    if ch == "T": return "t"
+    if ch == "U": return "u"
+    if ch == "V": return "v"
+    if ch == "W": return "w"
+    if ch == "X": return "x"
+    if ch == "Y": return "y"
+    if ch == "Z": return "z"
+    ch
+
+fn to_lower_cli(s: text) -> text:
+    var r = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        r = r + to_lower_char_cli(ch)
+        i = i + 1
+    r
+
+fn contains_text(hay: text, needle: text) -> bool:
+    if needle.len() > hay.len():
+        return false
+    var i = 0
+    while i <= hay.len() - needle.len():
+        if hay[i:i + needle.len()] == needle:
+            return true
+        i = i + 1
+    false
+
+fn starts_with_text(s: text, prefix: text) -> bool:
+    if prefix.len() > s.len():
+        return false
+    s[0:prefix.len()] == prefix
+
+fn ends_with_text(s: text, suffix: text) -> bool:
+    if suffix.len() > s.len():
+        return false
+    s[s.len() - suffix.len():s.len()] == suffix
+
+fn trim_start_text(s: text) -> text:
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch != " " and ch != "\t":
+            return s[i:s.len()]
+        i = i + 1
+    ""
+
+fn has_no_spaces_text(s: text) -> bool:
+    var i = 0
+    while i < s.len():
+        if s[i:i + 1] == " ":
+            return false
+        i = i + 1
+    true
+
+fn check_gui_keywords(content: text) -> [text]:
+    val banned: [text] = ["dialog", "winpos", "winclear", "winpage", "wintabs", "framepos", "toolbar", "statusbar", "screen.always", "screen.alw", "menu.reprogram", "area.view", "autostore", "menu.rp", "toolitem", "winresume", "winfocus"]
+    var violations: [text] = []
+    val lines = split_to_lines(content)
+    var li = 0
+    while li < lines.len():
+        val trimmed = trim_start_text(lines[li])
+        if trimmed.len() == 0:
+            li = li + 1
+            continue
+        val lowered = to_lower_cli(trimmed)
+        if starts_with_text(lowered, ";"):
+            li = li + 1
+            continue
+        if ends_with_text(trimmed, ":") and has_no_spaces_text(trimmed):
+            li = li + 1
+            continue
+        var bi = 0
+        while bi < banned.len():
+            val kw = banned[bi]
+            if starts_with_text(lowered, kw):
+                if lowered.len() == kw.len():
+                    violations.push(kw)
+                else:
+                    val next_ch = lowered[kw.len():kw.len() + 1]
+                    if next_ch == " " or next_ch == "." or next_ch == "\t" or next_ch == "(":
+                        violations.push(kw)
+            bi = bi + 1
+        li = li + 1
+    violations
+
+fn check_has_command(content: text, cmd: text) -> bool:
+    val lines = split_to_lines(content)
+    var li = 0
+    while li < lines.len():
+        val trimmed = trim_start_text(lines[li])
+        if trimmed.len() > 0 and not starts_with_text(trimmed, ";"):
+            val lowered = to_lower_cli(trimmed)
+            if starts_with_text(lowered, cmd):
+                return true
+        li = li + 1
+    false
+
+# ============================================================================
+# Text Utilities
+# ============================================================================
+
+describe "T32 LSP MCP Text Utilities":
+
+    context "split_to_lines":
+        it "splits multiline string":
+            val lines = split_to_lines("line1\nline2\nline3")
+            expect(lines[0]).to_equal("line1")
+            expect(lines.len()).to_equal(3)
+            expect(lines[1]).to_equal("line2")
+            expect(lines[2]).to_equal("line3")
+
+        it "handles single line":
+            val lines = split_to_lines("hello")
+            expect(lines[0]).to_equal("hello")
+            expect(lines.len()).to_equal(1)
+
+        it "handles empty string":
+            val lines = split_to_lines("")
+            expect(lines[0]).to_equal("")
+            expect(lines.len()).to_equal(1)
+
+    context "extract_word_at":
+        it "extracts word at start":
+            val word = extract_word_at("BREAK.Set 0x1000", 3)
+            expect(word).to_equal("BREAK.Set")
+
+        it "extracts word in middle":
+            val word = extract_word_at("Data.dump 0x1000", 5)
+            expect(word).to_equal("Data.dump")
+
+        it "returns empty for out-of-bounds":
+            val word = extract_word_at("hello", -1)
+            expect(word).to_equal("")
+
+        it "stops at delimiters":
+            val word = extract_word_at("fn(arg1, arg2)", 3)
+            expect(word).to_equal("arg1")
+
+# ============================================================================
+# CLI Validation
+# ============================================================================
+
+describe "T32 LSP MCP CLI Validation":
+
+    context "GUI keyword detection":
+        it "detects dialog keyword":
+            val violations = check_gui_keywords("DIALOG.view test.dlg")
+            expect(violations[0]).to_equal("dialog")
+            expect(violations.len()).to_be_greater_than(0)
+
+        it "detects winpos keyword":
+            val violations = check_gui_keywords("WinPOS 0 0 80 40")
+            expect(violations[0]).to_equal("winpos")
+            expect(violations.len()).to_be_greater_than(0)
+
+        it "returns empty for clean CLI script":
+            val script = "SCREEN.OFF\nAREA.Create A000\nAREA.Select A000\nBREAK.Set 0x1000"
+            val violations = check_gui_keywords(script)
+            expect(violations.len()).to_equal(0)
+
+        it "ignores comments":
+            val violations = check_gui_keywords("; dialog is fine in comments")
+            expect(violations.len()).to_equal(0)
+
+        it "ignores labels ending with colon":
+            val violations = check_gui_keywords("dialog_closed:")
+            expect(violations.len()).to_equal(0)
+
+    context "command detection":
+        it "finds SCREEN.OFF":
+            val script = "SCREEN.OFF\nBREAK.Set main\nGo"
+            val found = check_has_command(script, "screen.off")
+            expect(found).to_equal(true)
+
+        it "returns false when absent":
+            val script = "BREAK.Set main\nGo"
+            val found = check_has_command(script, "screen.off")
+            expect(found).to_equal(false)
+
+        it "ignores commented-out commands":
+            val script = "; SCREEN.OFF\nBREAK.Set main"
+            val found = check_has_command(script, "screen.off")
+            expect(found).to_equal(false)
+
+# ============================================================================
+# JSON Helpers
+# ============================================================================
+
+describe "T32 LSP MCP JSON Helpers":
+
+    context "encoding":
+        it "escapes special characters":
+            val result = lsp_escape_json("a\"b\\c\nd")
+            expect(result).to_contain("\\\"")
+            expect(result).to_contain("\\\\")
+            expect(result).to_contain("\\n")
+
+        it "builds quoted string":
+            val result = lsp_js("test")
+            expect(result).to_equal("\"test\"")
+
+        it "builds key-value pair":
+            val result = lsp_jp("key", lsp_js("val"))
+            expect(result).to_equal("\"key\":\"val\"")
+
+        it "builds single-pair object":
+            val pair = lsp_jp("x", lsp_js("1"))
+            val result = lsp_jo1(pair)
+            expect(result).to_equal("{\"x\":\"1\"}")
+
+    context "extraction":
+        it "extracts field from JSON":
+            val json = "{\"method\":\"initialize\",\"id\":1}"
+            val result = lsp_extract_field(json, "method")
+            expect(result).to_equal("initialize")
+
+        it "handles missing fields":
+            val json = "{\"a\":1}"
+            val result = lsp_extract_field(json, "missing")
+            expect(result).to_equal("")
+
+# ============================================================================
+# Wrapper integration
+# ============================================================================
+
+fn shell_escape_text(value: text) -> text:
+    "'" + value.replace("'", "'\\''") + "'"
+
+fn mcp_msg(body: text) -> text:
+    "Content-Length: " + body.len().to_string() + "\r\n\r\n" + body
+
+fn init_request(id: text) -> text:
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+    mcp_msg(body)
+
+fn shutdown_request(id: text) -> text:
+    mcp_msg("{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"shutdown\",\"params\":{}}")
+
+fn tools_call_request(id: text, name: text, arguments_json: text) -> text:
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"tools/call\",\"params\":{\"name\":\"" + name + "\",\"arguments\":" + arguments_json + "}}"
+    mcp_msg(body)
+
+describe "T32 LSP MCP Wrapper":
+
+    it "recovers from stale ready marker before tools/call":
+        val mk_input = shell("mktemp /tmp/t32_lsp_mcp_input.XXXXXX")
+        val input_path = (mk_input.stdout ?? "").trim()
+        val daemon_dir = "/tmp/t32_lsp_mcp_spec_stale_ready"
+        val stale_req = daemon_dir + "/stale.req"
+        val messages = init_request("1") + tools_call_request("2", "cmm_complete", "{\"source\":\"BR\",\"line\":0,\"character\":2}") + shutdown_request("3")
+        expect(input_path != "").to_equal(true)
+        expect(rt_file_write_text(input_path, messages)).to_equal(true)
+
+        val setup = shell("rm -rf " + shell_escape_text(daemon_dir) + " && mkdir -p " + shell_escape_text(daemon_dir) + " && printf ready > " + shell_escape_text(daemon_dir + "/ready") + " && printf stale > " + shell_escape_text(stale_req))
+        expect(setup.exit_code).to_equal(0)
+
+        val cmd = "timeout 15s env T32_LSP_MCP_TOOL_DAEMON_DIR=" + shell_escape_text(daemon_dir) + " /home/ormastes/dev/pub/simple/bin/t32_lsp_mcp_server < " + shell_escape_text(input_path)
+        val result = shell(cmd)
+        val stdout = result.stdout ?? ""
+        val stderr = result.stderr ?? ""
+
+        rt_file_delete(input_path)
+        shell("rm -rf " + shell_escape_text(daemon_dir))
+
+        expect(result.exit_code).to_equal(0)
+        expect(stdout.contains("\"id\":\"1\"")).to_equal(true)
+        expect(stdout.contains("\"id\":\"2\"")).to_equal(true)
+        expect(stdout.contains("\"result\"")).to_equal(true)
+        expect(stdout.contains("Tool daemon timed out")).to_equal(false)
+        expect(stdout.contains("failed to become ready")).to_equal(true)
+        expect(stderr.contains("Transport closed")).to_equal(false)
+
+    it "passes escaped source text through tools/call arguments":
+        val mk_input = shell("mktemp /tmp/t32_lsp_mcp_input.XXXXXX")
+        val input_path = (mk_input.stdout ?? "").trim()
+        val daemon_dir = "/tmp/t32_lsp_mcp_spec_escaped_source"
+        val args_json = "{\"source\":\"PRINT \\\"arguments\\\": 1\",\"line\":0,\"character\":0}"
+        val messages = init_request("1") + tools_call_request("2", "cmm_parse", args_json) + shutdown_request("3")
+        expect(input_path != "").to_equal(true)
+        expect(rt_file_write_text(input_path, messages)).to_equal(true)
+
+        val setup = shell("rm -rf " + shell_escape_text(daemon_dir))
+        expect(setup.exit_code).to_equal(0)
+
+        val cmd = "timeout 20s env SIMPLE_RUNTIME=" + shell_escape_text("/home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple") + " T32_LSP_MCP_TOOL_DAEMON_DIR=" + shell_escape_text(daemon_dir) + " /home/ormastes/dev/pub/simple/bin/t32_lsp_mcp_server < " + shell_escape_text(input_path)
+        val result = shell(cmd)
+        val stdout = result.stdout ?? ""
+        val stderr = result.stderr ?? ""
+
+        rt_file_delete(input_path)
+        shell("rm -rf " + shell_escape_text(daemon_dir))
+
+        expect(result.exit_code).to_equal(0)
+        expect(stdout.contains("\"id\":\"2\"")).to_equal(true)
+        expect(stdout.contains("Missing required parameter: source")).to_equal(false)
+        expect(stdout.contains("\"node_count\"")).to_equal(true)
+        expect(stderr.contains("Transport closed")).to_equal(false)

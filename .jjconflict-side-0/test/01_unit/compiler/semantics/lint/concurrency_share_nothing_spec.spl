@@ -1,0 +1,284 @@
+# Concurrency Share-Nothing Lint Specification
+#
+# Tests for E-PAR-006 detection of green spawn closures that share mutable state.
+#
+# Green tasks are share-nothing processes; spawned closures must not:
+#   1. Read module-level `var` declarations  (kind: module-level mutable variable)
+#   2. Write to variables captured from an enclosing scope  (kind: captured mutable variable write)
+#
+# EXEMPT: thread_spawn (OS threads may share via Mutex).
+# SAFE:   module-level `val` constants, lambda-local variables, lambda params.
+#
+# Uses text-based heuristics (no AST dependency) so the spec runs in interpreter mode.
+
+use std.spec.*
+
+# ============================================================================
+# Text-based lint helpers
+# ============================================================================
+
+fn _sn_is_ident_char(c: text) -> bool:
+    val alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+    alpha.contains(c)
+
+fn _sn_count_indent(line: text) -> i64:
+    var count = 0
+    val len = line.len()
+    var i = 0
+    var going = true
+    while going and i < len:
+        val c = line.substring(i, i + 1)
+        if c == " ":
+            count = count + 1
+            i = i + 1
+        elif c == "\t":
+            count = count + 4
+            i = i + 1
+        else:
+            going = false
+    count
+
+fn _sn_extract_name(after_kw: text) -> text:
+    """Extract identifier name from text starting right after keyword."""
+    var i = 0
+    val len = after_kw.len()
+    while i < len:
+        val c = after_kw.substring(i, i + 1)
+        if not _sn_is_ident_char(c):
+            break
+        i = i + 1
+    after_kw.substring(0, i)
+
+fn _sn_is_assign_to(trimmed: text, var_name: text) -> bool:
+    if trimmed.starts_with(var_name):
+        val after = trimmed.substring(var_name.len())
+        val at = after.trim()
+        if at.starts_with("= ") or at.starts_with("=\t") or at == "=":
+            return true
+        if (at.starts_with("+= ") or at.starts_with("-= ") or
+            at.starts_with("*= ") or at.starts_with("/= ")):
+            return true
+    false
+
+fn _sn_is_token_present(line: text, token: text) -> bool:
+    """Check if token appears as a whole identifier word in line."""
+    val tlen = token.len()
+    val llen = line.len()
+    var i = 0
+    while i <= llen - tlen:
+        val sub = line.substring(i, i + tlen)
+        if sub == token:
+            var after_ok = true
+            var before_ok = true
+            if i + tlen < llen:
+                val ac = line.substring(i + tlen, i + tlen + 1)
+                if _sn_is_ident_char(ac):
+                    after_ok = false
+            if i > 0:
+                val bc = line.substring(i - 1, i)
+                if _sn_is_ident_char(bc):
+                    before_ok = false
+            if after_ok and before_ok:
+                return true
+        i = i + 1
+    false
+
+fn _sn_collect_module_vars(lines: [text]) -> [text]:
+    """Collect top-level `var` names (indent == 0)."""
+    var result: [text] = []
+    for line in lines:
+        val t = line.trim()
+        val indent = _sn_count_indent(line)
+        if indent == 0 and t.starts_with("var "):
+            val nm = _sn_extract_name(t.substring(4))
+            if nm != "":
+                result.push(nm)
+    result
+
+fn _sn_callee_of_line(trimmed: text) -> text:
+    """Return the share-nothing callee name if trimmed line contains a spawn call."""
+    for callee in ["cooperative_green_spawn", "multicore_green_spawn", "green_spawn"]:
+        if trimmed.contains(callee + "("):
+            return callee
+    ""
+
+fn check_share_nothing_text(source: text) -> [text]:
+    """Text-based heuristic for E-PAR-006 detection.
+    Returns list of finding messages (each contains 'E-PAR-006' and the relevant var name)."""
+    var msgs: [text] = []
+    val lines = source.split("\n")
+    val module_vars = _sn_collect_module_vars(lines)
+
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        val callee = _sn_callee_of_line(trimmed)
+
+        if callee != "":
+            val spawn_indent = _sn_count_indent(line)
+
+            # Collect enclosing-scope vars visible just above this spawn call
+            var enclosing_vars: [text] = []
+            var si = li - 1
+            while si >= 0:
+                val sl = lines[si]
+                val st = sl.trim()
+                val sindent = _sn_count_indent(sl)
+                if st == "" or st.starts_with("#"):
+                    si = si - 1
+                    continue
+                if sindent < spawn_indent and (st.starts_with("fn ") or st.starts_with("class ") or st.starts_with("struct ")):
+                    break
+                if sindent <= spawn_indent and st.starts_with("var "):
+                    val nm = _sn_extract_name(st.substring(4))
+                    if nm != "":
+                        enclosing_vars.push(nm)
+                si = si - 1
+
+            # Collect lambda-local vars (declared inside the lambda body)
+            var lambda_locals: [text] = []
+
+            # Check the spawn call line itself for inline lambda content after "\:"
+            # e.g.  green_spawn(\: shared_total + 1)
+            val lambda_sep = "\\:"
+            if trimmed.contains(lambda_sep):
+                val sep_pos = _sn_find_substr(trimmed, lambda_sep)
+                if sep_pos >= 0:
+                    val lambda_inline = trimmed.substring(sep_pos + 2)
+                    # Check module-level var reads in inline lambda
+                    for mv in module_vars:
+                        if _sn_is_token_present(lambda_inline, mv):
+                            msgs.push("E-PAR-006: {callee} closure must not share mutable variable '{mv}' (module-level mutable variable)")
+                    # Check captured var writes in inline lambda
+                    for ev in enclosing_vars:
+                        if _sn_is_assign_to(lambda_inline.trim(), ev):
+                            msgs.push("E-PAR-006: {callee} closure must not share mutable variable '{ev}' (captured mutable variable write)")
+
+            # Check continuation lines with deeper indent (multi-line lambda body)
+            var bi = li + 1
+            while bi < lines.len():
+                val bl = lines[bi]
+                val bt = bl.trim()
+                val bindent = _sn_count_indent(bl)
+                if bt == "":
+                    bi = bi + 1
+                    continue
+                if bindent <= spawn_indent:
+                    break
+
+                # Track new locals declared inside the lambda
+                if bt.starts_with("var ") or bt.starts_with("val "):
+                    val nm = _sn_extract_name(bt.substring(4))
+                    if nm != "":
+                        lambda_locals.push(nm)
+
+                # Check: read of module-level var on this lambda body line
+                for mv in module_vars:
+                    var is_local = false
+                    for lv in lambda_locals:
+                        if lv == mv:
+                            is_local = true
+                    if not is_local and _sn_is_token_present(bt, mv):
+                        msgs.push("E-PAR-006: {callee} closure must not share mutable variable '{mv}' (module-level mutable variable)")
+
+                # Check: write to enclosing-scope var on this lambda body line
+                for ev in enclosing_vars:
+                    var is_lambda_local = false
+                    for lv in lambda_locals:
+                        if lv == ev:
+                            is_lambda_local = true
+                    if not is_lambda_local and _sn_is_assign_to(bt, ev):
+                        msgs.push("E-PAR-006: {callee} closure must not share mutable variable '{ev}' (captured mutable variable write)")
+
+                bi = bi + 1
+
+        li = li + 1
+    msgs
+
+fn _sn_find_substr(haystack: text, needle: text) -> i64:
+    """Return start index of first occurrence of needle in haystack, or -1."""
+    val nlen = needle.len()
+    val hlen = haystack.len()
+    var i = 0
+    while i <= hlen - nlen:
+        val sub = haystack.substring(i, i + nlen)
+        if sub == needle:
+            return i
+        i = i + 1
+    -1
+
+fn msgs_contain_code(msgs: [text], code: text) -> bool:
+    for m in msgs:
+        if m.contains(code):
+            return true
+    false
+
+fn msgs_contain_var(msgs: [text], var_name: text) -> bool:
+    for m in msgs:
+        if m.contains(var_name):
+            return true
+    false
+
+fn msgs_contain_kind(msgs: [text], kind: text) -> bool:
+    for m in msgs:
+        if m.contains(kind):
+            return true
+    false
+
+# ============================================================================
+# E-PAR-006: green_spawn reads module-level var
+# ============================================================================
+
+describe "E-PAR-006 share-nothing closure lint":
+    context "green_spawn closure reads module-level var":
+        it "flags green_spawn closure reading a module-level var":
+            val code = "var shared_total = 0\n\nfn main():\n    val h = green_spawn(\\: shared_total + 1)\n    h.join()\n"
+            val msgs = check_share_nothing_text(code)
+            expect(msgs_contain_code(msgs, "E-PAR-006")).to_equal(true)
+            expect(msgs_contain_var(msgs, "shared_total")).to_equal(true)
+
+        it "includes 'module-level mutable variable' in the finding":
+            val code = "var shared_total = 0\n\nfn main():\n    val h = green_spawn(\\: shared_total + 1)\n    h.join()\n"
+            val msgs = check_share_nothing_text(code)
+            expect(msgs_contain_kind(msgs, "module-level mutable variable")).to_equal(true)
+
+    context "cooperative_green_spawn closure writes captured local var":
+        it "flags cooperative_green_spawn closure assigning a captured local var":
+            val code = "fn main():\n    var local_count = 0\n    val h = cooperative_green_spawn(\\:\n        local_count = local_count + 1\n        local_count)\n    h.join()\n"
+            val msgs = check_share_nothing_text(code)
+            expect(msgs_contain_code(msgs, "E-PAR-006")).to_equal(true)
+            expect(msgs_contain_var(msgs, "local_count")).to_equal(true)
+
+        it "includes 'captured mutable variable write' in the finding":
+            val code = "fn main():\n    var local_count = 0\n    val h = cooperative_green_spawn(\\:\n        local_count = local_count + 1\n        local_count)\n    h.join()\n"
+            val msgs = check_share_nothing_text(code)
+            expect(msgs_contain_kind(msgs, "captured mutable variable write")).to_equal(true)
+
+    context "multicore_green_spawn closure reads module-level var":
+        it "flags multicore_green_spawn closure reading a module-level var":
+            val code = "var shared_sum = 0\n\nfn main():\n    val h = multicore_green_spawn(\\: shared_sum + 1)\n    h.join()\n"
+            val msgs = check_share_nothing_text(code)
+            expect(msgs_contain_code(msgs, "E-PAR-006")).to_equal(true)
+            expect(msgs_contain_var(msgs, "shared_sum")).to_equal(true)
+
+    context "negative cases — no finding expected":
+        it "does not flag a value-only closure (no shared state)":
+            val code = "fn main():\n    val h = green_spawn(\\: 42)\n    h.join()\n"
+            val msgs = check_share_nothing_text(code)
+            expect(msgs_contain_code(msgs, "E-PAR-006")).to_equal(false)
+
+        it "does not flag reading a module-level val constant":
+            val code = "val MAX_RETRIES = 5\n\nfn main():\n    val h = green_spawn(\\: MAX_RETRIES + 1)\n    h.join()\n"
+            val msgs = check_share_nothing_text(code)
+            expect(msgs_contain_code(msgs, "E-PAR-006")).to_equal(false)
+
+        it "does not flag thread_spawn with a module-level var (OS threads are exempt)":
+            val code = "var shared_count = 0\n\nfn main():\n    val h = thread_spawn(\\: shared_count + 1)\n    h.join()\n"
+            val msgs = check_share_nothing_text(code)
+            expect(msgs_contain_code(msgs, "E-PAR-006")).to_equal(false)
+
+        it "does not flag a lambda that only uses its own local variables":
+            val code = "fn main():\n    val h = green_spawn(\\:\n        var x = 10\n        x + 1)\n    h.join()\n"
+            val msgs = check_share_nothing_text(code)
+            expect(msgs_contain_code(msgs, "E-PAR-006")).to_equal(false)

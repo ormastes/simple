@@ -1,0 +1,134 @@
+# SReplay — Stage 6 Cross-Track Integration
+#
+# Ties the 6 SReplay tracks together with a unified replay session manager.
+# Tracks: QEMU, KernelEventLog, ProcessRR, SemanticTrace, ContainerCheckpoint, VmReplay
+
+# ============================================================================
+# ReplayTrack enum
+# ============================================================================
+
+enum ReplayTrack:
+    QEMU
+    KernelEventLog
+    ProcessRR
+    SemanticTrace
+    ContainerCheckpoint
+    VmReplay
+
+impl ReplayTrack:
+    fn to_i32() -> i32:
+        match self:
+            case ReplayTrack.QEMU:                0
+            case ReplayTrack.KernelEventLog:      1
+            case ReplayTrack.ProcessRR:           2
+            case ReplayTrack.SemanticTrace:       3
+            case ReplayTrack.ContainerCheckpoint: 4
+            case ReplayTrack.VmReplay:            5
+
+    fn to_text() -> text:
+        match self:
+            case ReplayTrack.QEMU:                "QEMU"
+            case ReplayTrack.KernelEventLog:      "KernelEventLog"
+            case ReplayTrack.ProcessRR:           "ProcessRR"
+            case ReplayTrack.SemanticTrace:       "SemanticTrace"
+            case ReplayTrack.ContainerCheckpoint: "ContainerCheckpoint"
+            case ReplayTrack.VmReplay:            "VmReplay"
+
+# ============================================================================
+# IntegratedSession
+# ============================================================================
+
+class IntegratedSession:
+    session_id: text
+    active_tracks: [ReplayTrack]
+    trace_dir: text
+    recording: bool
+    replaying: bool
+
+    static fn create(session_id: text, trace_dir: text) -> IntegratedSession:
+        """Create a new integrated replay session with no active tracks."""
+        IntegratedSession(
+            session_id: session_id,
+            active_tracks: [],
+            trace_dir: trace_dir,
+            recording: false,
+            replaying: false
+        )
+
+    me fn enable_track(t: ReplayTrack):
+        """Enable a replay track if not already active."""
+        var found: bool = false
+        for existing in self.active_tracks:
+            if existing.to_i32() == t.to_i32():
+                found = true
+        if found == false:
+            self.active_tracks.push(t)
+
+    me fn disable_track(t: ReplayTrack):
+        """Remove a track from the active set."""
+        var new_tracks: [ReplayTrack] = []
+        for existing in self.active_tracks:
+            if existing.to_i32() != t.to_i32():
+                new_tracks.push(existing)
+        self.active_tracks = new_tracks
+
+    fn is_track_enabled(t: ReplayTrack) -> bool:
+        """Return true if the given track is currently active."""
+        var found: bool = false
+        for existing in self.active_tracks:
+            if existing.to_i32() == t.to_i32():
+                found = true
+        found
+
+    fn track_count() -> i32:
+        """Return the number of active tracks."""
+        self.active_tracks.len()
+
+    me fn start_recording() -> Result<text, text>:
+        """Begin recording on all active tracks."""
+        if self.recording:
+            return Err("session {self.session_id} is already recording")
+        if self.replaying:
+            return Err("session {self.session_id} is currently replaying")
+        self.recording = true
+        Ok("recording started: {self.session_id} ({self.active_tracks.len()} tracks)")
+
+    me fn stop_recording() -> Result<text, text>:
+        """Stop recording and finalise trace output."""
+        if self.recording == false:
+            return Err("session {self.session_id} is not recording")
+        self.recording = false
+        Ok("recording stopped: {self.session_id} -> {self.trace_dir}")
+
+    me fn start_replay() -> Result<text, text>:
+        """Begin replaying from the trace directory."""
+        if self.replaying:
+            return Err("session {self.session_id} is already replaying")
+        if self.recording:
+            return Err("session {self.session_id} is currently recording")
+        self.replaying = true
+        Ok("replay started: {self.session_id} from {self.trace_dir}")
+
+    me fn stop_replay() -> Result<text, text>:
+        """Stop an in-progress replay."""
+        if self.replaying == false:
+            return Err("session {self.session_id} is not replaying")
+        self.replaying = false
+        Ok("replay stopped: {self.session_id}")
+
+    fn status() -> text:
+        """Return a human-readable session status string."""
+        var mode: text = "idle"
+        if self.recording:
+            mode = "recording"
+        if self.replaying:
+            mode = "replaying"
+        var track_list: text = ""
+        var first: bool = true
+        for t in self.active_tracks:
+            if first:
+                track_list = t.to_text()
+                first = false
+            else:
+                track_list = track_list + "," + t.to_text()
+        "Session({self.session_id}, mode={mode}, tracks=[{track_list}], dir={self.trace_dir})"

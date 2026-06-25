@@ -1,0 +1,248 @@
+# CSS tokenizer — CSS Syntax Level 3 subset.
+#
+# Produces a token stream for the CSS parser. Supports:
+#   - Identifiers (alpha, digit, hyphen, underscore)
+#   - Strings ("..." or '...')
+#   - Numbers (int and float; no unit suffix — parser re-pairs)
+#   - At-keywords (@media, @import)
+#   - Hash (#id, #rrggbb)
+#   - Delim (any non-identifier single char: : ; { } , ( ) etc.)
+#   - Whitespace (skipped — not emitted)
+#   - Comments (/* ... */) — emitted as Comment tokens so downstream
+#       consumers can preserve source-map fidelity if desired.
+#
+# Out of scope: URL token, unicode escapes, bad-string/bad-url recovery.
+#
+# Design notes:
+#   - Whitespace is skipped entirely (no Whitespace token emitted). The CSS
+#       parser reconstructs whitespace-sensitivity from token adjacency.
+#   - Strings: the delimiting quotes are stripped from `text` (so "'hello'"
+#       yields text "hello"). Escape sequences are NOT interpreted.
+#   - AtKeyword: the leading `@` is stripped from `text` ("@media" -> "media").
+#   - Hash: the leading `#` is stripped from `text` ("#abc" -> "abc").
+#   - Numbers: consumed as a single lexeme including optional `.digits`.
+#   - Comments: full `/* ... */` span is preserved as `text`, inner content
+#       only (delimiters stripped). Emitted — not skipped.
+
+# ============================================================================
+# CssTokenKind — variant tag for each CSS lexeme class
+# ============================================================================
+
+enum CssTokenKind:
+    Identifier
+    String
+    Number
+    AtKeyword
+    Hash
+    Delim
+    Whitespace
+    Comment
+    Eof
+
+# ============================================================================
+# CssToken — one lexeme with source location
+# ============================================================================
+
+class CssToken:
+    kind: CssTokenKind
+    text: String
+    line: i64
+    column: i64
+
+# ============================================================================
+# Character classification helpers — ASCII-only.
+#
+# CSS Syntax Level 3 permits non-ASCII identifier code points, but this
+# minimal tokenizer restricts to ASCII to keep the byte-driven scanner
+# simple. A future pass can lift this when the parser needs it.
+# ============================================================================
+
+fn _is_alpha(c: i64) -> bool:
+    # a-z or A-Z
+    val lower = c >= 97 and c <= 122
+    val upper = c >= 65 and c <= 90
+    lower or upper
+
+fn _is_digit(c: i64) -> bool:
+    c >= 48 and c <= 57
+
+fn _is_ident_start(c: i64) -> bool:
+    # alpha or underscore
+    _is_alpha(c) or c == 95
+
+fn _is_ident_continue(c: i64) -> bool:
+    # alpha, digit, hyphen, or underscore
+    _is_alpha(c) or _is_digit(c) or c == 45 or c == 95
+
+fn _is_whitespace(c: i64) -> bool:
+    # space, tab, CR, LF, form feed
+    c == 32 or c == 9 or c == 13 or c == 10 or c == 12
+
+# ============================================================================
+# _peek — safe byte fetch, returns -1 on out-of-range.
+#
+# -1 is outside the u8 range so it cannot collide with any real byte,
+# and all classification helpers above treat it as "not a match".
+# ============================================================================
+
+fn _peek(source: String, pos: i64) -> i64:
+    val bytes = source.bytes()
+    if pos < 0 or pos >= bytes.length():
+        return -1
+    val opt = bytes.at(pos)
+    match opt:
+        Some(v):
+            v as i64
+        None:
+            -1
+
+# ============================================================================
+# _slice_text — copy source[start..end) back into a String.
+# ============================================================================
+
+fn _slice_text(source: String, start: i64, end: i64) -> String:
+    source[start:end]
+
+# ============================================================================
+# tokenize_css — main entry point.
+#
+# Walks bytes of `source`, tracks (line, column) at the start of each
+# emitted token, and returns a token list terminated by a single
+# CssToken(Eof, "", line, col).
+# ============================================================================
+
+fn tokenize_css(source: String) -> [CssToken]:
+    var tokens: [CssToken] = []
+    val n = source.bytes().length()
+    var i = 0
+    var line = 1
+    var col = 1
+
+    while i < n:
+        val c = _peek(source, i)
+
+        # --- whitespace (skipped — not emitted) ---
+        if _is_whitespace(c):
+            if c == 10:
+                line = line + 1
+                col = 1
+            else:
+                col = col + 1
+            i = i + 1
+            continue
+
+        # --- block comment `/* ... */` (emitted) ---
+        if c == 47 and _peek(source, i + 1) == 42:
+            val start_col = col
+            val start_line = line
+            # skip opening `/*`
+            i = i + 2
+            col = col + 2
+            val inner_start = i
+            var inner_end = i
+            while i < n:
+                val bc = _peek(source, i)
+                if bc == 42 and _peek(source, i + 1) == 47:
+                    inner_end = i
+                    i = i + 2
+                    col = col + 2
+                    break
+                if bc == 10:
+                    line = line + 1
+                    col = 1
+                else:
+                    col = col + 1
+                i = i + 1
+                inner_end = i
+            val text = _slice_text(source, inner_start, inner_end)
+            tokens.push(CssToken(kind: CssTokenKind.Comment, text: text, line: start_line, column: start_col))
+            continue
+
+        val start_col = col
+
+        # --- string `"..."` or `'...'` (no escape handling) ---
+        if c == 34 or c == 39:
+            val quote = c
+            # skip opening quote
+            i = i + 1
+            col = col + 1
+            val inner_start = i
+            var inner_end = i
+            while i < n and _peek(source, i) != quote:
+                if _peek(source, i) == 10:
+                    line = line + 1
+                    col = 1
+                else:
+                    col = col + 1
+                i = i + 1
+                inner_end = i
+            if i < n:
+                # record end before consuming closing quote
+                inner_end = i
+                i = i + 1
+                col = col + 1
+            val text = _slice_text(source, inner_start, inner_end)
+            tokens.push(CssToken(kind: CssTokenKind.String, text: text, line: line, column: start_col))
+            continue
+
+        # --- at-keyword `@name` (only if followed by ident-start) ---
+        if c == 64 and _is_ident_start(_peek(source, i + 1)):
+            # skip `@`
+            i = i + 1
+            col = col + 1
+            val start = i
+            while i < n and _is_ident_continue(_peek(source, i)):
+                i = i + 1
+                col = col + 1
+            val text = _slice_text(source, start, i)
+            tokens.push(CssToken(kind: CssTokenKind.AtKeyword, text: text, line: line, column: start_col))
+            continue
+
+        # --- hash `#name` (only if followed by ident-continue) ---
+        if c == 35 and _is_ident_continue(_peek(source, i + 1)):
+            # skip `#`
+            i = i + 1
+            col = col + 1
+            val start = i
+            while i < n and _is_ident_continue(_peek(source, i)):
+                i = i + 1
+                col = col + 1
+            val text = _slice_text(source, start, i)
+            tokens.push(CssToken(kind: CssTokenKind.Hash, text: text, line: line, column: start_col))
+            continue
+
+        # --- identifier ---
+        if _is_ident_start(c):
+            val start = i
+            while i < n and _is_ident_continue(_peek(source, i)):
+                i = i + 1
+                col = col + 1
+            val text = _slice_text(source, start, i)
+            tokens.push(CssToken(kind: CssTokenKind.Identifier, text: text, line: line, column: start_col))
+            continue
+
+        # --- number (int or float) ---
+        if _is_digit(c):
+            val start = i
+            while i < n and _is_digit(_peek(source, i)):
+                i = i + 1
+                col = col + 1
+            if i < n and _peek(source, i) == 46 and _is_digit(_peek(source, i + 1)):
+                # consume `.` and fractional digits
+                i = i + 1
+                col = col + 1
+                while i < n and _is_digit(_peek(source, i)):
+                    i = i + 1
+                    col = col + 1
+            val text = _slice_text(source, start, i)
+            tokens.push(CssToken(kind: CssTokenKind.Number, text: text, line: line, column: start_col))
+            continue
+
+        # --- delim: any other single byte (: ; { } , ( ) etc.) ---
+        val text = _slice_text(source, i, i + 1)
+        tokens.push(CssToken(kind: CssTokenKind.Delim, text: text, line: line, column: start_col))
+        i = i + 1
+        col = col + 1
+
+    tokens.push(CssToken(kind: CssTokenKind.Eof, text: "", line: line, column: col))
+    tokens

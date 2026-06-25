@@ -1,0 +1,467 @@
+# X25519 Key Exchange — No-Alloc Baremetal Port
+#
+# Ported from src/os/crypto/curve25519_smalllimb.spl.
+# Uses a 10-limb radix-2^25/2^26 representation to avoid checked-overflow paths.
+# All intermediate state is in [u64] (fixed 10 elements) — no heap.
+#
+# Public API:
+#   x25519(scalar: [u8], u_coord: [u8]) -> [u8]   — general DH step
+#   x25519_pubkey(scalar: [u8]) -> [u8]             — derive pubkey from private key
+
+extern fn rt_tls13_x25519(scalar: [u8], u_coord: [u8]) -> [u8]
+
+val _X25519_MASK26: u64 = 0x3FFFFFF
+val _X25519_MASK25: u64 = 0x1FFFFFF
+val _X25519_BASE26: u64 = 0x4000000
+val _X25519_BASE25: u64 = 0x2000000
+
+# ============================================================================
+# Field element helpers
+# ============================================================================
+
+fn _fe_zero() -> [u64]:
+    [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64]
+
+fn _fe_one() -> [u64]:
+    [1u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64]
+
+fn _load3(b: [u8], off: i64) -> u64:
+    b[off].to_u64() | (b[off + 1].to_u64() * 256) | (b[off + 2].to_u64() * 65536)
+
+fn _load4(b: [u8], off: i64) -> u64:
+    b[off].to_u64() | (b[off + 1].to_u64() * 256) | (b[off + 2].to_u64() * 65536) | (b[off + 3].to_u64() * 16777216)
+
+fn _fe_carry(a: [u64]) -> [u64]:
+    var h0 = a[0]
+    var h1 = a[1]
+    var h2 = a[2]
+    var h3 = a[3]
+    var h4 = a[4]
+    var h5 = a[5]
+    var h6 = a[6]
+    var h7 = a[7]
+    var h8 = a[8]
+    var h9 = a[9]
+
+    var c: u64 = 0
+    c = h0 / _X25519_BASE26
+    h0 = h0 & _X25519_MASK26
+    h1 = h1 + c
+
+    c = h1 / _X25519_BASE25
+    h1 = h1 & _X25519_MASK25
+    h2 = h2 + c
+
+    c = h2 / _X25519_BASE26
+    h2 = h2 & _X25519_MASK26
+    h3 = h3 + c
+
+    c = h3 / _X25519_BASE25
+    h3 = h3 & _X25519_MASK25
+    h4 = h4 + c
+
+    c = h4 / _X25519_BASE26
+    h4 = h4 & _X25519_MASK26
+    h5 = h5 + c
+
+    c = h5 / _X25519_BASE25
+    h5 = h5 & _X25519_MASK25
+    h6 = h6 + c
+
+    c = h6 / _X25519_BASE26
+    h6 = h6 & _X25519_MASK26
+    h7 = h7 + c
+
+    c = h7 / _X25519_BASE25
+    h7 = h7 & _X25519_MASK25
+    h8 = h8 + c
+
+    c = h8 / _X25519_BASE26
+    h8 = h8 & _X25519_MASK26
+    h9 = h9 + c
+
+    c = h9 / _X25519_BASE25
+    h9 = h9 & _X25519_MASK25
+    h0 = h0 + c * 19
+
+    c = h0 / _X25519_BASE26
+    h0 = h0 & _X25519_MASK26
+    h1 = h1 + c
+
+    c = h1 / _X25519_BASE25
+    h1 = h1 & _X25519_MASK25
+    h2 = h2 + c
+
+    c = h2 / _X25519_BASE26
+    h2 = h2 & _X25519_MASK26
+    h3 = h3 + c
+
+    c = h3 / _X25519_BASE25
+    h3 = h3 & _X25519_MASK25
+    h4 = h4 + c
+
+    c = h4 / _X25519_BASE26
+    h4 = h4 & _X25519_MASK26
+    h5 = h5 + c
+
+    c = h5 / _X25519_BASE25
+    h5 = h5 & _X25519_MASK25
+    h6 = h6 + c
+
+    c = h6 / _X25519_BASE26
+    h6 = h6 & _X25519_MASK26
+    h7 = h7 + c
+
+    c = h7 / _X25519_BASE25
+    h7 = h7 & _X25519_MASK25
+    h8 = h8 + c
+
+    c = h8 / _X25519_BASE26
+    h8 = h8 & _X25519_MASK26
+    h9 = h9 + c
+
+    c = h9 / _X25519_BASE25
+    h9 = h9 & _X25519_MASK25
+    h0 = h0 + c * 19
+
+    c = h0 / _X25519_BASE26
+    h0 = h0 & _X25519_MASK26
+    h1 = h1 + c
+
+    [h0, h1, h2, h3, h4, h5, h6, h7, h8, h9]
+
+fn _fe_add(a: [u64], b: [u64]) -> [u64]:
+    _fe_carry([
+        a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3], a[4] + b[4],
+        a[5] + b[5], a[6] + b[6], a[7] + b[7], a[8] + b[8], a[9] + b[9]
+    ])
+
+fn _fe_sub(a: [u64], b: [u64]) -> [u64]:
+    _fe_carry([
+        a[0] + 134217690 - b[0],
+        a[1] + 67108862 - b[1],
+        a[2] + 134217726 - b[2],
+        a[3] + 67108862 - b[3],
+        a[4] + 134217726 - b[4],
+        a[5] + 67108862 - b[5],
+        a[6] + 134217726 - b[6],
+        a[7] + 67108862 - b[7],
+        a[8] + 134217726 - b[8],
+        a[9] + 67108862 - b[9]
+    ])
+
+fn _fe_neg(a: [u64]) -> [u64]:
+    _fe_sub(_fe_zero(), a)
+
+fn _fe_mul_scalar(a: [u64], s: u64) -> [u64]:
+    _fe_carry([
+        a[0] * s, a[1] * s, a[2] * s, a[3] * s, a[4] * s,
+        a[5] * s, a[6] * s, a[7] * s, a[8] * s, a[9] * s
+    ])
+
+fn _fe_mul(a: [u64], b: [u64]) -> [u64]:
+    val h0 = a[0] * b[0]
+    val h1 = a[0] * b[1] + a[1] * b[0]
+    val h2 = a[0] * b[2] + a[1] * b[1] + a[2] * b[0]
+    val h3 = a[0] * b[3] + a[1] * b[2] + a[2] * b[1] + a[3] * b[0]
+    val h4 = a[0] * b[4] + a[1] * b[3] + a[2] * b[2] + a[3] * b[1] + a[4] * b[0]
+    val h5 = a[0] * b[5] + a[1] * b[4] + a[2] * b[3] + a[3] * b[2] + a[4] * b[1] + a[5] * b[0]
+    val h6 = a[0] * b[6] + a[1] * b[5] + a[2] * b[4] + a[3] * b[3] + a[4] * b[2] + a[5] * b[1] + a[6] * b[0]
+    val h7 = a[0] * b[7] + a[1] * b[6] + a[2] * b[5] + a[3] * b[4] + a[4] * b[3] + a[5] * b[2] + a[6] * b[1] + a[7] * b[0]
+    val h8 = a[0] * b[8] + a[1] * b[7] + a[2] * b[6] + a[3] * b[5] + a[4] * b[4] + a[5] * b[3] + a[6] * b[2] + a[7] * b[1] + a[8] * b[0]
+    val h9 = a[0] * b[9] + a[1] * b[8] + a[2] * b[7] + a[3] * b[6] + a[4] * b[5] + a[5] * b[4] + a[6] * b[3] + a[7] * b[2] + a[8] * b[1] + a[9] * b[0]
+    # Remaining cross terms fold in with 19x reduction
+    val r0 = h0 + 19 * (a[1] * b[9] + a[2] * b[8] + a[3] * b[7] + a[4] * b[6] + a[5] * b[5] + a[6] * b[4] + a[7] * b[3] + a[8] * b[2] + a[9] * b[1])
+    val r1 = h1 + 19 * (a[2] * b[9] + a[3] * b[8] + a[4] * b[7] + a[5] * b[6] + a[6] * b[5] + a[7] * b[4] + a[8] * b[3] + a[9] * b[2])
+    val r2 = h2 + 19 * (a[3] * b[9] + a[4] * b[8] + a[5] * b[7] + a[6] * b[6] + a[7] * b[5] + a[8] * b[4] + a[9] * b[3])
+    val r3 = h3 + 19 * (a[4] * b[9] + a[5] * b[8] + a[6] * b[7] + a[7] * b[6] + a[8] * b[5] + a[9] * b[4])
+    val r4 = h4 + 19 * (a[5] * b[9] + a[6] * b[8] + a[7] * b[7] + a[8] * b[6] + a[9] * b[5])
+    val r5 = h5 + 19 * (a[6] * b[9] + a[7] * b[8] + a[8] * b[7] + a[9] * b[6])
+    val r6 = h6 + 19 * (a[7] * b[9] + a[8] * b[8] + a[9] * b[7])
+    val r7 = h7 + 19 * (a[8] * b[9] + a[9] * b[8])
+    val r8 = h8 + 19 * (a[9] * b[9])
+    val r9 = h9
+    _fe_carry([r0, r1, r2, r3, r4, r5, r6, r7, r8, r9])
+
+fn _fe_sq(a: [u64]) -> [u64]:
+    _fe_mul(a, a)
+
+fn _fe_from_bytes(b: [u8]) -> [u64]:
+    val h0 = _load4(b, 0) & _X25519_MASK26
+    val h1 = (_load3(b, 4) * 8) & _X25519_MASK25
+    val h2 = (_load4(b, 7) * 4) & _X25519_MASK26
+    val h3 = (_load3(b, 11) * 2) & _X25519_MASK25
+    val h4 = _load4(b, 14) & _X25519_MASK26
+    val h5 = (_load3(b, 18) * 128) & _X25519_MASK25
+    val h6 = (_load4(b, 21) * 64) & _X25519_MASK26
+    val h7 = (_load3(b, 25) * 32) & _X25519_MASK25
+    val h8 = (_load4(b, 28) * 16) & _X25519_MASK26
+    val h9 = (_load3(b, 31) / 4) & _X25519_MASK25
+    [h0, h1, h2, h3, h4, h5, h6, h7, h8, h9]
+
+fn _fe_to_bytes(a: [u64]) -> [u8]:
+    val n = _fe_carry(a)
+    val h0 = n[0]
+    val h1 = n[1]
+    val h2 = n[2]
+    val h3 = n[3]
+    val h4 = n[4]
+    val h5 = n[5]
+    val h6 = n[6]
+    val h7 = n[7]
+    val h8 = n[8]
+    val h9 = n[9]
+
+    val q = (19 * h9 + 0x2000000 + h0 * h0) / 0x4000000
+    val t0 = h0 + 19 * q
+    val t1 = h1 + (t0 / _X25519_BASE26)
+    val t2 = h2 + (t1 / _X25519_BASE25)
+    val t3 = h3 + (t2 / _X25519_BASE26)
+    val t4 = h4 + (t3 / _X25519_BASE25)
+    val t5 = h5 + (t4 / _X25519_BASE26)
+    val t6 = h6 + (t5 / _X25519_BASE25)
+    val t7 = h7 + (t6 / _X25519_BASE26)
+    val t8 = h8 + (t7 / _X25519_BASE25)
+    val t9 = h9 + (t8 / _X25519_BASE26)
+
+    val r0 = t0 & _X25519_MASK26
+    val r1 = t1 & _X25519_MASK25
+    val r2 = t2 & _X25519_MASK26
+    val r3 = t3 & _X25519_MASK25
+    val r4 = t4 & _X25519_MASK26
+    val r5 = t5 & _X25519_MASK25
+    val r6 = t6 & _X25519_MASK26
+    val r7 = t7 & _X25519_MASK25
+    val r8 = t8 & _X25519_MASK26
+    val r9 = t9 & _X25519_MASK25
+
+    var out: [u8] = []
+    out.push((r0 & 0xFF).to_u8())
+    out.push(((r0 >> 8) & 0xFF).to_u8())
+    out.push(((r0 >> 16) & 0xFF).to_u8())
+    out.push(((r0 >> 24) | ((r1 * 4) & 0xFF)).to_u8())
+    out.push(((r1 >> 6) & 0xFF).to_u8())
+    out.push(((r1 >> 14) & 0xFF).to_u8())
+    out.push(((r1 >> 22) | ((r2 * 2) & 0xFF)).to_u8())
+    out.push(((r2 >> 7) & 0xFF).to_u8())
+    out.push(((r2 >> 15) & 0xFF).to_u8())
+    out.push(((r2 >> 23) | ((r3 * 8) & 0xFF)).to_u8())
+    out.push(((r3 >> 5) & 0xFF).to_u8())
+    out.push(((r3 >> 13) & 0xFF).to_u8())
+    out.push(((r3 >> 21) | ((r4 * 64) & 0xFF)).to_u8())
+    out.push(((r4 >> 2) & 0xFF).to_u8())
+    out.push(((r4 >> 10) & 0xFF).to_u8())
+    out.push(((r4 >> 18) | ((r5 * 128) & 0xFF)).to_u8())
+    out.push(((r5 >> 1) & 0xFF).to_u8())
+    out.push(((r5 >> 9) & 0xFF).to_u8())
+    out.push(((r5 >> 17) | ((r6 * 8) & 0xFF)).to_u8())
+    out.push(((r6 >> 5) & 0xFF).to_u8())
+    out.push(((r6 >> 13) & 0xFF).to_u8())
+    out.push(((r6 >> 21) | ((r7 * 32) & 0xFF)).to_u8())
+    out.push(((r7 >> 3) & 0xFF).to_u8())
+    out.push(((r7 >> 11) & 0xFF).to_u8())
+    out.push(((r7 >> 19) | ((r8 * 16) & 0xFF)).to_u8())
+    out.push(((r8 >> 4) & 0xFF).to_u8())
+    out.push(((r8 >> 12) & 0xFF).to_u8())
+    out.push(((r8 >> 20) | ((r9 * 64) & 0xFF)).to_u8())
+    out.push(((r9 >> 2) & 0xFF).to_u8())
+    out.push(((r9 >> 10) & 0xFF).to_u8())
+    out.push(((r9 >> 18) & 0xFF).to_u8())
+    out.push(0x00u8)
+    out
+
+fn _fe_invert(z: [u64]) -> [u64]:
+    """Compute z^(p-2) mod p = z^(-1) via Fermat's little theorem.
+
+    Ported from curve25519_smalllimb.spl _x25519_fe_invert.
+    Squaring counts: 1+1+1=z9, z11, 1+5=z_2_5, 5+10=z_2_10, 10+20=z_2_20,
+    10+z_2_10=z_2_50, 50+z_2_50=z_2_100, 100+z_2_100=z_2_200,
+    50+z_2_50=z_2_250, 5+z11=z^(2^255-21).
+    """
+    var t = _fe_sq(z)
+    t = _fe_sq(t)
+    t = _fe_sq(t)
+    val z9 = _fe_mul(t, z)
+    val z11 = _fe_mul(z9, _fe_sq(z))
+    t = _fe_sq(z11)
+    val z_2_5_0 = _fe_mul(t, z9)
+
+    t = _fe_sq(z_2_5_0)
+    var i: i64 = 1
+    while i < 5:
+        t = _fe_sq(t)
+        i = i + 1
+    val z_2_10_0 = _fe_mul(t, z_2_5_0)
+
+    t = _fe_sq(z_2_10_0)
+    i = 1
+    while i < 10:
+        t = _fe_sq(t)
+        i = i + 1
+    val z_2_20_0 = _fe_mul(t, z_2_10_0)
+
+    t = _fe_sq(z_2_20_0)
+    i = 1
+    while i < 20:
+        t = _fe_sq(t)
+        i = i + 1
+    t = _fe_mul(t, z_2_20_0)
+
+    i = 0
+    while i < 10:
+        t = _fe_sq(t)
+        i = i + 1
+    val z_2_50_0 = _fe_mul(t, z_2_10_0)
+
+    t = _fe_sq(z_2_50_0)
+    i = 1
+    while i < 50:
+        t = _fe_sq(t)
+        i = i + 1
+    val z_2_100_0 = _fe_mul(t, z_2_50_0)
+
+    t = _fe_sq(z_2_100_0)
+    i = 1
+    while i < 100:
+        t = _fe_sq(t)
+        i = i + 1
+    t = _fe_mul(t, z_2_100_0)
+
+    i = 0
+    while i < 50:
+        t = _fe_sq(t)
+        i = i + 1
+    t = _fe_mul(t, z_2_50_0)
+
+    t = _fe_sq(t)
+    t = _fe_sq(t)
+    t = _fe_sq(t)
+    t = _fe_sq(t)
+    t = _fe_sq(t)
+    _fe_mul(t, z11)
+
+# ============================================================================
+# Montgomery Ladder
+# ============================================================================
+
+fn _x25519_cswap(x1: [u64], x2: [u64], z1: [u64], z2: [u64], swap: i64) -> [list]:
+    if swap == 0:
+        return [x1, x2, z1, z2]
+    [x2, x1, z2, z1]
+
+fn _x25519_ladder_step(x2: [u64], z2: [u64], x3: [u64], z3: [u64], x1: [u64]) -> [list]:
+    val a = _fe_add(x2, z2)
+    val aa = _fe_sq(a)
+    val b = _fe_sub(x2, z2)
+    val bb = _fe_sq(b)
+    val e = _fe_sub(aa, bb)
+    val c = _fe_add(x3, z3)
+    val d = _fe_sub(x3, z3)
+    val da = _fe_mul(d, a)
+    val cb = _fe_mul(c, b)
+    val sum_dc = _fe_add(da, cb)
+    val new_x3 = _fe_sq(sum_dc)
+    val diff_dc = _fe_sub(da, cb)
+    val diff_sq = _fe_sq(diff_dc)
+    val new_z3 = _fe_mul(x1, diff_sq)
+    val new_x2 = _fe_mul(aa, bb)
+    val a24_e = _fe_mul_scalar(e, 121665)
+    val aa_plus = _fe_add(aa, a24_e)
+    val new_z2 = _fe_mul(e, aa_plus)
+    [new_x2, new_z2, new_x3, new_z3]
+
+fn _x25519_clamp(scalar: [u8]) -> [u8]:
+    var clamped: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        clamped.push(scalar[i])
+        i = i + 1
+    clamped[0] = clamped[0] & 0xF8
+    clamped[31] = clamped[31] & 0x7F
+    clamped[31] = clamped[31] | 0x40
+    clamped
+
+fn _x25519_bit_div(bit_idx: i64) -> i64:
+    if bit_idx == 0: 1
+    elif bit_idx == 1: 2
+    elif bit_idx == 2: 4
+    elif bit_idx == 3: 8
+    elif bit_idx == 4: 16
+    elif bit_idx == 5: 32
+    elif bit_idx == 6: 64
+    else: 128
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn x25519(scalar: [u8], u_coord: [u8]) -> [u8]:
+    """X25519 Diffie-Hellman: compute scalar * u_coord.
+
+    scalar: 32-byte private key (clamped internally)
+    u_coord: 32-byte peer public key (u coordinate)
+    Returns: 32-byte shared secret
+    """
+    # Fast path: C extern
+    val fast = rt_tls13_x25519(scalar, u_coord)
+    if fast.len() == 32:
+        return fast
+
+    val k = _x25519_clamp(scalar)
+    # Mask high bit of u coordinate
+    var u_masked: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        u_masked.push(u_coord[i])
+        i = i + 1
+    u_masked[31] = u_masked[31] & 0x7F
+
+    val u = _fe_from_bytes(u_masked)
+
+    var x_2 = _fe_one()
+    var z_2 = _fe_zero()
+    var x_3 = u
+    var z_3 = _fe_one()
+
+    var prev_bit: i64 = 0
+    var bit_pos: i64 = 254
+    while bit_pos >= 0:
+        val byte_idx = bit_pos / 8
+        val bit_idx = bit_pos % 8
+        val k_bit: i64 = (k[byte_idx].to_i64() / _x25519_bit_div(bit_idx)) & 1
+        val swap_bit = k_bit ^ prev_bit
+        prev_bit = k_bit
+
+        val swapped = _x25519_cswap(x_2, x_3, z_2, z_3, swap_bit)
+        x_2 = swapped[0]
+        x_3 = swapped[1]
+        z_2 = swapped[2]
+        z_3 = swapped[3]
+
+        val step = _x25519_ladder_step(x_2, z_2, x_3, z_3, u)
+        x_2 = step[0]
+        z_2 = step[1]
+        x_3 = step[2]
+        z_3 = step[3]
+
+        if bit_pos == 0:
+            val fs = _x25519_cswap(x_2, x_3, z_2, z_3, prev_bit)
+            x_2 = fs[0]
+            z_2 = fs[2]
+            val z_inv = _fe_invert(z_2)
+            val result = _fe_mul(x_2, z_inv)
+            return _fe_to_bytes(result)
+
+        bit_pos = bit_pos - 1
+
+    val z_inv = _fe_invert(z_2)
+    val result = _fe_mul(x_2, z_inv)
+    _fe_to_bytes(result)
+
+fn x25519_pubkey(scalar: [u8]) -> [u8]:
+    """Derive X25519 public key from private key (multiply with base point 9)."""
+    val base_point: [u8] = [9u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+                             0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+                             0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+                             0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+    x25519(scalar, base_point)

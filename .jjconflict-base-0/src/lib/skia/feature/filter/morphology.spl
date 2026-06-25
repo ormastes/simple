@@ -1,0 +1,165 @@
+# Morphological filters — erode and dilate, mirroring Skia's SkImageFilters::Erode/Dilate.
+#
+# Erode: each pixel = min of all pixels in (2*rx+1)x(2*ry+1) window (shrinks bright regions)
+# Dilate: each pixel = max of all pixels in (2*rx+1)x(2*ry+1) window (expands bright regions)
+# Both are per-channel (R, G, B, A independently) with clamp-to-edge at borders.
+#
+# Implementation: separable two-pass approach (horizontal then vertical), which
+# yields the same result as a full rectangular window for min/max operations
+# because min/max are distributive over rectangular windows:
+#     min_rect(x,y) = min_v( min_h(x', y) )  for x' in x-rx..x+rx
+#
+# Input/output: Bitmap (RGBA8888, row-major, premultiplied, 4 bytes per pixel)
+# from std.skia.backend.cpu.raster_prims.
+
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+
+# ----------------------------------------------------------------------------
+# Kind — Erode or Dilate
+# ----------------------------------------------------------------------------
+
+enum MorphologyKind:
+    Erode
+    Dilate
+
+# ----------------------------------------------------------------------------
+# MorphologyFilter — parameter object mirroring SkImageFilters::Erode/Dilate.
+# ----------------------------------------------------------------------------
+
+class MorphologyFilter:
+    kind: MorphologyKind
+    radius_x: i64
+    radius_y: i64
+
+fn erode_filter_new(rx: i64, ry: i64) -> MorphologyFilter:
+    val rxc = if rx < 0: 0 as i64 else: rx
+    val ryc = if ry < 0: 0 as i64 else: ry
+    MorphologyFilter(kind: MorphologyKind.Erode, radius_x: rxc, radius_y: ryc)
+
+fn dilate_filter_new(rx: i64, ry: i64) -> MorphologyFilter:
+    val rxc = if rx < 0: 0 as i64 else: rx
+    val ryc = if ry < 0: 0 as i64 else: ry
+    MorphologyFilter(kind: MorphologyKind.Dilate, radius_x: rxc, radius_y: ryc)
+
+# ----------------------------------------------------------------------------
+# _morph_h — one horizontal min/max pass with window 2*radius+1.
+# Edge handling: clamp-to-edge (replicate boundary pixels).
+# ----------------------------------------------------------------------------
+
+fn _morph_h(src: Bitmap, kind: MorphologyKind, radius: i64) -> Bitmap:
+    val w = src.width
+    val h = src.height
+    val out = Bitmap.zeros(w, h)
+    if radius <= 0:
+        var idx = 0 as i64
+        val total = w * h * 4
+        while idx < total:
+            out.pixels[idx] = src.pixels[idx]
+            idx = idx + 1
+        return out
+    var y = 0 as i64
+    while y < h:
+        var x = 0 as i64
+        while x < w:
+            # Seed accumulators with the center pixel, then fold the window.
+            val cidx = (y * w + x) * 4
+            var ar = src.pixels[cidx]     as i64
+            var ag = src.pixels[cidx + 1] as i64
+            var ab = src.pixels[cidx + 2] as i64
+            var aa = src.pixels[cidx + 3] as i64
+            var k = 0 - radius
+            while k <= radius:
+                var sx = x + k
+                if sx < 0: sx = 0
+                if sx >= w: sx = w - 1
+                val sidx = (y * w + sx) * 4
+                val pr = src.pixels[sidx]     as i64
+                val pg = src.pixels[sidx + 1] as i64
+                val pb = src.pixels[sidx + 2] as i64
+                val pa = src.pixels[sidx + 3] as i64
+                if kind == MorphologyKind.Erode:
+                    if pr < ar: ar = pr
+                    if pg < ag: ag = pg
+                    if pb < ab: ab = pb
+                    if pa < aa: aa = pa
+                else:
+                    if pr > ar: ar = pr
+                    if pg > ag: ag = pg
+                    if pb > ab: ab = pb
+                    if pa > aa: aa = pa
+                k = k + 1
+            val oidx = (y * w + x) * 4
+            out.pixels[oidx]     = ar as u8
+            out.pixels[oidx + 1] = ag as u8
+            out.pixels[oidx + 2] = ab as u8
+            out.pixels[oidx + 3] = aa as u8
+            x = x + 1
+        y = y + 1
+    out
+
+# ----------------------------------------------------------------------------
+# _morph_v — one vertical min/max pass with window 2*radius+1.
+# Edge handling: clamp-to-edge.
+# ----------------------------------------------------------------------------
+
+fn _morph_v(src: Bitmap, kind: MorphologyKind, radius: i64) -> Bitmap:
+    val w = src.width
+    val h = src.height
+    val out = Bitmap.zeros(w, h)
+    if radius <= 0:
+        var idx = 0 as i64
+        val total = w * h * 4
+        while idx < total:
+            out.pixels[idx] = src.pixels[idx]
+            idx = idx + 1
+        return out
+    var y = 0 as i64
+    while y < h:
+        var x = 0 as i64
+        while x < w:
+            val cidx = (y * w + x) * 4
+            var ar = src.pixels[cidx]     as i64
+            var ag = src.pixels[cidx + 1] as i64
+            var ab = src.pixels[cidx + 2] as i64
+            var aa = src.pixels[cidx + 3] as i64
+            var k = 0 - radius
+            while k <= radius:
+                var sy = y + k
+                if sy < 0: sy = 0
+                if sy >= h: sy = h - 1
+                val sidx = (sy * w + x) * 4
+                val pr = src.pixels[sidx]     as i64
+                val pg = src.pixels[sidx + 1] as i64
+                val pb = src.pixels[sidx + 2] as i64
+                val pa = src.pixels[sidx + 3] as i64
+                if kind == MorphologyKind.Erode:
+                    if pr < ar: ar = pr
+                    if pg < ag: ag = pg
+                    if pb < ab: ab = pb
+                    if pa < aa: aa = pa
+                else:
+                    if pr > ar: ar = pr
+                    if pg > ag: ag = pg
+                    if pb > ab: ab = pb
+                    if pa > aa: aa = pa
+                k = k + 1
+            val oidx = (y * w + x) * 4
+            out.pixels[oidx]     = ar as u8
+            out.pixels[oidx + 1] = ag as u8
+            out.pixels[oidx + 2] = ab as u8
+            out.pixels[oidx + 3] = aa as u8
+            x = x + 1
+        y = y + 1
+    out
+
+# ----------------------------------------------------------------------------
+# apply_morphology — Skia SkImageFilters::Erode/Dilate equivalent on Bitmap.
+#
+# Applies a separable horizontal pass (radius = filter.radius_x) followed by
+# a vertical pass (radius = filter.radius_y). For min/max operations this is
+# exactly equivalent to a full 2D rectangular window.
+# ----------------------------------------------------------------------------
+
+fn apply_morphology(src: Bitmap, filter: MorphologyFilter) -> Bitmap:
+    val mid = _morph_h(src, filter.kind, filter.radius_x)
+    _morph_v(mid, filter.kind, filter.radius_y)

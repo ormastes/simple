@@ -1,0 +1,120 @@
+# Editor Split Tree — binary tree of horizontal/vertical pane splits.
+#
+# Provides: SplitNode, SplitTree, split_tree_leaf, split_tree_split.
+
+enum SplitDirection:
+    Horizontal
+    Vertical
+
+# A node in the split tree.
+# Leaf nodes hold a pane_id; internal nodes split two children.
+enum SplitNode:
+    Leaf(pane_id: i64)
+    Split(direction: SplitDirection, ratio: f64, left: SplitNode, right: SplitNode)
+
+struct SplitTree:
+    root: SplitNode
+    active_pane_id: i64
+
+impl SplitTree:
+    # Number of leaf panes in the tree.
+    fn leaf_count() -> i64:
+        _split_node_leaf_count(me.root)
+
+    me resize(group_id: i64, delta: i64):
+        me.root = _split_node_resize(me.root, group_id, delta)
+
+    me swap(source_pane_id: i64, target_pane_id: i64):
+        if source_pane_id == target_pane_id:
+            return
+        me.root = _split_node_swap(me.root, source_pane_id, target_pane_id)
+
+    me equalize():
+        me.root = _split_node_equalize(me.root)
+
+fn _split_node_leaf_count(node: SplitNode) -> i64:
+    match node:
+        case Leaf(_):
+            1
+        case Split(_, _, left, right):
+            _split_node_leaf_count(left) + _split_node_leaf_count(right)
+
+fn _split_node_contains(node: SplitNode, pane_id: i64) -> bool:
+    match node:
+        case Leaf(id):
+            id == pane_id
+        case Split(_, _, left, right):
+            _split_node_contains(left, pane_id) or _split_node_contains(right, pane_id)
+
+fn _split_node_swap(node: SplitNode, source_pane_id: i64, target_pane_id: i64) -> SplitNode:
+    match node:
+        case Leaf(id):
+            if id == source_pane_id:
+                return SplitNode.Leaf(pane_id: target_pane_id)
+            if id == target_pane_id:
+                return SplitNode.Leaf(pane_id: source_pane_id)
+            node
+        case Split(direction, ratio, left, right):
+            SplitNode.Split(
+                direction: direction,
+                ratio: ratio,
+                left: _split_node_swap(left, source_pane_id, target_pane_id),
+                right: _split_node_swap(right, source_pane_id, target_pane_id))
+
+fn _split_node_equalize(node: SplitNode) -> SplitNode:
+    match node:
+        case Leaf(_):
+            node
+        case Split(direction, _, left, right):
+            SplitNode.Split(
+                direction: direction,
+                ratio: 0.5,
+                left: _split_node_equalize(left),
+                right: _split_node_equalize(right))
+
+fn _split_node_resize(node: SplitNode, group_id: i64, delta: i64) -> SplitNode:
+    match node:
+        case Leaf(_):
+            node
+        case Split(direction, ratio, left, right):
+            var new_ratio = ratio
+            if _split_node_contains(left, group_id):
+                new_ratio = _split_clamp_ratio(ratio + (delta as f64) / 100.0)
+            elif _split_node_contains(right, group_id):
+                new_ratio = _split_clamp_ratio(ratio - (delta as f64) / 100.0)
+            SplitNode.Split(
+                direction: direction,
+                ratio: new_ratio,
+                left: _split_node_resize(left, group_id, delta),
+                right: _split_node_resize(right, group_id, delta))
+
+fn _split_clamp_ratio(ratio: f64) -> f64:
+    if ratio < 0.1:
+        return 0.1
+    if ratio > 0.9:
+        return 0.9
+    ratio
+
+fn split_tree_leaf(pane_id: i64) -> SplitTree:
+    SplitTree(root: SplitNode.Leaf(pane_id: pane_id), active_pane_id: pane_id)
+
+fn split_tree_split(tree: SplitTree, pane_id: i64, new_pane_id: i64, direction: SplitDirection) -> SplitTree:
+    val new_root = _split_node_insert(tree.root, pane_id, new_pane_id, direction)
+    SplitTree(root: new_root, active_pane_id: new_pane_id)
+
+fn _split_node_insert(node: SplitNode, pane_id: i64, new_pane_id: i64, direction: SplitDirection) -> SplitNode:
+    match node:
+        case Leaf(id):
+            if id == pane_id:
+                return SplitNode.Split(
+                    direction: direction,
+                    ratio: 0.5,
+                    left: SplitNode.Leaf(pane_id: pane_id),
+                    right: SplitNode.Leaf(pane_id: new_pane_id))
+            node
+        case Split(existing_direction, ratio, left, right):
+            SplitNode.Split(
+                direction: existing_direction,
+                ratio: ratio,
+                left: _split_node_insert(left, pane_id, new_pane_id, direction),
+                right: _split_node_insert(right, pane_id, new_pane_id, direction))

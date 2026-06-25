@@ -1,0 +1,79 @@
+# typed/seam.spl — Typed alpha-seam helpers for the dual-backend layer.
+#
+# PROBE B (generic trait ByteEq) was attempted first (Phase-0 plan).
+# Simple generics on fn signatures (`fn run_typed<T: ByteEq>(...)`) produced
+# "Unknown type: T" — the same root blocker as the filed generic-struct bug
+# (doc/08_tracking/bug/crypto_digest_generic_struct_2026-06-15.md).
+# Filed: doc/08_tracking/bug/dual_backend_generic_typed_seam_2026-06-15.md
+# Fell back to SEAM A (non-generic typed helpers).
+#
+# SEAM A — non-generic typed wrappers over dual_backend_run_bytes.
+#
+# Closure parameter type: fn()->ByteSpan.
+# The helpers internally convert to fn()->[u8] for dual_backend_run_bytes
+# (which takes [u8] closures) via .to_bytes().  Callers pass ByteSpan closures
+# so the typed boundary is preserved end-to-end.
+#
+# Known interpreter issue: Digest.hex() returns garbage when seam.spl is
+# imported alongside std.common.crypto.typed.ctypes in fn main() context.
+# ByteSpan.get()/len() and Digest.ct_eq()/len() are unaffected.
+# Filed: doc/08_tracking/bug/digest_hex_double_import_corruption_2026-06-15.md
+#
+# Alpha mismatch behaviour (IMPORTANT):
+#   dual_backend_choose_bytes on mismatch in Alpha mode calls
+#   _dual_backend_alpha_halt(report) — which only does serial_println, it does
+#   NOT abort/panic — then returns [].  So alpha is NOT truly fail-closed: it
+#   logs and returns an empty result rather than halting.
+#   Filed: doc/08_tracking/bug/alpha_mode_not_fail_closed_2026-06-15.md
+#
+# Import path verified against real callers (ssh_session_kex.spl, rsa.spl):
+#   use os.crypto.dual_backend.{...}   (NOT std.os.crypto.dual_backend)
+
+use os.crypto.dual_backend.{dual_backend_run_bytes, dual_backend_alpha_default_mode}
+use std.common.bytes.span.{ByteSpan}
+use std.common.crypto.typed.ctypes.{Digest}
+
+# ---------------------------------------------------------------------------
+# alpha_run_span — typed alpha runner returning ByteSpan
+# ---------------------------------------------------------------------------
+# Accepts fn()->ByteSpan closures; wraps them into fn()->[u8] for the
+# underlying dual_backend_run_bytes call.
+# On mismatch: logs diff + returns ByteSpan.new([]) (alpha logs, does not abort).
+
+fn alpha_run_span(
+    component: text,
+    op: text,
+    runtime_run: fn() -> ByteSpan,
+    pure_run: fn() -> ByteSpan
+) -> ByteSpan:
+    val result = dual_backend_run_bytes(
+        component,
+        op,
+        dual_backend_alpha_default_mode(),
+        [],
+        fn(): runtime_run().to_bytes(),
+        fn(): pure_run().to_bytes()
+    )
+    ByteSpan.new(result)
+
+# ---------------------------------------------------------------------------
+# alpha_run_digest — typed alpha runner returning Digest
+# ---------------------------------------------------------------------------
+# Same as alpha_run_span but returns a Digest (hash output type).
+# Digest.new([]) is produced on mismatch (alpha is NOT abort — see header).
+
+fn alpha_run_digest(
+    component: text,
+    op: text,
+    runtime_run: fn() -> ByteSpan,
+    pure_run: fn() -> ByteSpan
+) -> Digest:
+    val result = dual_backend_run_bytes(
+        component,
+        op,
+        dual_backend_alpha_default_mode(),
+        [],
+        fn(): runtime_run().to_bytes(),
+        fn(): pure_run().to_bytes()
+    )
+    Digest.new(result)

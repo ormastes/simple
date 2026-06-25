@@ -1,0 +1,218 @@
+# Fixed CT spec covering the constant-shape Fixed layer.
+#
+# All KATs construct `Fixed` values via the constructor-rebind pattern
+# `Fixed(n: ..., limbs: [...])` rather than `a.limbs[i] = x` post-hoc
+# (the in-place form does not persist in the interpreter — the bug
+# surfaced this session). The modular exponentiation / inversion cases
+# below now exercise real modular reduction rather than the old
+# upper-half truncation stub.
+
+use std.math.bignum.limb.{LIMB_BITS, LIMB_BASE, LIMB_MASK}
+use std.math.bignum.bignat.{bn_from_i64, mul as bn_mul, cmp as bn_cmp}
+use std.math.bignum.fixed.{
+    Fixed,
+    fx_zero, fx_one, fx_clone, fx_from_bignat, fx_to_bignat, fx_eq,
+    add_fixed, sub_fixed, mul_fixed,
+    cond_swap, cond_select, cmp_fixed, is_zero_ct,
+    mod_reduce_ct, mod_exp_ct, mod_inv_ct
+}
+
+describe "math.bignum.fixed":
+    describe "constructors":
+        it "fx_zero(3) is three zero limbs":
+            val z = fx_zero(3)
+            expect(z.n).to_equal(3)
+            expect(z.limbs[0]).to_equal(0)
+            expect(z.limbs[1]).to_equal(0)
+            expect(z.limbs[2]).to_equal(0)
+
+        it "fx_one(3) is [1, 0, 0]":
+            val o = fx_one(3)
+            expect(o.limbs[0]).to_equal(1)
+            expect(o.limbs[1]).to_equal(0)
+            expect(o.limbs[2]).to_equal(0)
+
+        it "fx_clone is a deep copy":
+            val a = Fixed(n: 2, limbs: [11, 22])
+            val b = fx_clone(a)
+            expect(b.limbs[0]).to_equal(11)
+            expect(b.limbs[1]).to_equal(22)
+
+        it "fx_from_bignat pads short input":
+            val fx = fx_from_bignat([5, 6], 4)
+            expect(fx.n).to_equal(4)
+            expect(fx.limbs[0]).to_equal(5)
+            expect(fx.limbs[1]).to_equal(6)
+            expect(fx.limbs[2]).to_equal(0)
+            expect(fx.limbs[3]).to_equal(0)
+
+        it "fx_to_bignat round-trips through fx_from_bignat":
+            val orig = bn_from_i64(LIMB_BASE)
+            val fx = fx_from_bignat(orig, 4)
+            val back = fx_to_bignat(fx)
+            expect(bn_cmp(orig, back)).to_equal(0)
+
+    describe "add_fixed / sub_fixed":
+        it "add_fixed propagates carry across all limbs":
+            # All limbs at LIMB_MASK + add 1 -> all-zero + carry-out 1.
+            val a = Fixed(n: 3, limbs: [LIMB_MASK, LIMB_MASK, LIMB_MASK])
+            val one = Fixed(n: 3, limbs: [1, 0, 0])
+            val r = add_fixed(a, one)
+            expect(r[0].limbs[0]).to_equal(0)
+            expect(r[0].limbs[1]).to_equal(0)
+            expect(r[0].limbs[2]).to_equal(0)
+            expect(r[1].limbs[0]).to_equal(1)
+
+        it "add_fixed no-carry case":
+            val a = Fixed(n: 2, limbs: [3, 4])
+            val b = Fixed(n: 2, limbs: [5, 6])
+            val r = add_fixed(a, b)
+            expect(r[0].limbs[0]).to_equal(8)
+            expect(r[0].limbs[1]).to_equal(10)
+            expect(r[1].limbs[0]).to_equal(0)
+
+        it "sub_fixed borrows when a < b":
+            val a = Fixed(n: 2, limbs: [0, 0])
+            val b = Fixed(n: 2, limbs: [1, 0])
+            val r = sub_fixed(a, b)
+            expect(r[0].limbs[0]).to_equal(LIMB_MASK)
+            expect(r[0].limbs[1]).to_equal(LIMB_MASK)
+            expect(r[1].limbs[0]).to_equal(1)
+
+    describe "cond_swap / cond_select":
+        it "cond_swap with swap=0 is identity":
+            val a = Fixed(n: 2, limbs: [1, 2])
+            val b = Fixed(n: 2, limbs: [3, 4])
+            val r = cond_swap(a, b, 0)
+            expect(r[0].limbs[0]).to_equal(1)
+            expect(r[0].limbs[1]).to_equal(2)
+            expect(r[1].limbs[0]).to_equal(3)
+            expect(r[1].limbs[1]).to_equal(4)
+
+        it "cond_swap with swap=1 swaps":
+            val a = Fixed(n: 2, limbs: [1, 2])
+            val b = Fixed(n: 2, limbs: [3, 4])
+            val r = cond_swap(a, b, 1)
+            expect(r[0].limbs[0]).to_equal(3)
+            expect(r[0].limbs[1]).to_equal(4)
+            expect(r[1].limbs[0]).to_equal(1)
+            expect(r[1].limbs[1]).to_equal(2)
+
+        it "double cond_swap returns identity":
+            val a = Fixed(n: 2, limbs: [7, 8])
+            val b = Fixed(n: 2, limbs: [9, 10])
+            val r1 = cond_swap(a, b, 1)
+            val r2 = cond_swap(r1[0], r1[1], 1)
+            expect(r2[0].limbs[0]).to_equal(7)
+            expect(r2[0].limbs[1]).to_equal(8)
+            expect(r2[1].limbs[0]).to_equal(9)
+            expect(r2[1].limbs[1]).to_equal(10)
+
+        it "cond_select(1, a, b) returns a":
+            val a = Fixed(n: 2, limbs: [11, 22])
+            val b = Fixed(n: 2, limbs: [33, 44])
+            val r = cond_select(1, a, b)
+            expect(r.limbs[0]).to_equal(11)
+            expect(r.limbs[1]).to_equal(22)
+
+        it "cond_select(0, a, b) returns b":
+            val a = Fixed(n: 2, limbs: [11, 22])
+            val b = Fixed(n: 2, limbs: [33, 44])
+            val r = cond_select(0, a, b)
+            expect(r.limbs[0]).to_equal(33)
+            expect(r.limbs[1]).to_equal(44)
+
+    describe "cmp_fixed / is_zero_ct":
+        it "cmp_fixed on equal returns 0":
+            val a = Fixed(n: 2, limbs: [5, 6])
+            val b = Fixed(n: 2, limbs: [5, 6])
+            expect(cmp_fixed(a, b)).to_equal(0)
+
+        it "cmp_fixed returns -1 when a < b":
+            val a = Fixed(n: 2, limbs: [3, 5])
+            val b = Fixed(n: 2, limbs: [5, 5])
+            expect(cmp_fixed(a, b)).to_equal(-1)
+
+        it "cmp_fixed returns 1 when a > b":
+            val a = Fixed(n: 2, limbs: [5, 5])
+            val b = Fixed(n: 2, limbs: [3, 5])
+            expect(cmp_fixed(a, b)).to_equal(1)
+
+        it "is_zero_ct true on all zeros":
+            expect(is_zero_ct(fx_zero(4))).to_equal(true)
+
+        it "is_zero_ct false on any non-zero limb":
+            val a = Fixed(n: 3, limbs: [0, 0, 1])
+            expect(is_zero_ct(a)).to_equal(false)
+
+    describe "mul_fixed":
+        it "LIMB_MASK^2 cross-validates against bn_mul":
+            # The highest-risk overflow case for 30-bit limbs.
+            val a = Fixed(n: 1, limbs: [LIMB_MASK])
+            val b = Fixed(n: 1, limbs: [LIMB_MASK])
+            val r = mul_fixed(a, b)
+            val ref = bn_mul(bn_from_i64(LIMB_MASK), bn_from_i64(LIMB_MASK))
+            expect(r.limbs[0]).to_equal(ref[0])
+            expect(r.limbs[1]).to_equal(ref[1])
+
+        it "small product 7 * 13 = 91":
+            val a = Fixed(n: 1, limbs: [7])
+            val b = Fixed(n: 1, limbs: [13])
+            val r = mul_fixed(a, b)
+            expect(r.limbs[0]).to_equal(91)
+            expect(r.limbs[1]).to_equal(0)
+
+    describe "mod_reduce_ct":
+        it "leaves a < m unchanged":
+            val a = Fixed(n: 2, limbs: [3, 0])
+            val m = Fixed(n: 2, limbs: [10, 0])
+            val r = mod_reduce_ct(a, m)
+            expect(r.limbs[0]).to_equal(3)
+
+        it "subtracts once when m <= a < 2m":
+            val a = Fixed(n: 2, limbs: [13, 0])
+            val m = Fixed(n: 2, limbs: [10, 0])
+            val r = mod_reduce_ct(a, m)
+            expect(r.limbs[0]).to_equal(3)
+
+    describe "mod_exp_ct":
+        it "base^0 = 1":
+            val base = Fixed(n: 2, limbs: [5, 0])
+            val exp = fx_zero(2)
+            val m = Fixed(n: 2, limbs: [LIMB_BASE - 1, 0])
+            val r = mod_exp_ct(base, exp, m)
+            expect(r.limbs[0]).to_equal(1)
+            expect(r.limbs[1]).to_equal(0)
+
+        it "5^3 mod 13 = 8":
+            val base = Fixed(n: 2, limbs: [5, 0])
+            val exp = Fixed(n: 2, limbs: [3, 0])
+            val m = Fixed(n: 2, limbs: [13, 0])
+            val r = mod_exp_ct(base, exp, m)
+            expect(r.limbs[0]).to_equal(8)
+            expect(r.limbs[1]).to_equal(0)
+
+        it "reduces a cross-limb base before exponentiation":
+            # LIMB_BASE + 2 ≡ 15 mod 17, and 15^5 mod 17 = 2.
+            val base = Fixed(n: 2, limbs: [2, 1])
+            val exp = Fixed(n: 2, limbs: [5, 0])
+            val m = Fixed(n: 2, limbs: [17, 0])
+            val r = mod_exp_ct(base, exp, m)
+            expect(r.limbs[0]).to_equal(2)
+            expect(r.limbs[1]).to_equal(0)
+
+    describe "mod_inv_ct":
+        it "5^-1 mod 13 = 8":
+            val a = Fixed(n: 2, limbs: [5, 0])
+            val m = Fixed(n: 2, limbs: [13, 0])
+            val r = mod_inv_ct(a, m)
+            expect(r.limbs[0]).to_equal(8)
+            expect(r.limbs[1]).to_equal(0)
+
+        it "reduces the input before inversion":
+            # LIMB_BASE + 2 ≡ 15 mod 17, and 15^-1 mod 17 = 8.
+            val a = Fixed(n: 2, limbs: [2, 1])
+            val m = Fixed(n: 2, limbs: [17, 0])
+            val r = mod_inv_ct(a, m)
+            expect(r.limbs[0]).to_equal(8)
+            expect(r.limbs[1]).to_equal(0)

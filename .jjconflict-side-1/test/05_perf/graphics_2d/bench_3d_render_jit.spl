@@ -1,0 +1,252 @@
+# GPU Framebuffer Benchmark — JIT-compiled scene loop
+#
+# Same workload as bench_3d_render.spl (clear + 100 rects, 1920x1080, 100 frames)
+# but the hot scene loop is JIT-compiled via Cranelift.
+#
+# Interpreter handles: CUDA init, buffer allocation, JIT compilation
+# JIT handles: scene_fill_1080p loop (ptr_writes, arithmetic, kernel launches)
+#
+# REQUIRES: cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver --features cuda
+# Without --features cuda, rt_cuda_* stubs return -3 and benchmark reports ~10 us/frame (no-op).
+#
+# Expected result: ~300-350 us/frame (matching C reference)
+
+extern fn rt_cuda_init() -> i64
+extern fn rt_cuda_device_get(id: i64) -> i64
+extern fn rt_cuda_ctx_create(device: i64) -> i64
+extern fn rt_cuda_ctx_destroy(ctx: i64) -> i64
+extern fn rt_cuda_mem_alloc(size: i64) -> i64
+extern fn rt_cuda_mem_free(ptr: i64) -> i64
+extern fn rt_cuda_module_load_data(ptx: text) -> i64
+extern fn rt_cuda_module_unload(m: i64) -> i64
+extern fn rt_cuda_launch_kernel(m: i64, func_name: text, grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64, args_ptr: i64) -> i64
+extern fn rt_cuda_sync() -> i64
+extern fn rt_time_now_nanos() -> i64
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_ptr_write_i64(ptr: i64, offset: i64, v: i64) -> i64
+
+extern fn rt_jit_create() -> i64
+extern fn rt_jit_compile_source(h: i64, s: text) -> text
+extern fn rt_jit_call_i64(h: i64, n: text, a: i64) -> i64
+extern fn rt_jit_cleanup(h: i64) -> i64
+
+val PTX_RENDER = ".version 7.5\n.target sm_75\n.address_size 64\n\n.visible .entry kernel_clear(\n    .param .u64 param_fb,\n    .param .u32 param_color,\n    .param .u32 param_count\n) {\n    .reg .u64  %rd<6>;\n    .reg .u32  %r<8>;\n    .reg .pred %p0;\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n    ld.param.u32  %r4, [param_count];\n    setp.ge.u32   %p0, %r3, %r4;\n    @%p0 bra done_clear;\n    ld.param.u64  %rd0, [param_fb];\n    mul.wide.u32  %rd1, %r3, 4;\n    add.u64       %rd2, %rd0, %rd1;\n    ld.param.u32  %r5, [param_color];\n    st.global.u32 [%rd2], %r5;\ndone_clear:\n    ret;\n}\n\n.visible .entry kernel_rect_fill(\n    .param .u64 param_fb,\n    .param .u32 param_x,\n    .param .u32 param_y,\n    .param .u32 param_w,\n    .param .u32 param_h,\n    .param .u32 param_stride,\n    .param .u32 param_color\n) {\n    .reg .u64  %rd<8>;\n    .reg .u32  %r<16>;\n    .reg .pred %p0;\n    mov.u32     %r0, %ctaid.x;\n    mov.u32     %r1, %ntid.x;\n    mov.u32     %r2, %tid.x;\n    mad.lo.u32  %r3, %r0, %r1, %r2;\n    ld.param.u32  %r4, [param_w];\n    ld.param.u32  %r5, [param_h];\n    mul.lo.u32    %r6, %r4, %r5;\n    setp.ge.u32   %p0, %r3, %r6;\n    @%p0 bra done_rect;\n    div.u32  %r7, %r3, %r4;\n    rem.u32  %r8, %r3, %r4;\n    ld.param.u32  %r9,  [param_x];\n    ld.param.u32  %r10, [param_y];\n    add.u32  %r11, %r9,  %r8;\n    add.u32  %r12, %r10, %r7;\n    ld.param.u32  %r13, [param_stride];\n    mad.lo.u32    %r14, %r12, %r13, %r11;\n    ld.param.u64  %rd0, [param_fb];\n    mul.wide.u32  %rd1, %r14, 4;\n    add.u64       %rd2, %rd0, %rd1;\n    ld.param.u32  %r15, [param_color];\n    st.global.u32 [%rd2], %r15;\ndone_rect:\n    ret;\n}\n"
+
+val FB_W: i64 = 1920
+val FB_H: i64 = 1080
+val FB_BYTES: i64 = 8294400
+val FB_PIX: i64 = 2073600
+val BLOCK_SIZE: i64 = 256
+val WARMUP_FRAMES: i64 = 5
+val TIMED_FRAMES: i64 = 100
+val NUM_RECTS: i64 = 100
+
+fn build_jit_source(clear_v: i64, clear_p: i64, rect_v: i64, rect_p: i64) -> text:
+    var s = "extern fn rt_ptr_write_i64(ptr: i64, offset: i64, v: i64) -> i64\n"
+          + "extern fn rt_cuda_launch_kernel(m: i64, func_name: text, grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64, args_ptr: i64) -> i64\n"
+          + "extern fn rt_cuda_sync() -> i64\n"
+          + "\n"
+          + "val CLEAR_VAL: i64 = " + clear_v.to_string() + "\n"
+          + "val CLEAR_PTR: i64 = " + clear_p.to_string() + "\n"
+          + "val RECT_VAL: i64 = " + rect_v.to_string() + "\n"
+          + "val RECT_PTR: i64 = " + rect_p.to_string() + "\n"
+          + "val FB_W: i64 = 1920\n"
+          + "val FB_H: i64 = 1080\n"
+          + "val FB_PIX: i64 = 2073600\n"
+          + "val BLOCK_SIZE: i64 = 256\n"
+          + "val NUM_RECTS: i64 = 100\n"
+          + "\n"
+          + "fn fill_color(idx: i64) -> i64:\n"
+          + "    if idx == 0: return 4278190335\n"
+          + "    if idx == 1: return 4278255360\n"
+          + "    if idx == 2: return 4294901760\n"
+          + "    if idx == 3: return 4286611584\n"
+          + "    if idx == 4: return 4278255615\n"
+          + "    if idx == 5: return 4294902015\n"
+          + "    if idx == 6: return 4294967040\n"
+          + "    return 4294967295\n"
+          + "\n"
+          + "fn launch_clear(mod_h: i64, color: i64) -> i64:\n"
+          + "    rt_ptr_write_i64(CLEAR_VAL, 8, color)\n"
+          + "    var grid_x = (FB_PIX + BLOCK_SIZE - 1) / BLOCK_SIZE\n"
+          + "    rt_cuda_launch_kernel(mod_h, \"kernel_clear\", grid_x, 1, 1, BLOCK_SIZE, 1, 1, CLEAR_PTR)\n"
+          + "    return 0\n"
+          + "\n"
+          + "fn launch_rect(mod_h: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> i64:\n"
+          + "    rt_ptr_write_i64(RECT_VAL, 8, x)\n"
+          + "    rt_ptr_write_i64(RECT_VAL, 16, y)\n"
+          + "    rt_ptr_write_i64(RECT_VAL, 24, w)\n"
+          + "    rt_ptr_write_i64(RECT_VAL, 32, h)\n"
+          + "    rt_ptr_write_i64(RECT_VAL, 48, color)\n"
+          + "    var grid_x = ((w * h) + BLOCK_SIZE - 1) / BLOCK_SIZE\n"
+          + "    rt_cuda_launch_kernel(mod_h, \"kernel_rect_fill\", grid_x, 1, 1, BLOCK_SIZE, 1, 1, RECT_PTR)\n"
+          + "    return 0\n"
+          + "\n"
+          + "fn scene_fill_1080p(mod_h: i64) -> i64:\n"
+          + "    launch_clear(mod_h, 4279308561)\n"
+          + "    var i = 0\n"
+          + "    while i < NUM_RECTS:\n"
+          + "        var col = (i * 37) % 8\n"
+          + "        var rx = (i * 19) % (FB_W - 1)\n"
+          + "        var ry = (i * 11) % (FB_H - 1)\n"
+          + "        var rw = 1 + (i * 7) % 320\n"
+          + "        var rh = 1 + (i * 13) % 180\n"
+          + "        if rx < 0: rx = 0\n"
+          + "        if ry < 0: ry = 0\n"
+          + "        if rx + rw > FB_W: rw = FB_W - rx\n"
+          + "        if ry + rh > FB_H: rh = FB_H - ry\n"
+          + "        if rw > 0:\n"
+          + "            if rh > 0:\n"
+          + "                launch_rect(mod_h, rx, ry, rw, rh, fill_color(col))\n"
+          + "        i = i + 1\n"
+          + "    rt_cuda_sync()\n"
+          + "    return 0\n"
+          + "\n"
+          + "fn run_n_frames(mod_h: i64) -> i64:\n"
+          + "    var fi = 0\n"
+          + "    while fi < 100:\n"
+          + "        scene_fill_1080p(mod_h)\n"
+          + "        fi = fi + 1\n"
+          + "    return 0\n"
+    return s
+
+fn main():
+    print("========================================")
+    print("GPU Framebuffer Benchmark — JIT Scene Loop")
+    print("Target: sm_75 (TITAN RTX), 1920x1080 RGBA")
+    print("========================================")
+    print("")
+
+    var err = rt_cuda_init()
+    if err != 0:
+        print("FAIL: rt_cuda_init error=" + err.to_string())
+        return
+
+    var dev = rt_cuda_device_get(0)
+    var ctx = rt_cuda_ctx_create(dev)
+    if ctx < 0:
+        print("FAIL: ctx_create error=" + ctx.to_string())
+        return
+    print("CUDA context: " + ctx.to_string())
+
+    var ptx_mod = rt_cuda_module_load_data(PTX_RENDER)
+    if ptx_mod <= 0:
+        print("FAIL: module_load error=" + ptx_mod.to_string())
+        rt_cuda_ctx_destroy(ctx)
+        return
+    print("PTX module loaded")
+
+    var d_fb = rt_cuda_mem_alloc(FB_BYTES)
+    if d_fb <= 0:
+        print("FAIL: mem_alloc error=" + d_fb.to_string())
+        rt_cuda_module_unload(ptx_mod)
+        rt_cuda_ctx_destroy(ctx)
+        return
+    print("Device FB: " + FB_BYTES.to_string() + " bytes at " + d_fb.to_string())
+
+    # Verify real CUDA is loaded (stubs return -3)
+    var sync_check = rt_cuda_sync()
+    if sync_check != 0:
+        print("FAIL: rt_cuda_sync returned " + sync_check.to_string() + " — CUDA stubs detected.")
+        print("  Build with: cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver --features cuda")
+        rt_cuda_mem_free(d_fb)
+        rt_cuda_module_unload(ptx_mod)
+        rt_cuda_ctx_destroy(ctx)
+        return
+
+    # Pre-allocate launch buffers (same as interpreter benchmark)
+    var clear_v = rt_alloc(24)
+    var clear_p = rt_alloc(24)
+    rt_ptr_write_i64(clear_p, 0, clear_v)
+    rt_ptr_write_i64(clear_p, 8, clear_v + 8)
+    rt_ptr_write_i64(clear_p, 16, clear_v + 16)
+    rt_ptr_write_i64(clear_v, 0, d_fb)
+    rt_ptr_write_i64(clear_v, 16, FB_PIX)
+
+    var rect_v = rt_alloc(56)
+    var rect_p = rt_alloc(56)
+    rt_ptr_write_i64(rect_p, 0, rect_v)
+    rt_ptr_write_i64(rect_p, 8, rect_v + 8)
+    rt_ptr_write_i64(rect_p, 16, rect_v + 16)
+    rt_ptr_write_i64(rect_p, 24, rect_v + 24)
+    rt_ptr_write_i64(rect_p, 32, rect_v + 32)
+    rt_ptr_write_i64(rect_p, 40, rect_v + 40)
+    rt_ptr_write_i64(rect_p, 48, rect_v + 48)
+    rt_ptr_write_i64(rect_v, 0, d_fb)
+    rt_ptr_write_i64(rect_v, 40, FB_W)
+
+    print("")
+    print("--- JIT Compilation ---")
+    var jit_src = build_jit_source(clear_v, clear_p, rect_v, rect_p)
+    var jit = rt_jit_create()
+    if jit < 0:
+        print("FAIL: rt_jit_create")
+        return
+
+    var compile_t0 = rt_time_now_nanos()
+    var jit_err = rt_jit_compile_source(jit, jit_src)
+    var compile_t1 = rt_time_now_nanos()
+    var compile_ns = compile_t1 - compile_t0
+    var compile_ms = compile_ns / 1000000
+
+    if jit_err != "":
+        print("FAIL: JIT compile error: " + jit_err)
+        rt_jit_cleanup(jit)
+        rt_cuda_mem_free(d_fb)
+        rt_cuda_module_unload(ptx_mod)
+        rt_cuda_ctx_destroy(ctx)
+        return
+    print("JIT compiled in " + compile_ms.to_string() + " ms")
+
+    # Warmup — JIT path
+    print("")
+    print("Warmup: " + WARMUP_FRAMES.to_string() + " frames (JIT)...")
+    var wi = 0
+    while wi < WARMUP_FRAMES:
+        var r = rt_jit_call_i64(jit, "scene_fill_1080p", ptx_mod)
+        if r == -1:
+            print("FAIL: JIT call returned -1 on warmup frame " + wi.to_string())
+            return
+        wi = wi + 1
+    print("Warmup done.")
+
+    # Timed — single native call runs all 100 frames
+    print("")
+    print("Timed: " + TIMED_FRAMES.to_string() + " frames (JIT, single native call)...")
+    var batch_t0 = rt_time_now_nanos()
+    var result = rt_jit_call_i64(jit, "run_n_frames", ptx_mod)
+    var batch_t1 = rt_time_now_nanos()
+
+    if result == -1:
+        print("FAIL: JIT run_n_frames returned -1")
+        return
+
+    var total_ns = batch_t1 - batch_t0
+    var total_us = total_ns / 1000
+    var avg_us = total_us / 100
+    var total_ms = total_ns / 1000000
+    print("Timed done.")
+    print("")
+
+    print("=== JIT Results ===")
+    print("  Frames:       " + TIMED_FRAMES.to_string())
+    print("  Total time:   " + total_ms.to_string() + " ms (" + total_us.to_string() + " us)")
+    print("  avg:          " + avg_us.to_string() + " us/frame")
+    print("  JIT compile:  " + compile_ms.to_string() + " ms (one-time)")
+    print("")
+    print("BENCH_RESULT scene=fill_1080p backend=jit_cranelift"
+        + " frames=" + TIMED_FRAMES.to_string()
+        + " avg_us=" + avg_us.to_string()
+        + " rects_per_frame=" + NUM_RECTS.to_string()
+        + " fb=" + FB_W.to_string() + "x" + FB_H.to_string()
+        + " compile_ms=" + compile_ms.to_string())
+
+    # Cleanup
+    rt_jit_cleanup(jit)
+    rt_cuda_mem_free(d_fb)
+    rt_cuda_module_unload(ptx_mod)
+    rt_cuda_ctx_destroy(ctx)
+    print("")
+    print("Done.")
+
+main()

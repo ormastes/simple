@@ -1,0 +1,89 @@
+"""Steam runtime ABI: linker namespace setup and runtime rootfs (M5, REQ-10).
+
+Detects the Steam runtime generation (soldier/sniper), validates x86_64 ABI,
+and resolves the runtime library path. In interpreter mode: modeled detection
+without real filesystem access.
+"""
+
+# ============================================================================
+# Types
+# ============================================================================
+
+class SteamRuntimeInfo:
+    is_ok:        bool
+    error:        text
+    generation:   text
+    abi:          text
+    runtime_path: text
+
+# ============================================================================
+# Private helpers
+# ============================================================================
+
+fn _sri_ok(runtime_gen: text, abi: text, path: text) -> SteamRuntimeInfo:
+    SteamRuntimeInfo(is_ok: true, error: "", generation: runtime_gen, abi: abi, runtime_path: path)
+
+fn _sri_err(msg: text) -> SteamRuntimeInfo:
+    SteamRuntimeInfo(is_ok: false, error: msg, generation: "", abi: "", runtime_path: "")
+
+fn _sr_has_token(evidence: text, token: text) -> bool:
+    if evidence == token:
+        return true
+    evidence.starts_with(token + " ") or evidence.ends_with(" " + token) or evidence.contains(" " + token + " ")
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn steam_runtime_detect(evidence: text) -> SteamRuntimeInfo:
+    """Detect Steam runtime ABI from an evidence string.
+
+    The evidence string must contain "steam-runtime", "abi-x86_64", and either
+    "soldier" or "sniper" for the runtime generation.
+
+    Args:
+        evidence: space-separated capability token string
+
+    Returns:
+        SteamRuntimeInfo with is_ok=true when all tokens are present.
+    """
+    if not _sr_has_token(evidence, "steam-runtime"):
+        return _sri_err("missing-steam-runtime")
+    if not _sr_has_token(evidence, "abi-x86_64"):
+        return _sri_err("missing-abi-x86_64")
+    var runtime_gen = ""
+    if _sr_has_token(evidence, "soldier"):
+        runtime_gen = "soldier"
+    else:
+        if _sr_has_token(evidence, "sniper"):
+            runtime_gen = "sniper"
+        else:
+            return _sri_err("missing-steam-linux-runtime-generation")
+    val path = "/run/steam-runtime-" + runtime_gen + "/usr"
+    _sri_ok(runtime_gen, "x86_64", path)
+
+pub fn steam_runtime_library_path(info: SteamRuntimeInfo) -> text:
+    """Return the LD_LIBRARY_PATH component for the Steam runtime.
+
+    Args:
+        info: SteamRuntimeInfo from steam_runtime_detect
+
+    Returns:
+        Colon-separated library path string, or "" on error.
+    """
+    if not info.is_ok:
+        return ""
+    info.runtime_path + "/lib/x86_64-linux-gnu:" + info.runtime_path + "/lib"
+
+pub fn steam_runtime_rootfs_mount(info: SteamRuntimeInfo) -> text:
+    """Return the rootfs mount point for the Steam runtime container.
+
+    Args:
+        info: SteamRuntimeInfo from steam_runtime_detect
+
+    Returns:
+        Mount path string, or "" on error.
+    """
+    if not info.is_ok:
+        return ""
+    "/run/pressure-vessel/usr"

@@ -1,0 +1,203 @@
+# test/unit/compiler/backend/avx512_mask_emit_spec.spl
+#
+# Byte-level golden tests for AVX-512 mask-op emit bodies.
+# Covers: VPCMPEQD (zmm→k), KANDB, KORB, KXORB, KANDNB (k-reg 3-op), KMOVW (gpr→k).
+#
+# All byte sequences verified against:
+#   llvm-mc -triple=x86_64 -mattr=+avx512f,+avx512dq,+avx512bw -show-encoding
+#   Intel SDM Vol 2C — VPCMPEQD, KANDB, KORB, KXORB, KANDNB, KMOVW entries
+#   Intel SDM Vol 2A §2.6.1 Table 2-36 (EVEX prefix layout)
+#   Intel SDM Vol 2A §2.3 Table 2-9 (2-byte VEX prefix layout)
+#
+# Register IDs (from x86_64_avx512.spl scaffold):
+#   X86_ZMM0=48, X86_ZMM1=49, X86_ZMM2=50
+#   X86_K0=80 (unmasked/reserved), X86_K1=81, X86_K2=82, X86_K3=83
+# GPR IDs: eax=0, ecx=1
+#
+# Post-F4 corrected encoder (ERR-001a/b RESOLVED) — see simd_strict_emit_errata.md
+
+use compiler.backend.native.x86_64_avx512.{emit_avx512_vpcmpeqd_zmm_to_k, emit_avx512_kandb_kreg_3op, emit_avx512_korb_kreg_3op, emit_avx512_kxorb_kreg_3op, emit_avx512_kandnb_kreg_3op, emit_avx512_kmovw_gpr_to_k}
+
+# ============================================================================
+# VPCMPEQD k1, zmm0, zmm0  (no write-mask, no zeroing)
+# EVEX.512.66.0F.W0 76 /r
+# kdst=k1(81) src1=zmm0(48) src2=zmm0(48) kmask=k0(80) z=false
+# Expected: 62 F1 7D 48 76 C8
+# Intel SDM Vol 2C VPCMPEQD; Vol 2A §2.6.1 Table 2-36
+# llvm-mc verified: vpcmpeqd k1, zmm0, zmm0 → 62 f1 7d 48 76 c8
+# ============================================================================
+
+describe "AVX-512 EVEX emit VPCMPEQD zmm-to-k golden":
+    it "VPCMPEQD k1 zmm0 zmm0 emits 6 bytes":
+        val result = emit_avx512_vpcmpeqd_zmm_to_k(81, 48, 48, 80, false)
+        expect(result.len()).to_equal(6)
+
+    it "VPCMPEQD k1 zmm0 zmm0 escape byte is 0x62":
+        val result = emit_avx512_vpcmpeqd_zmm_to_k(81, 48, 48, 80, false)
+        expect(result[0]).to_equal(98)
+
+    it "VPCMPEQD k1 zmm0 zmm0 P0 is 0xF1":
+        # P0: ~R=1 ~X=1 ~B=1 ~R'=1 0 m2=0 m1=0 m0=1 = 0xF1 (mm=001=0F map)
+        val result = emit_avx512_vpcmpeqd_zmm_to_k(81, 48, 48, 80, false)
+        expect(result[1]).to_equal(241)
+
+    it "VPCMPEQD k1 zmm0 zmm0 P1 is 0x7D":
+        # P1: W=0 ~vvvv=1111(zmm0) must-1 pp=01(0x66) = 0x7D
+        val result = emit_avx512_vpcmpeqd_zmm_to_k(81, 48, 48, 80, false)
+        expect(result[2]).to_equal(125)
+
+    it "VPCMPEQD k1 zmm0 zmm0 P2 is 0x48":
+        # P2: z=0 L'=1 L=0 b=0 ~V'=1 aaa=000 = 0x48
+        val result = emit_avx512_vpcmpeqd_zmm_to_k(81, 48, 48, 80, false)
+        expect(result[3]).to_equal(72)
+
+    it "VPCMPEQD k1 zmm0 zmm0 opcode is 0x76":
+        val result = emit_avx512_vpcmpeqd_zmm_to_k(81, 48, 48, 80, false)
+        expect(result[4]).to_equal(118)
+
+    it "VPCMPEQD k1 zmm0 zmm0 ModRM is 0xC8":
+        # ModRM: mod=11 reg=1(k1) rm=0(zmm0) = 0xC8
+        val result = emit_avx512_vpcmpeqd_zmm_to_k(81, 48, 48, 80, false)
+        expect(result[5]).to_equal(200)
+
+# ============================================================================
+# KANDB k1, k2, k3  (bitwise AND of 8-bit lane masks)
+# VEX.L1.66.0F.W0 41 /r
+# kdst=k1(81) ksrc1=k2(82) ksrc2=k3(83)
+# Expected: C5 ED 41 CB
+# Intel SDM Vol 2C KANDB; Vol 2A §2.3 Table 2-9
+# llvm-mc verified: kandb k1, k2, k3 → c5 ed 41 cb
+# ============================================================================
+
+describe "AVX-512 VEX emit KANDB k-reg 3-op golden":
+    it "KANDB k1 k2 k3 emits 4 bytes":
+        val result = emit_avx512_kandb_kreg_3op(81, 82, 83)
+        expect(result.len()).to_equal(4)
+
+    it "KANDB k1 k2 k3 VEX escape is 0xC5":
+        val result = emit_avx512_kandb_kreg_3op(81, 82, 83)
+        expect(result[0]).to_equal(197)
+
+    it "KANDB k1 k2 k3 byte1 is 0xED":
+        # byte1: ~R=1 ~vvvv=1101(k2) L=1 pp=01(66) = 0xED
+        val result = emit_avx512_kandb_kreg_3op(81, 82, 83)
+        expect(result[1]).to_equal(237)
+
+    it "KANDB k1 k2 k3 opcode is 0x41":
+        val result = emit_avx512_kandb_kreg_3op(81, 82, 83)
+        expect(result[2]).to_equal(65)
+
+    it "KANDB k1 k2 k3 ModRM is 0xCB":
+        # ModRM: mod=11 reg=1(k1) rm=3(k3) = 0xCB
+        val result = emit_avx512_kandb_kreg_3op(81, 82, 83)
+        expect(result[3]).to_equal(203)
+
+# ============================================================================
+# KORB k1, k2, k3  (bitwise OR of 8-bit lane masks)
+# VEX.L1.66.0F.W0 45 /r
+# kdst=k1(81) ksrc1=k2(82) ksrc2=k3(83)
+# Expected: C5 ED 45 CB
+# Intel SDM Vol 2C KORB; Vol 2A §2.3 Table 2-9
+# llvm-mc verified: korb k1, k2, k3 → c5 ed 45 cb
+# ============================================================================
+
+describe "AVX-512 VEX emit KORB k-reg 3-op golden":
+    it "KORB k1 k2 k3 emits 4 bytes":
+        val result = emit_avx512_korb_kreg_3op(81, 82, 83)
+        expect(result.len()).to_equal(4)
+
+    it "KORB k1 k2 k3 byte1 is 0xED":
+        val result = emit_avx512_korb_kreg_3op(81, 82, 83)
+        expect(result[1]).to_equal(237)
+
+    it "KORB k1 k2 k3 opcode is 0x45":
+        val result = emit_avx512_korb_kreg_3op(81, 82, 83)
+        expect(result[2]).to_equal(69)
+
+    it "KORB k1 k2 k3 ModRM is 0xCB":
+        val result = emit_avx512_korb_kreg_3op(81, 82, 83)
+        expect(result[3]).to_equal(203)
+
+# ============================================================================
+# KXORB k1, k2, k3  (bitwise XOR of 8-bit lane masks)
+# VEX.L1.66.0F.W0 47 /r
+# kdst=k1(81) ksrc1=k2(82) ksrc2=k3(83)
+# Expected: C5 ED 47 CB
+# Intel SDM Vol 2C KXORB; Vol 2A §2.3 Table 2-9
+# llvm-mc verified: kxorb k1, k2, k3 → c5 ed 47 cb
+# ============================================================================
+
+describe "AVX-512 VEX emit KXORB k-reg 3-op golden":
+    it "KXORB k1 k2 k3 emits 4 bytes":
+        val result = emit_avx512_kxorb_kreg_3op(81, 82, 83)
+        expect(result.len()).to_equal(4)
+
+    it "KXORB k1 k2 k3 byte1 is 0xED":
+        val result = emit_avx512_kxorb_kreg_3op(81, 82, 83)
+        expect(result[1]).to_equal(237)
+
+    it "KXORB k1 k2 k3 opcode is 0x47":
+        val result = emit_avx512_kxorb_kreg_3op(81, 82, 83)
+        expect(result[2]).to_equal(71)
+
+    it "KXORB k1 k2 k3 ModRM is 0xCB":
+        val result = emit_avx512_kxorb_kreg_3op(81, 82, 83)
+        expect(result[3]).to_equal(203)
+
+# ============================================================================
+# KANDNB k1, k2, k3  (k_src1 AND NOT k_src2, 8-bit lanes)
+# VEX.L1.66.0F.W0 42 /r
+# kdst=k1(81) ksrc1=k2(82) ksrc2=k3(83)
+# Expected: C5 ED 42 CB
+# Intel SDM Vol 2C KANDNB; Vol 2A §2.3 Table 2-9
+# llvm-mc verified: kandnb k1, k2, k3 → c5 ed 42 cb
+# ============================================================================
+
+describe "AVX-512 VEX emit KANDNB k-reg 3-op golden":
+    it "KANDNB k1 k2 k3 emits 4 bytes":
+        val result = emit_avx512_kandnb_kreg_3op(81, 82, 83)
+        expect(result.len()).to_equal(4)
+
+    it "KANDNB k1 k2 k3 byte1 is 0xED":
+        val result = emit_avx512_kandnb_kreg_3op(81, 82, 83)
+        expect(result[1]).to_equal(237)
+
+    it "KANDNB k1 k2 k3 opcode is 0x42":
+        val result = emit_avx512_kandnb_kreg_3op(81, 82, 83)
+        expect(result[2]).to_equal(66)
+
+    it "KANDNB k1 k2 k3 ModRM is 0xCB":
+        val result = emit_avx512_kandnb_kreg_3op(81, 82, 83)
+        expect(result[3]).to_equal(203)
+
+# ============================================================================
+# KMOVW k1, eax  (GPR r32 → k-register, 16-bit move)
+# VEX.L0.0F.W0 92 /r
+# kdst=k1(81) gpr=eax(0)
+# Expected: C5 F8 92 C8
+# Intel SDM Vol 2C KMOVW; Vol 2A §2.3 Table 2-9
+# llvm-mc verified: kmovw k1, eax → c5 f8 92 c8
+# ============================================================================
+
+describe "AVX-512 VEX emit KMOVW gpr-to-k golden":
+    it "KMOVW k1 eax emits 4 bytes":
+        val result = emit_avx512_kmovw_gpr_to_k(81, 0)
+        expect(result.len()).to_equal(4)
+
+    it "KMOVW k1 eax VEX escape is 0xC5":
+        val result = emit_avx512_kmovw_gpr_to_k(81, 0)
+        expect(result[0]).to_equal(197)
+
+    it "KMOVW k1 eax byte1 is 0xF8":
+        # byte1: ~R=1 ~vvvv=1111(unused) L=0 pp=00 = 0xF8
+        val result = emit_avx512_kmovw_gpr_to_k(81, 0)
+        expect(result[1]).to_equal(248)
+
+    it "KMOVW k1 eax opcode is 0x92":
+        val result = emit_avx512_kmovw_gpr_to_k(81, 0)
+        expect(result[2]).to_equal(146)
+
+    it "KMOVW k1 eax ModRM is 0xC8":
+        # ModRM: mod=11 reg=1(k1) rm=0(eax) = 0xC8
+        val result = emit_avx512_kmovw_gpr_to_k(81, 0)
+        expect(result[3]).to_equal(200)

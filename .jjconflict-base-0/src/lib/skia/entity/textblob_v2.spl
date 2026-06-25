@@ -1,0 +1,170 @@
+# Skia TextBlob V2
+#
+# Additive builder-style text blob types that do NOT touch the legacy
+# SkTextBlob/SkGlyphRun API in textblob.spl. New code that needs per-run
+# positioning semantics (default origin, horizontal per-glyph x, full xy)
+# should use SkTextBlobBuilder -> SkTextBlobV2 here.
+
+use std.skia.entity.font.{SkFont}
+use std.skia.entity.geometry.{SkRect}
+
+# ============================================================================
+# TextRunPositioning — how glyph positions are packed inside a TextRun
+# ============================================================================
+
+enum TextRunPositioning:
+    Default
+    Horizontal
+    Full
+
+# ============================================================================
+# TextRun — one run of glyphs with a single font and one positioning mode
+# ============================================================================
+#
+# `positions` packing depends on `positioning`:
+#   Default    -> positions is empty; run origin (origin_x, origin_y) applies
+#   Horizontal -> positions has one f64 per glyph (x offsets); y = origin_y
+#   Full       -> positions has two f64 per glyph (x0, y0, x1, y1, ...)
+
+class TextRun:
+    font: SkFont
+    glyphs: [i64]
+    positions: [f64]
+    positioning: TextRunPositioning
+    origin_x: f64
+    origin_y: f64
+
+# ============================================================================
+# SkTextBlobV2 — immutable container of TextRun values + cached bounds
+# ============================================================================
+
+class SkTextBlobV2:
+    runs: [TextRun]
+    bounds: SkRect
+
+impl SkTextBlobV2:
+    fn is_empty() -> bool:
+        self.runs.len() == 0
+
+    fn run_count() -> i64:
+        self.runs.len()
+
+    fn glyph_count() -> i64:
+        var total: i64 = 0
+        for run in self.runs:
+            total = total + run.glyphs.len()
+        total
+
+# ============================================================================
+# SkTextBlobBuilder — mutable builder; build() freezes into SkTextBlobV2
+# ============================================================================
+
+class SkTextBlobBuilder:
+    runs: [TextRun]
+
+fn sk_text_blob_builder_new() -> SkTextBlobBuilder:
+    SkTextBlobBuilder(runs: [])
+
+impl SkTextBlobBuilder:
+    fn new() -> SkTextBlobBuilder:
+        SkTextBlobBuilder(runs: [])
+
+    fn run_count() -> i64:
+        self.runs.len()
+
+    fn add_run_default(font: SkFont, glyphs: [i64], x: f64, y: f64) -> SkTextBlobBuilder:
+        val run = TextRun(
+            font: font,
+            glyphs: glyphs,
+            positions: [],
+            positioning: TextRunPositioning.Default,
+            origin_x: x,
+            origin_y: y
+        )
+        self.runs.push(run)
+        self
+
+    fn add_run_horizontal(font: SkFont, glyphs: [i64], x_positions: [f64], y: f64) -> SkTextBlobBuilder:
+        val run = TextRun(
+            font: font,
+            glyphs: glyphs,
+            positions: x_positions,
+            positioning: TextRunPositioning.Horizontal,
+            origin_x: 0.0,
+            origin_y: y
+        )
+        self.runs.push(run)
+        self
+
+    fn add_run_full(font: SkFont, glyphs: [i64], xy_positions: [f64]) -> SkTextBlobBuilder:
+        val run = TextRun(
+            font: font,
+            glyphs: glyphs,
+            positions: xy_positions,
+            positioning: TextRunPositioning.Full,
+            origin_x: 0.0,
+            origin_y: 0.0
+        )
+        self.runs.push(run)
+        self
+
+    fn build() -> SkTextBlobV2:
+        # Compute a conservative bounds over every glyph position we have.
+        # For Default runs we only have the run origin; treat it as a point.
+        var min_x: f64 = 0.0
+        var min_y: f64 = 0.0
+        var max_x: f64 = 0.0
+        var max_y: f64 = 0.0
+        var seeded: bool = false
+        for run in self.runs:
+            if run.positioning == TextRunPositioning.Default:
+                if not seeded:
+                    min_x = run.origin_x
+                    min_y = run.origin_y
+                    max_x = run.origin_x
+                    max_y = run.origin_y
+                    seeded = true
+                else:
+                    if run.origin_x < min_x: min_x = run.origin_x
+                    if run.origin_y < min_y: min_y = run.origin_y
+                    if run.origin_x > max_x: max_x = run.origin_x
+                    if run.origin_y > max_y: max_y = run.origin_y
+            elif run.positioning == TextRunPositioning.Horizontal:
+                var i = 0
+                val n = run.positions.len()
+                while i < n:
+                    val px = run.positions[i]
+                    val py = run.origin_y
+                    if not seeded:
+                        min_x = px
+                        min_y = py
+                        max_x = px
+                        max_y = py
+                        seeded = true
+                    else:
+                        if px < min_x: min_x = px
+                        if py < min_y: min_y = py
+                        if px > max_x: max_x = px
+                        if py > max_y: max_y = py
+                    i = i + 1
+            else:
+                # Full: pairs of (x, y)
+                var i = 0
+                val n = run.positions.len()
+                while i + 1 < n:
+                    val px = run.positions[i]
+                    val py = run.positions[i + 1]
+                    if not seeded:
+                        min_x = px
+                        min_y = py
+                        max_x = px
+                        max_y = py
+                        seeded = true
+                    else:
+                        if px < min_x: min_x = px
+                        if py < min_y: min_y = py
+                        if px > max_x: max_x = px
+                        if py > max_y: max_y = py
+                    i = i + 2
+        val bounds = SkRect(left: min_x, top: min_y, right: max_x, bottom: max_y)
+        SkTextBlobV2(runs: self.runs, bounds: bounds)

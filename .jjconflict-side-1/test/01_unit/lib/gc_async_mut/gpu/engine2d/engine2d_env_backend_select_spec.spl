@@ -1,0 +1,37 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 60%
+# @tag: unit, ui, engine2d, backend, config
+#
+# The 2D API is one surface; the lane it runs on (SIMD CPU vs a GPU backend) is
+# selectable by config/environment via SIMPLE_2D_BACKEND, without changing call
+# sites. These specs prove the override is honored when the backend initializes
+# and is ignored (auto-probe) otherwise.
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D, engine2d_env_backend_override}
+
+extern fn rt_env_set(key: text, value: text) -> bool
+
+describe "Engine2D config/environment backend selection":
+    it "reads the SIMPLE_2D_BACKEND override":
+        rt_env_set("SIMPLE_2D_BACKEND", "software")
+        expect(engine2d_env_backend_override()).to_equal("software")
+        rt_env_set("SIMPLE_2D_BACKEND", "")
+        expect(engine2d_env_backend_override()).to_equal("")
+
+    it "honors an available override backend (software always initializes)":
+        rt_env_set("SIMPLE_2D_BACKEND", "software")
+        expect(Engine2D.detect_best_backend()).to_equal("software")
+        rt_env_set("SIMPLE_2D_BACKEND", "")
+
+    it "falls through to auto-probe when the override is unavailable":
+        # A GPU lane that cannot init on this host must not be forced — the same
+        # API gracefully auto-selects an available lane instead of failing.
+        rt_env_set("SIMPLE_2D_BACKEND", "no_such_backend_xyz")
+        val selected = Engine2D.detect_best_backend()
+        expect(selected).to_not_equal("no_such_backend_xyz")
+        expect(selected.len()).to_be_greater_than(0)
+        rt_env_set("SIMPLE_2D_BACKEND", "")
+
+    it "auto-selects a non-empty backend with no override":
+        rt_env_set("SIMPLE_2D_BACKEND", "")
+        expect(Engine2D.detect_best_backend().len()).to_be_greater_than(0)

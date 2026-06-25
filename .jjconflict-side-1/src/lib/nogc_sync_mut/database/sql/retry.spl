@@ -1,0 +1,103 @@
+# Typed SQL Database Library - Exponential Backoff Retry
+#
+# Provides retry policy and helpers for transient SQLite errors.
+# Use with_retry for operations that can be retried safely.
+
+use std.database.sql.types.{DbError}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# RetryPolicy — configuration for exponential backoff
+# ============================================================================
+
+struct RetryPolicy:
+    max_retries: i64
+    base_delay_ms: i64
+    max_delay_ms: i64
+    backoff_factor: i64
+
+fn retry_policy_default() -> RetryPolicy:
+    RetryPolicy(
+        max_retries: 3,
+        base_delay_ms: 100,
+        max_delay_ms: 5000,
+        backoff_factor: 2,
+    )
+
+# ============================================================================
+# calculate_delay — exponential delay capped at max_delay_ms
+# ============================================================================
+
+fn calculate_delay(policy: RetryPolicy, attempt: i64) -> i64:
+    var delay = policy.base_delay_ms
+    var i = 0
+    while i < attempt:
+        delay = delay * policy.backoff_factor
+        i = i + 1
+    if delay > policy.max_delay_ms:
+        delay = policy.max_delay_ms
+    delay
+
+# ============================================================================
+# is_retryable_error — true for transient SQLite busy/locked errors
+# ============================================================================
+
+fn is_retryable_error(err: DbError) -> bool:
+    match err:
+        DbError.QueryFailed(sql, message):
+            val _ = sql
+            val m = message
+            if m.contains("SQLITE_BUSY"):
+                return true
+            if m.contains("SQLITE_LOCKED"):
+                return true
+            if m.contains("database is locked"):
+                return true
+            if m.contains("database is busy"):
+                return true
+            false
+        DbError.TransactionFailed(reason):
+            val m = reason
+            if m.contains("SQLITE_BUSY"):
+                return true
+            if m.contains("SQLITE_LOCKED"):
+                return true
+            if m.contains("database is locked"):
+                return true
+            if m.contains("database is busy"):
+                return true
+            false
+        _: false
+
+# ============================================================================
+# _sleep_ms — polyfill using rt_process_run (mirrors atomic.spl pattern)
+# ============================================================================
+
+fn _sleep_ms(ms: i64):
+    val _ = ms
+    rt_process_run("sleep", ["0.01"])
+
+# ============================================================================
+# with_retry — run op with exponential backoff on retryable errors
+#
+# The closure returns Result<text, DbError>. Use text as a universal
+# return carrier; callers parse the result as needed.
+# ============================================================================
+
+fn with_retry(policy: RetryPolicy, op: fn() -> Result<text, DbError>) -> Result<text, DbError>:
+    var attempt = 0
+    var last_err = DbError.Other(message: "no attempt made")
+    while attempt <= policy.max_retries:
+        val result = op()
+        match result:
+            Ok(v): return Ok(v)
+            Err(e):
+                if not is_retryable_error(e):
+                    return Err(e)
+                last_err = e
+                if attempt < policy.max_retries:
+                    val delay = calculate_delay(policy, attempt)
+                    _sleep_ms(delay)
+        attempt = attempt + 1
+    Err(last_err)

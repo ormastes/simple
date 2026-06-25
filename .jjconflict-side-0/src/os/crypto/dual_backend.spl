@@ -1,0 +1,392 @@
+# Dual backend parity framework for runtime-backed and pure-Simple algorithms.
+#
+# This module is the shared policy surface for components that can execute both
+# a runtime/C-backed implementation and a pure-Simple implementation.
+
+extern fn serial_println(msg: text)
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_exit(code: i64)
+
+enum DualBackendMode:
+    Alpha
+    Beta
+    Normal
+
+enum DualBackendPreference:
+    RuntimeFirst
+    PureSimpleFirst
+
+struct DualBackendConfig:
+    mode: DualBackendMode
+    preference: DualBackendPreference
+
+var _dual_backend_default_config = DualBackendConfig(
+    mode: DualBackendMode.Alpha,
+    preference: DualBackendPreference.RuntimeFirst
+)
+
+fn dual_backend_default_config() -> DualBackendConfig:
+    _dual_backend_default_config
+
+fn dual_backend_set_default_config(config: DualBackendConfig):
+    _dual_backend_default_config = config
+
+fn dual_backend_alpha_default_mode() -> DualBackendConfig:
+    DualBackendConfig(
+        mode: DualBackendMode.Alpha,
+        preference: DualBackendPreference.RuntimeFirst
+    )
+
+fn dual_backend_beta_default_mode() -> DualBackendConfig:
+    DualBackendConfig(
+        mode: DualBackendMode.Beta,
+        preference: DualBackendPreference.RuntimeFirst
+    )
+
+fn dual_backend_normal_pure_simple_mode() -> DualBackendConfig:
+    DualBackendConfig(
+        mode: DualBackendMode.Normal,
+        preference: DualBackendPreference.PureSimpleFirst
+    )
+
+fn dual_backend_assert_mode() -> DualBackendConfig:
+    dual_backend_alpha_default_mode()
+
+fn dual_backend_critical_mode() -> DualBackendConfig:
+    dual_backend_beta_default_mode()
+
+fn dual_backend_pure_simple_mode() -> DualBackendConfig:
+    dual_backend_normal_pure_simple_mode()
+
+fn dual_backend_alpha_mode(preference: DualBackendPreference) -> DualBackendConfig:
+    DualBackendConfig(
+        mode: DualBackendMode.Alpha,
+        preference: preference
+    )
+
+fn dual_backend_beta_mode(preference: DualBackendPreference) -> DualBackendConfig:
+    DualBackendConfig(
+        mode: DualBackendMode.Beta,
+        preference: preference
+    )
+
+fn dual_backend_normal_mode(preference: DualBackendPreference) -> DualBackendConfig:
+    DualBackendConfig(
+        mode: DualBackendMode.Normal,
+        preference: preference
+    )
+
+fn dual_backend_bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if rt_bytes_u8_at(a, i.to_i64()).to_u8() != rt_bytes_u8_at(b, i.to_i64()).to_u8():
+            return false
+        i = i + 1
+    true
+
+fn _hex_digit(n: u8) -> u8:
+    if n < 10:
+        0x30 + n
+    else:
+        0x61 + (n - 10)
+
+fn _hex_digit_text(n: u8) -> text:
+    if n == 0x0:
+        return "0"
+    if n == 0x1:
+        return "1"
+    if n == 0x2:
+        return "2"
+    if n == 0x3:
+        return "3"
+    if n == 0x4:
+        return "4"
+    if n == 0x5:
+        return "5"
+    if n == 0x6:
+        return "6"
+    if n == 0x7:
+        return "7"
+    if n == 0x8:
+        return "8"
+    if n == 0x9:
+        return "9"
+    if n == 0xA:
+        return "a"
+    if n == 0xB:
+        return "b"
+    if n == 0xC:
+        return "c"
+    if n == 0xD:
+        return "d"
+    if n == 0xE:
+        return "e"
+    "f"
+
+fn _bool_text(v: bool) -> text:
+    if v:
+        return "true"
+    "false"
+
+fn dual_backend_hex(data: [u8], limit: u64) -> text:
+    var out = ""
+    var i: u64 = 0
+    while i < data.len() and i < limit:
+        val byte_val = rt_bytes_u8_at(data, i.to_i64()).to_u8()
+        out = out + _hex_digit_text((byte_val >> 4) & 0x0F)
+        out = out + _hex_digit_text(byte_val & 0x0F)
+        i = i + 1
+    if i < data.len():
+        out = out + "..."
+    out
+
+fn dual_backend_diff_report(component: text, operation: text, inputs: [text], runtime_output: [u8], pure_output: [u8]) -> text:
+    var input_report = ""
+    var i: u64 = 0
+    while i < inputs.len():
+        if i > 0:
+            input_report = input_report + ";"
+        input_report = input_report + inputs[i]
+        i = i + 1
+    "{component}:{operation}: runtime/pure mismatch | inputs={input_report} | runtime={dual_backend_hex(runtime_output, 64)} | pure={dual_backend_hex(pure_output, 64)}"
+
+fn dual_backend_scalar_diff_report(component: text, operation: text, inputs: [text], runtime_output: text, pure_output: text) -> text:
+    var input_report = ""
+    var i: u64 = 0
+    while i < inputs.len():
+        if i > 0:
+            input_report = input_report + ";"
+        input_report = input_report + inputs[i]
+        i = i + 1
+    "{component}:{operation}: runtime/pure mismatch | inputs={input_report} | runtime={runtime_output} | pure={pure_output}"
+
+fn _dual_backend_beta_report(report: text):
+    serial_println("[dual-backend] " + report)
+
+fn _dual_backend_alpha_halt(report: text):
+    # Alpha is the fail-closed security guard: a genuine runtime/pure mismatch
+    # (both backends produced output and they differ) means one path is
+    # compromised or buggy. Returning to the caller would be fail-OPEN, so we
+    # abort the process hard. EX_SOFTWARE (70) marks an internal consistency
+    # failure. This only fires on a true mismatch — the one-side-empty
+    # absent-oracle degradation path in dual_backend_choose_bytes never reaches
+    # here, so stubbed-runtime callers are unaffected.
+    serial_println("[dual-backend] ALPHA HALT (fail-closed): " + report)
+    rt_exit(70)
+
+fn dual_backend_choose_bytes(
+    component: text,
+    operation: text,
+    config: DualBackendConfig,
+    inputs: [text],
+    runtime_output: [u8],
+    pure_output: [u8]
+) -> [u8]:
+    if config.mode == DualBackendMode.Normal:
+        if config.preference == DualBackendPreference.PureSimpleFirst:
+            if pure_output.len() > 0:
+                return pure_output
+            return runtime_output
+        if runtime_output.len() > 0:
+            return runtime_output
+        return pure_output
+
+    if runtime_output.len() == 0:
+        return pure_output
+    if pure_output.len() == 0:
+        return runtime_output
+    if dual_backend_bytes_equal(runtime_output, pure_output):
+        if config.preference == DualBackendPreference.PureSimpleFirst:
+            return pure_output
+        return runtime_output
+
+    val report = dual_backend_diff_report(component, operation, inputs, runtime_output, pure_output)
+    if config.mode == DualBackendMode.Alpha:
+        _dual_backend_alpha_halt(report)
+        return []
+
+    _dual_backend_beta_report(report)
+    if config.preference == DualBackendPreference.PureSimpleFirst:
+        return pure_output
+    runtime_output
+
+fn dual_backend_run_bytes(
+    component: text,
+    operation: text,
+    config: DualBackendConfig,
+    inputs: [text],
+    runtime_run: fn() -> [u8],
+    pure_run: fn() -> [u8]
+) -> [u8]:
+    if config.mode == DualBackendMode.Normal:
+        if config.preference == DualBackendPreference.PureSimpleFirst:
+            val pure_output = pure_run()
+            if pure_output.len() > 0:
+                return pure_output
+            return runtime_run()
+        val runtime_output = runtime_run()
+        if runtime_output.len() > 0:
+            return runtime_output
+        return pure_run()
+
+    val runtime_output = runtime_run()
+    val pure_output = pure_run()
+    dual_backend_choose_bytes(component, operation, config, inputs, runtime_output, pure_output)
+
+fn dual_backend_choose_bool(
+    component: text,
+    operation: text,
+    config: DualBackendConfig,
+    inputs: [text],
+    runtime_output: bool,
+    pure_output: bool
+) -> bool:
+    if config.mode == DualBackendMode.Normal:
+        if config.preference == DualBackendPreference.PureSimpleFirst:
+            return pure_output
+        return runtime_output
+
+    if runtime_output == pure_output:
+        if config.preference == DualBackendPreference.PureSimpleFirst:
+            return pure_output
+        return runtime_output
+
+    val report = dual_backend_scalar_diff_report(component, operation, inputs, _bool_text(runtime_output), _bool_text(pure_output))
+    if config.mode == DualBackendMode.Alpha:
+        _dual_backend_alpha_halt(report)
+        return false
+
+    _dual_backend_beta_report(report)
+    if config.preference == DualBackendPreference.PureSimpleFirst:
+        return pure_output
+    runtime_output
+
+fn dual_backend_run_bool(
+    component: text,
+    operation: text,
+    config: DualBackendConfig,
+    inputs: [text],
+    runtime_run: fn() -> bool,
+    pure_run: fn() -> bool
+) -> bool:
+    if config.mode == DualBackendMode.Normal:
+        if config.preference == DualBackendPreference.PureSimpleFirst:
+            return pure_run()
+        return runtime_run()
+
+    val runtime_output = runtime_run()
+    val pure_output = pure_run()
+    dual_backend_choose_bool(component, operation, config, inputs, runtime_output, pure_output)
+
+fn dual_backend_choose_u64(
+    component: text,
+    operation: text,
+    config: DualBackendConfig,
+    inputs: [text],
+    runtime_output: u64,
+    pure_output: u64
+) -> u64:
+    if config.mode == DualBackendMode.Normal:
+        if config.preference == DualBackendPreference.PureSimpleFirst:
+            return pure_output
+        return runtime_output
+
+    if runtime_output == pure_output:
+        if config.preference == DualBackendPreference.PureSimpleFirst:
+            return pure_output
+        return runtime_output
+
+    val report = dual_backend_scalar_diff_report(component, operation, inputs, runtime_output.to_text(), pure_output.to_text())
+    if config.mode == DualBackendMode.Alpha:
+        _dual_backend_alpha_halt(report)
+        return 0
+
+    _dual_backend_beta_report(report)
+    if config.preference == DualBackendPreference.PureSimpleFirst:
+        return pure_output
+    runtime_output
+
+fn dual_backend_run_u64(
+    component: text,
+    operation: text,
+    config: DualBackendConfig,
+    inputs: [text],
+    runtime_run: fn() -> u64,
+    pure_run: fn() -> u64
+) -> u64:
+    if config.mode == DualBackendMode.Normal:
+        if config.preference == DualBackendPreference.PureSimpleFirst:
+            return pure_run()
+        return runtime_run()
+
+    val runtime_output = runtime_run()
+    val pure_output = pure_run()
+    dual_backend_choose_u64(component, operation, config, inputs, runtime_output, pure_output)
+
+fn dual_backend_choose_text(
+    component: text,
+    operation: text,
+    config: DualBackendConfig,
+    inputs: [text],
+    runtime_output: text,
+    pure_output: text
+) -> text:
+    if config.mode == DualBackendMode.Normal:
+        if config.preference == DualBackendPreference.PureSimpleFirst:
+            if pure_output != "":
+                return pure_output
+            return runtime_output
+        if runtime_output != "":
+            return runtime_output
+        return pure_output
+
+    if runtime_output == pure_output:
+        if config.preference == DualBackendPreference.PureSimpleFirst:
+            return pure_output
+        return runtime_output
+
+    val report = dual_backend_scalar_diff_report(component, operation, inputs, runtime_output, pure_output)
+    if config.mode == DualBackendMode.Alpha:
+        _dual_backend_alpha_halt(report)
+        return ""
+
+    _dual_backend_beta_report(report)
+    if config.preference == DualBackendPreference.PureSimpleFirst:
+        return pure_output
+    runtime_output
+
+fn dual_backend_run_text(
+    component: text,
+    operation: text,
+    config: DualBackendConfig,
+    inputs: [text],
+    runtime_run: fn() -> text,
+    pure_run: fn() -> text
+) -> text:
+    if config.mode == DualBackendMode.Normal:
+        if config.preference == DualBackendPreference.PureSimpleFirst:
+            val pure_output = pure_run()
+            if pure_output != "":
+                return pure_output
+            return runtime_run()
+        val runtime_output = runtime_run()
+        if runtime_output != "":
+            return runtime_output
+        return pure_run()
+
+    val runtime_output = runtime_run()
+    val pure_output = pure_run()
+    dual_backend_choose_text(component, operation, config, inputs, runtime_output, pure_output)
+
+export DualBackendMode, DualBackendPreference, DualBackendConfig
+export dual_backend_default_config, dual_backend_set_default_config
+export dual_backend_alpha_default_mode, dual_backend_beta_default_mode, dual_backend_normal_pure_simple_mode
+export dual_backend_assert_mode, dual_backend_critical_mode, dual_backend_pure_simple_mode
+export dual_backend_alpha_mode, dual_backend_beta_mode, dual_backend_normal_mode
+export dual_backend_bytes_equal, dual_backend_diff_report, dual_backend_scalar_diff_report
+export dual_backend_choose_bytes, dual_backend_run_bytes
+export dual_backend_choose_bool, dual_backend_run_bool
+export dual_backend_choose_u64, dual_backend_run_u64
+export dual_backend_choose_text, dual_backend_run_text

@@ -1,0 +1,155 @@
+# Mask<V> — Per-lane boolean mask for SIMD vectors
+#
+# C2 §1.4: Full Mask method catalog (18 methods).
+# C2 §5:   Mask semantics — construction, logical ops, queries, conversion.
+# C2 §2.3: Mask<FixedVec<f32,4>> ≠ Mask<FixedVec<i32,4>>; parameterized by
+#           full vector type, NOT just lane count.
+#
+# Storage: bit-vector packed into a u64 (N ≤ 64 enforced by E_SIMD_MASK_BITS_OOB).
+# Interpreter mode: all ops work on the u64 bits field.
+#
+# @tag:stdlib
+# @tag:simd
+
+use std.simd.vector.{Vector}
+
+# ============================================================================
+# Mask<V> class  (C2 §1.4)
+# ============================================================================
+
+class Mask<V: Vector>:
+    """Per-lane boolean mask parameterized by the full vector type V.
+
+    C2 §2.3: Mask<FixedVec<f32,4>> and Mask<FixedVec<i32,4>> are DISTINCT
+    types, even though both have 4 lanes, because element width matters for
+    SVE2 predicate granularity and RVV mask layout.
+
+    Storage (interpreter): u64 bits field; bit i = 1 means lane i active.
+    N must be <= 64; enforced at from_bits / to_bits call sites.
+    """
+    bits: u64            # low lane_count bits; remaining bits are 0
+    lane_count: usize    # mirrors V.lanes() at construction time
+
+# ============================================================================
+# Mask<V> impl — C2 §1.4 full method catalog
+# ============================================================================
+
+impl<V: Vector> Mask<V>:
+
+    # — Construction — (C2 §1.4)
+
+    static fn from_bits(bits: u64) -> Self:
+        """Construct from bitmask. bit i → lane i active.
+        For ScalableVec: bits must fit in runtime lanes count; else E_SIMD_MASK_BITS_OOB.
+        C2 §5.1"""
+        # lane_count comes from context; in interpreter use 64 as safe upper bound
+        # The concrete vector's impl block (FixedVec/ScalableVec) may override with N.
+        Mask(bits: bits, lane_count: 64)
+
+    static fn from_bits_n(bits: u64, n: usize) -> Self:
+        """Construct with explicit lane count — preferred over from_bits in interpreter."""
+        if n > 64:
+            panic("E_SIMD_MASK_BITS_OOB: lane count {n} > 64")
+        # Mask off any bits beyond lane_count
+        val mask_bits = if n < 64: bits & ((1 << n) - 1) else bits
+        Mask(bits: mask_bits, lane_count: n)
+
+    static fn all_ones() -> Self:
+        """All lanes active."""
+        Mask(bits: 0xFFFFFFFFFFFFFFFF, lane_count: 64)
+
+    static fn all_ones_n(n: usize) -> Self:
+        """All n lanes active."""
+        if n > 64:
+            panic("E_SIMD_MASK_BITS_OOB: lane count {n} > 64")
+        val bits = if n < 64: (1 << n) - 1 else 0xFFFFFFFFFFFFFFFF
+        Mask(bits: bits, lane_count: n)
+
+    static fn all_zeros() -> Self:
+        """No lanes active."""
+        Mask(bits: 0, lane_count: 64)
+
+    static fn all_zeros_n(n: usize) -> Self:
+        Mask(bits: 0, lane_count: n)
+
+    static fn from_cmp(cmp_result: V.Mask) -> Self:
+        """Identity cast — the comparison methods already return Self.Mask.
+        This constructor is for cases where a mask is produced by one expression
+        and consumed by another.  C2 §5.1"""
+        cmp_result
+
+    # — Logical operations — (C2 §1.4)
+
+    fn and(self, rhs: Self) -> Self:
+        Mask(bits: self.bits & rhs.bits, lane_count: self.lane_count)
+
+    fn or(self, rhs: Self) -> Self:
+        Mask(bits: self.bits | rhs.bits, lane_count: self.lane_count)
+
+    fn xor(self, rhs: Self) -> Self:
+        Mask(bits: self.bits ^ rhs.bits, lane_count: self.lane_count)
+
+    fn not(self) -> Self:
+        val n = self.lane_count
+        val inv = ~self.bits
+        val mask_bits = if n < 64: inv & ((1 << n) - 1) else inv
+        Mask(bits: mask_bits, lane_count: n)
+
+    fn andnot(self, rhs: Self) -> Self:
+        # ~self & rhs  (C2 §1.4)
+        Mask(bits: (~self.bits) & rhs.bits, lane_count: self.lane_count)
+
+    # — Queries — (C2 §1.4)
+
+    fn count_ones(self) -> usize:
+        # popcount of the lane_count active bits
+        var b = self.bits
+        var count: usize = 0
+        val n = self.lane_count
+        var i = 0
+        while i < n:
+            if (b & 1) == 1:
+                count = count + 1
+            b = b >> 1
+            i = i + 1
+        count
+
+    fn any(self) -> bool:
+        val n = self.lane_count
+        val active = if n < 64: self.bits & ((1 << n) - 1) else self.bits
+        active != 0
+
+    fn all(self) -> bool:
+        val n = self.lane_count
+        val full = if n < 64: (1 << n) - 1 else 0xFFFFFFFFFFFFFFFF
+        (self.bits & full) == full
+
+    fn none(self) -> bool:
+        not self.any()
+
+    fn lane_active(self, i: usize) -> bool:
+        """Single-lane test. C2 §1.4 — raises E_SIMD_LANE_OOB if i >= lane_count."""
+        if i >= self.lane_count:
+            panic("E_SIMD_LANE_OOB: lane index {i} >= {self.lane_count}")
+        (self.bits >> i) & 1 == 1
+
+    # — Conversion — (C2 §1.4)
+
+    fn to_bits(self) -> u64:
+        """Low lane_count bits set per active lane; N must be <= 64.
+        E_SIMD_MASK_BITS_OOB if lane_count > 64."""
+        if self.lane_count > 64:
+            panic("E_SIMD_MASK_BITS_OOB: to_bits requires lane_count <= 64")
+        self.bits
+
+    fn to_bitmask_u32(self) -> u32:
+        """For AVX-512 k-reg extraction. N must be <= 32.
+        E_SIMD_MASK_BITS_OOB if lane_count > 32."""
+        if self.lane_count > 32:
+            panic("E_SIMD_MASK_BITS_OOB: to_bitmask_u32 requires lane_count <= 32")
+        self.bits as u32
+
+    fn ptx_preg_handle(self) -> u32:
+        """PTX predicate register handle. compile-mode only.
+        E_SIMD_COMPILE_ONLY in interpreter."""
+        panic("E_SIMD_COMPILE_ONLY: ptx_preg_handle is not available in interpreter mode")

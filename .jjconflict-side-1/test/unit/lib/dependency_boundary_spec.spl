@@ -1,0 +1,212 @@
+# Library dependency boundary regression.
+#
+# Portable library code must not grow direct `os.*` or `examples.*` imports.
+# Production OS code must depend on stdlib backend contracts, not examples.
+
+use std.spec.*
+use compiler.tools.verify.noalloc_reachable.{verify_noalloc_reachable_imports}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _lib_os_import_scan() -> text:
+    val cmd = "rg -n '^use os\\.|^from os\\.|^import os\\.' src/lib || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _lib_posix_linux_namespace_import_scan() -> text:
+    val cmd = "rg -n '^(use|from|import)( lazy)? ((std\\.)?(posix|linux)\\.|os\\.posix\\.)' src/lib || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _nogc_sync_imports_gc_async_scan() -> text:
+    val cmd = "rg -n '^(use|from|import)( lazy)? std\\.gc_async_mut\\.' src/lib/nogc_sync_mut -g '*.spl' || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _nogc_async_imports_gc_async_scan() -> text:
+    val cmd = "rg -n '^(use|from|import)( lazy)? std\\.gc_async_mut\\.' src/lib/nogc_async_mut -g '*.spl' || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _gc_async_imports_nogc_sync_scan() -> text:
+    val cmd = "rg -n '^(use|from|import)( lazy)? std\\.nogc_sync_mut\\.' src/lib/gc_async_mut -g '*.spl' || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _noalloc_imports_allocating_family_scan() -> text:
+    val cmd = "rg -n '^(use|from|import)( lazy)? std\\.(nogc_sync_mut|nogc_async_mut|nogc_async_immut|gc_async_mut)\\.' src/lib/nogc_async_mut_noalloc -g '*.spl' || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _noalloc_app_import_scan() -> text:
+    val cmd = "rg -n '^(use|from|import)( lazy)? app\\.' src/lib/nogc_async_mut_noalloc -g '*.spl' || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _noalloc_alloc_annotation_scan() -> text:
+    val cmd = "rg -n '^(# *)?@alloc\\b' src/lib/nogc_async_mut_noalloc -g '*.spl' || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _noalloc_host_allocation_api_scan() -> text:
+    val cmd = "rg -n '\\b(malloc|calloc|free)\\s*\\(|\\brt_alloc\\b|extern fn .*realloc' src/lib/nogc_async_mut_noalloc -g '*.spl' || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _lib_examples_import_scan() -> text:
+    val cmd = "rg -n '^(use|from|import)( lazy)? examples\\.' src/lib || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _os_examples_import_scan() -> text:
+    val cmd = "rg -n '^(use|from|import)( lazy)? examples\\.' src/os || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _app_examples_import_scan() -> text:
+    val cmd = "rg -n '^(use|from|import)( lazy)? examples\\.' src/app || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _system_spec_examples_import_scan() -> text:
+    val cmd = "rg -n '^(use|from|import)( lazy)? examples\\.' doc/06_spec -g '*.spl' -g '!**/.spipe_matchers_*' || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _lib_test_examples_import_scan() -> text:
+    val cmd = "rg -n '^(use|from|import)( lazy)? examples\\.' test/unit/lib test/feature/lib || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _test_examples_import_scan() -> text:
+    val cmd = "rg -n '^(use|from|import)( lazy)? examples\\.' test -g '*.spl' -g '!**/.spipe_matchers_*' || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _common_pure_runtime_import_scan() -> text:
+    val cmd = "rg -n '^(use|from|import)( lazy)? (std\\.)?common\\.pure\\.runtime' src/lib src/app src/os test/unit/lib test/feature/lib || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _host_platform_marker_scan() -> text:
+    val markers = "(/proc|/sys|fork\\(|execve|pthread|ptrace|epoll|inotify|rt_process_run|rt_process_run_capture|/bin/sh|rt_readdir|rt_mkdir|rt_remove|rt_stat_open)"
+    val cmd = "rg -n '" + markers + "' src/lib -g '*.spl' || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _non_empty_scan_lines(scan: text) -> [text]:
+    var result: [text] = []
+    for line in scan.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.len() > 0:
+            result.push(trimmed)
+    result
+
+fn _scan_line_path(line: text) -> text:
+    val parts = line.split(":")
+    if parts.len() == 0:
+        return line
+    parts[0]
+
+fn _is_approved_host_backend_path(path: text) -> bool:
+    if path.starts_with("src/lib/nogc_sync_mut/"):
+        return true
+    if path.starts_with("src/lib/nogc_async_mut/"):
+        return true
+    if path.starts_with("src/lib/gc_async_mut/"):
+        return true
+    if path.starts_with("src/lib/nogc_async_mut_noalloc/"):
+        return true
+    if path.starts_with("src/lib/hardware/"):
+        return true
+    if path.starts_with("src/lib/ffi/"):
+        return true
+    if path == "src/lib/process_monitor.spl":
+        return true
+    return false
+
+fn _is_approved_common_host_contract(path: text) -> bool:
+    if path.starts_with("src/lib/common/wine_"):
+        return true
+    return false
+
+fn _unapproved_host_platform_marker_lines(scan: text) -> [text]:
+    var result: [text] = []
+    for line in _non_empty_scan_lines(scan):
+        val path = _scan_line_path(line)
+        if not _is_approved_host_backend_path(path) and not _is_approved_common_host_contract(path):
+            result.push(line)
+    result
+
+describe "Library dependency boundary":
+    it "has no unapproved direct os imports from src/lib":
+        val unexpected = _non_empty_scan_lines(_lib_os_import_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "has no direct POSIX or Linux namespace imports from src/lib":
+        val unexpected = _non_empty_scan_lines(_lib_posix_linux_namespace_import_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "does not let no-GC sync libs import GC async libs directly":
+        val unexpected = _non_empty_scan_lines(_nogc_sync_imports_gc_async_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "does not let no-GC async libs import GC async libs directly":
+        val unexpected = _non_empty_scan_lines(_nogc_async_imports_gc_async_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "does not let GC async libs import no-GC sync libs directly":
+        val unexpected = _non_empty_scan_lines(_gc_async_imports_nogc_sync_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "does not let noalloc libs import allocating runtime families directly":
+        val unexpected = _non_empty_scan_lines(_noalloc_imports_allocating_family_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "does not let noalloc libs import app surfaces directly":
+        val unexpected = _non_empty_scan_lines(_noalloc_app_import_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "does not let noalloc libs opt into allocation annotations":
+        val unexpected = _non_empty_scan_lines(_noalloc_alloc_annotation_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "does not let noalloc libs call host allocation APIs":
+        val unexpected = _non_empty_scan_lines(_noalloc_host_allocation_api_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "keeps the noalloc reachable import closure in noalloc or common":
+        val unexpected = verify_noalloc_reachable_imports()
+        expect(unexpected.len()).to_equal(0)
+
+    it "has no direct examples imports from src/lib":
+        val unexpected = _non_empty_scan_lines(_lib_examples_import_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "has no direct examples imports from src/os":
+        val unexpected = _non_empty_scan_lines(_os_examples_import_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "has no direct examples imports from src/app":
+        val unexpected = _non_empty_scan_lines(_app_examples_import_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "has no direct examples imports from production system specs":
+        val unexpected = _non_empty_scan_lines(_system_spec_examples_import_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "has no direct examples imports from library tests":
+        val unexpected = _non_empty_scan_lines(_lib_test_examples_import_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "has no direct examples imports from non-generated tests":
+        val unexpected = _non_empty_scan_lines(_test_examples_import_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "does not route production code through common pure runtime shell helpers":
+        val unexpected = _non_empty_scan_lines(_common_pure_runtime_import_scan())
+        expect(unexpected.len()).to_equal(0)
+
+    it "keeps host platform markers inside approved backend or contract paths":
+        val unexpected = _unapproved_host_platform_marker_lines(_host_platform_marker_scan())
+        expect(unexpected.len()).to_equal(0)

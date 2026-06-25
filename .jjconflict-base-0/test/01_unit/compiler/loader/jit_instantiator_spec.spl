@@ -1,0 +1,98 @@
+use compiler.loader.jit_instantiator.*
+
+fn default_jit_config() -> JitInstantiatorConfig:
+    JitInstantiatorConfig(
+        update_smf: true,
+        max_depth: 50,
+        enabled: true,
+        verbose: false
+    )
+
+describe "Jit Instantiator":
+    it "reports empty stats for a new instance":
+        val jit = JitInstantiator.new(default_jit_config())
+        val stats = jit.stats()
+        expect(stats.cached_count).to_equal(0)
+        expect(stats.compile_count).to_equal(0)
+        expect(stats.loaded_smf_count).to_equal(0)
+
+    it "finds metadata-backed symbols":
+        var jit = JitInstantiator.new(default_jit_config())
+        val entry = PossibleInstantiation(
+            template_name: "Vec",
+            type_args: "i64",
+            mangled_name: "Vec$i64"
+        )
+        jit.set_metadata_for_test("vec.smf", LoadedMetadata(possible: [entry], instantiations: []))
+
+        expect(jit.can_jit_instantiate("Vec$i64")).to_equal(true)
+        val found = jit.find_possible("Vec$i64")
+        expect(found.?).to_equal(true)
+        expect(found.unwrap()[0]).to_equal("vec.smf")
+
+    it "returns cached code without changing depth":
+        var jit = JitInstantiator.new(default_jit_config())
+        jit.set_cache_for_test("cached_fn", [1, 2, 3], 4096)
+        val before_depth = jit.depth
+
+        val result = jit.try_jit_instantiate("cached_fn")
+        match result:
+            case JitInstantiationResult.Success(code, symbol, address):
+                expect(code).to_equal([1, 2, 3])
+                expect(symbol).to_equal("cached_fn")
+                expect(address.unwrap()).to_equal(4096)
+            case _:
+                fail("expected cached success")
+
+        expect(jit.depth).to_equal(before_depth)
+
+    it "compiles known metadata-backed symbols and records the instantiation":
+        var jit = JitInstantiator.new(default_jit_config())
+        val entry = PossibleInstantiation(
+            template_name: "Map",
+            type_args: "text,i64",
+            mangled_name: "Map$text_i64"
+        )
+        jit.set_metadata_for_test("map.smf", LoadedMetadata(possible: [entry], instantiations: []))
+
+        val result = jit.try_jit_instantiate("Map$text_i64")
+        match result:
+            case JitInstantiationResult.Success(code, symbol, address):
+                expect(symbol).to_equal("Map$text_i64")
+                expect(code.len()).to_be_greater_than(0)
+                expect(address.?).to_equal(true)
+            case _:
+                fail("expected compile success")
+
+        expect(jit.in_progress.contains("Map$text_i64")).to_equal(false)
+        expect(jit.depth).to_equal(0)
+        expect(jit.stats().compile_count).to_equal(1)
+        expect(jit.loaded_metadata["map.smf"].possible.len()).to_equal(0)
+        expect(jit.loaded_metadata["map.smf"].instantiations.len()).to_equal(1)
+
+    it "detects direct circular dependencies":
+        var jit = JitInstantiator.new(default_jit_config())
+        jit.in_progress = jit.in_progress.insert("cycle_fn")
+
+        val result = jit.try_jit_instantiate("cycle_fn")
+        match result:
+            case JitInstantiationResult.CircularDependency(cycle):
+                expect(cycle.len()).to_be_greater_than(0)
+            case _:
+                fail("expected circular dependency")
+
+    it "enforces the configured depth limit":
+        var jit = JitInstantiator.new(JitInstantiatorConfig(
+            update_smf: true,
+            max_depth: 2,
+            enabled: true,
+            verbose: false
+        ))
+        jit.depth = 2
+
+        val result = jit.try_jit_instantiate("too_deep")
+        match result:
+            case JitInstantiationResult.CompilationError(message):
+                expect(message).to_contain("Maximum JIT depth")
+            case _:
+                fail("expected depth error")

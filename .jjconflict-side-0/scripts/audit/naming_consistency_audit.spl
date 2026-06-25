@@ -1,0 +1,431 @@
+# Audit public Simple API names for verbose naming patterns.
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_exit(code: i32) -> void
+
+struct NamingConfig:
+    root: text
+    lib_root: text
+    baseline_path: text
+    fix_suggestions_path: text
+
+struct NamingHit:
+    code: text
+    file: text
+    line: i64
+    current: text
+    suggested: text
+    message: text
+
+fn shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\"'\"'") + "'"
+
+fn normalize_args(all_args: [text]) -> [text]:
+    var start = 0
+    var found = false
+    var i = 0
+    while i < all_args.len():
+        if all_args[i].ends_with("naming_consistency_audit.spl"):
+            start = i + 1
+            found = true
+            break
+        i = i + 1
+    if not found and all_args.len() > 0:
+        start = 1
+
+    var args: [text] = []
+    i = start
+    while i < all_args.len():
+        if all_args[i] != "--":
+            args = args.push(all_args[i])
+        i = i + 1
+    args
+
+fn default_config() -> NamingConfig:
+    NamingConfig(
+        root: ".",
+        lib_root: "src/lib",
+        baseline_path: "scripts/audit/naming_consistency_baseline.json",
+        fix_suggestions_path: ""
+    )
+
+fn join_path(root: text, path: text) -> text:
+    if root == "" or root == ".":
+        return path
+    if root.ends_with("/"):
+        return root + path
+    root + "/" + path
+
+fn finalize_config(config: NamingConfig) -> NamingConfig:
+    var result = config
+    if result.root != "" and result.root != ".":
+        if result.lib_root == "src/lib":
+            result.lib_root = join_path(result.root, result.lib_root)
+        if result.baseline_path == "scripts/audit/naming_consistency_baseline.json":
+            result.baseline_path = join_path(result.root, result.baseline_path)
+    result
+
+fn parse_args(args: [text]) -> NamingConfig:
+    var config = default_config()
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--root" and i + 1 < args.len():
+            config.root = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("--root="):
+            config.root = arg.substring("--root=".len())
+            i = i + 1
+        elif arg == "--lib-root" and i + 1 < args.len():
+            config.lib_root = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("--lib-root="):
+            config.lib_root = arg.substring("--lib-root=".len())
+            i = i + 1
+        elif arg == "--baseline" and i + 1 < args.len():
+            config.baseline_path = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("--baseline="):
+            config.baseline_path = arg.substring("--baseline=".len())
+            i = i + 1
+        elif arg == "--fix-suggestions" and i + 1 < args.len():
+            config.fix_suggestions_path = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("--fix-suggestions="):
+            config.fix_suggestions_path = arg.substring("--fix-suggestions=".len())
+            i = i + 1
+        else:
+            i = i + 1
+    finalize_config(config)
+
+fn list_spl_files(lib_root: text) -> [text]:
+    val command = "if [ -e " + shell_quote(lib_root) + " ]; then find " + shell_quote(lib_root) + " -type f -name '*.spl' | sort; fi"
+    val result = rt_process_run("/bin/sh", ["-c", command])
+    if result.2 != 0:
+        print("Naming Consistency Audit")
+        print("========================")
+        print("find failed:")
+        print(result.1)
+        rt_exit(1)
+    var files: [text] = []
+    for raw in result.0.split("\n"):
+        val path = raw.trim()
+        if path != "" and not path.contains("/vendor/"):
+            files = files.push(path)
+    files
+
+fn list_dirs(path: text, depth: i64) -> [text]:
+    val command = "if [ -e " + shell_quote(path) + " ]; then find " + shell_quote(path) + " -mindepth " + depth.to_string() + " -maxdepth " + depth.to_string() + " -type d | sort; fi"
+    val result = rt_process_run("/bin/sh", ["-c", command])
+    if result.2 != 0:
+        return []
+    var dirs: [text] = []
+    for raw in result.0.split("\n"):
+        val dir = raw.trim()
+        if dir != "":
+            dirs = dirs.push(dir)
+    dirs
+    dirs
+
+fn basename(path: text) -> text:
+    var idx = path.len() - 1
+    while idx >= 0:
+        if path.substring(idx, idx + 1) == "/":
+            return path.substring(idx + 1, path.len())
+        idx = idx - 1
+    path
+
+fn rel_path(path: text, root: text) -> text:
+    if root != "" and root != "." and path.starts_with(root + "/"):
+        return path.substring(root.len() + 1)
+    if path.starts_with("./"):
+        return path.substring(2)
+    path
+
+fn first_name_delim(rest: text) -> i64:
+    val paren = rest.index_of("(") ?? -1
+    val generic_idx = rest.index_of("<") ?? -1
+    if paren < 0:
+        return generic_idx
+    if generic_idx < 0:
+        return paren
+    if generic_idx < paren:
+        return generic_idx
+    paren
+
+fn pub_fn_name(line: text) -> text:
+    val trimmed = line.trim()
+    if not trimmed.starts_with("pub fn "):
+        return ""
+    val rest = trimmed.substring("pub fn ".len())
+    val delim = first_name_delim(rest)
+    if delim <= 0:
+        return ""
+    rest.substring(0, delim).trim()
+
+fn pub_fn_signature(line: text) -> text:
+    val open_idx = line.index_of("(") ?? -1
+    if open_idx < 0:
+        return ""
+    val rest = line.substring(open_idx + 1)
+    val close_idx = rest.index_of(")") ?? -1
+    if close_idx < 0:
+        return ""
+    rest.substring(0, close_idx).trim()
+
+fn hit(code: text, file: text, line: i64, current: text, suggested: text, message: text) -> NamingHit:
+    NamingHit(code: code, file: file, line: line, current: current, suggested: suggested, message: message)
+
+fn check_n001(files: [text], root: text) -> [NamingHit]:
+    var hits: [NamingHit] = []
+    for path in files:
+        val source = rt_file_read_text(path) ?? ""
+        val lines = source.split("\n")
+        var idx = 0
+        while idx < lines.len():
+            val name = pub_fn_name(lines[idx])
+            if name.starts_with("get_"):
+                val suggestion = name.substring(4)
+                hits = hits.push(hit("N001", rel_path(path, root), idx + 1, name, suggestion, "Verbose `get_` prefix: rename `" + name + "` to `" + suggestion + "`"))
+            idx = idx + 1
+    hits
+
+fn contains_name(paths: [text], name: text) -> bool:
+    for path in paths:
+        if basename(path) == name:
+            return true
+    false
+
+fn check_layer_pair(hits: [NamingHit], layer: text, subdirs: [text], root: text, short_name: text, long_name: text) -> [NamingHit]:
+    if contains_name(subdirs, short_name) and contains_name(subdirs, long_name):
+        val layer_rel = rel_path(layer, root)
+        return hits.push(hit("N002", layer_rel, 0, short_name + "/ + " + long_name + "/", short_name + "/ (API) + " + long_name + "/ (impl)", "Complementary pair: `" + short_name + "/` (public API) and `" + long_name + "/` (impl/legacy) coexist in `" + layer_rel + "/` - verify cross-references (see lib_architecture.md section 5)"))
+    hits
+
+fn check_n002(lib_root: text, root: text) -> [NamingHit]:
+    var hits: [NamingHit] = []
+    for layer in list_dirs(lib_root, 1):
+        val subdirs = list_dirs(layer, 1)
+        hits = check_layer_pair(hits, layer, subdirs, root, "fs", "file_system")
+        hits = check_layer_pair(hits, layer, subdirs, root, "db", "database")
+        hits = check_layer_pair(hits, layer, subdirs, root, "compress", "compression")
+    hits
+
+fn predicate_name(name: text) -> bool:
+    name.starts_with("is_") or name.starts_with("has_")
+
+fn key_index(keys: [text], target: text) -> i64:
+    var i = 0
+    while i < keys.len():
+        if keys[i] == target:
+            return i
+        i = i + 1
+    -1
+
+fn check_n003(files: [text], root: text) -> [NamingHit]:
+    var keys: [text] = []
+    var names: [text] = []
+    var sigs: [text] = []
+    var first_files: [text] = []
+    var first_lines: [i64] = []
+    var counts: [i64] = []
+    var duplicates: [text] = []
+
+    for path in files:
+        val source = rt_file_read_text(path) ?? ""
+        val lines = source.split("\n")
+        var idx = 0
+        while idx < lines.len():
+            val name = pub_fn_name(lines[idx])
+            if predicate_name(name):
+                val sig = pub_fn_signature(lines[idx])
+                val key = name + "\n" + sig
+                val rel = rel_path(path, root)
+                val found = key_index(keys, key)
+                if found < 0:
+                    keys = keys.push(key)
+                    names = names.push(name)
+                    sigs = sigs.push(sig)
+                    first_files = first_files.push(rel)
+                    first_lines = first_lines.push(idx + 1)
+                    counts = counts.push(1)
+                    duplicates = duplicates.push("")
+                else:
+                    counts[found] = counts[found] + 1
+                    if duplicates[found] == "":
+                        duplicates[found] = rel + ":" + (idx + 1).to_string()
+                    else:
+                        duplicates[found] = duplicates[found] + "; " + rel + ":" + (idx + 1).to_string()
+            idx = idx + 1
+
+    var hits: [NamingHit] = []
+    var i = 0
+    while i < keys.len():
+        if counts[i] >= 2:
+            val current = names[i] + "(" + sigs[i] + ")"
+            val suggested = "single canonical definition (duplicated in: " + duplicates[i] + ")"
+            val message = "Duplicate predicate `" + current + "` declared in " + counts[i].to_string() + " files - consider delegating to one canonical definition"
+            hits = hits.push(hit("N003", first_files[i], first_lines[i], current, suggested, message))
+        i = i + 1
+    hits
+
+fn check_n004(files: [text], root: text) -> [NamingHit]:
+    var hits: [NamingHit] = []
+    for path in files:
+        val source = rt_file_read_text(path) ?? ""
+        val lines = source.split("\n")
+        var idx = 0
+        while idx < lines.len():
+            val name = pub_fn_name(lines[idx])
+            if name.starts_with("set_from_"):
+                val suggestion = name.substring(4)
+                hits = hits.push(hit("N004", rel_path(path, root), idx + 1, name, suggestion, "`set_from_*` constructor pattern: rename `" + name + "` to `" + suggestion + "`"))
+            idx = idx + 1
+    hits
+
+fn count_code(hits: [NamingHit], code: text) -> i64:
+    var count = 0
+    for item in hits:
+        if item.code == code:
+            count = count + 1
+    count
+
+fn number_after(source: text, marker: text, fallback: i64) -> i64:
+    val marker_idx = source.index_of(marker) ?? -1
+    if marker_idx < 0:
+        return fallback
+    val rest = source.substring(marker_idx + marker.len()).trim()
+    var digits = ""
+    var i = 0
+    while i < rest.len():
+        val ch = rest.substring(i, i + 1)
+        if ch < "0" or ch > "9":
+            break
+        digits = digits + ch
+        i = i + 1
+    if digits == "":
+        return fallback
+    digits.to_i64()
+
+fn baseline_count(source: text, code: text) -> i64:
+    number_after(source, "\"" + code + "\":", -1)
+
+fn print_hits(hits: [NamingHit], limit: i64):
+    var shown = 0
+    while shown < hits.len() and shown < limit:
+        val item = hits[shown]
+        val loc = if item.line == 0: item.file else: item.file + ":" + item.line.to_string()
+        print("  [" + item.code + "] " + loc + ": " + item.message)
+        shown = shown + 1
+    if hits.len() > limit:
+        print("  ... " + (hits.len() - limit).to_string() + " more")
+
+fn json_escape(value: text) -> text:
+    val escaped_backslash = value.replace("\\", "\\\\")
+    val escaped_quote = escaped_backslash.replace("\"", "\\\"")
+    escaped_quote.replace("\n", "\\n")
+
+fn hit_to_json(item: NamingHit) -> text:
+    "    {\"code\":\"" + json_escape(item.code) + "\",\"file\":\"" + json_escape(item.file) + "\",\"line\":" + item.line.to_string() + ",\"current\":\"" + json_escape(item.current) + "\",\"suggested\":\"" + json_escape(item.suggested) + "\"}"
+
+fn write_fix_suggestions(path: text, hits: [NamingHit]):
+    var body = "{\n  \"generated_by\": \"scripts/audit/naming_consistency_audit.spl\",\n  \"fixes\": [\n"
+    var i = 0
+    while i < hits.len():
+        if i > 0:
+            body = body + ",\n"
+        body = body + hit_to_json(hits[i])
+        i = i + 1
+    body = body + "\n  ]\n}\n"
+    val ok = rt_file_write_text(path, body)
+    if ok:
+        print("Fix suggestions written to: " + path)
+    else:
+        print("Failed to write fix suggestions to: " + path)
+
+fn baseline_status(current: i64, baseline: i64) -> text:
+    if baseline < 0:
+        return ""
+    if current > baseline:
+        return " [REGRESSION]"
+    if current < baseline:
+        return " [IMPROVED]"
+    ""
+
+val config = parse_args(normalize_args(rt_cli_get_args()))
+val files = list_spl_files(config.lib_root)
+val baseline_source = rt_file_read_text(config.baseline_path) ?? ""
+
+val n001 = check_n001(files, config.root)
+val n002 = check_n002(config.lib_root, config.root)
+val n003 = check_n003(files, config.root)
+val n004 = check_n004(files, config.root)
+var all_hits: [NamingHit] = []
+for item in n001:
+    all_hits = all_hits.push(item)
+for item in n002:
+    all_hits = all_hits.push(item)
+for item in n003:
+    all_hits = all_hits.push(item)
+for item in n004:
+    all_hits = all_hits.push(item)
+
+val n001_count = n001.len()
+val n002_count = n002.len()
+val n003_count = n003.len()
+val n004_count = n004.len()
+val n001_base = baseline_count(baseline_source, "N001")
+val n002_base = baseline_count(baseline_source, "N002")
+val n003_base = baseline_count(baseline_source, "N003")
+val n004_base = baseline_count(baseline_source, "N004")
+
+var baseline_violations: [text] = []
+if n001_base >= 0 and n001_count > n001_base:
+    baseline_violations = baseline_violations.push("N001 violation count increased from " + n001_base.to_string() + " to " + n001_count.to_string())
+if n002_base >= 0 and n002_count > n002_base:
+    baseline_violations = baseline_violations.push("N002 violation count increased from " + n002_base.to_string() + " to " + n002_count.to_string())
+if n003_base >= 0 and n003_count > n003_base:
+    baseline_violations = baseline_violations.push("N003 violation count increased from " + n003_base.to_string() + " to " + n003_count.to_string())
+if n004_base >= 0 and n004_count > n004_base:
+    baseline_violations = baseline_violations.push("N004 violation count increased from " + n004_base.to_string() + " to " + n004_count.to_string())
+
+print("Naming Consistency Audit")
+print("========================")
+print("Scanned " + files.len().to_string() + " .spl files under " + rel_path(config.lib_root, config.root) + "/")
+print("")
+print("N001 - Verbose get_* prefix: " + n001_count.to_string())
+print_hits(n001, 50)
+print("")
+print("N002 - Module naming inconsistency: " + n002_count.to_string())
+print_hits(n002, 50)
+print("")
+print("N003 - Duplicate predicates: " + n003_count.to_string())
+print_hits(n003, 50)
+print("")
+print("N004 - set_from_* constructor pattern: " + n004_count.to_string())
+print_hits(n004, 50)
+print("")
+
+if n001_base >= 0 or n002_base >= 0 or n003_base >= 0 or n004_base >= 0:
+    print("Baseline comparison:")
+    print("  N001: current=" + n001_count.to_string() + ", baseline=" + (if n001_base >= 0: n001_base.to_string() else: "N/A") + baseline_status(n001_count, n001_base))
+    print("  N002: current=" + n002_count.to_string() + ", baseline=" + (if n002_base >= 0: n002_base.to_string() else: "N/A") + baseline_status(n002_count, n002_base))
+    print("  N003: current=" + n003_count.to_string() + ", baseline=" + (if n003_base >= 0: n003_base.to_string() else: "N/A") + baseline_status(n003_count, n003_base))
+    print("  N004: current=" + n004_count.to_string() + ", baseline=" + (if n004_base >= 0: n004_base.to_string() else: "N/A") + baseline_status(n004_count, n004_base))
+    print("")
+
+if baseline_violations.len() > 0:
+    print("Baseline violations (CI gate):")
+    for item in baseline_violations:
+        print("  - " + item)
+    print("")
+
+if config.fix_suggestions_path != "":
+    write_fix_suggestions(config.fix_suggestions_path, all_hits)
+
+if baseline_violations.len() > 0:
+    rt_exit(1)
+rt_exit(0)

@@ -1,0 +1,332 @@
+# Check command - parse and validate Simple source files
+#
+# Runs the compiler front-end in-process in check-only mode (parse + resolve +
+# type-check, no codegen) on each target file, mirroring cli_compile_pure_simple
+# in app.io.cli_compile_part1 but with `options.mode = CompileMode.Check`.
+#
+# Earlier revisions shelled out to a hardcoded Linux binary path via a raw
+# runtime process call, which
+# (a) never resolved on non-Linux hosts and (b) routed through a tuple-returning
+# extern chain that aborted with no output under the native build. A shell-out
+# would also self-delegate: query_diagnostics._run_simple_check already shells
+# out to `simple check`, i.e. to this very handler, so check must do the work
+# in-process. Both problems are removed here.
+
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.driver.driver_types.{CompileOptions, CompileMode, CompileResult}
+use compiler.core.parser.{parse_module, parser_has_errors}
+use compiler.core.ast.{ast_reset, module_get_decls}
+use compiler.semantics.lint.concurrency_api_misuse.{check_concurrency_api_misuse}
+use compiler.semantics.lint.concurrency_share_nothing.{check_concurrency_share_nothing}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.file_discovery.{find_spl_files}
+use app.cli.query_rich_common.{query_file_read_rich}
+use app.cli.repo_hygiene_gate.{run_repo_hygiene_gate}
+
+class CheckLogOptions:
+    log_mode: text
+    progress: text
+    valid: bool
+    error: text
+
+    static fn defaults() -> CheckLogOptions:
+        CheckLogOptions(
+            log_mode: "human",
+            progress: "summary",
+            valid: true,
+            error: ""
+        )
+
+fn log_options_help() -> [text]:
+    [
+        "--log-mode <human|llm|json>  Select log rendering mode",
+        "--human | --llm | --json     Shorthand log modes",
+        "--progress <summary|count|dot|none>",
+        "--dots | --count | --no-progress",
+        "--quiet | --verbose"
+    ]
+
+fn parse_log_options(args: [text]) -> CheckLogOptions:
+    var opts = CheckLogOptions.defaults()
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--json":
+            opts.log_mode = "json"
+        elif arg == "--human":
+            opts.log_mode = "human"
+        elif arg == "--llm":
+            opts.log_mode = "llm"
+        elif arg == "--dots":
+            opts.progress = "dot"
+        elif arg == "--count":
+            opts.progress = "count"
+        elif arg == "--quiet" or arg == "--no-progress":
+            opts.progress = "none"
+        elif arg.starts_with("--log-mode="):
+            opts.log_mode = arg.slice(11, arg.len())
+        elif arg == "--log-mode":
+            if i + 1 < args.len():
+                opts.log_mode = args[i + 1]
+                i = i + 1
+            else:
+                opts.valid = false
+                opts.error = "missing --log-mode value"
+        elif arg.starts_with("--progress="):
+            opts.progress = arg.slice(11, arg.len())
+        elif arg == "--progress":
+            if i + 1 < args.len():
+                opts.progress = args[i + 1]
+                i = i + 1
+            else:
+                opts.valid = false
+                opts.error = "missing --progress value"
+        i = i + 1
+    opts
+
+fn render_progress(mode: text, done: i64, total: i64, label: text) -> text:
+    if mode == "none" or mode == "summary":
+        return ""
+    if mode == "dot":
+        return "."
+    if label == "":
+        return "{done}/{total}"
+    "{label}: {done}/{total}"
+
+fn _print_help():
+    print "Usage: simple check <file.spl> [file2.spl ...]"
+    print ""
+    print "Parse and validate Simple source files."
+    print ""
+    print "Options:"
+    for line in log_options_help():
+        print "  {line}"
+    print "  -h, --help       Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    if arg == "--human":
+        return true
+    if arg == "--llm":
+        return true
+    if arg == "--json":
+        return true
+    if arg == "--tui":
+        return true
+    if arg == "--stdout":
+        return true
+    if arg == "--quiet":
+        return true
+    if arg == "--verbose":
+        return true
+    if arg == "--dots":
+        return true
+    if arg == "--count":
+        return true
+    if arg == "--no-progress":
+        return true
+    if arg == "--log-mode":
+        return true
+    if arg == "--surface":
+        return true
+    if arg == "--progress":
+        return true
+    if arg.starts_with("--log-mode="):
+        return true
+    if arg.starts_with("--surface="):
+        return true
+    arg.starts_with("--progress=")
+
+fn _status_name(total_errors: i64) -> text:
+    if total_errors == 0:
+        return "ok"
+    "error"
+
+fn _collect_spl_files(path: text) -> [text]:
+    if file_exists(path):
+        if path.ends_with(".spl") or path.ends_with(".spipe"):
+            return [path]
+        # Path exists but is not a Simple source file: treat as a directory
+        # and gather any .spl files it directly contains.
+        val files = find_spl_files(path)
+        if files.len() > 0:
+            return files
+        return [path]
+    # Not an existing file: try directory discovery.
+    find_spl_files(path)
+
+# Run the compiler front-end on one file in check-only mode (parse + resolve +
+# type-check, no codegen). Returns the number of errors found (0 == clean). On
+# error, prints diagnostics unless JSON output is requested.
+fn _concurrency_lint_errors(path: text, source: text) -> [text]:
+    """Run the E-PAR concurrency lints (E-PAR-001..006) on one source file."""
+    var msgs: [text] = []
+    val misuse = check_concurrency_api_misuse(source, path)
+    for finding in misuse:
+        msgs.push(finding.fmt())
+    # E-PAR-006 walks the AST arena; parse this file into the global arena first.
+    # NOTE: the self-hosted parser cannot yet parse lambda call arguments, so
+    # E-PAR-006 stays inert here until that gap closes — see
+    # doc/08_tracking/bug/selfhosted_parser_lambda_gap_2026-06-11.md
+    ast_reset()
+    parse_module(source, path)
+    if not parser_has_errors():
+        val share = check_concurrency_share_nothing(module_get_decls())
+        for sn_finding in share:
+            msgs.push(sn_finding.fmt())
+    msgs
+
+fn _host_gpu_lane_lint_errors(source: text) -> [text]:
+    """Source-level guard for target.later(...) gpu \\: semantic ownership."""
+    var msgs: [text] = []
+    var in_gpu_lane = false
+    val lines = source.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.contains(" gpu \\:"):
+            in_gpu_lane = true
+        elif trimmed.contains(" host \\:"):
+            in_gpu_lane = false
+        elif trimmed.len() > 0 and not line.starts_with(" ") and not line.starts_with("\t"):
+            in_gpu_lane = false
+        if in_gpu_lane and trimmed.contains(".checked ="):
+            msgs.push("error[HGL-SEMANTIC]: GPU lambda cannot mutate host semantic field `checked`. Use target.later(...) host \\: or return a host proposal.")
+    msgs
+
+fn _host_gpu_lane_lint_warnings(source: text) -> [text]:
+    """Warn when target.later(...) gpu \\: appears as per-widget loop dispatch."""
+    var msgs: [text] = []
+    var in_loop = false
+    val lines = source.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("for "):
+            in_loop = true
+        elif trimmed.len() > 0 and not line.starts_with(" ") and not line.starts_with("\t"):
+            in_loop = false
+        if in_loop and trimmed.contains(" gpu \\:") and trimmed.contains("later"):
+            msgs.push("warning[HGL-BATCH]: per-widget GPU later() call inside loop. Use frame-level Draw IR batch, instance buffer, or DisplayGraphIR delta.")
+    msgs
+
+fn _check_path(path: text, as_json: bool) -> i64:
+    if not file_exists(path):
+        if not as_json:
+            print "ERROR: {path}: file not found"
+        return 1
+
+    var options = CompileOptions.default()
+    options.mode = CompileMode.Check
+    options.input_files = [path]
+
+    val driver = compiler_driver_create(options)
+    val result = compiler_driver_run_compile(driver)
+    val errors = result.get_errors()
+
+    val source = query_file_read_rich(path) ?? ""
+    val lint_errors = _concurrency_lint_errors(path, source)
+    val host_gpu_errors = _host_gpu_lane_lint_errors(source)
+    val host_gpu_warnings = _host_gpu_lane_lint_warnings(source)
+
+    if errors.len() == 0 and lint_errors.len() == 0 and host_gpu_errors.len() == 0 and result.is_success():
+        if not as_json:
+            for warning in host_gpu_warnings:
+                print "{path}: {warning}"
+        return 0
+
+    if not as_json:
+        for err in errors:
+            print "{path}: {err}"
+        for lint_err in lint_errors:
+            print "{path}: {lint_err}"
+        for host_gpu_err in host_gpu_errors:
+            print "{path}: {host_gpu_err}"
+        for host_gpu_warning in host_gpu_warnings:
+            print "{path}: {host_gpu_warning}"
+        if errors.len() == 0 and lint_errors.len() == 0 and host_gpu_errors.len() == 0:
+            print "{path}: check failed"
+    val total = errors.len() + lint_errors.len() + host_gpu_errors.len()
+    if total > 0: total else: 1
+
+fn run_check(args: [text]) -> i64:
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        print "ERROR: {log_opts.error}"
+        return 1
+
+    var file_args: [text] = []
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
+        if arg == "-h" or arg == "--help":
+            _print_help()
+            return 0
+        elif arg == "check":
+            ai = ai
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            ai = ai
+        elif not arg.starts_with("-"):
+            file_args.push(arg)
+        ai = ai + 1
+
+    val as_json = log_opts.log_mode == "json"
+    if file_args.len() == 0:
+        if as_json:
+            print "{\"command\":\"check\",\"status\":\"error\",\"checked\":0,\"files\":0,\"errors\":1,\"files_with_errors\":0}"
+        else:
+            _print_help()
+        return 1
+
+    var total_errors: i64 = 0
+    var files_checked: i64 = 0
+    var files_with_errors: i64 = 0
+
+    for arg in file_args:
+        val source_files = _collect_spl_files(arg)
+        if source_files.len() == 0:
+            if not as_json:
+                print "ERROR: file not found: {arg}"
+            total_errors = total_errors + 1
+            files_with_errors = files_with_errors + 1
+            continue
+
+        for source_file in source_files:
+            files_checked = files_checked + 1
+            if not as_json:
+                print "Checking {source_file}... "
+            val failed = _check_path(source_file, as_json)
+            if failed != 0:
+                total_errors = total_errors + failed
+                files_with_errors = files_with_errors + 1
+            elif not as_json:
+                print "OK"
+
+    # Run repo hygiene gate (forbidden file types, naming, secrets)
+    if not as_json:
+        print "\nRunning repo hygiene gate..."
+    val hygiene_exit = run_repo_hygiene_gate()
+    if hygiene_exit != 0:
+        total_errors = total_errors + 1
+        files_with_errors = files_with_errors + 1
+
+    if files_with_errors == 0:
+        if log_opts.progress != "summary" and not as_json:
+            val progress_line = render_progress(log_opts.progress, file_args.len(), file_args.len(), "check")
+            if progress_line != "":
+                print progress_line
+        if as_json:
+            print "{\"command\":\"check\",\"status\":\"ok\",\"checked\":{files_checked},\"files\":{file_args.len()},\"errors\":0,\"files_with_errors\":0}"
+            return 0
+        print "\n✓ All checks passed ({files_checked} file(s))"
+        return 0
+
+    if log_opts.progress != "summary" and not as_json:
+        val progress_line = render_progress(log_opts.progress, file_args.len(), file_args.len(), "check")
+        if progress_line != "":
+            print progress_line
+    if as_json:
+        val status = _status_name(total_errors)
+        print "{\"command\":\"check\",\"status\":\"{status}\",\"checked\":{files_checked},\"files\":{file_args.len()},\"errors\":{total_errors},\"files_with_errors\":{files_with_errors}}"
+        return 1
+    print "\n✗ {total_errors} error(s) found in {files_with_errors} of {files_checked} file(s)"
+    1

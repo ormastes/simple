@@ -1,0 +1,72 @@
+use common.wine_image_vm_map.{wine_image_map_into_vm_process}
+use common.wine_vm_adapter.{WineVmFault, wine_vm_process_space_new, wine_vm_production_gate}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _minimal_image(entry_rva: i64, image_size: i64) -> [u8]:
+    var data = _zero_bytes(1024)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, entry_rva)
+    data = _put_u32_le(data, 0x98 + 0x38, image_size)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
+    data = _put_u16_le(data, 0x98 + 0x5c, 3)
+    data = _put_u32_le(data, 0x98 + 0x6c, 16)
+    val section_offset = 0x98 + 0xf0
+    data = _put_u32_le(data, section_offset + 8, 0x300)
+    data = _put_u32_le(data, section_offset + 12, 0x2000)
+    data = _put_u32_le(data, section_offset + 16, 0x200)
+    data = _put_u32_le(data, section_offset + 20, 0x200)
+    data = _put_u32_le(data, section_offset + 36, 0x60000020)
+    data
+
+fn _fault() -> WineVmFault:
+    WineVmFault(process_id: 10, thread_id: 20, address: 0x402010, access: "execute", policy: "deliver-seh")
+
+describe "Wine PE image to VM process mapping":
+    it "rejects malformed PE before touching the VM process":
+        val space = wine_vm_process_space_new(10, 9000, "pid fs ipc net capability")
+        val result = wine_image_map_into_vm_process([], space, 0x400000, 0x700000, 0x2000, 0x1000)
+        expect(result.ok).to_equal(false)
+        expect(result.state).to_equal("too-small")
+        expect(result.space.regions.len()).to_equal(0)
+
+    it "maps a validated image and stack into an OS-backed VM process":
+        val space = wine_vm_process_space_new(10, 9000, "pid fs ipc net capability")
+        val result = wine_image_map_into_vm_process(_minimal_image(0x2010, 0x5000), space, 0x400000, 0x700000, 0x2000, 0x1000)
+        expect(result.ok).to_equal(true)
+        expect(result.state).to_equal("mapped")
+        expect(result.entry_address).to_equal(0x402010)
+        expect(result.space.regions.len()).to_equal(3)
+        expect(wine_vm_production_gate(result.space, _fault())).to_equal("ready")
+
+    it "rejects overlapping image and stack ranges":
+        val space = wine_vm_process_space_new(10, 9000, "pid fs ipc net capability")
+        val result = wine_image_map_into_vm_process(_minimal_image(0x2010, 0x5000), space, 0x400000, 0x401000, 0x2000, 0x1000)
+        expect(result.ok).to_equal(false)
+        expect(result.state).to_equal("fixed-map-conflict")

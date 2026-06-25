@@ -1,0 +1,72 @@
+use std.spec.*
+
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_storage.{
+    pair_value, upsert_pair, is_storage_api_property, storage_internal_key,
+    storage_public_key_from_internal
+}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_loading.*
+use std.js.types.js_types.{JsValue}
+use std.js.types.pair.{Pair}
+
+fn _display_js(v: JsValue) -> text:
+    match v:
+        JsValue.Undefined: "undefined"
+        JsValue.Null: "null"
+        JsValue.Boolean(b): if b: "true" else: "false"
+        JsValue.Number(n):
+            var s = "{n}"
+            if s.ends_with(".0"):
+                s = s.slice(0, s.len() - 2)
+            s
+        JsValue.String(s): s
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[object Array]"
+        JsValue.Function(id): "[Function]"
+        JsValue.Symbol(id): "Symbol()"
+
+describe "BrowserSession storage API":
+    it "updates pair lists without changing first-match order":
+        val first = Pair(first: "theme", second: "light")
+        val second = Pair(first: "mode", second: "reader")
+        val appended = upsert_pair([first], "mode", "reader")
+        val replaced = upsert_pair(appended, "theme", "dark")
+
+        expect(appended.len()).to_equal(2)
+        expect(appended[0].first).to_equal("theme")
+        expect(appended[1].first).to_equal("mode")
+        expect(pair_value(replaced, "theme") ?? "").to_equal("dark")
+        expect(pair_value(replaced, "mode") ?? "").to_equal("reader")
+        expect(pair_value(replaced, "missing")).to_be_nil()
+
+    it "keeps internal names for storage API property collisions":
+        val stored_key = storage_internal_key("getItem")
+
+        expect(is_storage_api_property("getItem")).to_equal(true)
+        expect(storage_public_key_from_internal(stored_key)).to_equal("getItem")
+
+    it "keeps storage API methods callable when stored keys use method names":
+        var session = BrowserSession.new()
+        session.open_html("about:storage-collision", "<html><body>Storage</body></html>")
+
+        val set_result = session.eval_script(
+            "sessionStorage.setItem('getItem', 'stored'); sessionStorage.setItem('length', 'manual'); typeof sessionStorage.getItem + ':' + sessionStorage.getItem('getItem') + ':' + sessionStorage.getItem('length') + ':' + sessionStorage.length"
+        )
+        match set_result:
+            Ok(value) =>
+                expect(_display_js(value)).to_equal("function:stored:manual:2")
+                expect(session.session_storage_item("getItem") ?? "").to_equal("stored")
+                expect(session.session_storage_item("length") ?? "").to_equal("manual")
+            Err(e) =>
+                fail("Expected storage collision script to evaluate successfully: {e}")
+
+        val remove_result = session.eval_script(
+            "sessionStorage.removeItem('getItem'); typeof sessionStorage.getItem + ':' + (sessionStorage.getItem('getItem') === null) + ':' + sessionStorage.length + ':' + sessionStorage.key(0)"
+        )
+        match remove_result:
+            Ok(value) =>
+                expect(_display_js(value)).to_equal("function:true:1:length")
+                expect(session.session_storage_item("getItem")).to_be_nil()
+            Err(e) =>
+                fail("Expected storage removeItem script to evaluate successfully: {e}")

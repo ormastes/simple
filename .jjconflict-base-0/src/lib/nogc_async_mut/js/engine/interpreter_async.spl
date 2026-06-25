@@ -1,0 +1,489 @@
+# JsInterpreter — async/promise/timer/fetch resolution and JSON serialization.
+
+use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError, js_nan, js_infinity, js_neg_infinity, is_nan}
+use std.js.types.pair.{Pair}
+use std.js.types.js_types.JsValue
+use std.js.types.js_types.JsObject
+use std.js.types.js_types.JsProperty
+use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
+use std.js.engine.vm_object_store.{ObjectStore}
+use std.nogc_async_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask}
+use std.nogc_async_mut.js.engine.interpreter.{filter_response_headers_for_script, parse_non_negative_i64_text, text_equals_exact, _simple_fetch_state, _simple_fetch_value}
+use std.nogc_async_mut.http.types.{status_text}
+use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_ARRAY_BUFFER, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
+use std.nogc_async_mut.js.engine.interpreter_object.{JsInterpreter}
+use std.nogc_async_mut.js.engine.interpreter_string_methods.{JsInterpreter}
+
+impl JsInterpreter:
+    me take_pending_async_request() -> i64?:
+        if self.pending_async_requests.len() == 0:
+            return nil
+        val req = self.pending_async_requests[0]
+        var rest: [PendingAsyncRequest] = []
+        var i = 1
+        while i < self.pending_async_requests.len():
+            rest.push(self.pending_async_requests[i])
+            i = i + 1
+        self.pending_async_requests = rest
+        Some(req.request_obj_id)
+
+    me drain_pending_microtasks() -> bool:
+        var ran = false
+        var drain_count = 0
+        while self.pending_promise_tasks.len() > 0:
+            drain_count = drain_count + 1
+            if drain_count > 1000:
+                self.logger.warn("Promise microtask drain limit reached")
+                self.pending_promise_tasks = []
+                return ran
+            val task = self.pending_promise_tasks[0]
+            var rest: [PendingPromiseTask] = []
+            var i = 1
+            while i < self.pending_promise_tasks.len():
+                rest.push(self.pending_promise_tasks[i])
+                i = i + 1
+            self.pending_promise_tasks = rest
+            self._run_promise_task(task.promise_id, task.handler_id)
+            ran = true
+        ran
+
+    me drain_due_timers(current_time_ms: i64) -> i64:
+        var ran_count = 0
+        var keep_scanning = true
+        while keep_scanning:
+            keep_scanning = false
+            var rest: [PendingTimerTask] = []
+            var handled = false
+            var i = 0
+            while i < self.pending_timer_tasks.len():
+                val task = self.pending_timer_tasks[i]
+                val due_at = task.scheduled_at_ms + task.delay_ms
+                if not handled and due_at <= current_time_ms:
+                    handled = true
+                    keep_scanning = true
+                    if task.callback_id >= 0:
+                        val ignored = self._invoke_function(task.callback_id, [], self.global_env)
+                        ran_count = ran_count + 1
+                    if task.is_interval:
+                        rest.push(PendingTimerTask.create(task.id, task.callback_id, task.delay_ms, due_at, true))
+                else:
+                    rest.push(task)
+                i = i + 1
+            self.pending_timer_tasks = rest
+        ran_count
+
+    me resolve_async_fetch_response(
+        request_id: text,
+        url: text,
+        status: i32,
+        headers: text,
+        body: text,
+        error: text
+    ) -> Result<bool, text>:
+        var idx = 0
+        while idx < self.pending_async_request_registry.len():
+            val req = self.pending_async_request_registry[idx]
+            val req_id_val = self.get_object_property(req.request_obj_id, "request_id")
+            if val JsValue.String(req_id) = req_id_val:
+                if req_id == request_id:
+                    var rest: [PendingAsyncRequest] = []
+                    var i = 0
+                    while i < self.pending_async_request_registry.len():
+                        if i != idx:
+                            rest.push(self.pending_async_request_registry[i])
+                        i = i + 1
+                    self.pending_async_request_registry = rest
+                    val promise_id_val = self.get_object_property(req.request_obj_id, "promise_id")
+                    match promise_id_val:
+                        JsValue.String(promise_id_text):
+                            var promise_id = self._promise_id_for_request_id(request_id)
+                            if promise_id < 0:
+                                promise_id = parse_non_negative_i64_text(promise_id_text)
+                            if error != "":
+                                self._settle_promise(promise_id, JsValue.String(v: error), true)
+                                return Ok(true)
+                            val response_id = self._create_response_object(url, status, headers, body, error)
+                            self._settle_promise(promise_id, JsValue.Object(id: response_id), false)
+                            return Ok(true)
+                        JsValue.Number(promise_id_num):
+                            var promise_id = self._promise_id_for_request_id(request_id)
+                            if promise_id < 0:
+                                promise_id = f64_to_i64(promise_id_num)
+                            if error != "":
+                                self._settle_promise(promise_id, JsValue.String(v: error), true)
+                                return Ok(true)
+                            val response_id = self._create_response_object(url, status, headers, body, error)
+                            self._settle_promise(promise_id, JsValue.Object(id: response_id), false)
+                            return Ok(true)
+                        _:
+                            return Err("missing promise id for async fetch")
+            idx = idx + 1
+        Err("unknown async fetch request: {request_id}")
+
+    me _create_pending_promise_object() -> i64:
+        var promise_id = self.create_object()
+        while _get_obj_id(JsValue.Object(id: promise_id)) != promise_id or promise_id % 10 == 9:
+            promise_id = self.create_object()
+        self.set_object_property(promise_id, "__proto__", JsValue.Object(id: -1))
+        self.set_object_property(promise_id, "__simple_promise_host", JsValue.Boolean(v: true))
+        self.set_object_property(promise_id, "__simple_state", JsValue.String(v: "pending"))
+        self.set_object_property(promise_id, "__simple_value", JsValue.Undefined)
+        val handlers_id = self.create_object()
+        self.set_object_property(handlers_id, "length", JsValue.Number(v: 0.0))
+        self.set_object_property(promise_id, "__simple_handlers", JsValue.Array(id: handlers_id))
+        self._define_method_on(promise_id, "then", NATIVE_PROMISE_THEN)
+        self._define_method_on(promise_id, "catch", NATIVE_PROMISE_CATCH)
+        self._define_method_on(promise_id, "finally", NATIVE_PROMISE_FINALLY)
+        promise_id
+
+    me _create_settled_promise_object(value: JsValue, rejected: bool) -> i64:
+        val promise_id = self._create_pending_promise_object()
+        if rejected:
+            self.set_object_property(promise_id, "__simple_state", JsValue.String(v: "rejected"))
+        else:
+            self.set_object_property(promise_id, "__simple_state", JsValue.String(v: "fulfilled"))
+        self.set_object_property(promise_id, "__simple_value", value)
+        promise_id
+
+    me _create_response_object(url: text, status: i32, headers: text, body: text, error: text) -> i64:
+        val response_id = self.create_object()
+        self.set_object_property(response_id, "__simple_response_host", JsValue.Boolean(v: true))
+        self.set_object_property(response_id, "url", JsValue.String(v: url))
+        self.set_object_property(response_id, "status", JsValue.Number(v: status.to_f64()))
+        self.set_object_property(response_id, "statusText", JsValue.String(v: status_text(status.to_i64())))
+        self.set_object_property(response_id, "ok", JsValue.Boolean(v: status >= 200 and status < 300 and error == ""))
+        self.set_object_property(response_id, "headersText", JsValue.String(v: filter_response_headers_for_script(headers)))
+        self.set_object_property(response_id, "body", JsValue.String(v: body))
+        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: false))
+        self.set_object_property(response_id, "error", JsValue.String(v: error))
+        self._define_method_on(response_id, "text", NATIVE_RESPONSE_TEXT)
+        self._define_method_on(response_id, "json", NATIVE_RESPONSE_JSON)
+        self._define_method_on(response_id, "blob", NATIVE_RESPONSE_BLOB)
+        self._define_method_on(response_id, "arrayBuffer", NATIVE_RESPONSE_ARRAY_BUFFER)
+        response_id
+
+    me _create_promise_handler(on_fulfilled: i64, on_rejected: i64, next_promise_id: i64, kind: text) -> i64:
+        val handler_id = self.next_promise_handler_id
+        self.next_promise_handler_id = self.next_promise_handler_id + 1
+        self.promise_handlers.push(PromiseHandlerRecord.create(handler_id, on_fulfilled, on_rejected, next_promise_id, kind))
+        handler_id
+
+    me _append_handler(promise_id: i64, handler_id: i64):
+        var on_fulfilled = -1
+        var on_rejected = -1
+        var next_promise_id = -1
+        var kind = "then"
+        var hi = 0
+        while hi < self.promise_handlers.len():
+            val handler = self.promise_handlers[hi]
+            if handler.id == handler_id:
+                on_fulfilled = handler.on_fulfilled
+                on_rejected = handler.on_rejected
+                next_promise_id = handler.next_promise_id
+                kind = handler.kind
+                hi = self.promise_handlers.len()
+            hi = hi + 1
+        self.set_object_property(promise_id, "__simple_handler_on_fulfilled:{handler_id}", JsValue.Number(v: on_fulfilled.to_f64()))
+        self.set_object_property(promise_id, "__simple_handler_on_rejected:{handler_id}", JsValue.Number(v: on_rejected.to_f64()))
+        self.set_object_property(promise_id, "__simple_handler_next:{handler_id}", JsValue.Number(v: next_promise_id.to_f64()))
+        self.set_object_property(promise_id, "__simple_handler_kind:{handler_id}", JsValue.String(v: kind))
+        self.promise_handler_registrations.push(PromiseHandlerRegistration.create(promise_id, handler_id, on_fulfilled, on_rejected, next_promise_id, kind))
+
+    me _promise_id_for_request_id(request_id: text) -> i64:
+        var obj_id = 0
+        while obj_id < self.object_store.next_id:
+            match self.get_object_property(obj_id, "__simple_request_id"):
+                JsValue.String(v):
+                    if text_equals_exact(v, request_id):
+                        return obj_id
+                _:
+                    pass_dn
+            obj_id = obj_id + 1
+        -1
+
+    me _enqueue_promise_task(promise_id: i64, handler_id: i64):
+        self.pending_promise_tasks.push(PendingPromiseTask.create(promise_id, handler_id))
+
+    me _invoke_promise_callback(fn_id: i64, arg_vals: [JsValue]) -> BrowserResult<JsValue>:
+        if fn_id < 0 or fn_id >= self.functions.len():
+            return Ok(JsValue.Undefined)
+        val js_fn = self.functions.get(fn_id)
+        val fn_env = self.env_stack.create_env(js_fn.closure_env)
+        var gi = 0
+        while gi < self.global_var_names.len():
+            self.env_stack.define_var(fn_env, self.global_var_names.get(gi), self.global_var_values.get(gi))
+            gi = gi + 1
+        var pi = 0
+        while pi < js_fn.params.len():
+            var pv = JsValue.Undefined
+            if pi < arg_vals.len():
+                pv = arg_vals.get(pi)
+            self.env_stack.define_var(fn_env, js_fn.params.get(pi), pv)
+            pi = pi + 1
+        self.env_stack.define_var(fn_env, "this", JsValue.Undefined)
+        val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: JsValue.Undefined)
+        self.call_stack.push(frame)
+        val saved = self.control_return
+        self.control_return = false
+        var result = JsValue.Undefined
+        var bi = 0
+        while bi < js_fn.body.len():
+            result = self.exec_statement(js_fn.body.get(bi), fn_env)?
+            if self.control_return:
+                result = self.return_value
+                break
+            bi = bi + 1
+        self.call_stack.pop()
+        self.control_return = saved
+        Ok(result)
+
+    me _settle_promise(promise_id: i64, value: JsValue, rejected: bool):
+        if _simple_fetch_state(promise_id, self.object_store) != "pending":
+            return
+        self.set_object_property(
+            promise_id,
+            "__simple_state",
+            JsValue.String(v: if rejected: "rejected" else: "fulfilled")
+        )
+        self.set_object_property(promise_id, "__simple_value", value)
+        var i = 0
+        while i < self.promise_handler_registrations.len():
+            val registration = self.promise_handler_registrations[i]
+            if registration.promise_id == promise_id:
+                self._enqueue_promise_task(promise_id, registration.handler_id)
+            i = i + 1
+
+    me _run_promise_task(promise_id: i64, handler_id: i64):
+                        val state = _simple_fetch_state(promise_id, self.object_store)
+                        var settled_value = _simple_fetch_value(promise_id, self.object_store)
+                        match settled_value:
+                            JsValue.Object(id: settled_obj_id):
+                                match self.get_object_property(settled_obj_id, "__simple_promise_host"):
+                                    JsValue.Boolean(is_host):
+                                        if is_host and _simple_fetch_state(settled_obj_id, self.object_store) == "fulfilled":
+                                            settled_value = _simple_fetch_value(settled_obj_id, self.object_store)
+                                    _:
+                                        pass_dn
+                            _:
+                                pass_dn
+                        var handler_kind = "then"
+                        var on_fulfilled = -1
+                        var on_rejected = -1
+                        var next_promise_id = -1
+                        match self.get_object_property(promise_id, "__simple_handler_on_fulfilled:{handler_id}"):
+                            JsValue.Number(v): on_fulfilled = f64_to_i64(v)
+                            _: pass_dn
+                        match self.get_object_property(promise_id, "__simple_handler_on_rejected:{handler_id}"):
+                            JsValue.Number(v): on_rejected = f64_to_i64(v)
+                            _: pass_dn
+                        match self.get_object_property(promise_id, "__simple_handler_next:{handler_id}"):
+                            JsValue.Number(v): next_promise_id = f64_to_i64(v)
+                            _: pass_dn
+                        match self.get_object_property(promise_id, "__simple_handler_kind:{handler_id}"):
+                            JsValue.String(v): handler_kind = v
+                            _: pass_dn
+                        var hi = 0
+                        while hi < self.promise_handler_registrations.len():
+                            val registration = self.promise_handler_registrations[hi]
+                            if registration.promise_id == promise_id and registration.handler_id == handler_id:
+                                if next_promise_id < 0:
+                                    handler_kind = registration.kind
+                                    on_fulfilled = registration.on_fulfilled
+                                    on_rejected = registration.on_rejected
+                                    next_promise_id = registration.next_promise_id
+                                hi = self.promise_handler_registrations.len()
+                            hi = hi + 1
+
+                        var callback_id = -1
+                        var propagate_rejection = false
+                        if state == "fulfilled":
+                            callback_id = on_fulfilled
+                        else:
+                            callback_id = on_rejected
+                            propagate_rejection = true
+
+                        var next_value = settled_value
+                        if handler_kind == "finally":
+                            callback_id = if state == "fulfilled": on_fulfilled else: on_rejected
+
+                        if callback_id >= 0:
+                            val result = self._invoke_promise_callback(callback_id, [settled_value])
+                            match result:
+                                Ok(callback_result):
+                                    if handler_kind == "finally":
+                                        next_value = settled_value
+                                        propagate_rejection = state == "rejected"
+                                    else:
+                                        next_value = callback_result
+                                        propagate_rejection = state == "rejected" and on_rejected < 0
+                                Err(e):
+                                    next_value = JsValue.String(v: e.message)
+                                    propagate_rejection = true
+                        else:
+                            if handler_kind == "finally":
+                                next_value = settled_value
+
+                        if next_promise_id >= 0:
+                            var adopted_pending = false
+                            match next_value:
+                                JsValue.Object(inner_promise_id):
+                                    if val JsValue.Boolean(true) = self.get_object_property(inner_promise_id, "__simple_promise_host"):
+                                        val inner_state = _simple_fetch_state(inner_promise_id, self.object_store)
+                                        if inner_state == "pending":
+                                            val adopt_handler_id = self._create_promise_handler(-1, -1, next_promise_id, "then")
+                                            self._append_handler(inner_promise_id, adopt_handler_id)
+                                            adopted_pending = true
+                                        else:
+                                            propagate_rejection = inner_state == "rejected"
+                                            next_value = _simple_fetch_value(inner_promise_id, self.object_store)
+                                            match next_value:
+                                                JsValue.Object(nested_promise_id):
+                                                    if val JsValue.Boolean(true) = self.get_object_property(nested_promise_id, "__simple_promise_host"):
+                                                        val nested_state = _simple_fetch_state(nested_promise_id, self.object_store)
+                                                        if nested_state != "pending":
+                                                            next_value = _simple_fetch_value(nested_promise_id, self.object_store)
+                                                            propagate_rejection = nested_state == "rejected"
+                                                _:
+                                                    pass_dn
+                                _:
+                                    pass_dn
+                            if not adopted_pending:
+                                self._settle_promise(next_promise_id, next_value, propagate_rejection)
+
+    # Find prototype id for a class constructor
+    me _find_class_proto(fn_id: i64) -> i64:
+        var i = 0
+        val len = self.class_proto_fns.len()
+        while i < len:
+            if self.class_proto_fns.get(i) == fn_id:
+                return self.class_proto_ids.get(i)
+            i = i + 1
+        -1
+
+    me _fulfilled_promise_value(value: JsValue) -> JsValue:
+        match value:
+            JsValue.Object(obj_id):
+                match self.get_object_property(obj_id, "__simple_promise_host"):
+                    JsValue.Boolean(is_host):
+                        if is_host:
+                            match self.get_object_property(obj_id, "__simple_state"):
+                                JsValue.String(state):
+                                    if state == "fulfilled":
+                                        return self.get_object_property(obj_id, "__simple_value")
+                                _:
+                                    pass_dn
+                    _:
+                        pass_dn
+            _:
+                pass_dn
+        value
+
+    me _is_stringish(value: JsValue) -> bool:
+        typeof_value(self._fulfilled_promise_value(value)) == "string"
+
+    me _js_to_string(value: JsValue) -> text:
+        val resolved = self._fulfilled_promise_value(value)
+        match resolved:
+            JsValue.Object(obj_id):
+                match self.get_object_property(obj_id, "__simple_string_value"):
+                    JsValue.String(v): return v
+                    _:
+                        pass_dn
+            _:
+                pass_dn
+        js_to_string(resolved)
+
+    me _serialize_fetch_headers(value: JsValue) -> text:
+        match value:
+            JsValue.String(v): return self._filter_request_headers(v)
+            JsValue.Object(obj_id):
+                val obj = self.object_store.get_object(obj_id)
+                var headers: [text] = []
+                var i = 0
+                while i < obj.properties.len():
+                    val prop = obj.properties.get(i)
+                    if prop.key.lower() != "cookie":
+                        headers.push(prop.key + ": " + self._js_to_string(prop.value))
+                    i = i + 1
+                return headers.join("\n")
+            _:
+                return ""
+
+    me _filter_request_headers(headers_text: text) -> text:
+        var kept: [text] = []
+        for line in headers_text.split("\n"):
+            val trimmed = line.trim()
+            if trimmed != "":
+                val lower = trimmed.lower()
+                if not lower.starts_with("cookie:"):
+                    kept.push(trimmed)
+        kept.join("\n")
+        js_to_string(value)
+
+    # Recursive JSON serialization (needs object_store access)
+    me _json_stringify(value: JsValue) -> text:
+        match value:
+            JsValue.Undefined: return "undefined"
+            JsValue.Null: return "null"
+            JsValue.Boolean(v):
+                if v:
+                    return "true"
+                return "false"
+            JsValue.Number(v):
+                var s = "{v}"
+                val slen = s.len()
+                if slen >= 3:
+                    if s[slen - 2] == ".":
+                        if s[slen - 1] == "0":
+                            var result = ""
+                            var ci = 0
+                            while ci < slen - 2:
+                                result = result + s[ci]
+                                ci = ci + 1
+                            return result
+                return s
+            JsValue.String(v):
+                # Escape special characters
+                var escaped = ""
+                var ei = 0
+                val elen = v.len()
+                while ei < elen:
+                    val ch = v[ei]
+                    if ch == "\"":
+                        escaped = escaped + "\\\""
+                    if ch == "\\":
+                        escaped = escaped + "\\\\"
+                    if ch != "\"" and ch != "\\":
+                        escaped = escaped + ch
+                    ei = ei + 1
+                return "\"" + escaped + "\""
+            JsValue.Object(id):
+                val obj = self.object_store.get_object(id)
+                var result = "{"
+                var oi = 0
+                var first = true
+                val plen = obj.properties.len()
+                while oi < plen:
+                    val prop = obj.properties.get(oi)
+                    # Skip internal __proto__ property
+                    if prop.key != "__proto__":
+                        if not first:
+                            result = result + ","
+                        result = result + "\"" + prop.key + "\":" + self._json_stringify(prop.value)
+                        first = false
+                    oi = oi + 1
+                return result + "}"
+            JsValue.Array(id):
+                val arr_len = self.object_store.array_length(id)
+                var result = "["
+                var ai = 0
+                while ai < arr_len:
+                    if ai > 0:
+                        result = result + ","
+                    val elem = self.object_store.get_by_index(id, ai)
+                    result = result + self._json_stringify(elem)
+                    ai = ai + 1
+                return result + "]"
+            JsValue.Function(id): return "null"
+            JsValue.Symbol(id): return "null"
+        "undefined"

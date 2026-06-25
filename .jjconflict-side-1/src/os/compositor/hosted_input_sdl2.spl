@@ -1,0 +1,124 @@
+use os.drivers.input.ps2_keyboard.{KeyEvent, Key}
+use os.drivers.input.ps2_mouse.{MouseEvent}
+use os.compositor.input_backend.{InputBackend}
+
+extern fn rt_sdl2_poll_event(handle: i64) -> i64
+extern fn rt_sdl2_get_event_type() -> i64
+extern fn rt_sdl2_get_mouse_x() -> i64
+extern fn rt_sdl2_get_mouse_y() -> i64
+extern fn rt_sdl2_get_key_code() -> i64
+extern fn rt_sdl2_get_mouse_button() -> i64
+
+val SDL_EVENT_NONE: i64 = 0
+val SDL_EVENT_QUIT: i64 = 256
+val SDL_EVENT_KEYDOWN: i64 = 768
+val SDL_EVENT_KEYUP: i64 = 769
+val SDL_EVENT_MOUSEMOTION: i64 = 1024
+val SDL_EVENT_MOUSEBUTTONDOWN: i64 = 1025
+val SDL_EVENT_MOUSEBUTTONUP: i64 = 1026
+
+class HostedSdl2Input:
+    window_handle: i64
+    last_mouse_x: i32
+    last_mouse_y: i32
+    alt_state: bool
+    shift_state: bool
+    ctrl_state: bool
+    pending_key: KeyEvent?
+    pending_mouse: MouseEvent?
+
+    static fn new(window_handle: i64) -> HostedSdl2Input:
+        HostedSdl2Input(
+            window_handle: window_handle,
+            last_mouse_x: 0,
+            last_mouse_y: 0,
+            alt_state: false,
+            shift_state: false,
+            ctrl_state: false,
+            pending_key: nil,
+            pending_mouse: nil
+        )
+
+    me poll_events():
+        val has_event = rt_sdl2_poll_event(self.window_handle)
+        if has_event == 0:
+            return
+        val event_type = rt_sdl2_get_event_type()
+        if event_type == SDL_EVENT_KEYDOWN or event_type == SDL_EVENT_KEYUP:
+            val code = rt_sdl2_get_key_code()
+            val pressed = event_type == SDL_EVENT_KEYDOWN
+            if code == 226 or code == 230:
+                self.alt_state = pressed
+            elif code == 225 or code == 229:
+                self.shift_state = pressed
+            elif code == 224 or code == 228:
+                self.ctrl_state = pressed
+            self.pending_key = KeyEvent(key: _sdl_keycode_to_key(code), pressed: pressed)
+        elif event_type == SDL_EVENT_MOUSEMOTION:
+            self.last_mouse_x = rt_sdl2_get_mouse_x().to_i32()
+            self.last_mouse_y = rt_sdl2_get_mouse_y().to_i32()
+            self.pending_mouse = MouseEvent(dx: self.last_mouse_x, dy: self.last_mouse_y, left: false, right: false, middle: false)
+        elif event_type == SDL_EVENT_MOUSEBUTTONDOWN or event_type == SDL_EVENT_MOUSEBUTTONUP:
+            val btn = rt_sdl2_get_mouse_button()
+            val down = event_type == SDL_EVENT_MOUSEBUTTONDOWN
+            self.pending_mouse = MouseEvent(dx: self.last_mouse_x, dy: self.last_mouse_y, left: btn == 1 and down, right: btn == 3 and down, middle: btn == 2 and down)
+
+impl InputBackend for HostedSdl2Input:
+
+    me poll_key() -> KeyEvent?:
+        self.poll_events()
+        val k = self.pending_key
+        self.pending_key = nil
+        k
+
+    me poll_mouse() -> MouseEvent?:
+        self.poll_events()
+        val m = self.pending_mouse
+        self.pending_mouse = nil
+        m
+
+    fn alt_held() -> bool:
+        self.alt_state
+
+    fn shift_held() -> bool:
+        self.shift_state
+
+    fn ctrl_held() -> bool:
+        self.ctrl_state
+
+    fn key_to_char(key: Key) -> text?:
+        _key_to_char_map(key)
+
+fn _sdl_keycode_to_key(code: i64) -> Key:
+    if code >= 97 and code <= 122:
+        return Key.A
+    if code >= 48 and code <= 57:
+        return Key.Num0
+    if code == 13:
+        return Key.Enter
+    if code == 27:
+        return Key.Escape
+    if code == 8:
+        return Key.Backspace
+    if code == 9:
+        return Key.Tab
+    if code == 32:
+        return Key.Space
+    if code == 1073741906:
+        return Key.Up
+    if code == 1073741905:
+        return Key.Down
+    if code == 1073741904:
+        return Key.Left
+    if code == 1073741903:
+        return Key.Right
+    Key.Unknown
+
+fn _key_to_char_map(key: Key) -> text?:
+    if key == Key.A:
+        return "a"
+    if key == Key.Space:
+        return " "
+    if key == Key.Enter:
+        return "\n"
+    nil

@@ -1,0 +1,239 @@
+"""Arbitrary PE probe and hello.exe regression (AC-9, AC-10)."""
+
+use common.wine_hello_exe.{
+    wine_hello_exe_probe,
+    wine_hello_exe_can_execute,
+    wine_arbitrary_pe_probe,
+    wine_arbitrary_pe_can_probe
+}
+
+# --- PE fixture helpers (copied from wine_hello_exe_spec; private there) ---
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _put_kernel32_name(data: [u8], offset: i64) -> [u8]:
+    data[offset] = 0x4b
+    data[offset + 1] = 0x45
+    data[offset + 2] = 0x52
+    data[offset + 3] = 0x4e
+    data[offset + 4] = 0x45
+    data[offset + 5] = 0x4c
+    data[offset + 6] = 0x33
+    data[offset + 7] = 0x32
+    data[offset + 8] = 0x2e
+    data[offset + 9] = 0x64
+    data[offset + 10] = 0x6c
+    data[offset + 11] = 0x6c
+    data[offset + 12] = 0
+    data
+
+fn _put_import_name(data: [u8], offset: i64, name: text) -> [u8]:
+    data[offset] = 0
+    data[offset + 1] = 0
+    var i = 0
+    while i < name.len():
+        data[offset + 2 + i] = name[i] as u8
+        i = i + 1
+    data[offset + 2 + name.len()] = 0
+    data
+
+fn _put_hello_marker(data: [u8], offset: i64) -> [u8]:
+    data[offset] = 0x53
+    data[offset + 1] = 0x49
+    data[offset + 2] = 0x4d
+    data[offset + 3] = 0x50
+    data[offset + 4] = 0x4c
+    data[offset + 5] = 0x45
+    data[offset + 6] = 0x5f
+    data[offset + 7] = 0x57
+    data[offset + 8] = 0x49
+    data[offset + 9] = 0x4e
+    data[offset + 10] = 0x45
+    data[offset + 11] = 0x5f
+    data[offset + 12] = 0x48
+    data[offset + 13] = 0x45
+    data[offset + 14] = 0x4c
+    data[offset + 15] = 0x4c
+    data[offset + 16] = 0x4f
+    data
+
+fn _put_hello_stdout_payload(data: [u8], offset: i64) -> [u8]:
+    val marker = "SIMPLE_WINE_STDOUT:"
+    var i = 0
+    while i < marker.len():
+        data[offset + i] = marker[i] as u8
+        i = i + 1
+    val payload = "Hello from SimpleOS Wine\n"
+    var j = 0
+    while j < payload.len():
+        data[offset + marker.len() + j] = payload[j] as u8
+        j = j + 1
+    data[offset + marker.len() + payload.len()] = 0
+    data
+
+fn _put_hello_code(data: [u8], offset: i64) -> [u8]:
+    _put_hello_code_at_rva(data, offset, 0x2000)
+
+fn _put_hello_code_at_rva(data: [u8], offset: i64, code_rva: i64) -> [u8]:
+    data[offset] = 0x48
+    data[offset + 1] = 0x31
+    data[offset + 2] = 0xc9
+    data[offset + 3] = 0xff
+    data[offset + 4] = 0x15
+    data = _put_u32_le(data, offset + 5, 0x2060 - (code_rva + 9))
+    data[offset + 9] = 0x48
+    data[offset + 10] = 0x8d
+    data[offset + 11] = 0x15
+    data = _put_u32_le(data, offset + 12, 0x2120 - (code_rva + 16))
+    data[offset + 16] = 0xff
+    data[offset + 17] = 0x15
+    data = _put_u32_le(data, offset + 18, 0x2068 - (code_rva + 22))
+    data[offset + 22] = 0x31
+    data[offset + 23] = 0xc9
+    data[offset + 24] = 0xff
+    data[offset + 25] = 0x15
+    data = _put_u32_le(data, offset + 26, 0x2070 - (code_rva + 30))
+    data
+
+fn _minimal_pe64_console_with_dirs() -> [u8]:
+    var data = _zero_bytes(1024)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data[0x82] = 0
+    data[0x83] = 0
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, 0x2000)
+    data = _put_u32_le(data, 0x98 + 0x38, 0x5000)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
+    data = _put_u16_le(data, 0x98 + 0x5c, 3)
+    data = _put_u32_le(data, 0x98 + 0x6c, 16)
+    data = _put_u32_le(data, 0x98 + 0x70 + 8, 0x2020)
+    data = _put_u32_le(data, 0x98 + 0x70 + 12, 0x40)
+    data = _put_u32_le(data, 0x98 + 0x70 + 40, 0x2160)
+    data = _put_u32_le(data, 0x98 + 0x70 + 44, 0x08)
+    data = _put_u32_le(data, 0x98 + 0x70 + 72, 0x2170)
+    data = _put_u32_le(data, 0x98 + 0x70 + 76, 0x18)
+    data
+
+fn _minimal_pe64_console_with_import_descriptor() -> [u8]:
+    var data = _minimal_pe64_console_with_dirs()
+    val section_offset = 0x98 + 0xf0
+    data = _put_u32_le(data, section_offset + 8, 0x300)
+    data = _put_u32_le(data, section_offset + 12, 0x2000)
+    data = _put_u32_le(data, section_offset + 16, 0x200)
+    data = _put_u32_le(data, section_offset + 20, 0x200)
+    data = _put_u32_le(data, section_offset + 36, 0x60000020)
+    data = _put_u32_le(data, 0x220, 0x2060)
+    data = _put_u32_le(data, 0x220 + 12, 0x2050)
+    data = _put_u32_le(data, 0x220 + 16, 0x2070)
+    data = _put_kernel32_name(data, 0x250)
+    data = _put_u32_le(data, 0x260, 0x2080)
+    data = _put_u32_le(data, 0x268, 0x20a0)
+    data = _put_u32_le(data, 0x270, 0x2080)
+    data = _put_u32_le(data, 0x278, 0x20a0)
+    data = _put_import_name(data, 0x280, "GetStdHandle")
+    data = _put_import_name(data, 0x2a0, "WriteFile")
+    data = _put_u32_le(data, 0x360, 0x2000)
+    data = _put_u32_le(data, 0x364, 0x08)
+    data
+
+fn _minimal_pe64_console_with_resolved_imports() -> [u8]:
+    var data = _minimal_pe64_console_with_import_descriptor()
+    data = _put_u32_le(data, 0x260, 0x2080)
+    data = _put_u32_le(data, 0x268, 0x20a0)
+    data = _put_u32_le(data, 0x270, 0x2080)
+    data = _put_u32_le(data, 0x278, 0x20a0)
+    data = _put_u32_le(data, 0x280, 0)
+    data = _put_import_name(data, 0x280, "GetStdHandle")
+    data = _put_import_name(data, 0x2a0, "WriteFile")
+    data = _put_u32_le(data, 0x2c0, 0)
+    data = _put_import_name(data, 0x2c0, "ExitProcess")
+    data = _put_u32_le(data, 0x268, 0x20a0)
+    data = _put_u32_le(data, 0x270, 0x20c0)
+    data = _put_u32_le(data, 0x278, 0)
+    data
+
+fn _known_hello_exe_fixture() -> [u8]:
+    var data = _minimal_pe64_console_with_resolved_imports()
+    data = _put_hello_code(data, 0x200)
+    data = _put_hello_marker(data, 0x300)
+    data = _put_hello_stdout_payload(data, 0x320)
+    data
+
+fn _verified_gates() -> text:
+    "process=verified exec_env=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified"
+
+fn _verified_cpu_envelope_gates() -> text:
+    _verified_gates() + " thread-context thread-context-rip thread-context-rsp thread-context-registers-zeroed thread-context-teb-bound user-stack user-stack-allocated user-stack-committed user-stack-guard-page user-stack-aligned entrypoint-mapped entrypoint-rva-valid entrypoint-section-executable entrypoint-window-readable import-thunks-bound import-module-loaded import-module-handle-valid import-module-loader-sequence import-thunk-table-valid import-thunk-symbols-resolved import-thunk-bindings-match import-thunk-iat-guarded stdout-handle stdout-handle-std-output stdout-handle-writable stdout-byte-count-checked stdout-write-guarded exit-trap exit-trap-process-exit exit-trap-status-code exit-trap-no-fallthrough no-native-jump no-native-jump-import-targets no-native-jump-entry-bounds no-native-jump-host-code-blocked win64-abi win64-abi-register-args win64-abi-shadow-space win64-abi-stack-align win64-abi-return-value win64-abi-guarded-call"
+
+fn _verified_dispatch_gates() -> text:
+    _verified_cpu_envelope_gates() + " x86_64-decoder x86_64-decode-window-mapped x86_64-decode-window-bounded x86_64-decode-supported-ops x86_64-decode-call-targets x86_64-dispatch x86_64-dispatch-no-native-jump x86_64-dispatch-import-calls-only x86_64-dispatch-exit-trap x86_64-dispatch-stdout-sequence"
+
+# --- Tests ---
+
+describe "Wine arbitrary PE probe and hello.exe regression":
+    it "wine_hello_exe_probe still works for hello.exe data (regression AC-10)":
+        val data = _known_hello_exe_fixture()
+        val result = wine_hello_exe_probe(data, _verified_dispatch_gates())
+        expect(result.status).to_equal("executed")
+        expect(result.stdout).to_equal("Hello from SimpleOS Wine\n")
+        expect(result.exit_code).to_equal(0)
+
+    it "wine_arbitrary_pe_probe rejects empty data":
+        val result = wine_arbitrary_pe_probe([], _verified_gates())
+        expect(result.status).to_equal("rejected")
+
+    it "wine_arbitrary_pe_probe rejects non-PE data":
+        var bad: [u8] = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]
+        val result = wine_arbitrary_pe_probe(bad, _verified_gates())
+        expect(result.status).to_equal("rejected")
+
+    it "wine_arbitrary_pe_probe accepts valid PE with implemented imports":
+        val data = _minimal_pe64_console_with_resolved_imports()
+        val result = wine_arbitrary_pe_probe(data, _verified_gates())
+        expect(result.status).to_equal("accepted")
+
+    it "wine_arbitrary_pe_probe returns partial for unimplemented imports":
+        # Start from the resolved-imports fixture (passes section/directory/import gates)
+        # but replace the import symbol names with unimplemented NT functions
+        var data = _minimal_pe64_console_with_resolved_imports()
+        data = _put_import_name(data, 0x280, "NtQueryVirtualMemory")
+        data = _put_import_name(data, 0x2a0, "NtMapViewOfSection")
+        data = _put_import_name(data, 0x2c0, "NtAllocateVirtualMemory")
+        val result = wine_arbitrary_pe_probe(data, _verified_gates())
+        expect(result.status).to_equal("partial")
+        expect(result.error).to_contain("unimplemented-imports")
+
+    it "wine_arbitrary_pe_can_probe returns true for accepted PE":
+        val data = _minimal_pe64_console_with_resolved_imports()
+        val can = wine_arbitrary_pe_can_probe(data, _verified_gates())
+        expect(can).to_equal(true)
+
+    it "wine_hello_exe_can_execute still works (regression)":
+        val data = _known_hello_exe_fixture()
+        val can = wine_hello_exe_can_execute(data, _verified_dispatch_gates())
+        expect(can).to_equal(true)

@@ -1,0 +1,175 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/low_dependency_ui_dynsmf/build_plans}"
+REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+COMPILE_DYNSMF="${COMPILE_DYNSMF:-1}"
+TIMEOUT_SECS="${DYNSMF_BUILD_TIMEOUT_SECS:-120}"
+KILL_SECS="${DYNSMF_BUILD_TIMEOUT_KILL_SECS:-10}"
+EVIDENCE_ENV="$BUILD_DIR/evidence.env"
+PLAN_SRC="$BUILD_DIR/dynsmf_build_plan_evidence.spl"
+PLAN_LOG="$BUILD_DIR/plan.env"
+PLAN_ERR="$BUILD_DIR/plan.err"
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+run_with_timeout() {
+    if have timeout; then
+        timeout -k "$KILL_SECS" "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+bytes_of() {
+    if [ -f "$1" ]; then
+        wc -c <"$1" | tr -d ' '
+    else
+        echo 0
+    fi
+}
+
+magic_of() {
+    if [ -f "$1" ] && have od; then
+        od -An -tx1 -N 4 "$1" | tr -d ' \n'
+    else
+        echo ""
+    fi
+}
+
+safe_key() {
+    printf '%s' "$1" | tr -c 'A-Za-z0-9_' '_'
+}
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$EVIDENCE_ENV" "$REPORT_PATH" "$PLAN_SRC" "$PLAN_LOG" "$PLAN_ERR"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    {
+        echo "low_dependency_dynsmf_build_status=fail"
+        echo "low_dependency_dynsmf_build_reason=missing-simple-bin"
+        echo "low_dependency_dynsmf_simple_bin=$SIMPLE_BIN"
+    } | tee "$EVIDENCE_ENV"
+    exit 1
+fi
+
+cat >"$PLAN_SRC" <<'SIMPLE'
+use os.smf.dynsmf_session.{dynsmf_default_manifest, dynsmf_build_plans, dynsmf_build_plans_ready}
+
+fn main() -> i64:
+    val plans = dynsmf_build_plans(dynsmf_default_manifest())
+    print("dynsmf_build_plan_count=" + plans.len().to_text())
+    print("dynsmf_build_plans_ready=" + dynsmf_build_plans_ready(plans).to_text())
+    var i = 0
+    while i < plans.len():
+        val p = plans[i]
+        print("dynsmf_build_plan=" + p.library_id + "|" + p.status + "|" + p.source_path + "|" + p.output_path + "|" + p.command)
+        i = i + 1
+    return 0
+SIMPLE
+
+set +e
+SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" run "$PLAN_SRC" >"$PLAN_LOG" 2>"$PLAN_ERR"
+plan_code=$?
+set -e
+
+plan_count="$(sed -n 's/^dynsmf_build_plan_count=//p' "$PLAN_LOG" | tail -n 1)"
+plans_ready="$(sed -n 's/^dynsmf_build_plans_ready=//p' "$PLAN_LOG" | tail -n 1)"
+if [ "$plan_count" = "" ]; then plan_count=0; fi
+if [ "$plans_ready" = "" ]; then plans_ready=false; fi
+
+compile_count=0
+compile_pass=0
+compile_fail=0
+if [ "$plan_code" -eq 0 ] && [ "$plans_ready" = "true" ] && [ "$COMPILE_DYNSMF" = "1" ]; then
+    while IFS='|' read -r id status source output command; do
+        [ "$id" = "" ] && continue
+        key="$(safe_key "$id")"
+        compile_count=$((compile_count + 1))
+        mkdir -p "$(dirname -- "$output")"
+        log="$BUILD_DIR/compile_${key}.log"
+        set +e
+        run_with_timeout "$SIMPLE_BIN" compile "$source" -o "$output" >"$log" 2>&1
+        code=$?
+        set -e
+        size="$(bytes_of "$output")"
+        magic="$(magic_of "$output")"
+        if [ "$code" -eq 0 ] && [ "$size" -gt 0 ]; then
+            compile_pass=$((compile_pass + 1))
+            compile_status=pass
+            compile_reason=compiled
+        else
+            compile_fail=$((compile_fail + 1))
+            compile_status=fail
+            compile_reason=compile-failed
+        fi
+        {
+            echo "dynsmf_compile_${key}_status=$compile_status"
+            echo "dynsmf_compile_${key}_reason=$compile_reason"
+            echo "dynsmf_compile_${key}_source=$source"
+            echo "dynsmf_compile_${key}_output=$output"
+            echo "dynsmf_compile_${key}_command=$command"
+            echo "dynsmf_compile_${key}_bytes=$size"
+            echo "dynsmf_compile_${key}_magic=$magic"
+            echo "dynsmf_compile_${key}_log=$log"
+        } >>"$EVIDENCE_ENV"
+    done <<EOF
+$(sed -n 's/^dynsmf_build_plan=//p' "$PLAN_LOG")
+EOF
+fi
+
+status=pass
+reason=ready
+if [ "$plan_code" -ne 0 ]; then
+    status=fail
+    reason=plan-command-failed
+elif [ "$plans_ready" != "true" ]; then
+    status=fail
+    reason=plans-not-ready
+elif [ "$COMPILE_DYNSMF" = "1" ] && { [ "$compile_count" != "$plan_count" ] || [ "$compile_fail" != "0" ]; }; then
+    status=fail
+    reason=compile-failed
+elif [ "$COMPILE_DYNSMF" != "1" ]; then
+    reason=plan-only
+fi
+
+{
+    echo "low_dependency_dynsmf_build_status=$status"
+    echo "low_dependency_dynsmf_build_reason=$reason"
+    echo "low_dependency_dynsmf_simple_bin=$SIMPLE_BIN"
+    echo "low_dependency_dynsmf_compile_enabled=$COMPILE_DYNSMF"
+    echo "low_dependency_dynsmf_plan_exit_code=$plan_code"
+    echo "low_dependency_dynsmf_plan_count=$plan_count"
+    echo "low_dependency_dynsmf_plans_ready=$plans_ready"
+    echo "low_dependency_dynsmf_compile_count=$compile_count"
+    echo "low_dependency_dynsmf_compile_pass=$compile_pass"
+    echo "low_dependency_dynsmf_compile_fail=$compile_fail"
+    echo "low_dependency_dynsmf_plan_log=$PLAN_LOG"
+    echo "low_dependency_dynsmf_plan_stderr=$PLAN_ERR"
+    echo "low_dependency_dynsmf_report=$REPORT_PATH"
+} >>"$EVIDENCE_ENV"
+
+{
+    echo "# Low Dependency UI dynSMF Build Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- compile enabled: $COMPILE_DYNSMF"
+    echo "- plan count: $plan_count"
+    echo "- plans ready: $plans_ready"
+    echo "- compile pass/fail: $compile_pass/$compile_fail"
+    echo
+    echo "## Plans"
+    echo
+    sed -n 's/^dynsmf_build_plan=/- /p' "$PLAN_LOG"
+} >"$REPORT_PATH"
+
+cat "$EVIDENCE_ENV"
+
+[ "$status" = "pass" ]

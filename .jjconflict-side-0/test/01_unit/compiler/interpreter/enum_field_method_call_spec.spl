@@ -1,0 +1,76 @@
+"""
+# Enum-Field Method Call Regression
+
+**Feature IDs:** #INTERP-ENUM-FIELD-METHOD
+**Category:** Interpreter
+**Difficulty:** 2/5
+**Status:** Regression
+
+## Overview
+
+Regression test for Bug A from
+`doc/08_tracking/bug/memory_capabilities_interpreter_crashes_2026-06-11.md`:
+a method call on an enum value retrieved from a struct field crashed/failed
+because `interpreter_method/mod.rs` only consulted the local `enums` map when
+looking up enum body methods, never `GLOBAL_ENUMS`.  When the enum's definition
+was registered only in `GLOBAL_ENUMS` (cross-module or block-scoped), the
+lookup silently fell through and the interpreter produced a "method not found"
+error (or crash).
+
+The fix adds a `GLOBAL_ENUMS` fallback probe in the `Value::Enum` method
+dispatch path, mirroring the three-tier lookup used in
+`interpreter_call/mod.rs` and `interpreter/expr/calls.rs`.
+
+These tests exercise:
+1. Plain enum-on-its-own method call (baseline).
+2. Enum value stored in a struct field — method called on the retrieved value.
+3. Nested: struct field holds an enum; inner method returns a string; checked
+   with `.to_equal()`.
+"""
+
+use std.spec
+
+enum CapKind:
+    Read
+    Write
+    Exec
+
+    fn label(self) -> text:
+        match self:
+            CapKind.Read:
+                return "read"
+            CapKind.Write:
+                return "write"
+            CapKind.Exec:
+                return "exec"
+
+class CapEntry:
+    kind: CapKind
+
+describe "enum-field method call — interpreter regression":
+    it "calls a method on a standalone enum value":
+        val k = CapKind.Read
+        val name = k.label()
+        expect(name).to_equal("read")
+
+    it "calls a method on an enum value stored in a struct field":
+        val entry = CapEntry(kind: CapKind.Write)
+        val k = entry.kind
+        val name = k.label()
+        expect(name).to_equal("write")
+
+    it "calls a method via temp var after field access":
+        val entry = CapEntry(kind: CapKind.Exec)
+        val k = entry.kind
+        expect(k.label()).to_equal("exec")
+
+    it "round-trips all three variants via struct field":
+        val r = CapEntry(kind: CapKind.Read)
+        val w = CapEntry(kind: CapKind.Write)
+        val e = CapEntry(kind: CapKind.Exec)
+        val rk = r.kind
+        val wk = w.kind
+        val ek = e.kind
+        expect(rk.label()).to_equal("read")
+        expect(wk.label()).to_equal("write")
+        expect(ek.label()).to_equal("exec")

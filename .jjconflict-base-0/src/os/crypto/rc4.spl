@@ -1,0 +1,126 @@
+# RC4 (ARC4/ARCFOUR) Stream Cipher — Pure Simple Implementation
+#
+# RC4 is a symmetric stream cipher with variable key length (1-256 bytes).
+# Encryption and decryption are the same operation (XOR with keystream).
+#
+# WARNING: RC4 has known weaknesses. Use only for legacy protocol compatibility
+# (e.g., WEP, old TLS). Prefer ChaCha20 for new applications.
+#
+# References:
+#   RFC 6229 — Test Vectors for the Stream Cipher RC4
+#   Schneier, "Applied Cryptography" 2nd ed.
+
+mod os.crypto.rc4
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _rc4_ksa(key: [u8]) -> [i64]:
+    """Key Scheduling Algorithm — returns initialized 256-entry S-box."""
+    var s: [i64] = []
+    var i: i64 = 0
+    while i < 256:
+        s.push(i)
+        i = i + 1
+
+    var j: i64 = 0
+    var klen: i64 = key.len().to_i64()
+    i = 0
+    while i < 256:
+        var ki: i64 = key[(i % klen).to_u64()].to_i64()
+        j = (j + s[i.to_u64()] + ki) % 256
+        # swap s[i] and s[j]
+        var tmp: i64 = s[i.to_u64()]
+        s[i.to_u64()] = s[j.to_u64()]
+        s[j.to_u64()] = tmp
+        i = i + 1
+
+    s
+
+fn _rc4_gen_keystream(s: [i64], length: i64) -> [u8]:
+    """PRGA — generate `length` keystream bytes from mutable S-box copy."""
+    var si: [i64] = []
+    var ci: i64 = 0
+    while ci < 256:
+        si.push(s[ci.to_u64()])
+        ci = ci + 1
+
+    var out: [u8] = []
+    var rc4_i: i64 = 0
+    var rc4_j: i64 = 0
+    var n: i64 = 0
+    while n < length:
+        rc4_i = (rc4_i + 1) % 256
+        rc4_j = (rc4_j + si[rc4_i.to_u64()]) % 256
+        # swap si[rc4_i] and si[rc4_j]
+        var tmp: i64 = si[rc4_i.to_u64()]
+        si[rc4_i.to_u64()] = si[rc4_j.to_u64()]
+        si[rc4_j.to_u64()] = tmp
+        # output byte
+        var idx: i64 = (si[rc4_i.to_u64()] + si[rc4_j.to_u64()]) % 256
+        var kb: u8 = si[idx.to_u64()].to_u8()
+        out.push(kb)
+        n = n + 1
+
+    out
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn rc4_keystream(key: [u8], length: i64) -> [u8]:
+    """Generate `length` keystream bytes for the given key.
+
+    Args:
+        key:    Variable-length key (1-256 bytes).
+        length: Number of keystream bytes to generate.
+
+    Returns: Raw keystream bytes.
+    """
+    var s = _rc4_ksa(key)
+    _rc4_gen_keystream(s, length)
+
+fn rc4_encrypt(key: [u8], plaintext: [u8]) -> [u8]:
+    """Encrypt plaintext using RC4 stream cipher.
+
+    Args:
+        key:       Variable-length key (1-256 bytes).
+        plaintext: Plaintext bytes to encrypt.
+
+    Returns: Ciphertext (same length as plaintext).
+    """
+    var s = _rc4_ksa(key)
+    var ks = _rc4_gen_keystream(s, plaintext.len().to_i64())
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < plaintext.len().to_i64():
+        out.push(plaintext[i.to_u64()] ^ ks[i.to_u64()])
+        i = i + 1
+    out
+
+fn rc4_decrypt(key: [u8], ciphertext: [u8]) -> [u8]:
+    """Decrypt ciphertext using RC4 stream cipher.
+
+    RC4 decryption is identical to encryption (XOR is self-inverse).
+
+    Args:
+        key:        Variable-length key (1-256 bytes).
+        ciphertext: Ciphertext bytes to decrypt.
+
+    Returns: Plaintext (same length as ciphertext).
+    """
+    rc4_encrypt(key, ciphertext)
+
+fn rc4_init(key: [u8]) -> [i64]:
+    """Initialize RC4 state (S-box) from key for incremental use.
+
+    Returns the 256-entry S-box as [i64] list.
+    The returned state can be passed to rc4_keystream_from_state.
+
+    Args:
+        key: Variable-length key (1-256 bytes).
+
+    Returns: 256-entry S-box.
+    """
+    _rc4_ksa(key)

@@ -1,0 +1,126 @@
+
+use os.compositor.electron_capture.{CaptureResult, capture_error}
+use os.compositor.wm_scene.{WmSceneSpec, render_scene_to_backend}
+use std.common.image.ppm_decode.{decode_ppm_to_argb}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+class QemuScreendumpCommandResult:
+    success: bool
+    error: text
+
+class QemuScreendumpProbeResult:
+    success: bool
+    backend_name: text
+    width: i32
+    height: i32
+    pixel_count: i64
+    non_black_count: i64
+    sample_match_count: i64
+    sample_mismatch_count: i64
+    sample_checksum: i64
+    scene_mismatch_count: i64
+    first_mismatch_x: i64
+    first_mismatch_y: i64
+    error: text
+
+fn capture_qemu_inprocess(scene: WmSceneSpec) -> CaptureResult:
+    val pixels = render_scene_to_backend(scene, nil)
+    CaptureResult(backend_name: "browser_compositor", width: scene.width, height: scene.height, pixels: pixels, success: true, error: "")
+
+fn decode_qemu_screendump_ppm(data: [u8]) -> CaptureResult:
+    match decode_ppm_to_argb(data):
+        Ok(image):
+            CaptureResult(backend_name: "qemu_vm", width: image.width, height: image.height, pixels: image.pixels, success: true, error: "")
+        Err(msg):
+            capture_error("qemu_vm", 0, 0, "QEMU screendump PPM decode failed: {msg}")
+
+fn qemu_screendump_to_file(qmp_socket: text, out_path: text) -> QemuScreendumpCommandResult:
+    val script = "import json,os,socket,sys,time;" +
+        "sock,out=sys.argv[1],sys.argv[2];" +
+        "s=socket.socket(socket.AF_UNIX);s.settimeout(5);s.connect(sock);" +
+        "f=s.makefile('rwb',buffering=0);" +
+        "f.readline();" +
+        "f.write(json.dumps(dict(execute='qmp_capabilities')).encode()+b'\\n');f.flush();f.readline();" +
+        "f.write(json.dumps(dict(execute='human-monitor-command',arguments=dict([('command-line','screendump '+out)]))).encode()+b'\\n');f.flush();" +
+        "f.readline();" +
+        "ok=any((time.sleep(0.1) or (os.path.exists(out) and os.path.getsize(out)>0)) for _ in range(50));" +
+        "sys.exit(0 if ok else 4)"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout("python3", ["-c", script, qmp_socket, out_path], 10000)
+    if exit_code == 0 and rt_file_exists(out_path):
+        return QemuScreendumpCommandResult(success: true, error: "")
+    var detail = "exit_code=" + exit_code.to_text()
+    if stderr.trim().len() > 0:
+        detail = detail + " stderr=" + stderr.trim()
+    elif stdout.trim().len() > 0:
+        detail = detail + " stdout=" + stdout.trim()
+    QemuScreendumpCommandResult(success: false, error: detail)
+
+fn capture_qemu_vm(qmp_socket: text, out_path: text) -> CaptureResult:
+    if qmp_socket.len() == 0:
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump unavailable: empty QMP socket path")
+    if out_path.len() == 0:
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump unavailable: empty output path")
+    if not rt_file_exists(qmp_socket):
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump unavailable for socket: {qmp_socket}")
+    val dumped = qemu_screendump_to_file(qmp_socket, out_path)
+    if not dumped.success:
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump command failed for socket: {qmp_socket} ({dumped.error})")
+    if not rt_file_exists(out_path):
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump did not create output: {out_path}")
+    val data: [u8] = rt_file_read_bytes(out_path) ?? []
+    decode_qemu_screendump_ppm(data)
+
+fn probe_qemu_vm_screendump(qmp_socket: text, out_path: text) -> QemuScreendumpProbeResult:
+    if qmp_socket.len() == 0:
+        return QemuScreendumpProbeResult(success: false, backend_name: "qemu_vm", width: 0, height: 0, pixel_count: 0, non_black_count: 0, sample_match_count: 0, sample_mismatch_count: 0, sample_checksum: 0, scene_mismatch_count: 0, first_mismatch_x: -1, first_mismatch_y: -1, error: "QEMU screendump unavailable: empty QMP socket path")
+    if out_path.len() == 0:
+        return QemuScreendumpProbeResult(success: false, backend_name: "qemu_vm", width: 0, height: 0, pixel_count: 0, non_black_count: 0, sample_match_count: 0, sample_mismatch_count: 0, sample_checksum: 0, scene_mismatch_count: 0, first_mismatch_x: -1, first_mismatch_y: -1, error: "QEMU screendump unavailable: empty output path")
+    if not rt_file_exists(qmp_socket):
+        return QemuScreendumpProbeResult(success: false, backend_name: "qemu_vm", width: 0, height: 0, pixel_count: 0, non_black_count: 0, sample_match_count: 0, sample_mismatch_count: 0, sample_checksum: 0, scene_mismatch_count: 0, first_mismatch_x: -1, first_mismatch_y: -1, error: "QEMU screendump unavailable for socket: {qmp_socket}")
+    val dumped = qemu_screendump_to_file(qmp_socket, out_path)
+    if not dumped.success:
+        return QemuScreendumpProbeResult(success: false, backend_name: "qemu_vm", width: 0, height: 0, pixel_count: 0, non_black_count: 0, sample_match_count: 0, sample_mismatch_count: 0, sample_checksum: 0, scene_mismatch_count: 0, first_mismatch_x: -1, first_mismatch_y: -1, error: "QEMU screendump command failed for socket: {qmp_socket} ({dumped.error})")
+    val script = "import pathlib,sys;" +
+        "p=pathlib.Path(sys.argv[1]);" +
+        "data=p.read_bytes();" +
+        "parts=data.split(None,4);" +
+        "ok=len(parts)>=4 and parts[0]==b'P6' and parts[3]==b'255';" +
+        "w=int(parts[1]) if ok else 0;" +
+        "h=int(parts[2]) if ok else 0;" +
+        "need=w*h*3;" +
+        "payload=parts[4] if ok and len(parts)>=5 else b'';" +
+        "samples=[(100,40,(26,26,46)),(200,750,(56,189,248)),(10,750,(52,152,219)),(130,90,(79,70,229)),(470,130,(22,160,133)),(150,132,(226,232,240)),(300,132,(245,158,11)),(150,180,(37,99,235)),(500,180,(100,116,139)),(860,750,(34,197,94))];" +
+        "matches=0;mismatches=0;checksum=0;" +
+        "nonblack=sum(1 for i in range(0,min(len(payload),need),3) if payload[i:i+3]!=b'\\x00\\x00\\x00');" +
+        "valid=ok and len(payload)>=need;" +
+        "exec(\"\\n\".join([\"for x,y,expected in samples:\",\"    i=(y*w+x)*3\", \"    got=tuple(payload[i:i+3]) if valid and i+3<=len(payload) else ()\", \"    checksum=(checksum*1315423911 + x*31 + y*17 + sum(got)) & 0x7fffffffffffffff\", \"    matches += 1 if got==expected else 0\", \"    mismatches += 0 if got==expected else 1\"]));" +
+        "scene_mismatches=0;first_x=-1;first_y=-1;" +
+        "exec(\"\\n\".join([\"def exp(x,y):\", \"    c=(26,26,46)\", \"    if y<32: c=(36,52,71)\", \"    if y>=736: c=(18,26,36)\", \"    if y>=736 and x<96: c=(52,152,219)\", \"    if x>=120 and x<420 and y>=80 and y<300: c=(32,38,58)\", \"    if x>=120 and x<420 and y>=80 and y<108: c=(79,70,229)\", \"    if x>=136 and x<404 and y>=122 and y<148: c=(15,23,42)\", \"    if x>=146 and x<274 and y>=130 and y<140: c=(226,232,240)\", \"    if x>=286 and x<372 and y>=126 and y<144: c=(245,158,11)\", \"    if x>=140 and x<204 and y>=170 and y<224: c=(37,99,235)\", \"    if x>=214 and x<278 and y>=170 and y<224: c=(16,185,129)\", \"    if x>=288 and x<352 and y>=170 and y<224: c=(244,63,94)\", \"    if x>=460 and x<720 and y>=120 and y<300: c=(24,36,48)\", \"    if x>=460 and x<720 and y>=120 and y<144: c=(22,160,133)\", \"    if x>=476 and x<580 and y>=160 and y<242: c=(100,116,139)\", \"    if x>=596 and x<692 and y>=162 and y<174: c=(248,250,252)\", \"    if x>=596 and x<674 and y>=184 and y<194: c=(148,163,184)\", \"    if x>=596 and x<706 and y>=206 and y<216: c=(203,213,225)\", \"    if x>=116 and x<244 and y>=744 and y<760: c=(56,189,248)\", \"    if x>=842 and x<924 and y>=744 and y<760: c=(34,197,94)\", \"    return c\", \"if valid:\", \"    for yy in range(h):\", \"        row=yy*w*3\", \"        for xx in range(w):\", \"            i=row+xx*3\", \"            if tuple(payload[i:i+3])!=exp(xx,yy):\", \"                scene_mismatches+=1\", \"                if first_x<0:\", \"                    first_x=xx;first_y=yy\"]));" +
+        "print('width='+str(w));print('height='+str(h));print('pixels='+str(w*h));" +
+        "print('nonblack='+str(nonblack));print('sample_matches='+str(matches));print('sample_mismatches='+str(mismatches));print('sample_checksum='+str(checksum));" +
+        "print('scene_mismatches='+str(scene_mismatches));print('first_mismatch_x='+str(first_x));print('first_mismatch_y='+str(first_y));" +
+        "sys.exit(0 if valid and nonblack>0 and mismatches==0 and scene_mismatches==0 else 2)"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout("python3", ["-c", script, out_path], 10000)
+    if exit_code != 0:
+        val err = if stderr.trim().len() > 0: stderr.trim() else: "invalid PPM screendump"
+        return QemuScreendumpProbeResult(success: false, backend_name: "qemu_vm", width: 0, height: 0, pixel_count: 0, non_black_count: _probe_value(stdout, "nonblack="), sample_match_count: _probe_value(stdout, "sample_matches="), sample_mismatch_count: _probe_value(stdout, "sample_mismatches="), sample_checksum: _probe_value(stdout, "sample_checksum="), scene_mismatch_count: _probe_value(stdout, "scene_mismatches="), first_mismatch_x: _probe_value(stdout, "first_mismatch_x="), first_mismatch_y: _probe_value(stdout, "first_mismatch_y="), error: err)
+    val width = _probe_value(stdout, "width=").to_i32()
+    val height = _probe_value(stdout, "height=").to_i32()
+    val pixels = _probe_value(stdout, "pixels=")
+    val nonblack = _probe_value(stdout, "nonblack=")
+    val matches = _probe_value(stdout, "sample_matches=")
+    val mismatches = _probe_value(stdout, "sample_mismatches=")
+    val checksum = _probe_value(stdout, "sample_checksum=")
+    val scene_mismatches = _probe_value(stdout, "scene_mismatches=")
+    val first_x = _probe_value(stdout, "first_mismatch_x=")
+    val first_y = _probe_value(stdout, "first_mismatch_y=")
+    QemuScreendumpProbeResult(success: width > 0 and height > 0 and pixels > 0 and nonblack > 0 and matches == 10 and mismatches == 0 and scene_mismatches == 0, backend_name: "qemu_vm", width: width, height: height, pixel_count: pixels, non_black_count: nonblack, sample_match_count: matches, sample_mismatch_count: mismatches, sample_checksum: checksum, scene_mismatch_count: scene_mismatches, first_mismatch_x: first_x, first_mismatch_y: first_y, error: "")
+
+fn _probe_value(output: text, prefix: text) -> i64:
+    for line in output.split("\n"):
+        if line.starts_with(prefix):
+            return line.slice(prefix.len() as u64, line.len() as u64).trim().parse_i64() ?? 0
+    0

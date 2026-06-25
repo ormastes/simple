@@ -1,0 +1,344 @@
+# Part 2 of src/compiler/70.backend/backend/mir_to_llvm_part2.spl
+use compiler.backend.backend.mir_to_llvm_part2.*
+# Part 2 of src/compiler/70.backend/backend/mir_to_llvm.spl
+use compiler.backend.backend.mir_to_llvm.*
+# MIR to LLVM IR Translation
+#
+# MirToLlvm class that translates MIR to LLVM IR.
+# Implements MirTextCodegen trait for shared instruction dispatch.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at}
+use compiler.backend.backend_api.*
+use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
+use compiler.backend.llvm_type_mapper.LlvmTypeMapper
+use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
+    llvm_ir_builder_build}
+use compiler.backend.common.mir_text_codegen.MirTextCodegen
+
+extern fn rt_env_get(key: text) -> text
+
+# ============================================================================
+# MIR to LLVM IR Translation
+# ============================================================================
+
+impl MirToLlvm:
+    me translate_gep(dest: LocalId, base: MirOperand, indices: [MirOperand]):
+        val dest_name = self.get_local(dest.id)
+        val base_val = self.translate_operand(base)
+        var index_vals: [text] = []
+        for idx in indices:
+            index_vals = index_vals.push(self.translate_operand(idx))
+        val base_ty = self.get_operand_type(base)
+        self.builder.emit_gep(dest_name, base_ty, base_val, index_vals)
+
+    # === Overrides: aggregates ===
+
+    me translate_aggregate(dest: LocalId, kind: AggregateKind, operands: [MirOperand]):
+        val dest_name = self.get_local(dest.id)
+        val agg_ty = self.get_local_type(dest.id)
+        val agg_ptr = self.builder.fresh_local()
+        self.builder.emit_alloca(agg_ptr, agg_ty)
+        for i in 0..operands.len():
+            val elem_val = self.translate_operand(operands[i])
+            val elem_ty = self.get_operand_type(operands[i])
+            val elem_ptr = self.builder.fresh_local()
+            self.builder.emit("  {elem_ptr} = getelementptr inbounds {agg_ty}, ptr {agg_ptr}, i32 0, i32 {i}")
+            self.builder.emit_store(elem_ty, elem_val, elem_ptr)
+        self.builder.emit_load(dest_name, agg_ty, agg_ptr)
+
+    me translate_get_field(dest: LocalId, base: MirOperand, field: i64):
+        val dest_name = self.get_local(dest.id)
+        val base_val = self.translate_operand(base)
+        val nit = self.native_int()
+        val field_ptr = self.builder.fresh_local()
+        self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
+        self.builder.emit_load(dest_name, nit, field_ptr)
+
+    me translate_set_field(base: MirOperand, field: i64, value: MirOperand):
+        val base_val = self.translate_operand(base)
+        val value_val = self.translate_operand(value)
+        val nit = self.native_int()
+        val field_ptr = self.builder.fresh_local()
+        self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
+        self.builder.emit_store(nit, value_val, field_ptr)
+
+    # === Overrides: casts ===
+
+    me translate_cast(dest: LocalId, operand: MirOperand, target: MirType):
+        val dest_name = self.get_local(dest.id)
+        val operand_val = self.translate_operand(operand)
+        val src_ty = self.get_operand_type(operand)
+        val target_ty = self.type_mapper.map_type(target)
+        val cast_inst = self.select_cast_instruction(src_ty, target_ty)
+        self.builder.emit("  {dest_name} = {cast_inst} {src_ty} {operand_val} to {target_ty}")
+
+    me translate_bitcast(dest: LocalId, operand: MirOperand, target: MirType):
+        val dest_name = self.get_local(dest.id)
+        val operand_val = self.translate_operand(operand)
+        val src_ty = self.get_operand_type(operand)
+        val target_ty = self.type_mapper.map_type(target)
+        self.builder.emit("  {dest_name} = bitcast {src_ty} {operand_val} to {target_ty}")
+
+    # === Overrides: indirect calls / intrinsics ===
+
+    me translate_call_indirect(dest: LocalId?, ptr: MirOperand, args: [MirOperand], sig: MirSignature):
+        val dest_name = if dest.?: Some(self.get_local(dest.unwrap().id)) else: nil
+        val ptr_val = self.translate_operand(ptr)
+        var arg_vals: [text] = []
+        for arg in args:
+            arg_vals = arg_vals.push(self.translate_operand(arg))
+        val ret_ty = self.type_mapper.map_type(sig.return_type)
+        self.builder.emit_call_indirect(dest_name, ret_ty, ptr_val, arg_vals)
+
+    me phi_block_id_arg(arg: MirOperand) -> i64?:
+        match arg.kind:
+            case Const(value, _):
+                match value:
+                    case Int(v): Some(v)
+                    case _: nil
+            case _: nil
+
+    me emit_ssa_phi_intrinsic(dest: LocalId?, args: [MirOperand]) -> bool:
+        if not dest.?:
+            return false
+        if args.len() < 4:
+            return false
+        val then_block = self.phi_block_id_arg(args[0])
+        val else_block = self.phi_block_id_arg(args[2])
+        if not then_block.? or not else_block.?:
+            return false
+        val dest_name = self.get_local(dest.unwrap().id)
+        val phi_ty = self.get_local_type(dest.unwrap().id)
+        val then_val = self.translate_operand(args[1])
+        val else_val = self.translate_operand(args[3])
+        self.builder.emit("  {dest_name} = phi {phi_ty} [ {then_val}, %bb{then_block.unwrap()} ], [ {else_val}, %bb{else_block.unwrap()} ]")
+        true
+
+    me translate_intrinsic(dest: LocalId?, name: text, args: [MirOperand]):
+        # Dispatch cipher intrinsics to real LLVM x86 intrinsics.
+        # Falls back to __simple_intrinsic_<name> for unknown names.
+        match name:
+            case "__simple_ssa_phi":
+                if not self.emit_ssa_phi_intrinsic(dest, args):
+                    eprint("[mir-to-llvm] ERROR: malformed __simple_ssa_phi intrinsic")
+            case "crypto_aes_round":
+                self.emit_aes2_intrinsic(dest, "llvm.x86.aesni.aesenc", args)
+            case "crypto_aes_round_last":
+                self.emit_aes2_intrinsic(dest, "llvm.x86.aesni.aesenclast", args)
+            case "crypto_aes_inv_round":
+                self.emit_aes2_intrinsic(dest, "llvm.x86.aesni.aesdec", args)
+            case "crypto_aes_inv_round_last":
+                self.emit_aes2_intrinsic(dest, "llvm.x86.aesni.aesdeclast", args)
+            case "crypto_sha256_rounds2":
+                self.emit_sha256_rnds2_intrinsic(dest, args)
+            case "crc32_u8":
+                self.emit_crc32_intrinsic(dest, "llvm.x86.sse42.crc32.32.8", "i32", "i8", args)
+            case "crc32_u32":
+                self.emit_crc32_intrinsic(dest, "llvm.x86.sse42.crc32.32.32", "i32", "i32", args)
+            case "clmul_lo":
+                self.emit_clmul_intrinsic(dest, args, "0")
+            case "clmul_hi":
+                self.emit_clmul_intrinsic(dest, args, "17")
+            case _:
+                # Generic fallback: forward to runtime stub
+                var arg_vals: [text] = []
+                for arg in args:
+                    arg_vals = arg_vals.push("i64 " + self.translate_operand(arg))
+                val args_str = arg_vals.join(", ")
+                if dest.?:
+                    val dest_name = self.get_local(dest.unwrap().id)
+                    val ret_ty = self.get_local_type(dest.unwrap().id)
+                    self.builder.emit("  {dest_name} = call {ret_ty} @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
+                else:
+                    self.builder.emit("  call void @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
+
+    me translate_inline_asm(asm_template: text, is_volatile: bool, inputs: [MirAsmOperand], outputs: [MirAsmOperand], clobbers: [text]):
+        """Translate inline assembly to LLVM inline asm call."""
+        var constraint_parts: [text] = []
+        var arg_values: [text] = []
+        var arg_types: [text] = []
+
+        for output in outputs:
+            val constraint = self.build_output_constraint(output)
+            constraint_parts.push(constraint)
+
+        for input in inputs:
+            val constraint = self.build_input_constraint(input)
+            constraint_parts.push(constraint)
+            val operand_value = self.translate_operand(input.operand)
+            arg_values.push(operand_value)
+            arg_types.push(self.native_int())
+
+        for clobber in clobbers:
+            constraint_parts.push("~{{clobber}}")
+
+        val constraints = constraint_parts.join(",")
+
+        var arg_list_parts: [text] = []
+        for i in 0..arg_values.len():
+            arg_list_parts.push("{arg_types[i]} {arg_values[i]}")
+        val arg_list = arg_list_parts.join(", ")
+
+        val volatile_flag = if is_volatile: " sideeffect" else: ""
+
+        if outputs.len() == 0:
+            # No outputs: call void
+            val asm_call = "  call void asm{volatile_flag} \"{asm_template}\", \"{constraints}\"({arg_list})"
+            self.builder.emit(asm_call)
+        elif outputs.len() == 1:
+            # Single output: capture result directly
+            val out_op = outputs[0]
+            val out_val = self.translate_operand(out_op.operand)
+            val out_ty = self.native_int()
+            val asm_call = "  {out_val} = call {out_ty} asm{volatile_flag} \"{asm_template}\", \"{constraints}\"({arg_list})"
+            self.builder.emit(asm_call)
+        else:
+            # Multiple outputs: use struct return type
+            var out_types: [text] = []
+            for out in outputs:
+                out_types.push(self.native_int())
+            val struct_ty = "{{ " + out_types.join(", ") + " }}"
+            val first_out_val = self.translate_operand(outputs[0].operand)
+            val tmp_name = "{first_out_val}.asm_ret"
+            val asm_call = "  {tmp_name} = call {struct_ty} asm{volatile_flag} \"{asm_template}\", \"{constraints}\"({arg_list})"
+            self.builder.emit(asm_call)
+            # Extract each output value
+            var out_idx = 0
+            for out in outputs:
+                val out_val = self.translate_operand(out.operand)
+                val out_ty = self.native_int()
+                self.builder.emit("  {out_val} = extractvalue {struct_ty} {tmp_name}, {out_idx}")
+                out_idx = out_idx + 1
+
+    # === Overrides: pipeline operators ===
+
+    me translate_pipe_forward(dest: LocalId, value: MirOperand, func: MirOperand):
+        val dest_name = self.get_local(dest.id)
+        val value_val = self.translate_operand(value)
+        val func_val = self.translate_operand(func)
+        val ret_ty = self.get_local_type(dest.id)
+        self.builder.emit("  {dest_name} = call {ret_ty} {func_val}(i64 {value_val})  ; pipe forward")
+
+    me translate_compose(dest: LocalId, f: MirOperand, g: MirOperand, forward: bool):
+        val dest_name = self.get_local(dest.id)
+        val f_val = self.translate_operand(f)
+        val g_val = self.translate_operand(g)
+        val dir = if forward: "forward" else: "backward"
+        self.builder.emit("  {dest_name} = call ptr @__simple_runtime_compose(ptr {f_val}, ptr {g_val})  ; compose ({dir})")
+
+    me translate_parallel(dest: LocalId, funcs: [MirOperand]):
+        val dest_name = self.get_local(dest.id)
+        val count = funcs.len()
+        self.builder.emit("  {dest_name} = call ptr @__simple_runtime_parallel(i64 {count})  ; parallel ({count} functions)")
+
+    me translate_layer_connect(dest: LocalId, l1: MirOperand, l2: MirOperand):
+        val dest_name = self.get_local(dest.id)
+        val l1_val = self.translate_operand(l1)
+        val l2_val = self.translate_operand(l2)
+        self.builder.emit("  {dest_name} = call ptr @__simple_runtime_layer_connect(ptr {l1_val}, ptr {l2_val})  ; layer connect")
+
+    # === Overrides: borrow checking ===
+
+    me translate_ref(dest: LocalId, kind: MirBorrowKind, place: MirPlace):
+        val dest_name = self.get_local(dest.id)
+        val place_val = self.get_local(place.local.id)
+        val nit = self.native_int()
+        self.builder.emit("  {dest_name} = add {nit} {place_val}, 0  ; Ref (borrow)")
+
+    # === Overrides: unsupported async/actor lowering ===
+
+    me translate_create_promise(dest: LocalId, body: LocalId, result_type: MirType):
+        self.emit_unsupported_panic("LLVM backend does not support async CreatePromise lowering yet")
+
+    me translate_await(dest: LocalId, promise: MirOperand):
+        self.emit_unsupported_panic("LLVM backend does not support async Await lowering yet")
+
+    me translate_yield(value: MirOperand?):
+        self.emit_unsupported_panic("LLVM backend does not support async Yield lowering yet")
+
+    me translate_spawn(dest: LocalId, handler: MirOperand, args: [MirOperand]):
+        self.emit_unsupported_panic("LLVM backend does not support async Spawn lowering yet")
+
+    me translate_send(target: MirOperand, message: MirOperand):
+        self.emit_unsupported_panic("LLVM backend does not support actor Send lowering yet")
+
+    me translate_receive(dest: LocalId, timeout: MirOperand?):
+        self.emit_unsupported_panic("LLVM backend does not support actor Receive lowering yet")
+
+    # === Overrides: unsupported GPU lowering ===
+
+    me translate_gpu_kernel_def(name: text):
+        self.emit_unsupported_panic("LLVM text backend does not support GPU kernel definitions")
+
+    me translate_gpu_launch(args: [text]):
+        self.emit_unsupported_panic("LLVM text backend does not support GPU launches")
+
+    me translate_gpu_global_id(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuGlobalId")
+
+    me translate_gpu_local_id(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuLocalId")
+
+    me translate_gpu_block_id(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuBlockId")
+
+    me translate_gpu_block_dim(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuBlockDim")
+
+    me translate_gpu_grid_dim(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuGridDim")
+
+    me translate_gpu_barrier(scope: GpuBarrierScope):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuBarrier")
+
+    me translate_gpu_mem_fence(scope: GpuMemoryScope):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuMemFence")
+
+    me translate_gpu_shared_alloc(dest: LocalId, type_: MirType, size: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuSharedAlloc")
+
+    me translate_gpu_atomic_op(dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuAtomicOp")
+
+    me translate_gpu_atomic_cas(dest: LocalId, ptr: MirOperand, expected: MirOperand, desired: MirOperand):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuAtomicCas")
+
+    # === Overrides: unsupported VHDL lowering ===
+
+    me translate_vhdl_process(kind: VhdlProcessKind, body_block: BlockId):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL process lowering")
+
+    me translate_vhdl_signal_assign(target: MirOperand, value: MirOperand, delay_ns: i64?):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL signal assignment lowering")
+
+    me translate_vhdl_var_assign(target: MirOperand, value: MirOperand):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL variable assignment lowering")
+
+    me translate_vhdl_port_map(entity: text, instance: text, connections: [(text, MirOperand)]):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL port maps")
+
+    me translate_vhdl_resize(dest: LocalId, operand: MirOperand, new_width: i64, signed: bool):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL resize")
+
+    me translate_vhdl_slice(dest: LocalId, signal: MirOperand, hi: i64, lo: i64):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL slice")
+
+    me translate_vhdl_concat(dest: LocalId, parts: [MirOperand]):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL concat")
+
+    # === Overrides: unsupported SIMD lowering ===
+
+    me translate_simd_binop(dest: LocalId, a: MirOperand, b: MirOperand, op_name: text):
+        self.emit_unsupported_panic("LLVM backend does not support SIMD operation {op_name}")
+
+    me translate_simd_fma(dest: LocalId, a: MirOperand, b: MirOperand, c: MirOperand, op_name: text):
+        self.emit_unsupported_panic("LLVM backend does not support SIMD operation {op_name}")
+
+    me translate_simd_horizontal(dest: LocalId, a: MirOperand, op_name: text):
+        self.emit_unsupported_panic("LLVM backend does not support SIMD operation {op_name}")
+
+# ============================================================================
+# LLVM-Specific Helpers (not part of trait)
+# ============================================================================

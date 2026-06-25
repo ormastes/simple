@@ -1,0 +1,71 @@
+# @tag: web, renderer, backend, parity, metal
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer.spl 40%
+#
+# The Simple web rasterizer turns HTML into pixels through
+# Engine2D.create_with_backend(w, h, backend). This guards that the three
+# 2D-backed web renderers agree: software, cpu, and metal must produce identical
+# framebuffers. On macOS the metal path uses a real Metal device (its GPU
+# clear/rect dispatch + deterministic CPU mirror readback), so parity here also
+# proves the Metal-backed web renderer matches the software reference. (The
+# Tauri-backed web renderer consumes the same render_html_tree HTML and is
+# covered by test/unit/app/ui/ui_layer_web_tauri_contract_spec.spl.)
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend, simple_web_resolved_engine2d_backend_name}
+use std.nogc_sync_mut.env.platform.{is_macos}
+
+fn sample_html() -> text:
+    "<html><body><div class='wm-app-titlebar'>Title</div><div class='wm-app-content'>Body</div></body></html>"
+
+fn pixels_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn count_distinct(px: [u32]) -> i32:
+    var seen: [u32] = []
+    var i = 0
+    while i < px.len():
+        val c = px[i]
+        var found = false
+        var j = 0
+        while j < seen.len():
+            if seen[j] == c:
+                found = true
+            j = j + 1
+        if not found and seen.len() < 32:
+            seen.push(c)
+        i = i + 1
+    seen.len()
+
+describe "Simple web renderer 2D-backend parity":
+
+    context "framebuffer output":
+        it "software backend renders a full framebuffer with multiple colors":
+            val px = simple_web_render_html_to_pixels_with_engine2d_backend(sample_html(), 48, 32, "software")
+            expect(px.len()).to_equal(48 * 32)
+            expect(count_distinct(px)).to_be_greater_than(1)
+
+    context "cross-backend parity":
+        it "cpu-backed pixels match software-backed exactly":
+            val sw = simple_web_render_html_to_pixels_with_engine2d_backend(sample_html(), 48, 32, "software")
+            val cpu = simple_web_render_html_to_pixels_with_engine2d_backend(sample_html(), 48, 32, "cpu")
+            expect(pixels_equal(sw, cpu)).to_equal(true)
+
+        it "metal-backed pixels match software-backed exactly":
+            val sw = simple_web_render_html_to_pixels_with_engine2d_backend(sample_html(), 48, 32, "software")
+            val mt = simple_web_render_html_to_pixels_with_engine2d_backend(sample_html(), 48, 32, "metal")
+            expect(pixels_equal(sw, mt)).to_equal(true)
+
+    context "real backend selection":
+        it "metal resolves to a real metal device on macOS (no silent fallback)":
+            val name = simple_web_resolved_engine2d_backend_name(48, 32, "metal")
+            if is_macos():
+                expect(name).to_equal("metal")
+            else:
+                expect(name).to_equal("software")

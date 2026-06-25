@@ -1,0 +1,229 @@
+"""
+# RV64 Instruction Decode Unit Tests
+
+**Feature IDs:** #RV64-DECODE-001
+**Category:** Hardware
+**Difficulty:** 2/5
+**Status:** Draft
+
+## Overview
+
+Unit tests for instruction field extraction on 64-bit RISC-V.
+All RV32/RV64 base instructions are 32-bit encoded.
+Field extraction is shared; this file tests via the RV64 decode module.
+"""
+
+import std.spec
+
+use hardware.rv64gc.core.rv64_decode.*
+use hardware.rv64gc.pkg.rv64_isa_pkg.*
+use hardware.rv64gc.pkg.rv64_types_pkg.*
+
+describe "Field Extraction":
+    """
+    ## Basic Instruction Field Decoding
+
+    Verify correct extraction of opcode, rd, rs1, rs2, funct3, funct7
+    from a 32-bit instruction word.
+    """
+
+    it "extracts opcode from ADDI x10, x0, 10":
+        val instr = 0x00A00513
+        expect(decode_opcode(instr)).to_equal(OP_OP_IMM)
+
+    it "extracts rd correctly":
+        val instr = 0x00A00513  # ADDI x10, x0, 10
+        expect(decode_rd(instr)).to_equal(10)
+
+    it "extracts rs1 correctly":
+        val instr = 0x00A00513  # ADDI x10, x0, 10
+        expect(decode_rs1(instr)).to_equal(0)
+
+    it "extracts rs2 from R-type":
+        val instr = 0x00B50533  # ADD x10, x10, x11
+        expect(decode_rs2(instr)).to_equal(11)
+
+    it "extracts funct3 correctly":
+        val instr = 0x00A00513  # ADDI x10, x0, 10 (funct3=0)
+        expect(decode_funct3(instr)).to_equal(0)
+
+    it "extracts funct7 from R-type":
+        val instr = 0x40B50533  # SUB x10, x10, x11 (funct7=0x20)
+        expect(decode_funct7(instr)).to_equal(0x20)
+
+describe "I-Type Immediate":
+    """
+    ## I-Type Immediate Decoding
+
+    12-bit signed immediate from bits [31:20].
+    """
+
+    it "positive immediate":
+        val instr = 0x00A00513  # ADDI x10, x0, 10
+        expect(decode_imm_i(instr)).to_equal(10)
+
+    it "negative immediate sign-extends to 64 bits":
+        val instr = 0xFFB00513  # ADDI x10, x0, -5
+        expect(decode_imm_i(instr)).to_equal(-5)
+
+    it "zero immediate":
+        val instr = 0x00000513  # ADDI x10, x0, 0
+        expect(decode_imm_i(instr)).to_equal(0)
+
+    it "max positive immediate (2047)":
+        val instr = 0x7FF00513  # ADDI x10, x0, 2047
+        expect(decode_imm_i(instr)).to_equal(2047)
+
+describe "S-Type Immediate":
+    """
+    ## S-Type Immediate Decoding
+
+    12-bit signed immediate from bits [31:25] and [11:7].
+    """
+
+    it "positive S-type immediate":
+        # SW x11, 8(x10) => imm=8, rs2=11, rs1=10, funct3=2
+        val instr = 0x00B52423  # SW x11, 8(x10)
+        expect(decode_imm_s(instr)).to_equal(8)
+
+    it "negative S-type immediate":
+        # SW x11, -4(x10) => imm=-4
+        val instr = 0xFEB52E23  # SW x11, -4(x10)
+        expect(decode_imm_s(instr)).to_equal(-4)
+
+    it "zero S-type immediate":
+        val instr = 0x00B52023  # SW x11, 0(x10)
+        expect(decode_imm_s(instr)).to_equal(0)
+
+describe "B-Type Immediate":
+    """
+    ## B-Type Immediate Decoding
+
+    13-bit signed immediate (bit 0 always 0) from scattered fields.
+    """
+
+    it "positive B-type immediate":
+        # BEQ x10, x11, +8
+        val instr = 0x00B50463  # BEQ x10, x11, 8
+        expect(decode_imm_b(instr)).to_equal(8)
+
+    it "negative B-type immediate":
+        # BEQ x10, x11, -8
+        val instr = 0xFEB50CE3  # BEQ x10, x11, -8
+        expect(decode_imm_b(instr)).to_equal(-8)
+
+    it "B-type immediate is always even":
+        val instr = 0x00B50463  # BEQ x10, x11, 8
+        val imm = decode_imm_b(instr)
+        expect(imm % 2).to_equal(0)
+
+describe "U-Type Immediate":
+    """
+    ## U-Type Immediate Decoding
+
+    20-bit upper immediate, shifted left by 12.
+    """
+
+    it "LUI immediate":
+        # LUI x10, 0x12345
+        val instr = 0x12345537  # LUI x10, 0x12345
+        expect(decode_imm_u(instr)).to_equal(0x12345000)
+
+    it "LUI with sign bit set":
+        # LUI x10, 0x80000
+        val instr = 0x80000537  # LUI x10, 0x80000
+        val imm = decode_imm_u(instr)
+        expect(imm and 0xFFFFF000).to_equal(0xFFFFFFFF80000000)
+
+describe "J-Type Immediate":
+    """
+    ## J-Type Immediate Decoding
+
+    21-bit signed immediate (bit 0 always 0) from scattered fields.
+    """
+
+    it "positive J-type immediate":
+        # JAL x1, +8
+        val instr = 0x008000EF  # JAL x1, 8
+        expect(decode_imm_j(instr)).to_equal(8)
+
+    it "negative J-type immediate":
+        # JAL x1, -4
+        val instr = 0xFFDFF0EF  # JAL x1, -4
+        expect(decode_imm_j(instr)).to_equal(-4)
+
+    it "J-type immediate is always even":
+        val instr = 0x008000EF  # JAL x1, 8
+        val imm = decode_imm_j(instr)
+        expect(imm % 2).to_equal(0)
+
+describe "RV64 OP-32 Opcode Decode":
+    """
+    ## RV64-Specific OP-32 Family
+
+    Opcode 0x3B for W-variant instructions (ADDW, SUBW, etc.)
+    """
+
+    it "identifies OP_OP_32 opcode (0x3B)":
+        # ADDW x10, x11, x12 => opcode=0x3B
+        val instr = 0x00C585BB  # ADDW x11, x11, x12
+        expect(decode_opcode(instr)).to_equal(OP_OP_32)
+
+    it "identifies OP_IMM_32 opcode (0x1B)":
+        # ADDIW x10, x0, 5 => opcode=0x1B
+        val instr = 0x0050051B  # ADDIW x10, x0, 5
+        expect(decode_opcode(instr)).to_equal(OP_OP_IMM_32)
+
+describe "ALU Operation Mapping":
+    """
+    ## ALU Op Decode from Opcode/Funct3/Funct7
+    """
+
+    it "ADD: opcode=OP, funct3=0, funct7=0":
+        val op = decode_alu_op(OP_OP, F3_ADD_SUB, F7_NORMAL)
+        expect(op == AluOp.Add).to_equal(true)
+
+    it "SUB: opcode=OP, funct3=0, funct7=0x20":
+        val op = decode_alu_op(OP_OP, F3_ADD_SUB, F7_SUB_SRA)
+        expect(op == AluOp.Sub).to_equal(true)
+
+    it "AND: opcode=OP, funct3=7, funct7=0":
+        val op = decode_alu_op(OP_OP, F3_AND, F7_NORMAL)
+        expect(op == AluOp.And).to_equal(true)
+
+    it "OR: opcode=OP, funct3=6, funct7=0":
+        val op = decode_alu_op(OP_OP, F3_OR, F7_NORMAL)
+        expect(op == AluOp.Or).to_equal(true)
+
+    it "XOR: opcode=OP, funct3=4, funct7=0":
+        val op = decode_alu_op(OP_OP, F3_XOR, F7_NORMAL)
+        expect(op == AluOp.Xor).to_equal(true)
+
+    it "SLT: opcode=OP, funct3=2, funct7=0":
+        val op = decode_alu_op(OP_OP, F3_SLT, F7_NORMAL)
+        expect(op == AluOp.Slt).to_equal(true)
+
+describe "Branch Operation Mapping":
+    """
+    ## Branch Op Decode from Funct3
+    """
+
+    it "BEQ: funct3=0":
+        val op = decode_branch_op(F3_BEQ)
+        expect(op == BranchOp.Beq).to_equal(true)
+
+    it "BNE: funct3=1":
+        val op = decode_branch_op(F3_BNE)
+        expect(op == BranchOp.Bne).to_equal(true)
+
+    it "BLT: funct3=4":
+        val op = decode_branch_op(F3_BLT)
+        expect(op == BranchOp.Blt).to_equal(true)
+
+    it "BGE: funct3=5":
+        val op = decode_branch_op(F3_BGE)
+        expect(op == BranchOp.Bge).to_equal(true)
+
+    it "BLTU: funct3=6":
+        val op = decode_branch_op(F3_BLTU)
+        expect(op == BranchOp.Bltu).to_equal(true)

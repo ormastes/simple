@@ -1,0 +1,1019 @@
+# BLAKE2b hash implementation per RFC 7693.
+# Provides blake2b_512_bytes, blake2b_512_text, blake2b_256_bytes, blake2b_256_text.
+#
+# Interpreter workarounds:
+# 1. >> on i64 is arithmetic (sign-extending). Use _lshr64 helpers for logical shifts.
+#    See: doc/08_tracking/bug/u64_right_shift_fn_param_arithmetic_2026-05-02.md
+# 2. + on i64 panics on overflow (not wrapping). Use _wadd64 for all 64-bit additions.
+#    See: doc/08_tracking/bug/interpreter_i64_add_overflow_not_wrapping_2026-06-15.md
+# 3. Array parameters cannot be mutated (W1006). All round state uses scalar var locals.
+
+# ---------------------------------------------------------------------------
+# Logical right-shift helpers (one per shift amount used).
+# ---------------------------------------------------------------------------
+
+fn _lshr64(x: i64, n: i64) -> i64:
+    if n <= 0:
+        return x
+    if n >= 64:
+        return 0
+    val low63 = (x & 9223372036854775807) >> n
+    if x < 0:
+        low63 | (1 << (63 - n))
+    else:
+        low63
+
+fn _lshr64_16(x: i64) -> i64:
+    val low63 = (x & 9223372036854775807) >> 16
+    if x < 0: low63 | (1 << 47) else: low63
+
+fn _lshr64_24(x: i64) -> i64:
+    val low63 = (x & 9223372036854775807) >> 24
+    if x < 0: low63 | (1 << 39) else: low63
+
+fn _lshr64_32(x: i64) -> i64:
+    val low63 = (x & 9223372036854775807) >> 32
+    if x < 0: low63 | (1 << 31) else: low63
+
+fn _lshr64_40(x: i64) -> i64:
+    val low63 = (x & 9223372036854775807) >> 40
+    if x < 0: low63 | (1 << 23) else: low63
+
+fn _lshr64_48(x: i64) -> i64:
+    val low63 = (x & 9223372036854775807) >> 48
+    if x < 0: low63 | (1 << 15) else: low63
+
+fn _lshr64_56(x: i64) -> i64:
+    val low63 = (x & 9223372036854775807) >> 56
+    if x < 0: low63 | (1 << 7) else: low63
+
+fn _lshr64_63(x: i64) -> i64:
+    if x < 0: 1 else: 0
+
+# ---------------------------------------------------------------------------
+# Rotate-right helpers for BLAKE2b's four rotation constants: 32, 24, 16, 63
+# ---------------------------------------------------------------------------
+
+fn _rotr64_16(x: i64) -> i64:
+    _lshr64_16(x) | (x << 48)
+
+fn _rotr64_24(x: i64) -> i64:
+    _lshr64_24(x) | (x << 40)
+
+fn _rotr64_32(x: i64) -> i64:
+    _lshr64_32(x) | (x << 32)
+
+fn _rotr64_63(x: i64) -> i64:
+    _lshr64_63(x) | (x << 1)
+
+# ---------------------------------------------------------------------------
+# _wadd64: wrapping 64-bit addition workaround for the interpreter.
+# ---------------------------------------------------------------------------
+
+fn _wadd64(a: i64, b: i64) -> i64:
+    val lo = (a & 4294967295) + (b & 4294967295)
+    val hi = _lshr64_32(a) + _lshr64_32(b) + _lshr64_32(lo)
+    (hi << 32) | (lo & 4294967295)
+
+# ---------------------------------------------------------------------------
+# Pack 8 bytes at offset off from byte array b into a little-endian 64-bit word.
+# ---------------------------------------------------------------------------
+
+fn _pack_le64(b: [i64], off: i64, blen: i64) -> i64:
+    val b0: i64 = if off   < blen: b[off]   & 255 else: 0
+    val b1: i64 = if off+1 < blen: b[off+1] & 255 else: 0
+    val b2: i64 = if off+2 < blen: b[off+2] & 255 else: 0
+    val b3: i64 = if off+3 < blen: b[off+3] & 255 else: 0
+    val b4: i64 = if off+4 < blen: b[off+4] & 255 else: 0
+    val b5: i64 = if off+5 < blen: b[off+5] & 255 else: 0
+    val b6: i64 = if off+6 < blen: b[off+6] & 255 else: 0
+    val b7: i64 = if off+7 < blen: b[off+7] & 255 else: 0
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+
+# ---------------------------------------------------------------------------
+# BLAKE2b core: process data of any length with given digest_size (32 or 64).
+# All round state is scalar vars. No arrays are mutated via parameters.
+# ---------------------------------------------------------------------------
+
+fn _blake2b_core(data: [i64], digest_size: i64) -> [i64]:
+    # BLAKE2b IV = SHA-512 initial hash values (signed i64)
+    val iv0: i64 =  7640891576956012808   # 0x6a09e667f3bcc908
+    val iv1: i64 = -4942790177534073029   # 0xbb67ae8584caa73b
+    val iv2: i64 =  4354685564936845355   # 0x3c6ef372fe94f82b
+    val iv3: i64 = -6534734903238641935   # 0xa54ff53a5f1d36f1
+    val iv4: i64 =  5840696475078001361   # 0x510e527fade682d1
+    val iv5: i64 = -7276294671716946913   # 0x9b05688c2b3e6c1f
+    val iv6: i64 =  2270897969802886507   # 0x1f83d9abfb41bd6b
+    val iv7: i64 =  6620516959819538809   # 0x5be0cd19137e2179
+
+    # Parameter block word 0: digest_len | (fanout=1 << 16) | (depth=1 << 24)
+    val param_word: i64 = digest_size | (1 << 16) | (1 << 24)
+
+    var h0 = iv0 ^ param_word
+    var h1 = iv1
+    var h2 = iv2
+    var h3 = iv3
+    var h4 = iv4
+    var h5 = iv5
+    var h6 = iv6
+    var h7 = iv7
+
+    val data_len = data.len()
+
+    # Compute total number of 128-byte blocks (at least 1, even for empty input)
+    var total_blocks = data_len / 128
+    if data_len & 127 != 0:
+        total_blocks = total_blocks + 1
+    if total_blocks == 0:
+        total_blocks = 1
+
+    var block_idx = 0
+    while block_idx < total_blocks:
+        val block_start = block_idx * 128
+
+        # Bytes consumed so far after this block
+        var t: i64 = block_start + 128
+        if t > data_len:
+            t = data_len
+
+        val is_last: i64 = if block_idx == total_blocks - 1: 1 else: 0
+
+        # Unpack 16 message words (zero-pad if past end of data)
+        val m0  = _pack_le64(data, block_start,       data_len)
+        val m1  = _pack_le64(data, block_start +   8, data_len)
+        val m2  = _pack_le64(data, block_start +  16, data_len)
+        val m3  = _pack_le64(data, block_start +  24, data_len)
+        val m4  = _pack_le64(data, block_start +  32, data_len)
+        val m5  = _pack_le64(data, block_start +  40, data_len)
+        val m6  = _pack_le64(data, block_start +  48, data_len)
+        val m7  = _pack_le64(data, block_start +  56, data_len)
+        val m8  = _pack_le64(data, block_start +  64, data_len)
+        val m9  = _pack_le64(data, block_start +  72, data_len)
+        val m10 = _pack_le64(data, block_start +  80, data_len)
+        val m11 = _pack_le64(data, block_start +  88, data_len)
+        val m12 = _pack_le64(data, block_start +  96, data_len)
+        val m13 = _pack_le64(data, block_start + 104, data_len)
+        val m14 = _pack_le64(data, block_start + 112, data_len)
+        val m15 = _pack_le64(data, block_start + 120, data_len)
+
+        # Initialize working vector v0..v15
+        var v0  = h0
+        var v1  = h1
+        var v2  = h2
+        var v3  = h3
+        var v4  = h4
+        var v5  = h5
+        var v6  = h6
+        var v7  = h7
+        var v8  = iv0
+        var v9  = iv1
+        var v10 = iv2
+        var v11 = iv3
+        var v12 = iv4 ^ t
+        var v13 = iv5
+        var v14 = if is_last != 0: iv6 ^ -1 else: iv6
+        var v15 = iv7
+
+        # Round 0 — sigma row: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+        v0 = _wadd64(_wadd64(v0, v4), m0)
+        v12 = _rotr64_32(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_24(v4 ^ v8)
+        v0 = _wadd64(_wadd64(v0, v4), m1)
+        v12 = _rotr64_16(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_63(v4 ^ v8)
+        v1 = _wadd64(_wadd64(v1, v5), m2)
+        v13 = _rotr64_32(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_24(v5 ^ v9)
+        v1 = _wadd64(_wadd64(v1, v5), m3)
+        v13 = _rotr64_16(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_63(v5 ^ v9)
+        v2 = _wadd64(_wadd64(v2, v6), m4)
+        v14 = _rotr64_32(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_24(v6 ^ v10)
+        v2 = _wadd64(_wadd64(v2, v6), m5)
+        v14 = _rotr64_16(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_63(v6 ^ v10)
+        v3 = _wadd64(_wadd64(v3, v7), m6)
+        v15 = _rotr64_32(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_24(v7 ^ v11)
+        v3 = _wadd64(_wadd64(v3, v7), m7)
+        v15 = _rotr64_16(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_63(v7 ^ v11)
+        v0 = _wadd64(_wadd64(v0, v5), m8)
+        v15 = _rotr64_32(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_24(v5 ^ v10)
+        v0 = _wadd64(_wadd64(v0, v5), m9)
+        v15 = _rotr64_16(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_63(v5 ^ v10)
+        v1 = _wadd64(_wadd64(v1, v6), m10)
+        v12 = _rotr64_32(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_24(v6 ^ v11)
+        v1 = _wadd64(_wadd64(v1, v6), m11)
+        v12 = _rotr64_16(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_63(v6 ^ v11)
+        v2 = _wadd64(_wadd64(v2, v7), m12)
+        v13 = _rotr64_32(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_24(v7 ^ v8)
+        v2 = _wadd64(_wadd64(v2, v7), m13)
+        v13 = _rotr64_16(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_63(v7 ^ v8)
+        v3 = _wadd64(_wadd64(v3, v4), m14)
+        v14 = _rotr64_32(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_24(v4 ^ v9)
+        v3 = _wadd64(_wadd64(v3, v4), m15)
+        v14 = _rotr64_16(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_63(v4 ^ v9)
+
+        # Round 1 — sigma row: [14,10,4,8,9,15,13,6,1,12,0,2,11,7,5,3]
+        v0 = _wadd64(_wadd64(v0, v4), m14)
+        v12 = _rotr64_32(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_24(v4 ^ v8)
+        v0 = _wadd64(_wadd64(v0, v4), m10)
+        v12 = _rotr64_16(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_63(v4 ^ v8)
+        v1 = _wadd64(_wadd64(v1, v5), m4)
+        v13 = _rotr64_32(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_24(v5 ^ v9)
+        v1 = _wadd64(_wadd64(v1, v5), m8)
+        v13 = _rotr64_16(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_63(v5 ^ v9)
+        v2 = _wadd64(_wadd64(v2, v6), m9)
+        v14 = _rotr64_32(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_24(v6 ^ v10)
+        v2 = _wadd64(_wadd64(v2, v6), m15)
+        v14 = _rotr64_16(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_63(v6 ^ v10)
+        v3 = _wadd64(_wadd64(v3, v7), m13)
+        v15 = _rotr64_32(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_24(v7 ^ v11)
+        v3 = _wadd64(_wadd64(v3, v7), m6)
+        v15 = _rotr64_16(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_63(v7 ^ v11)
+        v0 = _wadd64(_wadd64(v0, v5), m1)
+        v15 = _rotr64_32(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_24(v5 ^ v10)
+        v0 = _wadd64(_wadd64(v0, v5), m12)
+        v15 = _rotr64_16(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_63(v5 ^ v10)
+        v1 = _wadd64(_wadd64(v1, v6), m0)
+        v12 = _rotr64_32(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_24(v6 ^ v11)
+        v1 = _wadd64(_wadd64(v1, v6), m2)
+        v12 = _rotr64_16(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_63(v6 ^ v11)
+        v2 = _wadd64(_wadd64(v2, v7), m11)
+        v13 = _rotr64_32(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_24(v7 ^ v8)
+        v2 = _wadd64(_wadd64(v2, v7), m7)
+        v13 = _rotr64_16(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_63(v7 ^ v8)
+        v3 = _wadd64(_wadd64(v3, v4), m5)
+        v14 = _rotr64_32(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_24(v4 ^ v9)
+        v3 = _wadd64(_wadd64(v3, v4), m3)
+        v14 = _rotr64_16(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_63(v4 ^ v9)
+
+        # Round 2 — sigma row: [11,8,12,0,5,2,15,13,10,14,3,6,7,1,9,4]
+        v0 = _wadd64(_wadd64(v0, v4), m11)
+        v12 = _rotr64_32(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_24(v4 ^ v8)
+        v0 = _wadd64(_wadd64(v0, v4), m8)
+        v12 = _rotr64_16(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_63(v4 ^ v8)
+        v1 = _wadd64(_wadd64(v1, v5), m12)
+        v13 = _rotr64_32(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_24(v5 ^ v9)
+        v1 = _wadd64(_wadd64(v1, v5), m0)
+        v13 = _rotr64_16(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_63(v5 ^ v9)
+        v2 = _wadd64(_wadd64(v2, v6), m5)
+        v14 = _rotr64_32(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_24(v6 ^ v10)
+        v2 = _wadd64(_wadd64(v2, v6), m2)
+        v14 = _rotr64_16(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_63(v6 ^ v10)
+        v3 = _wadd64(_wadd64(v3, v7), m15)
+        v15 = _rotr64_32(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_24(v7 ^ v11)
+        v3 = _wadd64(_wadd64(v3, v7), m13)
+        v15 = _rotr64_16(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_63(v7 ^ v11)
+        v0 = _wadd64(_wadd64(v0, v5), m10)
+        v15 = _rotr64_32(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_24(v5 ^ v10)
+        v0 = _wadd64(_wadd64(v0, v5), m14)
+        v15 = _rotr64_16(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_63(v5 ^ v10)
+        v1 = _wadd64(_wadd64(v1, v6), m3)
+        v12 = _rotr64_32(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_24(v6 ^ v11)
+        v1 = _wadd64(_wadd64(v1, v6), m6)
+        v12 = _rotr64_16(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_63(v6 ^ v11)
+        v2 = _wadd64(_wadd64(v2, v7), m7)
+        v13 = _rotr64_32(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_24(v7 ^ v8)
+        v2 = _wadd64(_wadd64(v2, v7), m1)
+        v13 = _rotr64_16(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_63(v7 ^ v8)
+        v3 = _wadd64(_wadd64(v3, v4), m9)
+        v14 = _rotr64_32(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_24(v4 ^ v9)
+        v3 = _wadd64(_wadd64(v3, v4), m4)
+        v14 = _rotr64_16(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_63(v4 ^ v9)
+
+        # Round 3 — sigma row: [7,9,3,1,13,12,11,14,2,6,5,10,4,0,15,8]
+        v0 = _wadd64(_wadd64(v0, v4), m7)
+        v12 = _rotr64_32(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_24(v4 ^ v8)
+        v0 = _wadd64(_wadd64(v0, v4), m9)
+        v12 = _rotr64_16(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_63(v4 ^ v8)
+        v1 = _wadd64(_wadd64(v1, v5), m3)
+        v13 = _rotr64_32(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_24(v5 ^ v9)
+        v1 = _wadd64(_wadd64(v1, v5), m1)
+        v13 = _rotr64_16(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_63(v5 ^ v9)
+        v2 = _wadd64(_wadd64(v2, v6), m13)
+        v14 = _rotr64_32(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_24(v6 ^ v10)
+        v2 = _wadd64(_wadd64(v2, v6), m12)
+        v14 = _rotr64_16(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_63(v6 ^ v10)
+        v3 = _wadd64(_wadd64(v3, v7), m11)
+        v15 = _rotr64_32(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_24(v7 ^ v11)
+        v3 = _wadd64(_wadd64(v3, v7), m14)
+        v15 = _rotr64_16(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_63(v7 ^ v11)
+        v0 = _wadd64(_wadd64(v0, v5), m2)
+        v15 = _rotr64_32(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_24(v5 ^ v10)
+        v0 = _wadd64(_wadd64(v0, v5), m6)
+        v15 = _rotr64_16(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_63(v5 ^ v10)
+        v1 = _wadd64(_wadd64(v1, v6), m5)
+        v12 = _rotr64_32(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_24(v6 ^ v11)
+        v1 = _wadd64(_wadd64(v1, v6), m10)
+        v12 = _rotr64_16(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_63(v6 ^ v11)
+        v2 = _wadd64(_wadd64(v2, v7), m4)
+        v13 = _rotr64_32(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_24(v7 ^ v8)
+        v2 = _wadd64(_wadd64(v2, v7), m0)
+        v13 = _rotr64_16(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_63(v7 ^ v8)
+        v3 = _wadd64(_wadd64(v3, v4), m15)
+        v14 = _rotr64_32(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_24(v4 ^ v9)
+        v3 = _wadd64(_wadd64(v3, v4), m8)
+        v14 = _rotr64_16(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_63(v4 ^ v9)
+
+        # Round 4 — sigma row: [9,0,5,7,2,4,10,15,14,1,11,12,6,8,3,13]
+        v0 = _wadd64(_wadd64(v0, v4), m9)
+        v12 = _rotr64_32(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_24(v4 ^ v8)
+        v0 = _wadd64(_wadd64(v0, v4), m0)
+        v12 = _rotr64_16(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_63(v4 ^ v8)
+        v1 = _wadd64(_wadd64(v1, v5), m5)
+        v13 = _rotr64_32(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_24(v5 ^ v9)
+        v1 = _wadd64(_wadd64(v1, v5), m7)
+        v13 = _rotr64_16(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_63(v5 ^ v9)
+        v2 = _wadd64(_wadd64(v2, v6), m2)
+        v14 = _rotr64_32(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_24(v6 ^ v10)
+        v2 = _wadd64(_wadd64(v2, v6), m4)
+        v14 = _rotr64_16(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_63(v6 ^ v10)
+        v3 = _wadd64(_wadd64(v3, v7), m10)
+        v15 = _rotr64_32(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_24(v7 ^ v11)
+        v3 = _wadd64(_wadd64(v3, v7), m15)
+        v15 = _rotr64_16(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_63(v7 ^ v11)
+        v0 = _wadd64(_wadd64(v0, v5), m14)
+        v15 = _rotr64_32(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_24(v5 ^ v10)
+        v0 = _wadd64(_wadd64(v0, v5), m1)
+        v15 = _rotr64_16(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_63(v5 ^ v10)
+        v1 = _wadd64(_wadd64(v1, v6), m11)
+        v12 = _rotr64_32(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_24(v6 ^ v11)
+        v1 = _wadd64(_wadd64(v1, v6), m12)
+        v12 = _rotr64_16(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_63(v6 ^ v11)
+        v2 = _wadd64(_wadd64(v2, v7), m6)
+        v13 = _rotr64_32(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_24(v7 ^ v8)
+        v2 = _wadd64(_wadd64(v2, v7), m8)
+        v13 = _rotr64_16(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_63(v7 ^ v8)
+        v3 = _wadd64(_wadd64(v3, v4), m3)
+        v14 = _rotr64_32(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_24(v4 ^ v9)
+        v3 = _wadd64(_wadd64(v3, v4), m13)
+        v14 = _rotr64_16(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_63(v4 ^ v9)
+
+        # Round 5 — sigma row: [2,12,6,10,0,11,8,3,4,13,7,5,15,14,1,9]
+        v0 = _wadd64(_wadd64(v0, v4), m2)
+        v12 = _rotr64_32(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_24(v4 ^ v8)
+        v0 = _wadd64(_wadd64(v0, v4), m12)
+        v12 = _rotr64_16(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_63(v4 ^ v8)
+        v1 = _wadd64(_wadd64(v1, v5), m6)
+        v13 = _rotr64_32(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_24(v5 ^ v9)
+        v1 = _wadd64(_wadd64(v1, v5), m10)
+        v13 = _rotr64_16(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_63(v5 ^ v9)
+        v2 = _wadd64(_wadd64(v2, v6), m0)
+        v14 = _rotr64_32(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_24(v6 ^ v10)
+        v2 = _wadd64(_wadd64(v2, v6), m11)
+        v14 = _rotr64_16(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_63(v6 ^ v10)
+        v3 = _wadd64(_wadd64(v3, v7), m8)
+        v15 = _rotr64_32(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_24(v7 ^ v11)
+        v3 = _wadd64(_wadd64(v3, v7), m3)
+        v15 = _rotr64_16(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_63(v7 ^ v11)
+        v0 = _wadd64(_wadd64(v0, v5), m4)
+        v15 = _rotr64_32(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_24(v5 ^ v10)
+        v0 = _wadd64(_wadd64(v0, v5), m13)
+        v15 = _rotr64_16(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_63(v5 ^ v10)
+        v1 = _wadd64(_wadd64(v1, v6), m7)
+        v12 = _rotr64_32(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_24(v6 ^ v11)
+        v1 = _wadd64(_wadd64(v1, v6), m5)
+        v12 = _rotr64_16(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_63(v6 ^ v11)
+        v2 = _wadd64(_wadd64(v2, v7), m15)
+        v13 = _rotr64_32(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_24(v7 ^ v8)
+        v2 = _wadd64(_wadd64(v2, v7), m14)
+        v13 = _rotr64_16(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_63(v7 ^ v8)
+        v3 = _wadd64(_wadd64(v3, v4), m1)
+        v14 = _rotr64_32(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_24(v4 ^ v9)
+        v3 = _wadd64(_wadd64(v3, v4), m9)
+        v14 = _rotr64_16(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_63(v4 ^ v9)
+
+        # Round 6 — sigma row: [12,5,1,15,14,13,4,10,0,7,6,3,9,2,8,11]
+        v0 = _wadd64(_wadd64(v0, v4), m12)
+        v12 = _rotr64_32(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_24(v4 ^ v8)
+        v0 = _wadd64(_wadd64(v0, v4), m5)
+        v12 = _rotr64_16(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_63(v4 ^ v8)
+        v1 = _wadd64(_wadd64(v1, v5), m1)
+        v13 = _rotr64_32(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_24(v5 ^ v9)
+        v1 = _wadd64(_wadd64(v1, v5), m15)
+        v13 = _rotr64_16(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_63(v5 ^ v9)
+        v2 = _wadd64(_wadd64(v2, v6), m14)
+        v14 = _rotr64_32(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_24(v6 ^ v10)
+        v2 = _wadd64(_wadd64(v2, v6), m13)
+        v14 = _rotr64_16(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_63(v6 ^ v10)
+        v3 = _wadd64(_wadd64(v3, v7), m4)
+        v15 = _rotr64_32(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_24(v7 ^ v11)
+        v3 = _wadd64(_wadd64(v3, v7), m10)
+        v15 = _rotr64_16(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_63(v7 ^ v11)
+        v0 = _wadd64(_wadd64(v0, v5), m0)
+        v15 = _rotr64_32(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_24(v5 ^ v10)
+        v0 = _wadd64(_wadd64(v0, v5), m7)
+        v15 = _rotr64_16(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_63(v5 ^ v10)
+        v1 = _wadd64(_wadd64(v1, v6), m6)
+        v12 = _rotr64_32(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_24(v6 ^ v11)
+        v1 = _wadd64(_wadd64(v1, v6), m3)
+        v12 = _rotr64_16(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_63(v6 ^ v11)
+        v2 = _wadd64(_wadd64(v2, v7), m9)
+        v13 = _rotr64_32(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_24(v7 ^ v8)
+        v2 = _wadd64(_wadd64(v2, v7), m2)
+        v13 = _rotr64_16(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_63(v7 ^ v8)
+        v3 = _wadd64(_wadd64(v3, v4), m8)
+        v14 = _rotr64_32(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_24(v4 ^ v9)
+        v3 = _wadd64(_wadd64(v3, v4), m11)
+        v14 = _rotr64_16(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_63(v4 ^ v9)
+
+        # Round 7 — sigma row: [13,11,7,14,12,1,3,9,5,0,15,4,8,6,2,10]
+        v0 = _wadd64(_wadd64(v0, v4), m13)
+        v12 = _rotr64_32(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_24(v4 ^ v8)
+        v0 = _wadd64(_wadd64(v0, v4), m11)
+        v12 = _rotr64_16(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_63(v4 ^ v8)
+        v1 = _wadd64(_wadd64(v1, v5), m7)
+        v13 = _rotr64_32(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_24(v5 ^ v9)
+        v1 = _wadd64(_wadd64(v1, v5), m14)
+        v13 = _rotr64_16(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_63(v5 ^ v9)
+        v2 = _wadd64(_wadd64(v2, v6), m12)
+        v14 = _rotr64_32(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_24(v6 ^ v10)
+        v2 = _wadd64(_wadd64(v2, v6), m1)
+        v14 = _rotr64_16(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_63(v6 ^ v10)
+        v3 = _wadd64(_wadd64(v3, v7), m3)
+        v15 = _rotr64_32(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_24(v7 ^ v11)
+        v3 = _wadd64(_wadd64(v3, v7), m9)
+        v15 = _rotr64_16(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_63(v7 ^ v11)
+        v0 = _wadd64(_wadd64(v0, v5), m5)
+        v15 = _rotr64_32(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_24(v5 ^ v10)
+        v0 = _wadd64(_wadd64(v0, v5), m0)
+        v15 = _rotr64_16(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_63(v5 ^ v10)
+        v1 = _wadd64(_wadd64(v1, v6), m15)
+        v12 = _rotr64_32(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_24(v6 ^ v11)
+        v1 = _wadd64(_wadd64(v1, v6), m4)
+        v12 = _rotr64_16(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_63(v6 ^ v11)
+        v2 = _wadd64(_wadd64(v2, v7), m8)
+        v13 = _rotr64_32(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_24(v7 ^ v8)
+        v2 = _wadd64(_wadd64(v2, v7), m6)
+        v13 = _rotr64_16(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_63(v7 ^ v8)
+        v3 = _wadd64(_wadd64(v3, v4), m2)
+        v14 = _rotr64_32(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_24(v4 ^ v9)
+        v3 = _wadd64(_wadd64(v3, v4), m10)
+        v14 = _rotr64_16(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_63(v4 ^ v9)
+
+        # Round 8 — sigma row: [6,15,14,9,11,3,0,8,12,2,13,7,1,4,10,5]
+        v0 = _wadd64(_wadd64(v0, v4), m6)
+        v12 = _rotr64_32(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_24(v4 ^ v8)
+        v0 = _wadd64(_wadd64(v0, v4), m15)
+        v12 = _rotr64_16(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_63(v4 ^ v8)
+        v1 = _wadd64(_wadd64(v1, v5), m14)
+        v13 = _rotr64_32(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_24(v5 ^ v9)
+        v1 = _wadd64(_wadd64(v1, v5), m9)
+        v13 = _rotr64_16(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_63(v5 ^ v9)
+        v2 = _wadd64(_wadd64(v2, v6), m11)
+        v14 = _rotr64_32(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_24(v6 ^ v10)
+        v2 = _wadd64(_wadd64(v2, v6), m3)
+        v14 = _rotr64_16(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_63(v6 ^ v10)
+        v3 = _wadd64(_wadd64(v3, v7), m0)
+        v15 = _rotr64_32(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_24(v7 ^ v11)
+        v3 = _wadd64(_wadd64(v3, v7), m8)
+        v15 = _rotr64_16(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_63(v7 ^ v11)
+        v0 = _wadd64(_wadd64(v0, v5), m12)
+        v15 = _rotr64_32(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_24(v5 ^ v10)
+        v0 = _wadd64(_wadd64(v0, v5), m2)
+        v15 = _rotr64_16(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_63(v5 ^ v10)
+        v1 = _wadd64(_wadd64(v1, v6), m13)
+        v12 = _rotr64_32(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_24(v6 ^ v11)
+        v1 = _wadd64(_wadd64(v1, v6), m7)
+        v12 = _rotr64_16(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_63(v6 ^ v11)
+        v2 = _wadd64(_wadd64(v2, v7), m1)
+        v13 = _rotr64_32(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_24(v7 ^ v8)
+        v2 = _wadd64(_wadd64(v2, v7), m4)
+        v13 = _rotr64_16(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_63(v7 ^ v8)
+        v3 = _wadd64(_wadd64(v3, v4), m10)
+        v14 = _rotr64_32(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_24(v4 ^ v9)
+        v3 = _wadd64(_wadd64(v3, v4), m5)
+        v14 = _rotr64_16(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_63(v4 ^ v9)
+
+        # Round 9 — sigma row: [10,2,8,4,7,6,1,5,15,11,9,14,3,12,13,0]
+        v0 = _wadd64(_wadd64(v0, v4), m10)
+        v12 = _rotr64_32(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_24(v4 ^ v8)
+        v0 = _wadd64(_wadd64(v0, v4), m2)
+        v12 = _rotr64_16(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_63(v4 ^ v8)
+        v1 = _wadd64(_wadd64(v1, v5), m8)
+        v13 = _rotr64_32(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_24(v5 ^ v9)
+        v1 = _wadd64(_wadd64(v1, v5), m4)
+        v13 = _rotr64_16(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_63(v5 ^ v9)
+        v2 = _wadd64(_wadd64(v2, v6), m7)
+        v14 = _rotr64_32(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_24(v6 ^ v10)
+        v2 = _wadd64(_wadd64(v2, v6), m6)
+        v14 = _rotr64_16(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_63(v6 ^ v10)
+        v3 = _wadd64(_wadd64(v3, v7), m1)
+        v15 = _rotr64_32(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_24(v7 ^ v11)
+        v3 = _wadd64(_wadd64(v3, v7), m5)
+        v15 = _rotr64_16(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_63(v7 ^ v11)
+        v0 = _wadd64(_wadd64(v0, v5), m15)
+        v15 = _rotr64_32(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_24(v5 ^ v10)
+        v0 = _wadd64(_wadd64(v0, v5), m11)
+        v15 = _rotr64_16(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_63(v5 ^ v10)
+        v1 = _wadd64(_wadd64(v1, v6), m9)
+        v12 = _rotr64_32(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_24(v6 ^ v11)
+        v1 = _wadd64(_wadd64(v1, v6), m14)
+        v12 = _rotr64_16(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_63(v6 ^ v11)
+        v2 = _wadd64(_wadd64(v2, v7), m3)
+        v13 = _rotr64_32(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_24(v7 ^ v8)
+        v2 = _wadd64(_wadd64(v2, v7), m12)
+        v13 = _rotr64_16(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_63(v7 ^ v8)
+        v3 = _wadd64(_wadd64(v3, v4), m13)
+        v14 = _rotr64_32(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_24(v4 ^ v9)
+        v3 = _wadd64(_wadd64(v3, v4), m0)
+        v14 = _rotr64_16(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_63(v4 ^ v9)
+
+        # Round 10 — sigma row: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+        v0 = _wadd64(_wadd64(v0, v4), m0)
+        v12 = _rotr64_32(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_24(v4 ^ v8)
+        v0 = _wadd64(_wadd64(v0, v4), m1)
+        v12 = _rotr64_16(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_63(v4 ^ v8)
+        v1 = _wadd64(_wadd64(v1, v5), m2)
+        v13 = _rotr64_32(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_24(v5 ^ v9)
+        v1 = _wadd64(_wadd64(v1, v5), m3)
+        v13 = _rotr64_16(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_63(v5 ^ v9)
+        v2 = _wadd64(_wadd64(v2, v6), m4)
+        v14 = _rotr64_32(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_24(v6 ^ v10)
+        v2 = _wadd64(_wadd64(v2, v6), m5)
+        v14 = _rotr64_16(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_63(v6 ^ v10)
+        v3 = _wadd64(_wadd64(v3, v7), m6)
+        v15 = _rotr64_32(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_24(v7 ^ v11)
+        v3 = _wadd64(_wadd64(v3, v7), m7)
+        v15 = _rotr64_16(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_63(v7 ^ v11)
+        v0 = _wadd64(_wadd64(v0, v5), m8)
+        v15 = _rotr64_32(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_24(v5 ^ v10)
+        v0 = _wadd64(_wadd64(v0, v5), m9)
+        v15 = _rotr64_16(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_63(v5 ^ v10)
+        v1 = _wadd64(_wadd64(v1, v6), m10)
+        v12 = _rotr64_32(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_24(v6 ^ v11)
+        v1 = _wadd64(_wadd64(v1, v6), m11)
+        v12 = _rotr64_16(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_63(v6 ^ v11)
+        v2 = _wadd64(_wadd64(v2, v7), m12)
+        v13 = _rotr64_32(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_24(v7 ^ v8)
+        v2 = _wadd64(_wadd64(v2, v7), m13)
+        v13 = _rotr64_16(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_63(v7 ^ v8)
+        v3 = _wadd64(_wadd64(v3, v4), m14)
+        v14 = _rotr64_32(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_24(v4 ^ v9)
+        v3 = _wadd64(_wadd64(v3, v4), m15)
+        v14 = _rotr64_16(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_63(v4 ^ v9)
+
+        # Round 11 — sigma row: [14,10,4,8,9,15,13,6,1,12,0,2,11,7,5,3]
+        v0 = _wadd64(_wadd64(v0, v4), m14)
+        v12 = _rotr64_32(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_24(v4 ^ v8)
+        v0 = _wadd64(_wadd64(v0, v4), m10)
+        v12 = _rotr64_16(v12 ^ v0)
+        v8 = _wadd64(v8, v12)
+        v4 = _rotr64_63(v4 ^ v8)
+        v1 = _wadd64(_wadd64(v1, v5), m4)
+        v13 = _rotr64_32(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_24(v5 ^ v9)
+        v1 = _wadd64(_wadd64(v1, v5), m8)
+        v13 = _rotr64_16(v13 ^ v1)
+        v9 = _wadd64(v9, v13)
+        v5 = _rotr64_63(v5 ^ v9)
+        v2 = _wadd64(_wadd64(v2, v6), m9)
+        v14 = _rotr64_32(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_24(v6 ^ v10)
+        v2 = _wadd64(_wadd64(v2, v6), m15)
+        v14 = _rotr64_16(v14 ^ v2)
+        v10 = _wadd64(v10, v14)
+        v6 = _rotr64_63(v6 ^ v10)
+        v3 = _wadd64(_wadd64(v3, v7), m13)
+        v15 = _rotr64_32(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_24(v7 ^ v11)
+        v3 = _wadd64(_wadd64(v3, v7), m6)
+        v15 = _rotr64_16(v15 ^ v3)
+        v11 = _wadd64(v11, v15)
+        v7 = _rotr64_63(v7 ^ v11)
+        v0 = _wadd64(_wadd64(v0, v5), m1)
+        v15 = _rotr64_32(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_24(v5 ^ v10)
+        v0 = _wadd64(_wadd64(v0, v5), m12)
+        v15 = _rotr64_16(v15 ^ v0)
+        v10 = _wadd64(v10, v15)
+        v5 = _rotr64_63(v5 ^ v10)
+        v1 = _wadd64(_wadd64(v1, v6), m0)
+        v12 = _rotr64_32(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_24(v6 ^ v11)
+        v1 = _wadd64(_wadd64(v1, v6), m2)
+        v12 = _rotr64_16(v12 ^ v1)
+        v11 = _wadd64(v11, v12)
+        v6 = _rotr64_63(v6 ^ v11)
+        v2 = _wadd64(_wadd64(v2, v7), m11)
+        v13 = _rotr64_32(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_24(v7 ^ v8)
+        v2 = _wadd64(_wadd64(v2, v7), m7)
+        v13 = _rotr64_16(v13 ^ v2)
+        v8 = _wadd64(v8, v13)
+        v7 = _rotr64_63(v7 ^ v8)
+        v3 = _wadd64(_wadd64(v3, v4), m5)
+        v14 = _rotr64_32(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_24(v4 ^ v9)
+        v3 = _wadd64(_wadd64(v3, v4), m3)
+        v14 = _rotr64_16(v14 ^ v3)
+        v9 = _wadd64(v9, v14)
+        v4 = _rotr64_63(v4 ^ v9)
+
+        # Finalize: h[i] ^= v[i] ^ v[i+8]
+        h0 = h0 ^ v0  ^ v8
+        h1 = h1 ^ v1  ^ v9
+        h2 = h2 ^ v2  ^ v10
+        h3 = h3 ^ v3  ^ v11
+        h4 = h4 ^ v4  ^ v12
+        h5 = h5 ^ v5  ^ v13
+        h6 = h6 ^ v6  ^ v14
+        h7 = h7 ^ v7  ^ v15
+
+        block_idx = block_idx + 1
+
+    # Serialize h[0..word_count] as little-endian bytes
+    val word_count = digest_size / 8
+    var result: [i64] = []
+    var wi = 0
+    while wi < word_count:
+        val wd = if wi == 0: h0 elif wi == 1: h1 elif wi == 2: h2 elif wi == 3: h3
+                 elif wi == 4: h4 elif wi == 5: h5 elif wi == 6: h6 else: h7
+        result.push(wd & 255)
+        result.push((wd >> 8) & 255)
+        result.push((wd >> 16) & 255)
+        result.push((wd >> 24) & 255)
+        result.push(_lshr64_32(wd) & 255)
+        result.push(_lshr64_40(wd) & 255)
+        result.push(_lshr64_48(wd) & 255)
+        result.push(_lshr64_56(wd) & 255)
+        wi = wi + 1
+    result
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+# BLAKE2b-512 of a byte list. Returns 64-byte list.
+fn blake2b_512_bytes(data: [i64]) -> [i64]:
+    _blake2b_core(data, 64)
+
+# BLAKE2b-256 of a byte list. Returns 32-byte list.
+fn blake2b_256_bytes(data: [i64]) -> [i64]:
+    _blake2b_core(data, 32)
+
+# BLAKE2b-512 of text input. Returns 128-char lowercase hex string.
+fn blake2b_512_text(data: text) -> text:
+    use std.common.crypto.types.{text_to_bytes, bytes_to_hex}
+    bytes_to_hex(blake2b_512_bytes(text_to_bytes(data)))
+
+# BLAKE2b-256 of text input. Returns 64-char lowercase hex string.
+fn blake2b_256_text(data: text) -> text:
+    use std.common.crypto.types.{text_to_bytes, bytes_to_hex}
+    bytes_to_hex(blake2b_256_bytes(text_to_bytes(data)))

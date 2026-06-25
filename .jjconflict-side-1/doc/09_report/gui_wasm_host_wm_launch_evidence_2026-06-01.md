@@ -1,0 +1,107 @@
+# GUI WASM Host WM Launch Evidence
+
+- status: pass
+- reason: pass
+- request count: 12
+- create/update/destroy: 3/3/3
+- per-app WASM content lifecycle proof: 3/3
+- proof path: build/gui_wasm_host_wm_launch_evidence/host-wm-launch-proof.json
+
+## Raw Evidence
+- gui_wasm_host_wm_launch_status=pass
+- gui_wasm_host_wm_launch_reason=pass
+- gui_wasm_host_wm_launch_client_exit_code=0
+- gui_wasm_host_wm_launch_server_exit_code=0
+- gui_wasm_host_wm_launch_request_count=12
+- gui_wasm_host_wm_launch_create_count=3
+- gui_wasm_host_wm_launch_update_count=3
+- gui_wasm_host_wm_launch_destroy_count=3
+- gui_wasm_host_wm_launch_per_app=3/3
+- gui_wasm_host_wm_launch_proof_path=build/gui_wasm_host_wm_launch_evidence/host-wm-launch-proof.json
+
+## Client Output
+- [window-client] Connected to hosted WM bridge (client 1184686)
+- client_gui-wasm-host-hello_connected=true
+- [window-client] Created hosted window 1000: 'GUI WASM hello host WM'
+- client_gui-wasm-host-hello_window_id=1000
+- [window-client] Disconnected
+- [window-client] Connected to hosted WM bridge (client 1184686)
+- client_gui-wasm-host-widget_connected=true
+- [window-client] Created hosted window 1001: 'GUI WASM widget matrix host WM'
+- client_gui-wasm-host-widget_window_id=1001
+- [window-client] Disconnected
+- [window-client] Connected to hosted WM bridge (client 1184686)
+- client_gui-wasm-host-builder_connected=true
+- [window-client] Created hosted window 1002: 'GUI WASM builder matrix host WM'
+- client_gui-wasm-host-builder_window_id=1002
+- [window-client] Disconnected
+- client_all_windows_created=true
+
+## Client Error
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/os/userlib/window.spl:29:1
+-    |
+-  29 | export use os.userlib.window_part1.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/os/userlib/window.spl:30:1
+-    |
+-  30 | export use os.userlib.window_part2.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/os/userlib/window.spl:31:1
+-    |
+-  31 | export use os.userlib.window_part3.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: Self
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/os/userlib/window.spl:29:1
+-    |
+-  29 | export use os.userlib.window_part1.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/os/userlib/window.spl:30:1
+-    |
+-  30 | export use os.userlib.window_part2.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/os/userlib/window.spl:31:1
+-    |
+-  31 | export use os.userlib.window_part3.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+
+## Server Output
+- host_wm_launch_server_status=pass
+- host_wm_launch_server_reason=pass
+- host_wm_launch_request_count=12

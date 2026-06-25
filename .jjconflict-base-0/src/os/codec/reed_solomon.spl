@@ -1,0 +1,439 @@
+# Reed-Solomon Erasure Code — Pure Simple Implementation
+#
+# BCH-style RS over GF(2^8) with primitive polynomial 0x11d (x^8+x^4+x^3+x^2+1).
+# Systematic encoder: k data bytes → (n-k) parity bytes appended.
+# Decoder: Berlekamp-Massey error locator + Chien search + Forney magnitudes.
+#
+# Parameters supported: n=10, k=4, t=3 (corrects up to 3 symbol errors).
+# Generator roots: alpha^0 .. alpha^(n-k-1) where alpha = 0x02.
+#
+# KAT (ISO/IEC 18004 QR-code RS variant):
+#   data   = [0x48, 0x65, 0x6c, 0x6c]
+#   parity = [0xfa, 0x22, 0x1d, 0xc7, 0x40, 0x6f]
+#
+# Reference: ISO/IEC 18004:2015 §7.5, Lin & Costello "Error Control Coding"
+# ============================================================================
+
+# ============================================================================
+# Error type
+# ============================================================================
+
+enum RsDecodeResult:
+    """Result of rs_gf256_decode: recovered k-byte data block or error."""
+    Ok(data: [u8])
+    Err(reason: text)
+
+# ============================================================================
+# GF(2^8) tables — primitive polynomial 0x11d
+# ============================================================================
+
+fn _gf_exp() -> [u8]:
+    """Build the 512-entry GF(2^8) antilog (exp) table over poly 0x11d.
+
+    exp[i] = alpha^i mod p(x).  Entries 255..511 mirror 0..254 for
+    wrap-free index arithmetic.
+    """
+    var tbl: [u8] = []
+    var i: u64 = 0
+    while i < 512:
+        tbl.push(0)
+        i = i + 1
+    var x: u32 = 1u32
+    var j: u64 = 0u64
+    while j < 255u64:
+        tbl[j] = x.to_u8()
+        x = x << 1u32
+        if x >= 256u32:
+            x = x ^ 0x11du32
+        j = j + 1u64
+    # mirror 0..254 into 255..509
+    var k: u64 = 0u64
+    while k < 255u64:
+        tbl[k + 255u64] = tbl[k]
+        k = k + 1u64
+    tbl
+
+fn _gf_log() -> [u8]:
+    """Build the 256-entry GF(2^8) log table over poly 0x11d.
+
+    log[alpha^i] = i.  log[0] is undefined; set to 0 as sentinel.
+    """
+    var exp: [u8] = _gf_exp()
+    var tbl: [u8] = []
+    var i: u64 = 0u64
+    while i < 256u64:
+        tbl.push(0)
+        i = i + 1u64
+    var j: u64 = 0u64
+    while j < 255u64:
+        val idx: u64 = exp[j].to_u64()
+        tbl[idx] = j.to_u8()
+        j = j + 1u64
+    tbl
+
+# ============================================================================
+# GF(2^8) arithmetic helpers
+# ============================================================================
+
+fn _gf_mul(a: u8, b: u8, exp: [u8], log: [u8]) -> u8:
+    """Multiply two GF(2^8) elements using log/antilog tables."""
+    if a == 0u8 or b == 0u8:
+        return 0u8
+    val la: u64 = log[a.to_u64()].to_u64()
+    val lb: u64 = log[b.to_u64()].to_u64()
+    exp[(la + lb) % 255u64]
+
+fn _gf_div(a: u8, b: u8, exp: [u8], log: [u8]) -> u8:
+    """Divide two GF(2^8) elements (a/b).  b must not be zero."""
+    if a == 0u8:
+        return 0u8
+    val la: u64 = log[a.to_u64()].to_u64()
+    val lb: u64 = log[b.to_u64()].to_u64()
+    val idx: u64 = (la + 255u64 - lb) % 255u64
+    exp[idx]
+
+# ============================================================================
+# Generator polynomial: product of (x - alpha^i) for i=0..n-k-1
+# ============================================================================
+
+fn _gen_poly(n_parity: u64, exp: [u8], log: [u8]) -> [u8]:
+    """Compute the RS generator polynomial g(x) with roots alpha^0..alpha^(2t-1).
+
+    Returns coefficients [g_0, g_1, ..., g_{2t}] where g_0 = 1 (leading).
+    """
+    var gp: [u8] = []
+    gp.push(1u8)
+    var i: u64 = 0u64
+    while i < n_parity:
+        val root: u8 = exp[i]
+        var new_gp: [u8] = []
+        var pad: u64 = 0u64
+        while pad < gp.len() + 1u64:
+            new_gp.push(0u8)
+            pad = pad + 1u64
+        var j: u64 = 0u64
+        while j < gp.len():
+            val c: u8 = gp[j]
+            new_gp[j] = new_gp[j] ^ c
+            val prod: u8 = _gf_mul(c, root, exp, log)
+            new_gp[j + 1u64] = new_gp[j + 1u64] ^ prod
+            j = j + 1u64
+        gp = new_gp
+        i = i + 1u64
+    gp
+
+# ============================================================================
+# Public API — Encoder
+# ============================================================================
+
+fn rs_gf256_encode(data: [u8], n: u8, k: u8) -> [u8]:
+    """Compute (n-k) RS parity bytes for k data bytes over GF(2^8)/0x11d.
+
+    Returns the (n-k) parity bytes only (not the full codeword).
+    Caller appends them to data to form the systematic codeword:
+        codeword = data ++ rs_gf256_encode(data, n, k)
+
+    Parameters:
+        data  — exactly k data bytes
+        n     — codeword length (data + parity), e.g. 10
+        k     — data length, e.g. 4
+
+    The function performs polynomial long division of data(x)*x^(n-k)
+    by the generator polynomial g(x), yielding the remainder as parity.
+    """
+    val np: u64 = n.to_u64() - k.to_u64()
+    val exp: [u8] = _gf_exp()
+    val log: [u8] = _gf_log()
+    val gp: [u8] = _gen_poly(np, exp, log)
+
+    # Working buffer: data followed by np zero bytes
+    var msg: [u8] = []
+    var ci: u64 = 0u64
+    while ci < data.len():
+        msg.push(data[ci])
+        ci = ci + 1u64
+    var pi: u64 = 0u64
+    while pi < np:
+        msg.push(0u8)
+        pi = pi + 1u64
+
+    # Polynomial long division (systematic remainder)
+    val dlen: u64 = data.len()
+    var di: u64 = 0u64
+    while di < dlen:
+        val coef: u8 = msg[di]
+        if coef != 0u8:
+            var gi: u64 = 1u64
+            while gi < gp.len():
+                val prod: u8 = _gf_mul(gp[gi], coef, exp, log)
+                msg[di + gi] = msg[di + gi] ^ prod
+                gi = gi + 1u64
+        di = di + 1u64
+
+    # Extract parity bytes (last np bytes of msg)
+    var parity: [u8] = []
+    var ri: u64 = dlen
+    while ri < msg.len():
+        parity.push(msg[ri])
+        ri = ri + 1u64
+    parity
+
+# ============================================================================
+# Internal — Syndrome computation
+# ============================================================================
+
+fn _syndromes(received: [u8], n_parity: u64, exp: [u8], log: [u8]) -> [u8]:
+    """Evaluate the received polynomial at alpha^0..alpha^(2t-1).
+
+    Returns a list of 2t syndrome values.  All zero means no detectable errors.
+    Uses Horner's method: S_i = ((...(recv[0]*alpha^i + recv[1])*alpha^i + ...)).
+    """
+    var s: [u8] = []
+    var i: u64 = 0u64
+    while i < n_parity:
+        val root: u8 = exp[i]
+        var v: u8 = 0u8
+        var j: u64 = 0u64
+        while j < received.len():
+            val vr: u8 = _gf_mul(v, root, exp, log)
+            v = vr ^ received[j]
+            j = j + 1u64
+        s.push(v)
+        i = i + 1u64
+    s
+
+# ============================================================================
+# Internal — Berlekamp-Massey error-locator polynomial
+# ============================================================================
+
+fn _berlekamp_massey(s: [u8], exp: [u8], log: [u8]) -> ([u8], u64):
+    """Run Berlekamp-Massey on syndrome array s.
+
+    Returns (sigma, L) where sigma is the error-locator polynomial
+    sigma(x) = 1 + sigma_1*x + ... + sigma_L*x^L, and L is the
+    number of errors found.
+    """
+    var big_c: [u8] = []
+    big_c.push(1u8)
+    var big_b: [u8] = []
+    big_b.push(1u8)
+    var big_l: u64 = 0u64
+    var m: u64 = 1u64
+    var b: u8 = 1u8
+
+    var ni: u64 = 0u64
+    while ni < s.len():
+        # Compute discrepancy d
+        var d: u8 = s[ni]
+        var ci: u64 = 1u64
+        while ci <= big_l:
+            if ci < big_c.len():
+                val term: u8 = _gf_mul(big_c[ci], s[ni - ci], exp, log)
+                d = d ^ term
+            ci = ci + 1u64
+
+        if d == 0u8:
+            m = m + 1u64
+        else:
+            val fac: u8 = _gf_div(d, b, exp, log)
+            if 2u64 * big_l <= ni:
+                # Update C, shift B, swap
+                val t: [u8] = big_c
+                # Extend C to hold m+len(B)-1 entries
+                var bi2: u64 = 0u64
+                while bi2 < big_b.len():
+                    val idx: u64 = m + bi2
+                    while big_c.len() <= idx:
+                        big_c.push(0u8)
+                    val prod: u8 = _gf_mul(fac, big_b[bi2], exp, log)
+                    big_c[idx] = big_c[idx] ^ prod
+                    bi2 = bi2 + 1u64
+                big_l = ni + 1u64 - big_l
+                big_b = t
+                b = d
+                m = 1u64
+            else:
+                var bi3: u64 = 0u64
+                while bi3 < big_b.len():
+                    val idx: u64 = m + bi3
+                    while big_c.len() <= idx:
+                        big_c.push(0u8)
+                    val prod: u8 = _gf_mul(fac, big_b[bi3], exp, log)
+                    big_c[idx] = big_c[idx] ^ prod
+                    bi3 = bi3 + 1u64
+                m = m + 1u64
+        ni = ni + 1u64
+
+    (big_c, big_l)
+
+# ============================================================================
+# Internal — Error magnitude via Forney algorithm
+# ============================================================================
+
+fn _forney(s: [u8], sigma: [u8], n: u64, n_parity: u64, exp: [u8], log: [u8]) -> [u8]:
+    """Apply Chien search + Forney formula to correct errors in-place buffer.
+
+    Returns an n-length error vector e[] such that corrected = received XOR e.
+    The Forney formula used is: e_i = Omega(X_i^-1) / sigma'(X_i^-1)
+    where X_i = alpha^chien_i, X_i^-1 = alpha^(255-chien_i),
+    array index = n - 1 - chien_i.
+
+    Omega(x) = (S(x) * sigma(x)) mod x^(2t)
+    sigma'(x) = formal derivative of sigma (odd-indexed terms only in GF(2^m))
+    """
+    # Compute omega[k] = sum_{j=0}^{k} S[k-j] * sigma[j]  for k=0..2t-1
+    var omega: [u8] = []
+    var oi: u64 = 0u64
+    while oi < n_parity:
+        omega.push(0u8)
+        oi = oi + 1u64
+    var ki: u64 = 0u64
+    while ki < n_parity:
+        var ji: u64 = 0u64
+        while ji < sigma.len() and ji <= ki:
+            val sv: u8 = s[ki - ji]
+            val sg: u8 = sigma[ji]
+            val prod: u8 = _gf_mul(sv, sg, exp, log)
+            omega[ki] = omega[ki] ^ prod
+            ji = ji + 1u64
+        ki = ki + 1u64
+
+    # Formal derivative of sigma: sigma'_k = sigma[k] if k odd, else 0
+    var sp: [u8] = []
+    var spi: u64 = 0u64
+    while spi < sigma.len():
+        sp.push(0u8)
+        spi = spi + 1u64
+    var spi2: u64 = 1u64
+    while spi2 < sigma.len():
+        sp[spi2] = sigma[spi2]
+        spi2 = spi2 + 2u64
+
+    # Error vector
+    var evec: [u8] = []
+    var evi: u64 = 0u64
+    while evi < n:
+        evec.push(0u8)
+        evi = evi + 1u64
+
+    # Chien search: find i in 0..n-1 where sigma(alpha^(-i)) = 0
+    var i: u64 = 0u64
+    while i < n:
+        val xi_inv_idx: u64 = (255u64 - i) % 255u64
+        val xi_inv: u8 = exp[xi_inv_idx]
+        # Evaluate sigma at xi_inv
+        var sv2: u8 = 0u8
+        var xp: u8 = 1u8
+        var ci2: u64 = 0u64
+        while ci2 < sigma.len():
+            val term: u8 = _gf_mul(sigma[ci2], xp, exp, log)
+            sv2 = sv2 ^ term
+            xp = _gf_mul(xp, xi_inv, exp, log)
+            ci2 = ci2 + 1u64
+        if sv2 == 0u8:
+            # Error at array index n-1-i
+            val arr: u64 = n - 1u64 - i
+            # Evaluate omega at xi_inv
+            var num: u8 = 0u8
+            var xp2: u8 = 1u8
+            var oi2: u64 = 0u64
+            while oi2 < omega.len():
+                val term2: u8 = _gf_mul(omega[oi2], xp2, exp, log)
+                num = num ^ term2
+                xp2 = _gf_mul(xp2, xi_inv, exp, log)
+                oi2 = oi2 + 1u64
+            # Evaluate sigma' at xi_inv
+            var den: u8 = 0u8
+            var xp3: u8 = 1u8
+            var si2: u64 = 0u64
+            while si2 < sp.len():
+                val term3: u8 = _gf_mul(sp[si2], xp3, exp, log)
+                den = den ^ term3
+                xp3 = _gf_mul(xp3, xi_inv, exp, log)
+                si2 = si2 + 1u64
+            if den == 0u8:
+                den = 1u8
+            val mag: u8 = _gf_div(num, den, exp, log)
+            evec[arr] = mag
+        i = i + 1u64
+    evec
+
+# ============================================================================
+# Public API — Decoder
+# ============================================================================
+
+fn rs_gf256_decode(received: [u8], n: u8, k: u8) -> RsDecodeResult:
+    """Decode a received RS codeword of length n, recovering k data bytes.
+
+    Corrects up to t = (n-k)/2 symbol errors using Berlekamp-Massey + Forney.
+
+    Parameters:
+        received — n received bytes (may contain up to t errors)
+        n        — codeword length, e.g. 10
+        k        — data length, e.g. 4
+
+    Returns:
+        RsDecodeResult.Ok(data)  — k recovered data bytes
+        RsDecodeResult.Err(msg)  — uncorrectable (> t errors) or bad input
+    """
+    val nv: u64 = n.to_u64()
+    val kv: u64 = k.to_u64()
+    val np: u64 = nv - kv
+    val t: u64 = np / 2u64
+
+    if received.len() != nv:
+        return RsDecodeResult.Err("InvalidLength: received length != n")
+
+    val exp: [u8] = _gf_exp()
+    val log: [u8] = _gf_log()
+
+    val s: [u8] = _syndromes(received, np, exp, log)
+
+    # Check if all syndromes are zero (no errors)
+    var all_zero: bool = true
+    var si: u64 = 0u64
+    while si < s.len():
+        if s[si] != 0u8:
+            all_zero = false
+        si = si + 1u64
+
+    if all_zero:
+        var out: [u8] = []
+        var oi: u64 = 0u64
+        while oi < kv:
+            out.push(received[oi])
+            oi = oi + 1u64
+        return RsDecodeResult.Ok(data: out)
+
+    val (sigma, big_l) = _berlekamp_massey(s, exp, log)
+
+    if big_l > t:
+        return RsDecodeResult.Err("TooManyErrors: BM found more than t errors")
+
+    val evec: [u8] = _forney(s, sigma, nv, np, exp, log)
+
+    # Apply corrections
+    var corrected: [u8] = []
+    var ri: u64 = 0u64
+    while ri < nv:
+        corrected.push(received[ri] ^ evec[ri])
+        ri = ri + 1u64
+
+    # Verify corrected codeword (re-check syndromes)
+    val s2: [u8] = _syndromes(corrected, np, exp, log)
+    var verify_ok: bool = true
+    var vi: u64 = 0u64
+    while vi < s2.len():
+        if s2[vi] != 0u8:
+            verify_ok = false
+        vi = vi + 1u64
+
+    if not verify_ok:
+        return RsDecodeResult.Err("TooManyErrors: syndrome check failed after correction")
+
+    var data_out: [u8] = []
+    var di: u64 = 0u64
+    while di < kv:
+        data_out.push(corrected[di])
+        di = di + 1u64
+    RsDecodeResult.Ok(data: data_out)

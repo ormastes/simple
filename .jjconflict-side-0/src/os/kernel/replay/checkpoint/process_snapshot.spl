@@ -1,0 +1,71 @@
+# SimpleOS — Process Snapshot Operations
+#
+# Captures single-process state: registers, memory pages, fd table.
+# Uses kernel APIs to walk address space and enumerate resources.
+
+use os.kernel.replay.checkpoint.checkpoint_types.{ProcessSnapshot, MemoryPage, FdEntry, FdKind}
+
+# ============================================================================
+# Snapshot Creation
+# ============================================================================
+
+fn snapshot_process(task_id: i64, parent_id: i64) -> Result<ProcessSnapshot, text>:
+    var snapshot = ProcessSnapshot.create(task_id, parent_id)
+
+    # In a real kernel, these would call into HAL/VMM/scheduler.
+    # This is the interface contract; implementation hooks into
+    # kernel internals once the kernel matures.
+
+    Ok(snapshot)
+
+# ============================================================================
+# Register Capture Helpers
+# ============================================================================
+
+fn capture_x86_64_registers(snapshot: ProcessSnapshot, regs: Dict<text, i64>):
+    val names = ["rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+                 "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+                 "rip", "rflags", "cs", "ss"]
+    for name in names:
+        val value = regs.get(name) ?? 0
+        snapshot.add_register(name, value)
+
+fn capture_riscv32_registers(snapshot: ProcessSnapshot, regs: Dict<text, i64>):
+    var i = 0
+    while i < 32:
+        val name = "x{i}"
+        val value = regs.get(name) ?? 0
+        snapshot.add_register(name, value)
+        i = i + 1
+    val pc = regs.get("pc") ?? 0
+    snapshot.add_register("pc", pc)
+
+# ============================================================================
+# Memory Page Capture
+# ============================================================================
+
+fn capture_memory_region(snapshot: ProcessSnapshot, start: i64, end: i64, page_size: i64, reader_fn: fn(i64) -> [i32]):
+    var addr = start
+    while addr < end:
+        val data = reader_fn(addr)
+        if data.len() > 0:
+            snapshot.add_page(MemoryPage(
+                virt_addr: addr,
+                phys_addr: 0,
+                flags: 7,   # rwx
+                data: data
+            ))
+        addr = addr + page_size
+
+# ============================================================================
+# FD Table Capture
+# ============================================================================
+
+fn capture_fd_entry(fd: i32, kind: FdKind, path: text, offset: i64) -> FdEntry:
+    FdEntry(
+        fd: fd,
+        kind: kind,
+        offset: offset,
+        flags: 0,
+        path: path
+    )

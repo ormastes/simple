@@ -1,0 +1,41 @@
+# @tag: rendering, engine2d, metal, readback
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl 45%
+#
+# Verifies Engine2D read_pixels can use a real Metal framebuffer download for
+# the subset of drawing operations currently implemented by GPU kernels.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
+use std.nogc_sync_mut.env.platform.{is_macos}
+
+describe "Metal Engine2D framebuffer readback":
+
+    context "raw GPU pixels":
+
+        it "downloads clear and rect_filled pixels from the Metal framebuffer":
+            if is_macos():
+                var b = MetalBackend.create()
+                expect(b.init(16, 16)).to_equal(true)
+                b.clear(0x10203040 as u32)
+                b.draw_rect_filled(4, 4, 4, 4, 0x01020304 as u32)
+                expect(b.gpu_frame_complete).to_equal(true)
+                val pixels = b.read_pixels()
+                expect(pixels.len()).to_equal(256)
+                expect(pixels[0]).to_equal(0x10203040 as u32)
+                expect(pixels[4 + (4 * 16)]).to_equal(0x01020304 as u32)
+                b.shutdown()
+            else:
+                expect(is_macos()).to_equal(false)
+
+        it "falls back after CPU-only text rendering invalidates GPU completeness":
+            if is_macos():
+                var b = MetalBackend.create()
+                expect(b.init(16, 16)).to_equal(true)
+                b.clear(0x10203040 as u32)
+                b.draw_text(1, 1, "A", 0x01020304 as u32, 8)
+                expect(b.gpu_frame_complete).to_equal(false)
+                val pixels = b.read_pixels()
+                expect(pixels.len()).to_equal(256)
+                b.shutdown()
+            else:
+                expect(is_macos()).to_equal(false)

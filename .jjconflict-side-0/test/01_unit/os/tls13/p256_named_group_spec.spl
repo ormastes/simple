@@ -1,0 +1,243 @@
+# P-256 (secp256r1) NamedGroup advertise + ephemeral keypair smoke spec
+#
+# Exercises the secp256r1 (NamedGroup 0x0017) advertise + key_share landing
+# added to handshake13.spl + ecdh_p256.spl:
+#
+#   * GROUP_SECP256R1 constant has the IANA-assigned value 0x0017
+#     (RFC 8422 §5.1.1, RFC 8446 §4.2.7).
+#   * `_build_ext_supported_groups` advertises both X25519 (0x001D) and
+#     secp256r1 (0x0017), in that order — X25519 stays preferred per
+#     §4.2.7 "most-preferred first" rule.
+#   * `_build_ext_key_share_dual` emits TWO KeyShareEntry rows in the
+#     extension: X25519 first, secp256r1 second, each formatted as
+#     `group(2) || key_len(2) || key_exchange<0..2^16-1>`.
+#   * `p256_keypair_pub(scalar)` returns a 65-byte uncompressed SEC1 point
+#     `04 || X || Y` per RFC 8446 §4.2.8.2 + RFC 8422 §5.4. For the trivial
+#     scalar k=1 the output equals the SEC2 generator G — this is the smoke
+#     check that the keypair gen actually multiplies on the curve.
+#
+# DEFERRED (out of this spec's scope, see crypto_recovery_status.md
+# Wave-1 outcomes):
+#   * Server-side P-256 key_share consumption.
+#   * ECDHE shared-secret derivation + handshake_secret integration.
+#   * HRR connect-flow integration (waits on this landing).
+#
+# Reference: RFC 8446 §4.2.7 / §4.2.8 ; RFC 8422 §5.1.1 / §5.4 ; SEC2 §2.4.2
+
+use std.spipe.*
+
+use os.tls13.handshake13.{
+    GROUP_X25519,
+    GROUP_SECP256R1,
+    build_client_hello_bytes,
+    build_client_hello_bytes_with_p256
+}
+use os.crypto.ecdh_p256.{p256_keypair_pub}
+
+# ============================================================================
+# Fixtures (module-level — feedback_it_block_var_mutation.md)
+# ============================================================================
+
+fn _scalar_one() -> [u8]:
+    """32-byte big-endian scalar k = 1. k*G = G, the simplest on-curve check."""
+    var s: [u8] = []
+    var i: u64 = 0
+    while i < 31:
+        s.push(0x00u8)
+        i = i + 1
+    s.push(0x01u8)
+    s
+
+fn _scalar_two() -> [u8]:
+    """32-byte big-endian scalar k = 2. k*G = 2G — exercises point doubling."""
+    var s: [u8] = []
+    var i: u64 = 0
+    while i < 31:
+        s.push(0x00u8)
+        i = i + 1
+    s.push(0x02u8)
+    s
+
+fn _gx_bytes() -> [u8]:
+    """SEC2 generator X-coordinate (32 bytes, big-endian)."""
+    [
+        0x6Bu8, 0x17u8, 0xD1u8, 0xF2u8, 0xE1u8, 0x2Cu8, 0x42u8, 0x47u8,
+        0xF8u8, 0xBCu8, 0xE6u8, 0xE5u8, 0x63u8, 0xA4u8, 0x40u8, 0xF2u8,
+        0x77u8, 0x03u8, 0x7Du8, 0x81u8, 0x2Du8, 0xEBu8, 0x33u8, 0xA0u8,
+        0xF4u8, 0xA1u8, 0x39u8, 0x45u8, 0xD8u8, 0x98u8, 0xC2u8, 0x96u8
+    ]
+
+fn _gy_bytes() -> [u8]:
+    """SEC2 generator Y-coordinate (32 bytes, big-endian)."""
+    [
+        0x4Fu8, 0xE3u8, 0x42u8, 0xE2u8, 0xFEu8, 0x1Au8, 0x7Fu8, 0x9Bu8,
+        0x8Eu8, 0xE7u8, 0xEBu8, 0x4Au8, 0x7Cu8, 0x0Fu8, 0x9Eu8, 0x16u8,
+        0x2Bu8, 0xCEu8, 0x33u8, 0x57u8, 0x6Bu8, 0x31u8, 0x5Eu8, 0xCEu8,
+        0xCBu8, 0xB6u8, 0x40u8, 0x68u8, 0x37u8, 0xBFu8, 0x51u8, 0xF5u8
+    ]
+
+fn _ch_random() -> [u8]:
+    """Deterministic 32-byte client random for the wire-format checks."""
+    var r: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        r.push(0xAAu8)
+        i = i + 1
+    r
+
+fn _x25519_pub_fixture() -> [u8]:
+    """Deterministic 32-byte X25519 public-key fixture (not on the wire)."""
+    var k: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        k.push(0xBBu8)
+        i = i + 1
+    k
+
+# ============================================================================
+# Wire helper: scan a byte buffer for the 4-byte sequence
+#   group_hi || group_lo || key_len_hi || key_len_lo
+# and return the byte offset where the next `key_len` data starts, or -1.
+# ============================================================================
+
+fn _find_key_share_entry(buf: [u8], group_hi: u8, group_lo: u8, expected_key_len: u64) -> i64:
+    var i: u64 = 0
+    while i + 4 <= buf.len():
+        if buf[i] == group_hi and buf[i + 1u64] == group_lo:
+            val klh = buf[i + 2u64].to_u64()
+            val kll = buf[i + 3u64].to_u64()
+            val klen = (klh << 8) | kll
+            if klen == expected_key_len:
+                return (i + 4u64).to_i64()
+        i = i + 1u64
+    -1i64
+
+fn _count_byte_pair(buf: [u8], hi: u8, lo: u8) -> u64:
+    var count: u64 = 0
+    var i: u64 = 0
+    while i + 1u64 < buf.len():
+        if buf[i] == hi and buf[i + 1u64] == lo:
+            count = count + 1u64
+        i = i + 1u64
+    count
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1u64
+    true
+
+fn _slice32(buf: [u8], start: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32u64:
+        out.push(buf[start + i])
+        i = i + 1u64
+    out
+
+# ============================================================================
+# AC-1: secp256r1 NamedGroup constant value
+# ============================================================================
+
+describe "secp256r1 NamedGroup constant":
+
+    it "GROUP_SECP256R1 equals IANA value 0x0017 (RFC 8422 §5.1.1)":
+        expect(GROUP_SECP256R1).to_equal(0x0017u16)
+
+    it "GROUP_X25519 equals IANA value 0x001D (RFC 8446 §4.2.7)":
+        expect(GROUP_X25519).to_equal(0x001Du16)
+
+# ============================================================================
+# AC-3: key_share extension carries BOTH X25519 and secp256r1 entries
+# ============================================================================
+
+describe "key_share extension dual entry construction":
+
+    it "ClientHello with p256_pub contains an X25519 KeyShareEntry (group 0x001D, key_len 32)":
+        val p256 = p256_keypair_pub(_scalar_one())
+        val ch = build_client_hello_bytes_with_p256(
+            _ch_random(), _x25519_pub_fixture(), p256, "example.com")
+        val off = _find_key_share_entry(ch, 0x00u8, 0x1Du8, 32u64)
+        # >= 0 means the entry was located in the wire; -1 means absent.
+        expect(off).to_be_greater_than(-1i64)
+
+    it "ClientHello with p256_pub contains a secp256r1 KeyShareEntry (group 0x0017, key_len 65)":
+        val p256 = p256_keypair_pub(_scalar_one())
+        val ch = build_client_hello_bytes_with_p256(
+            _ch_random(), _x25519_pub_fixture(), p256, "example.com")
+        val off = _find_key_share_entry(ch, 0x00u8, 0x17u8, 65u64)
+        expect(off).to_be_greater_than(-1i64)
+
+    it "secp256r1 KeyShareEntry payload begins with the SEC1 uncompressed-point tag 0x04":
+        val p256 = p256_keypair_pub(_scalar_one())
+        val ch = build_client_hello_bytes_with_p256(
+            _ch_random(), _x25519_pub_fixture(), p256, "example.com")
+        val off = _find_key_share_entry(ch, 0x00u8, 0x17u8, 65u64)
+        # off must be a valid byte index for the indexing below to be meaningful.
+        expect(off).to_be_greater_than(-1i64)
+        val payload_start = off.to_u64()
+        expect(ch[payload_start]).to_equal(0x04u8)
+
+    it "supported_groups extension advertises secp256r1 (0x0017) somewhere in ClientHello":
+        # Count occurrences of the 0x00 0x17 byte pair in the ClientHello.
+        # secp256r1 (0x0017) must appear at least once (in supported_groups,
+        # plus once more in the key_share group field).
+        val p256 = p256_keypair_pub(_scalar_one())
+        val ch = build_client_hello_bytes_with_p256(
+            _ch_random(), _x25519_pub_fixture(), p256, "example.com")
+        val occurrences = _count_byte_pair(ch, 0x00u8, 0x17u8)
+        expect(occurrences).to_be_greater_than(0u64)
+
+    it "back-compat: build_client_hello_bytes (no p256) still advertises secp256r1 in supported_groups":
+        val ch = build_client_hello_bytes(
+            _ch_random(), _x25519_pub_fixture(), "example.com")
+        expect(ch.len()).to_be_greater_than(0u64)
+        # supported_groups now lists secp256r1 even when no P-256 key_share
+        # is sent — this is what enables a server to issue an HRR asking for
+        # secp256r1 in CH2.
+        val occurrences = _count_byte_pair(ch, 0x00u8, 0x17u8)
+        expect(occurrences).to_be_greater_than(0u64)
+
+# ============================================================================
+# AC-2: ephemeral keypair gen — pubkey is on the curve
+# ============================================================================
+
+describe "P-256 ephemeral keypair gen smoke":
+
+    it "p256_keypair_pub returns a 65-byte uncompressed SEC1 point":
+        val out = p256_keypair_pub(_scalar_one())
+        expect(out.len()).to_equal(65u64)
+
+    it "p256_keypair_pub starts with the uncompressed-point tag 0x04":
+        val out = p256_keypair_pub(_scalar_one())
+        expect(out[0u64]).to_equal(0x04u8)
+
+    it "p256_keypair_pub(k=1) X-coordinate equals SEC2 generator Gx (smoke: scalar mult is on-curve)":
+        # k=1 => k*G = G. Byte-equality of the output X against the public
+        # SEC2 / FIPS 186-4 D.2.3 base point is the strongest cheap smoke
+        # check that the scalar-mult ladder lands on the curve.
+        val out = p256_keypair_pub(_scalar_one())
+        val out_x = _slice32(out, 1u64)
+        expect(out_x).to_equal(_gx_bytes())
+
+    it "p256_keypair_pub(k=1) Y-coordinate equals SEC2 generator Gy":
+        val out = p256_keypair_pub(_scalar_one())
+        val out_y = _slice32(out, 33u64)
+        expect(out_y).to_equal(_gy_bytes())
+
+    it "p256_keypair_pub(k=2) X-coordinate differs from Gx (smoke: doubling actually fires)":
+        # 2G != G; if doubling were a no-op the X-coordinate would still equal
+        # Gx. _bytes_equal gives us a direct value comparison rather than a
+        # boolean-wrapper assertion.
+        val out2 = p256_keypair_pub(_scalar_two())
+        val out2_x = _slice32(out2, 1u64)
+        expect(_bytes_equal(out2_x, _gx_bytes())).to_equal(false)
+
+    it "p256_keypair_pub(k=2) returns a 65-byte SEC1 uncompressed point":
+        val out2 = p256_keypair_pub(_scalar_two())
+        expect(out2.len()).to_equal(65u64)
+        expect(out2[0u64]).to_equal(0x04u8)

@@ -1,0 +1,289 @@
+# WebSocket Frame Parser — RFC 6455 §5
+#
+# [u8] -> WsFrame. Big-endian. Masked payloads are XOR-decoded so the
+# `payload` returned in WsFrame is always the unmasked application bytes
+# (matching the writer, which receives unmasked payload + masking key).
+#
+# Scope (W16-E):
+#   - All 6 frame variants (Text/Binary/Continuation/Close/Ping/Pong)
+#   - 7-bit, 16-bit, and 64-bit extended payload lengths
+#   - Mask XOR-decode per RFC 6455 §5.3
+#   - Returns nil on truncation, unknown opcode, or RFC violation
+#
+# Out of scope (deferred):
+#   - State machine: Continuation lifecycle, Text-after-fragment validation,
+#     control-frame interleaving rules — that's the connection layer.
+#   - UTF-8 validation of Text frame payloads.
+
+use std.http.ws.ws_frame.{
+    WsFrame, WsTextFrame, WsBinaryFrame, WsContinuationFrame,
+    WsCloseFrame, WsPingFrame, WsPongFrame,
+    WS_OPCODE_CONTINUATION, WS_OPCODE_TEXT, WS_OPCODE_BINARY,
+    WS_OPCODE_CLOSE, WS_OPCODE_PING, WS_OPCODE_PONG,
+    WS_FIN_BIT, WS_RSV1_BIT, WS_RSV2_BIT, WS_RSV3_BIT,
+    WS_OPCODE_MASK,
+    WS_MASK_BIT, WS_PAYLOAD_LEN_MASK,
+    WS_LEN_EXT_16, WS_LEN_EXT_64,
+    WS_MASK_KEY_LEN,
+    WS_MAX_CONTROL_PAYLOAD,
+    ws_is_control_opcode
+}
+
+# ============================================================================
+# Big-endian decode helpers
+# ============================================================================
+
+fn _read_u16_be(data: [u8], offset: i64) -> i64:
+    val b0 = data[offset]
+    val b1 = data[offset + 1]
+    return (b0 << 8) | b1
+
+fn _read_u64_be(data: [u8], offset: i64) -> i64:
+    val b0 = data[offset]
+    val b1 = data[offset + 1]
+    val b2 = data[offset + 2]
+    val b3 = data[offset + 3]
+    val b4 = data[offset + 4]
+    val b5 = data[offset + 5]
+    val b6 = data[offset + 6]
+    val b7 = data[offset + 7]
+    return (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7
+
+fn _slice_bytes(data: [u8], start: i64, count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    loop:
+        if i >= count:
+            break
+        out.push(data[start + i])
+        i = i + 1
+    return out
+
+# ============================================================================
+# XOR helper (mirrors writer)
+# ============================================================================
+
+fn _xor_u8(a: i64, b: i64) -> i64:
+    var result: i64 = 0
+    var bit_value: i64 = 1
+    var va = a & 0xff
+    var vb = b & 0xff
+    var bit = 0
+    loop:
+        if bit >= 8:
+            break
+        val bit_a = va % 2
+        val bit_b = vb % 2
+        if bit_a != bit_b:
+            result = result + bit_value
+        va = va / 2
+        vb = vb / 2
+        bit_value = bit_value * 2
+        bit = bit + 1
+    return result
+
+# Unmask `len` bytes starting at `start` in `data` using the 4-byte `key`.
+# Returns a fresh [u8] holding the unmasked payload.
+fn _unmask_payload(data: [u8], start: i64, len: i64, key: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    loop:
+        if i >= len:
+            break
+        val k = key[i % WS_MASK_KEY_LEN]
+        out.push(_xor_u8(data[start + i], k))
+        i = i + 1
+    return out
+
+# ============================================================================
+# Frame header (RFC 6455 §5.2)
+# ============================================================================
+
+class WsFrameHeader:
+    """Parsed WebSocket frame header. payload_offset is the absolute index
+    of the first payload byte in the original buffer; payload_len is the
+    decoded payload length (0..2^63-1). mask_key is empty when MASK=0."""
+    fin: bool
+    rsv1: bool
+    rsv2: bool
+    rsv3: bool
+    opcode: i64
+    masked: bool
+    payload_offset: i64
+    payload_len: i64
+    mask_key: [u8]
+
+# Parse the WebSocket frame header starting at `offset`. Returns nil if
+# the buffer is truncated mid-header.
+fn ws_parse_frame_header(data: [u8], offset: i64) -> WsFrameHeader?:
+    # Need at least 2 bytes for the fixed header.
+    if data.len() < offset + 2:
+        return nil
+    val b1 = data[offset]
+    val b2 = data[offset + 1]
+
+    val fin = (b1 & WS_FIN_BIT) != 0
+    val rsv1 = (b1 & WS_RSV1_BIT) != 0
+    val rsv2 = (b1 & WS_RSV2_BIT) != 0
+    val rsv3 = (b1 & WS_RSV3_BIT) != 0
+    val opcode = b1 & WS_OPCODE_MASK
+    val masked = (b2 & WS_MASK_BIT) != 0
+    val len7 = b2 & WS_PAYLOAD_LEN_MASK
+
+    var cursor = offset + 2
+    var payload_len: i64 = 0
+    if len7 < WS_LEN_EXT_16:
+        payload_len = len7
+    elif len7 == WS_LEN_EXT_16:
+        if data.len() < cursor + 2:
+            return nil
+        payload_len = _read_u16_be(data, cursor)
+        cursor = cursor + 2
+    else:
+        # len7 == WS_LEN_EXT_64
+        if data.len() < cursor + 8:
+            return nil
+        payload_len = _read_u64_be(data, cursor)
+        cursor = cursor + 8
+
+    var mask_key: [u8] = []
+    if masked:
+        if data.len() < cursor + WS_MASK_KEY_LEN:
+            return nil
+        mask_key = _slice_bytes(data, cursor, WS_MASK_KEY_LEN)
+        cursor = cursor + WS_MASK_KEY_LEN
+
+    return WsFrameHeader(
+        fin: fin,
+        rsv1: rsv1,
+        rsv2: rsv2,
+        rsv3: rsv3,
+        opcode: opcode,
+        masked: masked,
+        payload_offset: cursor,
+        payload_len: payload_len,
+        mask_key: mask_key
+    )
+
+# ============================================================================
+# Per-type construction helpers
+# ============================================================================
+
+fn _build_close_frame(header: WsFrameHeader, payload: [u8]) -> WsFrame?:
+    # Control frame size MUST be <= 125 bytes (RFC 6455 §5.5).
+    if payload.len() > WS_MAX_CONTROL_PAYLOAD:
+        return nil
+    # Control frames MUST NOT be fragmented (RFC 6455 §5.5: FIN=1).
+    if not header.fin:
+        return nil
+    # Empty Close payload = "no status" form (RFC 6455 §5.5.1).
+    if payload.len() == 0:
+        var empty: [u8] = []
+        return WsFrame.Close(WsCloseFrame(
+            fin: true,
+            has_status: false,
+            code: 0,
+            reason: empty
+        ))
+    # Status code requires at least 2 bytes; a 1-byte payload is invalid
+    # (RFC 6455 §5.5.1).
+    if payload.len() < 2:
+        return nil
+    val code = _read_u16_be(payload, 0)
+    val reason = _slice_bytes(payload, 2, payload.len() - 2)
+    return WsFrame.Close(WsCloseFrame(
+        fin: true,
+        has_status: true,
+        code: code,
+        reason: reason
+    ))
+
+fn _build_ping_frame(header: WsFrameHeader, payload: [u8]) -> WsFrame?:
+    if payload.len() > WS_MAX_CONTROL_PAYLOAD:
+        return nil
+    if not header.fin:
+        return nil
+    return WsFrame.Ping(WsPingFrame(fin: true, payload: payload))
+
+fn _build_pong_frame(header: WsFrameHeader, payload: [u8]) -> WsFrame?:
+    if payload.len() > WS_MAX_CONTROL_PAYLOAD:
+        return nil
+    if not header.fin:
+        return nil
+    return WsFrame.Pong(WsPongFrame(fin: true, payload: payload))
+
+# ============================================================================
+# Public parser entry point
+# ============================================================================
+#
+# Parse a single frame at `data[offset..]`. Returns nil on:
+#   - truncated header / payload
+#   - unknown opcode (RFC 6455 §5.2: receivers MUST fail the connection on
+#     unknown opcodes; surfaced here as nil so the connection state machine
+#     layer can translate to a Close(1002) response)
+#   - control-frame size violation (>125 bytes)
+#   - fragmented control frame (FIN=0 on Close/Ping/Pong)
+#   - 1-byte Close payload (invalid status code)
+fn ws_parse_frame(data: [u8], offset: i64) -> WsFrame?:
+    val maybe_header = ws_parse_frame_header(data, offset)
+    if maybe_header == nil:
+        return nil
+    val header = maybe_header ?? WsFrameHeader(
+        fin: false, rsv1: false, rsv2: false, rsv3: false,
+        opcode: 0, masked: false, payload_offset: 0, payload_len: 0, mask_key: []
+    )
+    # Bounds check payload.
+    if data.len() < header.payload_offset + header.payload_len:
+        return nil
+    # Decode payload (unmask if masked).
+    var payload: [u8] = []
+    if header.masked:
+        payload = _unmask_payload(data, header.payload_offset, header.payload_len, header.mask_key)
+    else:
+        payload = _slice_bytes(data, header.payload_offset, header.payload_len)
+
+    match header.opcode:
+        case WS_OPCODE_TEXT:
+            return WsFrame.Text(WsTextFrame(
+                fin: header.fin,
+                rsv1: header.rsv1,
+                rsv2: header.rsv2,
+                rsv3: header.rsv3,
+                payload: payload
+            ))
+        case WS_OPCODE_BINARY:
+            return WsFrame.Binary(WsBinaryFrame(
+                fin: header.fin,
+                rsv1: header.rsv1,
+                rsv2: header.rsv2,
+                rsv3: header.rsv3,
+                payload: payload
+            ))
+        case WS_OPCODE_CONTINUATION:
+            return WsFrame.Continuation(WsContinuationFrame(
+                fin: header.fin,
+                rsv1: header.rsv1,
+                rsv2: header.rsv2,
+                rsv3: header.rsv3,
+                payload: payload
+            ))
+        case WS_OPCODE_CLOSE:
+            return _build_close_frame(header, payload)
+        case WS_OPCODE_PING:
+            return _build_ping_frame(header, payload)
+        case WS_OPCODE_PONG:
+            return _build_pong_frame(header, payload)
+        case _:
+            return nil
+
+# Compute the wire size that a frame with `payload_len` would consume.
+# Useful for caller-side framing chunking. Does not include masking key bytes.
+fn ws_frame_wire_size(payload_len: i64, masked: bool) -> i64:
+    var size: i64 = 2
+    if payload_len >= 65536:
+        size = size + 8
+    elif payload_len >= 126:
+        size = size + 2
+    if masked:
+        size = size + WS_MASK_KEY_LEN
+    return size + payload_len

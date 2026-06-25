@@ -1,0 +1,200 @@
+# VHDL Subprogram Emission Diagnostics — stateful checks, cycle detection, and diagnostic reporting.
+#
+# Implements emission diagnostics for VHDL subprogram emission.
+#
+# Classes:
+#   StatefulCheck      — stateful helper detection with signal/variable/process classification
+#   CycleDetection     — call-graph cycle detection between subprograms
+#   EmissionDiagnostic — single diagnostic entry with kind, severity, and message
+#   DiagnosticReport   — aggregated report with up to 3 diagnostics and error summary
+
+# ============================================================================
+# StatefulCheck — stateful helper detection with signal/variable/process classification
+# ============================================================================
+
+class StatefulCheck:
+    """Stateful-helper check result for a named VHDL subprogram."""
+    helper_name: text
+    has_state: bool
+    state_kind: text
+    diagnostic_msg: text
+
+    me is_stateful() -> bool:
+        """Returns true when the helper has state."""
+        return has_state
+
+    me is_signal() -> bool:
+        """Returns true when state kind is signal."""
+        return state_kind == "signal"
+
+    me is_process() -> bool:
+        """Returns true when state kind is process."""
+        return state_kind == "process"
+
+    me to_text() -> text:
+        """Returns a readable summary of the stateful check result."""
+        if has_state:
+            return "STATEFUL " + helper_name + ": " + state_kind
+        return "PURE " + helper_name
+
+    static fn pure(name: text) -> StatefulCheck:
+        """Factory for a pure (stateless) helper check."""
+        return StatefulCheck(
+            helper_name: name,
+            has_state: false,
+            state_kind: "none",
+            diagnostic_msg: ""
+        )
+
+    static fn stateful(name: text, kind: text, msg: text) -> StatefulCheck:
+        """Factory for a stateful helper check."""
+        return StatefulCheck(
+            helper_name: name,
+            has_state: true,
+            state_kind: kind,
+            diagnostic_msg: msg
+        )
+
+# ============================================================================
+# CycleDetection — call-graph cycle detection between subprograms
+# ============================================================================
+
+class CycleDetection:
+    """Call-graph cycle detection result between two subprograms."""
+    caller: text
+    callee: text
+    is_cycle: bool
+    cycle_depth: int
+
+    me has_cycle() -> bool:
+        """Returns true when a cycle was detected."""
+        return is_cycle
+
+    me is_self_recursive() -> bool:
+        """Returns true when caller and callee are the same subprogram."""
+        return caller == callee
+
+    me to_text() -> text:
+        """Returns a readable summary of the cycle detection result."""
+        if is_cycle:
+            return "CYCLE " + caller + " -> " + callee + " depth=" + cycle_depth.to_text()
+        return "OK " + caller + " -> " + callee
+
+    static fn no_cycle(from: text, to: text) -> CycleDetection:
+        """Factory for a clean (no cycle) detection result."""
+        return CycleDetection(
+            caller: from,
+            callee: to,
+            is_cycle: false,
+            cycle_depth: 0
+        )
+
+    static fn cycle(from: text, to: text, depth: int) -> CycleDetection:
+        """Factory for a detected cycle."""
+        return CycleDetection(
+            caller: from,
+            callee: to,
+            is_cycle: true,
+            cycle_depth: depth
+        )
+
+# ============================================================================
+# EmissionDiagnostic — single diagnostic entry with kind, severity, and message
+# ============================================================================
+
+class EmissionDiagnostic:
+    """Single diagnostic produced during VHDL subprogram emission."""
+    diagnostic_kind: text
+    helper_name: text
+    message: text
+    severity: text
+
+    me is_error() -> bool:
+        """Returns true when severity is error."""
+        return severity == "error"
+
+    me is_warning() -> bool:
+        """Returns true when severity is warning."""
+        return severity == "warning"
+
+    me to_text() -> text:
+        """Returns a formatted diagnostic string."""
+        return severity + "[" + diagnostic_kind + "] " + helper_name + ": " + message
+
+    static fn error(kind: text, name: text, msg: text) -> EmissionDiagnostic:
+        """Factory for an error-severity diagnostic."""
+        return EmissionDiagnostic(
+            diagnostic_kind: kind,
+            helper_name: name,
+            message: msg,
+            severity: "error"
+        )
+
+    static fn warning(kind: text, name: text, msg: text) -> EmissionDiagnostic:
+        """Factory for a warning-severity diagnostic."""
+        return EmissionDiagnostic(
+            diagnostic_kind: kind,
+            helper_name: name,
+            message: msg,
+            severity: "warning"
+        )
+
+# ============================================================================
+# DiagnosticReport — aggregated report with up to 3 diagnostics and error summary
+# ============================================================================
+
+class DiagnosticReport:
+    """Aggregated emission diagnostic report holding up to 3 diagnostics."""
+    f0_diag: EmissionDiagnostic
+    f1_diag: EmissionDiagnostic
+    f2_diag: EmissionDiagnostic
+    diag_count: int
+    has_errors: bool
+
+    me add_diagnostic(d: EmissionDiagnostic) -> DiagnosticReport:
+        """Adds a diagnostic to the next available slot and returns an updated copy."""
+        var updated_has_errors = has_errors
+        if d.is_error():
+            updated_has_errors = true
+        if diag_count == 0:
+            return DiagnosticReport(
+                f0_diag: d,
+                f1_diag: f1_diag,
+                f2_diag: f2_diag,
+                diag_count: 1,
+                has_errors: updated_has_errors
+            )
+        if diag_count == 1:
+            return DiagnosticReport(
+                f0_diag: f0_diag,
+                f1_diag: d,
+                f2_diag: f2_diag,
+                diag_count: 2,
+                has_errors: updated_has_errors
+            )
+        return DiagnosticReport(
+            f0_diag: f0_diag,
+            f1_diag: f1_diag,
+            f2_diag: d,
+            diag_count: 3,
+            has_errors: updated_has_errors
+        )
+
+    me is_clean() -> bool:
+        """Returns true when no diagnostics have been recorded."""
+        return diag_count == 0
+
+    me to_text() -> text:
+        """Returns a summary of the diagnostic report."""
+        return "report(" + diag_count.to_text() + " diagnostics, errors=" + has_errors.to_text() + ")"
+
+    static fn create() -> DiagnosticReport:
+        """Factory for an empty diagnostic report."""
+        var dummy = EmissionDiagnostic.warning("none", "", "")
+        return DiagnosticReport(
+            f0_diag: dummy,
+            f1_diag: dummy,
+            f2_diag: dummy,
+            diag_count: 0,
+            has_errors: false
+        )

@@ -1,0 +1,269 @@
+# Verification Report
+#
+# Renders verification status at four levels:
+# 1. Project summary: "3 verified, 1 failed, 2 admitted, 1 stale, 5 not_checked"
+# 2. File summary: Per-file state rollup
+# 3. Symbol summary: Per-function/type verification state
+# 4. Theorem detail: Individual theorem + source origin + proof file
+#
+# Invariants:
+# - Admitted and Trusted NEVER render as "verified" or with green styling
+# - Debt counts (sorry, assume) are always shown prominently
+# - Source origins are included for failures
+# - Environment errors are separated from proof errors
+
+use verification.state.{VerificationState, StateCounts, aggregate_states}
+use verification.proof_unit.{ProofUnit, ProofUnitSet}
+
+# Report detail level
+enum ReportLevel:
+    Project     # One-line summary
+    File        # Per-file breakdown
+    Symbol      # Per-symbol breakdown
+    Theorem     # Individual theorem detail
+
+    fn to_string(self) -> text:
+        match self:
+            case Project: "project"
+            case File: "file"
+            case Symbol: "symbol"
+            case Theorem: "theorem"
+
+# A single file's verification entry
+class FileEntry:
+    file_path: text
+    state: VerificationState
+    obligation_count: i32
+    admitted_count: i32
+    trusted_count: i32
+
+    fn format_line(self) -> text:
+        var debt = ""
+        if self.admitted_count > 0:
+            debt = debt + " [{self.admitted_count} sorry]"
+        if self.trusted_count > 0:
+            debt = debt + " [{self.trusted_count} assume]"
+        val state_str = self.state.to_display()
+        "  {state_str}  {self.file_path}  ({self.obligation_count} obligations){debt}"
+
+# A single theorem's verification entry
+class TheoremEntry:
+    theorem_name: text
+    source_file: text
+    source_line: i32
+    lean_file: text
+    state: VerificationState
+    error_message: Option<text>
+    is_environment_error: bool
+
+    fn format_line(self) -> text:
+        val state_str = self.state.to_display()
+        var line = "  {state_str}  {self.theorem_name}"
+        line = line + "\n    source: {self.source_file}:{self.source_line}"
+        line = line + "\n    lean:   {self.lean_file}"
+        match self.error_message:
+            case Some(msg):
+                if self.is_environment_error:
+                    line = line + "\n    ENV ERROR: {msg}"
+                else:
+                    line = line + "\n    error: {msg}"
+            case nil:
+                pass_do_nothing
+        line
+
+# The full verification report
+class VerificationReport:
+    title: text
+    scope: text                     # "project" | "file:path" | etc.
+    units: ProofUnitSet
+    file_entries: List<FileEntry>
+    theorem_entries: List<TheoremEntry>
+    generated_at: text              # ISO-8601 timestamp
+
+    static fn from_units(title: text, scope: text, units: ProofUnitSet, timestamp: text) -> VerificationReport:
+        # Build file_entries from units
+        var file_entries: List<FileEntry> = []
+        for u in units.units:
+            val entry = FileEntry(
+                file_path=u.source_file,
+                state=u.state,
+                obligation_count=u.obligations.len(),
+                admitted_count=u.admitted_count,
+                trusted_count=u.trusted_count
+            )
+            file_entries = file_entries + [entry]
+
+        # Build theorem_entries from obligations
+        var theorem_entries: List<TheoremEntry> = []
+        for u in units.units:
+            for ob in u.obligations:
+                val entry = TheoremEntry(
+                    theorem_name=ob,
+                    source_file=u.source_file,
+                    source_line=0,
+                    lean_file=u.lean_file,
+                    state=u.state,
+                    error_message=nil,
+                    is_environment_error=false
+                )
+                theorem_entries = theorem_entries + [entry]
+
+        VerificationReport(
+            title=title,
+            scope=scope,
+            units=units,
+            file_entries=file_entries,
+            theorem_entries=theorem_entries,
+            generated_at=timestamp
+        )
+
+    # Render at specified level
+    fn render(self, level: ReportLevel) -> text:
+        match level:
+            case Project: self.render_project()
+            case File: self.render_files()
+            case Symbol: self.render_symbols()
+            case Theorem: self.render_theorems()
+
+    fn render_project(self) -> text:
+        val counts = self.units.state_counts()
+        val total = counts.total()
+        var out = "Lean Verification: {counts.format()}\n"
+        out = out + "  Total: {total} proof units\n"
+        val debt_total = counts.admitted + counts.trusted
+        if debt_total > 0:
+            out = out + "  DEBT: {debt_total} units have sorry/assume obligations\n"
+        out
+
+    fn render_files(self) -> text:
+        var out = "{self.title}\n"
+        out = out + "Scope: {self.scope}\n"
+        out = out + "Generated: {self.generated_at}\n"
+        out = out + "\n"
+        val counts = self.units.state_counts()
+        out = out + "Summary: {counts.format()}\n"
+        val debt_total = counts.admitted + counts.trusted
+        if debt_total > 0:
+            out = out + "DEBT: {debt_total} units have sorry/assume obligations\n"
+        out = out + "\n"
+        out = out + "Files:\n"
+        if self.file_entries.len() == 0:
+            out = out + "  (no files)\n"
+        else:
+            for entry in self.file_entries:
+                out = out + entry.format_line() + "\n"
+        out
+
+    fn render_symbols(self) -> text:
+        var out = "{self.title}\n"
+        out = out + "Scope: {self.scope}\n"
+        out = out + "\n"
+        val counts = self.units.state_counts()
+        out = out + "Summary: {counts.format()}\n"
+        val debt_total = counts.admitted + counts.trusted
+        if debt_total > 0:
+            out = out + "DEBT: {debt_total} units have sorry/assume obligations\n"
+        out = out + "\n"
+        out = out + "Symbols:\n"
+        if self.units.units.len() == 0:
+            out = out + "  (no symbols)\n"
+        else:
+            for u in self.units.units:
+                out = out + u.format_summary() + "\n"
+        out
+
+    fn render_theorems(self) -> text:
+        var out = "{self.title}\n"
+        out = out + "Scope: {self.scope}\n"
+        out = out + "Generated: {self.generated_at}\n"
+        out = out + "\n"
+        val counts = self.units.state_counts()
+        out = out + "Summary: {counts.format()}\n"
+        val debt_total = counts.admitted + counts.trusted
+        if debt_total > 0:
+            out = out + "DEBT: {debt_total} units have sorry/assume obligations\n"
+        out = out + "\n"
+
+        # Separate environment errors from proof errors
+        var env_errors: List<TheoremEntry> = []
+        var proof_errors: List<TheoremEntry> = []
+        var other_entries: List<TheoremEntry> = []
+
+        for entry in self.theorem_entries:
+            if entry.is_environment_error:
+                env_errors = env_errors + [entry]
+            elif entry.state == VerificationState.Failed:
+                proof_errors = proof_errors + [entry]
+            else:
+                other_entries = other_entries + [entry]
+
+        if env_errors.len() > 0:
+            out = out + "Environment Errors ({env_errors.len()}):\n"
+            for entry in env_errors:
+                out = out + entry.format_line() + "\n"
+            out = out + "\n"
+
+        if proof_errors.len() > 0:
+            out = out + "Proof Failures ({proof_errors.len()}):\n"
+            for entry in proof_errors:
+                out = out + entry.format_line() + "\n"
+            out = out + "\n"
+
+        out = out + "All Theorems ({self.theorem_entries.len()}):\n"
+        if self.theorem_entries.len() == 0:
+            out = out + "  (no theorems)\n"
+        else:
+            for entry in self.theorem_entries:
+                out = out + entry.format_line() + "\n"
+        out
+
+    # Render as machine-readable SDN format
+    fn render_sdn(self) -> text:
+        val counts = self.units.state_counts()
+        var out = "verification_report {\n"
+        out = out + "  title: \"{self.title}\"\n"
+        out = out + "  scope: \"{self.scope}\"\n"
+        out = out + "  generated_at: \"{self.generated_at}\"\n"
+        out = out + "\n"
+        out = out + "  counts {\n"
+        out = out + "    verified: {counts.verified}\n"
+        out = out + "    failed: {counts.failed}\n"
+        out = out + "    admitted: {counts.admitted}\n"
+        out = out + "    trusted: {counts.trusted}\n"
+        out = out + "    stale: {counts.stale}\n"
+        out = out + "    not_checked: {counts.not_checked}\n"
+        out = out + "    total: {counts.total()}\n"
+        out = out + "  }\n"
+        out = out + "\n"
+
+        out = out + "  files {\n"
+        for entry in self.file_entries:
+            out = out + "    file {\n"
+            out = out + "      path: \"{entry.file_path}\"\n"
+            out = out + "      state: \"{entry.state.to_string()}\"\n"
+            out = out + "      obligations: {entry.obligation_count}\n"
+            out = out + "      admitted: {entry.admitted_count}\n"
+            out = out + "      trusted: {entry.trusted_count}\n"
+            out = out + "    }\n"
+        out = out + "  }\n"
+        out = out + "\n"
+
+        out = out + "  theorems {\n"
+        for entry in self.theorem_entries:
+            out = out + "    theorem {\n"
+            out = out + "      name: \"{entry.theorem_name}\"\n"
+            out = out + "      source_file: \"{entry.source_file}\"\n"
+            out = out + "      source_line: {entry.source_line}\n"
+            out = out + "      lean_file: \"{entry.lean_file}\"\n"
+            out = out + "      state: \"{entry.state.to_string()}\"\n"
+            out = out + "      is_environment_error: {entry.is_environment_error}\n"
+            match entry.error_message:
+                case Some(msg):
+                    out = out + "      error_message: \"{msg}\"\n"
+                case nil:
+                    pass_do_nothing
+            out = out + "    }\n"
+        out = out + "  }\n"
+
+        out = out + "}\n"
+        out

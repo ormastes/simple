@@ -1,0 +1,116 @@
+# Shared wm_compare failure triage report.
+
+pub struct ComparisonFailureReport:
+    source_a: text
+    source_b: text
+    capture_status: text
+    metadata_status: text
+    structural_status: text
+    pixel_status: text
+    backend_status: text
+    primary_status: text
+    exact_required: bool
+    perceptual_diagnostic_only: bool
+    tolerance_acceptance_allowed: bool
+    accepted: bool
+
+fn _sdn_escape(value: text) -> text:
+    val slash_escaped = value.replace("\\", "\\\\")
+    slash_escaped.replace("\"", "\\\"")
+
+fn _bool_text(value: bool) -> text:
+    if value: "true" else: "false"
+
+fn _backend_status(raw_status: text) -> text:
+    if raw_status == "Initialized":
+        "backend_initialized"
+    elif raw_status == "Unavailable":
+        "backend_unavailable"
+    elif raw_status == "Failed":
+        "backend_failed"
+    elif raw_status == "Fallback":
+        "backend_fallback"
+    elif raw_status == "":
+        "backend_unknown"
+    else:
+        raw_status
+
+fn _primary_status(capture_status: text, metadata_status: text,
+                   structural_status: text, pixel_status: text,
+                   backend_status: text) -> text:
+    if capture_status != "ok":
+        capture_status
+    elif metadata_status != "ok":
+        metadata_status
+    elif structural_status != "layout_match":
+        structural_status
+    elif pixel_status != "exact_match":
+        pixel_status
+    elif backend_status != "backend_initialized":
+        backend_status
+    else:
+        "accepted"
+
+pub fn comparison_failure_report(source_a: text, source_b: text,
+                                 source_a_capture_ok: bool,
+                                 source_b_capture_ok: bool,
+                                 metadata_ok: bool,
+                                 structural_status: text,
+                                 exact_match: bool,
+                                 backend_raw_status: text) -> ComparisonFailureReport:
+    val capture_status = if source_a_capture_ok and source_b_capture_ok:
+        "ok"
+    else:
+        "capture_failed"
+    val metadata_status = if capture_status != "ok":
+        "not_evaluated"
+    elif metadata_ok:
+        "ok"
+    else:
+        "metadata_mismatch"
+    val normalized_structural = if metadata_status != "ok":
+        "not_evaluated"
+    elif structural_status == "":
+        "layout_unknown"
+    else:
+        structural_status
+    val pixel_status = if metadata_status != "ok" or normalized_structural != "layout_match":
+        "not_evaluated"
+    elif exact_match:
+        "exact_match"
+    else:
+        "exact_mismatch"
+    val backend_status = _backend_status(backend_raw_status)
+    val accepted = capture_status == "ok" and metadata_status == "ok" and
+        normalized_structural == "layout_match" and pixel_status == "exact_match"
+    val primary = _primary_status(capture_status, metadata_status,
+        normalized_structural, pixel_status, backend_status)
+    ComparisonFailureReport(
+        source_a: source_a,
+        source_b: source_b,
+        capture_status: capture_status,
+        metadata_status: metadata_status,
+        structural_status: normalized_structural,
+        pixel_status: pixel_status,
+        backend_status: backend_status,
+        primary_status: primary,
+        exact_required: true,
+        perceptual_diagnostic_only: true,
+        tolerance_acceptance_allowed: false,
+        accepted: accepted
+    )
+
+pub fn comparison_failure_report_sdn(report: ComparisonFailureReport) -> text:
+    "(comparison_failure_report " +
+        "source_a: \"" + _sdn_escape(report.source_a) + "\" " +
+        "source_b: \"" + _sdn_escape(report.source_b) + "\" " +
+        "capture_status: \"" + report.capture_status + "\" " +
+        "metadata_status: \"" + report.metadata_status + "\" " +
+        "structural_status: \"" + report.structural_status + "\" " +
+        "pixel_status: \"" + report.pixel_status + "\" " +
+        "backend_status: \"" + report.backend_status + "\" " +
+        "primary_status: \"" + report.primary_status + "\" " +
+        "acceptance_policy: (exact_required: " + _bool_text(report.exact_required) +
+        " perceptual_diagnostic_only: " + _bool_text(report.perceptual_diagnostic_only) +
+        " tolerance_acceptance_allowed: " + _bool_text(report.tolerance_acceptance_allowed) + ") " +
+        "accepted: " + _bool_text(report.accepted) + ")"

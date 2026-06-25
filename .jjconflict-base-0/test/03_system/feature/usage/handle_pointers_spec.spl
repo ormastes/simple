@@ -1,0 +1,128 @@
+"""
+# Handle Pointers Specification
+
+**Feature IDs:** #820-825
+**Category:** Language
+**Status:** Implemented
+
+## Overview
+
+Handle pointers provide safe, reusable references to i64 values via a slot
+table with generation counters. Freed slots are reused, but stale handles
+are detected via generation mismatch.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Handle | Index + generation pair for safe reference |
+| Generation | Version counter incremented on free |
+| Pool | Pre-allocated slot table with free list |
+| Slot reuse | Freed indices are recycled |
+"""
+
+use std.ptr.handle.{handle_pool_new, handle_pool_reset, handle_alloc, handle_deref, handle_is_valid, handle_free, handle_pool_size, handle_pool_capacity}
+
+# ============================================================================
+# Basic Handle Operations
+# ============================================================================
+
+describe "Handle - create and deref":
+    it "creates handle for value":
+        handle_pool_new(16)
+        val h = handle_alloc(42)
+        expect(handle_deref(h)).to_equal(42)
+        expect(handle_is_valid(h)).to_equal(true)
+        handle_pool_reset()
+
+describe "Handle - deref safely":
+    it "dereferences handle":
+        handle_pool_new(16)
+        val h = handle_alloc(100)
+        val v = handle_deref(h)
+        expect(v).to_equal(100)
+        handle_pool_reset()
+
+
+# ============================================================================
+# Handle Validation and Generation
+# ============================================================================
+
+describe "Handle - validate live":
+    it "validates live handle":
+        handle_pool_new(16)
+        val h = handle_alloc(100)
+        expect(handle_is_valid(h)).to_equal(true)
+        handle_pool_reset()
+
+describe "Handle - detect stale":
+    it "detects freed handle":
+        handle_pool_new(16)
+        val h = handle_alloc(100)
+        handle_free(h)
+        expect(handle_is_valid(h)).to_equal(false)
+        handle_pool_reset()
+
+describe "Handle - generation invalidation":
+    it "old handle invalid after slot reuse":
+        handle_pool_new(16)
+        val h1 = handle_alloc(10)
+        handle_free(h1)
+        val h2 = handle_alloc(20)
+        expect(handle_is_valid(h1)).to_equal(false)
+        expect(handle_is_valid(h2)).to_equal(true)
+        expect(handle_deref(h2)).to_equal(20)
+        handle_pool_reset()
+
+
+# ============================================================================
+# Handle Pool Management
+# ============================================================================
+
+describe "Handle - slot reuse":
+    it "reuses freed slot index":
+        handle_pool_new(4)
+        val h1 = handle_alloc(100)
+        val idx1 = h1.index
+        handle_free(h1)
+        val h2 = handle_alloc(200)
+        val idx2 = h2.index
+        expect(idx1).to_equal(idx2)
+        expect(handle_deref(h2)).to_equal(200)
+        handle_pool_reset()
+
+describe "Handle - multiple handles":
+    it "manages multiple concurrent handles":
+        handle_pool_new(16)
+        val h1 = handle_alloc(1)
+        val h2 = handle_alloc(2)
+        val h3 = handle_alloc(3)
+        expect(handle_is_valid(h1)).to_equal(true)
+        expect(handle_is_valid(h2)).to_equal(true)
+        expect(handle_is_valid(h3)).to_equal(true)
+        expect(handle_pool_size()).to_equal(3)
+        handle_pool_reset()
+
+
+# ============================================================================
+# Error Handling
+# ============================================================================
+
+describe "Handle - invalid deref":
+    it "returns -1 for freed handle":
+        handle_pool_new(4)
+        val h = handle_alloc(42)
+        handle_free(h)
+        val v = handle_deref(h)
+        expect(v).to_equal(-1)
+        handle_pool_reset()
+
+describe "Handle - double free":
+    it "second free returns false":
+        handle_pool_new(4)
+        val h = handle_alloc(42)
+        val ok1 = handle_free(h)
+        val ok2 = handle_free(h)
+        expect(ok1).to_equal(true)
+        expect(ok2).to_equal(false)
+        handle_pool_reset()

@@ -1,0 +1,93 @@
+# ECS ComponentStore<T> — sparse-set column for one component type
+#
+# Storage layout (struct-of-arrays friendly):
+#   dense:   [T]    — packed component values, one per live (entity, T) pair
+#   ents:    [i32]  — entity id matching dense[i] (parallel to dense)
+#   sparse:  [i32]  — entity id -> dense slot, or -1 if T not present
+#   ticks:   [i64]  — last-modified tick for dense[i] (change detection)
+#
+# Invariants:
+#   dense.len() == ents.len() == ticks.len()
+#   For every i in 0..dense.len(): sparse[ents[i]] == i
+#   For any entity id not in the store: sparse[id] == -1
+
+use std.ecs.entity.{Entity}
+
+struct ComponentStore<T>:
+    dense: [T]
+    ents: [i32]
+    sparse: [i32]
+    ticks: [i64]
+
+    static fn new() -> ComponentStore<T>:
+        ComponentStore(
+            dense: [],
+            ents: [],
+            sparse: [],
+            ticks: []
+        )
+
+    fn ensure_sparse_capacity(self, id: i32):
+        while (self.sparse.len() as i32) <= id:
+            self.sparse.push(-1)
+
+    fn contains(self, e: Entity) -> bool:
+        if e.id < 0 or e.id >= (self.sparse.len() as i32):
+            return false
+        self.sparse[e.id] >= 0
+
+    fn insert(self, e: Entity, value: T, tick: i64) -> bool:
+        """Insert or overwrite the component for e. Returns true if inserted new."""
+        self.ensure_sparse_capacity(e.id)
+        val slot = self.sparse[e.id]
+        if slot >= 0:
+            self.dense[slot] = value
+            self.ticks[slot] = tick
+            return false
+        val new_slot = (self.dense.len() as i32)
+        self.dense.push(value)
+        self.ents.push(e.id)
+        self.ticks.push(tick)
+        self.sparse[e.id] = new_slot
+        true
+
+    fn remove(self, e: Entity) -> bool:
+        """Remove component from e if present (swap-with-last). Returns true if removed."""
+        if not self.contains(e):
+            return false
+        val slot = self.sparse[e.id]
+        val last = (self.dense.len() as i32) - 1
+        if slot != last:
+            self.dense[slot] = self.dense[last]
+            self.ents[slot] = self.ents[last]
+            self.ticks[slot] = self.ticks[last]
+            self.sparse[self.ents[slot]] = slot
+        self.dense.pop()
+        self.ents.pop()
+        self.ticks.pop()
+        self.sparse[e.id] = -1
+        true
+
+    fn get_slot(self, e: Entity) -> i32:
+        """Return dense slot index for e, or -1 if absent."""
+        if e.id < 0 or e.id >= (self.sparse.len() as i32):
+            return -1
+        self.sparse[e.id]
+
+    fn touch(self, e: Entity, tick: i64) -> bool:
+        """Mark the component as changed at tick. Returns false if absent."""
+        val slot = self.get_slot(e)
+        if slot < 0:
+            return false
+        self.ticks[slot] = tick
+        true
+
+    fn len(self) -> i32:
+        self.dense.len() as i32
+
+    fn entity_at(self, slot: i32) -> i32:
+        """Return entity id stored at dense slot (for iteration)."""
+        self.ents[slot]
+
+    fn tick_at(self, slot: i32) -> i64:
+        self.ticks[slot]

@@ -1,0 +1,43 @@
+# Regression spec (2026-06-11): CoreLexer.scan_string lacked triple-quote
+# support, so a multi-line docstring lexed as `""` (empty string token) +
+# an unterminated-string Error(191) token. Every module with a multi-line
+# docstring then failed to parse in the self-hosted `check` driver path
+# (parser.spl -> lex_next -> CoreLexer.next_token).
+use compiler.frontend.core.lexer.{lex_init, lex_next, lex_token_text}
+
+describe "CoreLexer triple-quoted strings":
+    it "lexes a multi-line docstring as one string token":
+        val src = "fn f() -> i64:\n    \"\"\"line one\n    line two\n    \"\"\"\n    1\n"
+        lex_init(src)
+        var kinds: [i64] = []
+        var string_text = ""
+        var error_count = 0
+        for i in 0..40:
+            val k = lex_next()
+            if k == 0:
+                break
+            kinds.push(k)
+            if k == 3 and string_text == "":
+                string_text = lex_token_text()
+            if k == 191:
+                error_count = error_count + 1
+        # No Error tokens, and the docstring is one String token containing
+        # both lines.
+        expect(error_count).to_equal(0)
+        expect(string_text.contains("line one")).to_equal(true)
+        expect(string_text.contains("line two")).to_equal(true)
+
+    it "lexes a single-line triple-quoted string as one token":
+        lex_init("val x = \"\"\"abc\"\"\"\n")
+        var found = ""
+        var errors = 0
+        for i in 0..20:
+            val k = lex_next()
+            if k == 0:
+                break
+            if k == 3:
+                found = lex_token_text()
+            if k == 191:
+                errors = errors + 1
+        expect(errors).to_equal(0)
+        expect(found).to_equal("abc")

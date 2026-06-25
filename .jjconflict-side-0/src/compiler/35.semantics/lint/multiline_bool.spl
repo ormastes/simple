@@ -1,0 +1,151 @@
+# Multiline Boolean Lint
+#
+# Detects if/while/elif conditions that span multiple lines without
+# parentheses. This is a known runtime limitation — multiline booleans
+# must be wrapped in parentheses to work correctly.
+#
+# BOOL001: Multiline boolean condition without parentheses            WARNING
+#
+# Example problem:
+#   if x > 0 and
+#      y > 0:              # BUG: parser may not join these lines
+#       do_something()
+#
+# Correct form:
+#   if (x > 0 and
+#       y > 0):
+#       do_something()
+#
+# This is a text-based lint since the issue occurs at the parser level
+# (before AST is formed). We scan source lines directly.
+#
+# Does NOT flag:
+# - Conditions already wrapped in parentheses
+# - Single-line conditions
+# - Conditions with `and`/`or` that fit on one line
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct MultilineBoolWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    line_num: i64
+    keyword: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: line {self.line_num} — {self.message} — {self.hint}"
+
+# ============================================================================
+# Main Entry Point (text-based scanning)
+# ============================================================================
+
+fn check_multiline_bool(source: text) -> [MultilineBoolWarning]:
+    """Run multiline-boolean lint on source text.
+
+    Scans for if/while/elif keywords where the condition contains
+    'and' or 'or' at the end of a line (indicating continuation onto
+    the next line) without the condition being wrapped in parentheses.
+    """
+    var warnings: [MultilineBoolWarning] = []
+    val lines = source.split("\n")
+
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+
+        # Detect if/while/elif keyword at the start of a trimmed line
+        var keyword = ""
+        var cond_start = ""
+        if trimmed.starts_with("if "):
+            keyword = "if"
+            cond_start = trimmed.slice(3)
+        elif trimmed.starts_with("elif "):
+            keyword = "elif"
+            cond_start = trimmed.slice(5)
+        elif trimmed.starts_with("while "):
+            keyword = "while"
+            cond_start = trimmed.slice(6)
+
+        if keyword != "":
+            # Check if the condition is NOT wrapped in parens
+            val cond_trimmed = cond_start.trim()
+
+            # If the line ends with `and` or `or` (with or without trailing colon),
+            # it's a multiline boolean that needs parens
+            val is_multiline = is_trailing_boolean_op(trimmed)
+
+            if is_multiline:
+                # Check if the condition starts with '(' and we can find a matching ')'
+                # on a subsequent line ending with '):' — meaning it's already wrapped
+                if not is_paren_wrapped(cond_trimmed):
+                    warnings.push(MultilineBoolWarning(
+                        code: "BOOL001",
+                        severity: "WARNING",
+                        message: "multiline boolean condition in '{keyword}' without parentheses",
+                        hint: "wrap the condition in parentheses: {keyword} (cond1 and\\n    cond2):",
+                        line_num: li + 1,
+                        keyword: keyword
+                    ))
+
+            # Also check if the NEXT line continues with and/or (condition continuation)
+            if keyword != "" and not is_multiline:
+                if li + 1 < lines.len():
+                    val next_line = lines[li + 1]
+                    val next_trimmed = next_line.trim()
+                    if is_leading_boolean_op(next_trimmed) and not is_paren_wrapped(cond_trimmed):
+                        warnings.push(MultilineBoolWarning(
+                            code: "BOOL001",
+                            severity: "WARNING",
+                            message: "multiline boolean condition in '{keyword}' without parentheses",
+                            hint: "wrap the condition in parentheses: {keyword} (cond1 and\\n    cond2):",
+                            line_num: li + 1,
+                            keyword: keyword
+                        ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn is_trailing_boolean_op(trimmed: text) -> bool:
+    """Check if a line ends with a boolean operator (and/or), indicating
+    the condition continues on the next line."""
+    # Strip trailing colon if present
+    var line = trimmed
+    if line.ends_with(":"):
+        line = line.slice(0, line.len() - 1).trim()
+
+    # Check for trailing boolean operators
+    if line.ends_with(" and") or line.ends_with(" or"):
+        return true
+    if line.ends_with("\tand") or line.ends_with("\tor"):
+        return true
+    false
+
+fn is_leading_boolean_op(trimmed: text) -> bool:
+    """Check if a line starts with a boolean operator, indicating it's
+    a continuation of a condition from the previous line."""
+    if trimmed.starts_with("and ") or trimmed.starts_with("or "):
+        return true
+    if trimmed.starts_with("and\t") or trimmed.starts_with("or\t"):
+        return true
+    false
+
+fn is_paren_wrapped(cond: text) -> bool:
+    """Check if a condition starts with '(' indicating it's parenthesized.
+    This is a simple heuristic — the opening paren should be at the start."""
+    if cond.len() == 0:
+        return false
+    cond.starts_with("(")
+
+# ============================================================================
+# Exports
+# ============================================================================

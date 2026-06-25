@@ -1,0 +1,197 @@
+# VHDL Subprogram Select — Entity-vs-subprogram selection criteria for VHDL subprogram emission.
+#
+# Implements selection criteria and emission planning for choosing between
+# entity, function, and procedure targets during VHDL subprogram emission.
+#
+# Classes:
+#   SelectionCriteria   — port/state/process flags that drive kind selection
+#   EntityKeep          — record that a helper must stay as an entity
+#   SubprogramCandidate — chosen kind + confidence for a single helper
+#   EmissionPlan        — ordered collection of candidates for a compilation unit
+
+# ============================================================================
+# SelectionCriteria — port/state/process flags that drive kind selection
+# ============================================================================
+
+class SelectionCriteria:
+    """Selection criteria flags used to decide VHDL emission target kind."""
+    has_ports: bool
+    has_state: bool
+    has_process: bool
+    return_count: int
+
+    me needs_entity() -> bool:
+        """Returns true when the helper requires an entity (has ports, state, or process)."""
+        return has_ports or has_state or has_process
+
+    me can_be_function() -> bool:
+        """Returns true when the helper can be emitted as a VHDL function."""
+        return return_count == 1 and has_state == false and has_process == false
+
+    me can_be_procedure() -> bool:
+        """Returns true when the helper can be emitted as a VHDL procedure."""
+        return return_count > 1 and has_state == false
+
+    me to_text() -> text:
+        """Returns a readable summary of the selection criteria."""
+        return "criteria: ports=" + has_ports.to_text() + " state=" + has_state.to_text() + " returns=" + return_count.to_text()
+
+    static fn pure_single() -> SelectionCriteria:
+        """Factory for a pure single-return helper (no ports, state, or process)."""
+        return SelectionCriteria(
+            has_ports: false,
+            has_state: false,
+            has_process: false,
+            return_count: 1
+        )
+
+    static fn pure_multi(rets: int) -> SelectionCriteria:
+        """Factory for a pure multi-return helper (no ports, state, or process)."""
+        return SelectionCriteria(
+            has_ports: false,
+            has_state: false,
+            has_process: false,
+            return_count: rets
+        )
+
+    static fn stateful() -> SelectionCriteria:
+        """Factory for a stateful helper with ports, state, and process."""
+        return SelectionCriteria(
+            has_ports: true,
+            has_state: true,
+            has_process: true,
+            return_count: 1
+        )
+
+# ============================================================================
+# EntityKeep — record that a helper must stay as an entity
+# ============================================================================
+
+class EntityKeep:
+    """Record indicating that a helper must be kept as a VHDL entity."""
+    entity_name: text
+    keep_reason: text
+    is_forced: bool
+    original_helper: text
+
+    me to_text() -> text:
+        """Returns a readable summary of the entity-keep record."""
+        return "keep-entity:" + entity_name + " reason=" + keep_reason
+
+    me is_hardware_boundary() -> bool:
+        """Returns true when the keep reason is a hardware boundary."""
+        return keep_reason == "hardware_boundary"
+
+    static fn forced(name: text, reason: text, helper: text) -> EntityKeep:
+        """Factory for a forced entity-keep record."""
+        return EntityKeep(
+            entity_name: name,
+            keep_reason: reason,
+            is_forced: true,
+            original_helper: helper
+        )
+
+    static fn optional(name: text, reason: text, helper: text) -> EntityKeep:
+        """Factory for an optional entity-keep record."""
+        return EntityKeep(
+            entity_name: name,
+            keep_reason: reason,
+            is_forced: false,
+            original_helper: helper
+        )
+
+# ============================================================================
+# SubprogramCandidate — chosen kind + confidence for a single helper
+# ============================================================================
+
+class SubprogramCandidate:
+    """Chosen emission kind and confidence score for a single VHDL subprogram candidate."""
+    candidate_name: text
+    criteria: SelectionCriteria
+    chosen_kind: text
+    confidence: int
+
+    me is_high_confidence() -> bool:
+        """Returns true when confidence is at least 80."""
+        return confidence >= 80
+
+    me to_text() -> text:
+        """Returns a readable summary of the candidate and its chosen kind."""
+        return candidate_name + " -> " + chosen_kind + " (" + confidence.to_text() + "%)"
+
+    static fn create(name: text, c: SelectionCriteria) -> SubprogramCandidate:
+        """Factory that selects chosen_kind from criteria and assigns confidence."""
+        if c.needs_entity():
+            return SubprogramCandidate(
+                candidate_name: name,
+                criteria: c,
+                chosen_kind: "entity",
+                confidence: 90
+            )
+        elif c.can_be_function():
+            return SubprogramCandidate(
+                candidate_name: name,
+                criteria: c,
+                chosen_kind: "function",
+                confidence: 80
+            )
+        else:
+            return SubprogramCandidate(
+                candidate_name: name,
+                criteria: c,
+                chosen_kind: "procedure",
+                confidence: 70
+            )
+
+# ============================================================================
+# EmissionPlan — ordered collection of candidates for a compilation unit
+# ============================================================================
+
+class EmissionPlan:
+    """Ordered collection of subprogram candidates for a VHDL compilation unit."""
+    f0_candidate: SubprogramCandidate
+    f1_candidate: SubprogramCandidate
+    f2_candidate: SubprogramCandidate
+    candidate_count: int
+
+    me add_candidate(c: SubprogramCandidate) -> EmissionPlan:
+        """Adds a candidate to the next available slot and returns an updated copy."""
+        if candidate_count == 0:
+            return EmissionPlan(
+                f0_candidate: c,
+                f1_candidate: f1_candidate,
+                f2_candidate: f2_candidate,
+                candidate_count: 1
+            )
+        elif candidate_count == 1:
+            return EmissionPlan(
+                f0_candidate: f0_candidate,
+                f1_candidate: c,
+                f2_candidate: f2_candidate,
+                candidate_count: 2
+            )
+        else:
+            return EmissionPlan(
+                f0_candidate: f0_candidate,
+                f1_candidate: f1_candidate,
+                f2_candidate: c,
+                candidate_count: 3
+            )
+
+    me is_empty() -> bool:
+        """Returns true when no candidates have been added."""
+        return candidate_count == 0
+
+    me to_text() -> text:
+        """Returns a readable summary of the emission plan."""
+        return "plan(" + candidate_count.to_text() + " candidates)"
+
+    static fn create() -> EmissionPlan:
+        """Factory that creates an empty emission plan with dummy candidates."""
+        var dummy = SubprogramCandidate.create("_dummy", SelectionCriteria.pure_single())
+        return EmissionPlan(
+            f0_candidate: dummy,
+            f1_candidate: dummy,
+            f2_candidate: dummy,
+            candidate_count: 0
+        )

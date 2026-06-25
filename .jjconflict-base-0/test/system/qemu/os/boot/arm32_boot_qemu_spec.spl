@@ -1,0 +1,66 @@
+# ARM32 Boot QEMU Tests — Architecture-Specific
+#
+# Minimal arm32 boot verification: HAL console init, boot banner,
+# boot-info parse, halt loop.
+#
+# @platform: baremetal(arm32)
+# @tag: os,qemu,boot,arm32
+
+use os.qemu_runner.{get_target, build_qemu_command}
+use os.kernel.arch.arch_context.{Architecture}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
+
+val TIMEOUT_MS: i64 = 10000
+val ARCH = Architecture.Arm32
+
+fn _can_run() -> bool:
+    val target = get_target(ARCH)
+    val qemu_check = rt_process_run_timeout("which", [target.qemu_system], 5000)
+    if qemu_check[2] != 0:
+        print "SKIP: {target.qemu_system} not found"
+        return false
+    if not rt_file_exists(target.output):
+        print "SKIP: Kernel not built: {target.output}"
+        return false
+    true
+
+fn _run_qemu() -> text:
+    val target = get_target(ARCH)
+    val cmd_parts = build_qemu_command(target)
+    val qemu_bin = cmd_parts[0]
+    var args: [text] = []
+    for i in 1..cmd_parts.len():
+        args.push(cmd_parts[i])
+    val result = rt_process_run_timeout(qemu_bin, args, TIMEOUT_MS)
+    result[0] + result[1]
+
+describe "ARM32 Architecture Boot":
+    it "binds the canonical arm32 boot artifact contract":
+        val target = get_target(ARCH)
+        expect(target.arch).to_equal(Architecture.Arm32)
+        expect(target.entry).to_equal("src/os/kernel/arch/arm32/boot.spl")
+        expect(target.linker_script).to_equal("src/os/kernel/arch/arm32/linker.ld")
+        expect(target.target_triple).to_equal("armv7-unknown-none-eabihf")
+        expect(target.output).to_equal("build/os/simpleos_arm32.elf")
+        expect(target.qemu_system).to_equal("qemu-system-arm")
+        expect(target.qemu_machine).to_equal("virt")
+        expect(target.qemu_cpu).to_equal("cortex-a15")
+        expect(target.qemu_memory).to_equal("128M")
+        expect(target.qemu_extra.len()).to_equal(0)
+
+    slow_it "prints boot banner on serial":
+        if _can_run():
+            val output = _run_qemu()
+            expect(output).to_contain("SimpleOS arm32 starting")
+
+    slow_it "boot info parsed":
+        if _can_run():
+            val output = _run_qemu()
+            expect(output).to_contain("boot-info:ok")
+
+    slow_it "reaches halt loop":
+        if _can_run():
+            val output = _run_qemu()
+            expect(output).to_contain("[arm32] halt")

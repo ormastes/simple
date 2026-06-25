@@ -1,0 +1,283 @@
+# NOTE: PrimitiveTypeResolver in 30.types/custom_primitive_info.spl is canonical for type validation
+#       (is_valid_underlying, is_integer_type, resolve_bit_width, resolve_byte_size).
+#
+# Custom Primitive Bitfield Support
+#
+# AC-5: Custom primitive wrappers as bitfield backing types
+# AC-6: Custom primitive wrappers as bitfield field types
+#
+# Validates and computes layout for bitfields backed by or composed of
+# custom primitive types.
+
+# ============================================================================
+# BitfieldBackingCheck — AC-5
+# Validates a custom primitive as a bitfield backing type.
+# The underlying type must be an unsigned integer (u8/u16/u32/u64).
+# ============================================================================
+
+class BitfieldBackingCheck:
+    wrapper_name: text
+    underlying: text
+    bit_width: i32
+    is_valid_backing: bool
+    error_msg: text
+
+impl BitfieldBackingCheck:
+    static fn check(wrapper_name: text, underlying: text) -> BitfieldBackingCheck:
+        if underlying == "u8":
+            BitfieldBackingCheck(
+                wrapper_name: wrapper_name,
+                underlying: underlying,
+                bit_width: 8,
+                is_valid_backing: true,
+                error_msg: ""
+            )
+        else if underlying == "u16":
+            BitfieldBackingCheck(
+                wrapper_name: wrapper_name,
+                underlying: underlying,
+                bit_width: 16,
+                is_valid_backing: true,
+                error_msg: ""
+            )
+        else if underlying == "u32":
+            BitfieldBackingCheck(
+                wrapper_name: wrapper_name,
+                underlying: underlying,
+                bit_width: 32,
+                is_valid_backing: true,
+                error_msg: ""
+            )
+        else if underlying == "u64":
+            BitfieldBackingCheck(
+                wrapper_name: wrapper_name,
+                underlying: underlying,
+                bit_width: 64,
+                is_valid_backing: true,
+                error_msg: ""
+            )
+        else:
+            BitfieldBackingCheck(
+                wrapper_name: wrapper_name,
+                underlying: underlying,
+                bit_width: 0,
+                is_valid_backing: false,
+                error_msg: "backing type '" + underlying + "' is not an unsigned integer; use u8, u16, u32, or u64"
+            )
+
+    fn max_bits() -> i32:
+        self.bit_width
+
+    fn summary() -> text:
+        if self.is_valid_backing:
+            "BitfieldBacking(" + self.wrapper_name + " wraps " + self.underlying + ", " + self.bit_width.to_text() + " bits)"
+        else:
+            "BitfieldBacking(" + self.wrapper_name + " INVALID: " + self.error_msg + ")"
+
+# ============================================================================
+# BitfieldFieldCheck — AC-6
+# Validates a custom primitive as a bitfield field type.
+# Integer and bool underlying types are allowed; float and text are not.
+# bit_count must not exceed the underlying type's bit width.
+# ============================================================================
+
+class BitfieldFieldCheck:
+    field_name: text
+    wrapper_name: text
+    underlying: text
+    bit_count: i32
+    is_valid_field: bool
+    error_msg: text
+
+impl BitfieldFieldCheck:
+    static fn check(field_name: text, wrapper_name: text, underlying: text, bit_count: i32) -> BitfieldFieldCheck:
+        if underlying == "f32" or underlying == "f64":
+            BitfieldFieldCheck(
+                field_name: field_name,
+                wrapper_name: wrapper_name,
+                underlying: underlying,
+                bit_count: bit_count,
+                is_valid_field: false,
+                error_msg: "float type not allowed in bitfield"
+            )
+        else if underlying == "text":
+            BitfieldFieldCheck(
+                field_name: field_name,
+                wrapper_name: wrapper_name,
+                underlying: underlying,
+                bit_count: bit_count,
+                is_valid_field: false,
+                error_msg: "text type not allowed in bitfield"
+            )
+        else:
+            # Determine max bits for this underlying type
+            val max_bits =
+                if underlying == "bool": 1
+                else if underlying == "i8" or underlying == "u8": 8
+                else if underlying == "i16" or underlying == "u16": 16
+                else if underlying == "i32" or underlying == "u32": 32
+                else if underlying == "i64" or underlying == "u64": 64
+                else: 64
+            if bit_count > max_bits:
+                BitfieldFieldCheck(
+                    field_name: field_name,
+                    wrapper_name: wrapper_name,
+                    underlying: underlying,
+                    bit_count: bit_count,
+                    is_valid_field: false,
+                    error_msg: "bit_count " + bit_count.to_text() + " exceeds max " + max_bits.to_text() + " for type '" + underlying + "'"
+                )
+            else:
+                BitfieldFieldCheck(
+                    field_name: field_name,
+                    wrapper_name: wrapper_name,
+                    underlying: underlying,
+                    bit_count: bit_count,
+                    is_valid_field: true,
+                    error_msg: ""
+                )
+
+    fn fits_in_backing(backing_bits: i32) -> bool:
+        self.is_valid_field and self.bit_count <= backing_bits
+
+    fn summary() -> text:
+        if self.is_valid_field:
+            "BitfieldField(" + self.field_name + ": " + self.wrapper_name + " wraps " + self.underlying + ", " + self.bit_count.to_text() + " bits)"
+        else:
+            "BitfieldField(" + self.field_name + " INVALID: " + self.error_msg + ")"
+
+# ============================================================================
+# BitfieldLayout — computes layout for a bitfield with custom primitives.
+# Supports up to 8 fields (f0..f7). add_field returns false on overflow.
+# ============================================================================
+
+class BitfieldLayout:
+    backing_name: text
+    backing_bits: i32
+    used_bits: i32
+    field_count: i32
+    f0_name: text
+    f1_name: text
+    f2_name: text
+    f3_name: text
+    f4_name: text
+    f5_name: text
+    f6_name: text
+    f7_name: text
+    f0_bits: i32
+    f1_bits: i32
+    f2_bits: i32
+    f3_bits: i32
+    f4_bits: i32
+    f5_bits: i32
+    f6_bits: i32
+    f7_bits: i32
+    f0_offset: i32
+    f1_offset: i32
+    f2_offset: i32
+    f3_offset: i32
+    f4_offset: i32
+    f5_offset: i32
+    f6_offset: i32
+    f7_offset: i32
+
+impl BitfieldLayout:
+    static fn create(backing_name: text, backing_bits: i32) -> BitfieldLayout:
+        BitfieldLayout(
+            backing_name: backing_name,
+            backing_bits: backing_bits,
+            used_bits: 0,
+            field_count: 0,
+            f0_name: "", f1_name: "", f2_name: "", f3_name: "",
+            f4_name: "", f5_name: "", f6_name: "", f7_name: "",
+            f0_bits: 0, f1_bits: 0, f2_bits: 0, f3_bits: 0,
+            f4_bits: 0, f5_bits: 0, f6_bits: 0, f7_bits: 0,
+            f0_offset: 0, f1_offset: 0, f2_offset: 0, f3_offset: 0,
+            f4_offset: 0, f5_offset: 0, f6_offset: 0, f7_offset: 0
+        )
+
+    me add_field(name: text, bits: i32) -> bool:
+        if self.used_bits + bits > self.backing_bits:
+            false
+        else if self.field_count >= 8:
+            false
+        else:
+            val slot = self.field_count
+            val offset = self.used_bits
+            self.used_bits = self.used_bits + bits
+            self.field_count = self.field_count + 1
+            if slot == 0:
+                self.f0_name = name
+                self.f0_bits = bits
+                self.f0_offset = offset
+            else if slot == 1:
+                self.f1_name = name
+                self.f1_bits = bits
+                self.f1_offset = offset
+            else if slot == 2:
+                self.f2_name = name
+                self.f2_bits = bits
+                self.f2_offset = offset
+            else if slot == 3:
+                self.f3_name = name
+                self.f3_bits = bits
+                self.f3_offset = offset
+            else if slot == 4:
+                self.f4_name = name
+                self.f4_bits = bits
+                self.f4_offset = offset
+            else if slot == 5:
+                self.f5_name = name
+                self.f5_bits = bits
+                self.f5_offset = offset
+            else if slot == 6:
+                self.f6_name = name
+                self.f6_bits = bits
+                self.f6_offset = offset
+            else:
+                self.f7_name = name
+                self.f7_bits = bits
+                self.f7_offset = offset
+            true
+
+    fn remaining_bits() -> i32:
+        self.backing_bits - self.used_bits
+
+    fn is_full() -> bool:
+        self.used_bits == self.backing_bits or self.field_count >= 8
+
+    fn summary() -> text:
+        "BitfieldLayout(" + self.backing_name + " " + self.backing_bits.to_text() + "b, used=" + self.used_bits.to_text() + ", fields=" + self.field_count.to_text() + ")"
+
+# ============================================================================
+# BitfieldValidator — validates complete bitfield definitions
+# ============================================================================
+
+class BitfieldValidator:
+    _dummy: i32
+
+impl BitfieldValidator:
+    static fn create() -> BitfieldValidator:
+        BitfieldValidator(_dummy: 0)
+
+    fn validate_backing(underlying: text) -> text:
+        val check = BitfieldBackingCheck.check("_", underlying)
+        if check.is_valid_backing:
+            ""
+        else:
+            check.error_msg
+
+    fn validate_field(underlying: text, bit_count: i32, backing_bits: i32) -> text:
+        val check = BitfieldFieldCheck.check("_", "_", underlying, bit_count)
+        if check.is_valid_field == false:
+            check.error_msg
+        else if bit_count > backing_bits:
+            "field bit_count " + bit_count.to_text() + " exceeds backing size " + backing_bits.to_text()
+        else:
+            ""
+
+    fn validate_layout(layout: BitfieldLayout) -> text:
+        if layout.used_bits > layout.backing_bits:
+            "layout overflow: used " + layout.used_bits.to_text() + " bits exceeds backing " + layout.backing_bits.to_text()
+        else:
+            ""

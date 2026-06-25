@@ -1,0 +1,85 @@
+# NoGC Compile - NoGC instruction model generation
+# Generates Lean verification for NoGC instruction set
+
+use verification.lean.codegen.{build_enum, build_function, build_theorem_implicit, LeanCodegen, make_list_type, make_simple_type}
+
+fn regenerate_nogc_compile() -> text:
+    print("    step 1: LeanCodegen.new")
+    var lgen = LeanCodegen.create("NogcCompile")
+
+    print("    step 2: add_namespace")
+    lgen = lgen.add_namespace("NogcCompile")
+
+    print("    step 3: add_doc_comment")
+    lgen = lgen.add_doc_comment("Mini IR with only arithmetic and explicit GC calls.")
+
+    print("    step 4: build_enum")
+    instr = build_enum("Instr", [
+        ("const", [("n", make_simple_type("Nat"))]),
+        ("add", []),
+        ("gcAlloc", [])
+    ])
+    print("    step 5: add_inductive")
+    lgen = lgen.add_inductive(instr)
+
+    print("    step 6: build_function nogc")
+    nogc_def = build_function(
+        "nogc",
+        [("p", make_list_type(make_simple_type("Instr")))],
+        make_simple_type("Prop"),
+        "∀ i, i ∈ p → i ≠ Instr.gcAlloc"
+    )
+    print("    step 7: add_function")
+    lgen = lgen.add_function(nogc_def)
+
+    print("    step 8: build_function append")
+    append_def = build_function(
+        "append",
+        [
+            ("a", make_list_type(make_simple_type("Instr"))),
+            ("b", make_list_type(make_simple_type("Instr")))
+        ],
+        make_list_type(make_simple_type("Instr")),
+        "a ++ b"
+    )
+    print("    step 9: add_function")
+    lgen = lgen.add_function(append_def)
+
+    print("    step 10: build_theorem_implicit nogc_append")
+    nogc_append = build_theorem_implicit(
+        "nogc_append",
+        [("a", "List Instr"), ("b", "List Instr")],
+        [],
+        "nogc a → nogc b → nogc (append a b)",
+        [
+            "intro ha hb i hmem",
+            "have := List.mem_append.mp hmem",
+            "cases this with",
+            "| inl haMem => exact ha _ haMem",
+            "| inr hbMem => exact hb _ hbMem"
+        ]
+    )
+    print("    step 11: add_theorem_implicit")
+    lgen = lgen.add_theorem_implicit(nogc_append)
+
+    print("    step 12: build_theorem_implicit nogc_singleton")
+    nogc_singleton = build_theorem_implicit(
+        "nogc_singleton",
+        [("i", "Instr")],
+        [("h", "i ≠ Instr.gcAlloc")],
+        "nogc [i]",
+        [
+            "intro j hj",
+            "have h' : j = i := by simpa using hj",
+            "subst h'",
+            "exact h"
+        ]
+    )
+    print("    step 13: add_theorem_implicit")
+    lgen = lgen.add_theorem_implicit(nogc_singleton)
+
+    print("    step 14: end_namespace")
+    lgen = lgen.end_namespace("NogcCompile")
+
+    print("    step 15: emit")
+    return lgen.emit()

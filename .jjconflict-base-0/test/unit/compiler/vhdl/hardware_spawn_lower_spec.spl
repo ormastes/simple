@@ -1,0 +1,369 @@
+# Hardware Spawn Lower Specification
+#
+# Tests typed return labels, hardware call lowering, and bit-width semantics
+# for the VHDL hardware spawn pipeline.
+#
+# **Feature IDs:** #vhdl-hardware-spawn
+# **Category:** Backend
+# **Difficulty:** 3/5
+
+use compiler.backend.backend.vhdl.vhdl_hardware_metadata.{HardwareAttr, ReturnLabel, HardwareCallInstance, CallLowerResult, LabelValidation, PortMapEntry, validate_hardware_attr, deterministic_instance_name}
+use compiler.backend.backend.vhdl.vhdl_call_lowering.{CallSite, CallLowerContext, TempSignal, LoweringDiagnostic, lower_call_site, build_instance, allocate_temp_signals}
+use compiler.backend.backend.vhdl.vhdl_bit_semantics.{BitWidth, BitSlice, BitConcat, BitExtension, BitShift, BitMask, BitDiagnostic, InstructionFormat, validate_bit_slice, rv32i_bitwidths}
+use compiler.backend.backend.vhdl.vhdl_hardware_spawn_lower.{SpawnLowerInput, SpawnLowerOutput, SpawnLowerDiag, lower_hardware_spawn}
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+# ============================================================================
+# AC-1: Typed Hardware Metadata and Return Labels
+# ============================================================================
+
+describe "HardwareAttr preservation":
+    it "creates combinational hardware attr":
+        var attr = HardwareAttr.hardware("full_adder")
+        check(attr.is_hardware())
+        check(attr.is_clocked == false)
+        check(attr.is_generic == false)
+        check(attr.entity_name == "full_adder")
+
+    it "creates clocked hardware attr":
+        var attr = HardwareAttr.clocked("pc_reg")
+        check(attr.is_hardware())
+        check(attr.is_clocked == true)
+
+    it "creates generic hardware attr":
+        var attr = HardwareAttr.generic_hw("param_adder")
+        check(attr.is_hardware())
+        check(attr.is_generic == true)
+
+    it "attaches two return labels":
+        var attr = HardwareAttr.hardware("full_adder")
+        var labeled = attr.with_labels("sum", "u1", "cout", "u1")
+        check(labeled.label_count == 2)
+        check(labeled.label_name_at(0) == "sum")
+        check(labeled.label_type_at(0) == "u1")
+        check(labeled.label_name_at(1) == "cout")
+        check(labeled.label_type_at(1) == "u1")
+
+    it "attaches three return labels":
+        var attr = HardwareAttr.hardware("decode")
+        var labeled = attr.with_three_labels("opcode", "u7", "rd", "u5", "funct3", "u3")
+        check(labeled.label_count == 3)
+        check(labeled.label_name_at(2) == "funct3")
+
+    it "rejects duplicate labels":
+        var attr = HardwareAttr.hardware("bad")
+        var labeled = attr.with_labels("out", "u1", "out", "u1")
+        check(labeled.has_duplicate_label())
+
+describe "LabelValidation":
+    it "passes for unique labels":
+        var attr = HardwareAttr.hardware("adder")
+        var labeled = attr.with_labels("sum", "u1", "cout", "u1")
+        var v = validate_hardware_attr(labeled)
+        check(v.is_valid)
+
+    it "fails for duplicate labels":
+        var attr = HardwareAttr.hardware("bad")
+        var labeled = attr.with_labels("x", "u1", "x", "u1")
+        var v = validate_hardware_attr(labeled)
+        check(not v.is_valid)
+        check(v.has_duplicates)
+
+    it "fails for same-type anonymous returns":
+        var attr = HardwareAttr.hardware("anon")
+        var labeled = attr.with_labels("", "u1", "", "u1")
+        var v = validate_hardware_attr(labeled)
+        check(not v.is_valid)
+        check(v.has_anonymous)
+
+describe "ReturnLabel":
+    it "generates output port":
+        var lbl = ReturnLabel.output("sum", "u1", 1, 0)
+        check(lbl.port_direction() == "out")
+        check(lbl.vhdl_type() == "std_logic")
+
+    it "generates wide output port":
+        var lbl = ReturnLabel.output("result", "u32", 32, 0)
+        check(lbl.vhdl_type() == "std_logic_vector(31 downto 0)")
+
+    it "generates input port":
+        var lbl = ReturnLabel.input("a", "u8", 8, 0)
+        check(lbl.port_direction() == "in")
+        check(lbl.vhdl_type() == "std_logic_vector(7 downto 0)")
+
+# ============================================================================
+# AC-2: Hardware Call Lowering
+# ============================================================================
+
+describe "deterministic instance naming":
+    it "generates inst0 for first call":
+        var name = deterministic_instance_name("adder", 0)
+        check(name == "adder_inst0")
+
+    it "generates inst1 for second call":
+        var name = deterministic_instance_name("adder", 1)
+        check(name == "adder_inst1")
+
+describe "CallSite":
+    it "allows direct calls":
+        var site = CallSite.direct("top", "adder", 0)
+        check(site.can_lower())
+
+    it "rejects indirect calls":
+        var site = CallSite(
+            caller_name: "top",
+            callee_name: "unknown",
+            call_index: 0,
+            is_indirect: true,
+            is_recursive: false,
+            arg_count: 0,
+            a0_name: "",
+            a1_name: "",
+            a2_name: ""
+        )
+        check(not site.can_lower())
+
+describe "lower_call_site":
+    it "lowers direct hardware call":
+        var site = CallSite.direct("top", "full_adder", 0)
+        site = site.with_args("sig_a", "sig_b")
+        var attr = HardwareAttr.hardware("full_adder")
+        var ctx = CallLowerContext.create("test_mod")
+        var result = lower_call_site(site, attr, ctx)
+        check(result.success)
+        check(result.instance_name == "full_adder_inst0")
+
+    it "rejects indirect call":
+        var site = CallSite(
+            caller_name: "top",
+            callee_name: "ptr",
+            call_index: 0,
+            is_indirect: true,
+            is_recursive: false,
+            arg_count: 0,
+            a0_name: "",
+            a1_name: "",
+            a2_name: ""
+        )
+        var attr = HardwareAttr.hardware("ptr")
+        var ctx = CallLowerContext.create("test_mod")
+        var result = lower_call_site(site, attr, ctx)
+        check(result.is_rejected())
+        check(result.is_indirect)
+
+    it "rejects recursive call":
+        var site = CallSite(
+            caller_name: "top",
+            callee_name: "self_ref",
+            call_index: 0,
+            is_indirect: false,
+            is_recursive: true,
+            arg_count: 0,
+            a0_name: "",
+            a1_name: "",
+            a2_name: ""
+        )
+        var attr = HardwareAttr.hardware("self_ref")
+        var ctx = CallLowerContext.create("test_mod")
+        var result = lower_call_site(site, attr, ctx)
+        check(result.is_rejected())
+        check(result.is_recursive)
+
+describe "HardwareCallInstance port map":
+    it "generates VHDL port map text":
+        var inst = HardwareCallInstance.create("fa_inst0", "full_adder")
+        inst = inst.add_port("a", "sig_a")
+        inst = inst.add_port("b", "sig_b")
+        inst = inst.add_port("sum", "fa_inst0_sum")
+        var pm = inst.vhdl_port_map()
+        check(pm == "a => sig_a, b => sig_b, sum => fa_inst0_sum")
+
+    it "generates full VHDL instantiation":
+        var inst = HardwareCallInstance.create("fa_inst0", "full_adder")
+        inst = inst.add_port("a", "sig_a")
+        inst = inst.add_port("b", "sig_b")
+        var vhdl = inst.vhdl_instantiation()
+        check(vhdl == "fa_inst0 : entity work.full_adder port map (a => sig_a, b => sig_b);")
+
+describe "TempSignal allocation":
+    it "allocates output temp signals":
+        var attr = HardwareAttr.hardware("adder")
+        var labeled = attr.with_labels("sum", "u1", "cout", "u1")
+        var temps = allocate_temp_signals(labeled, "adder_inst0")
+        check(temps.len() == 2)
+
+# ============================================================================
+# AC-3: Bit-Width Semantics
+# ============================================================================
+
+describe "BitWidth types":
+    it "generates std_logic for u1":
+        var bw = BitWidth.unsigned(1)
+        check(bw.vhdl_type() == "std_logic")
+        check(bw.name == "u1")
+
+    it "generates unsigned for u32":
+        var bw = BitWidth.unsigned(32)
+        check(bw.vhdl_type() == "unsigned(31 downto 0)")
+
+    it "generates signed for s32":
+        var bw = BitWidth.signed(32)
+        check(bw.vhdl_type() == "signed(31 downto 0)")
+
+    it "checks width fitting":
+        var bw = BitWidth.unsigned(12)
+        check(bw.fits_in(32))
+        check(not bw.fits_in(8))
+
+    it "returns rv32i standard widths":
+        var widths = rv32i_bitwidths()
+        check(widths.len() == 9)
+
+describe "BitSlice extraction":
+    it "extracts opcode field":
+        var s = BitSlice.opcode()
+        check(s.is_valid())
+        check(s.result_width == 7)
+        check(s.vhdl_expr("instr") == "instr(6 downto 0)")
+
+    it "extracts rd field":
+        var s = BitSlice.rd()
+        check(s.result_width == 5)
+        check(s.vhdl_expr("instr") == "instr(11 downto 7)")
+
+    it "extracts funct3 field":
+        var s = BitSlice.funct3()
+        check(s.result_width == 3)
+
+    it "extracts rs1 field":
+        var s = BitSlice.rs1()
+        check(s.result_width == 5)
+
+    it "extracts rs2 field":
+        var s = BitSlice.rs2()
+        check(s.result_width == 5)
+
+    it "extracts funct7 field":
+        var s = BitSlice.funct7()
+        check(s.result_width == 7)
+
+    it "validates slice bounds":
+        var bad = BitSlice(source_width: 8, high_bit: 10, low_bit: 0, result_width: 11)
+        check(not bad.is_valid())
+        var diag = validate_bit_slice(bad)
+        check(diag.is_error)
+        check(diag.is_out_of_range())
+
+describe "BitConcat":
+    it "concatenates two signals":
+        var cat = BitConcat.create("high", 4, "low", 4)
+        check(cat.result_width == 8)
+        check(cat.is_valid())
+        check(cat.vhdl_expr() == "high & low")
+
+describe "BitExtension":
+    it "zero extends":
+        var ext = BitExtension.zero_extend("sig12", 12, 32)
+        check(ext.is_extension())
+        check(not ext.is_truncation())
+
+    it "sign extends":
+        var ext = BitExtension.sign_extend("imm12", 12, 32)
+        check(ext.is_extension())
+        check(ext.is_sign_extend)
+
+    it "truncates":
+        var trunc = BitExtension.truncate("wide", 32, 8)
+        check(trunc.is_truncation())
+        check(trunc.vhdl_expr() == "wide(7 downto 0)")
+
+    it "identity for same width":
+        var id = BitExtension.zero_extend("x", 16, 16)
+        check(id.is_identity())
+        check(id.vhdl_expr() == "x")
+
+describe "BitShift":
+    it "generates shift left":
+        var sh = BitShift.sll("data", 32, 2)
+        check(sh.result_width() == 32)
+        check(sh.vhdl_expr() == "shift_left(data, 2)")
+
+    it "generates shift right logical":
+        var sh = BitShift.srl("data", 32, 5)
+        check(sh.vhdl_expr() == "shift_right(data, 5)")
+
+describe "BitMask":
+    it "generates AND mask":
+        var m = BitMask.mask_and("opcode", 7, "\"1111111\"")
+        check(m.vhdl_expr() == "opcode and \"1111111\"")
+
+    it "generates equality comparison":
+        var m = BitMask.compare_eq("opcode", 7, "\"0110011\"")
+        check(m.vhdl_expr() == "opcode = \"0110011\"")
+
+describe "InstructionFormat":
+    it "classifies R-type":
+        var fmt = InstructionFormat.r_type()
+        check(fmt.is_r_type())
+        check(not fmt.has_immediate())
+
+    it "classifies I-type":
+        var fmt = InstructionFormat.i_type()
+        check(fmt.is_i_type())
+        check(fmt.has_immediate())
+        check(fmt.imm_width == 12)
+
+    it "classifies B-type":
+        var fmt = InstructionFormat.b_type()
+        check(fmt.is_branch())
+        check(fmt.imm_width == 13)
+
+# ============================================================================
+# AC-7: Full Pipeline
+# ============================================================================
+
+describe "lower_hardware_spawn pipeline":
+    it "lowers single call with labels":
+        var attr = HardwareAttr.hardware("full_adder")
+        var labeled = attr.with_labels("sum", "u1", "cout", "u1")
+        var input = SpawnLowerInput.single_call("test", "add2", labeled, "add2", "full_adder", "sig_a", "sig_b")
+        var output = lower_hardware_spawn(input)
+        check(output.success)
+        check(output.instance_count == 1)
+
+    it "lowers two calls":
+        var attr = HardwareAttr.hardware("full_adder")
+        var labeled = attr.with_labels("sum", "u1", "cout", "u1")
+        var input = SpawnLowerInput.two_calls("test", "add2", labeled, "add2", "full_adder", "a0", "b0", "add2", "full_adder", "a1", "b1")
+        var output = lower_hardware_spawn(input)
+        check(output.success)
+        check(output.instance_count == 2)
+
+    it "rejects duplicate labels":
+        var attr = HardwareAttr.hardware("bad")
+        var labeled = attr.with_labels("x", "u1", "x", "u1")
+        var input = SpawnLowerInput.single_call("test", "fn1", labeled, "fn1", "bad", "a", "b")
+        var output = lower_hardware_spawn(input)
+        check(output.has_errors())
+
+    it "handles empty call list":
+        var attr = HardwareAttr.hardware("unused")
+        var input = SpawnLowerInput(
+            module_name: "test",
+            function_name: "none",
+            attr: attr,
+            call_count: 0,
+            s0_caller: "",
+            s0_callee: "",
+            s0_arg0: "",
+            s0_arg1: "",
+            s1_caller: "",
+            s1_callee: "",
+            s1_arg0: "",
+            s1_arg1: ""
+        )
+        var output = lower_hardware_spawn(input)
+        check(output.success)
+        check(output.instance_count == 0)

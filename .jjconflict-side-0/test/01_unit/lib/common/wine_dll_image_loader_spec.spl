@@ -1,0 +1,45 @@
+use common.wine_dll_image_loader.{wine_dll_prepare_image_map_handoff}
+
+describe "Wine DLL image loader handoff":
+    it "maps and unmaps a modeled KnownDll image without executing DLL code":
+        val result = wine_dll_prepare_image_map_handoff(
+            "kernel32.dll",
+            "C:\\Games",
+            "C:\\Users\\Player",
+            ["D:\\GameBin"],
+            ["kernel32.dll", "ntdll.dll"],
+            0x5000,
+            0x70000000
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.dll_name).to_equal("kernel32.dll")
+        expect(result.selected_path).to_equal("\\KnownDlls\\kernel32.dll")
+        expect(result.mapped_base).to_equal(0x70000000)
+        expect(result.mapped_size).to_equal(0x5000)
+        expect(result.section_handle).to_equal(0x400)
+        expect(result.evidence).to_contain("dll-search-order-modeled")
+        expect(result.evidence).to_contain("NtCreateSection NtMapViewOfSection NtUnmapViewOfSection")
+        expect(result.evidence).to_contain("dll-image-map-handoff-ready")
+        expect(result.evidence).to_contain("dll-view-unmapped")
+        expect(result.evidence).to_contain("no-dll-entrypoint-executed")
+        expect(result.evidence).to_contain("no-tls-callback-executed")
+        expect(result.status).to_equal("dll-image-map-handoff-ready")
+
+    it "rejects invalid image map parameters before section mapping":
+        val bad_size = wine_dll_prepare_image_map_handoff("kernel32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"], 0, 0x70000000)
+        expect(bad_size.ok).to_equal(false)
+        expect(bad_size.error).to_equal("invalid-image-size")
+        expect(bad_size.status).to_equal("rejected")
+
+        val bad_base = wine_dll_prepare_image_map_handoff("kernel32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"], 0x5000, 0)
+        expect(bad_base.ok).to_equal(false)
+        expect(bad_base.error).to_equal("invalid-image-base")
+        expect(bad_base.status).to_equal("rejected")
+
+    it "rejects DLL names outside the modeled basename search lane":
+        val result = wine_dll_prepare_image_map_handoff("C:\\Windows\\System32\\kernel32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"], 0x5000, 0x70000000)
+
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("dll-search:dll-name-must-be-basename")
+        expect(result.status).to_equal("rejected")

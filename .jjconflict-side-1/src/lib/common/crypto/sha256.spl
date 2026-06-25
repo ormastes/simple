@@ -1,0 +1,176 @@
+# SHA-256 hash implementation per FIPS 180-4.
+# Provides sha256_bytes (bytes -> bytes) and sha256_text (text -> hex).
+
+use std.common.crypto.types.{rotr32}
+
+# SHA-256 round constants (first 32 bits of fractional parts of cube roots of first 64 primes).
+fn _sha256_k() -> [i64]:
+    [
+        1116352408, 1899447441, 3049323471, 3921009573,
+         961987163, 1508970993, 2453635748, 2870763221,
+        3624381080,  310598401,  607225278, 1426881987,
+        1925078388, 2162078206, 2614888103, 3248222580,
+        3835390401, 4022224774,  264347078,  604807628,
+         770255983, 1249150122, 1555081692, 1996064986,
+        2554220882, 2821834349, 2952996808, 3210313671,
+        3336571891, 3584528711,  113926993,  338241895,
+         666307205,  773529912, 1294757372, 1396182291,
+        1695183700, 1986661051, 2177026350, 2456956037,
+        2730485921, 2820302411, 3259730800, 3345764771,
+        3516065817, 3600352804, 4094571909,  275423344,
+         430227734,  506948616,  659060556,  883997877,
+         958139571, 1322822218, 1537002063, 1747873779,
+        1955562222, 2024104815, 2227730452, 2361852424,
+        2428436474, 2756734187, 3204031479, 3329325298
+    ]
+
+# SHA-256 of a byte list. Returns 32-byte list (raw hash bytes).
+fn sha256_bytes(data: [i64]) -> [i64]:
+    val mask32 = 4294967295  # 0xFFFFFFFF
+    val k = _sha256_k()
+
+    # Initial hash values (square roots of first 8 primes).
+    var h0 = 1779033703
+    var h1 = 3144134277
+    var h2 = 1013904242
+    var h3 = 2773480762
+    var h4 = 1359893119
+    var h5 = 2600822924
+    var h6 =  528734635
+    var h7 = 1541459225
+
+    # Pre-processing: copy data then pad.
+    val data_len = data.len()
+    var padded: [i64] = []
+    var pi = 0
+    while pi < data_len:
+        padded.push(data[pi])
+        pi = pi + 1
+
+    # Append 0x80 byte.
+    padded.push(128)
+
+    # Pad with zeros until length ≡ 56 mod 64.
+    while padded.len() % 64 != 56:
+        padded.push(0)
+
+    # Append original bit-length as 8-byte big-endian.
+    val bit_len = data_len * 8
+    padded.push((bit_len >> 56) & 255)
+    padded.push((bit_len >> 48) & 255)
+    padded.push((bit_len >> 40) & 255)
+    padded.push((bit_len >> 32) & 255)
+    padded.push((bit_len >> 24) & 255)
+    padded.push((bit_len >> 16) & 255)
+    padded.push((bit_len >>  8) & 255)
+    padded.push( bit_len        & 255)
+
+    # Process each 64-byte block.
+    val total_len = padded.len()
+    var block_offset = 0
+    while block_offset < total_len:
+        # Build message schedule w[0..63].
+        var w: [i64] = []
+        var wi = 0
+        while wi < 16:
+            val base = block_offset + wi * 4
+            val word = (
+                ((padded[base    ] & 255) << 24) |
+                ((padded[base + 1] & 255) << 16) |
+                ((padded[base + 2] & 255) <<  8) |
+                 (padded[base + 3] & 255)
+            ) & mask32
+            w.push(word)
+            wi = wi + 1
+
+        wi = 16
+        while wi < 64:
+            val w15 = w[wi - 15]
+            val w2  = w[wi - 2]
+            val s0 = (rotr32(w15, 7) ^ rotr32(w15, 18) ^ (w15 >> 3)) & mask32
+            val s1 = (rotr32(w2, 17) ^ rotr32(w2,  19) ^ (w2  >> 10)) & mask32
+            w.push((w[wi - 16] + s0 + w[wi - 7] + s1) & mask32)
+            wi = wi + 1
+
+        # Working variables.
+        var a = h0
+        var b = h1
+        var c = h2
+        var d = h3
+        var e = h4
+        var f = h5
+        var g = h6
+        var hh = h7
+
+        var ri = 0
+        while ri < 64:
+            val big_s1 = (rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25)) & mask32
+            val ch     = ((e & f) ^ ((e ^ mask32) & g)) & mask32
+            val temp1  = (hh + big_s1 + ch + k[ri] + w[ri]) & mask32
+            val big_s0 = (rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22)) & mask32
+            val maj    = ((a & b) ^ (a & c) ^ (b & c)) & mask32
+            val temp2  = (big_s0 + maj) & mask32
+
+            hh = g
+            g  = f
+            f  = e
+            e  = (d + temp1) & mask32
+            d  = c
+            c  = b
+            b  = a
+            a  = (temp1 + temp2) & mask32
+            ri = ri + 1
+
+        h0 = (h0 + a) & mask32
+        h1 = (h1 + b) & mask32
+        h2 = (h2 + c) & mask32
+        h3 = (h3 + d) & mask32
+        h4 = (h4 + e) & mask32
+        h5 = (h5 + f) & mask32
+        h6 = (h6 + g) & mask32
+        h7 = (h7 + hh) & mask32
+        block_offset = block_offset + 64
+
+    # Produce 32-byte result.
+    var result: [i64] = []
+    val words = [h0, h1, h2, h3, h4, h5, h6, h7]
+    var wi2 = 0
+    while wi2 < 8:
+        val w = words[wi2]
+        result.push((w >> 24) & 255)
+        result.push((w >> 16) & 255)
+        result.push((w >>  8) & 255)
+        result.push( w        & 255)
+        wi2 = wi2 + 1
+    result
+
+# SHA-256 of text input. Returns 64-char lowercase hex string.
+fn sha256_text(data: text) -> text:
+    use std.common.crypto.types.{text_to_bytes, bytes_to_hex}
+    bytes_to_hex(sha256_bytes(text_to_bytes(data)))
+
+# ============================================================================
+# MIR optimizer pattern-recognition hooks
+# Symbol names must match the strings in rules_crypto.spl exactly.
+# ============================================================================
+
+# Sigma_0 message schedule expansion (w[i-15]).
+fn msg_schedule1(w: i64) -> i64:
+    val mask32 = 4294967295
+    (rotr32(w, 7) ^ rotr32(w, 18) ^ (w >> 3)) & mask32
+
+# Sigma_1 message schedule expansion (w[i-2]).
+fn msg_schedule2(w: i64) -> i64:
+    val mask32 = 4294967295
+    (rotr32(w, 17) ^ rotr32(w, 19) ^ (w >> 10)) & mask32
+
+# One SHA-256 compression round. Returns (new_a, new_e).
+fn compress_block(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, hh: i64, k: i64, w: i64) -> (i64, i64):
+    val mask32 = 4294967295
+    val big_s1 = (rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25)) & mask32
+    val ch     = ((e & f) ^ ((e ^ mask32) & g)) & mask32
+    val temp1  = (hh + big_s1 + ch + k + w) & mask32
+    val big_s0 = (rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22)) & mask32
+    val maj    = ((a & b) ^ (a & c) ^ (b & c)) & mask32
+    val temp2  = (big_s0 + maj) & mask32
+    ((temp1 + temp2) & mask32, (d + temp1) & mask32)

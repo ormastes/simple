@@ -1,0 +1,107 @@
+#!/bin/sh
+set -eu
+
+# Contract coverage for crash containment in the cross-language profile script.
+# The test stubs docker so it verifies the exact re-exec command without
+# requiring a local Docker daemon or running the heavy profile.
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+cd "$ROOT_DIR"
+
+TMP_DIR="build/tmp/profile_docker_isolation_contract"
+FAKE_BIN="$TMP_DIR/bin"
+rm -rf "$TMP_DIR"
+mkdir -p "$FAKE_BIN"
+
+fail() {
+    echo "profile_docker_isolation_contract=false"
+    echo "error=$1"
+    exit 1
+}
+
+cat > "$FAKE_BIN/docker" <<'SH'
+#!/bin/sh
+set -eu
+if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then
+    printf 'docker_image_inspect=%s\n' "${3:-}"
+    exit 0
+fi
+if [ "${1:-}" = "run" ]; then
+    shift
+    printf 'docker_run=true\n'
+    for arg in "$@"; do
+        printf 'arg=%s\n' "$arg"
+    done
+    exit 0
+fi
+printf 'unexpected_docker_command=%s\n' "$*" >&2
+exit 64
+SH
+chmod +x "$FAKE_BIN/docker"
+
+output="$(
+    PATH="$FAKE_BIN:$PATH" \
+    PROFILE_DOCKER_ISOLATION=1 \
+    PROFILE_DOCKER_IMAGE=simple-cross-language-perf:contract \
+    PROFILE_DOCKER_MEMORY=777m \
+    PROFILE_DOCKER_CPUS=1.5 \
+    PROFILE_DOCKER_SIMPLE_BINARY=__auto__ \
+    BUILD_DIR=build/tmp/profile_docker_isolation_contract/work \
+    REPORT_PATH=build/tmp/profile_docker_isolation_contract/report.md \
+    RUNS=1 FIB_N=13 CPU_WORKERS=3 GOMAXPROCS=3 \
+    OS_THREAD_WORKERS=4 MULTICORE_GREEN_WORKERS=5 \
+    COOPERATIVE_GREEN_WORKERS=2 GREEN_WORKERS=2 \
+    FANOUT_WORKERS=17 FANOUT_OS_THREAD_WORKERS=18 \
+    FANOUT_MULTICORE_GREEN_WORKERS=19 FANOUT_COOPERATIVE_GREEN_WORKERS=7 \
+    FANOUT_ITERS=3 FANOUT_STRESS_WORKERS=11 FANOUT_STRESS_ITERS=2 \
+    WARM_IN_PROCESS=4 RUN_TIMEOUT=9 \
+    sh scripts/check/check-cross-language-perf.shs
+)" || fail "profile script did not dispatch through docker stub"
+
+require_line() {
+    needle="$1"
+    printf '%s\n' "$output" | grep -Fxq "$needle" || fail "missing docker argument: $needle"
+}
+
+require_contains() {
+    needle="$1"
+    printf '%s\n' "$output" | grep -Fq "$needle" || fail "missing docker argument containing: $needle"
+}
+
+require_line "docker_run=true"
+require_line "arg=--rm"
+require_line "arg=--entrypoint"
+require_line "arg=/bin/sh"
+require_contains "arg=--user"
+require_contains "arg=$ROOT_DIR:/workspace:rw"
+require_line "arg=-w"
+require_line "arg=/workspace"
+require_line "arg=--network=none"
+require_line "arg=--memory=777m"
+require_line "arg=--cpus=1.5"
+require_line "arg=-e"
+require_line "arg=PROFILE_DOCKER_ISOLATION=0"
+require_line "arg=PROFILE_DOCKER_INSIDE=1"
+require_line "arg=PROFILE_DOCKER_SIMPLE_BINARY=__auto__"
+require_line "arg=RUNS=1"
+require_line "arg=FIB_N=13"
+require_line "arg=CPU_WORKERS=3"
+require_line "arg=GOMAXPROCS=3"
+require_line "arg=OS_THREAD_WORKERS=4"
+require_line "arg=MULTICORE_GREEN_WORKERS=5"
+require_line "arg=COOPERATIVE_GREEN_WORKERS=2"
+require_line "arg=GREEN_WORKERS=2"
+require_line "arg=FANOUT_WORKERS=17"
+require_line "arg=FANOUT_OS_THREAD_WORKERS=18"
+require_line "arg=FANOUT_MULTICORE_GREEN_WORKERS=19"
+require_line "arg=FANOUT_COOPERATIVE_GREEN_WORKERS=7"
+require_line "arg=FANOUT_ITERS=3"
+require_line "arg=FANOUT_STRESS_WORKERS=11"
+require_line "arg=FANOUT_STRESS_ITERS=2"
+require_line "arg=WARM_IN_PROCESS=4"
+require_line "arg=RUN_TIMEOUT=9"
+require_line "arg=simple-cross-language-perf:contract"
+require_line "arg=-lc"
+require_line "arg=sh scripts/check/check-cross-language-perf.shs"
+
+echo "profile_docker_isolation_contract=true"

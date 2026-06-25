@@ -1,0 +1,256 @@
+# VHDL Backend - Entity and Function Compilation
+#
+# Compiles MIR functions to VHDL entities with signal declarations,
+# port mappings, and architecture bodies. Extension of VhdlBackend via impl block.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTerminator}
+use compiler.backend.backend_api.*
+use compiler.backend.vhdl_type_mapper.VhdlTypeMapper
+use compiler.backend.vhdl.vhdl_builder.{VhdlBuilder}
+use .vhdl.vhdl_builder.{VhdlBuilder}
+use compiler.backend.vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity, vhdl_helper_is_procedure}
+use compiler.backend.vhdl.vhdl_memory_templates.{VhdlConstrainedSignalMemoryTemplate, render_constrained_signal_memory_template, VhdlMemoryTemplateDiagnostic}
+use .vhdl.vhdl_memory_templates.{VhdlMemoryTemplateDiagnostic}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use .vhdl_backend.{VhdlBackend, VhdlReturnAbi, VhdlReturnField, VhdlEntity}
+
+impl VhdlBackend:
+    me emit_return_assign(builder: VhdlBuilder, value: MirOperand) -> Result<(), CompileError>:
+        val value_name_result = self.operand_to_vhdl(value)
+        if value_name_result.is_err():
+            return Err(value_name_result.unwrap_err())
+        val value_name = value_name_result.unwrap()
+        self.emit_return_expr(builder, value_name)
+
+    me emit_return_expr(builder: VhdlBuilder, value_name: text) -> Result<(), CompileError>:
+        if self.active_return_abi.is_tuple:
+            for field in self.active_return_abi.fields:
+                builder.emit_signal_assign(field.name, "{value_name}.f{field.index}")
+        else:
+            builder.emit_signal_assign("result_out", value_name)
+        Ok(())
+
+    me compile_function(builder: VhdlBuilder, func: MirFunction) -> Result<VhdlEntity, CompileError>:
+        """Compile a function as a VHDL entity/architecture pair."""
+        val entity_name = func.name
+        self.active_local_names = {}
+        self.active_local_types = {}
+        self.active_local_kinds = {}
+        self.active_blocks = {}
+        self.active_local_memory_type_names = {}
+        val return_abi_result = self.vhdl_return_abi(func)
+        if return_abi_result.is_err():
+            return Err(return_abi_result.unwrap_err())
+        self.active_return_abi = return_abi_result.unwrap()
+
+        for block in func.blocks:
+            self.active_blocks = self.active_blocks.set(block.id.id, block)
+
+        for local in func.locals:
+            val resolved_name = self.default_local_name(local)
+            self.active_local_names = self.active_local_names.set(local.id.id, resolved_name)
+            self.active_local_types = self.active_local_types.set(local.id.id, local.type_)
+            self.active_local_kinds = self.active_local_kinds.set(local.id.id, local.kind)
+
+        val ports_result = self.vhdl_ports_for_function(func)
+        if ports_result.is_err():
+            return Err(ports_result.unwrap_err())
+        val ports = ports_result.unwrap()
+
+        # Emit entity
+        builder.emit_entity_begin(entity_name)
+        builder.emit_port_begin()
+        for i in 0..ports.len():
+            val port = ports[i]
+            builder.emit_port(port.name, port.direction, port.type_name, i == ports.len() - 1)
+
+        builder.emit_port_end()
+        builder.emit_entity_end(entity_name)
+
+        # Emit architecture
+        builder.emit_architecture_begin(entity_name, "rtl")
+
+        # Declare internal signals for local variables
+        for local in func.locals:
+            match local.kind:
+                case Var | Temp:
+                    val declare_result = self.emit_local_signal_declaration(builder, local, Some(func.span))
+                    if declare_result.is_err():
+                        return Err(declare_result.unwrap_err())
+                case _:
+                    ()
+
+        builder.emit_architecture_body_begin()
+
+        if self.needs_control_process(func):
+            val process_result = self.compile_function_control_process(builder, func)
+            if process_result.is_err():
+                return Err(process_result.unwrap_err())
+            builder.emit_architecture_end("rtl")
+            return Ok(VhdlEntity(
+                name: entity_name,
+                port_count: ports.len()
+            ))
+
+        # Compile basic blocks
+        var handled_branch_blocks: Dict<i64, bool> = {}
+        for block in func.blocks:
+            if handled_branch_blocks.get(block.id.id).?:
+                continue
+            builder.emit_comment("Block BB{block.id.id}")
+            for inst in block.instructions:
+                val result = self.compile_instruction(builder, inst)
+                if result.is_err():
+                    return Err(result.unwrap_err())
+            if block.terminator != nil:
+                match block.terminator:
+                    case If(cond, then_, else_):
+                        val if_result = self.compile_if_return_terminator(builder, cond, then_, else_)
+                        if if_result.is_err():
+                            return Err(if_result.unwrap_err())
+                        handled_branch_blocks = self.mark_return_chain_handled(then_, handled_branch_blocks)
+                        handled_branch_blocks = self.mark_return_chain_handled(else_, handled_branch_blocks)
+                    case Switch(value, targets, default):
+                        val switch_result = self.compile_switch_return_terminator(builder, value, targets, default)
+                        if switch_result.is_err():
+                            return Err(switch_result.unwrap_err())
+                        for target in targets:
+                            handled_branch_blocks = self.mark_return_chain_handled(target.target, handled_branch_blocks)
+                        handled_branch_blocks = self.mark_return_chain_handled(default, handled_branch_blocks)
+                    case Goto(target):
+                        val term_result = self.compile_terminator(builder, block.terminator)
+                        if term_result.is_err():
+                            return Err(term_result.unwrap_err())
+                        handled_branch_blocks = self.mark_return_chain_handled(target, handled_branch_blocks)
+                    case _:
+                        val term_result = self.compile_terminator(builder, block.terminator)
+                        if term_result.is_err():
+                            return Err(term_result.unwrap_err())
+
+        builder.emit_architecture_end("rtl")
+
+        Ok(VhdlEntity(
+            name: entity_name,
+            port_count: ports.len()
+        ))
+
+    fn default_local_name(local: MirLocal) -> text:
+        match local.kind:
+            case Arg(idx):
+                if local.name.?:
+                    local.name.unwrap()
+                else:
+                    "arg{idx}"
+            case Ret:
+                if self.active_return_abi.is_tuple:
+                    "return_value"
+                else:
+                    "result_out"
+            case Var | Temp:
+                if local.name.?:
+                    local.name.unwrap()
+                else:
+                    "sig_{local.id.id}"
+
+    fn local_memory_type_name(local: MirLocal) -> text:
+        vhdl_sanitize_identifier("{self.default_local_name(local)}_memory_t")
+
+    fn memory_template_error(code: text, message: text) -> CompileError:
+        self.backend_error("{code}: {message}")
+
+    me emit_local_signal_declaration(builder: VhdlBuilder, local: MirLocal, span: Span?) -> Result<(), CompileError>:
+        val name = self.default_local_name(local)
+        match local.type_.kind:
+            case Array(element, size):
+                if size <= 0:
+                    return Err(self.backend_error("VHDL-MEM-UNCONSTRAINED: Local memory `{name}` must have a concrete positive array size before VHDL emission"))
+                match element.kind:
+                    case Array(_, _) | Slice(_) | Ptr(_, _) | Ref(_, _):
+                        return Err(self.backend_error("VHDL-MEM-GENERAL: Local memory `{name}` has nested, slice, pointer, or reference element type; constrained VHDL memory lowering is not implemented"))
+                    case _:
+                        ()
+                val element_type_result = self.mir_type_to_vhdl_at(element, span)
+                if element_type_result.is_err():
+                    return Err(element_type_result.unwrap_err())
+                val type_name = self.local_memory_type_name(local)
+                val template_result = render_constrained_signal_memory_template(VhdlConstrainedSignalMemoryTemplate(
+                    name: name,
+                    type_name: type_name,
+                    data_type: element_type_result.unwrap(),
+                    depth: size,
+                    initial_value: nil
+                ))
+                if template_result.is_err():
+                    val diagnostic: VhdlMemoryTemplateDiagnostic = template_result.unwrap_err()
+                    return Err(self.memory_template_error(diagnostic.code, diagnostic.message))
+                builder.emit_raw(template_result.unwrap().declarations)
+                self.active_local_memory_type_names = self.active_local_memory_type_names.set(local.id.id, type_name)
+            case _:
+                val vhdl_type_result = self.mir_type_to_vhdl_at(local.type_, span)
+                if vhdl_type_result.is_err():
+                    return Err(vhdl_type_result.unwrap_err())
+                builder.emit_signal_decl(name, vhdl_type_result.unwrap(), nil)
+        Ok(())
+
+    fn local_object_type_to_vhdl(local: MirLocal, span: Span?) -> Result<text, CompileError>:
+        if self.active_local_memory_type_names.has(local.id.id):
+            Ok(self.active_local_memory_type_names[local.id.id])
+        else:
+            self.mir_type_to_vhdl_at(local.type_, span)
+
+    fn local_to_vhdl(local: LocalId) -> Result<text, CompileError>:
+        if self.active_local_names.has(local.id):
+            Ok(self.active_local_names[local.id])
+        else:
+            Err(self.backend_error("No active VHDL name for local {local.id}"))
+
+    fn local_type(local: LocalId) -> Result<MirType, CompileError>:
+        if self.active_local_types.has(local.id):
+            Ok(self.active_local_types[local.id])
+        else:
+            Err(self.backend_error("No active MIR type for local {local.id}"))
+
+    fn operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
+        """Convert operand to VHDL signal/variable name."""
+        match operand.kind:
+            case Copy(local): self.local_to_vhdl(local)
+            case Move(local): self.local_to_vhdl(local)
+            case Const(value, ty):
+                self.const_value_to_vhdl(value, ty)
+
+    fn operand_type(operand: MirOperand) -> Result<MirType, CompileError>:
+        match operand.kind:
+            case Copy(local): self.local_type(local)
+            case Move(local): self.local_type(local)
+            case Const(_, ty): Ok(ty)
+
+    fn type_def_by_symbol(symbol: SymbolId) -> Result<MirTypeDef, CompileError>:
+        if self.active_type_defs.has(symbol.id):
+            Ok(self.active_type_defs[symbol.id])
+        else:
+            Err(self.backend_error("No active VHDL type definition for symbol {symbol.id}"))
+
+    fn block_by_id(id: BlockId) -> Result<MirBlock, CompileError>:
+        if self.active_blocks.has(id.id):
+            Ok(self.active_blocks[id.id])
+        else:
+            Err(self.backend_error("VHDL process references unknown block BB{id.id}"))
+
+    fn needs_control_process(func: MirFunction) -> bool:
+        val entry = self.block_by_id(func.entry_block)
+        if entry.is_err():
+            return false
+        match entry.unwrap().terminator:
+            case If(_, then_, else_):
+                self.block_chain_has_instructions(then_, []) or self.block_chain_has_instructions(else_, [])
+            case Switch(_, targets, default):
+                var has_target_instructions = self.block_chain_has_instructions(default, [])
+                for target in targets:
+                    if self.block_chain_has_instructions(target.target, []):
+                        has_target_instructions = true
+                has_target_instructions
+            case _:
+                false
+

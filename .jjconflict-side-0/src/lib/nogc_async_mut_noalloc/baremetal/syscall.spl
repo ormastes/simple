@@ -1,0 +1,275 @@
+
+
+
+val SYS_OPEN: i32 = 0x01
+val SYS_CLOSE: i32 = 0x02
+val SYS_WRITEC: i32 = 0x03
+val SYS_WRITE0: i32 = 0x04
+val SYS_WRITE: i32 = 0x05
+val SYS_READ: i32 = 0x06
+val SYS_READC: i32 = 0x07
+val SYS_ISERROR: i32 = 0x08
+val SYS_ISTTY: i32 = 0x09
+val SYS_SEEK: i32 = 0x0A
+val SYS_FLEN: i32 = 0x0C
+val SYS_REMOVE: i32 = 0x0E
+val SYS_RENAME: i32 = 0x0F
+val SYS_CLOCK: i32 = 0x10
+val SYS_TIME: i32 = 0x11
+val SYS_EXIT: i32 = 0x18
+
+val MODE_READ: i32 = 0
+val MODE_WRITE: i32 = 4
+val MODE_APPEND: i32 = 8
+
+fn semi_host_call(operation: i32, param: u32) -> i32:
+    0
+
+fn semi_open(path: text, mode: i32) -> i32:
+    -1
+
+fn semi_close(fd: i32) -> bool:
+    val result = semi_host_call(SYS_CLOSE, fd)
+    result == 0
+
+fn semi_write(fd: i32, buffer: [u8], length: u32) -> i32:
+    0
+
+fn semi_read(fd: i32, buffer: [u8], length: u32) -> i32:
+    0
+
+fn semi_write_string(message: text):
+    semi_host_call(SYS_WRITE0, message as u32)
+
+fn semi_read_line() -> text:
+    ""
+
+fn semi_exit(status: i32):
+    semi_host_call(SYS_EXIT, status)
+
+fn semi_clock() -> i32:
+    semi_host_call(SYS_CLOCK, 0)
+
+fn semi_time() -> i32:
+    semi_host_call(SYS_TIME, 0)
+
+
+struct UartConfig:
+    base_addr: u32
+    baudrate: u32
+    data_bits: u8
+    stop_bits: u8
+    parity: u8
+
+val UART_RBR: u32 = 0x00
+val UART_THR: u32 = 0x00
+val UART_IER: u32 = 0x04
+val UART_FCR: u32 = 0x08
+val UART_LCR: u32 = 0x0C
+val UART_MCR: u32 = 0x10
+val UART_LSR: u32 = 0x14
+val UART_MSR: u32 = 0x18
+
+val LSR_DATA_READY: u8 = 0x01
+val LSR_OVERRUN_ERROR: u8 = 0x02
+val LSR_PARITY_ERROR: u8 = 0x04
+val LSR_FRAMING_ERROR: u8 = 0x08
+val LSR_BREAK_INTERRUPT: u8 = 0x10
+val LSR_THR_EMPTY: u8 = 0x20
+val LSR_TRANSMITTER_EMPTY: u8 = 0x40
+
+# reason: positional baremetal syscall API
+fn uart_init(base_addr: u32, baudrate: u32):
+    val divisor: u32 = 115200 / baudrate
+
+    val lcr_val = mem_read_u8(base_addr + UART_LCR)
+    mem_write_u8(base_addr + UART_LCR, lcr_val | 0x80)
+
+    val divisor_low: u8 = (divisor & 0xFF) as u8
+    mem_write_u8(base_addr + UART_RBR, divisor_low)
+
+    val divisor_high: u8 = ((divisor >> 8) & 0xFF) as u8
+    mem_write_u8(base_addr + UART_IER, divisor_high)
+
+    mem_write_u8(base_addr + UART_LCR, 0x03)
+
+    mem_write_u8(base_addr + UART_FCR, 0x07)
+
+fn uart_wait_lsr(base_addr: u32, mask: u8):
+    while true:
+        val lsr = mem_read_u8(base_addr + UART_LSR)
+        if (lsr & mask) != 0:
+            break
+
+fn uart_write_byte(base_addr: u32, byte: u8):
+    uart_wait_lsr(base_addr, LSR_THR_EMPTY)
+    mem_write_u8(base_addr + UART_THR, byte)
+
+fn uart_read_byte(base_addr: u32) -> u8:
+    uart_wait_lsr(base_addr, LSR_DATA_READY)
+    mem_read_u8(base_addr + UART_RBR)
+
+fn uart_write_string(base_addr: u32, message: text):
+    val bytes = message.bytes()
+    var i = 0
+    while i < bytes.len():
+        uart_write_byte(base_addr, bytes[i])
+        i = i + 1
+
+fn uart_read_available(base_addr: u32) -> bool:
+    val lsr = mem_read_u8(base_addr + UART_LSR)
+    (lsr & LSR_DATA_READY) != 0
+
+fn uart_write_ready(base_addr: u32) -> bool:
+    val lsr = mem_read_u8(base_addr + UART_LSR)
+    (lsr & LSR_THR_EMPTY) != 0
+
+
+struct TimerConfig:
+    base_addr: u32
+    frequency: u32
+    prescaler: u32
+
+val TIMER_CNT: u32 = 0x24
+val TIMER_PSC: u32 = 0x28
+val TIMER_ARR: u32 = 0x2C
+val TIMER_CR1: u32 = 0x00
+
+# reason: positional baremetal syscall API
+fn timer_init(base_addr: u32, frequency: u32):
+    val prescaler: u32 = (1000000 / frequency) - 1
+    mem_write_u32(base_addr + TIMER_PSC, prescaler)
+
+    mem_write_u32(base_addr + TIMER_ARR, 0xFFFFFFFF)
+
+    val cr1 = mem_read_u32(base_addr + TIMER_CR1)
+    mem_write_u32(base_addr + TIMER_CR1, cr1 | 0x01)
+
+fn timer_read(base_addr: u32) -> u32:
+    mem_read_u32(base_addr + TIMER_CNT)
+
+# reason: positional baremetal syscall API
+fn timer_delay_ms(base_addr: u32, milliseconds: u32):
+    val start = mem_read_u32(base_addr + TIMER_CNT)
+    val target_ticks: u32 = milliseconds * 1000
+    while true:
+        val current = mem_read_u32(base_addr + TIMER_CNT)
+        val elapsed = current - start
+        if elapsed >= target_ticks:
+            break
+
+# reason: positional baremetal syscall API
+fn timer_delay_us(base_addr: u32, microseconds: u32):
+    val start = mem_read_u32(base_addr + TIMER_CNT)
+    val target_ticks: u32 = microseconds
+    while true:
+        val current = mem_read_u32(base_addr + TIMER_CNT)
+        val elapsed = current - start
+        if elapsed >= target_ticks:
+            break
+
+
+fn debug_putc(c: u8):
+    semi_host_call(SYS_WRITEC, c as u32)
+
+fn debug_puts(message: text):
+    semi_write_string(message)
+
+fn debug_printf_u32_to_base(value: u32, base: u32, digits: text) -> text:
+    if value == 0:
+        return "0"
+    var result = ""
+    var remaining = value
+    while remaining > 0:
+        val digit = remaining % base
+        result = "{digits[digit]}" + result
+        remaining = remaining / base
+    result
+
+fn debug_printf_u32_to_dec(value: u32) -> text:
+    debug_printf_u32_to_base(value, 10, "0123456789")
+
+fn debug_printf_u32_to_hex(value: u32) -> text:
+    debug_printf_u32_to_base(value, 16, "0123456789ABCDEF")
+
+fn debug_printf(format: text, args: [u32]):
+    val fmt_bytes = format.bytes()
+    val fmt_len = fmt_bytes.len()
+    var i = 0
+    var arg_idx = 0
+    while i < fmt_len:
+        val ch = fmt_bytes[i]
+        if ch == 0x25:
+            i = i + 1
+            if i < fmt_len:
+                val spec = fmt_bytes[i]
+                if spec == 0x64:
+                    if arg_idx < args.len():
+                        semi_write_string(debug_printf_u32_to_dec(args[arg_idx]))
+                        arg_idx = arg_idx + 1
+                elif spec == 0x78:
+                    if arg_idx < args.len():
+                        semi_write_string(debug_printf_u32_to_hex(args[arg_idx]))
+                        arg_idx = arg_idx + 1
+                elif spec == 0x73:
+                    if arg_idx < args.len():
+                        semi_write_string("<str@" + debug_printf_u32_to_hex(args[arg_idx]) + ">")
+                        arg_idx = arg_idx + 1
+                elif spec == 0x63:
+                    if arg_idx < args.len():
+                        val char_byte = (args[arg_idx] & 0xFF) as u8
+                        debug_putc(char_byte)
+                        arg_idx = arg_idx + 1
+                elif spec == 0x25:
+                    debug_putc(0x25)
+        else:
+            debug_putc(ch)
+        i = i + 1
+
+
+extern fn rt_mmio_read_u32(addr: u64) -> u32
+extern fn rt_mmio_write_u32(addr: u64, value: u32)
+extern fn rt_mmio_read_u16(addr: u64) -> u16
+extern fn rt_mmio_write_u16(addr: u64, value: u16)
+extern fn rt_mmio_read_u8(addr: u64) -> u8
+extern fn rt_mmio_write_u8(addr: u64, value: u8)
+
+fn mem_read_u32(addr: u32) -> u32:
+    rt_mmio_read_u32(addr.to_u64())
+
+# reason: positional baremetal syscall API
+fn mem_write_u32(addr: u32, value: u32):
+    rt_mmio_write_u32(addr.to_u64(), value)
+
+fn mem_read_u16(addr: u32) -> u16:
+    rt_mmio_read_u16(addr.to_u64())
+
+fn mem_write_u16(addr: u32, value: u16):
+    rt_mmio_write_u16(addr.to_u64(), value)
+
+fn mem_read_u8(addr: u32) -> u8:
+    rt_mmio_read_u8(addr.to_u64())
+
+fn mem_write_u8(addr: u32, value: u8):
+    rt_mmio_write_u8(addr.to_u64(), value)
+
+# reason: positional baremetal syscall API
+fn mem_modify_bits(addr: u32, clear_mask: u32, set_mask: u32):
+    val value = mem_read_u32(addr)
+    val modified = (value & ~clear_mask) | set_mask
+    mem_write_u32(addr, modified)
+
+fn mem_set_bit(addr: u32, bit: u8):
+    val mask: u32 = 1 << bit
+    val value = mem_read_u32(addr)
+    mem_write_u32(addr, value | mask)
+
+fn mem_clear_bit(addr: u32, bit: u8):
+    val mask: u32 = 1 << bit
+    val value = mem_read_u32(addr)
+    mem_write_u32(addr, value & ~mask)
+
+fn mem_test_bit(addr: u32, bit: u8) -> bool:
+    val mask: u32 = 1 << bit
+    val value = mem_read_u32(addr)
+    (value & mask) != 0

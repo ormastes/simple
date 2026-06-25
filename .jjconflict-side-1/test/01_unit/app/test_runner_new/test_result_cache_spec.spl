@@ -1,0 +1,62 @@
+use std.spec.{describe, it, expect, after_each}
+use app.test_runner_new.test_result_cache.{test_result_cache_new, test_result_cache_load}
+use app.io.mod.{file_write, file_delete, file_exists, dir_create_all}
+
+val runner_cache_spec_root = "/tmp/simple_test_result_cache_spec"
+
+fn runner_cache_test_path(name: text) -> text:
+    "{runner_cache_spec_root}/{name}"
+
+fn runner_cache_cleanup():
+    val paths = [
+        runner_cache_test_path("runner_cache.sdn"),
+        runner_cache_test_path("sample_spec.spl"),
+        runner_cache_test_path("dep_a.spl"),
+        runner_cache_test_path("dep_b.spl")
+    ]
+    var i = 0
+    while i < paths.len():
+        if file_exists(paths[i]):
+            file_delete(paths[i])
+        i = i + 1
+
+describe "TestResultCache":
+    after_each:
+        runner_cache_cleanup()
+
+    it "invalidates cache when dependency content changes without changing size":
+        dir_create_all(runner_cache_spec_root)
+        val cache_path = runner_cache_test_path("runner_cache.sdn")
+        val test_path = runner_cache_test_path("sample_spec.spl")
+        val dep_path = runner_cache_test_path("dep_a.spl")
+
+        file_write(test_path, "describe \"sample\":\n    it \"runs\":\n        expect(1).to_equal(1)\n")
+        file_write(dep_path, "alpha")
+
+        val cache = test_result_cache_new(cache_path)
+        cache.record_result(test_path, [dep_path], 1, 0, 0, 12)
+        cache.save()
+
+        file_write(dep_path, "omega")
+
+        val reloaded = test_result_cache_load(cache_path)
+        val entry = reloaded.check_freshness(test_path, [dep_path])
+
+        expect(entry.result_status).to_equal(-1)
+
+    it "invalidates cache when dependency set no longer matches recorded dependencies":
+        dir_create_all(runner_cache_spec_root)
+        val test_path = runner_cache_test_path("sample_spec.spl")
+        val dep_a = runner_cache_test_path("dep_a.spl")
+        val dep_b = runner_cache_test_path("dep_b.spl")
+
+        file_write(test_path, "describe \"sample\":\n    it \"runs\":\n        expect(1).to_equal(1)\n")
+        file_write(dep_a, "dep-a")
+        file_write(dep_b, "dep-b")
+
+        val cache = test_result_cache_new(runner_cache_test_path("runner_cache.sdn"))
+        cache.record_result(test_path, [dep_a, dep_b], 1, 0, 0, 12)
+
+        val entry = cache.check_freshness(test_path, [dep_a])
+
+        expect(entry.result_status).to_equal(-1)

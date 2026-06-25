@@ -1,0 +1,399 @@
+# ELF Parser Unit Tests
+#
+# Tests for elf_parser.spl: symbol tables, string tables, relocations,
+# helper functions, and error handling — using synthetic byte arrays.
+
+use compiler.backend.linker.elf_inspect.{
+    elf_parse_header,
+    ElfHeader, ElfSectionHeader,
+    ELF64_HEADER_SIZE, ELF64_SHDR_SIZE,
+    SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB
+}
+use compiler.backend.linker.elf_parser.{
+    ElfSymbol, ElfRelocation, ElfStringTable, ElfObject,
+    elf_parse_object,
+    elf_parse_symbols,
+    elf_parse_relocations,
+    elf_parse_string_table,
+    elf_strtab_get,
+    elf_symbol_binding,
+    elf_symbol_type,
+    elf_reloc_sym,
+    elf_reloc_type,
+    elf_find_section_by_type,
+    elf_defined_symbols,
+    elf_undefined_symbols,
+    elf_make_empty_strtab,
+    SHT_RELA, SHN_UNDEF,
+    STB_LOCAL, STB_GLOBAL, STB_WEAK,
+    STT_NOTYPE, STT_OBJECT, STT_FUNC,
+    ELF64_SYM_SIZE, ELF64_RELA_SIZE
+}
+
+# ============================================================================
+# Helper: Build a minimal valid ELF64 header byte array (64 bytes)
+#
+# Offsets used (ELF64 little-endian):
+#   0-3:   magic (0x7f, 'E', 'L', 'F')
+#   4:     EI_CLASS = 2 (64-bit)
+#   5:     EI_DATA  = 1 (little-endian)
+#   6:     EI_VERSION = 1
+#   7-15:  padding/OS ABI (zeros)
+#   16-17: e_type    (ET_REL = 1)
+#   18-19: e_machine (EM_X86_64 = 62 = 0x3e)
+#   20-23: e_version = 1
+#   24-31: e_entry   = 0
+#   32-39: e_phoff   = 0
+#   40-47: e_shoff   = section header offset
+#   48-51: e_flags   = 0
+#   52-53: e_ehsize  = 64
+#   54-55: e_phentsize = 56
+#   56-57: e_phnum   = 0
+#   58-59: e_shentsize = 64
+#   60-61: e_shnum   = shnum
+#   62-63: e_shstrndx = shstrndx
+# ============================================================================
+
+fn make_elf_header_bytes(e_shoff: i64, e_shnum: i64, e_shstrndx: i64) -> [i64]:
+    """Build a minimal 64-byte ELF64 little-endian header byte array."""
+    var b: [i64] = [
+        # Magic
+        0x7f, 0x45, 0x4c, 0x46,
+        # EI_CLASS=2, EI_DATA=1, EI_VERSION=1, EI_OSABI=0
+        2, 1, 1, 0,
+        # EI_ABIVERSION + 7 padding bytes
+        0, 0, 0, 0, 0, 0, 0, 0,
+        # e_type = ET_REL = 1 (LE 2 bytes)
+        1, 0,
+        # e_machine = EM_X86_64 = 62 = 0x3e (LE 2 bytes)
+        0x3e, 0,
+        # e_version = 1 (LE 4 bytes)
+        1, 0, 0, 0,
+        # e_entry = 0 (LE 8 bytes)
+        0, 0, 0, 0, 0, 0, 0, 0,
+        # e_phoff = 0 (LE 8 bytes)
+        0, 0, 0, 0, 0, 0, 0, 0,
+        # e_shoff low byte, then 7 zeros (LE 8 bytes)
+        e_shoff & 0xff, (e_shoff >> 8) & 0xff, (e_shoff >> 16) & 0xff, (e_shoff >> 24) & 0xff,
+        0, 0, 0, 0,
+        # e_flags = 0 (LE 4 bytes)
+        0, 0, 0, 0,
+        # e_ehsize = 64 (LE 2 bytes)
+        64, 0,
+        # e_phentsize = 56 (LE 2 bytes)
+        56, 0,
+        # e_phnum = 0 (LE 2 bytes)
+        0, 0,
+        # e_shentsize = 64 (LE 2 bytes)
+        64, 0,
+        # e_shnum (LE 2 bytes)
+        e_shnum & 0xff, (e_shnum >> 8) & 0xff,
+        # e_shstrndx (LE 2 bytes)
+        e_shstrndx & 0xff, (e_shstrndx >> 8) & 0xff
+    ]
+    b
+
+fn make_section_header_bytes(
+    sh_name: i64, sh_type: i64, sh_flags: i64,
+    sh_addr: i64, sh_offset: i64, sh_size: i64
+) -> [i64]:
+    """Build a 64-byte ELF64 section header byte array.
+
+    ELF64 Shdr layout:
+      0:   sh_name    (u32, 4 bytes)
+      4:   sh_type    (u32, 4 bytes)
+      8:   sh_flags   (u64, 8 bytes)
+      16:  sh_addr    (u64, 8 bytes)
+      24:  sh_offset  (u64, 8 bytes)
+      32:  sh_size    (u64, 8 bytes)
+      40:  sh_link    (u32, 4 bytes)
+      44:  sh_info    (u32, 4 bytes)
+      48:  sh_addralign (u64, 8 bytes)
+      56:  sh_entsize (u64, 8 bytes)
+    """
+    [
+        # sh_name (u32 LE)
+        sh_name & 0xff, (sh_name >> 8) & 0xff, (sh_name >> 16) & 0xff, (sh_name >> 24) & 0xff,
+        # sh_type (u32 LE)
+        sh_type & 0xff, (sh_type >> 8) & 0xff, (sh_type >> 16) & 0xff, (sh_type >> 24) & 0xff,
+        # sh_flags (u64 LE)
+        sh_flags & 0xff, (sh_flags >> 8) & 0xff, (sh_flags >> 16) & 0xff, (sh_flags >> 24) & 0xff, 0, 0, 0, 0,
+        # sh_addr (u64 LE)
+        sh_addr & 0xff, (sh_addr >> 8) & 0xff, (sh_addr >> 16) & 0xff, (sh_addr >> 24) & 0xff, 0, 0, 0, 0,
+        # sh_offset (u64 LE)
+        sh_offset & 0xff, (sh_offset >> 8) & 0xff, (sh_offset >> 16) & 0xff, (sh_offset >> 24) & 0xff, 0, 0, 0, 0,
+        # sh_size (u64 LE)
+        sh_size & 0xff, (sh_size >> 8) & 0xff, (sh_size >> 16) & 0xff, (sh_size >> 24) & 0xff, 0, 0, 0, 0,
+        # sh_link, sh_info (u32 LE each)
+        0, 0, 0, 0,  0, 0, 0, 0,
+        # sh_addralign (u64 LE)
+        1, 0, 0, 0, 0, 0, 0, 0,
+        # sh_entsize (u64 LE)
+        0, 0, 0, 0, 0, 0, 0, 0
+    ]
+
+fn make_sym_entry(st_name: i64, st_info: i64, st_other: i64, st_shndx: i64, st_value: i64, st_size: i64) -> [i64]:
+    """Build a 24-byte ELF64 symbol entry."""
+    [
+        # st_name (u32 LE)
+        st_name & 0xff, (st_name >> 8) & 0xff, (st_name >> 16) & 0xff, (st_name >> 24) & 0xff,
+        # st_info (u8), st_other (u8)
+        st_info & 0xff, st_other & 0xff,
+        # st_shndx (u16 LE)
+        st_shndx & 0xff, (st_shndx >> 8) & 0xff,
+        # st_value (u64 LE)
+        st_value & 0xff, (st_value >> 8) & 0xff, (st_value >> 16) & 0xff, (st_value >> 24) & 0xff, 0, 0, 0, 0,
+        # st_size (u64 LE)
+        st_size & 0xff, (st_size >> 8) & 0xff, (st_size >> 16) & 0xff, (st_size >> 24) & 0xff, 0, 0, 0, 0
+    ]
+
+fn make_rela_entry(r_offset: i64, r_info: i64, r_addend: i64) -> [i64]:
+    """Build a 24-byte ELF64 RELA entry."""
+    [
+        # r_offset (u64 LE)
+        r_offset & 0xff, (r_offset >> 8) & 0xff, (r_offset >> 16) & 0xff, (r_offset >> 24) & 0xff, 0, 0, 0, 0,
+        # r_info (u64 LE)
+        r_info & 0xff, (r_info >> 8) & 0xff, (r_info >> 16) & 0xff, (r_info >> 24) & 0xff,
+        (r_info >> 32) & 0xff, (r_info >> 40) & 0xff, (r_info >> 48) & 0xff, (r_info >> 56) & 0xff,
+        # r_addend (i64 LE)
+        r_addend & 0xff, (r_addend >> 8) & 0xff, (r_addend >> 16) & 0xff, (r_addend >> 24) & 0xff, 0, 0, 0, 0
+    ]
+
+fn concat_bytes(a: [i64], b: [i64]) -> [i64]:
+    """Concatenate two byte arrays."""
+    var result: [i64] = []
+    for x in a:
+        result = result.push(x)
+    for x in b:
+        result = result.push(x)
+    result
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "ELF Parser - header parsing":
+    it "parses a minimal ELF header from bytes":
+        val hdr_bytes = make_elf_header_bytes(0, 0, 0)
+        val result = elf_parse_header(hdr_bytes)
+        expect(result.is_ok()).to_equal(true)
+        val hdr = result.unwrap()
+        expect(hdr.e_type).to_equal(1)      # ET_REL
+        expect(hdr.e_machine).to_equal(62)  # EM_X86_64
+
+    it "returns error on too-short input":
+        val short_bytes: [i64] = [0x7f, 0x45, 0x4c, 0x46]
+        val result = elf_parse_header(short_bytes)
+        expect(result.is_ok()).to_equal(false)
+
+    it "returns error on bad magic bytes":
+        val bad_bytes: [i64] = [
+            0x00, 0x00, 0x00, 0x00,
+            2, 1, 1, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            1, 0, 0x3e, 0,
+            1, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0,
+            64, 0, 56, 0, 0, 0, 64, 0,
+            0, 0, 0, 0
+        ]
+        val result = elf_parse_header(bad_bytes)
+        expect(result.is_ok()).to_equal(false)
+
+describe "ELF Parser - string table":
+    it "reads a string from a string table by index":
+        # strtab bytes: NUL, 'f', 'o', 'o', NUL, 'b', 'a', 'r', NUL
+        val strtab_section = ElfSectionHeader(
+            sh_name: 0,
+            sh_type: SHT_STRTAB,
+            sh_flags: 0,
+            sh_addr: 0,    # file offset = 0 (data starts at byte 0 of our slice)
+            sh_size: 9
+        )
+        val raw: [i64] = [0, 102, 111, 111, 0, 98, 97, 114, 0]
+        val strtab = elf_parse_string_table(raw, strtab_section)
+        expect(strtab.data.len()).to_equal(9)
+        expect(elf_strtab_get(strtab, 0)).to_equal("")
+        expect(elf_strtab_get(strtab, 1)).to_equal("foo")
+        expect(elf_strtab_get(strtab, 5)).to_equal("bar")
+
+    it "returns empty string for out-of-range index":
+        val strtab = elf_make_empty_strtab()
+        expect(elf_strtab_get(strtab, 0)).to_equal("")
+        expect(elf_strtab_get(strtab, 999)).to_equal("")
+
+describe "ELF Parser - symbol binding and type helpers":
+    it "extracts binding from st_info":
+        # STB_LOCAL=0, STT_FUNC=2 => st_info = (0 << 4) | 2 = 2
+        val sym_local_func = ElfSymbol(st_name: 0, st_info: 2, st_other: 0, st_shndx: 1, st_value: 0, st_size: 0, name: "")
+        expect(elf_symbol_binding(sym_local_func)).to_equal(STB_LOCAL)
+        expect(elf_symbol_type(sym_local_func)).to_equal(STT_FUNC)
+
+    it "extracts global binding from st_info":
+        # STB_GLOBAL=1, STT_OBJECT=1 => st_info = (1 << 4) | 1 = 17
+        val sym_global_obj = ElfSymbol(st_name: 0, st_info: 17, st_other: 0, st_shndx: 2, st_value: 0, st_size: 0, name: "")
+        expect(elf_symbol_binding(sym_global_obj)).to_equal(STB_GLOBAL)
+        expect(elf_symbol_type(sym_global_obj)).to_equal(STT_OBJECT)
+
+    it "extracts weak binding from st_info":
+        # STB_WEAK=2, STT_NOTYPE=0 => st_info = (2 << 4) | 0 = 32
+        val sym_weak = ElfSymbol(st_name: 0, st_info: 32, st_other: 0, st_shndx: 0, st_value: 0, st_size: 0, name: "")
+        expect(elf_symbol_binding(sym_weak)).to_equal(STB_WEAK)
+        expect(elf_symbol_type(sym_weak)).to_equal(STT_NOTYPE)
+
+describe "ELF Parser - symbol table parsing":
+    it "parses symbol table entries":
+        # Build: strtab = [NUL, 'm', 'a', 'i', 'n', NUL]
+        # Symbol 0 (null): st_name=0, st_info=0, st_other=0, st_shndx=0, st_value=0, st_size=0
+        # Symbol 1 (main): st_name=1, st_info=(STB_GLOBAL<<4)|STT_FUNC=18, st_other=0, st_shndx=1, st_value=0x100, st_size=32
+        val strtab_data: [i64] = [0, 109, 97, 105, 110, 0]  # NUL, 'm','a','i','n', NUL
+        val strtab = ElfStringTable(data: strtab_data, offset: 0)
+
+        val sym0 = make_sym_entry(0, 0, 0, 0, 0, 0)
+        val sym1 = make_sym_entry(1, 18, 0, 1, 0x100, 32)
+        val sym_bytes = concat_bytes(sym0, sym1)
+
+        val symtab_section = ElfSectionHeader(
+            sh_name: 0,
+            sh_type: SHT_SYMTAB,
+            sh_flags: 0,
+            sh_addr: 0,      # file offset = 0
+            sh_size: 48      # 2 symbols * 24 bytes
+        )
+
+        val symbols = elf_parse_symbols(sym_bytes, symtab_section, strtab)
+        expect(symbols.len()).to_equal(2)
+
+        val s0 = symbols[0]
+        expect(s0.st_name).to_equal(0)
+        expect(s0.st_shndx).to_equal(0)
+        expect(s0.st_value).to_equal(0)
+
+        val s1 = symbols[1]
+        expect(s1.st_name).to_equal(1)
+        expect(s1.st_info).to_equal(18)
+        expect(s1.st_shndx).to_equal(1)
+        expect(s1.st_value).to_equal(0x100)
+        expect(s1.st_size).to_equal(32)
+        expect(s1.name).to_equal("main")
+
+describe "ELF Parser - relocation parsing":
+    it "parses RELA relocation entries":
+        # One RELA entry: r_offset=0x8, r_info=0x200000001 (sym=2, type=1), r_addend=-4
+        val r_info: i64 = (2 << 32) | 1
+        val r_addend: i64 = -4
+        val rela_bytes = make_rela_entry(0x8, r_info, r_addend)
+
+        val rela_section = ElfSectionHeader(
+            sh_name: 0,
+            sh_type: SHT_RELA,
+            sh_flags: 0,
+            sh_addr: 0,
+            sh_size: 24
+        )
+
+        val relocs = elf_parse_relocations(rela_bytes, rela_section)
+        expect(relocs.len()).to_equal(1)
+        val r = relocs[0]
+        expect(r.r_offset).to_equal(8)
+        expect(elf_reloc_sym(r)).to_equal(2)
+        expect(elf_reloc_type(r)).to_equal(1)
+
+    it "extracts sym index and type from r_info":
+        val r_info: i64 = (5 << 32) | 42
+        val reloc = ElfRelocation(r_offset: 0, r_info: r_info, r_addend: 0)
+        expect(elf_reloc_sym(reloc)).to_equal(5)
+        expect(elf_reloc_type(reloc)).to_equal(42)
+
+describe "ELF Parser - defined and undefined symbols":
+    it "separates defined from undefined symbols":
+        val defined_sym = ElfSymbol(st_name: 1, st_info: 18, st_other: 0, st_shndx: 1, st_value: 0x100, st_size: 16, name: "foo")
+        val undef_sym = ElfSymbol(st_name: 5, st_info: 16, st_other: 0, st_shndx: 0, st_value: 0, st_size: 0, name: "bar")
+
+        # Build a minimal ElfObject to test the filter functions
+        val empty_strtab = elf_make_empty_strtab()
+        val empty_sections: [ElfSectionHeader] = []
+        val empty_relocs: [ElfRelocation] = []
+        val raw: [i64] = []
+        val fake_header = ElfHeader(e_type: 1, e_machine: 62, e_entry: 0, e_phoff: 0, e_shoff: 0, e_shnum: 0, e_shstrndx: 0)
+
+        val obj = ElfObject(
+            header: fake_header,
+            sections: empty_sections,
+            symbols: [defined_sym, undef_sym],
+            relocations: empty_relocs,
+            strtab: empty_strtab,
+            shstrtab: empty_strtab,
+            raw: raw
+        )
+
+        val defined = elf_defined_symbols(obj)
+        val undefined = elf_undefined_symbols(obj)
+
+        expect(defined.len()).to_equal(1)
+        expect(defined[0].name).to_equal("foo")
+        expect(undefined.len()).to_equal(1)
+        expect(undefined[0].name).to_equal("bar")
+
+describe "ELF Parser - find section by type":
+    it "finds a section by sh_type":
+        val sec_null = ElfSectionHeader(sh_name: 0, sh_type: SHT_NULL, sh_flags: 0, sh_addr: 0, sh_size: 0)
+        val sec_strtab = ElfSectionHeader(sh_name: 1, sh_type: SHT_STRTAB, sh_flags: 0, sh_addr: 64, sh_size: 10)
+        val sec_symtab = ElfSectionHeader(sh_name: 2, sh_type: SHT_SYMTAB, sh_flags: 0, sh_addr: 128, sh_size: 24)
+
+        val empty_strtab = elf_make_empty_strtab()
+        val fake_header = ElfHeader(e_type: 1, e_machine: 62, e_entry: 0, e_phoff: 0, e_shoff: 0, e_shnum: 3, e_shstrndx: 1)
+        val obj = ElfObject(
+            header: fake_header,
+            sections: [sec_null, sec_strtab, sec_symtab],
+            symbols: [],
+            relocations: [],
+            strtab: empty_strtab,
+            shstrtab: empty_strtab,
+            raw: []
+        )
+
+        val found_strtab = elf_find_section_by_type(obj, SHT_STRTAB)
+        expect(found_strtab != nil).to_equal(true)
+        if found_strtab != nil:
+            expect(found_strtab.sh_type).to_equal(SHT_STRTAB)
+
+        val found_rela = elf_find_section_by_type(obj, SHT_RELA)
+        expect(found_rela == nil).to_equal(true)
+
+describe "ELF Parser - full object parsing":
+    it "parses a minimal ELF object with no sections":
+        val hdr_bytes = make_elf_header_bytes(0, 0, 0)
+        val result = elf_parse_object(hdr_bytes)
+        expect(result.is_ok()).to_equal(true)
+        val obj = result.unwrap()
+        expect(obj.header.e_type).to_equal(1)
+        expect(obj.header.e_machine).to_equal(62)
+        expect(obj.sections.len()).to_equal(0)
+        expect(obj.symbols.len()).to_equal(0)
+        expect(obj.relocations.len()).to_equal(0)
+
+    it "returns error on too-short input for object parse":
+        val short_bytes: [i64] = [0x7f, 0x45]
+        val result = elf_parse_object(short_bytes)
+        expect(result.is_ok()).to_equal(false)
+
+    it "returns error on bad magic for object parse":
+        val bad_bytes: [i64] = [
+            0xDE, 0xAD, 0xBE, 0xEF,
+            2, 1, 1, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            1, 0, 0x3e, 0,
+            1, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0,
+            64, 0, 56, 0, 0, 0, 64, 0,
+            0, 0, 0, 0
+        ]
+        val result = elf_parse_object(bad_bytes)
+        expect(result.is_ok()).to_equal(false)

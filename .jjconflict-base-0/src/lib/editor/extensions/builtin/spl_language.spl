@@ -1,0 +1,136 @@
+# Simple Language Extension — registers Simple (.spl) language support.
+#
+# Provides: spl_language_manifest, spl_language_id.
+
+use std.editor.extensions.manifest.{ExtensionManifest, ExtensionCommand, ExtensionLanguage,
+    ExtensionDebugAdapterManifest, ExtensionTheme, ExtensionKeybinding}
+
+fn spl_language_id() -> text:
+    "simple"
+
+fn spl_language_manifest() -> ExtensionManifest:
+    ExtensionManifest(
+        name: "simple-language",
+        version: "1.0.0",
+        main: "",
+        activation_events: ["onLanguage:simple"],
+        contributes_commands: [
+            ExtensionCommand(id: "simple.build", title: "Simple: Build"),
+            ExtensionCommand(id: "simple.run", title: "Simple: Run"),
+            ExtensionCommand(id: "simple.test", title: "Simple: Test")
+        ],
+        contributes_languages: [
+            ExtensionLanguage(id: "simple", extensions: [".spl"])
+        ],
+        contributes_debug_adapters: [
+            ExtensionDebugAdapterManifest(id: "simple-dap", label: "Simple Debug", program: "bin/simple")
+        ],
+        contributes_themes: [],
+        contributes_keybindings: []
+    )
+
+struct SplDiagnostic:
+    line: i64
+    col: i64
+    message: text
+    severity: text
+
+struct SplCompletion:
+    label: text
+    kind: text
+    detail: text
+
+fn spl_language_diagnose(content: text) -> [SplDiagnostic]:
+    var diagnostics: [SplDiagnostic] = []
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val tab_col = _spl_find_char(line, "\t", 0)
+        if tab_col >= 0:
+            diagnostics.push(SplDiagnostic(line: i, col: tab_col, message: "Tab character found", severity: "warning"))
+        if line.len() > 0:
+            val last = line.char_at(line.len() - 1)
+            if last == " " or last == "\t":
+                diagnostics.push(SplDiagnostic(line: i, col: line.len() - 1, message: "Trailing whitespace", severity: "info"))
+        if _spl_has_unclosed_string(line):
+            diagnostics.push(SplDiagnostic(line: i, col: 0, message: "unclosed string literal", severity: "error"))
+        val trimmed = line.trim()
+        if (trimmed.starts_with("fn ") or trimmed.starts_with("me ")) and not trimmed.ends_with(":"):
+            diagnostics.push(SplDiagnostic(line: i, col: line.len(), message: "missing ':'", severity: "error"))
+        if trimmed.starts_with("var ") and not trimmed.contains("="):
+            diagnostics.push(SplDiagnostic(line: i, col: 0, message: "Prefer 'val' for immutable bindings", severity: "hint"))
+        i = i + 1
+    diagnostics
+
+fn spl_language_complete(content: text, line: i64, col: i64) -> [SplCompletion]:
+    val current = _spl_language_line(content, line)
+    val prefix = if col <= current.len() then current.slice(0, col) else: current
+    var completions: [SplCompletion] = []
+    completions.push(SplCompletion(label: "fn", kind: "keyword", detail: "Immutable method or free function"))
+    completions.push(SplCompletion(label: "val", kind: "keyword", detail: "Immutable binding"))
+    completions.push(SplCompletion(label: "var", kind: "keyword", detail: "Mutable binding"))
+    completions.push(SplCompletion(label: "if", kind: "keyword", detail: "Conditional"))
+    completions.push(SplCompletion(label: "for", kind: "keyword", detail: "Iteration"))
+    completions.push(SplCompletion(label: "struct", kind: "keyword", detail: "Data type"))
+    completions.push(SplCompletion(label: "class", kind: "keyword", detail: "Reference type"))
+    if prefix.trim().starts_with("use"):
+        completions.push(SplCompletion(label: "std.", kind: "snippet", detail: "Standard library module prefix"))
+    completions
+
+fn spl_language_hover(content: text, line: i64, col: i64) -> text:
+    val word = _spl_word_at(_spl_language_line(content, line), col)
+    if word == "val":
+        return "Immutable binding"
+    if word == "me":
+        return "Mutable method (modifies self)"
+    if word == "fn":
+        return "Immutable method or free function"
+    if word == "extern":
+        return "Runtime-provided function declaration"
+    return ""
+
+fn _spl_language_line(content: text, line: i64) -> text:
+    val lines = content.split("\n")
+    if line < 0 or line >= lines.len():
+        return ""
+    lines[line]
+
+fn _spl_find_char(line: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i < line.len():
+        if line.char_at(i) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _spl_has_unclosed_string(line: text) -> bool:
+    var in_string = false
+    var i = 0
+    while i < line.len():
+        val ch = line.char_at(i)
+        if ch == "\\":
+            i = i + 1
+        elif ch == "\"":
+            in_string = not in_string
+        i = i + 1
+    in_string
+
+fn _spl_is_word_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+fn _spl_word_at(line: text, col: i64) -> text:
+    if line.len() == 0:
+        return ""
+    var pos = col
+    if pos >= line.len():
+        pos = line.len() - 1
+    if pos < 0 or not _spl_is_word_char(line.char_at(pos)):
+        return ""
+    var start = pos
+    while start > 0 and _spl_is_word_char(line.char_at(start - 1)):
+        start = start - 1
+    var end = pos + 1
+    while end < line.len() and _spl_is_word_char(line.char_at(end)):
+        end = end + 1
+    line.slice(start, end)

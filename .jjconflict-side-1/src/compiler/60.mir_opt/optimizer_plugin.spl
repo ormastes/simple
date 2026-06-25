@@ -1,0 +1,277 @@
+# Unified OptimizerPlugin descriptor + registry
+# Generalizes MIR optimizer, source-level optimizer, and hotspot optimizer
+# behind a common interface with scope, apply mode, and cost budget filtering.
+
+use compiler.mir_opt.mir_opt.mod.{
+    PassKind, PassScope, OptLevel, MirPassDescriptor,
+    run_typed_pass_on_function, run_typed_pass_on_module
+}
+use compiler.mir.mir_instructions.{MirFunction, MirModule}
+use compiler.mir_opt.optimizer_manifest.{DynamicPassDescriptor}
+
+
+# ============================================================================
+# Plugin Scope — which IR level the plugin operates on
+# ============================================================================
+
+enum PluginScope:
+    Mir
+    Source
+    Both
+
+fn plugin_scope_name(scope: PluginScope) -> text:
+    match scope:
+        case Mir: "mir"
+        case Source: "source"
+        case Both: "both"
+
+fn plugin_scope_includes_mir(scope: PluginScope) -> bool:
+    match scope:
+        case Mir: true
+        case Both: true
+        case Source: false
+
+fn plugin_scope_includes_source(scope: PluginScope) -> bool:
+    match scope:
+        case Source: true
+        case Both: true
+        case Mir: false
+
+
+# ============================================================================
+# Apply Mode — compile-time pipeline vs runtime hotspot-triggered
+# ============================================================================
+
+enum ApplyMode:
+    Static
+    Dynamic
+    Both
+
+fn apply_mode_name(mode: ApplyMode) -> text:
+    match mode:
+        case Static: "static"
+        case Dynamic: "dynamic"
+        case Both: "both"
+
+fn apply_mode_includes_static(mode: ApplyMode) -> bool:
+    match mode:
+        case Static: true
+        case Both: true
+        case Dynamic: false
+
+fn apply_mode_includes_dynamic(mode: ApplyMode) -> bool:
+    match mode:
+        case Dynamic: true
+        case Both: true
+        case Static: false
+
+
+# ============================================================================
+# Unified Plugin Descriptor
+# ============================================================================
+
+struct OptimizerPluginDescriptor:
+    name: text
+    aliases: [text]
+    plugin_scope: PluginScope
+    apply_mode: ApplyMode
+    level: OptLevel
+    cost_class: text
+    mir_pass_kind: PassKind?
+    mir_pass_scope: PassScope?
+    source_patterns: [text]
+
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+fn optimizer_plugin_mir(name: text, aliases: [text], kind: PassKind, scope: PassScope, mode: ApplyMode, level: OptLevel, cost_class: text) -> OptimizerPluginDescriptor:
+    OptimizerPluginDescriptor(
+        name: name,
+        aliases: aliases,
+        plugin_scope: PluginScope.Mir,
+        apply_mode: mode,
+        level: level,
+        cost_class: cost_class,
+        mir_pass_kind: Some(kind),
+        mir_pass_scope: Some(scope),
+        source_patterns: []
+    )
+
+fn optimizer_plugin_source(name: text, aliases: [text], mode: ApplyMode, level: OptLevel, patterns: [text]) -> OptimizerPluginDescriptor:
+    OptimizerPluginDescriptor(
+        name: name,
+        aliases: aliases,
+        plugin_scope: PluginScope.Source,
+        apply_mode: mode,
+        level: level,
+        cost_class: "cheap",
+        mir_pass_kind: nil,
+        mir_pass_scope: nil,
+        source_patterns: patterns
+    )
+
+fn optimizer_plugin_both(name: text, aliases: [text], kind: PassKind, scope: PassScope, mode: ApplyMode, level: OptLevel, cost_class: text, patterns: [text]) -> OptimizerPluginDescriptor:
+    OptimizerPluginDescriptor(
+        name: name,
+        aliases: aliases,
+        plugin_scope: PluginScope.Both,
+        apply_mode: mode,
+        level: level,
+        cost_class: cost_class,
+        mir_pass_kind: Some(kind),
+        mir_pass_scope: Some(scope),
+        source_patterns: patterns
+    )
+
+fn optimizer_plugin_from_mir_descriptor(desc: MirPassDescriptor, mode: ApplyMode, level: OptLevel) -> OptimizerPluginDescriptor:
+    OptimizerPluginDescriptor(
+        name: desc.stable_name,
+        aliases: desc.aliases,
+        plugin_scope: PluginScope.Mir,
+        apply_mode: mode,
+        level: level,
+        cost_class: desc.cost_class,
+        mir_pass_kind: Some(desc.kind),
+        mir_pass_scope: Some(desc.scope),
+        source_patterns: []
+    )
+
+fn optimizer_plugin_from_dynamic_descriptor(desc: DynamicPassDescriptor, level: OptLevel) -> OptimizerPluginDescriptor:
+    OptimizerPluginDescriptor(
+        name: desc.name,
+        aliases: desc.aliases,
+        plugin_scope: PluginScope.Mir,
+        apply_mode: ApplyMode.Dynamic,
+        level: level,
+        cost_class: desc.cost_class,
+        mir_pass_kind: nil,
+        mir_pass_scope: Some(desc.scope),
+        source_patterns: []
+    )
+
+
+# ============================================================================
+# Cost Budget
+# ============================================================================
+
+fn plugin_cost_rank(cost_class: text) -> i64:
+    if cost_class == "free":
+        0
+    elif cost_class == "cheap":
+        1
+    elif cost_class == "medium":
+        2
+    elif cost_class == "moderate":
+        3
+    elif cost_class == "expensive":
+        4
+    else:
+        5
+
+
+# ============================================================================
+# Name Matching
+# ============================================================================
+
+fn optimizer_plugin_matches_name(plugin: OptimizerPluginDescriptor, query: text) -> bool:
+    if plugin.name == query:
+        return true
+    for alias in plugin.aliases:
+        if alias == query:
+            return true
+    false
+
+
+# ============================================================================
+# Registry
+# ============================================================================
+
+struct OptimizerPluginRegistry:
+    plugins: [OptimizerPluginDescriptor]
+
+fn optimizer_plugin_registry_new() -> OptimizerPluginRegistry:
+    OptimizerPluginRegistry(plugins: [])
+
+fn optimizer_plugin_registry_register(registry: OptimizerPluginRegistry, plugin: OptimizerPluginDescriptor) -> OptimizerPluginRegistry:
+    var plugins = registry.plugins
+    plugins.push(plugin)
+    OptimizerPluginRegistry(plugins: plugins)
+
+fn optimizer_plugin_registry_lookup(registry: OptimizerPluginRegistry, name: text) -> OptimizerPluginDescriptor?:
+    for plugin in registry.plugins:
+        if optimizer_plugin_matches_name(plugin, name):
+            return Some(plugin)
+    nil
+
+fn optimizer_plugin_registry_by_scope(registry: OptimizerPluginRegistry, scope: PluginScope) -> [OptimizerPluginDescriptor]:
+    var result = []
+    for plugin in registry.plugins:
+        val ps = plugin.plugin_scope
+        if plugin_scope_name(ps) == plugin_scope_name(scope):
+            result.push(plugin)
+        elif plugin_scope_name(scope) == "mir" and plugin_scope_includes_mir(ps):
+            result.push(plugin)
+        elif plugin_scope_name(scope) == "source" and plugin_scope_includes_source(ps):
+            result.push(plugin)
+    result
+
+fn optimizer_plugin_registry_by_apply_mode(registry: OptimizerPluginRegistry, mode: ApplyMode) -> [OptimizerPluginDescriptor]:
+    var result = []
+    for plugin in registry.plugins:
+        val pm = plugin.apply_mode
+        if apply_mode_name(pm) == apply_mode_name(mode):
+            result.push(plugin)
+        elif apply_mode_name(mode) == "static" and apply_mode_includes_static(pm):
+            result.push(plugin)
+        elif apply_mode_name(mode) == "dynamic" and apply_mode_includes_dynamic(pm):
+            result.push(plugin)
+    result
+
+fn optimizer_plugin_registry_by_cost_budget(registry: OptimizerPluginRegistry, max_cost: text) -> [OptimizerPluginDescriptor]:
+    val max_rank = plugin_cost_rank(max_cost)
+    var result = []
+    for plugin in registry.plugins:
+        if plugin_cost_rank(plugin.cost_class) <= max_rank:
+            result.push(plugin)
+    result
+
+fn optimizer_plugin_registry_names(registry: OptimizerPluginRegistry) -> [text]:
+    var result = []
+    for plugin in registry.plugins:
+        result.push(plugin.name)
+    result
+
+fn optimizer_plugin_registry_count(registry: OptimizerPluginRegistry) -> i64:
+    registry.plugins.len()
+
+
+# ============================================================================
+# Run Adapters
+# ============================================================================
+
+fn optimizer_plugin_run_on_function(plugin: OptimizerPluginDescriptor, func: MirFunction) -> MirFunction:
+    match plugin.mir_pass_kind:
+        Some(kind):
+            run_typed_pass_on_function(kind, func)
+        nil:
+            func
+
+fn optimizer_plugin_run_on_module(plugin: OptimizerPluginDescriptor, module: MirModule) -> MirModule:
+    match plugin.mir_pass_kind:
+        Some(kind):
+            run_typed_pass_on_module(kind, module)
+        nil:
+            module
+
+fn optimizer_plugin_analyze_source(plugin: OptimizerPluginDescriptor, source_lines: [text]) -> [text]:
+    if plugin.source_patterns.len() == 0:
+        return []
+    var suggestions = []
+    for (line_idx, line) in source_lines.enumerate():
+        for pattern in plugin.source_patterns:
+            if line.contains(pattern):
+                val ln = line_idx + 1
+                suggestions.push("line {ln}: {pattern}")
+    suggestions

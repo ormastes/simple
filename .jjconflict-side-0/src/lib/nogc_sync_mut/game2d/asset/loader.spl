@@ -1,0 +1,126 @@
+# std.game2d.asset.loader — SDN walker for `assets.sdn` (Wave B, AC-6)
+#
+# Internal helpers `_walk_images / _walk_sounds / _walk_atlases` and the
+# top-level `load_assets_impl(path)` handler. The public entry point
+# `load_assets(path)` lives in `asset/table.spl` (so the AC-6 spec greps
+# `fn load_assets(` in that file) and forwards here.
+#
+# Diagnostics (codes wired by `asset/diagnostic.spl`):
+#   - GAME-ASSET-001 — missing image/sound path (file:line)
+#   - GAME-ASSET-002 — wrong-type asset
+#   - GAME-ASSET-014 — atlas region OOB
+
+use std.common.sdn.parser.{parse_with_spans}
+use std.common.sdn.value.{SdnValue, Span}
+use std.nogc_sync_mut.game2d.asset.diagnostic.{AssetError}
+use std.nogc_sync_mut.game2d.render.image.{Image}
+use std.nogc_sync_mut.game2d.audio.{Sound}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+
+fn _span_from_dict(spans: Dict<text, Span>, path: text) -> Span:
+    if spans.contains(path):
+        spans[path]
+    else:
+        Span.empty()
+
+
+fn _to_i(v: SdnValue) -> i64:
+    match v:
+        case Int(i): i
+        case Float(f): f as i64
+        case _: 0
+
+
+fn _dict_path(inner: Dict<text, SdnValue>) -> text:
+    if inner.contains("path"):
+        match inner["path"]:
+            case String(s): s
+            case _: ""
+    else:
+        ""
+
+
+fn _walk_images_dict(d: Dict<text, SdnValue>, spans: Dict<text, Span>, file: text, out_images: Dict<text, Image>) -> Result<i64, AssetError>:
+    var count: i64 = 0
+    for entry in d.entries():
+        val name = entry.key
+        match entry.value:
+            case Dict(inner):
+                val path_str = _dict_path(inner)
+                if path_str.len() > 0 and not rt_file_exists(path_str):
+                    val sp = _span_from_dict(spans, "assets.images.{name}")
+                    return Err(AssetError.missing(sp, file, name))
+                if inner.contains("frequency"):
+                    val sp = _span_from_dict(spans, "assets.images.{name}")
+                    return Err(AssetError.wrong_type(sp, file, name, "Image", "Sound"))
+                val img_result = Image.new(if path_str.len() > 0: path_str else: name)
+                match img_result:
+                    case Ok(img):
+                        out_images[name] = img
+                        count = count + 1
+                    case Err(_):
+                        out_images[name] = Image.null()
+            case _:
+                pass_do_nothing
+    Ok(count)
+
+
+fn _walk_sounds_dict(d: Dict<text, SdnValue>, spans: Dict<text, Span>, file: text, out_sounds: Dict<text, Sound>) -> Result<i64, AssetError>:
+    var count: i64 = 0
+    for entry in d.entries():
+        val name = entry.key
+        match entry.value:
+            case Dict(inner):
+                val path_str = _dict_path(inner)
+                if path_str.len() > 0 and not rt_file_exists(path_str):
+                    val sp = _span_from_dict(spans, "assets.sounds.{name}")
+                    return Err(AssetError.missing(sp, file, name))
+                val snd_result = Sound.new(if path_str.len() > 0: path_str else: name)
+                match snd_result:
+                    case Ok(snd):
+                        out_sounds[name] = snd
+                        count = count + 1
+                    case Err(_):
+                        out_sounds[name] = Sound.null()
+            case _:
+                pass_do_nothing
+    Ok(count)
+
+
+fn _check_atlas_dict(d: Dict<text, SdnValue>, spans: Dict<text, Span>, file: text) -> Result<i64, AssetError>:
+    """Validate atlas regions. Region OOB → GAME-ASSET-014."""
+    var count: i64 = 0
+    for entry in d.entries():
+        val name = entry.key
+        match entry.value:
+            case Dict(inner):
+                var iw: i64 = 0
+                var ih: i64 = 0
+                if inner.contains("image_width"):
+                    iw = _to_i(inner["image_width"])
+                if inner.contains("image_height"):
+                    ih = _to_i(inner["image_height"])
+                if inner.contains("regions"):
+                    match inner["regions"]:
+                        case Dict(rmap):
+                            for re in rmap.entries():
+                                val rname = re.key
+                                match re.value:
+                                    case Array(coords):
+                                        if coords.len() == 4:
+                                            val rx = _to_i(coords[0])
+                                            val ry = _to_i(coords[1])
+                                            val rw = _to_i(coords[2])
+                                            val rh = _to_i(coords[3])
+                                            if rx + rw > iw or ry + rh > ih:
+                                                val sp = _span_from_dict(spans, "assets.atlases.{name}.regions.{rname}")
+                                                return Err(AssetError.atlas_oob(sp, file, rname))
+                                    case _: pass_do_nothing
+                        case _: pass_do_nothing
+                count = count + 1
+            case _:
+                pass_do_nothing
+    Ok(count)

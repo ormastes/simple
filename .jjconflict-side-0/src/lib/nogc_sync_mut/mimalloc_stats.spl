@@ -1,0 +1,122 @@
+@no_gc
+# mimalloc Stats, Options, and Allocator Trait Impl
+#
+# Statistics snapshots, option flags, collection hooks, version string,
+# and the MimallocAllocator class that implements the Allocator trait.
+
+use std.nogc_sync_mut.allocator.{Allocator}
+use std.nogc_sync_mut.mimalloc_types.{
+    MiHeap,
+    MiStats,
+    MiOption,
+    _g_total_allocated,
+    _g_total_allocated_get,
+    _g_raw_allocated,
+    _g_peak_allocated,
+    _g_allocation_count,
+    _g_free_count,
+    _g_option_show_stats,
+    _g_option_verbose,
+    _g_option_eager_commit,
+    _g_option_secure
+}
+use std.nogc_sync_mut.mimalloc.{
+    mimalloc_init,
+    mi_malloc,
+    mi_free,
+    mi_realloc,
+    _drain_delayed_free
+}
+
+# ============================================================================
+# Stats, collection, and options compatibility shims
+# ============================================================================
+
+fn mi_stats_current() -> MiStats:
+    """Return a snapshot of modeled allocator statistics."""
+    MiStats(
+        allocated: _g_total_allocated,
+        peak_allocated: _g_peak_allocated,
+        raw_allocated: _g_raw_allocated,
+        allocation_count: _g_allocation_count,
+        free_count: _g_free_count,
+    )
+
+fn mi_stats_reset():
+    """Reset modeled statistics without changing allocated heap contents."""
+    _g_peak_allocated = _g_total_allocated
+    _g_allocation_count = 0
+    _g_free_count = 0
+
+fn mi_collect(force: bool):
+    """Collection hook — drains the delayed free list when force is true."""
+    if force:
+        _drain_delayed_free()
+
+fn mi_heap_collect(_heap: MiHeap, force: bool):
+    """Heap-specific collection hook over the current single global heap."""
+    mi_collect(force)
+
+fn mi_version() -> text:
+    """Return a Simple compatibility-layer version string."""
+    "simple-mimalloc-compat"
+
+fn mi_option_is_enabled(option: MiOption) -> bool:
+    match option:
+        case MiOption.ShowStats: _g_option_show_stats
+        case MiOption.Verbose: _g_option_verbose
+        case MiOption.EagerCommit: _g_option_eager_commit
+        case MiOption.Secure: _g_option_secure
+
+fn mi_option_enable(option: MiOption):
+    mi_option_set_enabled(option, true)
+
+fn mi_option_disable(option: MiOption):
+    mi_option_set_enabled(option, false)
+
+fn mi_option_set_enabled(option: MiOption, enabled: bool):
+    match option:
+        case MiOption.ShowStats:
+            _g_option_show_stats = enabled
+        case MiOption.Verbose:
+            _g_option_verbose = enabled
+        case MiOption.EagerCommit:
+            _g_option_eager_commit = enabled
+        case MiOption.Secure:
+            _g_option_secure = enabled
+
+# ============================================================================
+# MimallocAllocator — implements Allocator trait
+# ============================================================================
+
+class MimallocAllocator:
+    """Allocator backed by the pure-Simple mimalloc port (single global heap).
+    Call mimalloc_init() before first use. All operations route through _g_heap.
+    """
+    initialized: bool
+
+impl MimallocAllocator:
+    static fn new() -> MimallocAllocator:
+        MimallocAllocator(initialized: false)
+
+impl Allocator for MimallocAllocator:
+    me allocate(size: usize, align: usize) -> [u8]?:
+        if not self.initialized or size == 0:
+            return nil
+        mi_malloc(size)
+
+    me deallocate(ptr: [u8], size: usize, align: usize):
+        if self.initialized:
+            mi_free(ptr, size)
+
+    me reallocate(ptr: [u8], old_size: usize, new_size: usize, align: usize) -> [u8]?:
+        if not self.initialized:
+            return nil
+        mi_realloc(ptr, old_size, new_size)
+
+    fn total_allocated() -> usize:
+        _g_total_allocated_get()
+
+fn default_allocator() -> MimallocAllocator:
+    """Return an uninitialized MimallocAllocator. Call mimalloc_init() before use."""
+    MimallocAllocator.new()

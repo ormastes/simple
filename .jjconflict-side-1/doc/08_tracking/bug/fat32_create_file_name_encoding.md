@@ -1,0 +1,90 @@
+# Bug: Fat32Core create_file writes wrong bytes for filenames
+
+Status: **RESOLVED** — the original three bugs are fixed in both `nogc_async_mut` and
+
+**Date:** 2026-05-27
+**Severity:** high
+**Component:** src/lib/nogc_sync_mut/fs_driver/fat32_dir_ops.spl
+
+## Symptom
+
+Files created via `Fat32Core.create_file()` cannot be found by
+`Fat32Core.open()` or `Fat32Core.resolve_path()`. The directory entry IS
+written to the block device (visible via `readdir`), but path resolution
+fails with "file not found".
+
+After create_file, `close(handle)` and `write(handle, ...)` return
+"invalid file handle" — the handle allocated in the free function
+`fat32_create_file` does not persist back to the Fat32Core instance.
+
+## Root Cause (two bugs)
+
+### 1. Name encoding (fat32_dir_ops.spl:65)
+
+```spl
+val ch = str_char_at(name, ci)
+var b: u8 = ch.len().to_u8()   # BUG: writes 1 for every ASCII char
+```
+
+`str_char_at` returns a single-character text. `.len()` is always 1.
+Every byte in the 8.3 directory entry name becomes `0x01`.
+
+**Fix:** `var b: u8 = name.char_at(ci) as u8`
+
+### 2. Handle persistence (fat32_dir_ops.spl → fat32_core.spl:1075)
+
+`create_file` delegates to free function `fat32_create_file(self, path)`.
+In interpreter mode, `self` is copied into the `core` parameter. The free
+function calls `core.alloc_file_handle(...)` on the copy — the handle is
+never registered on the original Fat32Core instance.
+
+**Fix:** Return cluster numbers from the free function; do handle
+allocation and cache invalidation on `self` in the `me fn create_file`
+method.
+
+### 3. Same name encoding bug in fat32_mkdir (fat32_dir_ops.spl:134)
+
+Identical `ch.len().to_u8()` pattern.
+
+## Status
+
+**RESOLVED** — the original three bugs are fixed in both `nogc_async_mut` and
+`nogc_sync_mut` versions. The sync implementation also now invalidates the
+new path and parent directory cache after `create_file`, so a cached
+`readdir("/")` cannot hide the newly-created 8.3 entry from a later `open`.
+Array value-type semantics required inlining 8.3 encoding directly (no helper
+function — arrays are copied into function params).
+
+## Verification (2026-05-27)
+
+- `rg -n "ch\\.len\\(\\)\\.to_u8|str_char_at\\(" src/lib/nogc_sync_mut/fs_driver/fat32_dir_ops.spl src/lib/nogc_async_mut/fs_driver/fat32_dir_ops.spl` finds no remaining bad filename-byte encoding.
+- `bin/simple test test/01_unit/lib/driver/fat32_file_io_spec.spl --mode=interpreter --clean` passes 14/14, including `create_file invalidates cached directory entries before reopen`.
+
+## Re-verification (2026-05-29)
+
+Repo-wide scan of all owned `.spl` source for `ch.len().to_u8()` and `str_char_at(` in FAT32 name-encoding paths:
+
+- `src/lib/nogc_sync_mut/fs_driver/fat32_dir_ops.spl` — all name bytes use `char_at(ci) as u8`. Fixed.
+- `src/lib/nogc_async_mut/fs_driver/fat32_dir_ops.spl` — same. Fixed.
+- `src/os/services/fat32/fat32_write_helpers.spl` (`format_8_3_name`) — uses `.bytes()[i]`. Correct.
+- `src/os/services/fat32/fat32_filesystem_ops.spl` — `str_char_at` used only for path-splitting (compare to `"/"`). Safe.
+- `src/os/services/fat32/fat32.spl` — `str_char_at` used for path-splitting and byte comparison via `.bytes()[0]`. Safe.
+- No other FAT32 file in owned code carries the `ch.len().to_u8()` pattern.
+
+Async parity gap closed 2026-05-29: `nogc_async_mut` `Fat32Core.create_file`
+now invalidates dentry, cluster, and chain caches on the real receiver after the
+free-function directory mutation returns. The focused FAT32 file I/O spec now
+passes 14/14 again.
+
+Verification:
+
+```bash
+SIMPLE_LIB=src bin/simple check src/lib/nogc_async_mut/fs_driver/fat32_core.spl src/lib/nogc_sync_mut/fs_driver/fat32_core.spl test/01_unit/lib/driver/fat32_file_io_spec.spl
+SIMPLE_LIB=src bin/simple test test/01_unit/lib/driver/fat32_file_io_spec.spl --mode=interpreter --clean
+```
+
+## Impact (before fix)
+
+- fat32_microbench.spl seq_write/seq_read benchmarks produced bogus results
+- fat32_vs_cfat_bench.spl: 5 of 7 workloads SKIP
+- Any code path using Fat32Core.create_file in interpreter mode was broken

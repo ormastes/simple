@@ -1,0 +1,252 @@
+//! `int.bits[lo..hi]` syntax sugar (B4 — bitfield slice).
+//!
+//! Desugars at parse time so that both the interpreter and HIR-lowering
+//! paths see only plain bitwise / shift expressions — no new AST or HIR
+//! variant required.
+//!
+//! Read form  : `x.bits[lo..hi]`        →  `(x >> lo) & mask`
+//! Write form : `x.bits[lo..hi] = v`    →  `x = (x & ~mask) | ((v & mask) << lo)`
+//!
+//! Augmented assigns (Phase 2): `x.bits[lo..hi] += v` desugars to the same
+//! plain-`=` shape but with the new field value computed as
+//!     `((x >> lo) & mask) <op> v`
+//! before being masked/shifted back. Supported ops are the arithmetic
+//! augmented assigns the language already defines on integers: `+=`, `-=`,
+//! `*=`, `/=`, `%=`. Bitwise augmented assigns (`&=`, `|=`, `^=`) and
+//! suspend forms (`~=`, `~+=`, ...) are NOT supported because the language
+//! has no token for the bitwise variants and the suspend semantics on a
+//! synthetic L-value are ambiguous.
+//!
+//! `mask` is `(1 << (hi - lo)) - 1` and is built either as a constant fold
+//! (when `lo` and `hi` are integer literals) or as a runtime expression
+//! using shift/sub on integer literals so the field width can be dynamic.
+//!
+//! The receiver must be syntactically `x.bits[lo..hi]`. If the receiver of
+//! `Slice` is a `FieldAccess` whose field name is anything other than
+//! `bits`, the rewrite does nothing — normal Slice lowering is used.
+//!
+//! Phase 3 (2026-04-25):
+//!   * Defer-body single-line writes (`defer x.bits[lo..hi] = v`) now run
+//!     the same desugar as top-level statements; previously
+//!     `parse_defer_body` constructed `Assignment` directly and bypassed
+//!     the rewrite.
+//!   * Side-effect guard: callers must reject impure write targets via
+//!     `is_pure_lvalue`. Full single-eval temp-binding for impure targets
+//!     is still deferred — it requires multi-statement lowering that the
+//!     parse-time AST rewrite cannot synthesise on its own.
+
+use crate::ast::{AssignOp, BinOp, Expr, RangeBound, UnaryOp};
+
+/// If `expr` is `x.bits[lo..hi]`, rewrite it into a mask+shift read
+/// expression. Otherwise return `expr` unchanged.
+///
+/// In the AST, `x.bits[lo..hi]` parses as
+///     `Index { receiver: FieldAccess { receiver: x, field: "bits" },
+///              index: Range { start: Some(lo), end: Some(hi), bound: Exclusive } }`
+/// because `0..8` is a `Range` expression and `[…]` is `Index`, not the
+/// Python-style `Slice` (which uses `:`).
+///
+/// Inclusive-bound (`..=`) ranges are accepted and treated as `lo..hi+1` so
+/// `bits[0..=7]` and `bits[0..8]` agree.
+pub fn maybe_rewrite_bits_read(expr: Expr) -> Expr {
+    if let Some((lvalue, lo, hi)) = try_match_bits_index(&expr) {
+        return build_bits_read(lvalue, lo, hi);
+    }
+    expr
+}
+
+/// If `target` is a `.bits[lo..hi]` index on an L-value `x`, return
+/// `Some((x, lo, hi_exclusive))` so the caller can synthesise the write
+/// rewrite. Otherwise return `None`.
+pub fn match_bits_write_target(target: &Expr) -> Option<(Expr, Expr, Expr)> {
+    try_match_bits_index(target)
+}
+
+/// Shared matcher for both read and write sides.
+///
+/// Returns `(receiver_lvalue, lo_inclusive, hi_exclusive)` or `None`.
+fn try_match_bits_index(expr: &Expr) -> Option<(Expr, Expr, Expr)> {
+    let Expr::Index { receiver, index } = expr else {
+        return None;
+    };
+    let Expr::FieldAccess { receiver: inner, field } = receiver.as_ref() else {
+        return None;
+    };
+    if field != "bits" {
+        return None;
+    }
+    let Expr::Range { start, end, bound } = index.as_ref() else {
+        return None;
+    };
+    let lo = (**start.as_ref()?).clone();
+    let raw_hi = (**end.as_ref()?).clone();
+    // Normalise `..=hi` into `..hi + 1` so the field width is `hi - lo`.
+    let hi_excl = match bound {
+        RangeBound::Exclusive => raw_hi,
+        RangeBound::Inclusive => Expr::Binary {
+            op: BinOp::Add,
+            left: Box::new(raw_hi),
+            right: Box::new(Expr::Integer(1)),
+        },
+    };
+    Some(((**inner).clone(), lo, hi_excl))
+}
+
+/// Phase 3 (side-effect guard): predicate that the bitfield write target is
+/// safe to duplicate — i.e. it has no side-effecting subexpressions on the
+/// l-value spine.
+///
+/// `build_bits_write_value` and `build_bits_augmented_value` duplicate the
+/// target l-value 2-3 times into the desugared expression. If the target
+/// contains a `Call`/`MethodCall`/`KernelLaunch` anywhere on its spine (or
+/// uses one of those as an `Index` index), each duplicate would re-execute
+/// the side effect. Phase 3 ships diagnose-only: callers that detect an
+/// impure target via this helper should reject the assignment with a clear
+/// error rather than silently emit incorrect code. Full single-eval temp
+/// binding is deferred — it requires multi-statement lowering that the
+/// parse-time AST rewrite cannot synthesise on its own.
+///
+/// "Pure" here means: `Identifier`, `Path`, recursive `FieldAccess` on a
+/// pure receiver, recursive `TupleIndex` on a pure receiver, or recursive
+/// `Index` on a pure receiver with a literal/identifier/path index. Range
+/// expressions on the index spine are also accepted because the bitfield
+/// `lo..hi` literally lives there. Anything else (calls, arithmetic on the
+/// l-value spine, etc.) is treated as impure.
+pub fn is_pure_lvalue(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identifier(_) | Expr::Path(_) => true,
+        Expr::FieldAccess { receiver, .. } => is_pure_lvalue(receiver),
+        Expr::TupleIndex { receiver, .. } => is_pure_lvalue(receiver),
+        Expr::Index { receiver, index } => is_pure_lvalue(receiver) && is_pure_index(index),
+        _ => false,
+    }
+}
+
+/// Helper: an `Index` index is "pure" if it is itself a leaf l-value-shaped
+/// expression with no calls. Integer/float literals are obviously fine; an
+/// `Identifier` (loop variable, etc.) is fine because reading a binding has
+/// no observable side effect; a nested pure l-value is fine. Range
+/// sub-expressions are accepted because that's exactly the `lo..hi` shape
+/// we're matching at the bitfield slice itself.
+fn is_pure_index(expr: &Expr) -> bool {
+    match expr {
+        Expr::Integer(_)
+        | Expr::Float(_)
+        | Expr::TypedInteger(..)
+        | Expr::TypedFloat(..)
+        | Expr::Bool(_)
+        | Expr::Nil
+        | Expr::Identifier(_)
+        | Expr::Path(_) => true,
+        Expr::FieldAccess { receiver, .. } => is_pure_lvalue(receiver),
+        Expr::TupleIndex { receiver, .. } => is_pure_lvalue(receiver),
+        Expr::Index { receiver, index } => is_pure_lvalue(receiver) && is_pure_index(index),
+        Expr::Range { start, end, .. } => {
+            start.as_ref().is_none_or(|s| is_pure_index(s)) && end.as_ref().is_none_or(|e| is_pure_index(e))
+        }
+        _ => false,
+    }
+}
+
+/// Build the value expression for `x.bits[lo..hi] = v`:
+///     `(x & ~mask_at_lo) | ((v & mask) << lo)`
+/// where `mask = (1 << (hi - lo)) - 1` and `mask_at_lo = mask << lo`.
+///
+/// Note: `target_lvalue` is duplicated into the value expression and so is
+/// evaluated twice. Callers MUST guard with `is_pure_lvalue` first — Phase 3
+/// (2026-04-25) added a diagnose-only check at the parse-time wrapper so
+/// side-effecting receivers (`arr[next()].bits[…]`) are rejected up front.
+/// Full single-eval temp binding is deferred — see the file-level comment.
+pub fn build_bits_write_value(target_lvalue: Expr, lo: Expr, hi: Expr, value: Expr) -> Expr {
+    let width = sub(hi, lo.clone());
+    let mask = sub(shl(int_lit(1), width), int_lit(1));
+    // Cache the field-shifted mask once (reused for both clear and set).
+    // We don't introduce a temp — the shapes are simple enough that emitting
+    // them twice is acceptable (HIR/MIR will fold equal subexpressions).
+    let mask_at_lo = shl(mask.clone(), lo.clone());
+    let cleared = bit_and(target_lvalue, bit_not(mask_at_lo));
+    let masked_value = bit_and(value, mask);
+    let shifted_value = shl(masked_value, lo);
+    bit_or(cleared, shifted_value)
+}
+
+/// Map a supported augmented `AssignOp` to its underlying `BinOp`.
+///
+/// Only arithmetic augmented assigns are supported on bitfield slices —
+/// the language has no `&=`/`|=`/`^=` tokens, and the `~=` family carries
+/// suspend semantics that don't compose with a synthetic L-value.
+pub fn augmented_assign_binop(op: AssignOp) -> Option<BinOp> {
+    match op {
+        AssignOp::AddAssign => Some(BinOp::Add),
+        AssignOp::SubAssign => Some(BinOp::Sub),
+        AssignOp::MulAssign => Some(BinOp::Mul),
+        AssignOp::DivAssign => Some(BinOp::Div),
+        AssignOp::ModAssign => Some(BinOp::Mod),
+        _ => None,
+    }
+}
+
+/// Build the value expression for `x.bits[lo..hi] <op>= v`:
+///     `(x & ~mask_at_lo) | (((((x >> lo) & mask) <op> v) & mask) << lo)`
+///
+/// The inner `& mask` after the binary op clamps the post-op value back to
+/// the field width so a `+=` carry into bit `hi` does not bleed into the
+/// next field.
+///
+/// Note: `target_lvalue` is duplicated three times into the value
+/// expression (clear-side, read-side, plus the assignment LHS in the
+/// caller), so a side-effecting target (e.g., `arr[next()].bits[…]`)
+/// would observe the side effect multiple times. That case is explicitly
+/// deferred — see the file-level comment in `bitfield.rs` and the
+/// task-tracking doc.
+pub fn build_bits_augmented_value(target_lvalue: Expr, lo: Expr, hi: Expr, binop: BinOp, rhs: Expr) -> Expr {
+    // Compute the post-op field value: `((target >> lo) & mask) <op> rhs`.
+    let current_field = build_bits_read(target_lvalue.clone(), lo.clone(), hi.clone());
+    let new_field = bin(binop, current_field, rhs);
+    // Reuse the plain-write builder; it re-applies `& mask` (truncating
+    // any overflow above the field) and shifts back into position.
+    build_bits_write_value(target_lvalue, lo, hi, new_field)
+}
+
+// ---- internal builders ------------------------------------------------------
+
+fn build_bits_read(x: Expr, lo: Expr, hi: Expr) -> Expr {
+    let width = sub(hi, lo.clone());
+    let mask = sub(shl(int_lit(1), width), int_lit(1));
+    let shifted = shr(x, lo);
+    bit_and(shifted, mask)
+}
+
+fn int_lit(n: i64) -> Expr {
+    Expr::Integer(n)
+}
+
+fn bin(op: BinOp, l: Expr, r: Expr) -> Expr {
+    Expr::Binary {
+        op,
+        left: Box::new(l),
+        right: Box::new(r),
+    }
+}
+
+fn shl(l: Expr, r: Expr) -> Expr {
+    bin(BinOp::ShiftLeft, l, r)
+}
+fn shr(l: Expr, r: Expr) -> Expr {
+    bin(BinOp::ShiftRight, l, r)
+}
+fn bit_and(l: Expr, r: Expr) -> Expr {
+    bin(BinOp::BitAnd, l, r)
+}
+fn bit_or(l: Expr, r: Expr) -> Expr {
+    bin(BinOp::BitOr, l, r)
+}
+fn sub(l: Expr, r: Expr) -> Expr {
+    bin(BinOp::Sub, l, r)
+}
+fn bit_not(e: Expr) -> Expr {
+    Expr::Unary {
+        op: UnaryOp::BitNot,
+        operand: Box::new(e),
+    }
+}

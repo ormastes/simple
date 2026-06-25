@@ -1,0 +1,61 @@
+# Current in-process screenshot capture adapters for wm_compare.
+#
+# These are deterministic emulation captures over the Simple Web Renderer pixel
+# path. They give the corpus and backend tests a bitwise screenshot-style API
+# without depending on the stale os.compositor capture module tree.
+
+use app.wm_compare.html_compat.{CaptureResult, ComparisonResult, capture_error, compare_exact}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    SimpleWebRenderer, simple_web_render_html_to_pixels}
+
+fn _capture_result(backend_name: text, width: i32, height: i32,
+                   pixels: [u32], error: text) -> CaptureResult:
+    if width <= 0 or height <= 0:
+        return capture_error(backend_name, width, height, "invalid viewport dimensions")
+    val expected_len = width * height
+    val ok = error == "" and pixels.len() == expected_len
+    CaptureResult(
+        pixels: pixels,
+        width: width,
+        height: height,
+        backend_name: backend_name,
+        success: ok,
+        error: if ok: "" else: error
+    )
+
+fn _failed_compare_result(width: i32, height: i32) -> ComparisonResult:
+    val total = width * height
+    val different = if total > 0: total as i64 else: 1
+    ComparisonResult(
+        different_pixels: different,
+        match_percentage: 0,
+        max_channel_diff: 255
+    )
+
+fn capture_simple_web_emulated(html: text, width: i32, height: i32) -> CaptureResult:
+    if width <= 0 or height <= 0:
+        return capture_error("simple_web_emulated", width, height, "invalid viewport dimensions")
+    val pixels = simple_web_render_html_to_pixels(html, width, height)
+    var error = ""
+    if pixels.len() != width * height:
+        error = "simple_web_emulated pixel buffer size mismatch"
+    _capture_result("simple_web_emulated", width, height, pixels, error)
+
+fn capture_engine2d_software_emulated(html: text, width: i32, height: i32) -> CaptureResult:
+    if width <= 0 or height <= 0:
+        return capture_error("engine2d_software_emulated", width, height, "invalid viewport dimensions")
+    val renderer = SimpleWebRenderer.create_with_backend(width, height, "software")
+    val pixels = renderer.render_html_to_pixels(html)
+    var error = ""
+    if renderer.backend_name != "software":
+        error = "engine2d software backend unavailable"
+    elif pixels.len() != width * height:
+        error = "engine2d software pixel buffer size mismatch"
+    _capture_result("engine2d_software_emulated", width, height, pixels, error)
+
+fn compare_emulated_screenshots_exact(html: text, width: i32, height: i32) -> ComparisonResult:
+    val simple = capture_simple_web_emulated(html, width, height)
+    val engine = capture_engine2d_software_emulated(html, width, height)
+    if not simple.success or not engine.success:
+        return _failed_compare_result(width, height)
+    compare_exact(simple.pixels, engine.pixels, width, height)

@@ -1,0 +1,41 @@
+use common.wine_kernel32_critical_section.{wine_kernel32_critical_section_table_new, wine_kernel32_execute_critical_section}
+
+describe "Wine KERNEL32 critical-section bridge":
+    it "executes a bounded initialize, enter, leave, and delete sequence":
+        val result = wine_kernel32_execute_critical_section(
+            ["InitializeCriticalSection", "EnterCriticalSection", "LeaveCriticalSection", "DeleteCriticalSection"],
+            wine_kernel32_critical_section_table_new(),
+            "loader-lock"
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.handle).to_equal(0x300)
+        expect(result.table.sections.len()).to_equal(0)
+        expect(result.operations).to_equal("InitializeCriticalSection EnterCriticalSection LeaveCriticalSection DeleteCriticalSection")
+
+    it "keeps critical-section dispatch ordered and bounded":
+        val out_of_order = wine_kernel32_execute_critical_section(
+            ["EnterCriticalSection", "InitializeCriticalSection", "LeaveCriticalSection", "DeleteCriticalSection"],
+            wine_kernel32_critical_section_table_new(),
+            "loader-lock"
+        )
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("kernel32-critical-section-sequence-expected:InitializeCriticalSection")
+
+        val wrong_family = wine_kernel32_execute_critical_section(
+            ["InitializeCriticalSection", "EnterCriticalSection", "LeaveCriticalSection", "HeapAlloc"],
+            wine_kernel32_critical_section_table_new(),
+            "loader-lock"
+        )
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:HeapAlloc")
+
+    it "rejects unnamed critical sections in the bounded startup path":
+        val result = wine_kernel32_execute_critical_section(
+            ["InitializeCriticalSection", "EnterCriticalSection", "LeaveCriticalSection", "DeleteCriticalSection"],
+            wine_kernel32_critical_section_table_new(),
+            ""
+        )
+
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("InitializeCriticalSection:invalid-name")

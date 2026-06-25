@@ -1,0 +1,519 @@
+# Markdown Document Decoration
+#
+# Extracts document-level rendering hints from Markdown frontmatter and CSS
+# fences so GUI preview can render page view, header/footer, and custom CSS.
+
+struct MdDocumentDecor:
+    page_view: bool
+    header: text
+    footer: text
+    css_file: text
+    inline_css: text
+    layout: text
+
+struct MdDocumentSlide:
+    index: i64
+    title: text
+    content: text
+    css: text
+
+struct MdSheetCell:
+    address: text
+    row: i64
+    col: i64
+    raw: text
+    value: text
+
+struct MdScriptEmbed:
+    language: text
+    code: text
+
+fn md_document_decor_empty() -> MdDocumentDecor:
+    MdDocumentDecor(page_view: false, header: "", footer: "", css_file: "", inline_css: "", layout: "document")
+
+fn md_document_decor_parse(content: text) -> MdDocumentDecor:
+    if content.len() == 0:
+        return md_document_decor_empty()
+    var decor = md_document_decor_empty()
+    val lines = _mdd_split_lines(content)
+    var body_start = 0
+    if lines.len() > 0 and lines[0].trim() == "---":
+        var i = 1
+        while i < lines.len():
+            val line = lines[i].trim()
+            if line == "---":
+                body_start = i + 1
+                break
+            val sep = line.index_of(":")
+            if sep >= 0:
+                val key = line.slice(0, sep).trim()
+                val value = _mdd_unquote(line.slice(sep + 1, line.len()).trim())
+                if key == "page_view":
+                    decor.page_view = _mdd_truthy(value)
+                elif key == "header":
+                    decor.header = value
+                elif key == "footer":
+                    decor.footer = value
+                elif key == "css_file":
+                    decor.css_file = value
+                elif key == "layout":
+                    decor.layout = value
+            i = i + 1
+    decor.inline_css = _mdd_collect_css_fences(lines, body_start)
+    if decor.page_view and decor.layout == "document":
+        decor.layout = "paper"
+    decor
+
+fn md_document_body_without_decor(content: text) -> text:
+    if content.len() == 0:
+        return ""
+    val lines = _mdd_split_lines(content)
+    var result: [text] = []
+    var i = 0
+    if lines.len() > 0 and lines.get(0).trim() == "---":
+        i = 1
+        while i < lines.len() and lines.get(i).trim() != "---":
+            i = i + 1
+        if i < lines.len() and lines.get(i).trim() == "---":
+            i = i + 1
+    var in_css = false
+    while i < lines.len():
+        val trimmed = lines.get(i).trim()
+        if not in_css and _mdd_is_css_fence(trimmed):
+            in_css = true
+            i = i + 1
+            continue
+        if in_css:
+            if trimmed.starts_with("```"):
+                in_css = false
+            i = i + 1
+            continue
+        result.push(lines[i])
+        i = i + 1
+    _mdd_compact_blank_runs(_mdd_trim_outer_blank_lines(result)).join("\n")
+
+fn md_document_split_ppt_pages(content: text) -> [MdDocumentSlide]:
+    if content.len() == 0:
+        return []
+    val body = md_document_body_without_decor(content)
+    val lines = _mdd_split_lines(body)
+    var slides: [MdDocumentSlide] = []
+    var current_title = ""
+    var current_lines: [text] = []
+    var current_css = ""
+    var seen_slide = false
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("## "):
+            if seen_slide:
+                slides.push(MdDocumentSlide(index: slides.len() + 1, title: current_title, content: _mdd_trim_outer_blank_lines(current_lines).join("\n"), css: current_css))
+            current_title = trimmed.slice(3, trimmed.len()).trim()
+            current_lines = []
+            current_css = _mdd_heading_css(trimmed)
+            seen_slide = true
+        elif seen_slide:
+            current_lines.push(line)
+    if seen_slide:
+        slides.push(MdDocumentSlide(index: slides.len() + 1, title: current_title, content: _mdd_trim_outer_blank_lines(current_lines).join("\n"), css: current_css))
+    slides
+
+fn md_document_render_ppt_html(content: text) -> text:
+    val decor = md_document_decor_parse(content)
+    val slides = md_document_split_ppt_pages(content)
+    var html: [text] = []
+    html.push("<section class=\"md-ppt-deck\" data-layout=\"" + _mdd_escape_html(decor.layout) + "\">")
+    if decor.css_file != "":
+        html.push("<link rel=\"stylesheet\" href=\"" + _mdd_escape_html(decor.css_file) + "\">")
+    if decor.inline_css != "":
+        html.push("<style class=\"md-inline-css\">" + _mdd_escape_html(decor.inline_css) + "</style>")
+    for slide in slides:
+        val css_class = if slide.css != "" then " " + _mdd_css_classes(slide.css) else: ""
+        html.push("<article class=\"md-ppt-slide" + css_class + "\" data-slide=\"" + slide.index.to_text() + "\"><h2>" + _mdd_escape_html(slide.title) + "</h2><div class=\"md-ppt-body\">" + _mdd_render_plain_markdown_lines(slide.content) + "</div></article>")
+    html.push("</section>")
+    html.join("")
+
+fn md_document_replace_ppt_page(content: text, slide_index: i64, new_content: text) -> text:
+    val lines = _mdd_split_lines(content)
+    val replacement = _mdd_trim_outer_blank_lines(_mdd_split_lines(new_content))
+    var result: [text] = []
+    var current_slide = 0
+    var skipping_target = false
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("## "):
+            current_slide = current_slide + 1
+            skipping_target = current_slide == slide_index
+            result.push(line)
+            if skipping_target:
+                for replacement_line in replacement:
+                    result.push(replacement_line)
+        elif not skipping_target:
+            result.push(line)
+    result.join("\n")
+
+fn md_document_render_paper_html(content: text) -> text:
+    val decor = md_document_decor_parse(content)
+    val body = _mdd_body_without_script_fences(md_document_body_without_decor(content))
+    var html: [text] = []
+    html.push("<article class=\"md-paper-layout\" data-layout=\"paper\">")
+    if decor.css_file != "":
+        html.push("<link rel=\"stylesheet\" href=\"" + _mdd_escape_html(decor.css_file) + "\">")
+    if decor.inline_css != "":
+        html.push("<style class=\"md-inline-css\">" + _mdd_escape_html(decor.inline_css) + "</style>")
+    if decor.header != "":
+        html.push("<header class=\"md-page-header\">" + _mdd_escape_html(decor.header) + "</header>")
+    html.push("<main class=\"md-page-body\">" + _mdd_render_plain_markdown_lines(body) + "</main>")
+    if decor.footer != "":
+        html.push("<footer class=\"md-page-footer\">" + _mdd_escape_html(decor.footer) + "</footer>")
+    val scripts = md_document_render_script_embeds_html(content)
+    if scripts != "":
+        html.push("<aside class=\"md-script-region\">" + scripts + "</aside>")
+    html.push("</article>")
+    html.join("")
+
+fn md_document_render_office_html(content: text) -> text:
+    val decor = md_document_decor_parse(content)
+    if decor.layout == "ppt" or decor.layout == "slides" or decor.layout == "presentation":
+        return md_document_render_ppt_html(content)
+    if decor.layout == "sheet" or decor.layout == "excel" or decor.layout == "spreadsheet":
+        return "<section class=\"md-sheet-layout\" data-layout=\"" + _mdd_escape_html(decor.layout) + "\">" + md_document_render_sheet_html(content) + md_document_render_script_embeds_html(content) + "</section>"
+    md_document_render_paper_html(content)
+
+fn md_document_sheet_cells(content: text) -> [MdSheetCell]:
+    if content.len() == 0:
+        return []
+    val body = md_document_body_without_decor(content)
+    val lines = _mdd_split_lines(body)
+    var table_lines: [text] = []
+    var in_table = false
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("|") and trimmed.ends_with("|"):
+            if not _mdd_is_table_separator(trimmed):
+                table_lines.push(trimmed)
+            in_table = true
+        elif in_table:
+            break
+    var cells: [MdSheetCell] = []
+    var row = 1
+    for table_line in table_lines:
+        val cols = _mdd_split_table_row(table_line)
+        var col = 1
+        for raw_cell in cols:
+            val raw = raw_cell.trim()
+            cells.push(MdSheetCell(address: _mdd_cell_address(row, col), row: row, col: col, raw: raw, value: raw))
+            col = col + 1
+        row = row + 1
+    _mdd_evaluate_sheet_cells(cells)
+
+fn md_document_render_sheet_html(content: text) -> text:
+    val cells = md_document_sheet_cells(content)
+    var html: [text] = []
+    html.push("<table class=\"md-sheet\" data-calculated=\"true\">")
+    var current_row = 0
+    for cell in cells:
+        if cell.row != current_row:
+            if current_row != 0:
+                html.push("</tr>")
+            current_row = cell.row
+            html.push("<tr data-row=\"" + current_row.to_text() + "\">")
+        val tag = if cell.row == 1 then "th" else: "td"
+        html.push("<" + tag + " data-cell=\"" + cell.address + "\" data-raw=\"" + _mdd_escape_html(cell.raw) + "\">" + _mdd_escape_html(cell.value) + "</" + tag + ">")
+    if current_row != 0:
+        html.push("</tr>")
+    html.push("</table>")
+    html.join("")
+
+fn md_document_replace_sheet_cell_value(content: text, address: text, value: text) -> text:
+    if content.len() == 0 or address.len() == 0:
+        return content
+    val target_row = _mdd_address_row(address)
+    val target_col = _mdd_address_col(address)
+    if target_row <= 0 or target_col <= 0:
+        return content
+    val lines = _mdd_split_lines(content)
+    var result: [text] = []
+    var table_row = 0
+    var in_table = false
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("|") and trimmed.ends_with("|"):
+            in_table = true
+            if _mdd_is_table_separator(trimmed):
+                result.push(line)
+            else:
+                table_row = table_row + 1
+                if table_row == target_row:
+                    var cells = _mdd_split_table_row(trimmed)
+                    if target_col > 0 and target_col <= cells.len():
+                        cells[target_col - 1] = value
+                    result.push(_mdd_join_table_row(cells))
+                else:
+                    result.push(line)
+        else:
+            if in_table:
+                in_table = false
+            result.push(line)
+    result.join("\n")
+
+fn md_document_script_embeds(content: text) -> [MdScriptEmbed]:
+    val lines = _mdd_split_lines(md_document_body_without_decor(content))
+    var embeds: [MdScriptEmbed] = []
+    var in_script = false
+    var language = ""
+    var code_lines: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if not in_script and (trimmed == "```simple" or trimmed == "```script" or trimmed == "```spl"):
+            in_script = true
+            language = trimmed.slice(3, trimmed.len()).trim()
+            code_lines = []
+        elif in_script and trimmed.starts_with("```"):
+            embeds.push(MdScriptEmbed(language: language, code: code_lines.join("\n")))
+            in_script = false
+        elif in_script:
+            code_lines.push(line)
+    embeds
+
+fn md_document_render_script_embeds_html(content: text) -> text:
+    val embeds = md_document_script_embeds(content)
+    var html: [text] = []
+    for embed in embeds:
+        html.push("<pre class=\"md-script-embed\" data-language=\"" + _mdd_escape_html(embed.language) + "\"><code>" + _mdd_escape_html(embed.code) + "</code></pre>")
+    html.join("")
+
+fn _mdd_body_without_script_fences(content: text) -> text:
+    val lines = _mdd_split_lines(content)
+    var result: [text] = []
+    var in_script = false
+    for line in lines:
+        val trimmed = line.trim()
+        if not in_script and (trimmed == "```simple" or trimmed == "```script" or trimmed == "```spl"):
+            in_script = true
+        elif in_script and trimmed.starts_with("```"):
+            in_script = false
+        elif not in_script:
+            result.push(line)
+    _mdd_compact_blank_runs(_mdd_trim_outer_blank_lines(result)).join("\n")
+
+fn _mdd_collect_css_fences(lines: [text], start: i64) -> text:
+    var blocks: [text] = []
+    var current: [text] = []
+    var in_css = false
+    var i = start
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if not in_css and _mdd_is_css_fence(trimmed):
+            in_css = true
+            current = []
+        elif in_css and trimmed.starts_with("```"):
+            blocks.push(current.join("\n"))
+            in_css = false
+        elif in_css:
+            current.push(lines[i])
+        i = i + 1
+    blocks.join("\n")
+
+fn _mdd_is_css_fence(line: text) -> bool:
+    line == "```css" or line == "```style"
+
+fn _mdd_heading_css(line: text) -> text:
+    val parts = line.split(" ")
+    var css: [text] = []
+    for part in parts:
+        val token = part.trim()
+        if token.starts_with("@") and token.len() > 1:
+            css.push(token.slice(1, token.len()))
+    css.join(" ")
+
+fn _mdd_split_table_row(line: text) -> [text]:
+    var cells: [text] = []
+    var current = ""
+    var i = 0
+    while i < line.len():
+        val ch = line.char_at(i)
+        if ch == "|":
+            val cell = current.trim()
+            if cells.len() > 0 or cell != "":
+                cells.push(cell)
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    val tail = current.trim()
+    if tail != "":
+        cells.push(tail)
+    cells
+
+fn _mdd_join_table_row(cells: [text]) -> text:
+    var out = "|"
+    for cell in cells:
+        out = out + " " + cell.trim() + " |"
+    out
+
+fn _mdd_is_table_separator(line: text) -> bool:
+    var non_marker = false
+    var i = 0
+    while i < line.len():
+        val ch = line.char_at(i)
+        if ch != "|" and ch != "-" and ch != ":" and ch != " ":
+            non_marker = true
+        i = i + 1
+    not non_marker
+
+fn _mdd_evaluate_sheet_cells(cells: [MdSheetCell]) -> [MdSheetCell]:
+    var out = cells
+    var i = 0
+    while i < out.len():
+        var cell = out[i]
+        if cell.raw.starts_with("="):
+            cell.value = _mdd_eval_formula(cell.raw.slice(1, cell.raw.len()), out)
+            out[i] = cell
+        i = i + 1
+    out
+
+fn _mdd_eval_formula(formula: text, cells: [MdSheetCell]) -> text:
+    val expr = formula.trim()
+    val plus = expr.index_of("+")
+    if plus >= 0:
+        val left = _mdd_formula_value(expr.slice(0, plus).trim(), cells)
+        val right = _mdd_formula_value(expr.slice(plus + 1, expr.len()).trim(), cells)
+        return (left + right).to_text()
+    _mdd_formula_value(expr, cells).to_text()
+
+fn _mdd_formula_value(token: text, cells: [MdSheetCell]) -> i64:
+    val raw = _mdd_cell_raw(token, cells)
+    if raw != "":
+        return raw.to_i64() ?? 0
+    token.to_i64() ?? 0
+
+fn _mdd_cell_raw(address: text, cells: [MdSheetCell]) -> text:
+    for cell in cells:
+        if cell.address == address:
+            if cell.raw.starts_with("="):
+                return cell.value
+            return cell.raw
+    ""
+
+fn _mdd_cell_address(row: i64, col: i64) -> text:
+    _mdd_col_name(col) + row.to_text()
+
+fn _mdd_address_col(address: text) -> i64:
+    if address.len() == 0:
+        return 0
+    val col = address.char_at(0)
+    if col == "A":
+        return 1
+    if col == "B":
+        return 2
+    if col == "C":
+        return 3
+    if col == "D":
+        return 4
+    if col == "E":
+        return 5
+    0
+
+fn _mdd_address_row(address: text) -> i64:
+    if address.len() <= 1:
+        return 0
+    address.slice(1, address.len()).to_i64() ?? 0
+
+fn _mdd_col_name(col: i64) -> text:
+    if col == 1:
+        return "A"
+    if col == 2:
+        return "B"
+    if col == 3:
+        return "C"
+    if col == 4:
+        return "D"
+    if col == 5:
+        return "E"
+    "C" + col.to_text()
+
+fn _mdd_css_classes(css: text) -> text:
+    val parts = css.split(" ")
+    var classes: [text] = []
+    for part in parts:
+        val token = part.trim()
+        if token != "":
+            classes.push("md-css-" + token)
+    classes.join(" ")
+
+fn _mdd_render_plain_markdown_lines(content: text) -> text:
+    val lines = _mdd_split_lines(content)
+    var html: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed != "":
+            html.push("<p>" + _mdd_escape_html(trimmed) + "</p>")
+    html.join("")
+
+fn _mdd_escape_html(s: text) -> text:
+    var result: [text] = []
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "<":
+            result.push("&lt;")
+        elif ch == ">":
+            result.push("&gt;")
+        elif ch == "&":
+            result.push("&amp;")
+        elif ch == "\"":
+            result.push("&quot;")
+        else:
+            result.push(ch)
+        i = i + 1
+    result.join("")
+
+fn _mdd_truthy(value: text) -> bool:
+    val lower = value.lower()
+    lower == "true" or lower == "yes" or lower == "on" or lower == "1"
+
+fn _mdd_unquote(value: text) -> text:
+    if value.len() >= 2:
+        val first = value.char_at(0)
+        val last = value.char_at(value.len() - 1)
+        if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
+            return value.slice(1, value.len() - 1)
+    value
+
+fn _mdd_trim_outer_blank_lines(lines: [text]) -> [text]:
+    var start = 0
+    var end = lines.len()
+    while start < end and lines.get(start).trim() == "":
+        start = start + 1
+    while end > start and lines.get(end - 1).trim() == "":
+        end = end - 1
+    var result: [text] = []
+    var i = start
+    while i < end:
+        result.push(lines[i])
+        i = i + 1
+    result
+
+fn _mdd_compact_blank_runs(lines: [text]) -> [text]:
+    var result: [text] = []
+    var previous_blank = false
+    for line in lines:
+        val blank = line.trim() == ""
+        if blank and previous_blank:
+            continue
+        result.push(line)
+        previous_blank = blank
+    result
+
+fn _mdd_split_lines(content: text) -> [text]:
+    var lines: [text] = []
+    var start = 0
+    var i = 0
+    while i < content.len():
+        if content.char_at(i) == "\n":
+            lines.push(content.slice(start, i))
+            start = i + 1
+        i = i + 1
+    if start <= content.len():
+        lines.push(content.slice(start, content.len()))
+    lines

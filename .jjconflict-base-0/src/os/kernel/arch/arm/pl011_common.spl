@@ -1,0 +1,57 @@
+# Shared ARM PL011 UART helpers for QEMU virt machines.
+
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
+
+val ARM_VIRT_PL011_BASE: u64 = 0x09000000
+
+val PL011_UARTDR: u64 = 0x000
+val PL011_UARTFR: u64 = 0x018
+val PL011_UARTIBRD: u64 = 0x024
+val PL011_UARTFBRD: u64 = 0x028
+val PL011_UARTLCR_H: u64 = 0x02C
+val PL011_UARTCR: u64 = 0x030
+val PL011_UARTIMSC: u64 = 0x038
+
+val PL011_FR_TXFF: u32 = 1 << 5
+val PL011_FR_BUSY: u32 = 1 << 3
+
+val PL011_CR_UARTEN: u32 = 1 << 0
+val PL011_CR_TXE: u32 = 1 << 8
+val PL011_CR_RXE: u32 = 1 << 9
+
+val PL011_LCR_FEN: u32 = 1 << 4
+val PL011_LCR_WLEN_8: u32 = 3 << 5
+
+fn pl011_init(base: u64, ready: bool) -> bool:
+    """Initialize PL011 UART once and return the ready state."""
+    if ready:
+        return true
+
+    mmio_write32(base + PL011_UARTCR, 0)
+    while (mmio_read32(base + PL011_UARTFR) & PL011_FR_BUSY) != 0:
+        pass_do_nothing
+
+    mmio_write32(base + PL011_UARTIBRD, 13)
+    mmio_write32(base + PL011_UARTFBRD, 1)
+    mmio_write32(base + PL011_UARTLCR_H, PL011_LCR_WLEN_8 | PL011_LCR_FEN)
+    mmio_write32(base + PL011_UARTIMSC, 0)
+    mmio_write32(base + PL011_UARTCR, PL011_CR_UARTEN | PL011_CR_TXE | PL011_CR_RXE)
+    true
+
+fn pl011_write_byte(base: u64, byte: u8):
+    """Write one byte, blocking until the transmit FIFO has space."""
+    while (mmio_read32(base + PL011_UARTFR) & PL011_FR_TXFF) != 0:
+        pass_do_nothing
+    mmio_write32(base + PL011_UARTDR, byte as u32)
+
+fn pl011_write(base: u64, msg: text):
+    """Write text to PL011 UART."""
+    for i in 0..msg.len():
+        val ch = msg.char_at(i)
+        pl011_write_byte(base, ch as u8)
+
+fn pl011_writeln(base: u64, msg: text):
+    """Write text plus CRLF to PL011 UART."""
+    pl011_write(base, msg)
+    pl011_write_byte(base, 0x0D)
+    pl011_write_byte(base, 0x0A)
