@@ -114,6 +114,12 @@ bin/simple test && bin/simple build lint
   as the canonical wrapper. For `--renderdoc-simple`, leave `RDOC_SIMPLE_BIN`
   unset in normal runs so the helper builds `src/compiler_rust/target/release/simple`
   with current `rt_renderdoc_*` externs.
+  For browser diagnostics only, `RDOC_RENDERDOC_HOOK_CHILDREN=0` omits
+  RenderDoc child-process hooking; record the result as blocker evidence unless
+  the browser GPU-process `.rdc` still has valid `RDOC` magic.
+  Do not treat Chromium `--in-process-gpu` as a valid Vulkan browser evidence
+  shortcut on this Linux host; current Chrome/Electron reports or exhibits that
+  Vulkan is unsupported/crashing in that mode.
 - If `src/compiler/**`, `src/lib/**`, `src/app/mcp/**`, `src/app/simple_lsp_mcp/**`, or MCP packaging files changed, run:
   - `<runtime> check src/compiler`
   - `<runtime> check src/lib`

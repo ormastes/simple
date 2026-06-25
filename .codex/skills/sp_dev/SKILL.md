@@ -75,6 +75,13 @@ RenderDoc host. Leave `RDOC_SIMPLE_BIN` unset unless deliberately overriding;
 the helper builds `src/compiler_rust/target/release/simple` so the
 `rt_renderdoc_*` externs are current. Use all-lane `--renderdoc` only for
 cross-surface evidence collection.
+For browser RenderDoc diagnostics, `RDOC_RENDERDOC_HOOK_CHILDREN=0` omits
+`--opt-hook-children`; this may isolate Chromium child-hook crashes, but it is
+not passing evidence unless the Chrome/Electron GPU-process capture still emits
+a valid `.rdc` with `RDOC` magic.
+Do not accept `--in-process-gpu` as a Linux Chromium/Vulkan workaround unless a
+fresh run proves Vulkan remains enabled and emits valid browser `.rdc` evidence;
+current Electron/Chrome diagnostics show that mode is unsupported or crashes.
 On Windows, first read `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`.
 `vulkaninfo --summary` plus Chrome/Electron installation proves host readiness
 only; it does not prove Chrome or Electron are Vulkan-backed. The Vulkan SDK

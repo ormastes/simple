@@ -164,6 +164,12 @@ Scan for stub patterns — any match is a **FAIL**:
   For Simple RenderDoc capture, leave `RDOC_SIMPLE_BIN` unset unless testing an
   explicit override; the helper must build/use the Rust interpreter carrying
   current `rt_renderdoc_*` externs.
+  Browser runs with `RDOC_RENDERDOC_HOOK_CHILDREN=0` are diagnostic unless they
+  still produce a Chrome/Electron GPU-process `.rdc` with valid `RDOC` magic;
+  no-child-hook `missing-rdc` evidence remains a FAIL.
+  Chromium `--in-process-gpu` evidence is also a FAIL on this Linux host unless
+  it separately proves Vulkan remains active and emits valid browser `.rdc`
+  evidence; current diagnostics show Vulkan unsupported or GPU crashes there.
 - **Metal/Vulkan/8K claims:** native Metal proof is macOS-only and must include
   raw Metal readback; Linux Metal is only `metal-requires-macos`. Vulkan claims
   need the readback/RenderDoc gate above. Any 8K performance claim needs a

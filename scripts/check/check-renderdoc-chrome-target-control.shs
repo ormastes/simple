@@ -1,0 +1,189 @@
+#!/bin/sh
+# Diagnostic Chrome-on-Vulkan RenderDoc target-control capture probe.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/renderdoc/chrome-target-control}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/renderdoc_chrome_target_control_$(date -u +%F).md}"
+HTML_PATH="${RDOC_HTML_PATH:-$ROOT_DIR/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html}"
+CHROME_BIN="${RDOC_CHROME:-/usr/bin/google-chrome}"
+RENDERDOC_HOME="${RDOC_HOME:-/opt/renderdoc}"
+WIDTH="${RDOC_CHROME_WIDTH:-900}"
+HEIGHT="${RDOC_CHROME_HEIGHT:-700}"
+WAIT_SECS="${RDOC_CHROME_TARGET_WAIT_SECS:-8}"
+CONTROL_TIMEOUT="${RDOC_TARGET_CONTROL_TIMEOUT_SECS:-20}"
+
+mkdir -p "$BUILD_DIR/vulkan-layer.d" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$BUILD_DIR/target-control.env" "$BUILD_DIR/rdc.list"
+
+status="fail"
+reason="not-run"
+capture_file=""
+capture_magic=""
+gpu_pid=""
+target_status=""
+target_reason=""
+target_api=""
+target_pid=""
+target_capture_path=""
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+write_env() {
+    {
+        echo "rdoc_chrome_target_control_status=$status"
+        echo "rdoc_chrome_target_control_reason=$reason"
+        echo "rdoc_chrome_target_control_html_path=$HTML_PATH"
+        echo "rdoc_chrome_target_control_chrome=$CHROME_BIN"
+        echo "rdoc_chrome_target_control_renderdoc_home=$RENDERDOC_HOME"
+        echo "rdoc_chrome_target_control_gpu_pid=$gpu_pid"
+        echo "rdoc_chrome_target_control_target_status=$target_status"
+        echo "rdoc_chrome_target_control_target_reason=$target_reason"
+        echo "rdoc_chrome_target_control_target_pid=$target_pid"
+        echo "rdoc_chrome_target_control_target_api=$target_api"
+        echo "rdoc_chrome_target_control_capture_path=$target_capture_path"
+        echo "rdoc_chrome_target_control_capture_file=$capture_file"
+        echo "rdoc_chrome_target_control_capture_magic=$capture_magic"
+        echo "rdoc_chrome_target_control_chrome_log=$BUILD_DIR/chrome.log"
+        echo "rdoc_chrome_target_control_qrenderdoc_log=$BUILD_DIR/qrenderdoc.log"
+        echo "rdoc_chrome_target_control_target_env=$BUILD_DIR/target-control.env"
+        echo "rdoc_chrome_target_control_required_magic=RDOC"
+        echo "rdoc_chrome_target_control_required_api=vulkan"
+        echo "rdoc_chrome_target_control_required_angle=vulkan"
+    } >"$OUT_ENV"
+    {
+        echo "# Chrome RenderDoc Target-Control Probe"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- gpu pid: $gpu_pid"
+        echo "- target status: $target_status"
+        echo "- target api: $target_api"
+        echo "- capture: $capture_file"
+        echo "- magic: $capture_magic"
+    } >"$REPORT_PATH"
+}
+
+if [ ! -x "$CHROME_BIN" ]; then
+    reason="missing-chrome"
+    write_env
+    cat "$OUT_ENV"
+    exit 1
+fi
+if [ ! -x "$RENDERDOC_HOME/bin/qrenderdoc" ]; then
+    reason="missing-qrenderdoc"
+    write_env
+    cat "$OUT_ENV"
+    exit 1
+fi
+if [ ! -s "$HTML_PATH" ]; then
+    reason="missing-html-fixture"
+    write_env
+    cat "$OUT_ENV"
+    exit 1
+fi
+if [ ! -s "$RENDERDOC_HOME/etc/vulkan/implicit_layer.d/renderdoc_capture.json" ]; then
+    reason="missing-renderdoc-vulkan-layer"
+    write_env
+    cat "$OUT_ENV"
+    exit 1
+fi
+
+sed "s#/io/dist/lib/librenderdoc.so#$RENDERDOC_HOME/lib/librenderdoc.so#g" \
+    "$RENDERDOC_HOME/etc/vulkan/implicit_layer.d/renderdoc_capture.json" \
+    >"$BUILD_DIR/vulkan-layer.d/renderdoc_capture.json"
+
+url="file://$HTML_PATH"
+LD_LIBRARY_PATH="$RENDERDOC_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+VK_LAYER_PATH="$ROOT_DIR/$BUILD_DIR/vulkan-layer.d" \
+VK_INSTANCE_LAYERS=VK_LAYER_RENDERDOC_Capture \
+ENABLE_VULKAN_RENDERDOC_CAPTURE=1 \
+RENDERDOC_CAPFILE="$ROOT_DIR/$BUILD_DIR/chrome_target_control" \
+"$CHROME_BIN" \
+    --ozone-platform=x11 \
+    --no-first-run \
+    --no-default-browser-check \
+    --disable-search-engine-choice-screen \
+    --disable-features=Translate,OptimizationHints,MediaRouter \
+    --no-sandbox \
+    --disable-gpu-sandbox \
+    --disable-dev-shm-usage \
+    --disable-crash-reporter \
+    --disable-breakpad \
+    --enable-features=Vulkan \
+    --use-angle=vulkan \
+    --user-data-dir="$ROOT_DIR/$BUILD_DIR/profile" \
+    --window-size="${WIDTH},${HEIGHT}" \
+    --app="$url" >"$BUILD_DIR/chrome.log" 2>&1 &
+chrome_pid=$!
+echo "$chrome_pid" >"$BUILD_DIR/chrome.pid"
+
+sleep "$WAIT_SECS"
+gpu_pid="$(pgrep -P "$chrome_pid" -af -- '--type=gpu-process' | awk 'NR==1 { print $1 }' || true)"
+
+set +e
+qrenderdoc_timeout="$((CONTROL_TIMEOUT + 10))"
+if command -v timeout >/dev/null 2>&1; then
+    RDOC_TARGET_CONTROL_OUT="$ROOT_DIR/$BUILD_DIR/target-control.env" \
+    RDOC_TARGET_CONTROL_PID="$gpu_pid" \
+    RDOC_TARGET_CONTROL_TIMEOUT_SECS="$CONTROL_TIMEOUT" \
+    RDOC_TARGET_CONTROL_CAPTURE_OUT="$ROOT_DIR/$BUILD_DIR/target_control_copy.rdc" \
+    timeout "$qrenderdoc_timeout" "$RENDERDOC_HOME/bin/qrenderdoc" \
+        --ui-python "$ROOT_DIR/scripts/tool/renderdoc-target-control-trigger.py" \
+        >"$BUILD_DIR/qrenderdoc.log" 2>&1
+else
+    RDOC_TARGET_CONTROL_OUT="$ROOT_DIR/$BUILD_DIR/target-control.env" \
+    RDOC_TARGET_CONTROL_PID="$gpu_pid" \
+    RDOC_TARGET_CONTROL_TIMEOUT_SECS="$CONTROL_TIMEOUT" \
+    RDOC_TARGET_CONTROL_CAPTURE_OUT="$ROOT_DIR/$BUILD_DIR/target_control_copy.rdc" \
+    "$RENDERDOC_HOME/bin/qrenderdoc" \
+        --ui-python "$ROOT_DIR/scripts/tool/renderdoc-target-control-trigger.py" \
+        >"$BUILD_DIR/qrenderdoc.log" 2>&1
+fi
+control_rc=$?
+set -e
+
+target_status="$(value_of rdoc_target_control_status "$BUILD_DIR/target-control.env")"
+target_reason="$(value_of rdoc_target_control_reason "$BUILD_DIR/target-control.env")"
+target_pid="$(value_of rdoc_target_control_chosen_pid "$BUILD_DIR/target-control.env")"
+target_api="$(value_of rdoc_target_control_chosen_api "$BUILD_DIR/target-control.env")"
+target_capture_path="$(value_of rdoc_target_control_capture_path "$BUILD_DIR/target-control.env")"
+
+sleep 2
+find "$BUILD_DIR" -name '*.rdc' -print >"$BUILD_DIR/rdc.list"
+if [ -s "$target_capture_path" ]; then
+    capture_file="$target_capture_path"
+else
+    capture_file="$(head -n 1 "$BUILD_DIR/rdc.list" || true)"
+fi
+if [ -n "$capture_file" ] && [ -s "$capture_file" ]; then
+    capture_magic="$(dd if="$capture_file" bs=4 count=1 2>/dev/null || true)"
+fi
+
+kill "$chrome_pid" 2>/dev/null || true
+sleep 1
+
+if [ "$capture_magic" = "RDOC" ]; then
+    status="pass"
+    reason="pass"
+elif [ "$target_status" = "" ]; then
+    status="fail"
+    reason="target-control-no-evidence"
+elif [ "$control_rc" -ne 0 ]; then
+    status="fail"
+    reason="${target_reason:-target-control-failed}"
+else
+    status="fail"
+    reason="missing-rdc"
+fi
+
+write_env
+cat "$OUT_ENV"
+[ "$status" = "pass" ]

@@ -119,6 +119,10 @@ Linux out of the top-level completion claim until their platform runbooks are
 added. Refresh the guide, SPipe skill, verify mirrors, Simple
 Vulkan/Engine2D evidence, Chrome gate, Electron gate, and production GUI/web
 parity evidence together.
+Do not use browser `RDOC_RENDERDOC_HOOK_CHILDREN=0` or Chromium
+`--in-process-gpu` as passing Linux RenderDoc evidence unless the run still
+emits a valid browser GPU-process `.rdc` with `RDOC` magic and proves Vulkan is
+active.
 
 ## Per-Agent Checks
 

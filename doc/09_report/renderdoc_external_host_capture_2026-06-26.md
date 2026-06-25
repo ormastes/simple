@@ -41,7 +41,7 @@
 - rdoc_external_host_gate_requested_api=vulkan
 - rdoc_external_host_gate_requested_angle=vulkan
 - rdoc_external_host_gate_requested_features=Vulkan
-- rdoc_external_host_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan
+- rdoc_external_host_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan
 - rdoc_external_host_required_backend=original
 - rdoc_external_host_required_scene=html-css-chrome
 - rdoc_external_host_required_status=pass

@@ -245,11 +245,19 @@ rdoc_write_unavailable_capture() {
 }
 
 rdoc_electron_vulkan_flags() {
-    printf '%s\n' "--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform=x11 --enable-features=Vulkan --use-angle=vulkan"
+    in_process_gpu_flag=""
+    if [ "${RDOC_ELECTRON_IN_PROCESS_GPU:-0}" = "1" ]; then
+        in_process_gpu_flag=" --in-process-gpu"
+    fi
+    printf '%s\n' "--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan$in_process_gpu_flag"
 }
 
 rdoc_chrome_vulkan_flags() {
-    printf '%s\n' "--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan"
+    in_process_gpu_flag=""
+    if [ "${RDOC_CHROME_IN_PROCESS_GPU:-0}" = "1" ]; then
+        in_process_gpu_flag=" --in-process-gpu"
+    fi
+    printf '%s\n' "--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan$in_process_gpu_flag"
 }
 
 rdoc_emit_chrome_html_metadata() {
@@ -463,46 +471,6 @@ rdoc_validate_rdc_magic() {
     return 1
 }
 
-rdoc_missing_rdc_reason_from_log() {
-    log_path="$1"
-    default_reason="${2:-missing-rdc}"
-    if [ ! -s "$log_path" ]; then
-        printf '%s\n' "$default_reason"
-        return 0
-    fi
-    if grep -E "GPU process exited unexpectedly: exit_code=139|Received signal 11|librenderdoc[.]so" "$log_path" >/dev/null 2>&1; then
-        printf '%s\n' "chromium-gpu-process-crashed-under-renderdoc"
-        return 0
-    fi
-    if grep -E "electron.*exited with signal SIGTRAP|Electron.*exited with signal SIGTRAP" "$log_path" >/dev/null 2>&1; then
-        printf '%s\n' "electron-process-sigtrap-under-renderdoc"
-        return 0
-    fi
-    if grep -E "Trace/breakpoint trap|segmentation fault|Segmentation fault|core dumped" "$log_path" >/dev/null 2>&1; then
-        printf '%s\n' "chromium-process-crashed-under-renderdoc"
-        return 0
-    fi
-    printf '%s\n' "$default_reason"
-}
-
-rdoc_rewrite_missing_rdc_reason() {
-    status_env_path="$1"
-    log_path="$2"
-    if [ ! -s "$status_env_path" ]; then
-        return 0
-    fi
-    if ! grep '^rdoc_capture_reason=missing-rdc$' "$status_env_path" >/dev/null 2>&1; then
-        return 0
-    fi
-    reason="$(rdoc_missing_rdc_reason_from_log "$log_path" "missing-rdc")"
-    if [ "$reason" = "missing-rdc" ]; then
-        return 0
-    fi
-    tmp_status_env="$status_env_path.tmp"
-    sed "s/^rdoc_capture_reason=missing-rdc$/rdoc_capture_reason=$reason/" "$status_env_path" >"$tmp_status_env"
-    mv "$tmp_status_env" "$status_env_path"
-}
-
 rdoc_emit_simple_runtime_metadata() {
     log_path="$1"
     if [ -s "$log_path" ]; then
@@ -519,6 +487,10 @@ rdoc_emit_simple_runtime_metadata() {
         renderdoc_end="$(sed -n 's/.*renderdoc_end=\([0-9-][0-9-]*\).*/\1/p' "$log_path" | tail -n 1)"
         renderdoc_num_captures="$(sed -n 's/.*num_captures=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
         pixel_count="$(sed -n 's/.*pixels=\([0-9][0-9]*\).*/\1/p' "$log_path" | tail -n 1)"
+        widget_html_path="$(sed -n 's/^widget_html_path=//p' "$log_path" | tail -n 1)"
+        widget_html_bytes="$(sed -n 's/^widget_html_bytes=//p' "$log_path" | tail -n 1)"
+        widget_width="$(sed -n 's/^widget_width=//p' "$log_path" | tail -n 1)"
+        widget_height="$(sed -n 's/^widget_height=//p' "$log_path" | tail -n 1)"
         unavailable_marker="0"
         if grep -q 'renderdoc_capture: VULKAN_UNAVAILABLE' "$log_path"; then
             unavailable_marker="1"
@@ -537,6 +509,10 @@ rdoc_emit_simple_runtime_metadata() {
         renderdoc_end=""
         renderdoc_num_captures=""
         pixel_count=""
+        widget_html_path=""
+        widget_html_bytes=""
+        widget_width=""
+        widget_height=""
         unavailable_marker="0"
     fi
     echo "rdoc_simple_runtime_backend=$runtime_backend"
@@ -552,6 +528,10 @@ rdoc_emit_simple_runtime_metadata() {
     echo "rdoc_simple_renderdoc_end=$renderdoc_end"
     echo "rdoc_simple_renderdoc_num_captures=$renderdoc_num_captures"
     echo "rdoc_simple_pixel_count=$pixel_count"
+    echo "rdoc_simple_widget_html_path=$widget_html_path"
+    echo "rdoc_simple_widget_html_bytes=$widget_html_bytes"
+    echo "rdoc_simple_widget_width=$widget_width"
+    echo "rdoc_simple_widget_height=$widget_height"
     echo "rdoc_simple_unavailable_marker=$unavailable_marker"
 }
 
@@ -613,6 +593,7 @@ rdoc_capture_simple_vulkan() {
         echo "rdoc_backend=simple"
         echo "rdoc_scene=${RDOC_SCENE:-vulkan-engine2d}"
         echo "rdoc_program=$prog"
+        echo "rdoc_html_path=${RDOC_HTML_PATH:-}"
         echo "rdoc_simple_bin=$simple_bin"
         echo "rdoc_simple_bin_reason=$simple_bin_reason"
         echo "rdoc_renderdoc_home=$renderdoc_home"
@@ -638,7 +619,6 @@ rdoc_capture_simple_vulkan() {
     rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
     validate_code=$?
     set -e
-    rdoc_rewrite_missing_rdc_reason "$tmp_env" "$out_dir/renderdoc-html.log"
     cat "$tmp_env" >> "$env_path"
     return "$validate_code"
 }
@@ -652,6 +632,10 @@ rdoc_capture_html() {
     timeout_secs="${RDOC_CAPTURE_TIMEOUT_SECS:-45}"
     width="${RDOC_CHROME_WIDTH:-1280}"
     height="${RDOC_CHROME_HEIGHT:-720}"
+    child_hook_option="--opt-hook-children"
+    if [ "${RDOC_RENDERDOC_HOOK_CHILDREN:-1}" = "0" ]; then
+        child_hook_option=""
+    fi
     case "$out_dir" in
         /*) out_dir_abs="$out_dir" ;;
         *) out_dir_abs="$root/$out_dir" ;;
@@ -695,53 +679,118 @@ rdoc_capture_html() {
     export VK_INSTANCE_LAYERS=VK_LAYER_RENDERDOC_Capture
     export ENABLE_VULKAN_RENDERDOC_CAPTURE=1
     chrome_display_mode="headless"
-    if [ "${RDOC_CHROME_USE_XVFB:-0}" = "1" ] && command -v xvfb-run >/dev/null 2>&1; then
+    if [ "${RDOC_CHROME_GPU_AUTOCAPTURE:-0}" = "1" ] && [ "${DISPLAY:-}" != "" ]; then
+        chrome_display_mode="gpu-autocapture"
+    elif [ "${RDOC_CHROME_GPU_LAUNCHER:-0}" = "1" ] && [ "${DISPLAY:-}" != "" ]; then
+        chrome_display_mode="gpu-launcher"
+    elif [ "${RDOC_CHROME_USE_XVFB:-0}" = "1" ] && command -v xvfb-run >/dev/null 2>&1; then
         chrome_display_mode="xvfb"
     elif [ "${RDOC_CHROME_HEADLESS:-0}" != "1" ] && [ "${DISPLAY:-}" != "" ]; then
         chrome_display_mode="display"
     fi
     echo "rdoc_chrome_display_mode=$chrome_display_mode" | tee -a "$env_path"
+    echo "rdoc_renderdoc_hook_children=${RDOC_RENDERDOC_HOOK_CHILDREN:-1}" | tee -a "$env_path"
+    echo "rdoc_chrome_gpu_launcher=$root/scripts/tool/renderdoc-gpu-launcher.shs" | tee -a "$env_path"
+    echo "rdoc_chrome_gpu_launcher_log=$out_dir/gpu-launcher.log" | tee -a "$env_path"
+    echo "rdoc_chrome_app_mode=${RDOC_CHROME_APP_MODE:-0}" | tee -a "$env_path"
     if [ "$chrome_display_mode" = "xvfb" ]; then
         if command -v timeout >/dev/null 2>&1; then
-            timeout "$timeout_secs" "$rdoc_cmd" capture -w --opt-hook-children \
+            timeout "$timeout_secs" "$rdoc_cmd" capture -w $child_hook_option \
                 -c "$out_dir/html_chrome" \
                 xvfb-run -a "$chrome_bin" \
-                --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \
-                --enable-features=Vulkan --use-angle=vulkan \
+                $(rdoc_chrome_vulkan_flags) \
                 --user-data-dir="$out_dir_abs/chrome-profile" \
                 --window-size="${width},${height}" \
                 --screenshot="$out_dir_abs/html_chrome.png" \
                 "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
         else
-            "$rdoc_cmd" capture -w --opt-hook-children \
+            "$rdoc_cmd" capture -w $child_hook_option \
                 -c "$out_dir/html_chrome" \
                 xvfb-run -a "$chrome_bin" \
-                --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \
-                --enable-features=Vulkan --use-angle=vulkan \
+                $(rdoc_chrome_vulkan_flags) \
                 --user-data-dir="$out_dir_abs/chrome-profile" \
                 --window-size="${width},${height}" \
                 --screenshot="$out_dir_abs/html_chrome.png" \
                 "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
         fi
+    elif [ "$chrome_display_mode" = "gpu-launcher" ] || [ "$chrome_display_mode" = "gpu-autocapture" ]; then
+        if [ "$chrome_display_mode" = "gpu-autocapture" ]; then
+            gpu_autocapture=1
+        else
+            gpu_autocapture=0
+        fi
+        if command -v timeout >/dev/null 2>&1; then
+            if [ "${RDOC_CHROME_APP_MODE:-0}" = "1" ]; then
+                RDOC_GPU_LAUNCHER_RENDERDOCCMD="$rdoc_cmd" \
+                RDOC_GPU_LAUNCHER_CAPTURE_PREFIX="$out_dir_abs/gpu_chrome" \
+                RDOC_GPU_LAUNCHER_LOG="$out_dir_abs/gpu-launcher.log" \
+                RDOC_GPU_LAUNCHER_AUTOCAPTURE="$gpu_autocapture" \
+                timeout "$timeout_secs" "$chrome_bin" \
+                    $(rdoc_chrome_vulkan_flags) \
+                    --disable-crash-reporter --disable-breakpad \
+                    --gpu-launcher="$root/scripts/tool/renderdoc-gpu-launcher.shs" \
+                    --user-data-dir="$out_dir_abs/chrome-profile" \
+                    --window-size="${width},${height}" \
+                    --app="file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+            else
+                RDOC_GPU_LAUNCHER_RENDERDOCCMD="$rdoc_cmd" \
+                RDOC_GPU_LAUNCHER_CAPTURE_PREFIX="$out_dir_abs/gpu_chrome" \
+                RDOC_GPU_LAUNCHER_LOG="$out_dir_abs/gpu-launcher.log" \
+                RDOC_GPU_LAUNCHER_AUTOCAPTURE="$gpu_autocapture" \
+                timeout "$timeout_secs" "$chrome_bin" \
+                    $(rdoc_chrome_vulkan_flags) \
+                    --disable-crash-reporter --disable-breakpad \
+                    --gpu-launcher="$root/scripts/tool/renderdoc-gpu-launcher.shs" \
+                    --user-data-dir="$out_dir_abs/chrome-profile" \
+                    --window-size="${width},${height}" \
+                    --screenshot="$out_dir_abs/html_chrome.png" \
+                    "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+            fi
+        else
+            if [ "${RDOC_CHROME_APP_MODE:-0}" = "1" ]; then
+                RDOC_GPU_LAUNCHER_RENDERDOCCMD="$rdoc_cmd" \
+                RDOC_GPU_LAUNCHER_CAPTURE_PREFIX="$out_dir_abs/gpu_chrome" \
+                RDOC_GPU_LAUNCHER_LOG="$out_dir_abs/gpu-launcher.log" \
+                RDOC_GPU_LAUNCHER_AUTOCAPTURE="$gpu_autocapture" \
+                "$chrome_bin" \
+                    $(rdoc_chrome_vulkan_flags) \
+                    --disable-crash-reporter --disable-breakpad \
+                    --gpu-launcher="$root/scripts/tool/renderdoc-gpu-launcher.shs" \
+                    --user-data-dir="$out_dir_abs/chrome-profile" \
+                    --window-size="${width},${height}" \
+                    --app="file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+            else
+                RDOC_GPU_LAUNCHER_RENDERDOCCMD="$rdoc_cmd" \
+                RDOC_GPU_LAUNCHER_CAPTURE_PREFIX="$out_dir_abs/gpu_chrome" \
+                RDOC_GPU_LAUNCHER_LOG="$out_dir_abs/gpu-launcher.log" \
+                RDOC_GPU_LAUNCHER_AUTOCAPTURE="$gpu_autocapture" \
+                "$chrome_bin" \
+                    $(rdoc_chrome_vulkan_flags) \
+                    --disable-crash-reporter --disable-breakpad \
+                    --gpu-launcher="$root/scripts/tool/renderdoc-gpu-launcher.shs" \
+                    --user-data-dir="$out_dir_abs/chrome-profile" \
+                    --window-size="${width},${height}" \
+                    --screenshot="$out_dir_abs/html_chrome.png" \
+                    "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+            fi
+        fi
     elif [ "$chrome_display_mode" = "display" ]; then
         if command -v timeout >/dev/null 2>&1; then
-            timeout "$timeout_secs" "$rdoc_cmd" capture -w --opt-hook-children \
+            timeout "$timeout_secs" "$rdoc_cmd" capture -w $child_hook_option \
                 -c "$out_dir/html_chrome" \
                 "$chrome_bin" \
-                --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \
+                $(rdoc_chrome_vulkan_flags) \
                 --disable-crash-reporter --disable-breakpad \
-                --enable-features=Vulkan --use-angle=vulkan \
                 --user-data-dir="$out_dir_abs/chrome-profile" \
                 --window-size="${width},${height}" \
                 --screenshot="$out_dir_abs/html_chrome.png" \
                 "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
         else
-            "$rdoc_cmd" capture -w --opt-hook-children \
+            "$rdoc_cmd" capture -w $child_hook_option \
                 -c "$out_dir/html_chrome" \
                 "$chrome_bin" \
-                --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \
+                $(rdoc_chrome_vulkan_flags) \
                 --disable-crash-reporter --disable-breakpad \
-                --enable-features=Vulkan --use-angle=vulkan \
                 --user-data-dir="$out_dir_abs/chrome-profile" \
                 --window-size="${width},${height}" \
                 --screenshot="$out_dir_abs/html_chrome.png" \
@@ -749,21 +798,19 @@ rdoc_capture_html() {
         fi
     else
         if command -v timeout >/dev/null 2>&1; then
-            timeout "$timeout_secs" "$rdoc_cmd" capture -w --opt-hook-children \
+            timeout "$timeout_secs" "$rdoc_cmd" capture -w $child_hook_option \
                 -c "$out_dir/html_chrome" \
                 "$chrome_bin" \
-                --headless=new --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \
-                --enable-features=Vulkan --use-angle=vulkan \
+                --headless=new $(rdoc_chrome_vulkan_flags) \
                 --user-data-dir="$out_dir_abs/chrome-profile" \
                 --window-size="${width},${height}" \
                 --screenshot="$out_dir_abs/html_chrome.png" \
                 "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
         else
-            "$rdoc_cmd" capture -w --opt-hook-children \
+            "$rdoc_cmd" capture -w $child_hook_option \
                 -c "$out_dir/html_chrome" \
                 "$chrome_bin" \
-                --headless=new --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \
-                --enable-features=Vulkan --use-angle=vulkan \
+                --headless=new $(rdoc_chrome_vulkan_flags) \
                 --user-data-dir="$out_dir_abs/chrome-profile" \
                 --window-size="${width},${height}" \
                 --screenshot="$out_dir_abs/html_chrome.png" \
@@ -777,7 +824,6 @@ rdoc_capture_html() {
     rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
     validate_code=$?
     set -e
-    rdoc_rewrite_missing_rdc_reason "$tmp_env" "$out_dir/renderdoc-html.log"
     cat "$tmp_env" >> "$env_path"
     return "$validate_code"
 }
@@ -793,6 +839,14 @@ rdoc_capture_electron_html() {
     height="${RDOC_ELECTRON_HEIGHT:-720}"
     settle_ms="${RDOC_ELECTRON_SETTLE_MS:-1000}"
     capture_script="$root/tools/electron-live-bitmap/capture_html_argb.js"
+    child_hook_option="--opt-hook-children"
+    if [ "${RDOC_RENDERDOC_HOOK_CHILDREN:-1}" = "0" ]; then
+        child_hook_option=""
+    fi
+    case "$out_dir" in
+        /*) out_dir_abs="$out_dir" ;;
+        *) out_dir_abs="$root/$out_dir" ;;
+    esac
     rdoc_prepare_output_dir "$out_dir"
     env_path="$out_dir/evidence.env"
     if [ ! -s "$html_path" ]; then
@@ -841,40 +895,64 @@ rdoc_capture_electron_html() {
     export VK_INSTANCE_LAYERS=VK_LAYER_RENDERDOC_Capture
     export ENABLE_VULKAN_RENDERDOC_CAPTURE=1
     electron_display_mode="display"
-    if [ "${RDOC_ELECTRON_USE_XVFB:-0}" = "1" ] && command -v xvfb-run >/dev/null 2>&1; then
+    if [ "${RDOC_ELECTRON_GPU_AUTOCAPTURE:-0}" = "1" ] && [ "${DISPLAY:-}" != "" ]; then
+        electron_display_mode="gpu-autocapture"
+    elif [ "${RDOC_ELECTRON_GPU_LAUNCHER:-0}" = "1" ] && [ "${DISPLAY:-}" != "" ]; then
+        electron_display_mode="gpu-launcher"
+    elif [ "${RDOC_ELECTRON_USE_XVFB:-0}" = "1" ] && command -v xvfb-run >/dev/null 2>&1; then
         electron_display_mode="xvfb"
     elif [ "${DISPLAY:-}" = "" ] && command -v xvfb-run >/dev/null 2>&1; then
         electron_display_mode="xvfb"
     fi
     echo "rdoc_electron_display_mode=$electron_display_mode" | tee -a "$env_path"
+    echo "rdoc_renderdoc_hook_children=${RDOC_RENDERDOC_HOOK_CHILDREN:-1}" | tee -a "$env_path"
+    echo "rdoc_electron_gpu_launcher=$root/scripts/tool/renderdoc-gpu-launcher.shs" | tee -a "$env_path"
+    echo "rdoc_electron_gpu_launcher_log=$out_dir/gpu-launcher.log" | tee -a "$env_path"
+    echo "rdoc_electron_stage_log=$out_dir/electron-stage.log" | tee -a "$env_path"
+    if [ "$electron_display_mode" = "xvfb" ]; then
+        electron_prefix="xvfb-run -a"
+    else
+        electron_prefix=""
+    fi
     if command -v timeout >/dev/null 2>&1; then
         timeout_prefix="timeout $timeout_secs"
     else
         timeout_prefix=""
     fi
-    if [ "$electron_display_mode" = "xvfb" ]; then
+    if [ "$electron_display_mode" = "gpu-launcher" ] || [ "$electron_display_mode" = "gpu-autocapture" ]; then
+        if [ "$electron_display_mode" = "gpu-autocapture" ]; then
+            gpu_autocapture=1
+        else
+            gpu_autocapture=0
+        fi
         # shellcheck disable=SC2086
+        RDOC_GPU_LAUNCHER_RENDERDOCCMD="$rdoc_cmd" \
+        RDOC_GPU_LAUNCHER_CAPTURE_PREFIX="$out_dir_abs/electron_gpu" \
+        RDOC_GPU_LAUNCHER_LOG="$out_dir_abs/gpu-launcher.log" \
+        RDOC_GPU_LAUNCHER_AUTOCAPTURE="$gpu_autocapture" \
         ELECTRON_CAPTURE_HTML="$html_path" \
         ELECTRON_CAPTURE_WIDTH="$width" \
         ELECTRON_CAPTURE_HEIGHT="$height" \
-        ELECTRON_CAPTURE_OUTPUT="$out_dir/electron_argb.json" \
+        ELECTRON_CAPTURE_OUTPUT="$out_dir_abs/electron_argb.json" \
+        ELECTRON_CAPTURE_STAGE_LOG="$out_dir_abs/electron-stage.log" \
         ELECTRON_CAPTURE_SETTLE_MS="$settle_ms" \
-        $timeout_prefix "$rdoc_cmd" capture -w --opt-hook-children \
-            -c "$out_dir/electron_html" \
-            xvfb-run -a --server-args="-screen 0 ${width}x${height}x24" \
-            "$electron_bin" \
+        ELECTRON_CAPTURE_SHOW_WINDOW="${RDOC_ELECTRON_SHOW_WINDOW:-0}" \
+        $timeout_prefix "$electron_bin" \
             $(rdoc_electron_vulkan_flags) \
+            --gpu-launcher="$root/scripts/tool/renderdoc-gpu-launcher.shs" \
             "$capture_script" >"$out_dir/renderdoc-electron-html.log" 2>&1 || true
     else
         # shellcheck disable=SC2086
         ELECTRON_CAPTURE_HTML="$html_path" \
         ELECTRON_CAPTURE_WIDTH="$width" \
         ELECTRON_CAPTURE_HEIGHT="$height" \
-        ELECTRON_CAPTURE_OUTPUT="$out_dir/electron_argb.json" \
+        ELECTRON_CAPTURE_OUTPUT="$out_dir_abs/electron_argb.json" \
+        ELECTRON_CAPTURE_STAGE_LOG="$out_dir_abs/electron-stage.log" \
         ELECTRON_CAPTURE_SETTLE_MS="$settle_ms" \
-        $timeout_prefix "$rdoc_cmd" capture -w --opt-hook-children \
+        ELECTRON_CAPTURE_SHOW_WINDOW="${RDOC_ELECTRON_SHOW_WINDOW:-0}" \
+        $timeout_prefix "$rdoc_cmd" capture -w $child_hook_option \
             -c "$out_dir/electron_html" \
-            "$electron_bin" \
+            $electron_prefix "$electron_bin" \
             $(rdoc_electron_vulkan_flags) \
             "$capture_script" >"$out_dir/renderdoc-electron-html.log" 2>&1 || true
     fi
@@ -886,7 +964,6 @@ rdoc_capture_electron_html() {
     rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
     validate_code=$?
     set -e
-    rdoc_rewrite_missing_rdc_reason "$tmp_env" "$out_dir/renderdoc-electron-html.log"
     cat "$tmp_env" >> "$env_path"
     return "$validate_code"
 }

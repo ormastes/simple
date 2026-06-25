@@ -82,6 +82,9 @@ not create, rewrite, or weaken SPipe after verification.
   and production GUI/web parity evidence. If Chrome or Electron logs show
   `angle=vulkan` unavailable, report
   `vulkan-angle-unavailable` and fail the Vulkan proof even when pixels render.
+  `RDOC_RENDERDOC_HOOK_CHILDREN=0` and Chromium `--in-process-gpu` runs are
+  diagnostic only unless they still produce valid browser GPU-process `.rdc`
+  evidence with `RDOC` magic and prove Vulkan remains active.
 - Metal/Vulkan/8K claims require matching evidence: native Metal raw readback
   on macOS, `metal-requires-macos` for Linux Metal, the Vulkan gate above for
   Vulkan, and a retained 8K row or explicit blocker in `doc/09_report` /

@@ -198,6 +198,9 @@ Chrome+RenderDoc proof, Electron+RenderDoc proof, and production GUI/web parity
 proof. If Chrome or Electron renders pixels but its log says `angle=vulkan` was
 not in the allowed implementations, classify the browser lane as
 `vulkan-angle-unavailable`; do not treat the bitmap as Vulkan-backed proof.
+Browser `RDOC_RENDERDOC_HOOK_CHILDREN=0` and Chromium `--in-process-gpu` runs
+are diagnostic only unless they still emit valid browser GPU-process `.rdc`
+evidence with `RDOC` magic and prove Vulkan remains active.
 The aggregate audit must also expose comparison artifact status keys:
 `gui_web_2d_vulkan_comparison_fixture_status`,
 `gui_web_2d_vulkan_comparison_artifact_status`,

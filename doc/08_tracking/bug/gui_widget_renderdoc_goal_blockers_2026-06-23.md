@@ -34,37 +34,55 @@ Use `scripts/check/check-gui-widget-renderdoc-goal-status.shs --strict` only on
 hosts with real Simple Vulkan Engine2D and Electron Chromium/Vulkan `.rdc`
 evidence.
 
-## Current Evidence
+## Current Linux Evidence
 
-As of 2026-06-25 on the Linux Vulkan host, the Simple lane is no longer a
-blocker:
+Resolved on 2026-06-26:
 
-- `gui_widget_renderdoc_goal_simple_gate_status=pass`
-- `gui_widget_renderdoc_goal_simple_gate_runtime_backend=vulkan`
-- `gui_widget_renderdoc_goal_simple_gate_capture_file_magic=RDOC`
+- Simple GUI widget RenderDoc evidence now passes with `RDOC` magic using
+  `src/app/test/renderdoc_vulkan_widget_capture.spl`.
+- The capture renders
+  `test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html` through
+  the Simple Web layout pipeline and presents the resulting frame on Vulkan
+  Engine2D inside an in-application RenderDoc capture.
+- Evidence:
+  `build/renderdoc/widget-probe-small/simple/evidence.env`
+- Capture:
+  `build/renderdoc/widget-probe-small/simple/simple_gui_app_capture.rdc`
+- Gate report:
+  `doc/09_report/gui_widget_renderdoc_goal_status_2026-06-26.md`
 
-The remaining blocker is Electron under RenderDoc:
+Still blocked:
 
-- `gui_widget_renderdoc_goal_electron_gate_status=fail`
-- `gui_widget_renderdoc_goal_electron_gate_reason=chromium-gpu-process-crashed-under-renderdoc`
-- `gui_widget_renderdoc_goal_electron_gate_vulkan_log_status=pass`
-- `gui_widget_renderdoc_goal_electron_gate_argb_file_status=missing`
-- `gui_widget_renderdoc_goal_electron_gate_capture_file_status=missing`
-
-This means the Electron wrapper requests Vulkan/ANGLE and does not hit the
-`vulkan-angle-unavailable` log gate, but Chromium's GPU process crashes under
-RenderDoc before producing either nonblank ARGB evidence or a `.rdc` capture.
-
-Rejected local variants on this host:
-
-- `--in-process-gpu` changed the failure to Electron main-process `SIGSEGV`
-  and produced no ARGB or `.rdc`.
-- `--single-process` also produced Electron `SIGSEGV` and no ARGB or `.rdc`.
-- `--use-gl=angle --use-angle=gl` still crashed the Chromium GPU process with
-  `exit_code=139`, so the failure is not only the Vulkan ANGLE selection.
-- Removing `renderdoccmd --opt-hook-children` avoided the GPU-process crash but
-  ended with `Failed to shutdown` and still produced no `.rdc`, so it is not
-  valid RenderDoc evidence.
-
-Keep the gate failed until Electron produces both a nonblank ARGB proof and an
-`RDOC` capture under the Chromium/Vulkan request contract.
+- Electron Chromium-on-Vulkan widget `.rdc` evidence with nonblank ARGB proof.
+- 2026-06-26 canonical Electron rerun has concrete source evidence, but still
+  fails with `missing-rdc`; the Chromium GPU process exits `139` under
+  RenderDoc and no ARGB proof is produced:
+  `build/renderdoc/canonical-probe/electron-html/evidence.env`.
+- 2026-06-26 no-child-hook RenderDoc diagnostics now record
+  `rdoc_renderdoc_hook_children=0`. They avoid the direct child-hook crash path
+  but still do not produce a browser GPU-process `.rdc`, so they are diagnostic
+  only:
+  `build/renderdoc/electron-no-child-hook-renderdoc-display/electron-html/evidence.env`.
+- 2026-06-26 visible Electron GPU-process autocapture diagnostics added
+  `RDOC_ELECTRON_SHOW_WINDOW=1` / `ELECTRON_CAPTURE_SHOW_WINDOW=1`. Visible
+  data-url runs reach load/settle/capture stages, but no valid widget/browser
+  `.rdc` is produced; RenderDoc preload crashes the GPU process and lazy
+  `dlopen` stalls:
+  `build/renderdoc/electron-visible-dataurl-dlopen-dlsym-trigger/electron-html/gpu-launcher.log`.
+- 2026-06-26 display-only and ANGLE scheduling-hook diagnostics still fail the
+  Electron widget/browser `.rdc` gate. The shim can reach
+  `rdoc_autocapture_api=ready`, but RenderDoc ends with `ok=0` and zero
+  submit/present/swap counters; a tiny animated HTML page also fails to produce
+  `.rdc` under the GPU launcher:
+  `build/renderdoc/electron-display-only-small-trigger/electron-html/gpu-launcher.log`.
+- The aggregate GUI RenderDoc status now reports
+  `gui_renderdoc_feature_coverage_reason=missing-electron-widget-renderdoc`
+  rather than `missing-simple-widget-renderdoc`.
+- The shared generated HTML fixture now includes a tiny CSS/rAF/WebGL pulse so
+  Chrome/Electron RenderDoc probes have continuous browser-side frame activity.
+  This does not close the Electron gate; it only removes a static-page trigger
+  ambiguity from future browser capture diagnostics.
+- A focused Electron GPU-process diagnostic now reaches RenderDoc API readiness
+  and Electron DOM audit/geometry, but still fails with no `.rdc` and no
+  offscreen ARGB paint:
+  `build/renderdoc/electron-gpu-autocapture-elf-trigger-offscreen-failfast/electron-html/evidence.env`.

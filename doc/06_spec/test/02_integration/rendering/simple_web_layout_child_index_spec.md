@@ -27,7 +27,7 @@ simple_web_layout_child_index_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -404,6 +404,51 @@ expect(_pixel_at(pixels, 96, 1, 1)).to_equal(0xffffffffu32)
 
 </details>
 
+#### samples named translate keyframes at explicit animation times
+
+- "@keyframes slide{from{transform:translate
+   - Expected: _pixel_at(mid, 48, 11, 1) equals `0xff22c55eu32`
+   - Expected: _pixel_at(mid, 48, 1, 1) equals `0xffffffffu32`
+   - Expected: _pixel_at(end, 48, 21, 1) equals `0xff22c55eu32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>" +
+    "html,body{margin:0;padding:0;background-color:#ffffff}" +
+    "@keyframes slide{from{transform:translate(0px,0px)}to{transform:translate(20px,0px)}}" +
+    "#box{width:10px;height:10px;background-color:#22c55e;animation-name:slide;animation-duration:1000ms;animation-delay:0ms;animation-fill-mode:forwards}" +
+    "</style></head><body><div id=\"box\"></div></body></html>"
+val mid = simple_web_layout_render_html_software_pixels_at_animation_time(html, 48, 24, 500)
+val end = simple_web_layout_render_html_software_pixels_at_animation_time(html, 48, 24, 1000)
+expect(_pixel_at(mid, 48, 11, 1)).to_equal(0xff22c55eu32)
+expect(_pixel_at(mid, 48, 1, 1)).to_equal(0xffffffffu32)
+expect(_pixel_at(end, 48, 21, 1)).to_equal(0xff22c55eu32)
+```
+
+<details>
+<summary>Rendered scenario source</summary>
+
+> val html = "<html><head><style>" +<br>
+>     "html,body{margin:0;padding:0;background-color:#ffffff}" +<br>
+>     "@keyframes slide{fro$transform$to{transform:translate(20px,0px)}}" +<br>
+>     "#box{width:10px;height:10px;background-color:#22c55e;animation-name:slide;animation-duration:1000ms;animation-delay:0ms;animation-fill-mode:forwards}" +<br>
+>     "</style></head><body><div id=\"box\"></div></body></html>"<br>
+> val mid = simple_web_layout_render_html_software_pixels_at_animation_time(html, 48, 24, 500)<br>
+> val end = simple_web_layout_render_html_software_pixels_at_animation_time(html, 48, 24, 1000)<br>
+> expect(_pixel_at(mid, 48, 11, 1)).to_equal(0xff22c55eu32)<br>
+> expect(_pixel_at(mid, 48, 1, 1)).to_equal(0xffffffffu32)<br>
+> expect(_pixel_at(end, 48, 21, 1)).to_equal(0xff22c55eu32)
+
+</details>
+
+</details>
+
 #### keeps already sorted positive z-index paint order stable
 
 <details>
@@ -461,8 +506,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

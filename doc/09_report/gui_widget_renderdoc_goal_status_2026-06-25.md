@@ -7,9 +7,8 @@
 - widget fixture status: pass
 - widgets with RenderDoc fixture features: 43 / 43
 - Simple gate status: pass
-- Simple source evidence: build/renderdoc/canonical-probe/simple/evidence.env
+- Simple source evidence: build/renderdoc/widget-probe-small/simple/evidence.env
 - Electron gate status: fail
-- Electron gate failure class: electron-gate-chromium-gpu-process-crashed-under-renderdoc
 - Electron source evidence: build/renderdoc/canonical-probe/electron-html/evidence.env
 - Electron fixture path status: pass
 - blocked gates: 1
@@ -32,23 +31,27 @@
 - gui_widget_renderdoc_goal_simple_gate_status=pass
 - gui_widget_renderdoc_goal_simple_gate_reason=pass
 - gui_widget_renderdoc_goal_simple_gate_exit_code=0
-- gui_widget_renderdoc_goal_simple_gate_source_env=build/renderdoc/canonical-probe/simple/evidence.env
+- gui_widget_renderdoc_goal_simple_gate_source_env=build/renderdoc/widget-probe-small/simple/evidence.env
 - gui_widget_renderdoc_goal_simple_gate_source_env_file_status=pass
-- gui_widget_renderdoc_goal_simple_gate_capture_file=build/renderdoc/canonical-probe/simple/simple_gui_app_capture.rdc
+- gui_widget_renderdoc_goal_simple_gate_capture_file=build/renderdoc/widget-probe-small/simple/simple_gui_app_capture.rdc
 - gui_widget_renderdoc_goal_simple_gate_capture_file_status=pass
 - gui_widget_renderdoc_goal_simple_gate_capture_file_magic=RDOC
 - gui_widget_renderdoc_goal_simple_gate_runtime_backend=vulkan
+- gui_widget_renderdoc_goal_simple_gate_widget_html_path=/home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- gui_widget_renderdoc_goal_simple_gate_widget_html_bytes=9478
+- gui_widget_renderdoc_goal_simple_gate_fixture_path_status=pass
 - gui_widget_renderdoc_goal_simple_gate_required_backend=simple
 - gui_widget_renderdoc_goal_simple_gate_required_scene=vulkan-engine2d
+- gui_widget_renderdoc_goal_simple_gate_required_program=src/app/test/renderdoc_vulkan_widget_capture.spl
+- gui_widget_renderdoc_goal_simple_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 - gui_widget_renderdoc_goal_simple_gate_required_magic=RDOC
 - gui_widget_renderdoc_goal_simple_gate_required_runtime_backend=vulkan
 - gui_widget_renderdoc_goal_electron_gate_status=fail
-- gui_widget_renderdoc_goal_electron_gate_reason=chromium-gpu-process-crashed-under-renderdoc
-- gui_widget_renderdoc_goal_electron_gate_failure_class=electron-gate-chromium-gpu-process-crashed-under-renderdoc
+- gui_widget_renderdoc_goal_electron_gate_reason=missing-rdc
 - gui_widget_renderdoc_goal_electron_gate_exit_code=1
 - gui_widget_renderdoc_goal_electron_gate_source_env=build/renderdoc/canonical-probe/electron-html/evidence.env
 - gui_widget_renderdoc_goal_electron_gate_source_env_file_status=pass
-- gui_widget_renderdoc_goal_electron_gate_html_path=/home/ormastes/dev/pub/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- gui_widget_renderdoc_goal_electron_gate_html_path=/home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 - gui_widget_renderdoc_goal_electron_gate_fixture_path_status=pass
 - gui_widget_renderdoc_goal_electron_gate_capture_file=
 - gui_widget_renderdoc_goal_electron_gate_capture_file_status=missing

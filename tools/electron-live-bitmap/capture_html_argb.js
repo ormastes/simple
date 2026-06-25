@@ -22,7 +22,13 @@ const width = Number(process.env.ELECTRON_CAPTURE_WIDTH || 320);
 const height = Number(process.env.ELECTRON_CAPTURE_HEIGHT || 240);
 const outputPath = process.env.ELECTRON_CAPTURE_OUTPUT || "build/pixel_compare/captured.json";
 const pngOutputPath = process.env.ELECTRON_CAPTURE_PNG_OUTPUT || "";
+const stageLogPath = process.env.ELECTRON_CAPTURE_STAGE_LOG || "";
 const settleMs = Number(process.env.ELECTRON_CAPTURE_SETTLE_MS || 1500);
+const loadTimeoutMs = Number(process.env.ELECTRON_CAPTURE_LOAD_TIMEOUT_MS || 10000);
+const forceDataUrl = /^(1|true|yes)$/i.test(process.env.ELECTRON_CAPTURE_FORCE_DATA_URL || "");
+const continueAfterLoadTimeout = /^(1|true|yes)$/i.test(process.env.ELECTRON_CAPTURE_CONTINUE_AFTER_LOAD_TIMEOUT || "");
+const useOffscreenPaint = /^(1|true|yes)$/i.test(process.env.ELECTRON_CAPTURE_OFFSCREEN_PAINT || "");
+const showWindow = /^(1|true|yes)$/i.test(process.env.ELECTRON_CAPTURE_SHOW_WINDOW || "");
 const auditSelectors = (process.env.ELECTRON_CAPTURE_AUDIT_SELECTORS || "")
   .split(",")
   .map(s => s.trim())
@@ -37,6 +43,22 @@ const emulatedMediaFeatures = parseMediaFeatures(process.env.ELECTRON_CAPTURE_ME
 
 app.commandLine.appendSwitch("force-device-scale-factor", "1");
 app.commandLine.appendSwitch("force-color-profile", "srgb");
+
+function stage(name) {
+  if (!stageLogPath) return;
+  fs.mkdirSync(path.dirname(stageLogPath), { recursive: true });
+  fs.appendFileSync(stageLogPath, `electron_capture_stage=${name}\n`);
+}
+
+function withTimeout(promise, ms, label) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(label + "-timeout")), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
 
 function parseMediaFeatures(value) {
   return String(value || "")
@@ -462,52 +484,114 @@ async function collectGeometry(win) {
 }
 
 async function main() {
+  stage("main-start");
   if (!htmlPath) {
     console.error("ELECTRON_CAPTURE_HTML is required");
     process.exit(1);
   }
 
+  stage("before-app-ready");
   await app.whenReady();
+  stage("after-app-ready");
+  let latestPaintImage = null;
   const win = new BrowserWindow({
-    show: false,
+    show: showWindow,
     useContentSize: true,
     width,
     height,
     backgroundColor: "#ffffff",
     webPreferences: {
-      offscreen: false,
+      offscreen: useOffscreenPaint,
       backgroundThrottling: false,
       nodeIntegration: false,
       contextIsolation: true,
     },
   });
+  if (useOffscreenPaint) {
+    win.webContents.setFrameRate(30);
+    win.webContents.on("paint", (_event, _dirty, image) => {
+      latestPaintImage = image;
+    });
+  }
   win.setContentSize(width, height);
 
   const absHtml = path.resolve(htmlPath);
   try {
-    await win.loadFile(absHtml);
+    if (forceDataUrl) {
+      stage("before-load-data-url");
+      const html = fs.readFileSync(absHtml, "utf8");
+      await withTimeout(
+        win.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html)),
+        loadTimeoutMs,
+        "load-data-url"
+      );
+      stage("after-load-data-url");
+    } else {
+      stage("before-load-file");
+      await withTimeout(win.loadFile(absHtml), loadTimeoutMs, "load-file");
+      stage("after-load-file");
+    }
   } catch (err) {
+    if (continueAfterLoadTimeout && err && String(err.message || "").includes("timeout")) {
+      stage("load-timeout-continue");
+    } else {
+    stage("load-file-failed");
     const html = fs.readFileSync(absHtml, "utf8");
-    await win.loadURL("about:blank");
+    stage("before-stop-load");
+    try {
+      win.webContents.stop();
+      stage("after-stop-load");
+    } catch (_) {
+      stage("stop-load-failed");
+    }
+    stage("before-document-write");
     await win.webContents.executeJavaScript(`
       document.open();
       document.write(${JSON.stringify(html)});
       document.close();
     `);
+    stage("after-document-write");
     console.log("load_fallback=document-write");
+    }
   }
+  stage("before-media-features");
   await applyEmulatedMediaFeatures(win, emulatedMediaFeatures);
+  stage("after-media-features");
+  stage("before-settle");
   await new Promise(r => setTimeout(r, settleMs));
+  stage("after-settle");
 
+  stage("before-audit");
   const audit = await collectAudit(win, auditSelectors, emulatedMediaFeatures);
+  stage("after-audit");
+  stage("before-geometry");
   const geometry = geometryOutputPath ? await collectGeometry(win) : null;
-  const image = await win.capturePage({ x: 0, y: 0, width, height });
+  stage("after-geometry");
+  let image = null;
+  if (useOffscreenPaint && latestPaintImage) {
+    stage("using-offscreen-paint");
+    image = latestPaintImage;
+  } else if (useOffscreenPaint) {
+    stage("missing-offscreen-paint");
+    throw new Error("missing-offscreen-paint");
+  } else {
+    stage("before-capture-page");
+    image = await win.capturePage({ x: 0, y: 0, width, height });
+    stage("after-capture-page");
+  }
+  stage("before-bitmap");
   const result = bitmapToLogicalArgb(image);
+  stage("after-bitmap");
+  stage("before-gpu-feature-status");
   const gpuFeatureStatus = app.getGPUFeatureStatus();
+  stage("after-gpu-feature-status");
   let gpuInfo = null;
   try {
+    stage("before-gpu-info");
     gpuInfo = await app.getGPUInfo("complete");
+    stage("after-gpu-info");
   } catch (err) {
+    stage("gpu-info-failed");
     gpuInfo = { error: err && err.message ? err.message : "gpu-info-unavailable" };
   }
 
@@ -527,7 +611,9 @@ async function main() {
   if (geometry) payload.geometry = geometry;
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  stage("before-write-argb");
   fs.writeFileSync(outputPath, JSON.stringify(payload));
+  stage("after-write-argb");
   if (pngOutputPath) {
     fs.mkdirSync(path.dirname(pngOutputPath), { recursive: true });
     fs.writeFileSync(pngOutputPath, image.toPNG());
@@ -592,10 +678,13 @@ async function main() {
     }
   }
 
+  stage("before-quit");
   app.quit();
+  stage("after-quit");
 }
 
 main().catch(e => {
+  stage("error");
   console.error(e);
   process.exit(1);
 });

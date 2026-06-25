@@ -1062,6 +1062,262 @@ that Vulkan is unsupported in the in-process GPU path; and Electron
 `renderdoccmd capture` before ARGB or `.rdc` output, recorded as
 `electron-process-sigtrap-under-renderdoc`.
 
+For GPU-process-only diagnostics, use:
+
+```sh
+RDOC_CHROME_GPU_LAUNCHER=1 \
+  RDOC_OUTPUT_DIR=build/renderdoc/chrome-gpu-launcher-helper \
+  scripts/tool/renderdoc-evidence.shs capture-html
+
+RDOC_ELECTRON_GPU_LAUNCHER=1 \
+  RDOC_OUTPUT_DIR=build/renderdoc/electron-gpu-launcher-helper \
+  scripts/tool/renderdoc-evidence.shs capture-electron-html
+```
+
+These modes pass Chromium's `--gpu-launcher` to
+`scripts/tool/renderdoc-gpu-launcher.shs`, so RenderDoc wraps only the GPU
+process instead of recursively hooking every child process. On the current
+Linux host this still does not satisfy the `.rdc` gates: Chrome repeatedly
+restarts the GPU process with no capture, and Electron fails with
+`UnknownVizError` before ARGB or `.rdc` output.
+
+The launcher also has an in-process autocapture variant:
+
+```sh
+RDOC_CHROME_GPU_AUTOCAPTURE=1 \
+  RDOC_OUTPUT_DIR=build/renderdoc/chrome-gpu-autocapture-wrap \
+  scripts/tool/renderdoc-evidence.shs capture-html
+
+RDOC_ELECTRON_GPU_AUTOCAPTURE=1 \
+  RDOC_OUTPUT_DIR=build/renderdoc/electron-gpu-autocapture-wrap \
+  scripts/tool/renderdoc-evidence.shs capture-electron-html
+```
+
+Autocapture builds and preloads
+`scripts/tool/renderdoc-vulkan-autocapture.c`, which wraps
+`dlsym`, `vkGetDeviceProcAddr`, `vkGetInstanceProcAddr`, `vkQueueSubmit`,
+`vkQueueSubmit2`, `vkQueueSubmit2KHR`, and `vkQueuePresentKHR` to call
+RenderDoc's in-application capture API from inside the GPU process. Current
+Linux evidence records `rdoc_autocapture_loaded=1` and confirms Chromium asks
+`dlsym` for `vkGetInstanceProcAddr`, but it does not reach the wrapped queue
+hooks before timeout/failure, so this remains diagnostic evidence rather than a
+passing `.rdc` gate. `RDOC_GPU_LAUNCHER_START_ON_DLSYM=1` is an opt-in
+diagnostic that starts capture as soon as `vkGetInstanceProcAddr` is resolved;
+on this host it crashes Chrome's GPU process with exit code 139 and still does
+not produce `.rdc`, so keep it off for canonical evidence runs.
+
+For the Simple-side GUI widget RenderDoc proof, capture the generated widget
+fixture with the dedicated Simple program:
+
+```sh
+RDOC_OUTPUT_DIR=build/renderdoc/widget-probe-small \
+RDOC_SIMPLE_PROG="$PWD/src/app/test/renderdoc_vulkan_widget_capture.spl" \
+RDOC_HTML_PATH="$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html" \
+  scripts/tool/renderdoc-evidence.shs capture-simple
+```
+
+The corresponding gate is:
+
+```sh
+sh scripts/check/check-gui-widget-renderdoc-goal-status.shs
+```
+
+Passing Simple widget evidence records
+`rdoc_simple_gate_required_program=src/app/test/renderdoc_vulkan_widget_capture.spl`,
+the generated fixture path, Vulkan runtime metadata, and `.rdc` `RDOC` magic.
+The widget goal still remains incomplete until Electron Chromium/Vulkan also
+produces widget `.rdc` evidence with nonblank ARGB proof.
+
+Linux browser diagnostics:
+
+- Before browser RenderDoc work, check RenderDoc's user-level Vulkan layer
+  registration:
+
+```sh
+/opt/renderdoc/bin/renderdoccmd vulkanlayer --explain
+/opt/renderdoc/bin/renderdoccmd vulkanlayer --register --user
+```
+
+  The repo evidence wrappers still create per-run layer manifests with
+  `VK_LAYER_PATH`, but the installed RenderDoc tools and target-control paths
+  can report an unregistered layer separately. Registration is host setup only;
+  it is not passing evidence. On the current Linux host, user registration is
+  fixed but Chrome and Electron browser `.rdc` gates still fail.
+- The browser RenderDoc launch contract includes `--no-zygote` so RenderDoc
+  child-process handling does not also have to cross Chromium's zygote model.
+  This is required evidence metadata, but it is not sufficient by itself: Chrome
+  still records GPU-process `exit_code=139` and no `.rdc` on the current host.
+  The launch contract also requests
+  `--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE`,
+  `--ignore-gpu-blocklist`, and `--enable-gpu-rasterization`; the wrapper must
+  launch those same flags, not only print them as metadata.
+- Do not use `--in-process-gpu` as the browser Vulkan capture solution on this
+  host. The older `/home/yoon/electron-vulkan` recipe used it, but current
+  Chromium/Electron reports `Vulkan not supported with in process gpu` and the
+  repo Electron runner segfaults under RenderDoc before `.rdc` output.
+- Direct Chrome/Electron RenderDoc capture supports
+  `RDOC_RENDERDOC_HOOK_CHILDREN=0` to omit `--opt-hook-children`. Use it only as
+  a diagnostic control:
+
+```sh
+RDOC_RENDERDOC_HOOK_CHILDREN=0 scripts/tool/renderdoc-evidence.shs capture-html
+RDOC_RENDERDOC_HOOK_CHILDREN=0 scripts/tool/renderdoc-evidence.shs capture-electron-html
+```
+
+  On the current Linux host, this avoids the Chrome GPU-process `exit_code=139`
+  seen with child-process hooking, but it still produces `missing-rdc` because
+  Chromium's Vulkan work happens in the GPU child process. Passing browser
+  evidence still requires a valid `.rdc` with `RDOC` magic from the browser GPU
+  process; no-child-hook runs are not passing gate evidence.
+- `renderdoccmd inject --PID=<gpu-process>` is not a viable workaround on this
+  host; RenderDoc reports that injecting into an already-running process is not
+  supported on non-Windows systems.
+- Running Chrome with only `VK_LAYER_RENDERDOC_Capture`,
+  `ENABLE_VULKAN_RENDERDOC_CAPTURE=1`, and `RENDERDOC_CAPFILE` avoids the
+  immediate Chromium GPU-process `exit_code=139` seen under
+  `renderdoccmd capture --opt-hook-children`, but the current automated F12
+  trigger does not produce `.rdc`. Treat this as diagnostic evidence, not as a
+  passing gate. Reproduce with:
+
+```sh
+sh scripts/check/check-renderdoc-chrome-x11-layer-hotkey.shs
+```
+
+  The probe records the Chrome fixture window id, Chromium GPU process pid,
+  hotkey attempts, and any `.rdc` magic in
+  `build/renderdoc/chrome-x11-layer-hotkey/evidence.env`.
+  RenderDoc source shows `RENDERDOC_CAPOPTS` is a byte-wise hex encoding of
+  `CaptureOptions` using `a..p` nibbles. The local x86_64 default option string
+  is `ababaaaaaaaaaaaaaaaaaaaaaaaaaaaaabaaaaaaaaaaaaaa`; enabling
+  `refAllResources` and `captureAllCmdLists` gives
+  `ababaaaaaaaaaaaaaaaaaaaaaaaaabababaaaaaaaaaaaaaa`. On this host, running:
+
+```sh
+BUILD_DIR=build/renderdoc/chrome-x11-layer-hotkey-capopts \
+RDOC_CAPOPTS=ababaaaaaaaaaaaaaaaaaaaaaaaaabababaaaaaaaaaaaaaa \
+  sh scripts/check/check-renderdoc-chrome-x11-layer-hotkey.shs
+```
+
+  still records `missing-rdc`, despite a live `--use-angle=vulkan` GPU process
+  and a targeted fixture window.
+- GPU-process delayed autocapture is available through
+  `RDOC_CHROME_GPU_AUTOCAPTURE=1`/`RDOC_ELECTRON_GPU_AUTOCAPTURE=1` plus
+  `RDOC_GPU_LAUNCHER_DELAY_START_MS=<ms>`. It starts a background trigger
+  thread inside the Chromium GPU process after launch. On this Linux host, the
+  no-dlopen mode avoids the immediate startup crash but cannot obtain a usable
+  RenderDoc API; explicitly preloading `librenderdoc.so` reintroduces
+  GPU-process `exit_code=139`.
+  Electron visible-window diagnostics can be enabled with
+  `RDOC_ELECTRON_SHOW_WINDOW=1`, which forwards
+  `ELECTRON_CAPTURE_SHOW_WINDOW=1` to the helper. This is diagnostic only: the
+  current visible/data-url probes reach Electron load/settle/capture stages but
+  still do not produce `.rdc`.
+- The GPU-process autocapture shim also supports a loader-lock-free RenderDoc
+  API lookup for Chromium:
+
+```sh
+RDOC_CHROME_GPU_AUTOCAPTURE=1 \
+RDOC_GPU_LAUNCHER_ALLOW_DLOPEN=1 \
+RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK=1 \
+RDOC_GPU_LAUNCHER_DISABLE_DLSYM_WRAP=1 \
+RDOC_GPU_LAUNCHER_TRIGGER_ONLY=1 \
+  scripts/tool/renderdoc-evidence.shs capture-html
+```
+
+  This mode finds `RENDERDOC_GetAPI` by reading the loaded
+  `librenderdoc.so` ELF dynsym and avoids `dlsym(RTLD_DEFAULT, ...)` and
+  `dlopen(...)`, both of which can hang in the Chromium GPU process. On this
+  host it reaches `rdoc_autocapture_api=ready`, but `TriggerCapture()` still
+  does not produce `.rdc`; treat it as diagnostic until an `.rdc` with `RDOC`
+  magic is present.
+  If `RDOC_GPU_LAUNCHER_START_ON_DLSYM=1` sees `vkGetInstanceProcAddr` before
+  `librenderdoc.so` is loaded, the evidence records
+  `rdoc_autocapture_api=missing-librenderdoc`. Allowing a normal `dlopen` can
+  stall inside `dlopen-path-start`; preloading RenderDoc makes the Electron GPU
+  process crash with `exit_code=139`. These are blocker diagnostics, not passing
+  capture modes.
+  A delayed no-dlopen GPU-process trigger can find the already-loaded
+  RenderDoc API (`rdoc_autocapture_api=ready`) and call
+  `StartFrameCapture`/`EndFrameCapture`, but current Electron evidence returns
+  `rdoc_autocapture_end=delay ok=0` with zero submit/present/swap counters and
+  no `.rdc`.
+- The autocapture shim wraps ANGLE scheduling symbols
+  `EGL_PrepareSwapBuffersANGLE` and `EGL_WaitUntilWorkScheduledANGLE` in both
+  upper- and lower-case spellings. On the current host Chromium resolves those
+  function pointers, but the wrappers are not called before the Electron runner
+  exits or times out; they remain diagnostics, not passing evidence.
+- `tools/electron-live-bitmap/renderdoc_display_html.js` is a visible-window
+  diagnostic runner that avoids `capturePage()`. It can hold a page open while
+  the GPU-process shim triggers RenderDoc. Current runs against both the full
+  fixture and a tiny animated HTML page still time out in Electron load and
+  produce no `.rdc`, even though the RenderDoc API is available in the GPU
+  process.
+- The GPU launcher exports `RENDERDOC_CAPFILE` before the Vulkan layer
+  initializes and forwards `RDOC_GPU_LAUNCHER_CAPOPTS` to `RENDERDOC_CAPOPTS`
+  when set. Use this when checking whether a failure is caused by late
+  in-application path setup:
+
+```sh
+RDOC_CHROME_GPU_AUTOCAPTURE=1 \
+RDOC_CHROME_APP_MODE=1 \
+RDOC_GPU_LAUNCHER_ALLOW_DLOPEN=1 \
+RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK=1 \
+RDOC_GPU_LAUNCHER_CAPOPTS=ababaaaaaaaaaaaaaaaaaaaaaaaaabababaaaaaaaaaaaaaa \
+RDOC_AUTOCAPTURE_TRACE_PROC_NAMES=1 \
+RDOC_AUTOCAPTURE_START_EGL_VK_LOCK=1 \
+RDOC_AUTOCAPTURE_END_EGL_VK_UNLOCK=2 \
+  scripts/tool/renderdoc-evidence.shs capture-html
+```
+
+  `RDOC_CHROME_APP_MODE=1` keeps the generated fixture open as a Chrome app on
+  X11 instead of using screenshot mode. The autocapture shim can trace
+  `dlsym`, `eglGetProcAddress`, Vulkan proc lookup, submit/present,
+  `eglSwapBuffers`, and ANGLE's `eglLockVulkanQueueANGLE` /
+  `eglUnlockVulkanQueueANGLE` extension calls. This remains diagnostic only:
+  current Chrome evidence looks up the EGL/ANGLE Vulkan symbols but still does
+  not execute a wrapped submit/present/swap/lock call in the GPU process or
+  produce `.rdc`.
+- The Chrome target-control diagnostic wraps `qrenderdoc --ui-python` in an
+  outer timeout. If qrenderdoc's UI Python startup hangs, the script now records
+  `target-control-no-evidence` instead of leaving the lane running indefinitely:
+
+```sh
+sh scripts/check/check-renderdoc-chrome-target-control.shs
+```
+- Running Electron with only the RenderDoc Vulkan layer currently times out
+  before ARGB output and produces no `.rdc`; the canonical Electron gate still
+  requires `tools/electron-live-bitmap/capture_html_argb.js` ARGB proof plus
+  `.rdc` magic `RDOC`.
+- Electron capture output and stage log paths are passed to the Electron process
+  as absolute paths. Electron may resolve relative paths from its binary
+  directory, so relative ARGB paths can produce misleading
+  `missing-electron-argb-file` metadata even when the script printed a capture
+  line. The canonical Electron gate should now show `rdoc_electron_argb_status=pass`
+  when the bitmap exists; the browser `.rdc` gate remains separate.
+- For focused Electron diagnostics, the ARGB helper accepts stage and fallback
+  controls:
+
+```sh
+ELECTRON_CAPTURE_STAGE_LOG=build/renderdoc/electron-stage.log \
+ELECTRON_CAPTURE_LOAD_TIMEOUT_MS=3000 \
+ELECTRON_CAPTURE_FORCE_DATA_URL=1 \
+ELECTRON_CAPTURE_CONTINUE_AFTER_LOAD_TIMEOUT=1 \
+ELECTRON_CAPTURE_OFFSCREEN_PAINT=1 \
+RDOC_ELECTRON_GPU_AUTOCAPTURE=1 \
+RDOC_GPU_LAUNCHER_ALLOW_DLOPEN=1 \
+RDOC_GPU_LAUNCHER_NO_DLOPEN_FALLBACK=1 \
+RDOC_GPU_LAUNCHER_DISABLE_DLSYM_WRAP=1 \
+RDOC_GPU_LAUNCHER_TRIGGER_ONLY=1 \
+  scripts/tool/renderdoc-evidence.shs capture-electron-html
+```
+
+  This is a diagnostic path, not a passing gate. It records which Electron
+  operation blocks under RenderDoc injection. On the current Linux host,
+  `loadFile(...)` and `loadURL(data:)` time out, continuation reaches DOM audit
+  and geometry, `capturePage(...)` hangs, and offscreen paint reaches
+  `missing-offscreen-paint`. The gate remains failed until the evidence env
+  records a valid Electron `.rdc` with `RDOC` magic and a nonblank ARGB file.
+
 ## macOS Notes
 
 macOS does not provide native Vulkan drivers. Use the LunarG Vulkan SDK with
