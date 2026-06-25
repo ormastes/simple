@@ -165,7 +165,14 @@ The browser Vulkan-backed proof is a separate rollup:
 `gui_web_2d_vulkan_browser_backing_mode`. Missing focused proof reports
 `focused-browser-backing-required`. Pixel comparison artifacts are useful
 comparison evidence, but they are not Electron/Chrome Vulkan-backed proof. The
-focused `--browser-backing` probe can provide `gpu-feature-status` evidence;
+focused `--browser-backing` probe can provide `gpu-feature-status` evidence.
+For failed or partial hosts, inspect
+`gui_web_2d_vulkan_electron_browser_backing_vulkan`,
+`gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan`,
+`gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts`,
+`gui_web_2d_vulkan_chrome_browser_backing_display_type`,
+`gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts`, and the
+matching `*_browser_backing_source` files before changing Chromium flags.
 RenderDoc capture and gate readiness remains a separate blocker reported by
 `gui_web_2d_vulkan_renderdoc_blocker_*`.
 As of 2026-06-22, Linux Xvfb evidence has Chrome Vulkan-backed and Simple

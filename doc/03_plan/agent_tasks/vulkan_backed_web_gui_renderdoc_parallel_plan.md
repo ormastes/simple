@@ -169,6 +169,8 @@ Browser backing:
 gui_web_2d_vulkan_browser_backing_status=pass
 gui_web_2d_vulkan_electron_browser_backing_status=pass
 gui_web_2d_vulkan_chrome_browser_backing_status=pass
+gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=true
+gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true
 ```
 
 Reject these reasons for completion:

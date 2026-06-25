@@ -283,6 +283,11 @@ downgraded to `fail`.
    - Expected: pixel_comparison_mode equals `artifact-only-no-pairwise-diff`
    - Expected: browser_backing_reason equals `pass`
    - Expected: browser_backing_mode equals `gpu-feature-status`
+   - Expected: electron_browser_backing_status equals `pass`
+   - Expected: electron_browser_backing_reason equals `electron-vulkan-backed`
+   - Expected: electron_browser_backing_hardware equals `true`
+   - Expected: chrome_browser_backing_status equals `pass`
+   - Expected: chrome_browser_backing_reason equals `chrome-vulkan-backed`
    - Expected: browser_backing_status equals `fail`
    - Expected: browser_backing_mode equals `focused-browser-backing-required`
    - Expected: browser_backing_mode equals `gpu-feature-status`
@@ -306,7 +311,7 @@ downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 666 lines folded for reproduction.
+Runnable source: 693 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -718,6 +723,16 @@ val pixel_comparison_mode = _value_of(evidence, "gui_web_2d_vulkan_pixel_compari
 val browser_backing_status = _value_of(evidence, "gui_web_2d_vulkan_browser_backing_status")
 val browser_backing_reason = _value_of(evidence, "gui_web_2d_vulkan_browser_backing_reason")
 val browser_backing_mode = _value_of(evidence, "gui_web_2d_vulkan_browser_backing_mode")
+val electron_browser_backing_status = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_status")
+val electron_browser_backing_reason = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_reason")
+val electron_browser_backing_vulkan = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_vulkan")
+val electron_browser_backing_hardware = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan")
+val electron_browser_backing_gl = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts")
+val chrome_browser_backing_status = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_status")
+val chrome_browser_backing_reason = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_reason")
+val chrome_browser_backing_display = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_display_type")
+val chrome_browser_backing_gl = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts")
+val chrome_browser_backing_hardware = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan")
 val renderdoc_blocker_status = _value_of(evidence, "gui_web_2d_vulkan_renderdoc_blocker_status")
 val renderdoc_blocker_reason = _value_of(evidence, "gui_web_2d_vulkan_renderdoc_blocker_reason")
 val renderdoc_blocker_gate_count = _value_of(evidence, "gui_web_2d_vulkan_renderdoc_blocker_gate_count")
@@ -891,6 +906,12 @@ else:
 if browser_backing_status == "pass":
     expect(browser_backing_reason).to_equal("pass")
     expect(browser_backing_mode).to_equal("gpu-feature-status")
+    expect(electron_browser_backing_status).to_equal("pass")
+    expect(electron_browser_backing_reason).to_equal("electron-vulkan-backed")
+    expect(electron_browser_backing_vulkan).to_contain("enabled")
+    expect(electron_browser_backing_hardware).to_equal("true")
+    expect(chrome_browser_backing_status).to_equal("pass")
+    expect(chrome_browser_backing_reason).to_equal("chrome-vulkan-backed")
 else:
     expect(browser_backing_status).to_equal("fail")
     expect(browser_backing_reason.len()).to_be_greater_than(0)
@@ -899,6 +920,17 @@ else:
         expect(browser_backing_mode).to_equal("focused-browser-backing-required")
     else:
         expect(browser_backing_mode).to_equal("gpu-feature-status")
+        expect(electron_browser_backing_status.len()).to_be_greater_than(0)
+        expect(electron_browser_backing_reason.len()).to_be_greater_than(0)
+        expect(chrome_browser_backing_status.len()).to_be_greater_than(0)
+        expect(chrome_browser_backing_reason.len()).to_be_greater_than(0)
+if electron_browser_backing_status.len() > 0:
+    expect(electron_browser_backing_hardware.len()).to_be_greater_than(0)
+    expect(electron_browser_backing_gl.len()).to_be_greater_than(0)
+if chrome_browser_backing_status.len() > 0:
+    expect(chrome_browser_backing_hardware.len()).to_be_greater_than(0)
+    if chrome_browser_backing_status == "pass":
+        expect(chrome_browser_backing_display + chrome_browser_backing_gl).to_contain("vulkan")
 expect(production_gate_status.len()).to_be_greater_than(0)
 if renderdoc_blocker_status == "pass":
     expect(renderdoc_blocker_reason).to_equal("pass")
