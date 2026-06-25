@@ -120,7 +120,7 @@ Stage support skill grouping:
 - Research: `research/skill.md`, `research/research_codex/`
 - Design: `design/skill.md`, `design/arch/`, `design/gemini_ui_design/`, `design/theme_sync/`, `design/ui/`
 - Implementation: `impl/skill.md`, `impl/dev/`, `impl/refactor/`, `impl/spipe_loop/`, `impl/stitch/`, `impl/sync/`
-- Documentation/wiki refactor checkpoint: `.claude/skills/spipe_doc_wiki_refactor.md` during SPipe Refactor and Ship
+- Documentation/wiki refactor checkpoint: `.claude/skills/spipe_doc_wiki_refactor.md` during SPipe Refactor before final verification
 - Verification: `verify/skill.md`, `verify/bug_review/`
 - Release: `release/skill.md`, `release/mail/`, `release/repo_and_pull_req/`
 
