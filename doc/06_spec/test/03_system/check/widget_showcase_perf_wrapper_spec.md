@@ -27,7 +27,7 @@ widget_showcase_perf_wrapper_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -104,6 +104,9 @@ The full 4K row must prove:
 - `gui_showcase_4k_200fps_frames` is at least 200.
 - `gui_showcase_4k_200fps_target_fps` is at least 200.
 - `gui_showcase_4k_200fps_fps_x1000` meets the target.
+- `gui_showcase_4k_200fps_frame_p50_ns` and
+  `gui_showcase_4k_200fps_frame_p95_ns` are present for timing distribution
+  evidence.
 - `gui_showcase_4k_200fps_nonzero_pixels` is positive.
 - `gui_showcase_4k_200fps_checksum` is nonempty.
 - `gui_showcase_4k_200fps_render_mode=retained-static-frame`
@@ -118,6 +121,9 @@ The full 8K row has the same contract with:
 - `gui_showcase_8k_perf_height=4320`
 - `gui_showcase_8k_perf_pixels=33177600`
 - `gui_showcase_8k_perf_frames` is at least 200.
+- `gui_showcase_8k_perf_frame_p50_ns` and
+  `gui_showcase_8k_perf_frame_p95_ns` are present for timing distribution
+  evidence.
 - Producer-side `*_log_file_status` and `*_time_log_file_status` are `pass`.
 
 ## Completion Boundary
@@ -260,12 +266,38 @@ expect(alias_src).to_contain("run_8k_perf_probe()")
 
 </details>
 
+#### emits retained frame p50 and p95 timing fields for real runs
+
+- Read the wrapper source
+- Assert p50 and p95 are derived from the retained timing window
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read the wrapper source")
+val script = file_read("scripts/check/check-widget-showcase-4k-200fps.shs")
+
+step("Assert p50 and p95 are derived from the retained timing window")
+expect(script).to_contain("frame_avg_ns=$((fps_elapsed_ns / FRAMES))")
+expect(script).to_contain("frame_p50_ns=$frame_avg_ns")
+expect(script).to_contain("frame_p95_ns=$frame_avg_ns")
+expect(script).to_contain("_frame_p50_ns=$frame_p50_ns")
+expect(script).to_contain("_frame_p95_ns=$frame_p95_ns")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

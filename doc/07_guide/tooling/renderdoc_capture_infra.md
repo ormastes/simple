@@ -197,6 +197,7 @@ Retained showcase performance is also machine-gated. The aggregate consumes
 `gui_showcase_4k_200fps_*` and `gui_showcase_8k_perf_*` rows. Completion
 requires the 4K row to prove `3840x2160`, `8294400` pixels, nonzero readback
 pixels, target FPS met, nonempty checksum,
+`frame_avg_ns`, `frame_p50_ns`, `frame_p95_ns`,
 `gui_showcase_4k_200fps_log_file_status=pass`,
 `gui_showcase_4k_200fps_time_log_file_status=pass`,
 `retained-static-frame`, one redraw frame, at least 200 measured frames, and
@@ -209,6 +210,7 @@ wrapper budget is 262144 KiB for 4K and
 completion evidence. The 8K row must likewise prove
 `7680x4320`, `33177600` pixels, nonzero readback pixels, target FPS at least
 200, positive measured frame count, checksum,
+`frame_avg_ns`, `frame_p50_ns`, `frame_p95_ns`,
 `gui_showcase_8k_perf_log_file_status=pass`,
 `gui_showcase_8k_perf_time_log_file_status=pass`, RSS budget status, and the
 same native binary provenance fields. Interpreter or fallback rows remain useful

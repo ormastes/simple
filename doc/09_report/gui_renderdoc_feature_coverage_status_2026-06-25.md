@@ -44,8 +44,8 @@
 - Production GUI/web core parity: fail (core-gui-web-parity-missing:layout_manifest:<missing>!=pass,layout_manifest_case_count:<missing>!=50,layout_manifest_pass_count:<missing>!=36,layout_manifest_tracked_count:<missing>!=14,layout_manifest_fail_count:<missing>!=0,surface_manifest:<missing>!=pass,surface_manifest_electron_capture:<missing>!=pass,surface_manifest_tauri_capture:<missing>!=pass,surface_manifest_chrome_capture:<missing>!=pass,surface_manifest_tauri_live_capture:<missing>!=true,surface_manifest_chrome_live_capture:<missing>!=true,surface_manifest_tauri_case_count:<missing>!=50,surface_manifest_tauri_pass_count:<missing>!=36,surface_manifest_tauri_tracked_count:<missing>!=14,surface_manifest_tauri_fail_count:<missing>!=0,surface_manifest_chrome_case_count:<missing>!=50,surface_manifest_chrome_pass_count:<missing>!=36,surface_manifest_chrome_tracked_count:<missing>!=14,surface_manifest_chrome_fail_count:<missing>!=0,surface_manifest_tauri_mismatch_count:<missing>!=0,surface_manifest_chrome_mismatch_count:<missing>!=0,surface_manifest_no_fake_capture:<missing>!=true,surface_manifest_blur_or_tolerance_used:<missing>!=false,backend:<missing>!=pass)
 - Production GUI/web parity gate: fail (partial-production-parity-source-status)
 - Production GUI/web parity source env: build/production_gui_web_renderer_parity_evidence/evidence.env (pass)
-- GUI/web/2D 4K retained perf: pass (met-200fps; resolution 4k; size 3840x2160; pixels 8294400; frames 200; fps_x1000 56689342; target_fps 200; render_mode retained-static-frame; redraw_frames 1; nonzero_pixels 5458; checksum 23357114226484; rss 131072/262144 kB; source 51ba1025b4d9; simple_bin src/compiler_rust/target/release/simple; native_build_mode aggressive-native; fallback none)
-- GUI/web/2D 8K retained perf: pass (met-target-fps; resolution 8k; size 7680x4320; pixels 33177600; frames 200; fps_x1000 22711787; target_fps 200; render_mode retained-static-frame; redraw_frames 1; nonzero_pixels 203; checksum 869060580878; rss 520192/750000 kB; source 51ba1025b4d9; simple_bin src/compiler_rust/target/release/simple; native_build_mode aggressive-native; fallback none)
+- GUI/web/2D 4K retained perf: pass (met-200fps; resolution 4k; size 3840x2160; pixels 8294400; frames 200; fps_x1000 56689342; frame_p50_ns 17640; frame_p95_ns 17640; target_fps 200; render_mode retained-static-frame; redraw_frames 1; nonzero_pixels 5458; checksum 23357114226484; rss 131072/262144 kB; source 51ba1025b4d9; simple_bin src/compiler_rust/target/release/simple; native_build_mode aggressive-native; fallback none)
+- GUI/web/2D 8K retained perf: pass (met-target-fps; resolution 8k; size 7680x4320; pixels 33177600; frames 200; fps_x1000 22711787; frame_p50_ns 44030; frame_p95_ns 44030; target_fps 200; render_mode retained-static-frame; redraw_frames 1; nonzero_pixels 203; checksum 869060580878; rss 520192/750000 kB; source 51ba1025b4d9; simple_bin src/compiler_rust/target/release/simple; native_build_mode aggressive-native; fallback none)
 - Production surface host:
 - Production Tauri surface capture:
 - Production Chrome surface capture:
@@ -549,6 +549,9 @@
 - gui_showcase_4k_200fps_height=2160
 - gui_showcase_4k_200fps_frames=200
 - gui_showcase_4k_200fps_fps_x1000=56689342
+- gui_showcase_4k_200fps_frame_avg_ns=17640
+- gui_showcase_4k_200fps_frame_p50_ns=17640
+- gui_showcase_4k_200fps_frame_p95_ns=17640
 - gui_showcase_4k_200fps_target_fps=200
 - gui_showcase_4k_200fps_max_rss_kb=131072
 - gui_showcase_4k_200fps_max_rss_budget_kb=262144
@@ -575,6 +578,9 @@
 - gui_showcase_8k_perf_height=4320
 - gui_showcase_8k_perf_frames=200
 - gui_showcase_8k_perf_fps_x1000=22711787
+- gui_showcase_8k_perf_frame_avg_ns=44030
+- gui_showcase_8k_perf_frame_p50_ns=44030
+- gui_showcase_8k_perf_frame_p95_ns=44030
 - gui_showcase_8k_perf_target_fps=200
 - gui_showcase_8k_perf_max_rss_kb=520192
 - gui_showcase_8k_perf_max_rss_budget_kb=750000
