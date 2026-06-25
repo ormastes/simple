@@ -910,9 +910,12 @@ Loose RenderDoc installs may also ship `renderdoccmd` as a symlink and an
 unregistered Vulkan layer manifest with a stale `library_path`. The helper
 resolves the real RenderDoc home, creates a per-run layer manifest pointing at
 `librenderdoc.so`, and forces `VK_LAYER_RENDERDOC_Capture` with
-`VK_INSTANCE_LAYERS`. Current focused evidence at
-`build/gui-web-2d-vulkan-env-renderdoc-simple-explicit-layer-owner-env/renderdoc/simple/evidence.env`
-passes with `rdoc_simple_renderdoc_capturing_after_start=1`,
+`VK_INSTANCE_LAYERS`. Current focused evidence is produced by
+`GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-renderdoc-simple
+scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple`, and the
+aggregate defaults `RDOC_SIMPLE_EVIDENCE_ENV` to
+`build/gui-web-2d-vulkan-env-renderdoc-simple/renderdoc/simple/evidence.env`.
+That evidence passes with `rdoc_simple_renderdoc_capturing_after_start=1`,
 `rdoc_simple_renderdoc_end=1`, `rdoc_simple_renderdoc_num_captures=1`,
 `rdoc_capture_status=pass`, and `rdoc_capture_magic=RDOC`.
 

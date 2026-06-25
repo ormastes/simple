@@ -1,13 +1,13 @@
 # GUI RenderDoc Feature Coverage Status
 
 - status: incomplete
-- reason: missing-simple-widget-renderdoc
+- reason: missing-electron-widget-renderdoc
 - widget HTML renderer dispatch: 43/43
 - widget rendering fixture/spec coverage: pass (43/43)
 - widget renderer class coverage: 43/43
 - widget render fixture witnesses: 43/43
 - widget RenderDoc HTML fixture witnesses: 43/43
-- widget RenderDoc goal: incomplete (missing-simple-widget-renderdoc; blocked 2)
+- widget RenderDoc goal: incomplete (missing-electron-widget-renderdoc; blocked 1)
 - widget RenderDoc blocker: doc/08_tracking/bug/gui_widget_renderdoc_goal_blockers_2026-06-23.md
 - Electron layout manifest cases: 50
 - HTML/CSS rendering manifest traceability: pass (pass)
@@ -19,8 +19,8 @@
 - Web WM modern shell evidence: pass (pass; interaction pass; bitmap pass; audit pass)
 - Native render-log platform matrix: fail (missing-or-failing-native-render-log-platforms; missing macos-metal,windows-d3d12; failed linux-vulkan; required linux-vulkan,macos-metal,windows-d3d12)
 - HTML/CSS animation rendering: incomplete (0/18; animation-transition-transform-css)
-- RenderDoc goal: fail (missing-source-evidence)
-- Simple RenderDoc: fail (missing-source-evidence)
+- RenderDoc goal: fail (capture-not-requested)
+- Simple RenderDoc: pass (pass)
 - External Chrome/Vulkan RenderDoc: unavailable (capture-not-requested)
 - Electron Chromium/Vulkan RenderDoc: unavailable (missing-electron-rdoc)
 - Electron Chromium/Vulkan gate: unavailable (missing-source-evidence)
@@ -31,7 +31,7 @@
 - GUI/web/2D Electron browser backing: fail (electron-vulkan-hardware-missing; vulkan enabled_on; gpu enabled; display ; gl (gl=none,angle=none); source build/gui-web-2d-vulkan-env-browser-backing/electron_argb.json)
 - GUI/web/2D Chrome browser backing: pass (chrome-vulkan-backed; display ANGLE_VULKAN; gpu enabled; gl (gl=egl-angle,angle=vulkan); source build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json)
 - GUI/web/2D browser backing blocker: doc/08_tracking/bug/gui_web_2d_vulkan_browser_backing_2026-06-23.md
-- GUI/web/2D Vulkan RenderDoc blockers: blocked (5; renderdoc-command-ready-ready;simple-renderdoc-gate-unavailable-missing-source-evidence;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run)
+- GUI/web/2D Vulkan RenderDoc blockers: blocked (4; renderdoc-command-ready-ready;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run)
 - GUI/web/2D RenderDoc blocker: doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
 - GUI/web/2D Vulkan loader: present (NVIDIA TITAN RTX / NVIDIA)
 - GUI/web/2D Vulkan RenderDoc: ready (ready)
@@ -49,13 +49,10 @@
 - Production surface host:
 - Production Tauri surface capture:
 - Production Chrome surface capture:
-- blocked completion gates: 12
+- blocked completion gates: 9
 - blocked gate list:
-  - Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic
   - original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
   - Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof
-  - Simple GUI widget RenderDoc .rdc on Vulkan Engine2D
-  - Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof
   - Electron and Chrome Vulkan-backed browser RenderDoc proof
   - native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12
   - production GUI/web font offload readback evidence
@@ -81,7 +78,7 @@
 
 ## Raw Evidence
 - gui_renderdoc_feature_coverage_status=incomplete
-- gui_renderdoc_feature_coverage_reason=missing-simple-widget-renderdoc
+- gui_renderdoc_feature_coverage_reason=missing-electron-widget-renderdoc
 - widget_kind_source=src/lib/common/ui/widget_kind.spl
 - widget_kind_count=43
 - widget_html_renderer_source=src/app/ui.render/html_widgets.spl
@@ -151,19 +148,19 @@
 - gui_widget_renderdoc_goal_command=sh scripts/check/check-gui-widget-renderdoc-goal-status.shs
 - gui_widget_renderdoc_goal_exit_code=0
 - gui_widget_renderdoc_goal_status=incomplete
-- gui_widget_renderdoc_goal_reason=missing-simple-widget-renderdoc
+- gui_widget_renderdoc_goal_reason=missing-electron-widget-renderdoc
 - gui_widget_renderdoc_goal_blocker_doc=doc/08_tracking/bug/gui_widget_renderdoc_goal_blockers_2026-06-23.md
-- gui_widget_renderdoc_goal_simple_blocker_doc=doc/08_tracking/bug/gui_widget_renderdoc_goal_blockers_2026-06-23.md
+- gui_widget_renderdoc_goal_simple_blocker_doc=
 - gui_widget_renderdoc_goal_electron_blocker_doc=doc/08_tracking/bug/gui_widget_renderdoc_goal_blockers_2026-06-23.md
-- gui_widget_renderdoc_goal_simple_gate_status=fail
+- gui_widget_renderdoc_goal_simple_gate_status=pass
 - gui_widget_renderdoc_goal_simple_gate_source_env_file_status=pass
 - gui_widget_renderdoc_goal_simple_gate_capture_file_status=pass
 - gui_widget_renderdoc_goal_electron_gate_status=unavailable
 - gui_widget_renderdoc_goal_electron_gate_source_env_file_status=missing
 - gui_widget_renderdoc_goal_electron_gate_capture_file_status=missing
 - gui_widget_renderdoc_goal_electron_gate_argb_file_status=missing
-- gui_widget_renderdoc_goal_blocked_gate_count=2
-- gui_widget_renderdoc_goal_blocked_gates=Simple GUI widget RenderDoc .rdc on Vulkan Engine2D|Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof
+- gui_widget_renderdoc_goal_blocked_gate_count=1
+- gui_widget_renderdoc_goal_blocked_gates=Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof
 - html_css_rendering_manifest_traceability_command=sh scripts/check/check-html-css-rendering-manifest-traceability.shs
 - html_css_rendering_manifest_traceability_exit_code=0
 - html_css_rendering_manifest_traceability_status=pass
@@ -315,9 +312,9 @@
 - gui_web_2d_vulkan_chrome_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json
 - gui_web_2d_vulkan_chrome_browser_backing_source_file_status=pass
 - gui_web_2d_vulkan_renderdoc_blocker_status=blocked
-- gui_web_2d_vulkan_renderdoc_blocker_reason=renderdoc-command-ready-ready;simple-renderdoc-gate-unavailable-missing-source-evidence;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run
-- gui_web_2d_vulkan_renderdoc_blocker_gate_count=5
-- gui_web_2d_vulkan_renderdoc_blocker_gates=renderdoc-command-ready-ready|simple-renderdoc-gate-unavailable-missing-source-evidence|electron-renderdoc-gate-unavailable-missing-source-evidence|chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|chrome-renderdoc-gate-not-run-not-run
+- gui_web_2d_vulkan_renderdoc_blocker_reason=renderdoc-command-ready-ready;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run
+- gui_web_2d_vulkan_renderdoc_blocker_gate_count=4
+- gui_web_2d_vulkan_renderdoc_blocker_gates=renderdoc-command-ready-ready|electron-renderdoc-gate-unavailable-missing-source-evidence|chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|chrome-renderdoc-gate-not-run-not-run
 - gui_web_2d_vulkan_renderdoc_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
 - gui_web_2d_vulkan_direct_run_evidence_env=build/gui-web-2d-vulkan-env/evidence.env
 - gui_web_2d_vulkan_direct_run_source=configured-main
@@ -587,29 +584,29 @@
 - renderdoc_goal_status_command=sh scripts/check/check-html-css-renderdoc-goal-status.shs
 - renderdoc_goal_status_exit_code=1
 - renderdoc_goal_status=fail
-- renderdoc_goal_reason=missing-source-evidence
-- renderdoc_goal_blocked_gate=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic
-- renderdoc_goal_blocked_gate_count=3
-- renderdoc_goal_blocked_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic|original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof
-- simple_renderdoc_status=fail
-- simple_renderdoc_reason=missing-source-evidence
-- simple_renderdoc_evidence_env=build/gui-web-2d-vulkan-env-renderdoc-simple-explicit-layer-owner-env/renderdoc/simple/evidence.env
-- simple_renderdoc_capture_status=
-- simple_renderdoc_capture_magic=
-- simple_renderdoc_capture_file_magic=
-- simple_renderdoc_capture_file=
+- renderdoc_goal_reason=capture-not-requested
+- renderdoc_goal_blocked_gate=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
+- renderdoc_goal_blocked_gate_count=2
+- renderdoc_goal_blocked_gates=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof
+- simple_renderdoc_status=pass
+- simple_renderdoc_reason=pass
+- simple_renderdoc_evidence_env=build/gui-web-2d-vulkan-env-renderdoc-simple/renderdoc/simple/evidence.env
+- simple_renderdoc_capture_status=pass
+- simple_renderdoc_capture_magic=RDOC
+- simple_renderdoc_capture_file_magic=RDOC
+- simple_renderdoc_capture_file=build/gui-web-2d-vulkan-env-renderdoc-simple/renderdoc/simple/simple_gui_app_capture.rdc
 - simple_renderdoc_gate_env=build/gui-renderdoc-feature-coverage-status/renderdoc-goal-status/simple-gate/evidence.env
-- simple_renderdoc_gate_status=unavailable
-- simple_renderdoc_gate_reason=missing-source-evidence
-- simple_renderdoc_gate_capture_file_magic=
-- simple_renderdoc_gate_runtime_backend=
-- simple_renderdoc_gate_renderdoc_available=
-- simple_renderdoc_gate_renderdoc_start=
-- simple_renderdoc_gate_renderdoc_end=
-- simple_renderdoc_gate_renderdoc_num_captures=
-- simple_renderdoc_gate_pixel_count=
-- simple_renderdoc_gate_runtime_metadata_status=missing
-- simple_renderdoc_gate_missing_runtime_metadata=rdoc_simple_runtime_backend,rdoc_simple_renderdoc_available,rdoc_simple_renderdoc_start,rdoc_simple_renderdoc_end,rdoc_simple_renderdoc_num_captures,rdoc_simple_pixel_count
+- simple_renderdoc_gate_status=pass
+- simple_renderdoc_gate_reason=pass
+- simple_renderdoc_gate_capture_file_magic=RDOC
+- simple_renderdoc_gate_runtime_backend=vulkan
+- simple_renderdoc_gate_renderdoc_available=1
+- simple_renderdoc_gate_renderdoc_start=1
+- simple_renderdoc_gate_renderdoc_end=1
+- simple_renderdoc_gate_renderdoc_num_captures=1
+- simple_renderdoc_gate_pixel_count=3072
+- simple_renderdoc_gate_runtime_metadata_status=pass
+- simple_renderdoc_gate_missing_runtime_metadata=
 - simple_renderdoc_gate_required_backend=simple
 - simple_renderdoc_gate_required_scene=vulkan-engine2d
 - simple_renderdoc_gate_required_program=src/app/test/renderdoc_vulkan_capture.spl
@@ -738,6 +735,6 @@
 - simple_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple
 - html_renderdoc_capture_command=RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
 - electron_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-electron-html
-- blocked_completion_gate=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic
-- blocked_completion_gate_count=12
-- blocked_completion_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic|original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Simple GUI widget RenderDoc .rdc on Vulkan Engine2D|Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof|Electron and Chrome Vulkan-backed browser RenderDoc proof|native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|full CSS specification rendering coverage beyond implemented Simple Web subset|CSS animation/transition/transform rendering coverage
+- blocked_completion_gate=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
+- blocked_completion_gate_count=9
+- blocked_completion_gates=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Electron and Chrome Vulkan-backed browser RenderDoc proof|native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|full CSS specification rendering coverage beyond implemented Simple Web subset|CSS animation/transition/transform rendering coverage
