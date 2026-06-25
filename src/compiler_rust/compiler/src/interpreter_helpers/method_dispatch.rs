@@ -682,6 +682,23 @@ pub(crate) fn call_method_on_value(
         return exec_function_with_values(&func, &arg_values, _env, _functions, _classes, _enums, _impl_methods);
     }
 
+    // Bare-payload Option/Result convention: a present Some(x)/Ok(x) is stored as
+    // the bare value x. In a chained/nested call (e.g. `obj.get().unwrap()`), these
+    // Option/Result methods on a present value reduce to the value itself or a
+    // constant, so they never need the (already-evaluated) args. None/Err is
+    // Value::Nil and is left to the generic path below.
+    // ponytail: covers payload-returning + predicate methods; map/and_then on an
+    // Option in nested position would need the AST closure arg — add only if a real
+    // case needs it.
+    if !matches!(recv_val, Value::Nil) {
+        match method {
+            "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" => return Ok(recv_val),
+            "is_some" | "is_ok" => return Ok(Value::Bool(true)),
+            "is_none" | "is_err" => return Ok(Value::Bool(false)),
+            _ => {}
+        }
+    }
+
     let ctx = ErrorContext::new()
         .with_code(codes::METHOD_NOT_FOUND)
         .with_help("check that the method is defined on this type");
