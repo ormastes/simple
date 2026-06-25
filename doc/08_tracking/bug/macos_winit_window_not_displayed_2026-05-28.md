@@ -1,6 +1,6 @@
 # macOS interpreter-driven winit window never displays - 2026-05-28
 
-Status: Open. Discovered 2026-05-28 while verifying the pure-Simple web renderer + Engine2D
+Status: RESOLVED 2026-05-29 (pure-Simple event loop + proper .app bundle; no Rust-seed change — see "RESOLVED 2026-05-29" section below). Status line reconciled 2026-06-25. Discovered 2026-05-28 while verifying the pure-Simple web renderer + Engine2D
 
 ## Summary
 
