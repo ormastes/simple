@@ -27,7 +27,7 @@ gui_renderdoc_feature_coverage_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 25 | 25 | 0 | 0 |
+| 26 | 26 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1236,6 +1236,34 @@ expect(report).to_contain("  - full CSS specification rendering coverage beyond 
 
 </details>
 
+#### promotes configured GUI web Vulkan run evidence as the direct-run source
+
+- Create a configured main Vulkan run env while the explicit direct-run env is missing
+   - Expected: code equals `0`
+- Assert the configured main env is reported as the direct-run source
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create a configured main Vulkan run env while the explicit direct-run env is missing")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-configured-main && mkdir -p build/test-gui-renderdoc-feature-coverage-status-configured-main/gui && printf 'gui_web_2d_vulkan_mode=--run\\ngui_web_2d_vulkan_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\ngui_web_2d_vulkan_width=1024\\ngui_web_2d_vulkan_height=768\\ngui_web_2d_vulkan_electron_argb_status=pass\\n' > build/test-gui-renderdoc-feature-coverage-status-configured-main/gui/run.env && GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-configured-main/gui/run.env GUI_WEB_2D_VULKAN_RUN_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-configured-main/gui/missing-run.env BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-configured-main/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-configured-main/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the configured main env is reported as the direct-run source")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-configured-main/out/evidence.env")
+expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_evidence_env=build/test-gui-renderdoc-feature-coverage-status-configured-main/gui/run.env")
+expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_source=configured-main")
+expect(evidence).to_contain("gui_web_2d_vulkan_direct_run_mode=--run")
+```
+
+</details>
+
 #### keeps missing Electron ARGB evidence as incomplete instead of mismatch
 
 - Create direct-run evidence where Chrome and Simple match but Electron is absent
@@ -2185,8 +2213,8 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-produ
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
