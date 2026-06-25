@@ -80,6 +80,14 @@ Required keys:
 - `gui_web_2d_vulkan_browser_backing_reason`
 - `gui_web_2d_vulkan_browser_backing_mode`
 
+Exact pixel parity between Simple, Chrome, and Electron is still fallback
+bitmap evidence. It does not satisfy browser Vulkan proof by itself. If focused
+browser proof is missing, record:
+
+- `gui_web_2d_vulkan_browser_backing_status=fail`
+- `gui_web_2d_vulkan_browser_backing_mode=focused-browser-backing-required`
+- `gui_web_2d_vulkan_browser_backing_reason=missing-focused-browser-backing`
+
 If Chrome or Electron logs `angle=vulkan` unavailable or falls back to a
 non-Vulkan path, record `vulkan-angle-unavailable` and leave the browser Vulkan
 gate failed.

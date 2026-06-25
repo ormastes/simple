@@ -864,3 +864,9 @@ implementation-evidence-in-progress
   passed for both working and staged scopes. This records doc/process/runtime
   hygiene only; the GUI/Web/2D Vulkan browser-backing blocker remains open until
   focused browser backing evidence passes.
+- continue-docs: Aligned the browser-backing bug and GUI setup guide with the
+  current fail-closed missing-proof semantics. Missing focused browser evidence
+  is now documented as `focused-browser-backing-required` /
+  `missing-focused-browser-backing`; bitmap comparison and pixel parity remain
+  fallback evidence only, not browser Vulkan proof. The GUI/Web/2D Vulkan
+  browser-backing blocker remains open.
