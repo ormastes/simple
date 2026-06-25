@@ -373,7 +373,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 862 lines folded for reproduction.
+Runnable source: 864 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -689,8 +689,10 @@ expect(evidence).to_contain("simple_renderdoc_gate_required_pixel_count_min=1")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_source_env_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_source_env_file_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_reason=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_file_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_failure_class=")
 expect(evidence).to_contain("html_renderdoc_capture_command=RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs")
 expect(evidence).to_contain("external_renderdoc_evidence_env=")
 expect(evidence).to_contain("external_renderdoc_capture_env=")

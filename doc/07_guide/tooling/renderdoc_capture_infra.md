@@ -761,6 +761,8 @@ require `gui_widget_renderdoc_goal_widget_feature_covered_count=43`,
 `gui_widget_renderdoc_goal_simple_gate_source_env_file_status=pass`,
 `gui_widget_renderdoc_goal_simple_gate_capture_file_status=pass`,
 `gui_widget_renderdoc_goal_electron_gate_status=pass`, and
+`gui_widget_renderdoc_goal_electron_gate_reason=pass`,
+`gui_widget_renderdoc_goal_electron_gate_failure_class=pass`,
 `gui_widget_renderdoc_goal_electron_gate_source_env_file_status=pass`,
 `gui_widget_renderdoc_goal_electron_gate_capture_file_status=pass`,
 `gui_widget_renderdoc_goal_electron_gate_argb_file_status=pass`, and
@@ -774,6 +776,8 @@ The top-level GUI audit now runs that focused wrapper, re-emits
 `gui_widget_renderdoc_goal_simple_gate_source_env_file_status`,
 `gui_widget_renderdoc_goal_simple_gate_capture_file_status`,
 `gui_widget_renderdoc_goal_electron_gate_status`, and
+`gui_widget_renderdoc_goal_electron_gate_reason`,
+`gui_widget_renderdoc_goal_electron_gate_failure_class`,
 `gui_widget_renderdoc_goal_electron_gate_source_env_file_status`,
 `gui_widget_renderdoc_goal_electron_gate_capture_file_status`,
 `gui_widget_renderdoc_goal_electron_gate_argb_file_status`, and

@@ -27,7 +27,7 @@ gui_widget_renderdoc_goal_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -97,7 +97,7 @@ sh scripts/check/check-gui-widget-renderdoc-goal-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -153,7 +153,7 @@ expect(report).to_contain("- widgets with RenderDoc fixture features: 43 / 43")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -206,7 +206,7 @@ expect(report).to_contain("- blocked gates: 0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
