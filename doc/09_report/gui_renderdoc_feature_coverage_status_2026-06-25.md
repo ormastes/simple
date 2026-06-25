@@ -19,19 +19,18 @@
 - Web WM modern shell evidence: pass (pass; interaction pass; bitmap pass; audit pass)
 - Native render-log platform matrix: incomplete (missing-or-failing-native-render-log-platforms; missing linux-vulkan,macos-metal,windows-d3d12; required linux-vulkan,macos-metal,windows-d3d12)
 - HTML/CSS animation rendering: incomplete (0/18; animation-transition-transform-css)
-- RenderDoc goal: fail (missing-source-evidence)
-- Simple RenderDoc: fail (missing-source-evidence)
+- RenderDoc goal: fail (capture-not-requested)
+- Simple RenderDoc: pass (pass)
 - External Chrome/Vulkan RenderDoc: unavailable (capture-not-requested)
-- Electron Chromium/Vulkan RenderDoc: unavailable (missing-electron-rdoc)
-- Electron Chromium/Vulkan gate: unavailable (missing-source-evidence)
+- Electron Chromium/Vulkan RenderDoc: fail (missing-rdc)
+- Electron Chromium/Vulkan gate: fail (missing-rdc)
 - GUI/web/2D Vulkan setup source: existing-evidence
 - GUI/web/2D Vulkan setup mode: --check
 - GUI/web/2D Vulkan direct-run source: auto-existing (--run; evidence build/gui-web-2d-vulkan-env-run-auto/evidence.env)
-- GUI/web/2D browser Vulkan backing: fail (gpu-feature-status; electron-vulkan-disabled_off;chrome-vulkan-backed)
-- GUI/web/2D Electron browser backing: fail (electron-vulkan-disabled_off; vulkan disabled_off; gl (gl=none,angle=none); source build/gui-web-2d-vulkan-env-browser-backing/electron_argb.json)
-- GUI/web/2D Chrome browser backing: pass (chrome-vulkan-backed; display ANGLE_VULKAN; gl (gl=egl-angle,angle=vulkan); source build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json)
-- GUI/web/2D browser backing blocker: doc/08_tracking/bug/gui_web_2d_vulkan_browser_backing_2026-06-23.md
-- GUI/web/2D Vulkan RenderDoc blockers: blocked (6; renderdoc-command-ready-ready;simple-renderdoc-gate-unavailable-missing-source-evidence;electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run)
+- GUI/web/2D browser Vulkan backing: pass (gpu-feature-status; pass)
+- GUI/web/2D Electron browser backing: pass (electron-vulkan-backed; vulkan enabled_on; gl (gl=none,angle=none); source build/gui-web-2d-vulkan-env-browser-backing-electron42/electron_argb.json)
+- GUI/web/2D Chrome browser backing: pass (chrome-vulkan-backed; display ANGLE_VULKAN; gl (gl=egl-angle,angle=vulkan); source build/gui-web-2d-vulkan-env-browser-backing-electron42/chrome_argb_proof.json)
+- GUI/web/2D Vulkan RenderDoc blockers: blocked (5; renderdoc-command-ready-ready;electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;electron-renderdoc-gate-fail-missing-rdc;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run)
 - GUI/web/2D RenderDoc blocker: doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
 - GUI/web/2D Vulkan loader: present (Intel(R) Graphics (RPL-P) / Intel open-source Mesa driver)
 - GUI/web/2D Vulkan RenderDoc: ready (ready)
@@ -49,14 +48,12 @@
 - Production surface host:
 - Production Tauri surface capture:
 - Production Chrome surface capture:
-- blocked completion gates: 14
+- blocked completion gates: 12
 - blocked gate list:
-  - Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic
   - original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
   - Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof
   - Simple GUI widget RenderDoc .rdc on Vulkan Engine2D
   - Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof
-  - Electron and Chrome Vulkan-backed browser RenderDoc proof
   - native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12
   - production GUI/web font offload readback evidence
   - production GUI/web raw Metal readback evidence
@@ -295,33 +292,33 @@
 - gui_web_2d_vulkan_pixel_comparison_reason=pass
 - gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff
 - gui_web_2d_vulkan_pixel_comparison_blocker_doc=
-- gui_web_2d_vulkan_browser_backing_status=fail
-- gui_web_2d_vulkan_browser_backing_reason=electron-vulkan-disabled_off;chrome-vulkan-backed
+- gui_web_2d_vulkan_browser_backing_status=pass
+- gui_web_2d_vulkan_browser_backing_reason=pass
 - gui_web_2d_vulkan_browser_backing_mode=gpu-feature-status
-- gui_web_2d_vulkan_browser_backing_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_browser_backing_2026-06-23.md
-- gui_web_2d_vulkan_electron_browser_backing_status=fail
-- gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-disabled_off
-- gui_web_2d_vulkan_electron_browser_backing_vulkan=disabled_off
+- gui_web_2d_vulkan_browser_backing_blocker_doc=
+- gui_web_2d_vulkan_electron_browser_backing_status=pass
+- gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed
+- gui_web_2d_vulkan_electron_browser_backing_vulkan=enabled_on
 - gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=false
 - gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=(gl=none,angle=none)
-- gui_web_2d_vulkan_electron_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/electron_argb.json
+- gui_web_2d_vulkan_electron_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing-electron42/electron_argb.json
 - gui_web_2d_vulkan_electron_browser_backing_source_file_status=pass
 - gui_web_2d_vulkan_chrome_browser_backing_status=pass
 - gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed
 - gui_web_2d_vulkan_chrome_browser_backing_display_type=ANGLE_VULKAN
 - gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=(gl=egl-angle,angle=vulkan)
 - gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true
-- gui_web_2d_vulkan_chrome_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json
+- gui_web_2d_vulkan_chrome_browser_backing_source=build/gui-web-2d-vulkan-env-browser-backing-electron42/chrome_argb_proof.json
 - gui_web_2d_vulkan_chrome_browser_backing_source_file_status=pass
 - gui_web_2d_vulkan_renderdoc_blocker_status=blocked
-- gui_web_2d_vulkan_renderdoc_blocker_reason=renderdoc-command-ready-ready;simple-renderdoc-gate-unavailable-missing-source-evidence;electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run
-- gui_web_2d_vulkan_renderdoc_blocker_gate_count=6
-- gui_web_2d_vulkan_renderdoc_blocker_gates=renderdoc-command-ready-ready|simple-renderdoc-gate-unavailable-missing-source-evidence|electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|electron-renderdoc-gate-unavailable-missing-source-evidence|chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|chrome-renderdoc-gate-not-run-not-run
+- gui_web_2d_vulkan_renderdoc_blocker_reason=renderdoc-command-ready-ready;electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;electron-renderdoc-gate-fail-missing-rdc;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run
+- gui_web_2d_vulkan_renderdoc_blocker_gate_count=5
+- gui_web_2d_vulkan_renderdoc_blocker_gates=renderdoc-command-ready-ready|electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|electron-renderdoc-gate-fail-missing-rdc|chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|chrome-renderdoc-gate-not-run-not-run
 - gui_web_2d_vulkan_renderdoc_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
 - gui_web_2d_vulkan_direct_run_evidence_env=build/gui-web-2d-vulkan-env-run-auto/evidence.env
 - gui_web_2d_vulkan_direct_run_source=auto-existing
 - gui_web_2d_vulkan_direct_run_mode=--run
-- gui_web_2d_vulkan_browser_backing_evidence_env=build/gui-web-2d-vulkan-env-browser-backing/evidence.env
+- gui_web_2d_vulkan_browser_backing_evidence_env=build/gui-web-2d-vulkan-env-browser-backing-electron42/evidence.env
 - gui_web_2d_vulkan_browser_backing_source=auto-existing
 - gui_web_2d_vulkan_browser_backing_direct_mode=--browser-backing
 - gui_web_2d_vulkan_uname_s=Linux
@@ -586,29 +583,29 @@
 - renderdoc_goal_status_command=sh scripts/check/check-html-css-renderdoc-goal-status.shs
 - renderdoc_goal_status_exit_code=1
 - renderdoc_goal_status=fail
-- renderdoc_goal_reason=missing-source-evidence
-- renderdoc_goal_blocked_gate=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic
-- renderdoc_goal_blocked_gate_count=3
-- renderdoc_goal_blocked_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic|original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof
-- simple_renderdoc_status=fail
-- simple_renderdoc_reason=missing-source-evidence
-- simple_renderdoc_evidence_env=build/renderdoc/canonical-probe/simple/evidence.env
-- simple_renderdoc_capture_status=
-- simple_renderdoc_capture_magic=
-- simple_renderdoc_capture_file_magic=
-- simple_renderdoc_capture_file=
+- renderdoc_goal_reason=capture-not-requested
+- renderdoc_goal_blocked_gate=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
+- renderdoc_goal_blocked_gate_count=2
+- renderdoc_goal_blocked_gates=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof
+- simple_renderdoc_status=pass
+- simple_renderdoc_reason=pass
+- simple_renderdoc_evidence_env=build/gui-web-2d-vulkan-env-renderdoc-simple-explicit-layer-owner-env/renderdoc/simple/evidence.env
+- simple_renderdoc_capture_status=pass
+- simple_renderdoc_capture_magic=RDOC
+- simple_renderdoc_capture_file_magic=RDOC
+- simple_renderdoc_capture_file=build/gui-web-2d-vulkan-env-renderdoc-simple-explicit-layer-owner-env/renderdoc/simple/simple_gui_app_capture.rdc
 - simple_renderdoc_gate_env=build/gui_renderdoc_feature_coverage_status/renderdoc-goal-status/simple-gate/evidence.env
-- simple_renderdoc_gate_status=unavailable
-- simple_renderdoc_gate_reason=missing-source-evidence
-- simple_renderdoc_gate_capture_file_magic=
-- simple_renderdoc_gate_runtime_backend=
-- simple_renderdoc_gate_renderdoc_available=
-- simple_renderdoc_gate_renderdoc_start=
-- simple_renderdoc_gate_renderdoc_end=
-- simple_renderdoc_gate_renderdoc_num_captures=
-- simple_renderdoc_gate_pixel_count=
-- simple_renderdoc_gate_runtime_metadata_status=missing
-- simple_renderdoc_gate_missing_runtime_metadata=rdoc_simple_runtime_backend,rdoc_simple_renderdoc_available,rdoc_simple_renderdoc_start,rdoc_simple_renderdoc_end,rdoc_simple_renderdoc_num_captures,rdoc_simple_pixel_count
+- simple_renderdoc_gate_status=pass
+- simple_renderdoc_gate_reason=pass
+- simple_renderdoc_gate_capture_file_magic=RDOC
+- simple_renderdoc_gate_runtime_backend=vulkan
+- simple_renderdoc_gate_renderdoc_available=1
+- simple_renderdoc_gate_renderdoc_start=1
+- simple_renderdoc_gate_renderdoc_end=1
+- simple_renderdoc_gate_renderdoc_num_captures=1
+- simple_renderdoc_gate_pixel_count=3072
+- simple_renderdoc_gate_runtime_metadata_status=pass
+- simple_renderdoc_gate_missing_runtime_metadata=
 - simple_renderdoc_gate_required_backend=simple
 - simple_renderdoc_gate_required_scene=vulkan-engine2d
 - simple_renderdoc_gate_required_program=src/app/test/renderdoc_vulkan_capture.spl
@@ -649,55 +646,55 @@
 - external_renderdoc_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 - external_renderdoc_required_launch_flag_enable_features=--enable-features=Vulkan
 - external_renderdoc_required_launch_flag_use_angle=--use-angle=vulkan
-- electron_renderdoc_evidence_env=build/renderdoc/canonical-probe/electron-html/evidence.env
-- electron_renderdoc_status=unavailable
-- electron_renderdoc_reason=missing-electron-rdoc
+- electron_renderdoc_evidence_env=build/renderdoc/electron-display-helper/electron-html/evidence.env
+- electron_renderdoc_status=fail
+- electron_renderdoc_reason=missing-rdc
 - electron_renderdoc_magic=
-- electron_renderdoc_scene=
+- electron_renderdoc_scene=html-css-electron
 - electron_renderdoc_capture_file=
 - electron_renderdoc_capture_file_magic=
-- electron_renderdoc_html_path=
-- electron_renderdoc_binary=
-- electron_renderdoc_capture_script=
-- electron_renderdoc_requested_api=
-- electron_renderdoc_requested_angle=
-- electron_renderdoc_requested_features=
-- electron_renderdoc_launch_flags=
+- electron_renderdoc_html_path=/home/yoon/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- electron_renderdoc_binary=/home/yoon/simple/tools/electron-shell/node_modules/.bin/electron
+- electron_renderdoc_capture_script=/home/yoon/simple/tools/electron-live-bitmap/capture_html_argb.js
+- electron_renderdoc_requested_api=vulkan
+- electron_renderdoc_requested_angle=vulkan
+- electron_renderdoc_requested_features=Vulkan
+- electron_renderdoc_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform=x11 --enable-features=Vulkan --use-angle=vulkan
 - electron_renderdoc_gate_command=RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/electron-html/evidence.env sh scripts/check/check-renderdoc-electron-html-gate.shs
 - electron_renderdoc_gate_exit_code=1
-- electron_renderdoc_gate_status=unavailable
-- electron_renderdoc_gate_reason=missing-source-evidence
-- electron_renderdoc_gate_source_env=build/renderdoc/canonical-probe/electron-html/evidence.env
-- electron_renderdoc_gate_backend=
-- electron_renderdoc_gate_scene=
-- electron_renderdoc_gate_capture_status=
-- electron_renderdoc_gate_capture_reason=missing-source-evidence
+- electron_renderdoc_gate_status=fail
+- electron_renderdoc_gate_reason=missing-rdc
+- electron_renderdoc_gate_source_env=build/renderdoc/electron-display-helper/electron-html/evidence.env
+- electron_renderdoc_gate_backend=electron
+- electron_renderdoc_gate_scene=html-css-electron
+- electron_renderdoc_gate_capture_status=fail
+- electron_renderdoc_gate_capture_reason=missing-rdc
 - electron_renderdoc_gate_capture_file=
 - electron_renderdoc_gate_capture_magic=
 - electron_renderdoc_gate_capture_file_magic=
-- electron_renderdoc_gate_html_path=
-- electron_renderdoc_gate_binary=
-- electron_renderdoc_gate_capture_script=
-- electron_renderdoc_gate_argb_path=
-- electron_renderdoc_gate_argb_status=
-- electron_renderdoc_gate_argb_reason=
+- electron_renderdoc_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+- electron_renderdoc_gate_binary=tools/electron-shell/node_modules/.bin/electron
+- electron_renderdoc_gate_capture_script=tools/electron-live-bitmap/capture_html_argb.js
+- electron_renderdoc_gate_argb_path=build/renderdoc/electron-display-helper/electron-html/electron_argb.json
+- electron_renderdoc_gate_argb_status=missing
+- electron_renderdoc_gate_argb_reason=missing-electron-argb-file
 - electron_renderdoc_gate_argb_width=
 - electron_renderdoc_gate_argb_height=
 - electron_renderdoc_gate_argb_format=
 - electron_renderdoc_gate_argb_producer=
 - electron_renderdoc_gate_argb_native_width=
 - electron_renderdoc_gate_argb_native_height=
-- electron_renderdoc_gate_argb_pixel_count=
-- electron_renderdoc_gate_argb_nonblank_pixel_count=
-- electron_renderdoc_gate_argb_expected_width=
-- electron_renderdoc_gate_argb_expected_height=
-- electron_renderdoc_gate_requested_api=
-- electron_renderdoc_gate_requested_angle=
-- electron_renderdoc_gate_requested_features=
-- electron_renderdoc_gate_launch_flags=
-- electron_renderdoc_gate_log=
-- electron_renderdoc_gate_vulkan_log_status=
-- electron_renderdoc_gate_vulkan_log_reason=
+- electron_renderdoc_gate_argb_pixel_count=0
+- electron_renderdoc_gate_argb_nonblank_pixel_count=0
+- electron_renderdoc_gate_argb_expected_width=1280
+- electron_renderdoc_gate_argb_expected_height=720
+- electron_renderdoc_gate_requested_api=vulkan
+- electron_renderdoc_gate_requested_angle=vulkan
+- electron_renderdoc_gate_requested_features=Vulkan
+- electron_renderdoc_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform=x11 --enable-features=Vulkan --use-angle=vulkan
+- electron_renderdoc_gate_log=build/renderdoc/electron-display-helper/electron-html/renderdoc-electron-html.log
+- electron_renderdoc_gate_vulkan_log_status=pass
+- electron_renderdoc_gate_vulkan_log_reason=pass
 - electron_renderdoc_gate_required_backend=electron
 - electron_renderdoc_gate_required_scene=html-css-electron
 - electron_renderdoc_gate_required_status=pass
@@ -737,6 +734,6 @@
 - simple_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple
 - html_renderdoc_capture_command=RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
 - electron_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-electron-html
-- blocked_completion_gate=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic
-- blocked_completion_gate_count=14
-- blocked_completion_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic|original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Simple GUI widget RenderDoc .rdc on Vulkan Engine2D|Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof|Electron and Chrome Vulkan-backed browser RenderDoc proof|native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum|retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS|full CSS specification rendering coverage beyond implemented Simple Web subset|CSS animation/transition/transform rendering coverage
+- blocked_completion_gate=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
+- blocked_completion_gate_count=12
+- blocked_completion_gates=original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof|Simple GUI widget RenderDoc .rdc on Vulkan Engine2D|Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof|native render-log comparison for Linux Vulkan, macOS Metal, and Windows D3D12|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum|retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS|full CSS specification rendering coverage beyond implemented Simple Web subset|CSS animation/transition/transform rendering coverage
