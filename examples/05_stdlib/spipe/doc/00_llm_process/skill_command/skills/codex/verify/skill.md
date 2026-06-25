@@ -55,6 +55,12 @@ Scan for stub patterns — any match is a **FAIL**:
 
 - Every REQ-NNN in `doc/02_requirements/feature/<feature>.md` traced to source code
 - Every BDD scenario in `doc/06_spec/` has matching `it` block in test files
+- Generated/manual docs for changed specs exist under `doc/06_spec`, report
+  `0 stubs`, and read as manuals for scenario-oriented specs
+- Broad lanes completed lower-model sidecar review or recorded `N/A`, and
+  normal/highest-capability review accepted generated-manual quality, coverage,
+  exclusions, and done marks
+- `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`
 - No orphan requirements (REQ without implementation)
 - No orphan tests (tests without corresponding REQ)
 
@@ -78,6 +84,9 @@ Scan for stub patterns — any match is a **FAIL**:
 
 - `doc/04_architecture/` updated for new modules
 - `doc/05_design/` updated for new features
+- Workflow/tooling/evidence/spec/verification contract changes updated matching
+  `doc/07_guide`, `doc/06_spec`, `.codex/skills`, `.agents/skills`,
+  `.claude/skills`, `.claude/agents/spipe`, and `.gemini/commands` docs
 - Cross-references between docs intact
 - CHANGELOG updated for user-facing changes
 
@@ -112,6 +121,8 @@ STATUS: FAIL (2 failures, 1 warning)
 - NEVER downgrade a FAIL to WARN — fix the issue
 - NEVER skip stub detection — STUB001 is non-negotiable
 - NEVER mark STATUS: PASS with outstanding FAILs
+- NEVER mark STATUS: PASS with stale generated manuals, unreviewed broad
+  sidecar output, executable specs under `doc/06_spec`, or stale process docs
 - If verification finds issues, report them — do not auto-fix without user approval
 - Fail production wrapper verification if an MCP or LSP launcher executes a source entrypoint directly instead of a cached compiled artifact
 - Audit hot request paths for repeated full scans, repeated file rereads, and per-request subprocesses; flag uncached patterns as FAIL or WARN based on impact

@@ -48,6 +48,14 @@ For each `*_spec.spl` in scope:
    - Read the requirement doc → list all REQ-NNN statements
    - Verify each REQ-NNN has at least one `it` block covering it
    - Flag uncovered requirements
+4. **Check generated/manual SPipe docs:**
+   - Run or inspect `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`
+   - Require complete generated manuals with `0 stubs`
+   - Read scenario-oriented manuals as operator docs; primary steps must be visible and understandable without opening the source spec
+   - Confirm `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`
+5. **Check cooperative review plan:**
+   - Broad lanes must complete lower-model sidecars such as Codex Spark, Claude Haiku, or Claude Sonnet, or record `N/A`
+   - Normal/highest-capability review must accept generated-manual quality, coverage claims, exclusions, and done marks before PASS
 
 **Report format:**
 ```
@@ -171,6 +179,10 @@ STATUS: FAIL (5 failures must be fixed before release)
 - NEVER skip NFR checks — even if no NFR doc exists, note it as WARN
 - If no requirement doc exists for a feature, flag as WARN (not FAIL)
 - If design doc exists but is outdated (references deleted files/functions), flag as FAIL
+- If workflow/tooling/evidence/spec/verification contracts changed but matching
+  `doc/07_guide`, `doc/06_spec`, `.codex/skills`, `.agents/skills`,
+  `.claude/skills`, `.claude/agents/spipe`, or `.gemini/commands` docs are stale,
+  do not mark verification PASS
 - Read actual source code — do not trust file names or comments alone
 - Fail wrapper verification if a production MCP or LSP launcher executes raw source instead of a cached compiled artifact
 - Audit request handlers for repeated scans, repeated rereads, and per-request subprocesses in hot paths
