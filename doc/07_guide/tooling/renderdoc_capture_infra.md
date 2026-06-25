@@ -1019,7 +1019,8 @@ The Electron HTML capture helper samples `app.getGPUFeatureStatus()` after
 rendering path instead of the early startup default. Current Linux evidence
 passes the browser-backing gate with
 `gui_web_2d_vulkan_browser_backing_status=pass` and
-`gui_web_2d_vulkan_electron_browser_backing_vulkan=enabled_on` in:
+`gui_web_2d_vulkan_electron_browser_backing_vulkan=enabled_on` but no
+Electron ANGLE/Vulkan backing proof in:
 
 ```sh
 build/gui-web-2d-vulkan-env-browser-backing-electron42/evidence.env

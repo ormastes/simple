@@ -10,6 +10,7 @@
 - Simple gate status: fail
 - Simple source evidence: build/renderdoc/canonical-probe/simple/evidence.env
 - Electron gate status: unavailable
+- Electron gate failure class: source-env-missing
 - Electron source evidence: build/renderdoc/canonical-probe/electron-html/evidence.env
 - Electron fixture path status: fail
 - blocked gates: 2
@@ -44,6 +45,7 @@
 - gui_widget_renderdoc_goal_simple_gate_required_runtime_backend=vulkan
 - gui_widget_renderdoc_goal_electron_gate_status=unavailable
 - gui_widget_renderdoc_goal_electron_gate_reason=missing-source-evidence
+- gui_widget_renderdoc_goal_electron_gate_failure_class=source-env-missing
 - gui_widget_renderdoc_goal_electron_gate_exit_code=1
 - gui_widget_renderdoc_goal_electron_gate_source_env=build/renderdoc/canonical-probe/electron-html/evidence.env
 - gui_widget_renderdoc_goal_electron_gate_source_env_file_status=missing
