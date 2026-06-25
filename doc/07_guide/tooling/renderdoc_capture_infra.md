@@ -339,11 +339,13 @@ It writes:
 
 The gate is fail-closed. It reads direct-run pixel comparison from
 `GUI_WEB_2D_VULKAN_ENV` and focused Chrome/Electron GPU-status proof from
-`GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV` when present, falling back to
-`GUI_WEB_2D_VULKAN_ENV` only for older combined fixtures. It requires Simple
-Vulkan backend evidence, focused Chrome and Electron Vulkan browser backing,
-`pairwise-argb-diff` mode, and all three pairwise diff lanes to pass. Missing
-RenderDoc `.rdc` evidence is
+`GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV` when present. If
+`GUI_WEB_2D_VULKAN_ENV` is itself a fresh `--browser-backing` run, that main env
+wins over a stale separate focused env; otherwise the separate focused env is
+used and older combined fixtures fall back to `GUI_WEB_2D_VULKAN_ENV`. It
+requires Simple Vulkan backend evidence, focused Chrome and Electron Vulkan
+browser backing, `pairwise-argb-diff` mode, and all three pairwise diff lanes to
+pass. Missing RenderDoc `.rdc` evidence is
 reported through `linux_vulkan_render_log_compare_renderdoc_*_status`; set
 `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=1` when the host is expected to provide
 real `.rdc` files and `RDOC` magic.

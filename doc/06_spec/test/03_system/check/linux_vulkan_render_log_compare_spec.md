@@ -27,7 +27,7 @@ linux_vulkan_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -142,7 +142,10 @@ The spec covers three cases:
    live in separate files. This proves current real host evidence is interpreted
    precisely: Chrome can be pass while Electron is fail, without reporting
    Chrome as missing.
-4. A source contract check that keeps the default RenderDoc evidence paths on
+4. A fresh main `--browser-backing` fixture plus a stale focused env. This proves
+   the wrapper does not let stale focused evidence override the current backing
+   run.
+5. A source contract check that keeps the default RenderDoc evidence paths on
    the focused current-capture rows instead of stale canonical probe rows.
 
 ## Completion Boundaries
@@ -305,6 +308,56 @@ expect(evidence.contains("chrome-browser-backing-fail")).to_equal(false)
 
 </details>
 
+#### prefers current main browser-backing evidence over stale focused evidence
+
+- Create a current main browser-backing env and a stale separate focused env
+   - Expected: code equals `0`
+- Assert the current main browser-backing env wins over stale focused evidence
+   - Expected: evidence does not contain `electron-browser-backing-fail`
+   - Expected: evidence does not contain `browser-backing-fail`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create a current main browser-backing env and a stale separate focused env")
+val command = "rm -rf build/test-linux-vulkan-render-log-main-browser-backing && mkdir -p build/test-linux-vulkan-render-log-main-browser-backing && cat > build/test-linux-vulkan-render-log-main-browser-backing/main.env <<'EOF'\n" +
+    "gui_web_2d_vulkan_mode=--browser-backing\n" +
+    "gui_web_2d_vulkan_simple_status=pass\n" +
+    "gui_web_2d_vulkan_simple_backend_name=vulkan\n" +
+    "gui_web_2d_vulkan_simple_argb_backend=vulkan\n" +
+    "gui_web_2d_vulkan_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_electron_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_chrome_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_pixel_comparison_status=pass\n" +
+    "gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff\n" +
+    "gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass\n" +
+    "EOF\n" +
+    "cat > build/test-linux-vulkan-render-log-main-browser-backing/stale.env <<'EOF'\n" +
+    "gui_web_2d_vulkan_browser_backing_status=fail\n" +
+    "gui_web_2d_vulkan_electron_browser_backing_status=fail\n" +
+    "gui_web_2d_vulkan_chrome_browser_backing_status=pass\n" +
+    "EOF\n" +
+    "BUILD_DIR=build/test-linux-vulkan-render-log-main-browser-backing/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-main-browser-backing/main.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-linux-vulkan-render-log-main-browser-backing/stale.env sh scripts/check/check-linux-vulkan-render-log-compare.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the current main browser-backing env wins over stale focused evidence")
+val evidence = file_read("build/test-linux-vulkan-render-log-main-browser-backing/out/evidence.env")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_browser_backing_env=build/test-linux-vulkan-render-log-main-browser-backing/main.env")
+expect(evidence.contains("electron-browser-backing-fail")).to_equal(false)
+expect(evidence.contains("browser-backing-fail")).to_equal(false)
+```
+
+</details>
+
 #### defaults RenderDoc inputs to focused current capture evidence
 
 - Read the Linux render-log wrapper defaults
@@ -342,8 +395,8 @@ expect(script.contains("build/renderdoc/canonical-probe/electron-html/evidence.e
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
