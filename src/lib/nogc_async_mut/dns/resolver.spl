@@ -141,8 +141,11 @@ class AsyncResolver:
 
     fn resolve(hostname: text) -> Result<[text], IoError>:
         val cached = self.cache.lookup(hostname)
-        if cached.?:
-            return Ok(cached.unwrap())
+        match cached:
+            Some(addresses):
+                return Ok(addresses)
+            nil:
+                pass
         self.resolve_uncached(hostname)
 
     fn resolve_uncached(hostname: text) -> Result<[text], IoError>:
@@ -186,26 +189,32 @@ class AsyncResolver:
         # Bind ephemeral UDP socket (bind returns Future.from_value -- always ready)
         val bind_future = AsyncUdpSocket.bind("0.0.0.0:0")
         val bind_result = poll_bind_with_timeout(bind_future, self.timeout_ms)
-        if bind_result.is_err():
-            return Err(bind_result.unwrap_err())
-        val socket = bind_result.unwrap()
+        val socket = match bind_result:
+            Ok(bound_socket):
+                bound_socket
+            Err(err):
+                return Err(err)
 
         # Send query to nameserver:53
         val dest = nameserver + ":53"
         val send_future = socket.send_to(query_bytes, dest)
         val send_result = poll_future_with_timeout(send_future, self.timeout_ms)
-        if send_result.is_err():
-            return Err(send_result.unwrap_err())
-        val sent = send_result.unwrap()
+        val sent = match send_result:
+            Ok(bytes_sent):
+                bytes_sent
+            Err(err):
+                return Err(err)
         if sent <= 0:
             return Err(IoError(kind: IoErrorKind.Other, message: "dns send returned 0 bytes", source: nil))
 
         # Receive response
         val recv_future = socket.recv_from(MAX_UDP_SIZE)
         val recv_result = poll_recv_with_timeout(recv_future, self.timeout_ms)
-        if recv_result.is_err():
-            return Err(recv_result.unwrap_err())
-        val pair = recv_result.unwrap()
+        val pair = match recv_result:
+            Ok(response_pair):
+                response_pair
+            Err(err):
+                return Err(err)
         val data = pair.0
         val response_text = dns_response_bytes_to_text(data)
 
