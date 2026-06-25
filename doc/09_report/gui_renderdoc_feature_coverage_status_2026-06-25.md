@@ -29,16 +29,16 @@
 - GUI/web/2D Vulkan direct-run source: missing (evidence build/gui-web-2d-vulkan-env-run-auto/evidence.env)
 - GUI/web/2D comparison artifact blocker: doc/08_tracking/bug/gui_web_2d_vulkan_pairwise_aggregate_2026-06-22.md
 - GUI/web/2D pixel comparison blocker: doc/08_tracking/bug/gui_web_2d_vulkan_pairwise_aggregate_2026-06-22.md
-- GUI/web/2D browser Vulkan backing: fail (gpu-feature-status; electron-vulkan-disabled_off;chrome-vulkan-backed)
-- GUI/web/2D Electron browser backing: fail (electron-vulkan-disabled_off; vulkan disabled_off; gl ; source )
-- GUI/web/2D Chrome browser backing: fail (chrome-vulkan-proof-missing:chrome_hardware,chrome_source_file,chrome_vulkan; display ; gl ; source )
+- GUI/web/2D browser Vulkan backing: fail (gpu-feature-status; electron-vulkan-hardware-missing;chrome-vulkan-backed)
+- GUI/web/2D Electron browser backing: fail (electron-vulkan-hardware-missing; vulkan enabled_on; gl (gl=none,angle=none); source build/gui-web-2d-vulkan-env/electron_argb.json)
+- GUI/web/2D Chrome browser backing: pass (chrome-vulkan-backed; display ANGLE_VULKAN; gl (gl=egl-angle,angle=vulkan); source build/gui-web-2d-vulkan-env/chrome_argb_proof.json)
 - GUI/web/2D browser backing blocker: doc/08_tracking/bug/gui_web_2d_vulkan_browser_backing_2026-06-23.md
-- GUI/web/2D Vulkan RenderDoc blockers: blocked (8; renderdoc-command-ready-ready;simple-direct-vulkan-fail-missing-simple-direct-vulkan-evidence;simple-renderdoc-gate-unavailable-missing-source-evidence;electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run;pairwise-pixel-comparison-incomplete-comparison-artifacts-incomplete;simple-argb-file-missing;simple-argb-viewport-fail;simple-argb-nonblank-fail;electron-chrome-diff-unavailable;electron-simple-diff-unavailable;chrome-simple-diff-unavailable)
+- GUI/web/2D Vulkan RenderDoc blockers: blocked (7; renderdoc-command-ready-ready;simple-direct-vulkan-fail-missing-simple-direct-vulkan-evidence;simple-renderdoc-gate-unavailable-missing-source-evidence;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run;pairwise-pixel-comparison-incomplete-comparison-artifacts-incomplete;simple-argb-file-missing;simple-argb-viewport-fail;simple-argb-nonblank-fail;electron-chrome-diff-unavailable;electron-simple-diff-unavailable;chrome-simple-diff-unavailable)
 - GUI/web/2D RenderDoc blocker: doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
-- GUI/web/2D Vulkan loader: present (llvmpipe (LLVM 20.1.2, 256 bits) / llvmpipe)
+- GUI/web/2D Vulkan loader: present (NVIDIA TITAN RTX / NVIDIA)
 - GUI/web/2D Vulkan RenderDoc: ready (ready)
 - GUI/web/2D Vulkan RenderDoc macOS package: not-applicable (not-applicable)
-- GUI/web/2D Electron direct Vulkan: not-rejected-by-log (no-angle-vulkan-unavailable-log; ARGB pass)
+- GUI/web/2D Electron direct Vulkan: pass (electron-vulkan-enabled; ARGB pass)
 - GUI/web/2D Chrome direct Vulkan: not-rejected-by-log (no-angle-vulkan-unavailable-log; bitmap not-run)
 - GUI/web/2D Simple Vulkan:
 - macOS Vulkan: unavailable (unavailable)
@@ -298,45 +298,45 @@
 - gui_web_2d_vulkan_pixel_comparison_mode=artifact-only-no-pairwise-diff
 - gui_web_2d_vulkan_pixel_comparison_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_pairwise_aggregate_2026-06-22.md
 - gui_web_2d_vulkan_browser_backing_status=fail
-- gui_web_2d_vulkan_browser_backing_reason=electron-vulkan-disabled_off;chrome-vulkan-backed
+- gui_web_2d_vulkan_browser_backing_reason=electron-vulkan-hardware-missing;chrome-vulkan-backed
 - gui_web_2d_vulkan_browser_backing_mode=gpu-feature-status
 - gui_web_2d_vulkan_browser_backing_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_browser_backing_2026-06-23.md
 - gui_web_2d_vulkan_electron_browser_backing_status=fail
-- gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-disabled_off
-- gui_web_2d_vulkan_electron_browser_backing_vulkan=disabled_off
+- gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-hardware-missing
+- gui_web_2d_vulkan_electron_browser_backing_vulkan=enabled_on
 - gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=false
-- gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=
-- gui_web_2d_vulkan_electron_browser_backing_source=
-- gui_web_2d_vulkan_electron_browser_backing_source_file_status=unavailable
-- gui_web_2d_vulkan_chrome_browser_backing_status=fail
-- gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-proof-missing:chrome_hardware,chrome_source_file,chrome_vulkan
-- gui_web_2d_vulkan_chrome_browser_backing_display_type=
-- gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=
-- gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=
-- gui_web_2d_vulkan_chrome_browser_backing_source=
-- gui_web_2d_vulkan_chrome_browser_backing_source_file_status=unavailable
+- gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=(gl=none,angle=none)
+- gui_web_2d_vulkan_electron_browser_backing_source=build/gui-web-2d-vulkan-env/electron_argb.json
+- gui_web_2d_vulkan_electron_browser_backing_source_file_status=pass
+- gui_web_2d_vulkan_chrome_browser_backing_status=pass
+- gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed
+- gui_web_2d_vulkan_chrome_browser_backing_display_type=ANGLE_VULKAN
+- gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=(gl=egl-angle,angle=vulkan)
+- gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true
+- gui_web_2d_vulkan_chrome_browser_backing_source=build/gui-web-2d-vulkan-env/chrome_argb_proof.json
+- gui_web_2d_vulkan_chrome_browser_backing_source_file_status=pass
 - gui_web_2d_vulkan_renderdoc_blocker_status=blocked
-- gui_web_2d_vulkan_renderdoc_blocker_reason=renderdoc-command-ready-ready;simple-direct-vulkan-fail-missing-simple-direct-vulkan-evidence;simple-renderdoc-gate-unavailable-missing-source-evidence;electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run;pairwise-pixel-comparison-incomplete-comparison-artifacts-incomplete;simple-argb-file-missing;simple-argb-viewport-fail;simple-argb-nonblank-fail;electron-chrome-diff-unavailable;electron-simple-diff-unavailable;chrome-simple-diff-unavailable
-- gui_web_2d_vulkan_renderdoc_blocker_gate_count=8
-- gui_web_2d_vulkan_renderdoc_blocker_gates=renderdoc-command-ready-ready|simple-direct-vulkan-fail-missing-simple-direct-vulkan-evidence|simple-renderdoc-gate-unavailable-missing-source-evidence|electron-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|electron-renderdoc-gate-unavailable-missing-source-evidence|chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|chrome-renderdoc-gate-not-run-not-run|pairwise-pixel-comparison-incomplete-comparison-artifacts-incomplete;simple-argb-file-missing;simple-argb-viewport-fail;simple-argb-nonblank-fail;electron-chrome-diff-unavailable;electron-simple-diff-unavailable;chrome-simple-diff-unavailable
+- gui_web_2d_vulkan_renderdoc_blocker_reason=renderdoc-command-ready-ready;simple-direct-vulkan-fail-missing-simple-direct-vulkan-evidence;simple-renderdoc-gate-unavailable-missing-source-evidence;electron-renderdoc-gate-unavailable-missing-source-evidence;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-not-run-not-run;pairwise-pixel-comparison-incomplete-comparison-artifacts-incomplete;simple-argb-file-missing;simple-argb-viewport-fail;simple-argb-nonblank-fail;electron-chrome-diff-unavailable;electron-simple-diff-unavailable;chrome-simple-diff-unavailable
+- gui_web_2d_vulkan_renderdoc_blocker_gate_count=7
+- gui_web_2d_vulkan_renderdoc_blocker_gates=renderdoc-command-ready-ready|simple-direct-vulkan-fail-missing-simple-direct-vulkan-evidence|simple-renderdoc-gate-unavailable-missing-source-evidence|electron-renderdoc-gate-unavailable-missing-source-evidence|chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log|chrome-renderdoc-gate-not-run-not-run|pairwise-pixel-comparison-incomplete-comparison-artifacts-incomplete;simple-argb-file-missing;simple-argb-viewport-fail;simple-argb-nonblank-fail;electron-chrome-diff-unavailable;electron-simple-diff-unavailable;chrome-simple-diff-unavailable
 - gui_web_2d_vulkan_renderdoc_blocker_doc=doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
 - gui_web_2d_vulkan_direct_run_evidence_env=build/gui-web-2d-vulkan-env-run-auto/evidence.env
 - gui_web_2d_vulkan_direct_run_source=missing
 - gui_web_2d_vulkan_direct_run_mode=
 - gui_web_2d_vulkan_browser_backing_evidence_env=build/gui-web-2d-vulkan-env/evidence.env
-- gui_web_2d_vulkan_browser_backing_source=auto-existing
+- gui_web_2d_vulkan_browser_backing_source=configured
 - gui_web_2d_vulkan_browser_backing_direct_mode=--browser-backing
 - gui_web_2d_vulkan_uname_s=Linux
 - gui_web_2d_vulkan_uname_m=x86_64
 - gui_web_2d_vulkan_loader_status=present
-- gui_web_2d_vulkan_device=llvmpipe (LLVM 20.1.2, 256 bits)
-- gui_web_2d_vulkan_driver=llvmpipe
+- gui_web_2d_vulkan_device=NVIDIA TITAN RTX
+- gui_web_2d_vulkan_driver=NVIDIA
 - gui_web_2d_vulkan_chrome=/home/ormastes/.cache/ms-playwright/chromium-1223/chrome-linux64/chrome
 - gui_web_2d_vulkan_electron=tools/electron-shell/node_modules/.bin/electron
 - gui_web_2d_vulkan_electron_requested_api=vulkan
 - gui_web_2d_vulkan_electron_requested_angle=vulkan
 - gui_web_2d_vulkan_electron_requested_features=Vulkan
-- gui_web_2d_vulkan_electron_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan
+- gui_web_2d_vulkan_electron_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform=x11 --enable-features=Vulkan --use-angle=vulkan
 - gui_web_2d_vulkan_chrome_requested_api=vulkan
 - gui_web_2d_vulkan_chrome_requested_angle=vulkan
 - gui_web_2d_vulkan_chrome_requested_features=Vulkan
@@ -347,7 +347,7 @@
 - gui_web_2d_vulkan_renderdoc_reason=ready
 - gui_web_2d_vulkan_renderdoc_setup_reason=ready
 - gui_web_2d_vulkan_renderdoc_cmd=build/tools/renderdoc/bin/renderdoccmd
-- gui_web_2d_vulkan_renderdoc_search_paths=RDOC_HOME_UNSET|/home/ormastes/dev/pub/simple/build/tools/renderdoc|/home/ormastes/dev/pub/simple/build/tools/renderdoc-*|/Applications/RenderDoc.app|/home/ormastes/Applications/RenderDoc.app|/home/ormastes/dev/pub/simple/build/tools/RenderDoc.app|/home/ormastes/dev/pub/simple/build/tools/renderdoc/RenderDoc.app
+- gui_web_2d_vulkan_renderdoc_search_paths=RDOC_HOME_UNSET|/home/ormastes/dev/pub/simple/build/tools/renderdoc|/home/ormastes/dev/pub/simple/build/tools/renderdoc-*|/Applications/RenderDoc.app|/home/ormastes/Applications/RenderDoc.app|/home/ormastes/dev/pub/simple/build/tools/RenderDoc.app|/home/ormastes/dev/pub/simple/build/tools/renderdoc/RenderDoc.app|PATH:renderdoccmd
 - gui_web_2d_vulkan_renderdoc_install_hint=
 - gui_web_2d_vulkan_renderdoc_macos_homebrew_package_status=not-applicable
 - gui_web_2d_vulkan_renderdoc_macos_upstream_support_status=not-applicable
@@ -369,8 +369,8 @@
 - gui_web_2d_vulkan_electron_argb_nonblank_status=pass
 - gui_web_2d_vulkan_electron_argb_checksum=3956812989604346
 - gui_web_2d_vulkan_electron_argb_weighted_checksum=1823529669080970897482
-- gui_web_2d_vulkan_electron_vulkan_status=not-rejected-by-log
-- gui_web_2d_vulkan_electron_vulkan_reason=no-angle-vulkan-unavailable-log
+- gui_web_2d_vulkan_electron_vulkan_status=pass
+- gui_web_2d_vulkan_electron_vulkan_reason=electron-vulkan-enabled
 - gui_web_2d_vulkan_chrome_stdout=build/gui-web-2d-vulkan-env/chrome.out
 - gui_web_2d_vulkan_chrome_stdout_file_status=pass
 - gui_web_2d_vulkan_chrome_log=build/gui-web-2d-vulkan-env/chrome.log
