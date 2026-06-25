@@ -3,7 +3,7 @@
 - status: pass
 - reason: pass
 - HTML tags: 105/105
-- implemented CSS properties: 95/95
+- implemented CSS properties: 96/96
 - manifest cases: 50
 
 ## Raw Evidence
@@ -19,9 +19,9 @@
 - html_css_rendering_manifest_traceability_html_tag_manifest_only_count=0
 - html_css_rendering_manifest_traceability_html_tag_manifest_only=
 - html_css_rendering_manifest_traceability_html_tag_missing=
-- html_css_rendering_manifest_traceability_css_property_count=95
-- html_css_rendering_manifest_traceability_css_property_covered_count=95
-- html_css_rendering_manifest_traceability_css_property_covered=align-content,align-items,align-self,background,background-color,background-image,background-repeat,background-size,border,border-bottom,border-bottom-color,border-bottom-left-radius,border-bottom-right-radius,border-bottom-style,border-bottom-width,border-color,border-left,border-left-color,border-left-style,border-left-width,border-radius,border-right,border-right-color,border-right-style,border-right-width,border-style,border-top,border-top-color,border-top-left-radius,border-top-right-radius,border-top-style,border-top-width,border-width,bottom,box-shadow,box-sizing,color,column-gap,direction,display,flex,flex-basis,flex-direction,flex-grow,flex-shrink,flex-wrap,font-size,font-style,font-weight,gap,height,justify-content,left,letter-spacing,line-height,margin,margin-bottom,margin-left,margin-right,margin-top,max-height,max-width,min-height,min-width,opacity,order,outline,outline-color,outline-style,outline-width,overflow,overflow-x,overflow-y,padding,padding-bottom,padding-left,padding-right,padding-top,position,right,row-gap,text-align,text-decoration,text-decoration-line,text-indent,text-overflow,text-shadow,text-transform,top,transform,visibility,white-space,width,word-spacing,z-index
+- html_css_rendering_manifest_traceability_css_property_count=96
+- html_css_rendering_manifest_traceability_css_property_covered_count=96
+- html_css_rendering_manifest_traceability_css_property_covered=align-content,align-items,align-self,background,background-color,background-image,background-position,background-repeat,background-size,border,border-bottom,border-bottom-color,border-bottom-left-radius,border-bottom-right-radius,border-bottom-style,border-bottom-width,border-color,border-left,border-left-color,border-left-style,border-left-width,border-radius,border-right,border-right-color,border-right-style,border-right-width,border-style,border-top,border-top-color,border-top-left-radius,border-top-right-radius,border-top-style,border-top-width,border-width,bottom,box-shadow,box-sizing,color,column-gap,direction,display,flex,flex-basis,flex-direction,flex-grow,flex-shrink,flex-wrap,font-size,font-style,font-weight,gap,height,justify-content,left,letter-spacing,line-height,margin,margin-bottom,margin-left,margin-right,margin-top,max-height,max-width,min-height,min-width,opacity,order,outline,outline-color,outline-style,outline-width,overflow,overflow-x,overflow-y,padding,padding-bottom,padding-left,padding-right,padding-top,position,right,row-gap,text-align,text-decoration,text-decoration-line,text-indent,text-overflow,text-shadow,text-transform,top,transform,visibility,white-space,width,word-spacing,z-index
 - html_css_rendering_manifest_traceability_css_property_missing=
 - html_css_rendering_manifest_traceability_manifest_case_count=50
 - html_css_rendering_manifest_traceability_required_manifest_case_count=50
