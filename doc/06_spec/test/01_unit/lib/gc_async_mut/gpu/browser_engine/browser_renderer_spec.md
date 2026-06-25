@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 110 | 110 | 0 | 0 |
+| 111 | 111 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -390,6 +390,27 @@ val rtl = render_html_to_pixels_with_viewport(rtl_html, 96, 32).pixel_data
 expect(_count_color(rtl, 0xFF111827u32)).to_equal(_count_color(reversed, 0xFF111827u32))
 expect(_pixels_equal(ltr, rtl)).to_equal(false)
 expect(_pixels_equal(reversed, rtl)).to_equal(true)
+```
+
+</details>
+
+#### renders text-shadow behind foreground text glyphs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plain_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; }</style></head><body><div class='label'>SHADOW</div></body></html>"
+val shadow_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; text-shadow: 4px 3px #dc2626; }</style></head><body><div class='label'>SHADOW</div></body></html>"
+val plain = render_html_to_pixels_with_viewport(plain_html, 96, 32).pixel_data
+val shadow = render_html_to_pixels_with_viewport(shadow_html, 96, 32).pixel_data
+
+expect(_count_color(shadow, 0xFF111827u32)).to_equal(_count_color(plain, 0xFF111827u32))
+expect(_count_color(shadow, 0xFFDC2626u32)).to_be_greater_than(0)
+expect(_pixels_equal(plain, shadow)).to_equal(false)
 ```
 
 </details>
@@ -2032,8 +2053,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 110 |
-| Active scenarios | 110 |
+| Total scenarios | 111 |
+| Active scenarios | 111 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
