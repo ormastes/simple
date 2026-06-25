@@ -52,8 +52,11 @@ fn _jit_cache_owner(self: ModuleLoader, sym_name: text, rec_cache) -> text:
     if rec_cache.has("owner"):
         return rec_cache["owner"]
     val rec_opt = self.jit.exec_mapper.lookup(sym_name)
-    if rec_opt.?:
-        return rec_opt.unwrap().owner_id
+    match rec_opt:
+        Some(rec):
+            return rec.owner_id
+        nil:
+            pass
     "__jit__"
 
 fn _jit_cached_loaded_symbol(sym_name: text, rec_cache) -> LoadedSymbol:
@@ -231,21 +234,27 @@ fn _compat_load_smf(self: ModuleLoader, path: text) -> LoadResult:
         return LoadResult.Error(message: "module not found: " + path)
 
     val smf_bytes_result = file_read_bytes(path)
-    if not smf_bytes_result.?:
-        return LoadResult.Error(message: "failed to read module bytes: " + path)
-    val smf_bytes = smf_bytes_result.unwrap()
+    val smf_bytes = match smf_bytes_result:
+        Some(bytes):
+            bytes
+        nil:
+            return LoadResult.Error(message: "failed to read module bytes: " + path)
     val reader_result = SmfReaderMemory.from_data(smf_bytes)
-    if reader_result.is_err():
-        return LoadResult.Error(message: reader_result.unwrap_err())
-    val reader = reader_result.unwrap()
+    val reader = match reader_result:
+        case Ok(value):
+            value
+        case Err(err):
+            return LoadResult.Error(message: err)
 
     var symbols: Dict<text, LoadedSymbol> = {}
     val exported_smf_symbols: [SmfSymbol] = reader.exported_symbols()
     for smf_sym in exported_smf_symbols:
         val code_result = reader.read_code(smf_sym)
-        if code_result.is_err():
-            return LoadResult.Error(message: code_result.unwrap_err())
-        val code = code_result.unwrap()
+        val code = match code_result:
+            case Ok(value):
+                value
+            case Err(err):
+                return LoadResult.Error(message: err)
         val addr = native_alloc_exec_memory(code.len() as i64)
         if addr == 0:
             return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
@@ -270,13 +279,17 @@ fn _compat_load_smf(self: ModuleLoader, path: text) -> LoadResult:
         self.global_symbols[smf_sym.name] = (path, loaded_sym)
 
     val ordered_symbols_result = reader.symbols_in_table_order()
-    if ordered_symbols_result.is_err():
-        return LoadResult.Error(message: ordered_symbols_result.unwrap_err())
-    val ordered_symbols = ordered_symbols_result.unwrap()
+    val ordered_symbols = match ordered_symbols_result:
+        case Ok(value):
+            value
+        case Err(err):
+            return LoadResult.Error(message: err)
     val relocs_result = reader.read_relocations()
-    if relocs_result.is_err():
-        return LoadResult.Error(message: relocs_result.unwrap_err())
-    val relocs = relocs_result.unwrap()
+    val relocs = match relocs_result:
+        case Ok(value):
+            value
+        case Err(err):
+            return LoadResult.Error(message: err)
     if relocs.len() > 0:
         for sym_name in symbols.keys():
             val loaded_sym = symbols[sym_name]
@@ -313,8 +326,12 @@ fn _compat_load_smf(self: ModuleLoader, path: text) -> LoadResult:
             native_flush_icache(loaded_sym.address, loaded_sym.size)
 
     val metadata_result = self.jit.load_smf_metadata(path)
-    if metadata_result.is_err() and symbols.len() == 0:
-        return LoadResult.Error(message: metadata_result.unwrap_err())
+    match metadata_result:
+        case Err(err):
+            if symbols.len() == 0:
+                return LoadResult.Error(message: err)
+        case Ok(_):
+            pass
 
     val m = LoadedModule(path: path, reader: "", symbols: symbols, load_time: 0, version: 1)
     self.modules[path] = m
@@ -405,14 +422,18 @@ impl ModuleLoader:
 
         match self.jit.try_jit_instantiate(name):
             case JitInstantiationResult.Success(code, sym_name, address):
-                val addr = if address.?:
-                    address.unwrap()
-                else:
-                    0
+                val addr = match address:
+                    Some(value):
+                        value
+                    nil:
+                        0
                 var owner = "__jit__"
                 val rec = self.jit.exec_mapper.lookup(sym_name)
-                if rec.?:
-                    owner = rec.unwrap().owner_id
+                match rec:
+                    Some(value):
+                        owner = value.owner_id
+                    nil:
+                        pass
                 val sym = LoadedSymbol(
                     name: sym_name,
                     address: addr,
