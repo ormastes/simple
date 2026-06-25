@@ -170,7 +170,9 @@ The browser Vulkan-backed proof is a separate rollup:
 `gui_web_2d_vulkan_browser_backing_status`,
 `gui_web_2d_vulkan_browser_backing_reason`, and
 `gui_web_2d_vulkan_browser_backing_mode`. Missing focused proof reports
-`focused-browser-backing-required`. Pixel comparison artifacts are useful
+`focused-browser-backing-required` and emits Electron/Chrome child backing
+statuses as `unavailable` with `missing-focused-browser-backing`, not blank.
+Pixel comparison artifacts are useful
 comparison evidence, but they are not Electron/Chrome Vulkan-backed proof. The
 focused `--browser-backing` probe can provide `gpu-feature-status` evidence.
 For failed or partial hosts, inspect

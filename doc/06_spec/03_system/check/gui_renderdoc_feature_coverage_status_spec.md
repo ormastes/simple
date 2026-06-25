@@ -308,6 +308,10 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
    - Expected: chrome_browser_backing_reason equals `chrome-vulkan-backed`
    - Expected: browser_backing_status equals `fail`
    - Expected: browser_backing_mode equals `focused-browser-backing-required`
+   - Expected: electron_browser_backing_status equals `unavailable`
+   - Expected: electron_browser_backing_reason equals `missing-focused-browser-backing`
+   - Expected: chrome_browser_backing_status equals `unavailable`
+   - Expected: chrome_browser_backing_reason equals `missing-focused-browser-backing`
    - Expected: browser_backing_mode equals `gpu-feature-status`
    - Expected: showcase_4k_width equals `3840`
    - Expected: showcase_4k_height equals `2160`
@@ -334,7 +338,7 @@ perf `status=pass` without FPS, checksum, and exact geometry is downgraded to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 715 lines folded for reproduction.
+Runnable source: 719 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -953,6 +957,10 @@ else:
     expect(browser_backing_reason.contains("missing-reason")).to_be(false)
     if browser_backing_reason.contains("missing-focused-browser-backing"):
         expect(browser_backing_mode).to_equal("focused-browser-backing-required")
+        expect(electron_browser_backing_status).to_equal("unavailable")
+        expect(electron_browser_backing_reason).to_equal("missing-focused-browser-backing")
+        expect(chrome_browser_backing_status).to_equal("unavailable")
+        expect(chrome_browser_backing_reason).to_equal("missing-focused-browser-backing")
     else:
         expect(browser_backing_mode).to_equal("gpu-feature-status")
         expect(electron_browser_backing_status.len()).to_be_greater_than(0)
