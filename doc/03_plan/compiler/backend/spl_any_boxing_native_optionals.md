@@ -204,3 +204,30 @@ half-built.
 does for `any`, makes `print` work for free, and is the shorter diff; the tuple
 form duplicates machinery the tagged-value model already has. Either way, fix the
 dead gate first. Iteration cost ≈134s self-host rebuild per change (tractable).
+
+## CORRECTION-of-CORRECTION 2026-06-25 — prior "runs fine" measured the SEED, not self-host
+
+The section above ("(C) was a STALE-build mirage; `.spl` codegen runs") is itself
+**wrong**: it tested `bin/simple`, which is a **~30 MB Rust seed** build
+(`bin/release/.../simple`, 30,335,240 B, md5 053e2f4) — NOT the self-hosted
+compiler. The self-hosted binary is the **17 MB** `build/bootstrap/full/.../simple`
+(`full_bin`, 17,327,408 B). They are different programs; `result=2`/`unwrap_or=nil`
+came from the seed's interpreter, not `.spl` codegen.
+
+Verified against a fresh `--pure-simple` build (stage4: 782 compiled / 0 failed,
+141 s) of `full_bin`:
+- `full_bin run <file>` → exits rc=0 doing nothing (a compile-time `eprint` added
+  to the `Let` MIR lowering never fired — `run` does not reach lowering/execution).
+- `full_bin -c 'print(1+1)'` → **rc=248**, empty stdout (×3). Caveat: the host was
+  at **load ~14** (continuous parallel bootstrap builds rewriting `full_bin`), so
+  "crashed" vs "starved" is not cleanly separable here.
+
+**Net blocker for A/B (and for verifying ANY `.spl` codegen change):** there is no
+usable self-hosted execution path in this environment. The only runnable `simple`
+is the seed; `full_bin`'s `run`/`-c` are broken-or-unverifiable; `--deploy` (the
+route to a delegate-backed working binary at `bin/simple`) is **human-gated**; and
+parallel sessions continuously rewrite `full_bin` + saturate the machine, so
+controlled iterative testing is not feasible. Implementing optional/`any`
+value-semantics blind (no run-time verification) would violate "leave a runnable
+check." **Needs a human to either deploy a known-good `full_bin` or quiet the box
+so `full_bin -c`/`run` can be trusted, before the feature build is testable.**
