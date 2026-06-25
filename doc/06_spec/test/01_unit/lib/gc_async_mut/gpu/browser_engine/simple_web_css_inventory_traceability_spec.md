@@ -80,13 +80,13 @@ coverage.
 
 - Record the functional SSpec owner for implemented Simple Web CSS properties
 - Keep the full implemented Simple Web CSS subset tied to renderer behavior
-   - Expected: implemented.split(" ").len() equals `67`
+   - Expected: implemented.split(" ").len() equals `68`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -95,10 +95,11 @@ val owner = _implemented_css_owner()
 expect(owner).to_contain("simple_web_generated_html_css_combinations_spec.spl")
 
 step("Keep the full implemented Simple Web CSS subset tied to renderer behavior")
-val implemented = "align-content align-items align-self background background-color border border-bottom border-bottom-color border-bottom-width border-color border-left border-left-color border-left-width border-right border-right-color border-right-width border-style border-top border-top-color border-top-width border-width box-sizing color column-gap display flex flex-basis flex-direction flex-grow flex-shrink flex-wrap font-size font-weight gap height justify-content left line-height margin margin-bottom margin-left margin-right margin-top max-height max-width min-height min-width opacity order overflow overflow-x overflow-y padding padding-bottom padding-left padding-right padding-top position right row-gap text-align top transform visibility white-space width z-index"
-expect(implemented.split(" ").len()).to_equal(67)
+val implemented = "align-content align-items align-self background background-color border border-bottom border-bottom-color border-bottom-width border-color border-left border-left-color border-left-width border-right border-right-color border-right-width border-style border-top border-top-color border-top-width border-width bottom box-sizing color column-gap display flex flex-basis flex-direction flex-grow flex-shrink flex-wrap font-size font-weight gap height justify-content left line-height margin margin-bottom margin-left margin-right margin-top max-height max-width min-height min-width opacity order overflow overflow-x overflow-y padding padding-bottom padding-left padding-right padding-top position right row-gap text-align top transform visibility white-space width z-index"
+expect(implemented.split(" ").len()).to_equal(68)
 expect(implemented).to_contain("display")
 expect(implemented).to_contain("background-color")
+expect(implemented).to_contain("bottom")
 expect(implemented).to_contain("align-content")
 expect(implemented).to_contain("align-items")
 expect(implemented).to_contain("align-self")
@@ -118,7 +119,7 @@ expect(implemented).to_contain("z-index")
 
 - Record the inventory SSpec owner for unsupported CSS properties
 - Keep the complete current unsupported W3C property inventory visible without claiming renderer support
-   - Expected: unsupported_cases.len() equals `334`
+   - Expected: unsupported_cases.len() equals `333`
 
 
 <details>
@@ -135,7 +136,7 @@ expect(owner).to_contain("simple_web_css_inventory_traceability_spec.spl")
 step("Keep the complete current unsupported W3C property inventory visible without claiming renderer support")
 val unsupported = _unsupported_css_inventory()
 val unsupported_cases = unsupported.split(" ")
-expect(unsupported_cases.len()).to_equal(334)
+expect(unsupported_cases.len()).to_equal(333)
 expect(unsupported).to_contain("accent-color")
 expect(unsupported).to_contain("border-image-source")
 expect(unsupported).to_contain("grid-template-columns")

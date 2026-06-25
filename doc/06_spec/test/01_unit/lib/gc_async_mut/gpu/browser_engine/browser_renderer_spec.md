@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 99 | 99 | 0 | 0 |
+| 100 | 100 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -158,6 +158,25 @@ val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
 expect(_count_region_changed(result.pixel_data, TEST_WIDTH, 0, 0, 6, 4, WHITE_BG)).to_equal(0)
 expect(_count_region_changed(result.pixel_data, TEST_WIDTH, 10, 6, 6, 4, WHITE_BG)).to_equal(24)
 expect(_count_color(result.pixel_data, 0xFF2563EBu32)).to_equal(24)
+```
+
+</details>
+
+#### renders absolute bottom offsets as bottom anchored painted pixels
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .shell { position: relative; width: 20px; height: 20px; background-color: #ffffff; } .card { position: absolute; left: 2px; bottom: 3px; width: 6px; height: 4px; background-color: #16a34a; }</style></head><body><div class='shell'><div class='card'></div></div></body></html>"
+val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+expect(_count_region_changed(result.pixel_data, TEST_WIDTH, 2, 0, 6, 4, WHITE_BG)).to_equal(0)
+expect(_count_region_changed(result.pixel_data, TEST_WIDTH, 2, 13, 6, 4, WHITE_BG)).to_equal(24)
+expect(_count_color(result.pixel_data, 0xFF16A34Au32)).to_equal(24)
 ```
 
 </details>
@@ -1800,8 +1819,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 99 |
-| Active scenarios | 99 |
+| Total scenarios | 100 |
+| Active scenarios | 100 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
