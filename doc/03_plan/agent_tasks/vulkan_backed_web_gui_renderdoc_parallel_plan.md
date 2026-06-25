@@ -183,6 +183,7 @@ gui_web_2d_vulkan_chrome_browser_backing_source_file_status=pass
 The aggregate normalizes stale child `pass` rows to `fail` when the matching
 hardware, Vulkan detail, or source proof files are missing. Do not hand-edit a
 pass row; rerun `--browser-backing` and keep the Electron/Chrome source proof
+file status rows emitted by the producer.
 files.
 The setup producer applies the same Chrome rule: `hardwareSupportsVulkan=true`
 and Vulkan display/GL detail are both required before emitting

@@ -216,8 +216,9 @@ The `--browser-backing` setup producer uses the same rule; Chrome hardware
 missing with Vulkan-looking display/GL text is emitted as
 `chrome-vulkan-hardware-missing`, not a pass.
 Both Electron and Chrome child passes also require their
-`*_browser_backing_source` files to exist; the aggregate emits
-`*_browser_backing_source_file_status=pass` for accepted proof.
+`*_browser_backing_source` files to exist; the `--browser-backing` producer
+emits `*_browser_backing_source_file_status`, and the aggregate verifies or
+recomputes that status for older evidence before accepting proof.
 The aggregate also normalizes stale child rows: a child `pass` without those
 matching proof fields is emitted as `fail` with `electron-vulkan-proof-missing`
 or `chrome-vulkan-proof-missing`, so agents must fix the probe evidence rather
