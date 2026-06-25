@@ -247,6 +247,10 @@ gui_web_2d_vulkan_chrome_simple_diff_path=<run-dir>/chrome_simple_diff.ppm
 gui_web_2d_vulkan_chrome_simple_diff_file_status=pass
 ```
 
+Pairwise `pass` requires `mismatch_count=0` and the corresponding
+`*_diff_file_status=pass`; zero mismatch metadata without the diff artifact is
+not pixel-equivalence proof.
+
 All pairwise mismatch counts must be `0`. If any capture is missing, inspect
 `gui_web_2d_vulkan_electron_stdout`,
 `gui_web_2d_vulkan_electron_stdout_file_status`,

@@ -180,9 +180,11 @@ three surfaces (`gui_web_2d_vulkan_electron_argb_*`,
 `gui_web_2d_vulkan_chrome_simple_pairwise_diff_status`,
 `gui_web_2d_vulkan_chrome_simple_diff_path`, and
 `gui_web_2d_vulkan_chrome_simple_diff_file_status`. A status of
+`pass` requires each zero-mismatch diff artifact file to exist. A status of
 `incomplete` with mode `artifact-only-no-pairwise-diff` means the run captured
 useful artifacts but did not prove Electron, Chrome, and Simple rendered the
-same GUI/web/2D pixels. Missing Electron, Chrome, or Simple ARGB input stays in
+same GUI/web/2D pixels. Missing Electron, Chrome, Simple ARGB input, or diff
+artifact files stay in
 this incomplete state and is not a mismatch claim. A status of `fail` with mode
 `pairwise-argb-diff-mismatch` means the pairwise comparisons ran and found
 pixel differences that must be fixed before claiming parity.
