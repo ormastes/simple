@@ -54,3 +54,17 @@ The remaining blocker is Electron under RenderDoc:
 This means the Electron wrapper requests Vulkan/ANGLE and does not hit the
 `vulkan-angle-unavailable` log gate, but Chromium's GPU process crashes under
 RenderDoc before producing either nonblank ARGB evidence or a `.rdc` capture.
+
+Rejected local variants on this host:
+
+- `--in-process-gpu` changed the failure to Electron main-process `SIGSEGV`
+  and produced no ARGB or `.rdc`.
+- `--single-process` also produced Electron `SIGSEGV` and no ARGB or `.rdc`.
+- `--use-gl=angle --use-angle=gl` still crashed the Chromium GPU process with
+  `exit_code=139`, so the failure is not only the Vulkan ANGLE selection.
+- Removing `renderdoccmd --opt-hook-children` avoided the GPU-process crash but
+  ended with `Failed to shutdown` and still produced no `.rdc`, so it is not
+  valid RenderDoc evidence.
+
+Keep the gate failed until Electron produces both a nonblank ARGB proof and an
+`RDOC` capture under the Chromium/Vulkan request contract.

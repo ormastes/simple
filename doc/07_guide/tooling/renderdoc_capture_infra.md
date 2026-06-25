@@ -830,7 +830,10 @@ The current canonical evidence contract is:
   `xvfb-run -a --server-args="-screen 0 ${width}x${height}x24"` on headless
   Linux, requests `--enable-features=Vulkan --use-angle=vulkan`, and currently
   records `chromium-gpu-process-crashed-under-renderdoc` before ARGB or `.rdc`
-  output is produced.
+  output is produced. Local 2026-06-25 probes also rejected
+  `--in-process-gpu`, `--single-process`, GL/ANGLE fallback, and removing
+  `--opt-hook-children`; none produced both nonblank ARGB and an `RDOC`
+  capture.
 - Original Chrome HTML/CSS path:
   `build/renderdoc/canonical-probe/html/evidence.env`, or an external-host
   evidence env, must pass the original-backend gate with `rdoc_scene=html-css-chrome`,
