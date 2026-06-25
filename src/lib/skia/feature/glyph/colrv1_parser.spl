@@ -273,13 +273,17 @@ fn route_color_glyph(shaper_glyph_id: u32, colr_blob: [u8]) -> Option<[ColrLayer
     if colr_blob.len() == 0:
         return None
     val maybe_header = parse_colr_header(colr_blob)
-    if maybe_header == None:
-        return None
-    val header = maybe_header.unwrap()
+    val header = match maybe_header:
+        case Some(parsed):
+            parsed
+        case None:
+            return None
     val maybe_paint_off = find_base_glyph_v1(colr_blob, header, shaper_glyph_id)
-    if maybe_paint_off == None:
-        return None
-    val paint_off = maybe_paint_off.unwrap()
+    val paint_off = match maybe_paint_off:
+        case Some(offset):
+            offset
+        case None:
+            return None
     # Walk the paint graph rooted at paint_off and collect all reachable
     # paint nodes as a flat ColrLayer list (glyph_id=shaper_glyph_id, paint_offset=each node's offset).
     # We perform a simple iterative BFS over paint offsets to avoid deep recursion.
@@ -313,53 +317,55 @@ fn route_color_glyph(shaper_glyph_id: u32, colr_blob: [u8]) -> Option<[ColrLayer
         result_layers.append(layer)
         # Decode node to discover child paint offsets
         val maybe_node = decode_paint_subtable(colr_blob, cur_off)
-        if maybe_node != None:
-            val node = maybe_node.unwrap()
-            val node_off = cur_off as i64
+        match maybe_node:
+            case Some(node):
+                val node_off = cur_off as i64
             # PaintColrLayers (fmt 11): child offsets come from layer list entries
-            if node.kind == PaintKind.ColrLayers:
-                if node_off + 6 <= colr_blob.len() as i64:
-                    val num_layers = colr_blob[node_off + 1] as i64
-                    val first_idx = read_u32_be(colr_blob, node_off + 2) as i64
-                    var li: i64 = 0
-                    while li < num_layers:
-                        val entry_off = (first_idx + li) * 4
-                        if entry_off + 4 <= colr_blob.len() as i64:
-                            val child_off = read_u32_be(colr_blob, entry_off)
-                            work_queue.append(child_off)
-                        li = li + 1
+                if node.kind == PaintKind.ColrLayers:
+                    if node_off + 6 <= colr_blob.len() as i64:
+                        val num_layers = colr_blob[node_off + 1] as i64
+                        val first_idx = read_u32_be(colr_blob, node_off + 2) as i64
+                        var li: i64 = 0
+                        while li < num_layers:
+                            val entry_off = (first_idx + li) * 4
+                            if entry_off + 4 <= colr_blob.len() as i64:
+                                val child_off = read_u32_be(colr_blob, entry_off)
+                                work_queue.append(child_off)
+                            li = li + 1
             # PaintComposite (fmt 32): source + backdrop paint offsets
-            else if node.kind == PaintKind.Composite:
-                if node_off + 8 <= colr_blob.len() as i64:
-                    val src_b0 = colr_blob[node_off + 1] as u32
-                    val src_b1 = colr_blob[node_off + 2] as u32
-                    val src_b2 = colr_blob[node_off + 3] as u32
-                    val src_off = cur_off + ((src_b0 << 16) or (src_b1 << 8) or src_b2)
-                    val bd_b0 = colr_blob[node_off + 5] as u32
-                    val bd_b1 = colr_blob[node_off + 6] as u32
-                    val bd_b2 = colr_blob[node_off + 7] as u32
-                    val bd_off = cur_off + ((bd_b0 << 16) or (bd_b1 << 8) or bd_b2)
-                    work_queue.append(src_off)
-                    work_queue.append(bd_off)
+                else if node.kind == PaintKind.Composite:
+                    if node_off + 8 <= colr_blob.len() as i64:
+                        val src_b0 = colr_blob[node_off + 1] as u32
+                        val src_b1 = colr_blob[node_off + 2] as u32
+                        val src_b2 = colr_blob[node_off + 3] as u32
+                        val src_off = cur_off + ((src_b0 << 16) or (src_b1 << 8) or src_b2)
+                        val bd_b0 = colr_blob[node_off + 5] as u32
+                        val bd_b1 = colr_blob[node_off + 6] as u32
+                        val bd_b2 = colr_blob[node_off + 7] as u32
+                        val bd_off = cur_off + ((bd_b0 << 16) or (bd_b1 << 8) or bd_b2)
+                        work_queue.append(src_off)
+                        work_queue.append(bd_off)
             # PaintGlyph (fmt 10): single child paint offset (u24 BE at off+1)
-            else if node.kind == PaintKind.Glyph:
-                if node_off + 4 <= colr_blob.len() as i64:
-                    val pb0 = colr_blob[node_off + 1] as u32
-                    val pb1 = colr_blob[node_off + 2] as u32
-                    val pb2 = colr_blob[node_off + 3] as u32
-                    val child_off = cur_off + ((pb0 << 16) or (pb1 << 8) or pb2)
-                    work_queue.append(child_off)
+                else if node.kind == PaintKind.Glyph:
+                    if node_off + 4 <= colr_blob.len() as i64:
+                        val pb0 = colr_blob[node_off + 1] as u32
+                        val pb1 = colr_blob[node_off + 2] as u32
+                        val pb2 = colr_blob[node_off + 3] as u32
+                        val child_off = cur_off + ((pb0 << 16) or (pb1 << 8) or pb2)
+                        work_queue.append(child_off)
             # Transform-family (fmt 12-21): single child paint offset at off+1 (u24 BE)
-            else if (node.kind == PaintKind.Transform or node.kind == PaintKind.Translate
-                     or node.kind == PaintKind.Rotate or node.kind == PaintKind.Scale
-                     or node.kind == PaintKind.Skew):
-                if node_off + 4 <= colr_blob.len() as i64:
-                    val tb0 = colr_blob[node_off + 1] as u32
-                    val tb1 = colr_blob[node_off + 2] as u32
-                    val tb2 = colr_blob[node_off + 3] as u32
-                    val child_off = cur_off + ((tb0 << 16) or (tb1 << 8) or tb2)
-                    work_queue.append(child_off)
+                else if (node.kind == PaintKind.Transform or node.kind == PaintKind.Translate
+                         or node.kind == PaintKind.Rotate or node.kind == PaintKind.Scale
+                         or node.kind == PaintKind.Skew):
+                    if node_off + 4 <= colr_blob.len() as i64:
+                        val tb0 = colr_blob[node_off + 1] as u32
+                        val tb1 = colr_blob[node_off + 2] as u32
+                        val tb2 = colr_blob[node_off + 3] as u32
+                        val child_off = cur_off + ((tb0 << 16) or (tb1 << 8) or tb2)
+                        work_queue.append(child_off)
             # Solid and gradient paints are leaf nodes — no child offsets
+            case None:
+                pass
         steps = steps + 1
     if result_layers.len() == 0:
         None
