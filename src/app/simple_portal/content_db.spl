@@ -6,6 +6,7 @@
 use std.json.builder.{escape_json}
 use std.fs_driver.mount_table.{MountTable}
 use std.fs_driver.types.{OpenFlags}
+use app.io.mod.{env_get}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -47,18 +48,16 @@ class PortalContentSource:
     db: PortalContentDb
 
 pub fn simple_portal_default_app_root() -> text:
-    val env_root = rt_env_get("SIMPLE_PORTAL_APP_ROOT") ?? ""
+    val env_root = env_get("SIMPLE_PORTAL_APP_ROOT") ?? ""
     if env_root != "":
         return env_root
     "src/app/simple_portal/app"
 
 pub fn simple_portal_default_data_root() -> text:
-    val env_root = rt_env_get("SIMPLE_PORTAL_DATA_ROOT") ?? ""
+    val env_root = env_get("SIMPLE_PORTAL_DATA_ROOT") ?? ""
     if env_root != "":
         return env_root
     "var/lib/simple_portal"
-
-extern fn rt_env_get(key: text) -> text
 
 pub fn portal_content_db_load(app_root: text) -> Result<PortalContentDb, text>:
     val pages_path = "{app_root}/content/pages.db"
@@ -364,21 +363,21 @@ fn _portal_content_db_files_exist(root: text) -> bool:
 
 fn _portal_mount_file_exists(fs: MountTable, path: text) -> bool:
     val stat = fs.stat(path)
-    if stat.is_err():
-        return false
-    stat.unwrap().is_file
+    match stat:
+        Ok(info): info.is_file
+        Err(_): false
 
 fn _portal_mount_read_text(fs: MountTable, path: text) -> Result<text, text>:
     val stat = fs.stat(path)
-    if stat.is_err():
-        return Err("Missing portal content file: {path}")
-    val info = stat.unwrap()
+    val info = match stat:
+        Ok(value): value
+        Err(_): return Err("Missing portal content file: {path}")
     if not info.is_file:
         return Err("Portal content path is not a file: {path}")
     val handle = fs.open(path, OpenFlags.read_only())
-    if handle.is_err():
-        return Err("Failed to open portal content file: {path}")
-    val fh = handle.unwrap()
+    val fh = match handle:
+        Ok(value): value
+        Err(_): return Err("Failed to open portal content file: {path}")
     val body = fs.read(fh, info.size)
     val _ = fs.close(fh)
     match body:
