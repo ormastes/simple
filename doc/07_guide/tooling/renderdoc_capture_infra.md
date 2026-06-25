@@ -648,6 +648,12 @@ from the nested Simple/original Chrome RenderDoc lanes, Electron
 Chromium/Vulkan RenderDoc gate, modern Web WM Electron visual/interaction
 evidence, and the production GUI/web core parity gate, so concurrent missing
 captures are not hidden by a single status reason.
+Callers that already produced fresh HTML/CSS traceability evidence may set
+`HTML_CSS_TRACEABILITY_EVIDENCE_ENV`; callers that already produced fresh
+rendering-manifest traceability evidence may set
+`HTML_CSS_RENDERING_MANIFEST_TRACEABILITY_ENV`. The nested gate reuses those
+files instead of rerunning the heavy checkers. A configured but missing file is
+a fail-closed state, not permission to fall back to stale build artifacts.
 
 For the HTML-backed GUI modernization claim, the top-level audit consumes
 `scripts/check/check-web-wm-modern-shell-evidence.shs` through

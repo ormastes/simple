@@ -6,6 +6,9 @@
 - Spec: `test/03_system/check/html_css_renderdoc_goal_status_spec.spl`
 - Observed duration: 76.783s
 - Runner flag: `[PERF BUG]`
+- Follow-up: reduced duplicate nested traceability/manifest checks by reusing
+  fresh evidence between scenarios.
+- Current focused duration: 11.653s for 3 scenarios on 2026-06-25.
 
 ## Impact
 
@@ -16,8 +19,9 @@ renderer hardening lane.
 
 ## Next Investigation
 
-- Split heavy synthetic setup from the contract assertions, or add a reusable
-  fixture/env builder that avoids repeated nested gate work.
+- Continue monitoring if broader system-test runs flag this file again; the
+  largest remaining cost is the single real traceability pass required by the
+  current-state scenario.
 - Keep the existing fail-closed assertions for Simple, original Chrome, and
   Electron RenderDoc evidence.
 - Do not relax the Vulkan/RenderDoc evidence requirements to make the spec
