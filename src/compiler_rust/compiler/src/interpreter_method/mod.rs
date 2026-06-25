@@ -1254,6 +1254,17 @@ pub(crate) fn evaluate_method_call(
         ));
     }
 
+    // Last resort: a present optional is stored as its bare payload (`None` is
+    // `Value::Nil`), so an Option method invoked on a present *primitive* optional
+    // (e.g. `mj: i32? = 7; mj.unwrap_or(9)`) reaches this general "method not
+    // found" point. Mirrors the Object-path fallback and the `Value::Nil => None`
+    // arm so typed optionals get the full Option API regardless of payload type.
+    if let Some(result) =
+        try_bare_some_option_method(&recv_val, method, args, env, functions, classes, enums, impl_methods)?
+    {
+        return Ok(result);
+    }
+
     let hint = match method {
         "to_f64" | "to_f32" | "to_float" => {
             Some("use implicit conversion (e.g., `float_val / int_val` auto-converts) or explicit cast: `val as f64`")

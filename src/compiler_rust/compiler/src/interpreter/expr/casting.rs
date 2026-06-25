@@ -16,13 +16,17 @@ pub(super) fn cast_value(val: Value, target_type: &Type) -> Result<Value, Compil
     match target_type {
         Type::Simple(type_name) => cast_to_simple_type(val, type_name),
         Type::Optional(inner) => {
-            // Cast to Option type - wrap in Some
-            let cast_val = cast_value(val, inner)?;
-            Ok(Value::Enum {
-                enum_name: "Option".to_string(),
-                variant: "Some".to_string(),
-                payload: Some(Box::new(cast_val)),
-            })
+            // Optional values follow the interpreter's bare-payload convention:
+            // `None` is `Value::Nil`, a present optional is its bare payload (see
+            // interpreter_method::try_bare_some_option_method and the
+            // `Value::Nil => ...` Option arm). Wrapping a present value in
+            // `Value::Enum{Option, Some}` here broke `unwrap_or`/`is_some`/... on
+            // typed optionals (`i32?`), which never reached those handlers.
+            if matches!(val, Value::Nil) {
+                Ok(Value::Nil)
+            } else {
+                cast_value(val, inner)
+            }
         }
         _ => {
             let ctx = ErrorContext::new()

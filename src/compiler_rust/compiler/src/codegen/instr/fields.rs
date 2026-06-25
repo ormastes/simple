@@ -2,7 +2,7 @@
 //!
 //! Handles reading from and writing to struct fields via byte offsets.
 
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlags, TrapCode};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
@@ -25,6 +25,11 @@ pub fn compile_field_get<M: Module>(
     let obj_value = get_vreg_or_default(ctx, builder, &object);
     let tag_mask = builder.ins().iconst(types::I64, !0x7i64);
     let obj_ptr = builder.ins().band(obj_value, tag_mask);
+
+    // Field access on a `nil` receiver (e.g. `b: T? = nil; b.n`) masks to a null
+    // pointer; loading from it is a wild segfault. The interpreter reports a clean
+    // "field on nil" error here, so guard the JIT load with a defined trap instead.
+    builder.ins().trapz(obj_ptr, TrapCode::unwrap_user(12));
 
     // Diagnostic: log FieldGet at non-zero offsets when tracing is enabled.
     // This helps diagnose cross-module FieldGet bugs where byte_offset is
@@ -59,6 +64,8 @@ pub fn compile_field_set<M: Module>(
     let obj_value = get_vreg_or_default(ctx, builder, &object);
     let tag_mask = builder.ins().iconst(types::I64, !0x7i64);
     let obj_ptr = builder.ins().band(obj_value, tag_mask);
+    // Same null guard as FieldGet: storing into a `nil` receiver is a wild segfault.
+    builder.ins().trapz(obj_ptr, TrapCode::unwrap_user(12));
     let val = get_vreg_or_default(ctx, builder, &value);
     builder.ins().store(MemFlags::new(), val, obj_ptr, byte_offset as i32);
     Ok(())
