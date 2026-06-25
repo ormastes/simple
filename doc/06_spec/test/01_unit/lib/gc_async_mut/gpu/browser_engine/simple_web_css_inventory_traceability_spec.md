@@ -85,7 +85,7 @@ coverage.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -94,9 +94,12 @@ val owner = _implemented_css_owner()
 expect(owner).to_contain("simple_web_generated_html_css_combinations_spec.spl")
 
 step("Keep representative implemented properties tied to renderer behavior")
-val implemented = "display flex flex-basis flex-direction flex-grow flex-shrink gap padding padding-bottom padding-right padding-top border border-style background-color border-bottom-color border-bottom-width border-left-color border-left-width border-right-color border-right-width border-top-color border-top-width color font-size width height margin margin-bottom margin-right overflow position z-index"
+val implemented = "display flex flex-basis flex-direction flex-grow flex-shrink align-content align-items align-self gap padding padding-bottom padding-right padding-top border border-style background-color border-bottom-color border-bottom-width border-left-color border-left-width border-right-color border-right-width border-top-color border-top-width color font-size width height margin margin-bottom margin-right overflow position z-index"
 expect(implemented).to_contain("display")
 expect(implemented).to_contain("background-color")
+expect(implemented).to_contain("align-content")
+expect(implemented).to_contain("align-items")
+expect(implemented).to_contain("align-self")
 expect(implemented).to_contain("z-index")
 ```
 

@@ -119,7 +119,7 @@ sh scripts/check/check-html-css-rendering-manifest-traceability.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 52 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

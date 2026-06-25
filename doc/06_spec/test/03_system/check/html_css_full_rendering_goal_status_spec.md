@@ -75,8 +75,8 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
 ## Acceptance
 
 - All 105 HTML tags are rendered in the 50-case fixture manifest.
-- All 63 implemented Simple Web CSS properties are rendered in fixture CSS.
-- The current full CSS inventory is tested as 394 properties, with 331 still
+- All 66 implemented Simple Web CSS properties are rendered in fixture CSS.
+- The current full CSS inventory is tested as 394 properties, with 328 still
   unrendered and 335 held in unsupported-inventory ownership.
 - Animation, transition, and transform CSS are reported as a separate
   incomplete sub-goal until those properties have rendered fixture coverage.
@@ -94,10 +94,10 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
    - Expected: code equals `0`
 - Read the full rendering goal evidence
    - Expected: full_css_total equals `394`
-   - Expected: full_css_rendered equals `63`
-   - Expected: full_css_unrendered equals `331`
+   - Expected: full_css_rendered equals `66`
+   - Expected: full_css_unrendered equals `328`
    - Expected: unsupported_inventory equals `335`
-   - Expected: full_css_unrendered_properties.split(",").len() equals `331`
+   - Expected: full_css_unrendered_properties.split(",").len() equals `328`
    - Expected: animation_css_unrendered_properties.split(",").len() equals `18`
 - Verify the operator report names the full CSS gap
 
@@ -127,12 +127,12 @@ expect(evidence).to_contain("html_css_full_rendering_goal_html_tag_rendered_coun
 expect(evidence).to_contain("html_css_full_rendering_goal_html_tag_missing=")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_scope=implemented-simple-web-css")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=63")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=63")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=66")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=66")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_missing=")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_required_min_count=390")
-expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=63")
+expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=66")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_unrendered_properties=")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_scope=animation-transition-transform-css")
@@ -156,10 +156,10 @@ val full_css_unrendered_properties = _value_of(evidence, "html_css_full_renderin
 val animation_css_unrendered_properties = _value_of(evidence, "html_css_full_rendering_goal_animation_css_unrendered_properties")
 val unsupported_inventory = _value_of(evidence, "html_css_full_rendering_goal_unsupported_css_inventory_count")
 expect(full_css_total).to_equal("394")
-expect(full_css_rendered).to_equal("63")
-expect(full_css_unrendered).to_equal("331")
+expect(full_css_rendered).to_equal("66")
+expect(full_css_unrendered).to_equal("328")
 expect(unsupported_inventory).to_equal("335")
-expect(full_css_unrendered_properties.split(",").len()).to_equal(331)
+expect(full_css_unrendered_properties.split(",").len()).to_equal(328)
 expect(animation_css_unrendered_properties.split(",").len()).to_equal(18)
 expect(full_css_unrendered_properties).to_contain("accent-color")
 expect(full_css_unrendered_properties).to_contain("border-image-source")
@@ -173,7 +173,7 @@ val report = file_read("build/test-html-css-full-rendering-goal-status/report.md
 expect(report).to_contain("# HTML/CSS Full Rendering Goal Status")
 expect(report).to_contain("- status: incomplete")
 expect(report).to_contain("- HTML tags rendered: 105/105")
-expect(report).to_contain("- implemented CSS rendered: 63/63")
+expect(report).to_contain("- implemented CSS rendered: 66/66")
 expect(report).to_contain("- full CSS unrendered:")
 expect(report).to_contain("- animation CSS rendered: 0/18 (incomplete)")
 ```
