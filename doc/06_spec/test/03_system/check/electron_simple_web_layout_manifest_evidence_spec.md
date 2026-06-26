@@ -27,7 +27,7 @@ electron_simple_web_layout_manifest_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -75,6 +75,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_m
 - When every manifest case reports a host dependency failure such as missing
   Electron, the manifest is `unavailable` instead of a renderer mismatch
   failure.
+- The standalone manifest wrapper resolves and exports the repo Simple launcher
+  for nested bitmap cases, so direct runs do not fail only because the legacy
+  Cargo release target is absent.
 
 ## Operator Notes
 
@@ -153,6 +156,10 @@ case-local and does not turn the entire manifest into a stale cached result.
 The manifest wrapper must not report a full manifest of missing Electron cases
 as renderer failures. That failure class blocks host setup, not Simple Web
 layout correctness.
+
+The standalone manifest wrapper must not depend on the production parity wrapper
+to select a usable Simple binary. It records the selected binary and exports it
+to each nested bitmap case.
 
 ## Manual Reproduction
 
@@ -272,12 +279,58 @@ expect(evidence).to_contain("electron_simple_web_layout_manifest_fail_count=2")
 
 </details>
 
+#### prefers repo simple launcher before legacy cargo target
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val script = file_read("scripts/check/check-electron-simple-web-layout-manifest-evidence.shs")
+expect(script).to_contain("for candidate in bin/simple ./bin/simple src/compiler_rust/target/release/simple")
+expect(script.index_of("bin/simple")).to_be_less_than(script.index_of("src/compiler_rust/target/release/simple"))
+expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE")
+expect(script).to_contain("electron_simple_web_layout_manifest_simple_bin=$SIMPLE_BIN")
+expect(script).to_contain("electron_simple_web_layout_manifest_simple_bin_source=$SIMPLE_BIN_SOURCE")
+```
+
+</details>
+
+#### exports selected simple binary to bitmap cases
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-simple-web-layout-manifest-simple-bin"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
+    "printf 'first_case|fixture-first|96|64|exact|first fixture\\n' > " + root + "/manifest.txt && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"electron_simple_web_layout_status=pass\\\\nelectron_simple_web_layout_reason=pass\\\\nelectron_simple_web_layout_scene=$ELECTRON_BITMAP_SCENE\\\\nelectron_simple_web_layout_width=$ELECTRON_BITMAP_WIDTH\\\\nelectron_simple_web_layout_height=$ELECTRON_BITMAP_HEIGHT\\\\nelectron_simple_web_layout_mismatch_count=0\\\\nelectron_simple_web_layout_blur_or_tolerance_used=false\\\\nelectron_simple_web_layout_exit_code=0\\\\nelectron_simple_web_layout_simple_bin=$SIMPLE_BIN\\\\nelectron_simple_web_layout_simple_bin_source=$SIMPLE_BIN_SOURCE\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/bitmap.sh && " +
+    "SIMPLE_BIN=" + root + "/fixture/simple-driver SIMPLE_BIN_SOURCE=fixture-env MANIFEST_PATH=" + root + "/manifest.txt ELECTRON_LAYOUT_MANIFEST_BITMAP_SCRIPT=" + root + "/fixture/bitmap.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-electron-simple-web-layout-manifest-evidence.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_status=pass")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_simple_bin=" + root + "/fixture/simple-driver")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_simple_bin_source=fixture-env")
+expect(evidence).to_contain("case_first_case_electron_simple_web_layout_simple_bin=" + root + "/fixture/simple-driver")
+expect(evidence).to_contain("case_first_case_electron_simple_web_layout_simple_bin_source=fixture-env")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
