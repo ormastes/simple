@@ -27,7 +27,7 @@ tauri_ios_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -77,6 +77,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
   Metal log text elsewhere is not enough.
 - The iOS context line must include both `metal_expected=true` and
   `metal_layer=CAMetalLayer`; a generic Metal expectation flag is not enough.
+- Render, WKWebView, and CAMetalLayer markers must be coherent within one
+  source log; markers split across unrelated log files fail closed.
 - Failure markers such as eval failures fail closed even when render and Metal
   markers are present.
 - The iOS renderer wrapper, mobile aggregate, and Tauri shell source are wired
@@ -94,7 +96,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -109,6 +111,8 @@ val evidence = file_read(root + "/evidence.env")
 step("Inspect normalized iOS render-log rows")
 expect(evidence).to_contain("ios_render_log_validation_status=pass")
 expect(evidence).to_contain("ios_render_log_validation_reason=pass")
+expect(evidence).to_contain("ios_render_log_source_count=1")
+expect(evidence).to_contain("ios_render_log_source_coherence_status=pass")
 expect(evidence).to_contain("ios_render_log_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_tauri_context_status=pass")
@@ -171,6 +175,40 @@ expect(evidence).to_contain("ios_render_log_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_tauri_context_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_context_status=fail")
+```
+
+</details>
+
+#### rejects pass markers split across unrelated log sources
+
+- Confirm iOS render and Metal proof must be coherent within one source
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-ios-render-log-validator-source-mismatch"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "printf '[tauri-shell] render, html_len=347702\\n' > " + root + "/render.log && " +
+    "printf '[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/metal.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/render.log " + root + "/metal.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm iOS render and Metal proof must be coherent within one source")
+expect(evidence).to_contain("ios_render_log_validation_status=fail")
+expect(evidence).to_contain("ios_render_log_validation_reason=ios-render-log-source-mismatch")
+expect(evidence).to_contain("ios_render_log_source_count=2")
+expect(evidence).to_contain("ios_render_log_source_coherence_status=fail")
+expect(evidence).to_contain("ios_render_log_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_tauri_context_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 ```
 
 </details>
@@ -292,7 +330,7 @@ expect(evidence).to_contain("ios_render_log_failure_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -302,10 +340,13 @@ val tauri = file_read("tools/tauri-shell/src-tauri/src/lib.rs")
 expect(direct).to_contain("validate-tauri-ios-render-log-proof.js")
 expect(direct).to_contain("ios_render_log.validation.env")
 expect(aggregate).to_contain("TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_count")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_coherence_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status")
 expect(aggregate).to_contain("ios-tauri-wkwebview-context-missing")
 expect(aggregate).to_contain("ios-metal-context-missing")
+expect(aggregate).to_contain("ios-render-log-source-mismatch")
 expect(tauri).to_contain("ios renderer context: backend=WKWebView")
 expect(tauri).to_contain("metal_layer=CAMetalLayer")
 ```
@@ -316,8 +357,8 @@ expect(tauri).to_contain("metal_layer=CAMetalLayer")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
