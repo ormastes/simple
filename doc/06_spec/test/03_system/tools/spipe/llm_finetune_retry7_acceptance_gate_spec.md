@@ -27,7 +27,7 @@ llm_finetune_retry7_acceptance_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -233,12 +233,33 @@ expect(output.split(absence_marker()).len()).to_equal(1)
 
 </details>
 
+#### surfaces license safety and deployment blockers through fine-tune doctor
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val (output, exit_code) = run_spipe_command(["fine-tune-doctor", ATTEMPT_ID])
+
+expect(exit_code).to_equal(1)
+expect(output).to_contain("WARN placeholder license_constraints=pending")
+expect(output).to_contain("WARN placeholder safety_eval=not-run")
+expect(output).to_contain("WARN placeholder deployment_evidence=not-deployable")
+expect(output).to_contain("STATUS: WARN llm-finetune-doctor")
+expect(output.split(absence_marker()).len()).to_equal(1)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -1188,7 +1188,9 @@ function hasPlaceholder(value) {
     || value.includes("pending")
     || value === "not-selected"
     || value === "not-created"
-    || value === "dry-run-record-only";
+    || value === "dry-run-record-only"
+    || value === "not-run"
+    || value === "not-deployable";
 }
 
 function commandFineTuneDoctor(args) {
@@ -1240,7 +1242,11 @@ function commandFineTuneDoctor(args) {
     ["base_model", registryValueForAttempt(root, "models.sdn", attemptId, "base_model") || readQuotedValue(attemptContent, "base_model")],
     ["tuning_method", registryValueForAttempt(root, "tuning_methods.sdn", attemptId, "method") || readQuotedValue(attemptContent, "method")],
     ["model_artifact", registryValueForAttempt(root, "training_scripts.sdn", attemptId, "model_artifact") || readQuotedValue(attemptContent, "model_artifact")],
-    ["decision_status", registryValueForAttempt(root, "decisions.sdn", attemptId, "status") || readQuotedValue(attemptContent, "status")]
+    ["decision_status", registryValueForAttempt(root, "decisions.sdn", attemptId, "status") || readQuotedValue(attemptContent, "status")],
+    ["license_constraints", registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "license_constraints") || readQuotedValue(attemptContent, "license_constraints")],
+    ["safety_eval", registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "safety_eval") || readQuotedValue(attemptContent, "safety_eval")],
+    ["deployment_evidence", registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "deployment_evidence") || readQuotedValue(attemptContent, "deployment_evidence")],
+    ["handoff_doc", registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "handoff_doc") || readQuotedValue(attemptContent, "handoff_doc")]
   ];
   for (const [name, value] of fields) {
     if (hasPlaceholder(value)) {
@@ -1431,6 +1437,10 @@ function readinessChecks(root, attemptId) {
   const method = registryValueForAttempt(root, "tuning_methods.sdn", attemptId, "method") || readQuotedValue(attemptContent, "method");
   const modelArtifact = registryValueForAttempt(root, "training_scripts.sdn", attemptId, "model_artifact") || readQuotedValue(attemptContent, "model_artifact");
   const status = registryValueForAttempt(root, "decisions.sdn", attemptId, "status") || readQuotedValue(attemptContent, "status");
+  const licenseConstraints = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "license_constraints") || readQuotedValue(attemptContent, "license_constraints");
+  const safetyEval = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "safety_eval") || readQuotedValue(attemptContent, "safety_eval");
+  const deploymentEvidence = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "deployment_evidence") || readQuotedValue(attemptContent, "deployment_evidence");
+  const handoffDoc = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "handoff_doc") || readQuotedValue(attemptContent, "handoff_doc");
   const evalTargetReached = fineTuneEvalTargetStatus(root, attemptId, attemptContent);
   return [
     ["requirements-selection", featureOption && featureOption !== "pending-user-selection" && nfrOption && nfrOption !== "pending-user-selection"],
@@ -1438,7 +1448,11 @@ function readinessChecks(root, attemptId) {
     ["tuning-method-selection", method && method !== "dry-run-record-only"],
     ["model-artifact", modelArtifactReady(modelArtifact)],
     ["target-eval", evalTargetReached],
-    ["acceptance-decision", status === "accepted"]
+    ["acceptance-decision", status === "accepted"],
+    ["license-constraints", licenseConstraints && licenseConstraints !== "pending"],
+    ["safety-eval", safetyEval && safetyEval !== "not-run"],
+    ["deployment-evidence", deploymentEvidence && deploymentEvidence !== "not-deployable"],
+    ["app-handoff-doc", handoffDoc && handoffDoc !== "missing" && handoffDoc !== "pending"]
   ];
 }
 

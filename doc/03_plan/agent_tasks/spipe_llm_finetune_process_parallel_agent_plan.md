@@ -243,6 +243,12 @@ Evidence:
   license/safety/deployment blockers remain pending and the app handoff doc is
   present, so the ready gate fails closed against the full non-acceptance
   checklist.
+- 2026-06-26 doctor hardening: shared readiness routing now includes the same
+  license, safety, deployment, and app-handoff gates used by `fine-tune-ready`.
+  `fine-tune-doctor llm_backed_app_server_dry_run_retry7` reports the current
+  `license_constraints=pending`, `safety_eval=not-run`, and
+  `deployment_evidence=not-deployable` placeholders explicitly, and the focused
+  retry7 system spec now passes 5/5 with that contract.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS
