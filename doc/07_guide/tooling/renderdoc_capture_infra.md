@@ -937,13 +937,24 @@ The top-level GUI audit now runs that focused wrapper, re-emits
 `gui_widget_renderdoc_goal_simple_gate_status`,
 `gui_widget_renderdoc_goal_simple_gate_source_env_file_status`,
 `gui_widget_renderdoc_goal_simple_gate_capture_file_status`,
+`gui_widget_renderdoc_goal_simple_gate_capture_file_magic`,
+`gui_widget_renderdoc_goal_simple_gate_runtime_backend`,
+`gui_widget_renderdoc_goal_simple_gate_widget_html_bytes`,
 `gui_widget_renderdoc_goal_simple_gate_widget_html_bytes_status`,
+`gui_widget_renderdoc_goal_simple_gate_fixture_path_status`,
 `gui_widget_renderdoc_goal_electron_gate_status`, and
 `gui_widget_renderdoc_goal_electron_gate_reason`,
 `gui_widget_renderdoc_goal_electron_gate_failure_class`,
 `gui_widget_renderdoc_goal_electron_gate_source_env_file_status`,
 `gui_widget_renderdoc_goal_electron_gate_capture_file_status`,
-`gui_widget_renderdoc_goal_electron_gate_argb_file_status`, and
+`gui_widget_renderdoc_goal_electron_gate_capture_file_magic`,
+`gui_widget_renderdoc_goal_electron_gate_argb_file_status`,
+`gui_widget_renderdoc_goal_electron_gate_argb_status`,
+`gui_widget_renderdoc_goal_electron_gate_argb_nonblank_pixel_count`,
+`gui_widget_renderdoc_goal_electron_gate_requested_api`,
+`gui_widget_renderdoc_goal_electron_gate_requested_angle`,
+`gui_widget_renderdoc_goal_electron_gate_requested_features`,
+`gui_widget_renderdoc_goal_electron_gate_fixture_path_status`, and
 `gui_widget_renderdoc_goal_blocked_gate_count`, and remains incomplete until
 the widget goal reaches `pass`. Any focused widget blocker reported by the
 widget goal is also included in top-level `blocked_completion_gates` so the

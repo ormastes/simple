@@ -385,7 +385,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 903 lines folded for reproduction.
+Runnable source: 915 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -715,10 +715,22 @@ expect(evidence).to_contain("simple_renderdoc_gate_required_num_captures_min=1")
 expect(evidence).to_contain("simple_renderdoc_gate_required_pixel_count_min=1")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_source_env_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_magic=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_runtime_backend=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_widget_html_bytes=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_widget_html_bytes_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_fixture_path_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_source_env_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_reason=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_file_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_file_magic=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_file_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_nonblank_pixel_count=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_requested_api=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_requested_angle=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_requested_features=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_fixture_path_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_failure_class=")
 expect(evidence).to_contain("html_renderdoc_capture_command=RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs")
 expect(evidence).to_contain("external_renderdoc_evidence_env=")
@@ -2240,7 +2252,7 @@ expect(evidence).to_contain("production GUI/web raw Metal readback evidence")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2268,6 +2280,11 @@ expect(evidence).to_contain("simple_renderdoc_gate_renderdoc_end=1")
 expect(evidence).to_contain("simple_renderdoc_gate_renderdoc_num_captures=1")
 expect(evidence).to_contain("simple_renderdoc_gate_pixel_count=3072")
 expect(evidence).to_contain("simple_renderdoc_gate_required_program=src/app/test/renderdoc_vulkan_capture.spl")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_magic=RDOC")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_runtime_backend=vulkan")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_widget_html_bytes=4096")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_widget_html_bytes_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_fixture_path_status=pass")
 expect(evidence).to_contain("external_renderdoc_status=pass")
 expect(evidence).to_contain("external_renderdoc_capture_status=pass")
 expect(evidence).to_contain("external_renderdoc_capture_magic=RDOC")
@@ -2319,7 +2336,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 240 lines folded for reproduction.
+Runnable source: 247 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2498,6 +2515,13 @@ expect(evidence).to_contain("electron_renderdoc_gate_required_argb_status=pass")
 expect(evidence).to_contain("electron_renderdoc_gate_required_argb_format=argb-u32")
 expect(evidence).to_contain("electron_renderdoc_gate_required_argb_producer=electron-chromium-capture")
 expect(evidence).to_contain("electron_renderdoc_gate_required_argb_nonblank_pixel_count_min=1")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_file_magic=RDOC")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_nonblank_pixel_count=1")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_requested_api=vulkan")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_requested_angle=vulkan")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_requested_features=Vulkan")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_fixture_path_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_comparison_fixture_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_comparison_artifact_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_comparison_artifact_reason=pass")
