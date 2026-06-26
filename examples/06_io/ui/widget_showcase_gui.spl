@@ -17,11 +17,14 @@
 
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.io.window_winit.{WinitLoop, WinitWindow, WinitInput, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_input}
-use common.image.ppm_decode.{encode_ppm_p6}
+use std.common.image.ppm_decode.{encode_ppm_p6}
 use std.nogc_sync_mut.sffi.io.{file_write_bytes}
 use std.nogc_sync_mut.io.time_ops.{time_now_micros}
 
-use std.io_runtime.{env_get}
+extern fn rt_env_get(key: text) -> text
+
+fn env_get(key: text) -> text:
+    rt_env_get(key) ?? ""
 
 val W: i32 = 520
 val H: i32 = 660
@@ -252,6 +255,33 @@ fn build_frame_sized(w: i32, h: i32) -> [u32]:
 fn build_frame() -> [u32]:
     build_frame_sized(W, H)
 
+fn showcase_ppm_scale() -> i32:
+    val raw = env_get("SHOWCASE_PPM_SCALE") ?? ""
+    if raw == "8":
+        return 8
+    if raw == "4":
+        return 4
+    if raw == "2":
+        return 2
+    1
+
+fn downsample_nearest(src: [u32], src_w: i32, src_h: i32, scale: i32) -> [u32]:
+    if scale <= 1:
+        return src
+    val dst_w = src_w / scale
+    val dst_h = src_h / scale
+    var out: [u32] = [0u32; dst_w * dst_h]
+    var y = 0
+    while y < dst_h:
+        var x = 0
+        val sy = y * scale
+        while x < dst_w:
+            val sx = x * scale
+            out[y * dst_w + x] = src[sy * src_w + sx]
+            x = x + 1
+        y = y + 1
+    out
+
 fn checksum_pixels(pixels: [u32]) -> i64:
     var sum = 0i64
     var i = 0
@@ -331,6 +361,14 @@ fn pack(src: [u32]) -> [i64]:
         i = i + 1
     out
 
+fn showcase_should_close(input: WinitInput) -> bool:
+    if input.close:
+        return true
+    for k in input.keys:
+        if k == 27 or k == 113 or k == 81:
+            return true
+    false
+
 fn main() -> i64:
     if (env_get("SHOWCASE_4K_PERF") ?? "") == "1":
         return run_4k_perf_probe()
@@ -344,9 +382,13 @@ fn main() -> i64:
     # Capture the framebuffer to a P6 PPM (absolute oracle) when SHOWCASE_PPM is set.
     val ppm_path = env_get("SHOWCASE_PPM") ?? ""
     if ppm_path != "":
-        val bytes = encode_ppm_p6(520u32, 660u32, pixels)
+        val scale = showcase_ppm_scale()
+        val ppm_pixels = downsample_nearest(pixels, W, H, scale)
+        val ppm_w = W / scale
+        val ppm_h = H / scale
+        val bytes = encode_ppm_p6(ppm_w.to_u32(), ppm_h.to_u32(), ppm_pixels)
         if file_write_bytes(ppm_path, bytes):
-            print "wrote {ppm_path} ({bytes.len()} bytes)"
+            print "wrote {ppm_path} ({ppm_w}x{ppm_h}, {bytes.len()} bytes)"
         else:
             print "failed to write {ppm_path}"
 
@@ -369,11 +411,8 @@ fn main() -> i64:
     while running and iters < 2000000:
         winit_present_rgba(win, W.to_i64(), H.to_i64(), packed)
         val input = winit_poll_input(lp)
-        if input.close:
+        if showcase_should_close(input):
             running = false
-        for k in input.keys:
-            if k == 27:
-                running = false
         iters = iters + 1
     winit_window_free(win)
     winit_loop_free(lp)
