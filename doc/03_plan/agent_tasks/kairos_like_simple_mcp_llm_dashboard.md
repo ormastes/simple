@@ -27,6 +27,10 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
 - Evidence:
   - `test/01_unit/app/llm_dashboard/agent_dashboard_hardening_spec.spl`
   - `test/unit/app/llm_dashboard/agent_dashboard_hardening_spec.spl`
+  - 2026-06-26 public manual hardening: both mirrored agent hardening specs
+    pass 44/44, the generated manuals were refreshed/synced, and public
+    snippets no longer expose raw absence checks, boolean negative-containment
+    wrappers, or the internal absence marker.
 
 ### Slice B: Dashboard Replay Collector and Live Bridge Projection
 
