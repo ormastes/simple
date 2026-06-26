@@ -362,6 +362,14 @@ operator/agent callers, and direct app execution through
 CLI dispatcher also registers `llm-runtime-control`; the prebuilt release
 binary will expose `simple llm-runtime-control` after rebuild.
 
+Native standalone rebuild evidence is present for the command itself:
+`native-build --source src/app --source src/lib --entry-closure --entry
+src/app/llm_runtime/control_cli.spl --output
+build/llm_runtime/llm_runtime_control_cli` links a 57 KB binary. That rebuilt
+binary emits JSONL for planned preflight, skipped start, and usage/error cases.
+Public pid absence is rendered as `0`, avoiding native negative-sentinel
+formatting issues in public JSONL.
+
 This slice also removed post-construction evidence mutation from
 `serve_plan`, `live_request_plan`, `live_environment`, and
 `dashboard_live_control` on the pure control path, and renamed request/serve
@@ -374,7 +382,8 @@ Runtime-adjacent decision record:
 - `facade_checked`: runtime pure control decision API and existing serve/request
   planning evidence APIs.
 - `chosen_path`: expose direct app execution plus source CLI dispatch through
-  the runtime owner; release-binary proof waits for rebuild.
+  the runtime owner; prove the standalone command with native-build evidence and
+  leave full release-binary proof for the next release rebuild.
 - `rejected_shortcuts`: shelling out to dashboard routes, importing dashboard
   process/HTTP paths, or adding raw process/runtime shortcuts.
 

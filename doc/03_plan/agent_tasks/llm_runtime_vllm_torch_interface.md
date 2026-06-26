@@ -302,6 +302,12 @@ Tasks:
    `serve_plan`, `live_request_plan`, `live_environment`, and
    `dashboard_live_control`; these now precompute JSONL without post-construction
    field mutation, and request/serve private helpers use module-specific names.
+10. Add rebuilt standalone command evidence. Status: done for
+    `src/app/llm_runtime/control_cli.spl`: `native-build` produced
+    `build/llm_runtime/llm_runtime_control_cli`, and the rebuilt binary emitted
+    public JSONL for planned preflight, skipped start, and usage/error cases.
+    Public pid absence renders as `0` so native negative-sentinel formatting
+    cannot leak huge integer values.
 
 ## Sidecars
 
@@ -318,9 +324,10 @@ Tasks:
   installed local `vllm`; the runtime owner now has a live wrapper, but the web
   dashboard route remains intent-only until integration evidence proves the
   process/HTTP imports do not reintroduce dashboard test teardown diagnostics.
-- Rebuilt-release evidence for top-level `simple llm-runtime-control`; the
-  source dispatcher is wired, and direct app execution is covered, but the
-  current prebuilt release binary predates the new command.
+- Full rebuilt release-binary evidence for top-level
+  `simple llm-runtime-control`; source dispatch is wired and the standalone
+  command binary has native evidence, but the checked-in prebuilt release binary
+  still predates the new top-level command.
 
 Runtime-adjacent decision record for live HTTP transport:
 

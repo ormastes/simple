@@ -109,7 +109,7 @@ val response = llm_runtime_control_cli_response(["llm-runtime-control", "--actio
 
 expect(response).to_contain("\"status\":\"skipped\"")
 expect(response).to_contain("\"reason\":\"missing_local_vllm_and_gpu\"")
-expect(response).to_contain("\"started_pid\":-1")
+expect(response).to_contain("\"started_pid\":0")
 ```
 
 </details>
