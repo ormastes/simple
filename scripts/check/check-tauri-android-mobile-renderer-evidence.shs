@@ -4,9 +4,11 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build/tauri_android_mobile_renderer"
 MDI_PROOF_VALIDATOR="$ROOT_DIR/scripts/check/validate-tauri-mobile-mdi-proof.js"
+RENDER_LOG_VALIDATOR="$ROOT_DIR/scripts/check/validate-tauri-android-render-log-proof.js"
 APK="${ANDROID_APK:-$ROOT_DIR/tools/tauri-shell/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk}"
 SCREENSHOT="${ANDROID_RENDERER_SCREENSHOT:-$BUILD_DIR/android_renderer.png}"
 LOGCAT="$BUILD_DIR/android_renderer_logcat.txt"
+RENDER_LOG_VALIDATION_ENV="$BUILD_DIR/android_render_log.validation.env"
 MDI_PROOF_JSON="$BUILD_DIR/android_mdi_proof.json"
 TIMEOUT_SECS="${ANDROID_RENDERER_TIMEOUT_SECS:-120}"
 ADB="${ADB:-adb}"
@@ -20,6 +22,12 @@ fail() {
     echo "status=fail"
     echo "reason=$1"
     exit 1
+}
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
 }
 
 validate_screenshot_png() {
@@ -75,6 +83,7 @@ command -v "$ADB" >/dev/null 2>&1 || fail "adb not found"
 command -v "$EMULATOR" >/dev/null 2>&1 || true
 command -v node >/dev/null 2>&1 || fail "node not found"
 test -f "$MDI_PROOF_VALIDATOR" || fail "MDI proof validator missing: $MDI_PROOF_VALIDATOR"
+test -f "$RENDER_LOG_VALIDATOR" || fail "Android render log validator missing: $RENDER_LOG_VALIDATOR"
 test -f "$APK" || fail "Android APK missing: $APK"
 unzip -l "$APK" | grep -q 'lib/arm64-v8a/libsimple_mobile_runtime_exec\.so' \
     || fail "Android APK missing arm64-v8a packaged Simple runtime"
@@ -137,13 +146,13 @@ while [ "$(date +%s)" -lt "$end" ]; do
     if grep -Eq 'F/DEBUG|Fatal signal|F/libc|F/VulkanManager|Simple subprocess stdout closed before a valid render arrived|Headless UI completed|parse error: expected value' "$LOGCAT" 2>/dev/null; then
         fail "Android renderer failure observed; see $LOGCAT"
     fi
-    if grep -Eq '\[tauri-shell\] render, html_len=' "$LOGCAT" 2>/dev/null; then
+    if grep -Eq '\[tauri-shell\][[:space:]]+render,[[:space:]]+html_len=[1-9][0-9]*([[:space:]]|$)' "$LOGCAT" 2>/dev/null; then
         break
     fi
     sleep 2
 done
 
-grep -Eq '\[tauri-shell\] render, html_len=' "$LOGCAT" 2>/dev/null \
+grep -Eq '\[tauri-shell\][[:space:]]+render,[[:space:]]+html_len=[1-9][0-9]*([[:space:]]|$)' "$LOGCAT" 2>/dev/null \
     || fail "Android Tauri renderer log not observed within ${TIMEOUT_SECS}s"
 grep -Eq 'F/DEBUG|Fatal signal|F/libc|F/VulkanManager|Simple subprocess stdout closed before a valid render arrived|Headless UI completed|parse error: expected value' "$LOGCAT" 2>/dev/null \
     && fail "Android renderer failure observed; see $LOGCAT"
@@ -173,6 +182,21 @@ validate_screenshot_png "$SCREENSHOT" android_mobile_renderer_screenshot \
 grep -Eiq 'Vulkan|vulkan|VK_|ANGLE.*Vulkan|Renderer.*Vulkan|HWUI.*Vulkan|skiavk' "$LOGCAT" "$GPU_LOG_EXTRA" \
     || fail "Android renderer log missing Vulkan/skiavk marker"
 
+android_render_validation_code=0
+node "$RENDER_LOG_VALIDATOR" "$LOGCAT" "$GPU_LOG_EXTRA" >"$RENDER_LOG_VALIDATION_ENV" \
+    || android_render_validation_code=$?
+android_render_log_validation_status="$(value_of android_render_log_validation_status "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_validation_reason="$(value_of android_render_log_validation_reason "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_source_count="$(value_of android_render_log_source_count "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_html_len="$(value_of android_render_log_html_len "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_source_coherence_status="$(value_of android_render_log_source_coherence_status "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_marker_status="$(value_of android_render_log_marker_status "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_vulkan_marker_status="$(value_of android_render_log_vulkan_marker_status "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_failure_marker_status="$(value_of android_render_log_failure_marker_status "$RENDER_LOG_VALIDATION_ENV")"
+if [ "$android_render_validation_code" -ne 0 ] || [ "$android_render_log_validation_status" != "pass" ]; then
+    fail "Android render log validation failed: ${android_render_log_validation_reason:-unknown}"
+fi
+
 node "$MDI_PROOF_VALIDATOR" android "$MDI_PROOF_JSON" "$LOGCAT" \
     || fail "Android MDI event/capture/performance/animation proof failed"
 
@@ -183,6 +207,14 @@ echo "android_logcat=$LOGCAT"
 echo "android_gpu_log=$GPU_LOG_EXTRA"
 echo "android_mdi_proof_json=$MDI_PROOF_JSON"
 echo "android_render_log_status=pass"
+echo "android_render_log_validation_status=$android_render_log_validation_status"
+echo "android_render_log_validation_reason=$android_render_log_validation_reason"
+echo "android_render_log_source_count=$android_render_log_source_count"
+echo "android_render_log_html_len=$android_render_log_html_len"
+echo "android_render_log_source_coherence_status=$android_render_log_source_coherence_status"
+echo "android_render_log_marker_status=$android_render_log_marker_status"
+echo "android_render_log_vulkan_marker_status=$android_render_log_vulkan_marker_status"
+echo "android_render_log_failure_marker_status=$android_render_log_failure_marker_status"
 echo "android_layout_status=pass"
 echo "android_vulkan_log_status=pass"
 echo "android_mdi_proof_status=pass"

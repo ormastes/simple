@@ -10,6 +10,7 @@ PRODUCTION_ENV="${PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV:-build/production_gui_w
 IOS_SCRIPT="${TAURI_MOBILE_RENDERER_IOS_SCRIPT:-scripts/check/check-tauri-ios-mobile-renderer-evidence.shs}"
 ANDROID_SCRIPT="${TAURI_MOBILE_RENDERER_ANDROID_SCRIPT:-scripts/check/check-tauri-android-mobile-renderer-evidence.shs}"
 IOS_RENDER_LOG_VALIDATOR="${TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR:-scripts/check/validate-tauri-ios-render-log-proof.js}"
+ANDROID_RENDER_LOG_VALIDATOR="${TAURI_MOBILE_RENDERER_ANDROID_RENDER_LOG_VALIDATOR:-scripts/check/validate-tauri-android-render-log-proof.js}"
 IOS_LOG_EXTRA="${TAURI_MOBILE_RENDERER_IOS_LOG:-}"
 ANDROID_LOG_EXTRA="${TAURI_MOBILE_RENDERER_ANDROID_LOG:-}"
 OUT_ENV="$BUILD_DIR/evidence.env"
@@ -296,6 +297,14 @@ android_screenshot=""
 android_logcat=""
 android_gpu_log=""
 android_render_log_status=unavailable
+android_render_log_validation_status=unavailable
+android_render_log_validation_reason=not-run
+android_render_log_source_count=0
+android_render_log_html_len=""
+android_render_log_source_coherence_status=unavailable
+android_render_log_marker_status=unavailable
+android_render_log_vulkan_marker_status=unavailable
+android_render_log_failure_marker_status=unavailable
 android_layout_status=unavailable
 android_vulkan_log_status=unavailable
 android_mdi_proof_json=""
@@ -329,6 +338,14 @@ if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
     android_logcat="$(value_of android_logcat "$BUILD_DIR/android.out")"
     android_gpu_log="$(value_of android_gpu_log "$BUILD_DIR/android.out")"
     android_render_log_status="$(value_of android_render_log_status "$BUILD_DIR/android.out")"
+    android_render_log_validation_status="$(value_of android_render_log_validation_status "$BUILD_DIR/android.out")"
+    android_render_log_validation_reason="$(value_of android_render_log_validation_reason "$BUILD_DIR/android.out")"
+    android_render_log_source_count="$(value_of android_render_log_source_count "$BUILD_DIR/android.out")"
+    android_render_log_html_len="$(value_of android_render_log_html_len "$BUILD_DIR/android.out")"
+    android_render_log_source_coherence_status="$(value_of android_render_log_source_coherence_status "$BUILD_DIR/android.out")"
+    android_render_log_marker_status="$(value_of android_render_log_marker_status "$BUILD_DIR/android.out")"
+    android_render_log_vulkan_marker_status="$(value_of android_render_log_vulkan_marker_status "$BUILD_DIR/android.out")"
+    android_render_log_failure_marker_status="$(value_of android_render_log_failure_marker_status "$BUILD_DIR/android.out")"
     android_mdi_proof_json="$(value_of android_mdi_proof_json "$BUILD_DIR/android.out")"
     android_mdi_proof_status="$(value_of android_mdi_proof_status "$BUILD_DIR/android.out")"
     android_mdi_render_status="$(value_of android_mdi_render_status "$BUILD_DIR/android.out")"
@@ -350,11 +367,43 @@ if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
     android_mdi_css_animation_probe="$(value_of android_mdi_css_animation_probe "$BUILD_DIR/android.out")"
     android_screenshot_file_status="$(png_file_status "$android_screenshot")"
     android_mdi_proof_file_status="$(artifact_file_status "$android_mdi_proof_json")"
-    if [ "$android_render_log_status" != "pass" ] && grep_any_file '\[tauri-shell\] render, html_len=' "$android_logcat" "$ANDROID_LOG_EXTRA"; then
-        android_render_log_status=pass
-    elif [ "$android_status" = "pass" ] && [ "$android_render_log_status" != "pass" ]; then
+    android_render_log_validation_env="$BUILD_DIR/android_render_log.validation.env"
+    if [ -f "$ANDROID_RENDER_LOG_VALIDATOR" ]; then
+        android_render_validation_code=0
+        node "$ANDROID_RENDER_LOG_VALIDATOR" "$android_logcat" "$android_gpu_log" "$ANDROID_LOG_EXTRA" >"$android_render_log_validation_env" \
+            || android_render_validation_code=$?
+        android_render_log_validation_status="$(value_of android_render_log_validation_status "$android_render_log_validation_env")"
+        android_render_log_validation_reason="$(value_of android_render_log_validation_reason "$android_render_log_validation_env")"
+        android_render_log_source_count="$(value_of android_render_log_source_count "$android_render_log_validation_env")"
+        android_render_log_html_len="$(value_of android_render_log_html_len "$android_render_log_validation_env")"
+        android_render_log_source_coherence_status="$(value_of android_render_log_source_coherence_status "$android_render_log_validation_env")"
+        android_render_log_marker_status="$(value_of android_render_log_marker_status "$android_render_log_validation_env")"
+        android_render_log_vulkan_marker_status="$(value_of android_render_log_vulkan_marker_status "$android_render_log_validation_env")"
+        android_render_log_failure_marker_status="$(value_of android_render_log_failure_marker_status "$android_render_log_validation_env")"
+        if [ "$android_render_validation_code" -eq 0 ] && [ "$android_render_log_validation_status" = "pass" ]; then
+            android_render_log_status=pass
+            android_vulkan_log_status=pass
+        elif [ "$android_status" = "pass" ]; then
+            android_render_log_status="$android_render_log_marker_status"
+            android_vulkan_log_status="$android_render_log_vulkan_marker_status"
+            if [ "$android_render_log_failure_marker_status" = "fail" ]; then
+                android_reason=android-render-log-failure-marker
+            elif [ "$android_render_log_marker_status" != "pass" ]; then
+                android_reason="${android_render_log_validation_reason:-android-render-log-marker-missing}"
+            elif [ "$android_render_log_vulkan_marker_status" != "pass" ]; then
+                android_reason=android-vulkan-log-marker-missing
+            elif [ "$android_render_log_source_coherence_status" != "pass" ]; then
+                android_reason=android-render-log-source-mismatch
+            else
+                android_reason="${android_render_log_validation_reason:-android-render-log-validation-failed}"
+            fi
+        fi
+    elif [ "$android_status" = "pass" ]; then
         android_render_log_status=fail
-        android_reason=android-render-log-marker-missing
+        android_vulkan_log_status=fail
+        android_render_log_validation_status=fail
+        android_render_log_validation_reason=android-render-log-validator-missing
+        android_reason=android-render-log-validator-missing
     fi
     if [ "$android_status" = "pass" ] && [ "$android_screenshot_file_status" = "pass" ]; then
         android_layout_status=pass
@@ -362,9 +411,9 @@ if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
         android_layout_status=fail
         android_reason=android-screenshot-png-missing
     fi
-    if grep_any_file 'Vulkan|vulkan|VK_|ANGLE.*Vulkan|Renderer.*Vulkan|HWUI.*Vulkan|skiavk' "$android_logcat" "$android_gpu_log" "$ANDROID_LOG_EXTRA"; then
+    if [ "$android_render_log_validation_status" = "unavailable" ] && grep_any_file 'Vulkan|vulkan|VK_|ANGLE.*Vulkan|Renderer.*Vulkan|HWUI.*Vulkan|skiavk' "$android_logcat" "$android_gpu_log" "$ANDROID_LOG_EXTRA"; then
         android_vulkan_log_status=pass
-    elif [ "$android_status" = "pass" ]; then
+    elif [ "$android_render_log_validation_status" = "unavailable" ] && [ "$android_status" = "pass" ]; then
         android_vulkan_log_status=fail
         android_reason=android-vulkan-log-marker-missing
     fi
@@ -422,6 +471,9 @@ elif [ "$android_status" != "pass" ]; then
 elif [ "$android_render_log_status" != "pass" ]; then
     status=fail
     reason="$android_reason"
+elif [ "$android_render_log_validation_status" != "pass" ]; then
+    status=fail
+    reason="${android_reason:-$android_render_log_validation_reason}"
 elif [ "$android_layout_status" != "pass" ]; then
     status=fail
     reason="$android_reason"
@@ -502,6 +554,14 @@ fi
     echo "tauri_mobile_renderer_parity_android_expected_gpu_backend=$android_expected_gpu_backend"
     echo "tauri_mobile_renderer_parity_android_tauri_backend=tauri2-android-webview"
     echo "tauri_mobile_renderer_parity_android_render_log_status=$android_render_log_status"
+    echo "tauri_mobile_renderer_parity_android_render_log_validation_status=$android_render_log_validation_status"
+    echo "tauri_mobile_renderer_parity_android_render_log_validation_reason=$android_render_log_validation_reason"
+    echo "tauri_mobile_renderer_parity_android_render_log_source_count=$android_render_log_source_count"
+    echo "tauri_mobile_renderer_parity_android_render_log_html_len=$android_render_log_html_len"
+    echo "tauri_mobile_renderer_parity_android_render_log_source_coherence_status=$android_render_log_source_coherence_status"
+    echo "tauri_mobile_renderer_parity_android_render_log_marker_status=$android_render_log_marker_status"
+    echo "tauri_mobile_renderer_parity_android_render_log_vulkan_marker_status=$android_render_log_vulkan_marker_status"
+    echo "tauri_mobile_renderer_parity_android_render_log_failure_marker_status=$android_render_log_failure_marker_status"
     echo "tauri_mobile_renderer_parity_android_layout_status=$android_layout_status"
     echo "tauri_mobile_renderer_parity_android_vulkan_log_status=$android_vulkan_log_status"
     echo "tauri_mobile_renderer_parity_android_mdi_proof_json=$android_mdi_proof_json"

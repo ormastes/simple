@@ -1,0 +1,129 @@
+"""
+# Tauri Android render-log validator
+
+## Overview
+
+Validates the Android mobile render-log proof used by the Tauri renderer
+evidence wrappers. A pass must include a clean Tauri render marker, Android
+Vulkan/HWUI evidence, coherent source proof, and no failure markers.
+
+**Plan:** doc/03_plan/platform/mobile_tauri_gui_parallel_2026-05-29.md
+**Requirements:** N/A
+**Research:** N/A
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+```sh
+SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_android_render_log_validator_spec.spl --mode=interpreter --clean --fail-fast
+```
+
+## Acceptance
+
+- Complete Android Tauri WebView/Vulkan logs validate and emit normalized rows.
+- The Tauri render marker must include a clean positive decimal `html_len`.
+- Render-only or generic Vulkan-only logs fail closed.
+- Render and Vulkan markers must be coherent within one source log.
+- Failure markers fail closed even when render and Vulkan markers are present.
+- The Android renderer wrapper and mobile aggregate are wired to the validator
+  contract.
+"""
+
+# @tag: system, gui, tauri, android, vulkan, renderer
+
+use std.io_runtime.{file_read, process_run}
+use std.spec.*
+
+describe "Tauri Android render-log validator":
+
+    it "accepts complete Android WebView Vulkan render-log proof":
+        val root = "build/test-tauri-android-render-log-validator-pass"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/android.log && " +
+            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = file_read(root + "/evidence.env")
+        step("Inspect normalized Android render-log rows")
+        expect(evidence).to_contain("android_render_log_validation_status=pass")
+        expect(evidence).to_contain("android_render_log_validation_reason=pass")
+        expect(evidence).to_contain("android_render_log_source_count=1")
+        expect(evidence).to_contain("android_render_log_html_len=4096")
+        expect(evidence).to_contain("android_render_log_source_coherence_status=pass")
+        expect(evidence).to_contain("android_render_log_marker_status=pass")
+        expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
+        expect(evidence).to_contain("android_render_log_failure_marker_status=pass")
+
+    it "rejects malformed Android render html length markers":
+        val root = "build/test-tauri-android-render-log-validator-html-len"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            "printf '[tauri-shell] render, html_len=4096px\\nHWUI Vulkan renderer ready\\n' > " + root + "/suffix.log && " +
+            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/suffix.log > " + root + "/suffix.env; " +
+            "printf '[tauri-shell] render, html_len=0\\nHWUI Vulkan renderer ready\\n' > " + root + "/zero.log && " +
+            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/zero.log > " + root + "/zero.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val suffix = file_read(root + "/suffix.env")
+        val zero = file_read(root + "/zero.env")
+        expect(suffix).to_contain("android_render_log_validation_reason=android-render-log-html-len-malformed")
+        expect(suffix).to_contain("android_render_log_marker_status=fail")
+        expect(suffix).to_contain("android_render_log_html_len=")
+        expect(zero).to_contain("android_render_log_validation_reason=android-render-log-html-len-malformed")
+        expect(zero).to_contain("android_render_log_marker_status=fail")
+        expect(zero).to_contain("android_render_log_html_len=")
+
+    it "rejects missing Vulkan render backing markers":
+        val root = "build/test-tauri-android-render-log-validator-missing-vulkan"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            "printf '[tauri-shell] render, html_len=4096\\nplain WebView log\\n' > " + root + "/android.log && " +
+            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/evidence.env")
+        expect(evidence).to_contain("android_render_log_validation_reason=android-vulkan-log-marker-missing")
+        expect(evidence).to_contain("android_render_log_marker_status=pass")
+        expect(evidence).to_contain("android_render_log_vulkan_marker_status=fail")
+
+    it "rejects pass markers split across unrelated Android log sources":
+        val root = "build/test-tauri-android-render-log-validator-source-mismatch"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            "printf '[tauri-shell] render, html_len=4096\\n' > " + root + "/render.log && " +
+            "printf 'HWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/vulkan.log && " +
+            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/render.log " + root + "/vulkan.log > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/evidence.env")
+        expect(evidence).to_contain("android_render_log_validation_reason=android-render-log-source-mismatch")
+        expect(evidence).to_contain("android_render_log_source_count=2")
+        expect(evidence).to_contain("android_render_log_source_coherence_status=fail")
+        expect(evidence).to_contain("android_render_log_marker_status=pass")
+        expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
+
+    it "rejects Android render-log failure markers":
+        val root = "build/test-tauri-android-render-log-validator-failure"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready\\nFatal signal 11\\n' > " + root + "/android.log && " +
+            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/evidence.env")
+        expect(evidence).to_contain("android_render_log_validation_reason=android-render-log-failure-marker")
+        expect(evidence).to_contain("android_render_log_failure_marker_status=fail")
+
+    it "keeps the Android renderer wrapper and mobile aggregate wired to the validator":
+        val direct = file_read("scripts/check/check-tauri-android-mobile-renderer-evidence.shs")
+        val aggregate = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
+        expect(direct).to_contain("validate-tauri-android-render-log-proof.js")
+        expect(direct).to_contain("android_render_log.validation.env")
+        expect(direct).to_contain("android_render_log_html_len")
+        expect(aggregate).to_contain("TAURI_MOBILE_RENDERER_ANDROID_RENDER_LOG_VALIDATOR")
+        expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_validation_status")
+        expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len")
+        expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_source_coherence_status")
+        expect(aggregate).to_contain("android-render-log-html-len-malformed")
+        expect(aggregate).to_contain("android-render-log-source-mismatch")

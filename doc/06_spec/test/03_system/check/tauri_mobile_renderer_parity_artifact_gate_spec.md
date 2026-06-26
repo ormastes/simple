@@ -90,7 +90,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -103,6 +103,8 @@ val evidence = file_read(root + "/stdout.env")
 step("Inspect normalized mobile artifact gate rows")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len=1")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_validation_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len=1")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status=pass")
@@ -196,7 +198,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -204,6 +206,8 @@ val script = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidenc
 expect(script).to_contain("png_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_source_coherence_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_render_image_count")
