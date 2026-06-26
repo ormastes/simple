@@ -92,8 +92,16 @@ const eventChecks = {
   taskbarLabelsVisible: proof.taskbarLabelsVisible === true,
   htmlRenderable: proof.htmlRenderable === true,
 };
+let screenshotStat = null;
+try {
+  screenshotStat = fs.statSync(screenshotPath);
+} catch (_err) {
+  screenshotStat = null;
+}
 const captureChecks = {
   screenshotPath: proof.screenshotPath === screenshotPath,
+  screenshotFileExists: screenshotStat !== null && screenshotStat.isFile(),
+  screenshotFileNonempty: screenshotStat !== null && screenshotStat.isFile() && screenshotStat.size > 0,
 };
 const performanceChecks = {
   performanceNowAvailable: proof.performanceNowAvailable === true,
@@ -139,6 +147,8 @@ emit('electron_mdi_animation_frame_available', proof.animationFrameAvailable ===
 emit('electron_mdi_animation_frame_count', integerTextOrBlank(proof.animationFrameCount));
 emit('electron_mdi_css_animation_probe', proof.cssAnimationProbe === true ? 'true' : 'false');
 emit('electron_mdi_screenshot_path_matches', proof.screenshotPath === screenshotPath ? 'true' : 'false');
+emit('electron_mdi_screenshot_file_status', screenshotStat !== null && screenshotStat.isFile() ? 'pass' : 'fail');
+emit('electron_mdi_screenshot_size_bytes', screenshotStat !== null && screenshotStat.isFile() ? String(screenshotStat.size) : '');
 if (reason !== 'pass') {
   emit('reason', reason);
   process.exit(1);
