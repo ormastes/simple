@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [GUI Showcase Perf Checksum Contract](test/03_system/check/gui_showcase_perf_checksum_contract_spec.md) | Minimal | N/A | 1 | 20% | 19 lines |
+| [GUI Showcase Perf Resolution Contract](test/03_system/check/gui_showcase_perf_resolution_contract_spec.md) | Minimal | N/A | 1 | 20% | 19 lines |
 
