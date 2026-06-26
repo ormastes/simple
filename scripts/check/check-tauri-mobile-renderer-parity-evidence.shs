@@ -22,6 +22,36 @@ value_of() {
     sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
 }
 
+num_at_least() {
+    value="$1"
+    min="$2"
+    case "$value" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$value" -ge "$min" ]
+}
+
+num_nonnegative() {
+    value="$1"
+    awk -v value="$value" 'BEGIN {
+        if (value ~ /^[0-9]+([.][0-9]+)?$/ && value + 0 >= 0) exit 0
+        exit 1
+    }'
+}
+
+mobile_mdi_detail_pass() {
+    width="$1"
+    height="$2"
+    performance_delta="$3"
+    animation_frames="$4"
+    css_animation="$5"
+    num_at_least "$width" 300 &&
+        num_at_least "$height" 300 &&
+        num_nonnegative "$performance_delta" &&
+        num_at_least "$animation_frames" 2 &&
+        [ "$css_animation" = "true" ]
+}
+
 grep_any_file() {
     pattern="$1"
     shift
@@ -110,6 +140,11 @@ ios_mdi_event_status=unavailable
 ios_mdi_capture_status=unavailable
 ios_mdi_performance_status=unavailable
 ios_mdi_animation_status=unavailable
+ios_mdi_capture_viewport_width=""
+ios_mdi_capture_viewport_height=""
+ios_mdi_performance_now_delta_ms=""
+ios_mdi_animation_frame_count=""
+ios_mdi_css_animation_probe=""
 ios_expected_gpu_backend=metal
 if [ -x "$IOS_SCRIPT" ] || [ -f "$IOS_SCRIPT" ]; then
     run_lane ios "$IOS_SCRIPT"
@@ -127,6 +162,11 @@ if [ -x "$IOS_SCRIPT" ] || [ -f "$IOS_SCRIPT" ]; then
     ios_mdi_capture_status="$(value_of ios_mdi_capture_status "$BUILD_DIR/ios.out")"
     ios_mdi_performance_status="$(value_of ios_mdi_performance_status "$BUILD_DIR/ios.out")"
     ios_mdi_animation_status="$(value_of ios_mdi_animation_status "$BUILD_DIR/ios.out")"
+    ios_mdi_capture_viewport_width="$(value_of ios_mdi_capture_viewport_width "$BUILD_DIR/ios.out")"
+    ios_mdi_capture_viewport_height="$(value_of ios_mdi_capture_viewport_height "$BUILD_DIR/ios.out")"
+    ios_mdi_performance_now_delta_ms="$(value_of ios_mdi_performance_now_delta_ms "$BUILD_DIR/ios.out")"
+    ios_mdi_animation_frame_count="$(value_of ios_mdi_animation_frame_count "$BUILD_DIR/ios.out")"
+    ios_mdi_css_animation_probe="$(value_of ios_mdi_css_animation_probe "$BUILD_DIR/ios.out")"
     if [ "$ios_render_log_status" != "pass" ] && grep_any_file '\[tauri-shell\] render, html_len=' "$ios_log_stream" "$ios_dev_log" "$IOS_LOG_EXTRA"; then
         ios_render_log_status=pass
     elif [ "$ios_status" = "pass" ] && [ "$ios_render_log_status" != "pass" ]; then
@@ -164,6 +204,11 @@ android_mdi_event_status=unavailable
 android_mdi_capture_status=unavailable
 android_mdi_performance_status=unavailable
 android_mdi_animation_status=unavailable
+android_mdi_capture_viewport_width=""
+android_mdi_capture_viewport_height=""
+android_mdi_performance_now_delta_ms=""
+android_mdi_animation_frame_count=""
+android_mdi_css_animation_probe=""
 android_expected_gpu_backend=vulkan
 if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
     run_lane android "$ANDROID_SCRIPT"
@@ -180,6 +225,11 @@ if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
     android_mdi_capture_status="$(value_of android_mdi_capture_status "$BUILD_DIR/android.out")"
     android_mdi_performance_status="$(value_of android_mdi_performance_status "$BUILD_DIR/android.out")"
     android_mdi_animation_status="$(value_of android_mdi_animation_status "$BUILD_DIR/android.out")"
+    android_mdi_capture_viewport_width="$(value_of android_mdi_capture_viewport_width "$BUILD_DIR/android.out")"
+    android_mdi_capture_viewport_height="$(value_of android_mdi_capture_viewport_height "$BUILD_DIR/android.out")"
+    android_mdi_performance_now_delta_ms="$(value_of android_mdi_performance_now_delta_ms "$BUILD_DIR/android.out")"
+    android_mdi_animation_frame_count="$(value_of android_mdi_animation_frame_count "$BUILD_DIR/android.out")"
+    android_mdi_css_animation_probe="$(value_of android_mdi_css_animation_probe "$BUILD_DIR/android.out")"
     if [ "$android_render_log_status" != "pass" ] && grep_any_file '\[tauri-shell\] render, html_len=' "$android_logcat" "$ANDROID_LOG_EXTRA"; then
         android_render_log_status=pass
     elif [ "$android_status" = "pass" ] && [ "$android_render_log_status" != "pass" ]; then
@@ -234,6 +284,9 @@ elif [ "$ios_metal_log_status" != "pass" ]; then
 elif [ "$ios_mdi_proof_status" != "pass" ] || [ "$ios_mdi_event_status" != "pass" ] || [ "$ios_mdi_capture_status" != "pass" ] || [ "$ios_mdi_performance_status" != "pass" ] || [ "$ios_mdi_animation_status" != "pass" ]; then
     status=fail
     reason=ios-mdi-event-capture-performance-animation-proof-missing
+elif ! mobile_mdi_detail_pass "$ios_mdi_capture_viewport_width" "$ios_mdi_capture_viewport_height" "$ios_mdi_performance_now_delta_ms" "$ios_mdi_animation_frame_count" "$ios_mdi_css_animation_probe"; then
+    status=fail
+    reason=ios-mdi-event-capture-performance-animation-proof-incomplete
 elif [ "$android_status" = "fail" ]; then
     status=fail
     reason="${android_reason:-android-mobile-renderer-evidence-failed}"
@@ -252,6 +305,9 @@ elif [ "$android_vulkan_log_status" != "pass" ]; then
 elif [ "$android_mdi_proof_status" != "pass" ] || [ "$android_mdi_event_status" != "pass" ] || [ "$android_mdi_capture_status" != "pass" ] || [ "$android_mdi_performance_status" != "pass" ] || [ "$android_mdi_animation_status" != "pass" ]; then
     status=fail
     reason=android-mdi-event-capture-performance-animation-proof-missing
+elif ! mobile_mdi_detail_pass "$android_mdi_capture_viewport_width" "$android_mdi_capture_viewport_height" "$android_mdi_performance_now_delta_ms" "$android_mdi_animation_frame_count" "$android_mdi_css_animation_probe"; then
+    status=fail
+    reason=android-mdi-event-capture-performance-animation-proof-incomplete
 fi
 
 {
@@ -281,8 +337,13 @@ fi
     echo "tauri_mobile_renderer_parity_ios_mdi_proof_status=$ios_mdi_proof_status"
     echo "tauri_mobile_renderer_parity_ios_mdi_event_status=$ios_mdi_event_status"
     echo "tauri_mobile_renderer_parity_ios_mdi_capture_status=$ios_mdi_capture_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_capture_viewport_width=$ios_mdi_capture_viewport_width"
+    echo "tauri_mobile_renderer_parity_ios_mdi_capture_viewport_height=$ios_mdi_capture_viewport_height"
     echo "tauri_mobile_renderer_parity_ios_mdi_performance_status=$ios_mdi_performance_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_performance_now_delta_ms=$ios_mdi_performance_now_delta_ms"
     echo "tauri_mobile_renderer_parity_ios_mdi_animation_status=$ios_mdi_animation_status"
+    echo "tauri_mobile_renderer_parity_ios_mdi_animation_frame_count=$ios_mdi_animation_frame_count"
+    echo "tauri_mobile_renderer_parity_ios_mdi_css_animation_probe=$ios_mdi_css_animation_probe"
     echo "tauri_mobile_renderer_parity_ios_screenshot=$ios_screenshot"
     echo "tauri_mobile_renderer_parity_ios_log_stream=$ios_log_stream"
     echo "tauri_mobile_renderer_parity_ios_dev_log=$ios_dev_log"
@@ -298,8 +359,13 @@ fi
     echo "tauri_mobile_renderer_parity_android_mdi_proof_status=$android_mdi_proof_status"
     echo "tauri_mobile_renderer_parity_android_mdi_event_status=$android_mdi_event_status"
     echo "tauri_mobile_renderer_parity_android_mdi_capture_status=$android_mdi_capture_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_capture_viewport_width=$android_mdi_capture_viewport_width"
+    echo "tauri_mobile_renderer_parity_android_mdi_capture_viewport_height=$android_mdi_capture_viewport_height"
     echo "tauri_mobile_renderer_parity_android_mdi_performance_status=$android_mdi_performance_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_performance_now_delta_ms=$android_mdi_performance_now_delta_ms"
     echo "tauri_mobile_renderer_parity_android_mdi_animation_status=$android_mdi_animation_status"
+    echo "tauri_mobile_renderer_parity_android_mdi_animation_frame_count=$android_mdi_animation_frame_count"
+    echo "tauri_mobile_renderer_parity_android_mdi_css_animation_probe=$android_mdi_css_animation_probe"
     echo "tauri_mobile_renderer_parity_android_screenshot=$android_screenshot"
     echo "tauri_mobile_renderer_parity_android_logcat=$android_logcat"
     echo "tauri_mobile_renderer_parity_android_gpu_log=$android_gpu_log"
