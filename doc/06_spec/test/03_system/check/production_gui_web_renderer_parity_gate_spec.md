@@ -27,7 +27,7 @@ production_gui_web_renderer_parity_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,7 +43,7 @@ Validates the non-launching gate for production GUI/web renderer parity evidence
 | Category | Other |
 | Status | Active |
 | Requirements | N/A |
-| Plan | doc/03_plan/sys_test/html_css_spec_traceability.md |
+| Plan | doc/03_plan/sys_test/simple_web_browser_production_hardening.md |
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/production_gui_web_renderer_parity_gate_spec.spl` |
@@ -58,7 +58,7 @@ closed unless the evidence proves the production renderer matrix, layout
 manifest, surface manifest, backend parity, font readback, and raw Metal
 readback are all passing.
 
-**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+**Plan:** doc/03_plan/sys_test/simple_web_browser_production_hardening.md
 **Requirements:** N/A
 **Research:** N/A
 **Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
@@ -90,6 +90,83 @@ sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true
   CSS animation probe. The `performance.now()` delta must be numeric and
   non-negative, not merely present.
 
+## Operator Notes
+
+This spec is intentionally non-launching. It feeds controlled `evidence.env`
+files into `scripts/check/check-production-gui-web-renderer-parity-gate.shs` so
+the gate contract can be verified without starting Electron, Tauri, Chrome, or
+Metal readback probes. The heavy evidence producer remains
+`scripts/check/check-production-gui-web-renderer-parity-evidence.shs`.
+
+Read the gate output in two passes:
+
+1. `production_gui_web_renderer_parity_gate_status` and `_reason` say whether
+   the complete production renderer contract passed.
+2. The promoted `production_gui_web_renderer_parity_gate_*` component fields
+   explain which prerequisite is missing, unavailable, timed out, or failing.
+
+The layout manifest dependency fields distinguish host setup failures from
+renderer mismatches. When the manifest wrapper reports
+`production_gui_web_renderer_parity_gate_layout_manifest_dependency_status=missing`
+with `dependency_reason=missing-electron-dependency`, install or repair the
+Electron capture dependency before investigating Simple Web layout code. When
+the dependency status is empty or `pass` and the manifest still fails, inspect
+the per-case manifest report for renderer, CSS, or pixel-comparison defects.
+
+The pass fixture in this spec is synthetic by design: it proves that the gate
+accepts only the full required evidence surface. It does not claim production
+GUI/web parity on the current host. Live parity still requires the heavy wrapper
+to produce real generated-GUI matrix, Simple Web layout manifest, live
+Tauri/Chrome surface manifest, backend, font-offload, Metal readback, and event
+routing rows.
+
+## Failure Modes Protected
+
+- Missing source evidence must produce typed non-pass output rather than an
+  empty or successful gate.
+- Statusless partial source evidence must not pass just because a nested matrix
+  row exists.
+- Timeout metadata from controlled subchecks must be preserved for triage.
+- Missing surface-manifest provenance, required Tauri capture commands, raw
+  Metal readback, or event-loop timing evidence must fail closed.
+- Layout-manifest host dependency diagnostics must be promoted so aggregate
+  reports can separate unavailable Electron setup from renderer mismatches.
+
+## Coverage Matrix
+
+Missing source fixture:
+
+- Input: no source `evidence.env`.
+- Expected: non-pass gate, missing source env status, refresh command, required
+  contract rows.
+
+Statusless source fixture:
+
+- Input: nested matrix row exists but top-level production status is absent.
+- Expected: `partial-production-parity-source-status`.
+
+Timeout fixture:
+
+- Input: matrix timeout rows.
+- Expected: timeout exit code, timeout status, timeout reason, and timeout
+  seconds are preserved.
+
+Pass fixture:
+
+- Input: all required synthetic component rows pass.
+- Expected: gate status and reason are `pass`.
+
+Dependency fixture:
+
+- Input: layout manifest is `unavailable` because every case missed Electron.
+- Expected: dependency status, reason, and missing-count are promoted.
+
+Negative contract fixtures:
+
+- Input: missing event timing, missing capture provenance, missing required
+  Tauri commands, missing surface capture rows, or missing Metal readback.
+- Expected: each missing contract has a typed failure reason and required row.
+
 ## Scenarios
 
 ### Production GUI/web renderer parity gate
@@ -99,7 +176,7 @@ sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 86 lines folded for reproduction.
+Runnable source: 89 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -124,6 +201,9 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_man
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_missing_commands=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_reason=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_backend=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_dependency_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_dependency_reason=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_dependency_missing_count=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_source_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_matrix_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_status=pass")
@@ -215,6 +295,30 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_part
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_partial_reason=missing-top-level-production-parity-status")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_refresh_command=sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_status=pass")
+```
+
+</details>
+
+#### promotes layout manifest host dependency diagnostics
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-production-gui-web-renderer-parity-gate-layout-dependency && mkdir -p build/test-production-gui-web-renderer-parity-gate-layout-dependency/source && printf 'production_gui_web_renderer_parity_status=fail\\nproduction_gui_web_renderer_parity_reason=layout-manifest-failed\\nproduction_gui_web_renderer_parity_matrix_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=unavailable\\nproduction_gui_web_renderer_parity_layout_manifest_reason=missing-electron-dependency\\nproduction_gui_web_renderer_parity_layout_manifest_case_count=50\\nproduction_gui_web_renderer_parity_layout_manifest_pass_count=0\\nproduction_gui_web_renderer_parity_layout_manifest_tracked_count=0\\nproduction_gui_web_renderer_parity_layout_manifest_fail_count=50\\nproduction_gui_web_renderer_parity_layout_manifest_dependency_status=missing\\nproduction_gui_web_renderer_parity_layout_manifest_dependency_reason=missing-electron-dependency\\nproduction_gui_web_renderer_parity_layout_manifest_dependency_missing_count=50\\n' > build/test-production-gui-web-renderer-parity-gate-layout-dependency/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-production-gui-web-renderer-parity-gate-layout-dependency/source/evidence.env BUILD_DIR=build/test-production-gui-web-renderer-parity-gate-layout-dependency/out REPORT_PATH=build/test-production-gui-web-renderer-parity-gate-layout-dependency/report.md sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-production-gui-web-renderer-parity-gate-layout-dependency/out/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_status=unavailable")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_reason=missing-electron-dependency")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_dependency_status=missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_dependency_reason=missing-electron-dependency")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_dependency_missing_count=50")
 ```
 
 </details>
@@ -446,8 +550,8 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_me
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -455,7 +559,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_me
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/sys_test/html_css_spec_traceability.md](doc/03_plan/sys_test/html_css_spec_traceability.md)
+- **Plan:** [doc/03_plan/sys_test/simple_web_browser_production_hardening.md](doc/03_plan/sys_test/simple_web_browser_production_hardening.md)
 - **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
 
 

@@ -102,6 +102,14 @@ the wrapper forwards that as `ELECTRON_LAYOUT_MANIFEST_RESUME=1`. Manifest
 policies named `track-*` are counted as tracked when they emit divergent or pass
 evidence with `blur_or_tolerance=false`; exact rows still require checksum and
 pixel-count equality.
+If every manifest row reports the same host dependency failure, such as
+`missing-electron-dependency` or `missing-simple-bin`, the manifest wrapper now
+emits `electron_simple_web_layout_manifest_status=unavailable` instead of a
+renderer mismatch failure. Read
+`electron_simple_web_layout_manifest_dependency_status`,
+`electron_simple_web_layout_manifest_dependency_reason`, and
+`electron_simple_web_layout_manifest_dependency_missing_count` before debugging
+Simple Web layout code.
 The same production wrapper now treats Electron event routing as both an
 interaction and browser-loop proof. A pass must promote focus/move/maximize,
 title-command, text-input, pointer-down/up, `performance.now()`, two

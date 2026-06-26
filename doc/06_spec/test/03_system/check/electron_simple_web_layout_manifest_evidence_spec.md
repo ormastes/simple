@@ -27,7 +27,7 @@ electron_simple_web_layout_manifest_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -72,6 +72,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_m
   emits divergent or pass evidence without blur/tolerance.
 - Resumable manifest runs reuse complete case evidence when scene and dimensions
   match, so a bounded rerun can continue without repeating completed captures.
+- When every manifest case reports a host dependency failure such as missing
+  Electron, the manifest is `unavailable` instead of a renderer mismatch
+  failure.
 
 ## Operator Notes
 
@@ -146,6 +149,10 @@ useful progress after a timeout.
 
 The manifest wrapper must still run missing cases in resume mode. Reuse is
 case-local and does not turn the entire manifest into a stale cached result.
+
+The manifest wrapper must not report a full manifest of missing Electron cases
+as renderer failures. That failure class blocks host setup, not Simple Web
+layout correctness.
 
 ## Manual Reproduction
 
@@ -236,12 +243,41 @@ expect(evidence).to_contain("electron_simple_web_layout_manifest_second_case_reu
 
 </details>
 
+#### classifies all-case missing Electron dependency as unavailable
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-simple-web-layout-manifest-missing-electron"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
+    "printf 'first_case|fixture-first|96|64|exact|first fixture\\nsecond_case|fixture-second|96|64|exact|second fixture\\n' > " + root + "/manifest.txt && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"electron_simple_web_layout_status=unavailable\\\\nelectron_simple_web_layout_reason=missing-electron-dependency\\\\nelectron_simple_web_layout_scene=$ELECTRON_BITMAP_SCENE\\\\nelectron_simple_web_layout_width=$ELECTRON_BITMAP_WIDTH\\\\nelectron_simple_web_layout_height=$ELECTRON_BITMAP_HEIGHT\\\\nelectron_simple_web_layout_mismatch_count=\\\\nelectron_simple_web_layout_blur_or_tolerance_used=\\\\nelectron_simple_web_layout_exit_code=1\\\\n\" > \"$BUILD_DIR/evidence.env\"\\nexit 1\\n' > " + root + "/fixture/bitmap.sh && " +
+    "MANIFEST_PATH=" + root + "/manifest.txt ELECTRON_LAYOUT_MANIFEST_BITMAP_SCRIPT=" + root + "/fixture/bitmap.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-electron-simple-web-layout-manifest-evidence.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_status=unavailable")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_reason=missing-electron-dependency")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_dependency_status=missing")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_dependency_reason=missing-electron-dependency")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_dependency_missing_count=2")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_case_count=2")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_fail_count=2")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

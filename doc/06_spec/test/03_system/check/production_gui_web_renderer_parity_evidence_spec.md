@@ -43,7 +43,7 @@ Validates the heavy production GUI/web renderer parity wrapper behavior that can
 | Category | Other |
 | Status | Active |
 | Requirements | N/A |
-| Plan | doc/03_plan/sys_test/html_css_spec_traceability.md |
+| Plan | doc/03_plan/sys_test/simple_web_browser_production_hardening.md |
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/production_gui_web_renderer_parity_evidence_spec.spl` |
@@ -55,7 +55,7 @@ Validates the heavy production GUI/web renderer parity wrapper behavior that can
 Validates the heavy production GUI/web renderer parity wrapper behavior that can
 be tested without launching the real renderer stack.
 
-**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+**Plan:** doc/03_plan/sys_test/simple_web_browser_production_hardening.md
 **Requirements:** N/A
 **Research:** N/A
 **Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
@@ -72,6 +72,84 @@ SIMPLE_LIB=src bin/simple test/03_system/check/production_gui_web_renderer_parit
   wrapper without a status.
 - The heavy wrapper resolves and exports a Simple binary for nested checks so a
   missing legacy cargo target does not hide renderer parity evidence.
+- The wrapper preserves layout-manifest host dependency diagnostics so the gate
+  and aggregate can distinguish missing Electron setup from Simple Web renderer
+  mismatches.
+
+## Operator Notes
+
+This spec uses fixture subcheck scripts to exercise the heavy production wrapper
+without launching Electron, Tauri, Chrome, or platform GPU readback probes. The
+real wrapper remains the canonical producer for
+`production_gui_web_renderer_parity_*` evidence consumed by
+`check-production-gui-web-renderer-parity-gate.shs` and the GUI RenderDoc
+feature aggregate.
+
+When triaging a production wrapper failure, read the top-level status and reason
+first, then inspect the promoted nested rows. The wrapper is designed to keep
+collecting independent evidence after an earlier layout or matrix failure, so a
+single failed top-level reason does not imply later backend, font, Metal, or
+event-routing rows are absent.
+
+Layout-manifest host dependency rows are especially important on fresh or
+isolated workspaces. If the nested manifest reports
+`electron_simple_web_layout_manifest_dependency_status=missing`, the production
+wrapper promotes that as
+`production_gui_web_renderer_parity_layout_manifest_dependency_status=missing`
+with the dependency reason and missing-count. That is host setup evidence, not a
+pixel mismatch.
+
+## Coverage Matrix
+
+Resolved Simple binary:
+
+- The wrapper searches repo `bin/simple`, the Rust release binary, then `simple`
+  on PATH.
+- The selected binary and source are exported to nested subchecks.
+
+Backend explicit override:
+
+- An explicit missing `SIMPLE_BIN` remains visible in backend evidence.
+
+Timeout fixture:
+
+- A slow fixture subcheck is killed by the configured timeout.
+- Timeout status, reason, and timeout seconds are retained.
+
+Bounded stdout fixture:
+
+- Full nested evidence stays on disk.
+- Stdout remains compact and omits verbose nested-only markers.
+
+Layout-failure continuation fixture:
+
+- The wrapper continues backend, font, and Metal collection after layout
+  failure.
+
+Layout-timeout count fixture:
+
+- Partial per-case rows are counted after timeout when enough evidence exists.
+
+## Failure Modes Protected
+
+- A missing resolved Simple binary must not silently fall back to a stale cargo
+  target path.
+- An explicitly configured missing binary must remain visible in typed evidence.
+- A timed-out nested check must not erase partial evidence already written by
+  that check.
+- A layout failure must not prevent independent backend, font, Metal, or event
+  probes from producing diagnostics.
+- Verbose nested rows must not flood stdout; they stay in the evidence file for
+  later inspection.
+- Layout dependency rows must not be dropped between the layout manifest and
+  production parity evidence layers.
+- Synthetic fixture passes must not be confused with live renderer parity; they
+  only prove wrapper aggregation and failure classification.
+
+## Related Gate
+
+Run `scripts/check/check-production-gui-web-renderer-parity-gate.shs` against
+the produced `evidence.env` to validate the final release-blocking contract.
 
 ## Scenarios
 
@@ -82,7 +160,7 @@ SIMPLE_LIB=src bin/simple test/03_system/check/production_gui_web_renderer_parit
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -103,6 +181,8 @@ expect(script).to_contain("production_gui_web_renderer_parity_event_routing_anim
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_css_animation_probe")
 expect(script).to_contain("num_nonnegative \"$performance_now_delta_ms\"")
 expect(script).to_contain("num_at_least \"$animation_frame_count\" 2")
+expect(script).to_contain("electron_simple_web_layout_manifest_dependency_status")
+expect(script).to_contain("production_gui_web_renderer_parity_layout_manifest_dependency_status")
 ```
 
 </details>
@@ -395,7 +475,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_po
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/sys_test/html_css_spec_traceability.md](doc/03_plan/sys_test/html_css_spec_traceability.md)
+- **Plan:** [doc/03_plan/sys_test/simple_web_browser_production_hardening.md](doc/03_plan/sys_test/simple_web_browser_production_hardening.md)
 - **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
 
 
