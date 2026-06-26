@@ -64,7 +64,7 @@ Commands:
   fine-tune-options    List host fine-tune requirement options.
   fine-tune-select-requirements <attempt_id> <feature_option> <nfr_option> <selected_by> [notes]
                        Write final requirement docs and record selected options.
-  fine-tune-record-app <attempt_id> <app_target> <usage> <handoff_doc>
+  fine-tune-record-app <attempt_id> <app_target> <usage> <handoff_doc> <license_constraints> <safety_eval> <deployment_evidence>
                        Append LLM-backed app/server handoff evidence.
   fine-tune-record-retune <attempt_id> <reason> <source_eval> <next_attempt> <retry_target>
                        Append retune request evidence from verification.
@@ -1027,9 +1027,9 @@ function commandFineTuneSelectRequirements(args) {
 }
 
 function commandFineTuneRecordApp(args) {
-  const [attemptId, appTarget, usage, handoffDoc] = args;
-  if (!attemptId || !appTarget || !usage || !handoffDoc) {
-    console.error("spipe fine-tune-record-app: attempt_id, app_target, usage, and handoff_doc are required");
+  const [attemptId, appTarget, usage, handoffDoc, licenseConstraints, safetyEval, deploymentEvidence] = args;
+  if (!attemptId || !appTarget || !usage || !handoffDoc || !licenseConstraints || !safetyEval || !deploymentEvidence) {
+    console.error("spipe fine-tune-record-app: attempt_id, app_target, usage, handoff_doc, license_constraints, safety_eval, and deployment_evidence are required");
     process.exitCode = 2;
     return;
   }
@@ -1040,6 +1040,9 @@ function commandFineTuneRecordApp(args) {
     app_target: "${quoteSdn(appTarget)}"
     usage: "${quoteSdn(usage)}"
     handoff_doc: "${quoteSdn(handoffDoc)}"
+    license_constraints: "${quoteSdn(licenseConstraints)}"
+    safety_eval: "${quoteSdn(safetyEval)}"
+    deployment_evidence: "${quoteSdn(deploymentEvidence)}"
 `);
   console.log(registryPath);
 }
@@ -1596,7 +1599,10 @@ function commandFineTuneVerify(recordPath) {
     "result",
     "status",
     "app_target",
-    "handoff_doc"
+    "handoff_doc",
+    "license_constraints",
+    "safety_eval",
+    "deployment_evidence"
   ];
 
   let failures = 0;

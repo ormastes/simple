@@ -275,9 +275,13 @@ node examples/05_stdlib/spipe/cli/spipe.js fine-tune-report <attempt_id>
 Record LLM-backed app/server handoff and retune routing:
 
 ```sh
-node examples/05_stdlib/spipe/cli/spipe.js fine-tune-record-app <attempt_id> <app_target> <usage> <handoff_doc>
+node examples/05_stdlib/spipe/cli/spipe.js fine-tune-record-app <attempt_id> <app_target> <usage> <handoff_doc> <license_constraints> <safety_eval> <deployment_evidence>
 node examples/05_stdlib/spipe/cli/spipe.js fine-tune-record-retune <attempt_id> <reason> <source_eval> <next_attempt> <retry_target>
 ```
+
+The app/server handoff is not production evidence unless it records the model
+license/distribution constraints, safety evaluation coverage, and deployment
+runtime/memory/latency/fallback evidence.
 
 Print the app/server handoff evidence for verification:
 

@@ -159,4 +159,17 @@ The remaining manual gate is model acceptance and licensed data access: do not
 mark a fine-tune attempt ready until the decision registry records `accepted`
 after target-reaching eval evidence, license review, cache/checksum evidence,
 and app/server handoff verification. The current concrete next attempt is
-`llm_backed_app_server_dry_run_retry5`.
+`llm_backed_app_server_dry_run_retry6`.
+
+2026-06-26 app/server handoff evidence gate:
+
+- `fine-tune-record-app` now requires explicit `license_constraints`,
+  `safety_eval`, and `deployment_evidence` fields.
+- Both `spipe fine-tune-verify` and
+  `.spipe/llm-finetune-process/scripts/verify_attempt.shs` fail records that
+  omit those fields, so medical QA handoffs cannot pass as production evidence
+  with only a free-form usage string.
+- Current retry records and `app_handoffs.sdn` carry explicit non-deployment
+  evidence until license/distribution review, refusal/boundary/clinical
+  disclaimer checks, and runtime/memory/latency/fallback deployment evidence
+  are real.

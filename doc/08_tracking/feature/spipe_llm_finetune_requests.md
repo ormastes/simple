@@ -59,6 +59,11 @@ Lifecycle: `Open` -> `Accepted` -> `Implemented` or `Rejected`.
         checks.
   - [ ] Deployment evidence records runtime, memory target, latency target, and
         rollback/fallback model.
+- **2026-06-26 gate update:** `fine-tune-record-app`, `fine-tune-verify`, and
+  `verify_attempt.shs` now require explicit `license_constraints`,
+  `safety_eval`, and `deployment_evidence` fields. The current MedGemma retry
+  records intentionally carry non-deployment evidence until the real license,
+  safety, and deployment checks above are complete.
 
 ### FR-SPIPE-LLM-0004 - Obtain licensed fixed-format data cache
 

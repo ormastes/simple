@@ -115,7 +115,9 @@ Use `spipe fine-tune-report <attempt_id>` to print a consolidated attempt
 handoff with the attempt record and all registry evidence.
 Use `spipe fine-tune-record-app` and `spipe fine-tune-record-retune` to connect
 an LLM-backed app/server to the model attempt it used and the next retune
-attempt requested by verification.
+attempt requested by verification. App/server handoff records must include
+license/distribution constraints, safety evaluation coverage, and deployment
+runtime/memory/latency/fallback evidence.
 Use `spipe fine-tune-app-handoff <attempt_id>` to print the app/server handoff,
 model, training, evaluation, decision, and retune evidence as a compact
 verification artifact.
