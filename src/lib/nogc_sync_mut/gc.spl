@@ -384,8 +384,11 @@ class GcHeap:
         # Process gray stack (depth-first traversal)
         while not self.gray_stack.is_empty():
             val obj_ptr = self.gray_stack.pop()
-            if obj_ptr.?:
-                self.scan_object(obj_ptr.unwrap())
+            match obj_ptr:
+                case Some(ptr):
+                    self.scan_object(ptr)
+                case None:
+                    pass_do_nothing
 
     me mark_gray(ptr: [u8]):
         """Mark object as gray (reachable but not scanned).
@@ -432,14 +435,19 @@ class GcHeap:
         val obj_data_ptr = ptr
         val obj_size = header.size
         val type_info = self.type_registry.get(header.type_id)
-        if type_info.? and type_info.unwrap().pointer_offsets.?:
-            # Precise scanning: only check known pointer fields
-            val offsets = type_info.unwrap().pointer_offsets.unwrap()
-            for offset in offsets:
-                self.scan_pointer_at(obj_data_ptr, offset)
-        else:
-            # Conservative scanning: scan entire object assuming all RuntimeValue
-            self.scan_for_pointers(obj_data_ptr, obj_size)
+        match type_info:
+            case Some(info):
+                match info.pointer_offsets:
+                    case Some(offsets):
+                        # Precise scanning: only check known pointer fields
+                        for offset in offsets:
+                            self.scan_pointer_at(obj_data_ptr, offset)
+                    case None:
+                        # Conservative scanning: scan entire object assuming all RuntimeValue
+                        self.scan_for_pointers(obj_data_ptr, obj_size)
+            case None:
+                # Conservative scanning: scan entire object assuming all RuntimeValue
+                self.scan_for_pointers(obj_data_ptr, obj_size)
 
     me scan_for_pointers(ptr: [u8], size: usize):
         """Scan memory region for pointers, mark them gray.
@@ -483,7 +491,9 @@ class GcHeap:
         var freed_bytes: usize = 0
 
         while current.?:
-            val obj_ptr = current.unwrap()
+            val obj_ptr = match current:
+                case Some(ptr): ptr
+                case None: break
             val header = read_header(obj_ptr)
 
             if header.is_marked():
@@ -515,7 +525,11 @@ class GcHeap:
                 # Unlink from list
                 if prev.?:
                     # Update previous object's next pointer
-                    write_header_field(prev.unwrap(), "next", next_obj)
+                    match prev:
+                        case Some(prev_ptr):
+                            write_header_field(prev_ptr, "next", next_obj)
+                        case None:
+                            self.objects = next_obj
                 else:
                     # This was head of list
                     self.objects = next_obj
@@ -538,9 +552,15 @@ class GcHeap:
         """
         # Call type-specific finalizer if registered
         val type_info = self.type_registry.get(header.type_id)
-        if type_info.? and type_info.unwrap().finalizer.?:
-            val finalizer = type_info.unwrap().finalizer.unwrap()
-            finalizer(ptr)
+        match type_info:
+            case Some(info):
+                match info.finalizer:
+                    case Some(finalizer):
+                        finalizer(ptr)
+                    case None:
+                        pass_do_nothing
+            case None:
+                pass_do_nothing
         # Log finalization in debug mode
         if self.config.incremental:
             pass  # Finalization complete
@@ -601,8 +621,11 @@ class GcPtr<T>:
         Write barrier ensures GC correctness during incremental collection.
         """
         # Remove old root
-        if self.ptr.?:
-            self.heap.remove_root(self.ptr.unwrap())
+        match self.ptr:
+            case Some(ptr):
+                self.heap.remove_root(ptr)
+            case None:
+                pass_do_nothing
 
         # Add new root
         self.heap.add_root(new_ptr)
@@ -626,8 +649,11 @@ class GcPtr<T>:
 
     me drop():
         """Cleanup: unregister root."""
-        if self.ptr.?:
-            self.heap.remove_root(self.ptr.unwrap())
+        match self.ptr:
+            case Some(ptr):
+                self.heap.remove_root(ptr)
+            case None:
+                pass_do_nothing
 
 # ============================================================================
 # SFFI Functions (GC Internals)
