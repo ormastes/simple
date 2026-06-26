@@ -27,7 +27,7 @@ tauri_mobile_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -85,6 +85,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
   and animation-frame counts must be real JSON numbers; stringified or
   fractional values do not prove routed events, capture, performance, or full
   animation frames.
+- Runtime failure markers in any requested device log fail the MDI proof even
+  when the JSON counters otherwise prove render, event, capture, performance,
+  and animation detail.
 
 ## Scenarios
 
@@ -100,7 +103,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -114,6 +117,7 @@ expect(code).to_equal(0)
 val evidence = file_read(root + "/evidence.env")
 step("Inspect normalized proof rows")
 expect(evidence).to_contain("ios_mdi_proof_status=pass")
+expect(evidence).to_contain("ios_mdi_failure_marker_status=pass")
 expect(evidence).to_contain("ios_mdi_proof_requested_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
@@ -533,12 +537,48 @@ expect(anim).to_contain("android_mdi_animation_frame_count=2")
 
 </details>
 
+#### rejects mobile MDI proof logs with runtime failure markers
+
+-  proof log command
+   - Expected: code equals `1`
+- Confirm valid MDI JSON cannot hide device-log runtime failures
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-failure-marker"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_log_command(root + "/device.log", "") +
+    " && printf 'Fatal signal 11 from renderer\\n' >> " + root + "/device.log && " +
+    "node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm valid MDI JSON cannot hide device-log runtime failures")
+expect(evidence).to_contain("ios_mdi_proof_status=fail")
+expect(evidence).to_contain("ios_mdi_proof_reason=mobile-mdi-failure-marker")
+expect(evidence).to_contain("ios_mdi_failure_marker_status=fail")
+expect(evidence).to_contain("ios_mdi_render_status=pass")
+expect(evidence).to_contain("ios_mdi_event_status=pass")
+expect(evidence).to_contain("ios_mdi_capture_status=pass")
+expect(evidence).to_contain("ios_mdi_performance_status=pass")
+expect(evidence).to_contain("ios_mdi_animation_status=pass")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

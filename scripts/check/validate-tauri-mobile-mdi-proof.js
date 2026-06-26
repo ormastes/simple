@@ -59,6 +59,9 @@ const requestedSourceCount = files.length;
 let missingSourceCount = 0;
 let sourceCount = 0;
 let lastJson = "";
+let failureMarker = false;
+const failureMarkerPattern =
+  /(eval FAIL|inline shell eval FAIL|delayed inline shell eval FAIL|Fatal signal|F\/DEBUG|F\/libc|NSURLErrorDomain|failed provisional load|Headless UI completed|subprocess exited with code|Simple subprocess stdout closed before a valid render arrived|parse error|Requested GL implementation .* not found|Exiting GPU process due to errors during initialization)/i;
 for (const file of files) {
   if (!file || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
     missingSourceCount += 1;
@@ -66,6 +69,9 @@ for (const file of files) {
   }
   sourceCount += 1;
   const text = fs.readFileSync(file, "utf8");
+  if (failureMarkerPattern.test(text)) {
+    failureMarker = true;
+  }
   const matches = [...text.matchAll(/\[tauri-shell\] mdi proof:\s*(\{[^\r\n]*\})/g)];
   if (matches.length > 0) {
     lastJson = matches[matches.length - 1][1];
@@ -130,11 +136,19 @@ const animationPass =
   proof.animationFrameAvailable === true &&
   jsonIntegerAtLeast(proof.animationFrameCount, 2) &&
   proof.cssAnimationProbe === true;
+const detailPass = eventPass && renderPass && capturePass && performancePass && animationPass;
+const status = !failureMarker && detailPass ? "pass" : "fail";
+const reason = failureMarker
+  ? "mobile-mdi-failure-marker"
+  : detailPass
+    ? "pass"
+    : "contract-missing";
 
 emit("mdi_proof_json", jsonPath);
-emit("mdi_proof_status", eventPass && renderPass && capturePass && performancePass && animationPass ? "pass" : "fail");
-emit("mdi_proof_reason", eventPass && renderPass && capturePass && performancePass && animationPass ? "pass" : "contract-missing");
+emit("mdi_proof_status", status);
+emit("mdi_proof_reason", reason);
 emitSourceRows();
+emit("mdi_failure_marker_status", failureMarker ? "fail" : "pass");
 emit("mdi_proof_window_count", jsonIntegerTextOrBlank(proof.count));
 emit("mdi_render_status", renderPass ? "pass" : "fail");
 emit("mdi_render_image_count", jsonIntegerTextOrBlank(proof.imageCount));
@@ -153,6 +167,6 @@ emit("mdi_animation_frame_available", proof.animationFrameAvailable === true ? "
 emit("mdi_animation_frame_count", jsonIntegerTextOrBlank(proof.animationFrameCount));
 emit("mdi_css_animation_probe", proof.cssAnimationProbe === true ? "true" : "false");
 
-if (!(eventPass && renderPass && capturePass && performancePass && animationPass)) {
+if (status !== "pass") {
   process.exit(1);
 }
