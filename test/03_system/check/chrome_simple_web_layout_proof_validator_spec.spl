@@ -23,6 +23,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 
 - Complete Chrome layout proof JSON validates and emits normalized
   `chrome_simple_web_layout_*` rows.
+- Large integer checksum values compare exactly, without JavaScript number
+  rounding.
 - Malformed `frame_us` fails closed instead of relying on shell integer
   comparison behavior.
 - Blur/tolerance use, missing ARGB capture, missing geometry, malformed
@@ -38,6 +40,9 @@ use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
     "node -e 'const fs=require(\"fs\");const p={checksum:100,expected_checksum:100,weighted_checksum:500,expected_weighted_checksum:500,mismatch_count:0,frame_us:1250,captured_argb_written:true,geometry_written:true,blur_or_tolerance_used:false,chrome_bin:\"/usr/bin/google-chrome\"};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+
+fn _large_proof_command(path: text, mutation: text) -> text:
+    "node -e 'const fs=require(\"fs\");const p={checksum:\"18446744073709551610\",expected_checksum:\"18446744073709551610\",weighted_checksum:\"18446744073709551611\",expected_weighted_checksum:\"18446744073709551611\",mismatch_count:0,frame_us:1250,captured_argb_written:true,geometry_written:true,blur_or_tolerance_used:false,chrome_bin:\"/usr/bin/google-chrome\"};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Chrome Simple Web layout proof validator":
 
@@ -58,6 +63,26 @@ describe "Chrome Simple Web layout proof validator":
         expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_written=true")
         expect(evidence).to_contain("chrome_simple_web_layout_geometry_written=true")
         expect(evidence).to_contain("chrome_simple_web_layout_blur_or_tolerance_used=false")
+
+    it "compares large Chrome checksum proof values exactly":
+        val root = "build/test-chrome-layout-validator-large-integers"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _large_proof_command(root + "/pass.json", "") +
+            " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/pass.json > " + root + "/pass.env; " +
+            _large_proof_command(root + "/fail.json", "p.checksum=\"18446744073709551609\"") +
+            " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/fail.json > " + root + "/fail.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val pass_evidence = file_read(root + "/pass.env")
+        val fail_evidence = file_read(root + "/fail.env")
+        step("Inspect exact decimal checksum rows")
+        expect(pass_evidence).to_contain("chrome_simple_web_layout_validation_status=pass")
+        expect(pass_evidence).to_contain("chrome_simple_web_layout_simple_checksum=18446744073709551610")
+        expect(pass_evidence).to_contain("chrome_simple_web_layout_chrome_weighted_checksum=18446744073709551611")
+        expect(fail_evidence).to_contain("chrome_simple_web_layout_validation_status=fail")
+        expect(fail_evidence).to_contain("chrome_simple_web_layout_validation_reason=checksum-mismatch")
+        expect(fail_evidence).to_contain("chrome_simple_web_layout_chrome_checksum=18446744073709551609")
 
     it "rejects malformed Chrome frame timing":
         val root = "build/test-chrome-layout-validator-bad-frame"
@@ -124,3 +149,5 @@ describe "Chrome Simple Web layout proof validator":
         expect(script).to_contain("chrome_simple_web_layout_validation_status")
         expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
         expect(script).to_contain("status=divergent")
+        val capture = file_read("tools/chrome-live-bitmap/capture_html_argb.js")
+        expect(capture).to_contain("return sum.toString()")

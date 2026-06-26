@@ -213,7 +213,7 @@ function decodePngRgba(buffer) {
 function checksum(pixels) {
   let sum = 0n;
   for (const pixel of pixels) sum += BigInt(pixel >>> 0);
-  return Number(sum);
+  return sum.toString();
 }
 
 function weightedChecksum(pixels) {
@@ -221,7 +221,7 @@ function weightedChecksum(pixels) {
   for (let i = 0; i < pixels.length; i += 1) {
     sum += BigInt(pixels[i] >>> 0) * BigInt(i + 1);
   }
-  return Number(sum);
+  return sum.toString();
 }
 
 function websocketAcceptKey(key) {

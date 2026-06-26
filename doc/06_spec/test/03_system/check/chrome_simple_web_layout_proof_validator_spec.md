@@ -27,7 +27,7 @@ chrome_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -72,6 +72,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 
 - Complete Chrome layout proof JSON validates and emits normalized
   `chrome_simple_web_layout_*` rows.
+- Large integer checksum values compare exactly, without JavaScript number
+  rounding.
 - Malformed `frame_us` fails closed instead of relying on shell integer
   comparison behavior.
 - Blur/tolerance use, missing ARGB capture, missing geometry, malformed
@@ -113,6 +115,43 @@ expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=1250")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_written=true")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_written=true")
 expect(evidence).to_contain("chrome_simple_web_layout_blur_or_tolerance_used=false")
+```
+
+</details>
+
+#### compares large Chrome checksum proof values exactly
+
+-  large proof command
+-  large proof command
+   - Expected: code equals `1`
+- Inspect exact decimal checksum rows
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-validator-large-integers"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _large_proof_command(root + "/pass.json", "") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/pass.json > " + root + "/pass.env; " +
+    _large_proof_command(root + "/fail.json", "p.checksum=\"18446744073709551609\"") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/fail.json > " + root + "/fail.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val pass_evidence = file_read(root + "/pass.env")
+val fail_evidence = file_read(root + "/fail.env")
+step("Inspect exact decimal checksum rows")
+expect(pass_evidence).to_contain("chrome_simple_web_layout_validation_status=pass")
+expect(pass_evidence).to_contain("chrome_simple_web_layout_simple_checksum=18446744073709551610")
+expect(pass_evidence).to_contain("chrome_simple_web_layout_chrome_weighted_checksum=18446744073709551611")
+expect(fail_evidence).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(fail_evidence).to_contain("chrome_simple_web_layout_validation_reason=checksum-mismatch")
+expect(fail_evidence).to_contain("chrome_simple_web_layout_chrome_checksum=18446744073709551609")
 ```
 
 </details>
@@ -243,7 +282,7 @@ expect(pixel).to_contain("chrome_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -252,6 +291,8 @@ expect(script).to_contain("validate-chrome-simple-web-layout-proof.js")
 expect(script).to_contain("chrome_simple_web_layout_validation_status")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
+val capture = file_read("tools/chrome-live-bitmap/capture_html_argb.js")
+expect(capture).to_contain("return sum.toString()")
 ```
 
 </details>
@@ -260,8 +301,8 @@ expect(script).to_contain("status=divergent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
