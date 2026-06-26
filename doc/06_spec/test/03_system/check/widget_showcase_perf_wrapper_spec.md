@@ -194,7 +194,7 @@ plan-only log artifact status, and generated native alias source.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -227,6 +227,8 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_checksum=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_render_mode=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_redraw_frames=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_kind=content-sha256")
+expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl")
 expect(evidence).to_contain("gui_showcase_4k_200fps_simple_bin=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_use_native=1")
 expect(evidence).to_contain("gui_showcase_4k_200fps_alias_src_file_status=pass")
@@ -257,7 +259,7 @@ expect(alias_src).to_contain("run_4k_perf_probe()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -290,6 +292,8 @@ expect(evidence).to_contain("gui_showcase_8k_perf_checksum=")
 expect(evidence).to_contain("gui_showcase_8k_perf_render_mode=")
 expect(evidence).to_contain("gui_showcase_8k_perf_redraw_frames=")
 expect(evidence).to_contain("gui_showcase_8k_perf_source_revision=")
+expect(evidence).to_contain("gui_showcase_8k_perf_source_revision_kind=content-sha256")
+expect(evidence).to_contain("gui_showcase_8k_perf_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl")
 expect(evidence).to_contain("gui_showcase_8k_perf_simple_bin=")
 expect(evidence).to_contain("gui_showcase_8k_perf_use_native=1")
 expect(evidence).to_contain("gui_showcase_8k_perf_alias_src_file_status=pass")

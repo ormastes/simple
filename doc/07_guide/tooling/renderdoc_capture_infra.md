@@ -203,16 +203,20 @@ pixels, target FPS met, nonempty checksum,
 `retained-static-frame`, one redraw frame, at least 200 measured frames, and
 `target_fps >= 200`, plus RSS budget status with `max_rss_kb` and
 `max_rss_budget_kb`. A pass row must also retain binary provenance:
-`source_revision`, `simple_bin`, `use_native=1`,
+`source_revision`, `source_revision_kind=content-sha256`,
+`source_revision_files`, `simple_bin`, `use_native=1`,
 `native_build_mode=aggressive-native`, and `fallback_state=none`. The
-aggregate compares each retained row against the current checkout and emits
+aggregate compares each retained row against a current content hash of the
+retained perf wrapper and measured showcase source, then emits
 `gui_showcase_4k_200fps_current_source_revision`,
 `gui_showcase_4k_200fps_source_revision_status`,
 `gui_showcase_8k_perf_current_source_revision`, and
 `gui_showcase_8k_perf_source_revision_status`; use
 `GUI_SHOWCASE_REQUIRE_CURRENT_SOURCE_REVISION=1` for release or goal evidence
 that must fail stale perf rows instead of reporting them as reusable
-diagnostics. The default wrapper budget is 262144 KiB for 4K and
+diagnostics. Docs-only commits should not stale retained perf evidence unless
+the measured wrapper/source content changes. The default wrapper budget is
+262144 KiB for 4K and
 750000 KiB for 8K; rows with `rss_status=measured` are diagnostics, not
 completion evidence. The 8K row must likewise prove
 `7680x4320`, `33177600` pixels, nonzero readback pixels, target FPS at least

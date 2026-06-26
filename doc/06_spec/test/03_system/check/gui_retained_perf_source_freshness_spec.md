@@ -71,7 +71,9 @@ proof.
    `GUI_SHOWCASE_4K_PERF_ENV` and `GUI_SHOWCASE_8K_PERF_ENV`.
 3. For release or goal-completion evidence, set
    `GUI_SHOWCASE_REQUIRE_CURRENT_SOURCE_REVISION=1` so stale measurements fail
-   instead of being accepted as current proof.
+   instead of being accepted as current proof. The default freshness revision is
+   a content hash of the retained perf wrapper and measured showcase source, not
+   a docs-only commit hash.
 4. Read the aggregate `evidence.env` rows before claiming a 4K or 8K pass:
    source revision status, current source revision, binary path, native build
    mode, fallback state, FPS, checksum, frame timing, and RSS status must all be
@@ -82,6 +84,8 @@ proof.
 The aggregate must emit these source freshness rows for retained 4K evidence:
 
 - `gui_showcase_4k_200fps_current_source_revision`
+- `gui_showcase_4k_200fps_source_revision_kind`
+- `gui_showcase_4k_200fps_source_revision_files`
 - `gui_showcase_4k_200fps_source_revision_status`
 - `gui_showcase_4k_200fps_require_current_source_revision`
 - `gui_showcase_4k_200fps_alias_src_file_status`
@@ -94,6 +98,8 @@ The aggregate must emit these source freshness rows for retained 4K evidence:
 The aggregate must emit the matching 8K rows:
 
 - `gui_showcase_8k_perf_current_source_revision`
+- `gui_showcase_8k_perf_source_revision_kind`
+- `gui_showcase_8k_perf_source_revision_files`
 - `gui_showcase_8k_perf_source_revision_status`
 - `gui_showcase_8k_perf_require_current_source_revision`
 - `gui_showcase_8k_perf_alias_src_file_status`
@@ -209,7 +215,7 @@ expect(report).to_contain("4K retained perf native artifacts: alias_src pass; na
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -223,6 +229,8 @@ val evidence = file_read("build/test-gui-retained-perf-source-freshness/out/evid
 val report = file_read("build/test-gui-retained-perf-source-freshness/report.md")
 expect(evidence).to_contain("gui_showcase_4k_200fps_status=fail")
 expect(evidence).to_contain("gui_showcase_4k_200fps_current_source_revision=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_kind=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_files=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_status=mismatch")
 expect(evidence).to_contain("gui_showcase_4k_200fps_require_current_source_revision=1")
 expect(evidence).to_contain("gui_showcase_4k_200fps_alias_src_file_status=pass")
@@ -234,6 +242,8 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_native_build_log_file_status
 expect(evidence).to_contain("gui_showcase_4k_200fps_reason=stale-4k-source-revision:mismatch")
 expect(evidence).to_contain("gui_showcase_8k_perf_status=fail")
 expect(evidence).to_contain("gui_showcase_8k_perf_current_source_revision=")
+expect(evidence).to_contain("gui_showcase_8k_perf_source_revision_kind=")
+expect(evidence).to_contain("gui_showcase_8k_perf_source_revision_files=")
 expect(evidence).to_contain("gui_showcase_8k_perf_source_revision_status=mismatch")
 expect(evidence).to_contain("gui_showcase_8k_perf_require_current_source_revision=1")
 expect(evidence).to_contain("gui_showcase_8k_perf_alias_src_file_status=pass")
