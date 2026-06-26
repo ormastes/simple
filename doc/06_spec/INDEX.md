@@ -7,12 +7,14 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 439
+- **Total Lines:** 19
+- **Warnings:** 2
 
 ---
 
-## Application (1 features)
+## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Kairos Like Simple Mcp Llm Dashboard Specification](03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.md) | Complete | N/A | 14 | 100% | 439 lines |
+| [GUI Vulkan ARGB Checksum Contract](test/03_system/check/gui_vulkan_argb_checksum_contract_spec.md) | Minimal | N/A | 1 | 20% | 19 lines |
+
