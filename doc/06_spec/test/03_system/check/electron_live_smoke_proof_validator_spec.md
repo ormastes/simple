@@ -10,7 +10,6 @@
 @layout dag
 @direction LR
 
-electron_live_smoke_proof_validator_spec -> fail closed
 electron_live_smoke_proof_validator_spec -> std
 ```
 
@@ -28,7 +27,7 @@ electron_live_smoke_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -72,9 +71,11 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 
 - A complete live Electron proof validates and emits normalized
   `electron_live_smoke_*` rows.
-- Missing DOM render text, missing `performance.now`, zero timing deltas,
-  missing two animation frames, missing CSS animation support, and blur/tolerance
-  use fail closed.
+- Missing DOM render text, missing CSS envelope, missing rendered text sample,
+  missing `performance.now`, zero timing deltas, missing two animation frames,
+  missing CSS animation support, and blur/tolerance use fail closed.
+- The rendered text sample must include the live-smoke entry text and must not
+  exceed the reported rendered text length.
 - Requested capture viewport dimensions must be explicit decimal integers; the
   proof validator must not accept exponent or fractional notation as a capture
   size contract.
@@ -94,7 +95,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -112,8 +113,10 @@ expect(evidence).to_contain("electron_live_smoke_validation_reason=pass")
 expect(evidence).to_contain("electron_live_smoke_target=electron")
 expect(evidence).to_contain("electron_live_smoke_width=1280")
 expect(evidence).to_contain("electron_live_smoke_body_html_length=64")
+expect(evidence).to_contain("electron_live_smoke_css_length=12")
 expect(evidence).to_contain("electron_live_smoke_app_element_present=true")
 expect(evidence).to_contain("electron_live_smoke_body_text_length=23")
+expect(evidence).to_contain("electron_live_smoke_body_text_sample=Hello World from Web!")
 expect(evidence).to_contain("electron_live_smoke_performance_now_available=true")
 expect(evidence).to_contain("electron_live_smoke_animation_frame_count=2")
 expect(evidence).to_contain("electron_live_smoke_css_animation_probe=true")
@@ -126,13 +129,14 @@ expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=false")
 
 -  proof command
 -  proof command
+-  proof command
    - Expected: code equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -140,15 +144,64 @@ val root = "build/test-electron-live-smoke-validator-dom"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/html.json", "p.body_html_length=0") +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/html.json 1280 720 > " + root + "/html.env; " +
+    _proof_command(root + "/css.json", "p.css_length=0") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/css.json 1280 720 > " + root + "/css.env; " +
     _proof_command(root + "/text.json", "p.body_text_length=0") +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/text.json 1280 720 > " + root + "/text.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val html = file_read(root + "/html.env")
+val css = file_read(root + "/css.env")
 val text = file_read(root + "/text.env")
 expect(html).to_contain("electron_live_smoke_validation_reason=missing-render-html")
+expect(css).to_contain("electron_live_smoke_validation_reason=missing-render-css")
+expect(css).to_contain("electron_live_smoke_css_length=0")
 expect(text).to_contain("electron_live_smoke_validation_reason=missing-rendered-text")
+```
+
+</details>
+
+#### rejects forged rendered text counters without the live smoke text sample
+
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm text length counters need a matching rendered sample
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-live-smoke-validator-text-sample"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/empty-sample.json", "p.body_text_sample=\"\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/empty-sample.json 1280 720 > " + root + "/empty-sample.env; " +
+    _proof_command(root + "/wrong-sample.json", "p.body_text_sample=\"Only a stale counter\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/wrong-sample.json 1280 720 > " + root + "/wrong-sample.env; " +
+    _proof_command(root + "/long-sample.json", "p.body_text_length=4;p.body_text_sample=\"Hello World from Web!\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/long-sample.json 1280 720 > " + root + "/long-sample.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val empty_sample = file_read(root + "/empty-sample.env")
+val wrong_sample = file_read(root + "/wrong-sample.env")
+val long_sample = file_read(root + "/long-sample.env")
+step("Confirm text length counters need a matching rendered sample")
+expect(empty_sample).to_contain("electron_live_smoke_validation_status=fail")
+expect(empty_sample).to_contain("electron_live_smoke_validation_reason=missing-rendered-text-sample")
+expect(empty_sample).to_contain("electron_live_smoke_body_text_sample=")
+expect(wrong_sample).to_contain("electron_live_smoke_validation_status=fail")
+expect(wrong_sample).to_contain("electron_live_smoke_validation_reason=missing-rendered-text-sample")
+expect(wrong_sample).to_contain("electron_live_smoke_body_text_sample=Only a stale counter")
+expect(long_sample).to_contain("electron_live_smoke_validation_status=fail")
+expect(long_sample).to_contain("electron_live_smoke_validation_reason=missing-rendered-text-sample")
+expect(long_sample).to_contain("electron_live_smoke_body_text_length=4")
 ```
 
 </details>
@@ -292,8 +345,8 @@ expect(envelopes).to_contain("css_length")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

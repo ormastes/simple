@@ -38,6 +38,10 @@ function boolText(value) {
   return clean(value);
 }
 
+function textSample(value) {
+  return typeof value === 'string' ? value : '';
+}
+
 const [proofPath, widthText, heightText] = process.argv.slice(2);
 if (!proofPath || !widthText || !heightText) {
   emit('electron_live_smoke_validation_status', 'fail');
@@ -70,10 +74,18 @@ if (proof.target !== 'electron') {
   reason = 'unexpected-height';
 } else if (!integerAtLeast(proof.body_html_length, 1)) {
   reason = 'missing-render-html';
+} else if (!integerAtLeast(proof.css_length, 1)) {
+  reason = 'missing-render-css';
 } else if (proof.app_element_present !== true) {
   reason = 'missing-app-element';
 } else if (!integerAtLeast(proof.body_text_length, 1)) {
   reason = 'missing-rendered-text';
+} else if (
+  textSample(proof.body_text_sample).length < 1 ||
+  !textSample(proof.body_text_sample).includes('Hello World from Web!') ||
+  textSample(proof.body_text_sample).length > Number(decimalIntegerText(proof.body_text_length))
+) {
+  reason = 'missing-rendered-text-sample';
 } else if (proof.performance_now_available !== true || !finiteNumberGreaterThan(proof.performance_now_delta_ms, 0)) {
   reason = 'missing-performance-now';
 } else if (proof.animation_frame_available !== true || !integerAtLeast(proof.animation_frame_count, 2)) {
@@ -91,6 +103,7 @@ emit('electron_live_smoke_surface_id', proof.surface_id);
 emit('electron_live_smoke_width', intText(proof.width));
 emit('electron_live_smoke_height', intText(proof.height));
 emit('electron_live_smoke_body_html_length', intText(proof.body_html_length));
+emit('electron_live_smoke_css_length', intText(proof.css_length));
 emit('electron_live_smoke_app_element_present', boolText(proof.app_element_present));
 emit('electron_live_smoke_body_text_length', intText(proof.body_text_length));
 emit('electron_live_smoke_body_text_sample', proof.body_text_sample);
