@@ -27,7 +27,7 @@ production_gui_web_renderer_parity_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -77,6 +77,8 @@ SIMPLE_LIB=src bin/simple test/03_system/check/production_gui_web_renderer_parit
 - The wrapper preserves layout-manifest host dependency diagnostics so the gate
   and aggregate can distinguish missing Electron setup from Simple Web renderer
   mismatches.
+- The Tauri/Chrome surface manifest emits host and live-capture provenance rows
+  directly, including backend, required-command, and missing-command evidence.
 - The wrapper promotes the event-routing validator status, exact browser event
   sequence, native payload/text rows, and titlebar/UI readback rows so the
   top-level parity proof cannot pass on shallow event counts alone.
@@ -464,6 +466,37 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_surface_manifest
 
 </details>
 
+#### emits surface manifest host and capture provenance without downstream fallbacks
+
+- Inspect direct Tauri/Chrome surface provenance rows
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-chrome-surface-manifest-provenance"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/source && printf 'electron_simple_web_layout_manifest_status=pass\\nelectron_simple_web_layout_manifest_reason=pass\\nelectron_simple_web_layout_manifest_case_count=0\\nelectron_simple_web_layout_manifest_pass_count=0\\nelectron_simple_web_layout_manifest_fail_count=0\\n' > " + root + "/source/layout.env && LAYOUT_ENV=" + root + "/source/layout.env BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-tauri-chrome-simple-web-layout-manifest-evidence.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+step("Inspect direct Tauri/Chrome surface provenance rows")
+expect(evidence).to_contain("tauri_chrome_simple_web_layout_manifest_status=fail")
+expect(evidence).to_contain("tauri_chrome_simple_web_layout_manifest_reason=tauri-tauri-layout-manifest-cases-missing;chrome-chrome-layout-manifest-cases-missing")
+expect(evidence).to_contain("tauri_chrome_simple_web_layout_manifest_host_uname_s=")
+expect(evidence).to_contain("tauri_chrome_simple_web_layout_manifest_host_uname_m=")
+expect(evidence).to_contain("tauri_chrome_simple_web_layout_manifest_tauri_capture_backend=x11-xvfb-window-screenshot")
+expect(evidence).to_contain("tauri_chrome_simple_web_layout_manifest_tauri_capture_required_commands=cargo,xvfb-run,dbus-run-session,xdotool,import,convert,node")
+expect(evidence).to_contain("tauri_chrome_simple_web_layout_manifest_tauri_capture_missing_commands=")
+expect(evidence).to_contain("tauri_chrome_simple_web_layout_manifest_chrome_capture_backend=chrome-live-bitmap")
+```
+
+</details>
+
 #### fails top-level parity when Electron event routing validator details are missing
 
 <details>
@@ -504,8 +537,8 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_tr
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
