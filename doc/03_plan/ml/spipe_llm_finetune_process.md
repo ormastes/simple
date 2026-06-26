@@ -175,6 +175,11 @@ check covers SPipe command routing. The `doc/06_spec` guard covers scenario 5.
 - Retry7 must continue to fail `fine-tune-ready` until retry6 has target eval,
   license constraints, safety evaluation, deployment evidence, and an accepted
   normal-review decision.
+- `test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl`
+  covers the retry7 gate script, `fine-tune-status`, `fine-tune-ready`, and the
+  public-output rule that blocked readiness must not surface raw `nil`.
+- `doc/06_spec/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.md`
+  is the operator manual for that system evidence.
 
 ## Manual Gate
 
