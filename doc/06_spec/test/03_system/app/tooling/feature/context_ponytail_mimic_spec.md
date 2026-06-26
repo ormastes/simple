@@ -42,8 +42,10 @@ This system spec verifies the shipped tool surfaces for the local context-mode m
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Requirements | REQ-012, REQ-013, REQ-014, REQ-015 |
+| Requirements | doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md |
 | Plan | doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md |
+| Design | doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md |
+| Research | doc/01_research/local/llm_tooling_context_ponytail_mimic.md |
 | Source | `test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -54,6 +56,92 @@ This system spec verifies the shipped tool surfaces for the local
 context-mode mimic and Ponytail mimic pair. It proves the CLI, app MCP, lower
 MCP, operator guide, and verification guard all describe the same public
 contract.
+
+## Syntax
+
+The SQL-backed context mimic supports:
+
+- `context <file> --sql --index --db=<path>`
+- `context --sql --query=<text> --db=<path> --source-filter=<path>`
+- MCP `simple_context` with `sql=true`, `query`, `db`, and optional `source_filter`
+- MCP `simple_ponytail` with `mode` set to `audit` or `simplification`
+
+## Examples
+
+Index two source files into a persisted context database, then query the
+database without a source argument while filtering to one stored source path.
+The filtered query must include the selected source content and exclude content
+from the other indexed source.
+
+## Operator Contract
+
+The context mimic is intentionally CLI-backed. App MCP and lower MCP build the
+same argument vector that an operator would run locally, so source-mode servers
+do not import the full context/compiler graph into request handlers. The
+observable contract is therefore the subprocess input and public response text:
+`--sql`, `--query`, `--db`, and `--source-filter` must survive all routing
+layers.
+
+The source-less SQL query shape is deliberately narrow. A missing `file` is
+accepted only when `sql=true` and `query` is non-empty. Local context generation,
+local index, source-backed SQL index, and source-backed SQL query still require
+a source file. This keeps accidental empty-file requests from becoming hidden
+database queries.
+
+`source_filter` narrows rows after the persisted context database is queried.
+The filter matches the stored source path exactly or as a path suffix so callers
+can pass either the full fixture path or a basename-style path. A filtered query
+must report one selected source without leaking content from another indexed
+source with the same marker.
+
+The Ponytail mimic exposes two modes through the same tool registry:
+
+- `audit` returns over-engineering findings.
+- `simplification` returns cut/replace guidance.
+
+Both app MCP and lower MCP must advertise these modes in schema metadata and
+dispatch to shared handler logic.
+
+## Coverage Matrix
+
+| Requirement | Evidence |
+|-------------|----------|
+| REQ-012 | CLI accepts source-less persisted SQL query with `--query` and `--db`. |
+| REQ-013 | App MCP advertises and forwards `simple_context` SQL query fields. |
+| REQ-014 | SQL `source_filter` is documented and excludes non-matching rows. |
+| REQ-015 | Lower MCP mirrors app MCP schema and handler routing. |
+
+## Failure Modes
+
+- Missing ordinary source file remains an error path.
+- Empty SQL query returns explicit `empty_query` output.
+- Missing or unavailable SQL database returns explicit `unavailable` output.
+- No SQL matches returns explicit `no_matches` output.
+- Public output must render absence as text such as `none`, `empty_query`,
+  `no_matches`, or `unavailable`.
+- Public output must not expose the internal absence marker.
+
+## Verification Notes
+
+This spec executes the real `src/app/context/main.spl` CLI through the current
+Simple runtime for the persisted SQL slice. Source-level MCP checks are limited
+to schema and argument-forwarding contracts so the test remains deterministic
+without starting a live MCP server. The public absence-rendering shell guard is
+also checked by source reference to keep release verification tied to this
+manual and the context/ponytail generated specs.
+
+## Out of Scope
+
+- A general SQL planner or arbitrary SQL grammar.
+- Importing the context compiler graph directly into MCP request handlers.
+- Replacing Ponytail logic with a separate dashboard-only implementation.
+- Treating fixture-only output as live vLLM, fine-tune, or Torch evidence.
+
+## Evidence Ownership
+
+The merge owner for this slice is the LLM tooling lane. Final review must check
+the executable spec, generated manual, MCP guide, and absence-rendering guard
+together so future schema or CLI changes do not drift across surfaces.
 
 ## Scenarios
 
@@ -80,26 +168,30 @@ expect(cli).to_contain("--source-filter=")
 
 - dir create all
 - file write
+- file write
    - Expected: index_code equals `0`
    - Expected: query_code equals `0`
+   - Expected: query_output.split("beta_excluded").len() equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 dir_create_all("build/test/context_ponytail_system")
 val source_path = "build/test/context_ponytail_system/alpha.spl"
+val beta_source_path = "build/test/context_ponytail_system/beta.spl"
 val db_path = "build/test/context_ponytail_system/context_cli.db"
 file_write(source_path, "fn alpha_context() -> text:\n    \"shared_context_marker alpha_only\"\n")
+file_write(beta_source_path, "fn beta_context() -> text:\n    \"shared_context_marker beta_excluded\"\n")
 
-val (index_output, index_code) = _run_context_cli([source_path, "--sql", "--index", "--db=" + db_path, "--text", "--no-progress"])
+val (index_output, index_code) = _run_context_cli([source_path, beta_source_path, "--sql", "--index", "--db=" + db_path, "--text", "--no-progress"])
 expect(index_code).to_equal(0)
 expect(index_output).to_contain("status: ready")
-expect(index_output).to_contain("pack_count: 1")
+expect(index_output).to_contain("pack_count: 2")
 
 val (query_output, query_code) = _run_context_cli(["--sql", "--query=shared_context_marker", "--db=" + db_path, "--source-filter=" + source_path, "--text", "--no-progress"])
 expect(query_code).to_equal(0)
@@ -107,6 +199,7 @@ expect(query_output).to_contain("status: ready")
 expect(query_output).to_contain("source_filter: " + source_path)
 expect(query_output).to_contain("matches: 1")
 expect(query_output).to_contain("alpha_only")
+expect(query_output.split("beta_excluded").len()).to_equal(1)
 ```
 
 </details>
@@ -230,8 +323,10 @@ expect(lower_schema).to_contain("Mode: audit, simplification")
 
 ## Related Documentation
 
-- **Requirements:** [REQ-012, REQ-013, REQ-014, REQ-015](REQ-012, REQ-013, REQ-014, REQ-015)
+- **Requirements:** [doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md](doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md)
 - **Plan:** [doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md](doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md)
+- **Design:** [doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md](doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md)
+- **Research:** [doc/01_research/local/llm_tooling_context_ponytail_mimic.md](doc/01_research/local/llm_tooling_context_ponytail_mimic.md)
 
 
 </details>
