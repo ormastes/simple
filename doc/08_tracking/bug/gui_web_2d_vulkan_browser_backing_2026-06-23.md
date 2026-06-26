@@ -46,6 +46,21 @@ gui_web_2d_vulkan_browser_backing_status=fail
 gui_web_2d_vulkan_browser_backing_reason=electron-vulkan-enabled-without-angle-vulkan-proof;chrome-vulkan-backed
 ```
 
+A bounded flag probe on the same host wrote evidence under
+`build/electron-vulkan-flag-probe-2026-06-26/` and did not find an Electron
+flag-only fix:
+
+```text
+x11: exit=0 vulkan=enabled_on gpu=enabled hardware=false gl=(gl=none,angle=none) skia=None
+no-ozone: exit=0 vulkan=enabled_on gpu=enabled hardware=false gl=(gl=none,angle=none) skia=None
+headless: exit=1 vulkan= gpu= hardware=undefined gl= skia=
+```
+
+That makes the next actionable work an Electron host/runtime proof change
+(for example a real desktop GPU host, a different Electron/Chromium GPU stack,
+or a CDP/SystemInfo-backed Electron proof if Electron can expose it), not simply
+adding more launch flags to the current Xvfb run.
+
 When the focused browser proof is absent, the gate must report:
 
 ```text
