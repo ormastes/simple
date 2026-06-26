@@ -2,6 +2,7 @@
 # Provides sha256_bytes (bytes -> bytes) and sha256_text (text -> hex).
 
 use std.common.crypto.types.{rotr32}
+use std.common.crypto.sha256_core.{sha256_initial_hash, sha256_pad_message, sha256_process_block}
 
 # SHA-256 round constants (first 32 bits of fractional parts of cube roots of first 64 primes).
 fn _sha256_k() -> [i64]:
@@ -163,6 +164,33 @@ fn msg_schedule1(w: i64) -> i64:
 fn msg_schedule2(w: i64) -> i64:
     val mask32 = 4294967295
     (rotr32(w, 17) ^ rotr32(w, 19) ^ (w >> 10)) & mask32
+
+# SHA-256 scalar reference path — routes through sha256_core block processor.
+# Parity target for sha256_simd_parity_spec: sha256_bytes uses inline code,
+# sha256_bytes_scalar uses sha256_core (different constants + add_mod32 path).
+fn sha256_bytes_scalar(data: [i64]) -> [i64]:
+    val padded = sha256_pad_message(data)
+    var h = sha256_initial_hash()
+    var offset = 0
+    val total = padded.len()
+    while offset < total:
+        var block: [i64] = []
+        var bi = 0
+        while bi < 64:
+            block.push(padded.get(offset + bi))
+            bi = bi + 1
+        h = sha256_process_block(h, block)
+        offset = offset + 64
+    var result: [i64] = []
+    var wi = 0
+    while wi < 8:
+        val w = h.get(wi)
+        result.push((w >> 24) & 255)
+        result.push((w >> 16) & 255)
+        result.push((w >>  8) & 255)
+        result.push( w        & 255)
+        wi = wi + 1
+    result
 
 # One SHA-256 compression round. Returns (new_a, new_e).
 fn compress_block(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, hh: i64, k: i64, w: i64) -> (i64, i64):
