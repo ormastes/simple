@@ -27,7 +27,7 @@ tauri_mobile_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -72,6 +72,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 
 - Complete mobile MDI proof logs validate and emit normalized
   `{prefix}_mdi_*` rows.
+- Explicitly requested mobile MDI proof source paths must exist; a valid
+  companion device log cannot hide a missing requested source artifact.
 - `performanceNowAvailable=true` is not enough: the proof must include an
   explicit finite positive `performanceNowDeltaMs` from distinct samples.
 - Capture viewport and animation-frame details must also be explicit finite
@@ -98,7 +100,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -112,6 +114,9 @@ expect(code).to_equal(0)
 val evidence = file_read(root + "/evidence.env")
 step("Inspect normalized proof rows")
 expect(evidence).to_contain("ios_mdi_proof_status=pass")
+expect(evidence).to_contain("ios_mdi_proof_requested_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_window_count=4")
 expect(evidence).to_contain("ios_mdi_render_status=pass")
 expect(evidence).to_contain("ios_mdi_render_image_count=1")
@@ -129,6 +134,38 @@ expect(evidence).to_contain("ios_mdi_animation_status=pass")
 expect(evidence).to_contain("ios_mdi_animation_frame_available=true")
 expect(evidence).to_contain("ios_mdi_animation_frame_count=2")
 expect(evidence).to_contain("ios_mdi_css_animation_probe=true")
+```
+
+</details>
+
+#### rejects missing requested mobile MDI proof log source paths
+
+-  proof log command
+   - Expected: code equals `1`
+- Confirm a valid companion MDI proof log cannot hide a missing requested source
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-missing-source"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_log_command(root + "/device.log", "") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log " + root + "/missing.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm a valid companion MDI proof log cannot hide a missing requested source")
+expect(evidence).to_contain("ios_mdi_proof_status=fail")
+expect(evidence).to_contain("ios_mdi_proof_reason=missing-mdi-proof-source")
+expect(evidence).to_contain("ios_mdi_proof_requested_source_count=2")
+expect(evidence).to_contain("ios_mdi_proof_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_missing_source_count=1")
 ```
 
 </details>
@@ -500,8 +537,8 @@ expect(anim).to_contain("android_mdi_animation_frame_count=2")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

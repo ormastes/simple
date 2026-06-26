@@ -30,6 +30,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   are not accepted as layout capture proof.
 - Missing iOS MDI proof JSON fails even when iOS status rows claim pass.
 - Missing Android MDI proof JSON fails even when Android status rows claim pass.
+- Missing MDI proof source rows fail even when mobile status rows and proof JSON
+  files claim pass.
 - The aggregate emits explicit mobile screenshot and MDI proof file status rows.
 """
 
@@ -64,6 +66,9 @@ fn _mobile_script_command(path: text, root: text, platform: text, proof_mode: te
         prefix + "_render_log_status=pass\\\\n" +
         prefix + "_mdi_proof_json=" + proof_path + "\\\\n" +
         prefix + "_mdi_proof_status=pass\\\\n" +
+        prefix + "_mdi_proof_requested_source_count=1\\\\n" +
+        prefix + "_mdi_proof_source_count=1\\\\n" +
+        prefix + "_mdi_proof_missing_source_count=0\\\\n" +
         prefix + "_mdi_render_status=pass\\\\n" +
         prefix + "_mdi_render_image_count=1\\\\n" +
         prefix + "_mdi_render_html_renderable=true\\\\n" +
@@ -111,6 +116,10 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len=347702")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_source_count=1")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_missing_source_count=0")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_source_count=1")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_missing_source_count=0")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_render_status=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=pass")
@@ -151,6 +160,24 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-proof-json-missing")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=fail")
 
+    it "rejects mobile pass claims with missing MDI proof source rows":
+        val root = "build/test-tauri-mobile-artifact-gate-missing-mdi-source"
+        val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "png", "png").replace("ios_mdi_proof_missing_source_count=0", "ios_mdi_proof_missing_source_count=1")
+        val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "png").replace("android_mdi_proof_source_count=1", "android_mdi_proof_source_count=0")
+        val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val ios = file_read(root + "-ios/stdout.env")
+        val android = file_read(root + "-android/stdout.env")
+        step("Confirm mobile MDI proof source counts are part of the aggregate gate")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-proof-source-missing")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_missing_source_count=1")
+        expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
+        expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-proof-source-missing")
+        expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_source_count=0")
+
     it "rejects pass claims with non-PNG mobile screenshots":
         val root = "build/test-tauri-mobile-artifact-gate-bad-screenshot"
         val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "bad", "png")
@@ -175,10 +202,12 @@ describe "Tauri mobile renderer parity artifact gates":
         val script = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
         expect(script).to_contain("png_file_status")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status")
+        expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_missing_source_count")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_source_coherence_status")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status")
+        expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_source_count")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_render_image_count")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_now_available")

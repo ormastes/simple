@@ -55,9 +55,16 @@ if (!prefix || !jsonPath || files.length === 0) {
   fail("usage-prefix-jsonpath-files");
 }
 
+const requestedSourceCount = files.length;
+let missingSourceCount = 0;
+let sourceCount = 0;
 let lastJson = "";
 for (const file of files) {
-  if (!file || !fs.existsSync(file)) continue;
+  if (!file || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
+    missingSourceCount += 1;
+    continue;
+  }
+  sourceCount += 1;
   const text = fs.readFileSync(file, "utf8");
   const matches = [...text.matchAll(/\[tauri-shell\] mdi proof:\s*(\{[^\r\n]*\})/g)];
   if (matches.length > 0) {
@@ -65,7 +72,22 @@ for (const file of files) {
   }
 }
 
+function emitSourceRows() {
+  emit("mdi_proof_requested_source_count", requestedSourceCount);
+  emit("mdi_proof_source_count", sourceCount);
+  emit("mdi_proof_missing_source_count", missingSourceCount);
+}
+
+if (missingSourceCount > 0) {
+  emit("mdi_proof_json", jsonPath);
+  emit("mdi_proof_status", "fail");
+  emit("mdi_proof_reason", "missing-mdi-proof-source");
+  emitSourceRows();
+  process.exit(1);
+}
+
 if (!lastJson) {
+  emitSourceRows();
   fail("missing-mdi-proof-log");
 }
 
@@ -112,6 +134,7 @@ const animationPass =
 emit("mdi_proof_json", jsonPath);
 emit("mdi_proof_status", eventPass && renderPass && capturePass && performancePass && animationPass ? "pass" : "fail");
 emit("mdi_proof_reason", eventPass && renderPass && capturePass && performancePass && animationPass ? "pass" : "contract-missing");
+emitSourceRows();
 emit("mdi_proof_window_count", jsonIntegerTextOrBlank(proof.count));
 emit("mdi_render_status", renderPass ? "pass" : "fail");
 emit("mdi_render_image_count", jsonIntegerTextOrBlank(proof.imageCount));
