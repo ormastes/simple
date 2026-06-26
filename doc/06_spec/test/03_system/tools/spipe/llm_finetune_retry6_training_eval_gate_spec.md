@@ -27,7 +27,7 @@ llm_finetune_retry6_training_eval_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -249,12 +249,59 @@ expect(output).to_contain("STATUS: WARN retry6-training-eval-gate")
 
 </details>
 
+#### surfaces retry6 target eval fields through fine-tune status
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val (output, exit_code) = run_spipe_command(["fine-tune-status", RETRY6_ATTEMPT_ID])
+
+expect(exit_code).to_equal(0)
+expect(output).to_contain("data_check_execution=warn")
+expect(output).to_contain("data_check_status=\"STATUS: WARN retry6-training-eval-gate\"")
+expect(output).to_contain("result=BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY")
+expect(output).to_contain("target_accuracy=missing")
+expect(output).to_contain("required_accuracy=90.0")
+expect(output).to_contain("target_eval_reached=false")
+expect(output).to_contain("acceptance_allowed=false")
+expect(output).to_contain("STATUS: WARN llm-finetune-status")
+```
+
+</details>
+
+#### surfaces retry6 target eval fields through fine-tune doctor
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val (output, exit_code) = run_spipe_command(["fine-tune-doctor", RETRY6_ATTEMPT_ID])
+
+expect(exit_code).to_equal(1)
+expect(output).to_contain("WARN data_check_execution STATUS: WARN retry6-training-eval-gate")
+expect(output).to_contain("result=BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY")
+expect(output).to_contain("target_accuracy=missing")
+expect(output).to_contain("required_accuracy=90.0")
+expect(output).to_contain("target_eval_reached=false")
+expect(output).to_contain("acceptance_allowed=false")
+expect(output).to_contain("STATUS: WARN llm-finetune-doctor")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

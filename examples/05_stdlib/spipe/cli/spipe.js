@@ -1178,6 +1178,16 @@ function commandFineTuneStatus(args) {
     if (gate.status === "FAIL") failures += 1;
     console.log(`data_check_execution=${gate.status === "PASS" ? "pass" : gate.status === "WARN" ? "warn" : "fail"}`);
     console.log(`data_check_status="${quoteSdn(gate.statusLine)}"`);
+    printFineTuneGateFields(gate, [
+      "result",
+      "training_allowed",
+      "model_manifest_exists",
+      "eval_result_exists",
+      "target_accuracy",
+      "required_accuracy",
+      "target_eval_reached",
+      "acceptance_allowed"
+    ]);
   }
   console.log(failures === 0 && warnings === 0 ? "STATUS: PASS llm-finetune-status" : failures ? "STATUS: FAIL llm-finetune-status" : "STATUS: WARN llm-finetune-status");
   process.exitCode = failures === 0 ? 0 : 1;
@@ -1260,6 +1270,16 @@ function commandFineTuneDoctor(args) {
     if (gate.status === "WARN") warnings += 1;
     if (gate.status === "FAIL") failures += 1;
     console.log(`${gate.status === "PASS" ? "OK" : gate.status} data_check_execution ${gate.statusLine}`);
+    printFineTuneGateFields(gate, [
+      "result",
+      "training_allowed",
+      "model_manifest_exists",
+      "eval_result_exists",
+      "target_accuracy",
+      "required_accuracy",
+      "target_eval_reached",
+      "acceptance_allowed"
+    ]);
   }
 
   const decisionStatus = registryValueForAttempt(root, "decisions.sdn", attemptId, "status") || readQuotedValue(attemptContent, "status");
@@ -1321,12 +1341,14 @@ function fineTuneDataGateStatus(root, attemptId) {
   const output = `${run.stdout || ""}${run.stderr || ""}`;
   const statusLine = output.split(/\r?\n/).reverse().find((line) => /^STATUS: (PASS|WARN|FAIL) /.test(line)) || "";
   const match = statusLine.match(/^STATUS: (PASS|WARN|FAIL) /);
+  const fields = parseFineTuneGateFields(output);
   if (run.error) {
     return {
       checker,
       result: `checker-error:${run.error.code || run.error.message}`,
       status: "FAIL",
-      statusLine: "STATUS: FAIL llm-finetune-data-gate"
+      statusLine: "STATUS: FAIL llm-finetune-data-gate",
+      fields
     };
   }
   if (run.status !== 0 && !match) {
@@ -1334,15 +1356,35 @@ function fineTuneDataGateStatus(root, attemptId) {
       checker,
       result: `checker-exit-${run.status}`,
       status: "FAIL",
-      statusLine: "STATUS: FAIL llm-finetune-data-gate"
+      statusLine: "STATUS: FAIL llm-finetune-data-gate",
+      fields
     };
   }
   return {
     checker,
     result: match ? match[1].toLowerCase() : "missing-status",
     status: match ? match[1] : "FAIL",
-    statusLine: statusLine || "STATUS: FAIL llm-finetune-data-gate"
+    statusLine: statusLine || "STATUS: FAIL llm-finetune-data-gate",
+    fields
   };
+}
+
+function parseFineTuneGateFields(output) {
+  const fields = new Map();
+  for (const line of (output || "").split(/\r?\n/)) {
+    const match = line.match(/^([A-Za-z0-9_.-]+)=(.*)$/);
+    if (match) fields.set(match[1], match[2]);
+  }
+  return fields;
+}
+
+function printFineTuneGateFields(gate, names) {
+  if (!gate.fields) return;
+  for (const name of names) {
+    if (gate.fields.has(name)) {
+      console.log(`${name}=${gate.fields.get(name)}`);
+    }
+  }
 }
 
 function parseMetricMap(value) {

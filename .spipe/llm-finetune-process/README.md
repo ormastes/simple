@@ -252,8 +252,12 @@ node examples/05_stdlib/spipe/cli/spipe.js fine-tune-status <attempt_id>
 
 When a `data_checks.sdn` row records a repo-local executable `checker` under
 `.spipe/llm-finetune-process/scripts/*.shs`, `fine-tune-status` also runs that
-checker and prints `data_check_execution` plus the checker `STATUS:` line. A
-WARN checker means registry rows exist but the data/cache gate is not ready.
+checker and prints `data_check_execution` plus the checker `STATUS:` line. For
+retry gates that emit key/value evidence, status also surfaces fields such as
+`result`, `target_accuracy`, `required_accuracy`, `target_eval_reached`, and
+`acceptance_allowed` so operators do not need to re-run the shell checker to
+understand the blocker. A WARN checker means registry rows exist but the
+data/cache or model/eval gate is not ready.
 
 Check evidence quality, placeholders, and next readiness action:
 
@@ -262,7 +266,9 @@ node examples/05_stdlib/spipe/cli/spipe.js fine-tune-doctor <attempt_id>
 ```
 
 `fine-tune-doctor` exits nonzero for WARN/FAIL states. Treat that exit as
-expected when the printed `next_action` routes an unfinished retry.
+expected when the printed `next_action` routes an unfinished retry. If the
+attempt has a checker, doctor prints the same gate fields as status before the
+next-action summary.
 
 Check whether an attempt is ready for real training/use:
 

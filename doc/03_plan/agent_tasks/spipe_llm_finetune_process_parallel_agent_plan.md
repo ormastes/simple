@@ -262,6 +262,12 @@ Evidence:
   checksum-matched retry5 cache still blocks below-target retry6 evals and only
   reaches `TARGET_EVAL_REVIEW_REQUIRED` after deployable model plus
   `target_accuracy>=90.0`; acceptance remains false pending normal review.
+- 2026-06-26 retry6 operator-surface hardening: `fine-tune-status` and
+  `fine-tune-doctor` now parse retry checker key/value output and print
+  `result`, `target_accuracy`, `required_accuracy`, `target_eval_reached`, and
+  `acceptance_allowed` directly. The retry6 system spec covers both public
+  surfaces so target-eval blockers are not hidden behind only
+  `data_check_status`.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS
