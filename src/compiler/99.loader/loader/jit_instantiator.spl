@@ -317,7 +317,9 @@ impl JitInstantiator:
         if not found.?:
             return JitInstantiationResult.NotFound(symbol)
 
-        val (smf_path, entry) = found.unwrap()
+        val (smf_path, entry) = match found:
+            case Some(found_entry): found_entry
+            case nil: return JitInstantiationResult.NotFound(symbol)
 
         # Start JIT compilation
         self.in_progress = self.in_progress.insert(symbol)
@@ -362,11 +364,12 @@ impl JitInstantiator:
         match code_result:
             case Ok(compiled_code):
                 val map_result = self.jit_mapper.map(self.exec_mapper, smf_path, entry.mangled_name, compiled_code)
-                if map_result.is_err():
-                    return JitInstantiationResult.CompilationError(
-                        "Failed to map executable memory: {map_result.unwrap_err()}"
-                    )
-                val fn_pointer = map_result.unwrap()
+                val fn_pointer = match map_result:
+                    case Ok(mapped_pointer): mapped_pointer
+                    case Err(map_error):
+                        return JitInstantiationResult.CompilationError(
+                            "Failed to map executable memory: {map_error}"
+                        )
 
                 # Cache the result
                 self.jit_cache[entry.mangled_name] = (compiled_code, fn_pointer)
@@ -380,11 +383,13 @@ impl JitInstantiator:
                 # Update SMF file if configured
                 if self.config.update_smf:
                     val update_result = self.update_smf_note_sdn(smf_path, entry)
-                    if update_result.is_err():
-                        return JitInstantiationResult.UpdateFailed(
-                            symbol: entry.mangled_name,
-                            error: update_result.unwrap_err()
-                        )
+                    match update_result:
+                        case Ok(_): ()
+                        case Err(update_error):
+                            return JitInstantiationResult.UpdateFailed(
+                                symbol: entry.mangled_name,
+                                error: update_error
+                            )
 
                 JitInstantiationResult.Success(
                     code: compiled_code,
@@ -514,10 +519,12 @@ impl JitSymbolResolver:
         val result = self.jit.try_jit_instantiate(name)
         match result:
             case Success(_, symbol, address):
-                if address.?:
-                    self.symbols[symbol] = address.unwrap()
-                    return address
-                nil
+                match address:
+                    case Some(resolved_address):
+                        self.symbols[symbol] = resolved_address
+                        return address
+                    case nil:
+                        nil
             case _:
                 nil
 
