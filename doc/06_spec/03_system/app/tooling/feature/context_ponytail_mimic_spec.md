@@ -42,8 +42,10 @@ This system spec verifies the shipped tool surfaces for the local context-mode m
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Requirements | REQ-012, REQ-013, REQ-014, REQ-015 |
+| Requirements | doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md |
 | Plan | doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md |
+| Design | doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md |
+| Research | doc/01_research/local/llm_tooling_context_ponytail_mimic.md |
 | Source | `test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -54,6 +56,95 @@ This system spec verifies the shipped tool surfaces for the local
 context-mode mimic and Ponytail mimic pair. It proves the CLI, app MCP, lower
 MCP, operator guide, and verification guard all describe the same public
 contract.
+
+## Requirements
+
+- REQ-012: The local `context` CLI can build a context pack, persist it through
+  the embedded SQL backend, and later query that persisted database without a
+  source-file argument.
+- REQ-013: App MCP exposes `simple_context` as a public analysis tool and can
+  forward SQL, DB path, query, format, and source-filter arguments to the
+  context CLI subprocess.
+- REQ-014: SQL query output carries explicit status fields, match counts,
+  source provenance, and absence text without exposing internal sentinel
+  values.
+- REQ-015: Lower MCP exposes the same `simple_context` and `simple_ponytail`
+  public contracts as app MCP, including sourceless SQL query and Ponytail
+  simplification mode.
+
+## Syntax
+
+```text
+context <source> --sql --index --db=<path> --text --no-progress
+context --sql --query=<text> --db=<path> --source-filter=<source> --text --no-progress
+simple_context(file?, target?, format?, index?, query?, sql?, db?, source_filter?)
+simple_ponytail(file, mode?)
+```
+
+## Evidence Rules
+
+This spec executes the context CLI in a subprocess because the feature is a
+tool-surface contract, not only a helper API contract. The subprocess uses the
+rebuilt release/current Simple driver when available and falls back to the
+checked-in release driver path. Debug-only binaries are not accepted as shipped
+context mimic evidence.
+
+The SQL scenario writes a fixture source file, indexes it into a DB path under
+`build/test/context_ponytail_system`, then launches a second process to query
+that DB with `--source-filter`. This proves path-backed persistence, source
+provenance filtering, and visible match output across process boundaries.
+
+## Examples
+
+A successful persisted context query produces text output with:
+
+```text
+Simple context SQL query
+status: ready
+backend: sqlite
+query: shared_context_marker
+source_filter: build/test/context_ponytail_system/alpha.spl
+matches: 1
+```
+
+A successful Ponytail MCP contract exposes both modes:
+
+```text
+mode=audit
+mode=simplification
+```
+
+## Coverage Matrix
+
+| Requirement | Scenario |
+|-------------|----------|
+| REQ-012 | source-less SQL context DB query is visible in CLI source |
+| REQ-012, REQ-014 | persisted SQL CLI query executes across subprocesses |
+| REQ-013, REQ-015 | app MCP advertises and forwards SQL query/filter options |
+| REQ-013, REQ-015 | lower MCP advertises and forwards SQL query/filter options |
+| REQ-014 | docs and public absence-rendering guard cover SQL source filters |
+| REQ-015 | app and lower MCP expose Ponytail audit/simplification modes |
+
+## Failure Modes
+
+- Missing source files render explicit missing status.
+- Empty SQL queries render `empty_query`.
+- DB/backend unavailability renders `unavailable`.
+- Source filters that exclude all rows render `no_matches`.
+- Ponytail mode values outside `audit` and `simplification` render an explicit
+  invalid-mode response.
+
+## Operator Notes
+
+The generated manual is intended to be usable without opening the source spec.
+It names the CLI forms, the MCP parameters, the shipped docs that must stay in
+sync, and the verification guard that prevents public absence-marker leakage.
+
+## Out of Scope
+
+This spec does not benchmark SQL query latency, implement a full SQL parser, or
+claim semantic parity with external context-mode or Ponytail plugins. It proves
+the repo-local mimic contract selected for this SPipe lane.
 
 ## Scenarios
 
@@ -230,8 +321,10 @@ expect(lower_schema).to_contain("Mode: audit, simplification")
 
 ## Related Documentation
 
-- **Requirements:** [REQ-012, REQ-013, REQ-014, REQ-015](REQ-012, REQ-013, REQ-014, REQ-015)
+- **Requirements:** [doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md](doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md)
 - **Plan:** [doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md](doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md)
+- **Design:** [doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md](doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md)
+- **Research:** [doc/01_research/local/llm_tooling_context_ponytail_mimic.md](doc/01_research/local/llm_tooling_context_ponytail_mimic.md)
 
 
 </details>

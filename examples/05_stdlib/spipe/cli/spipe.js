@@ -1261,7 +1261,7 @@ function commandFineTuneDoctor(args) {
   for (const [name, value] of fields) {
     if (hasPlaceholder(value)) {
       warnings += 1;
-      console.log(`WARN placeholder ${name}=${value || "(missing)"}`);
+      console.log(`WARN missing_evidence ${name}=${value || "(missing)"}`);
     }
   }
 

@@ -362,7 +362,7 @@ expect(invalid_endpoint.evidence_jsonl.split(absence_marker()).len()).to_equal(1
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Source | `test/unit/app/llm_runtime/vllm_readiness_spec.spl` |
+| Source | `test/01_unit/app/llm_runtime/vllm_readiness_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
