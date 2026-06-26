@@ -141,7 +141,7 @@ val absence_marker = "n" + "il"
 val output = context_generate("build/test/does_not_exist.spl", "", "text")
 expect(output).to_contain("status: missing")
 expect(output).to_contain("content: none")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -158,7 +158,7 @@ Reproduction: this block contains the complete executable scenario source.
 val absence_marker = "n" + "il"
 val output = context_generate("build/test/does_not_exist.spl", "", "json")
 expect(output).to_contain("\"status\":\"missing\"")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -167,7 +167,7 @@ expect(output.contains(absence_marker)).to_equal(false)
 
 - dir create all
 - file write
-   - Expected: output does not contain `absence_marker`
+   - Expected: output.split(absence_marker).len() equals `1`
 
 
 <details>
@@ -184,7 +184,7 @@ file_write(path, "fn marker() -> text:\n    \"SIMPLE_WRITE_EOF\"\n")
 val output = context_generate(path, "marker", "text")
 expect(output).to_contain("status: ready")
 expect(output).to_contain("SIMPLE_WRITE_EOF")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -205,7 +205,7 @@ expect(output).to_contain("Simple context index")
 expect(output).to_contain("pack_count: 1")
 expect(output).to_contain("source: " + path)
 expect(output).to_contain("status: ready")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -227,7 +227,7 @@ expect(output).to_contain("Simple context query")
 expect(output).to_contain("status: ready")
 expect(output).to_contain("matches:")
 expect(output).to_contain("hello context")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -247,7 +247,7 @@ val index = context_index_packs([path], "hello", "text")
 val output = context_query_index(index, "missing_symbol_name", "json")
 expect(output).to_contain("\"status\":\"no_matches\"")
 expect(output).to_contain("\"matches\":0")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -269,7 +269,7 @@ expect(output).to_contain("backend: sqlite")
 if not output.contains("status: unavailable"):
     expect(output).to_contain("pack_count: 1")
     expect(output).to_contain("hello context")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -291,7 +291,7 @@ if not output.contains("\"status\":\"unavailable\""):
     expect(output).to_contain("\"status\":\"ready\"")
     expect(output).to_contain("\"matches\":")
     expect(output).to_contain("hello context")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -316,7 +316,7 @@ expect(output).to_contain("backend: sqlite")
 if not output.contains("status: unavailable"):
     expect(output).to_contain("status: no_matches")
     expect(output).to_contain("matches: 0")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -326,9 +326,9 @@ expect(output.contains(absence_marker)).to_equal(false)
 - dir create all
 - file write
 - file write
-   - Expected: output does not contain `beta_path`
-   - Expected: output does not contain `beta_only`
-   - Expected: indexed does not contain `absence_marker`
+   - Expected: output.split(beta_path).len() equals `1`
+   - Expected: output.split("beta_only").len() equals `1`
+   - Expected: indexed.split(absence_marker).len() equals `1`
 
 
 <details>
@@ -355,9 +355,9 @@ if not indexed.contains("status: unavailable"):
     expect(output).to_contain("matches: 1")
     expect(output).to_contain(alpha_path)
     expect(output).to_contain("alpha_only")
-    expect(output.contains(beta_path)).to_equal(false)
-    expect(output.contains("beta_only")).to_equal(false)
-expect(indexed.contains(absence_marker)).to_equal(false)
+    expect(output.split(beta_path).len()).to_equal(1)
+    expect(output.split("beta_only").len()).to_equal(1)
+expect(indexed.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
