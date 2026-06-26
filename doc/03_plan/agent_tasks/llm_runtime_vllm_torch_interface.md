@@ -324,6 +324,17 @@ Tasks:
     `native-build --source src/app --source src/lib --entry-closure --entry
     src/app/cli/main.spl --strip --threads 1 --timeout 240 --output
     build/llm_runtime/simple_cli_full` hit the 300s external cap with no binary.
+13. Move web dashboard control route onto runtime-owned execution JSONL.
+    Status: done for `/api/vllm/control` returning
+    `llm_runtime_vllm_dashboard_control_execution` from
+    `app.llm_runtime.dashboard_live_control` instead of collector panel JSONL.
+    The route defaults resource flags to unavailable; explicit
+    `vllm_available` and `gpu_available` query flags are required before the
+    runtime decision layer can plan side-effecting live execution. A direct web
+    server import of `dashboard_live_control_executor` was tested and rejected
+    because it reintroduced process/HTTP teardown diagnostics in dashboard
+    specs; live executor import remains runtime-owner-only until that boundary
+    has a dashboard-safe facade.
 
 ## Sidecars
 
