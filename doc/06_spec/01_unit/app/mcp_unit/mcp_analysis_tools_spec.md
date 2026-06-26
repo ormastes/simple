@@ -351,6 +351,26 @@ expect(source).to_contain("Invalid format: ")
 
 </details>
 
+#### app and lower MCP context find checked-in release binaries
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val app_source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
+expect(app_source).to_contain("release/x86_64-unknown-linux-gnu/simple")
+expect(app_source).to_contain("bootstrap/stage3/simple")
+
+val lower_source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
+expect(lower_source).to_contain("release/x86_64-unknown-linux-gnu/simple")
+expect(lower_source).to_contain("bootstrap/stage3/simple")
+```
+
+</details>
+
 #### lower MCP context diagnostics use argv process timeout
 
 <details>

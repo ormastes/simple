@@ -241,6 +241,13 @@ Tasks:
 9. Forward SQL source/provenance filtering through MCP. Status: done on
    2026-06-26 for app MCP and lower MCP; `simple_context` now accepts
    `source_filter` and forwards it to the shared `context` CLI subprocess.
+10. Resolve context subprocess binary discovery for checked-in release
+    workspaces. Status: done on 2026-06-26; app MCP and lower MCP now check
+    repo-root `release/x86_64-unknown-linux-gnu/simple`,
+    `release/linux-x86_64/simple`, `release/simple`, and
+    `bootstrap/stage3/simple` in addition to existing `bin/` and Rust target
+    fallbacks, so `simple_context` can execute the context CLI in this release
+    workspace without requiring `SIMPLE_BINARY`.
 
 Evidence:
 
@@ -273,6 +280,9 @@ Evidence:
   so a separate `context --sql --query=<text> --db=<path> --source-filter=<text>`
   subprocess can read records created by an earlier `context <file> --sql
   --index --db=<path>` subprocess. The focused mimic system spec passes 6/6.
+- 2026-06-26 MCP binary discovery hardening: focused MCP analysis specs assert
+  app and lower MCP check repo-root release and bootstrap binaries before
+  falling back to `bin/simple`, matching the actual release workspace layout.
 
 ## Lane 3: Dashboard Tooling Artifact Panel
 

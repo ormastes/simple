@@ -27,7 +27,7 @@ mcp_analysis_tools_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -243,6 +243,26 @@ expect(table).to_contain("prop_str(\"file\", \"Source file path; optional for --
 expect(table).to_contain("prop_str(\"query\", \"Query local or SQL context-pack index\")")
 expect(table).to_contain("prop_str(\"sql\", \"Use Simple embedded SQLite for index/query (true/false)\")")
 expect(table).to_contain("e.required_json = build_required([])")
+```
+
+</details>
+
+#### app and lower MCP context find checked-in release binaries
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val app_source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
+expect(app_source).to_contain("release/x86_64-unknown-linux-gnu/simple")
+expect(app_source).to_contain("bootstrap/stage3/simple")
+
+val lower_source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
+expect(lower_source).to_contain("release/x86_64-unknown-linux-gnu/simple")
+expect(lower_source).to_contain("bootstrap/stage3/simple")
 ```
 
 </details>
@@ -508,8 +528,8 @@ expect(cmd).to_contain("^type Position")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
