@@ -27,7 +27,7 @@ tauri_ios_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -71,6 +71,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 
 - Complete iOS Tauri/WKWebView/Metal logs validate and emit normalized rows.
 - Render-only or generic Metal-only logs fail closed.
+- Bare `WKWebView` text is not enough; the context marker must be tied to the
+  Tauri shell or the mobile MDI probe source.
 - Failure markers such as eval failures fail closed even when render and Metal
   markers are present.
 - The iOS renderer wrapper, mobile aggregate, and Tauri shell source are wired
@@ -128,6 +130,36 @@ val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val evidence = file_read(root + "/evidence.env")
+expect(evidence).to_contain("ios_render_log_validation_status=fail")
+expect(evidence).to_contain("ios_render_log_validation_reason=ios-tauri-wkwebview-context-missing")
+expect(evidence).to_contain("ios_render_log_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_tauri_context_status=fail")
+```
+
+</details>
+
+#### rejects bare WKWebView text that is not tied to Tauri shell context
+
+- Confirm generic WebKit text does not satisfy the Tauri context contract
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-ios-render-log-validator-bare-wkwebview"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "printf '[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\nWKWebView allocation note from unrelated framework\\n' > " + root + "/ios.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm generic WebKit text does not satisfy the Tauri context contract")
 expect(evidence).to_contain("ios_render_log_validation_status=fail")
 expect(evidence).to_contain("ios_render_log_validation_reason=ios-tauri-wkwebview-context-missing")
 expect(evidence).to_contain("ios_render_log_marker_status=pass")
@@ -215,8 +247,8 @@ expect(tauri).to_contain("metal_layer=CAMetalLayer")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

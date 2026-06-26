@@ -23,7 +23,7 @@ for (const file of files) {
 
 const renderMarker = /\[tauri-shell\]\s+render,\s+html_len=[1-9][0-9]*/.test(text);
 const metalMarker = /(CAMetalLayer|Metal renderer ready|MetalKit\.framework|Metal\.framework|-framework Metal|\bMTL[A-Za-z0-9_]*\b|\bAGX\b|\bIOGPU\b)/i.test(text);
-const tauriIosContext = /(\[tauri-shell\]\s+ios renderer context:.*WKWebView|\bWKWebView\b|Tauri iOS external_url|ios_mdi_probe\.html|\[tauri-shell\]\s+creating window (from|with)|mobile inline shell base)/i.test(text);
+const tauriIosContext = /(\[tauri-shell\]\s+ios renderer context:.*WKWebView|Tauri iOS external_url|ios_mdi_probe\.html|\[tauri-shell\]\s+creating window (from|with)|mobile inline shell base)/i.test(text);
 const failureMarker = /(eval FAIL|inline shell eval FAIL|delayed inline shell eval FAIL|window 'main' not found|parse error|Fatal signal|F\/DEBUG|NSURLErrorDomain|failed provisional load|Headless UI completed|subprocess exited with code)/i.test(text);
 
 let reason = 'pass';
