@@ -30,6 +30,11 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
   viewport mismatches are rejected.
 - ARGB capture proof paths must resolve to nonempty files instead of relying
   on `captured_argb_written=true` alone.
+- Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
+  match the proof viewport, include the expected pixel count, and contain
+  nonzero pixels.
+- Proof renderer must be the live Electron capture page and scenes must stay
+  within the Simple Web layout scene family.
 - The live Electron layout wrapper consumes the validator and still maps real
   pixel mismatches to `divergent` evidence.
 """
@@ -40,7 +45,7 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);fs.writeFileSync(path.join(dir,\"captured.json\"),\"{}\");const p={renderer:\"electron-live-capture-page\",scene:\"simple-web-layout-text-flow\",width:96,height:64,iterations:3,checksum:\"18446744073709551610\",expected_checksum:\"18446744073709551610\",weighted_checksum:\"18446744073709551611\",expected_weighted_checksum:\"18446744073709551611\",mismatch_count:0,frame_us:1250,capture_native_width:96,capture_native_height:64,capture_downsampled:false,captured_argb_path:\"captured.json\",captured_argb_written:true,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);const argb={width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(4294967295)};fs.writeFileSync(path.join(dir,\"captured.json\"),JSON.stringify(argb));const p={renderer:\"electron-live-capture-page\",scene:\"simple-web-layout-text-flow\",width:96,height:64,iterations:3,checksum:\"18446744073709551610\",expected_checksum:\"18446744073709551610\",weighted_checksum:\"18446744073709551611\",expected_weighted_checksum:\"18446744073709551611\",mismatch_count:0,frame_us:1250,capture_native_width:96,capture_native_height:64,capture_downsampled:false,captured_argb_path:\"captured.json\",captured_argb_written:true,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Electron Simple Web layout proof validator":
 
@@ -56,6 +61,8 @@ describe "Electron Simple Web layout proof validator":
         step("Inspect normalized Electron layout proof rows")
         expect(evidence).to_contain("electron_simple_web_layout_validation_status=pass")
         expect(evidence).to_contain("electron_simple_web_layout_validation_reason=pass")
+        expect(evidence).to_contain("electron_simple_web_layout_renderer=electron-live-capture-page")
+        expect(evidence).to_contain("electron_simple_web_layout_scene=simple-web-layout-text-flow")
         expect(evidence).to_contain("electron_simple_web_layout_simple_checksum=18446744073709551610")
         expect(evidence).to_contain("electron_simple_web_layout_electron_weighted_checksum=18446744073709551611")
         expect(evidence).to_contain("electron_simple_web_layout_mismatch_count=0")
@@ -68,7 +75,28 @@ describe "Electron Simple Web layout proof validator":
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_path=captured.json")
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_written=true")
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_status=pass")
-        expect(evidence).to_contain("electron_simple_web_layout_captured_argb_size_bytes=2")
+        expect(evidence).to_contain("electron_simple_web_layout_captured_argb_format=argb-u32")
+        expect(evidence).to_contain("electron_simple_web_layout_captured_argb_producer=electron-live-capture-page")
+        expect(evidence).to_contain("electron_simple_web_layout_captured_argb_width=96")
+        expect(evidence).to_contain("electron_simple_web_layout_captured_argb_height=64")
+        expect(evidence).to_contain("electron_simple_web_layout_captured_argb_pixel_count=6144")
+        expect(evidence).to_contain("electron_simple_web_layout_captured_argb_nonzero_pixel_count=6144")
+
+    it "rejects unexpected Electron renderer or non-layout scene identity":
+        val root = "build/test-electron-layout-validator-identity"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/renderer.json", "p.renderer=\"static-fixture\"") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/renderer.json > " + root + "/renderer.env; " +
+            _proof_command(root + "/scene.json", "p.scene=\"simple-web-engine2d-image-taskbar-command\"") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/scene.json > " + root + "/scene.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val renderer = file_read(root + "/renderer.env")
+        val scene = file_read(root + "/scene.env")
+        step("Confirm layout proof is tied to live Electron layout scenes")
+        expect(renderer).to_contain("electron_simple_web_layout_validation_reason=unexpected-electron-renderer")
+        expect(scene).to_contain("electron_simple_web_layout_validation_reason=unexpected-electron-scene")
 
     it "rejects malformed Electron layout frame timing":
         val root = "build/test-electron-layout-validator-bad-frame"
@@ -120,6 +148,33 @@ describe "Electron Simple Web layout proof validator":
         expect(empty).to_contain("electron_simple_web_layout_validation_reason=empty-captured-argb-file")
         expect(empty).to_contain("electron_simple_web_layout_captured_argb_file_status=pass")
         expect(empty).to_contain("electron_simple_web_layout_captured_argb_size_bytes=0")
+
+    it "rejects malformed captured ARGB shape and pixel data":
+        val root = "build/test-electron-layout-validator-argb-shape"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/malformed.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"{}\")") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/malformed.json > " + root + "/malformed.env; " +
+            _proof_command(root + "/viewport.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:95,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(95*64).fill(4294967295)}))") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/viewport.json > " + root + "/viewport.env; " +
+            _proof_command(root + "/pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:[0,0,0,0]}))") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/pixels.json > " + root + "/pixels.env; " +
+            _proof_command(root + "/blank.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(0)}))") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/blank.json > " + root + "/blank.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val malformed = file_read(root + "/malformed.env")
+        val viewport = file_read(root + "/viewport.env")
+        val pixels = file_read(root + "/pixels.env")
+        val blank = file_read(root + "/blank.env")
+        step("Confirm layout captured ARGB evidence is parsed, dimensioned, and nonblank")
+        expect(malformed).to_contain("electron_simple_web_layout_validation_reason=malformed-captured-argb")
+        expect(viewport).to_contain("electron_simple_web_layout_validation_reason=captured-argb-viewport-mismatch")
+        expect(viewport).to_contain("electron_simple_web_layout_captured_argb_width=95")
+        expect(pixels).to_contain("electron_simple_web_layout_validation_reason=captured-argb-pixel-count-mismatch")
+        expect(pixels).to_contain("electron_simple_web_layout_captured_argb_pixel_count=4")
+        expect(blank).to_contain("electron_simple_web_layout_validation_reason=blank-captured-argb")
+        expect(blank).to_contain("electron_simple_web_layout_captured_argb_nonzero_pixel_count=0")
 
     it "rejects missing requested viewport and native capture viewport mismatch":
         val root = "build/test-electron-layout-validator-viewport"
@@ -181,5 +236,8 @@ describe "Electron Simple Web layout proof validator":
         expect(script).to_contain("electron_simple_web_layout_validation_status")
         expect(script).to_contain("electron_simple_web_layout_captured_argb_file_status")
         expect(script).to_contain("electron_simple_web_layout_captured_argb_size_bytes")
+        expect(script).to_contain("electron_simple_web_layout_captured_argb_format")
+        expect(script).to_contain("electron_simple_web_layout_captured_argb_nonzero_pixel_count")
+        expect(script).to_contain("electron_simple_web_layout_proof_renderer")
         expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
         expect(script).to_contain("status=divergent")

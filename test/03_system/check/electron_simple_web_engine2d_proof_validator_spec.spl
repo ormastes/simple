@@ -28,6 +28,11 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
 - Malformed `frame_us`, malformed mismatch counts, blur/tolerance use, missing
   ARGB capture, missing or empty captured ARGB files, missing capture provenance,
   missing viewport proof, and capture viewport mismatches are rejected.
+- Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
+  match the proof viewport, include the expected pixel count, and contain
+  nonzero pixels.
+- Proof renderer must be the live Electron capture page and scenes must stay
+  within the Simple Web Engine2D scene family.
 - The live Electron wrapper consumes the validator instead of raw shell JSON
   parsing or shell integer timing checks.
 """
@@ -38,14 +43,13 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={renderer:\"electron-live-capture-page\",scene:\"simple-web-engine2d-image-taskbar-command\",width:96,height:64,iterations:5,checksum:\"18446744073709551610\",expected_checksum:\"18446744073709551610\",weighted_checksum:\"18446744073709551611\",expected_weighted_checksum:\"18446744073709551611\",mismatch_count:0,frame_us:1250,capture_native_width:96,capture_native_height:64,capture_downsampled:false,captured_argb_path:\"captured.json\",captured_argb_written:true,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);const argb={width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(4294967295)};fs.writeFileSync(path.join(dir,\"captured.json\"),JSON.stringify(argb));const p={renderer:\"electron-live-capture-page\",scene:\"simple-web-engine2d-image-taskbar-command\",width:96,height:64,iterations:5,checksum:\"18446744073709551610\",expected_checksum:\"18446744073709551610\",weighted_checksum:\"18446744073709551611\",expected_weighted_checksum:\"18446744073709551611\",mismatch_count:0,frame_us:1250,capture_native_width:96,capture_native_height:64,capture_downsampled:false,captured_argb_path:\"captured.json\",captured_argb_written:true,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Electron Simple Web Engine2D proof validator":
 
     it "accepts complete Electron Engine2D timing capture and exact checksum proof":
         val root = "build/test-electron-engine2d-validator-pass"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '{\"pixels\":[1]}' > " + root + "/captured.json && " +
             _proof_command(root + "/proof.json", "") +
             " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -55,6 +59,8 @@ describe "Electron Simple Web Engine2D proof validator":
         step("Inspect normalized Electron Engine2D proof rows")
         expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=pass")
         expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=pass")
+        expect(evidence).to_contain("electron_simple_web_engine2d_renderer=electron-live-capture-page")
+        expect(evidence).to_contain("electron_simple_web_engine2d_scene=simple-web-engine2d-image-taskbar-command")
         expect(evidence).to_contain("electron_simple_web_engine2d_simple_checksum=18446744073709551610")
         expect(evidence).to_contain("electron_simple_web_engine2d_electron_weighted_checksum=18446744073709551611")
         expect(evidence).to_contain("electron_simple_web_engine2d_mismatch_count=0")
@@ -67,11 +73,32 @@ describe "Electron Simple Web Engine2D proof validator":
         expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_path=captured.json")
         expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_written=true")
         expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_file_status=pass")
+        expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_format=argb-u32")
+        expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_producer=electron-live-capture-page")
+        expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_width=96")
+        expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_height=64")
+        expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_pixel_count=6144")
+        expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_nonzero_pixel_count=6144")
+
+    it "rejects unexpected Electron renderer or non-Engine2D scene identity":
+        val root = "build/test-electron-engine2d-validator-identity"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/renderer.json", "p.renderer=\"static-fixture\"") +
+            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/renderer.json > " + root + "/renderer.env; " +
+            _proof_command(root + "/scene.json", "p.scene=\"simple-web-layout-text-flow\"") +
+            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/scene.json > " + root + "/scene.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val renderer = file_read(root + "/renderer.env")
+        val scene = file_read(root + "/scene.env")
+        step("Confirm Engine2D proof is tied to live Electron Engine2D scenes")
+        expect(renderer).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-electron-renderer")
+        expect(scene).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-electron-scene")
 
     it "rejects malformed Electron Engine2D frame timing":
         val root = "build/test-electron-engine2d-validator-bad-frame"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '{\"pixels\":[1]}' > " + root + "/captured.json && " +
             _proof_command(root + "/proof.json", "p.frame_us=\"not-a-number\"") +
             " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/evidence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -85,7 +112,6 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects missing capture artifact and provenance proof rows":
         val root = "build/test-electron-engine2d-validator-missing-artifacts"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '{\"pixels\":[1]}' > " + root + "/captured.json && " +
             _proof_command(root + "/capture.json", "p.captured_argb_written=false") +
             " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/capture.json > " + root + "/capture.env; " +
             _proof_command(root + "/provenance.json", "delete p.capture_native_height") +
@@ -102,10 +128,9 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects missing and empty captured ARGB files":
         val root = "build/test-electron-engine2d-validator-captured-file"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/missing.json", "") +
+            _proof_command(root + "/missing.json", "p.captured_argb_path=\"missing.json\"") +
             " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
-            "touch " + root + "/captured.json && " +
-            _proof_command(root + "/empty.json", "") +
+            _proof_command(root + "/empty.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"\")") +
             " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/empty.json > " + root + "/empty.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
         expect(code).to_equal(1)
@@ -121,10 +146,36 @@ describe "Electron Simple Web Engine2D proof validator":
         expect(empty).to_contain("electron_simple_web_engine2d_captured_argb_file_status=pass")
         expect(empty).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=0")
 
+    it "rejects malformed captured ARGB shape and pixel data":
+        val root = "build/test-electron-engine2d-validator-argb-shape"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/malformed.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"{}\")") +
+            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/malformed.json > " + root + "/malformed.env; " +
+            _proof_command(root + "/viewport.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:63,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*63).fill(4294967295)}))") +
+            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/viewport.json > " + root + "/viewport.env; " +
+            _proof_command(root + "/pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:[0,0,0,0]}))") +
+            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/pixels.json > " + root + "/pixels.env; " +
+            _proof_command(root + "/blank.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(0)}))") +
+            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/blank.json > " + root + "/blank.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val malformed = file_read(root + "/malformed.env")
+        val viewport = file_read(root + "/viewport.env")
+        val pixels = file_read(root + "/pixels.env")
+        val blank = file_read(root + "/blank.env")
+        step("Confirm Engine2D captured ARGB evidence is parsed, dimensioned, and nonblank")
+        expect(malformed).to_contain("electron_simple_web_engine2d_validation_reason=malformed-captured-argb")
+        expect(viewport).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-viewport-mismatch")
+        expect(viewport).to_contain("electron_simple_web_engine2d_captured_argb_height=63")
+        expect(pixels).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-pixel-count-mismatch")
+        expect(pixels).to_contain("electron_simple_web_engine2d_captured_argb_pixel_count=4")
+        expect(blank).to_contain("electron_simple_web_engine2d_validation_reason=blank-captured-argb")
+        expect(blank).to_contain("electron_simple_web_engine2d_captured_argb_nonzero_pixel_count=0")
+
     it "rejects missing requested viewport and native capture viewport mismatch":
         val root = "build/test-electron-engine2d-validator-viewport"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '{\"pixels\":[1]}' > " + root + "/captured.json && " +
             _proof_command(root + "/missing.json", "delete p.height") +
             " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
             _proof_command(root + "/mismatch.json", "p.capture_native_height=63") +
@@ -143,7 +194,6 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects blur tolerance and malformed mismatch counts":
         val root = "build/test-electron-engine2d-validator-blur-mismatch"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '{\"pixels\":[1]}' > " + root + "/captured.json && " +
             _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=true") +
             " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/blur.json > " + root + "/blur.env; " +
             _proof_command(root + "/mismatch.json", "p.mismatch_count=\"bad\"") +
@@ -160,7 +210,6 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects checksum, weighted checksum, and pixel mismatches":
         val root = "build/test-electron-engine2d-validator-divergent"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '{\"pixels\":[1]}' > " + root + "/captured.json && " +
             _proof_command(root + "/checksum.json", "p.checksum=\"18446744073709551609\"") +
             " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/checksum.json > " + root + "/checksum.env; " +
             _proof_command(root + "/weighted.json", "p.weighted_checksum=\"18446744073709551612\"") +
@@ -183,4 +232,8 @@ describe "Electron Simple Web Engine2D proof validator":
         expect(script).to_contain("validate-electron-simple-web-engine2d-proof.js")
         expect(script).to_contain("electron_simple_web_engine2d_validation_status")
         expect(script).to_contain("electron_simple_web_engine2d_capture_native_width")
+        expect(script).to_contain("electron_simple_web_engine2d_captured_argb_file_status")
+        expect(script).to_contain("electron_simple_web_engine2d_captured_argb_format")
+        expect(script).to_contain("electron_simple_web_engine2d_captured_argb_nonzero_pixel_count")
+        expect(script).to_contain("electron_simple_web_engine2d_proof_renderer")
         expect(script).to_contain("electron-proof.validation.env")

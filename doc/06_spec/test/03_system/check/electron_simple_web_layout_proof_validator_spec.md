@@ -27,7 +27,7 @@ electron_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -79,6 +79,11 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
   viewport mismatches are rejected.
 - ARGB capture proof paths must resolve to nonempty files instead of relying
   on `captured_argb_written=true` alone.
+- Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
+  match the proof viewport, include the expected pixel count, and contain
+  nonzero pixels.
+- Proof renderer must be the live Electron capture page and scenes must stay
+  within the Simple Web layout scene family.
 - The live Electron layout wrapper consumes the validator and still maps real
   pixel mismatches to `divergent` evidence.
 
@@ -96,7 +101,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -111,6 +116,8 @@ val evidence = file_read(root + "/evidence.env")
 step("Inspect normalized Electron layout proof rows")
 expect(evidence).to_contain("electron_simple_web_layout_validation_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_validation_reason=pass")
+expect(evidence).to_contain("electron_simple_web_layout_renderer=electron-live-capture-page")
+expect(evidence).to_contain("electron_simple_web_layout_scene=simple-web-layout-text-flow")
 expect(evidence).to_contain("electron_simple_web_layout_simple_checksum=18446744073709551610")
 expect(evidence).to_contain("electron_simple_web_layout_electron_weighted_checksum=18446744073709551611")
 expect(evidence).to_contain("electron_simple_web_layout_mismatch_count=0")
@@ -123,7 +130,45 @@ expect(evidence).to_contain("electron_simple_web_layout_capture_downsampled=fals
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_path=captured.json")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_written=true")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_status=pass")
-expect(evidence).to_contain("electron_simple_web_layout_captured_argb_size_bytes=2")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_format=argb-u32")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_producer=electron-live-capture-page")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_width=96")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_height=64")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_pixel_count=6144")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_nonzero_pixel_count=6144")
+```
+
+</details>
+
+#### rejects unexpected Electron renderer or non-layout scene identity
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm layout proof is tied to live Electron layout scenes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-layout-validator-identity"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/renderer.json", "p.renderer=\"static-fixture\"") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/renderer.json > " + root + "/renderer.env; " +
+    _proof_command(root + "/scene.json", "p.scene=\"simple-web-engine2d-image-taskbar-command\"") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/scene.json > " + root + "/scene.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val renderer = file_read(root + "/renderer.env")
+val scene = file_read(root + "/scene.env")
+step("Confirm layout proof is tied to live Electron layout scenes")
+expect(renderer).to_contain("electron_simple_web_layout_validation_reason=unexpected-electron-renderer")
+expect(scene).to_contain("electron_simple_web_layout_validation_reason=unexpected-electron-scene")
 ```
 
 </details>
@@ -223,6 +268,52 @@ expect(empty).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(empty).to_contain("electron_simple_web_layout_validation_reason=empty-captured-argb-file")
 expect(empty).to_contain("electron_simple_web_layout_captured_argb_file_status=pass")
 expect(empty).to_contain("electron_simple_web_layout_captured_argb_size_bytes=0")
+```
+
+</details>
+
+#### rejects malformed captured ARGB shape and pixel data
+
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm layout captured ARGB evidence is parsed, dimensioned, and nonblank
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 25 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-layout-validator-argb-shape"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/malformed.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"{}\")") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/malformed.json > " + root + "/malformed.env; " +
+    _proof_command(root + "/viewport.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:95,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(95*64).fill(4294967295)}))") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/viewport.json > " + root + "/viewport.env; " +
+    _proof_command(root + "/pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:[0,0,0,0]}))") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/pixels.json > " + root + "/pixels.env; " +
+    _proof_command(root + "/blank.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(0)}))") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/blank.json > " + root + "/blank.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val malformed = file_read(root + "/malformed.env")
+val viewport = file_read(root + "/viewport.env")
+val pixels = file_read(root + "/pixels.env")
+val blank = file_read(root + "/blank.env")
+step("Confirm layout captured ARGB evidence is parsed, dimensioned, and nonblank")
+expect(malformed).to_contain("electron_simple_web_layout_validation_reason=malformed-captured-argb")
+expect(viewport).to_contain("electron_simple_web_layout_validation_reason=captured-argb-viewport-mismatch")
+expect(viewport).to_contain("electron_simple_web_layout_captured_argb_width=95")
+expect(pixels).to_contain("electron_simple_web_layout_validation_reason=captured-argb-pixel-count-mismatch")
+expect(pixels).to_contain("electron_simple_web_layout_captured_argb_pixel_count=4")
+expect(blank).to_contain("electron_simple_web_layout_validation_reason=blank-captured-argb")
+expect(blank).to_contain("electron_simple_web_layout_captured_argb_nonzero_pixel_count=0")
 ```
 
 </details>
@@ -335,7 +426,7 @@ expect(pixel).to_contain("electron_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -344,6 +435,9 @@ expect(script).to_contain("validate-electron-simple-web-layout-proof.js")
 expect(script).to_contain("electron_simple_web_layout_validation_status")
 expect(script).to_contain("electron_simple_web_layout_captured_argb_file_status")
 expect(script).to_contain("electron_simple_web_layout_captured_argb_size_bytes")
+expect(script).to_contain("electron_simple_web_layout_captured_argb_format")
+expect(script).to_contain("electron_simple_web_layout_captured_argb_nonzero_pixel_count")
+expect(script).to_contain("electron_simple_web_layout_proof_renderer")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
 ```
@@ -354,8 +448,8 @@ expect(script).to_contain("status=divergent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

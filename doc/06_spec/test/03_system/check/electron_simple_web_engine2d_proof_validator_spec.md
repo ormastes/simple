@@ -27,7 +27,7 @@ electron_simple_web_engine2d_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -77,6 +77,11 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
 - Malformed `frame_us`, malformed mismatch counts, blur/tolerance use, missing
   ARGB capture, missing or empty captured ARGB files, missing capture provenance,
   missing viewport proof, and capture viewport mismatches are rejected.
+- Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
+  match the proof viewport, include the expected pixel count, and contain
+  nonzero pixels.
+- Proof renderer must be the live Electron capture page and scenes must stay
+  within the Simple Web Engine2D scene family.
 - The live Electron wrapper consumes the validator instead of raw shell JSON
   parsing or shell integer timing checks.
 
@@ -94,13 +99,12 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-engine2d-validator-pass"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-    "printf '{\"pixels\":[1]}' > " + root + "/captured.json && " +
     _proof_command(root + "/proof.json", "") +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/evidence.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -110,6 +114,8 @@ val evidence = file_read(root + "/evidence.env")
 step("Inspect normalized Electron Engine2D proof rows")
 expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=pass")
+expect(evidence).to_contain("electron_simple_web_engine2d_renderer=electron-live-capture-page")
+expect(evidence).to_contain("electron_simple_web_engine2d_scene=simple-web-engine2d-image-taskbar-command")
 expect(evidence).to_contain("electron_simple_web_engine2d_simple_checksum=18446744073709551610")
 expect(evidence).to_contain("electron_simple_web_engine2d_electron_weighted_checksum=18446744073709551611")
 expect(evidence).to_contain("electron_simple_web_engine2d_mismatch_count=0")
@@ -122,6 +128,45 @@ expect(evidence).to_contain("electron_simple_web_engine2d_capture_downsampled=fa
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_path=captured.json")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_written=true")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_file_status=pass")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_format=argb-u32")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_producer=electron-live-capture-page")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_width=96")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_height=64")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_pixel_count=6144")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_nonzero_pixel_count=6144")
+```
+
+</details>
+
+#### rejects unexpected Electron renderer or non-Engine2D scene identity
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Engine2D proof is tied to live Electron Engine2D scenes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-engine2d-validator-identity"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/renderer.json", "p.renderer=\"static-fixture\"") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/renderer.json > " + root + "/renderer.env; " +
+    _proof_command(root + "/scene.json", "p.scene=\"simple-web-layout-text-flow\"") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/scene.json > " + root + "/scene.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val renderer = file_read(root + "/renderer.env")
+val scene = file_read(root + "/scene.env")
+step("Confirm Engine2D proof is tied to live Electron Engine2D scenes")
+expect(renderer).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-electron-renderer")
+expect(scene).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-electron-scene")
 ```
 
 </details>
@@ -135,13 +180,12 @@ expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_file_sta
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-engine2d-validator-bad-frame"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-    "printf '{\"pixels\":[1]}' > " + root + "/captured.json && " +
     _proof_command(root + "/proof.json", "p.frame_us=\"not-a-number\"") +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/evidence.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -165,13 +209,12 @@ expect(evidence).to_contain("electron_simple_web_engine2d_electron_frame_us=not-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-engine2d-validator-missing-artifacts"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-    "printf '{\"pixels\":[1]}' > " + root + "/captured.json && " +
     _proof_command(root + "/capture.json", "p.captured_argb_written=false") +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/capture.json > " + root + "/capture.env; " +
     _proof_command(root + "/provenance.json", "delete p.capture_native_height") +
@@ -198,16 +241,15 @@ expect(provenance).to_contain("electron_simple_web_engine2d_validation_reason=mi
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-engine2d-validator-captured-file"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-    _proof_command(root + "/missing.json", "") +
+    _proof_command(root + "/missing.json", "p.captured_argb_path=\"missing.json\"") +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
-    "touch " + root + "/captured.json && " +
-    _proof_command(root + "/empty.json", "") +
+    _proof_command(root + "/empty.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"\")") +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/empty.json > " + root + "/empty.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
@@ -226,6 +268,52 @@ expect(empty).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=
 
 </details>
 
+#### rejects malformed captured ARGB shape and pixel data
+
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Engine2D captured ARGB evidence is parsed, dimensioned, and nonblank
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 25 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-engine2d-validator-argb-shape"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/malformed.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"{}\")") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/malformed.json > " + root + "/malformed.env; " +
+    _proof_command(root + "/viewport.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:63,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*63).fill(4294967295)}))") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/viewport.json > " + root + "/viewport.env; " +
+    _proof_command(root + "/pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:[0,0,0,0]}))") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/pixels.json > " + root + "/pixels.env; " +
+    _proof_command(root + "/blank.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(0)}))") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/blank.json > " + root + "/blank.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val malformed = file_read(root + "/malformed.env")
+val viewport = file_read(root + "/viewport.env")
+val pixels = file_read(root + "/pixels.env")
+val blank = file_read(root + "/blank.env")
+step("Confirm Engine2D captured ARGB evidence is parsed, dimensioned, and nonblank")
+expect(malformed).to_contain("electron_simple_web_engine2d_validation_reason=malformed-captured-argb")
+expect(viewport).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-viewport-mismatch")
+expect(viewport).to_contain("electron_simple_web_engine2d_captured_argb_height=63")
+expect(pixels).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-pixel-count-mismatch")
+expect(pixels).to_contain("electron_simple_web_engine2d_captured_argb_pixel_count=4")
+expect(blank).to_contain("electron_simple_web_engine2d_validation_reason=blank-captured-argb")
+expect(blank).to_contain("electron_simple_web_engine2d_captured_argb_nonzero_pixel_count=0")
+```
+
+</details>
+
 #### rejects missing requested viewport and native capture viewport mismatch
 
 -  proof command
@@ -236,13 +324,12 @@ expect(empty).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-engine2d-validator-viewport"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-    "printf '{\"pixels\":[1]}' > " + root + "/captured.json && " +
     _proof_command(root + "/missing.json", "delete p.height") +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
     _proof_command(root + "/mismatch.json", "p.capture_native_height=63") +
@@ -271,13 +358,12 @@ expect(mismatch).to_contain("electron_simple_web_engine2d_capture_native_height=
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-engine2d-validator-blur-mismatch"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-    "printf '{\"pixels\":[1]}' > " + root + "/captured.json && " +
     _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=true") +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/blur.json > " + root + "/blur.env; " +
     _proof_command(root + "/mismatch.json", "p.mismatch_count=\"bad\"") +
@@ -305,13 +391,12 @@ expect(mismatch).to_contain("electron_simple_web_engine2d_mismatch_count=bad")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-engine2d-validator-divergent"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-    "printf '{\"pixels\":[1]}' > " + root + "/captured.json && " +
     _proof_command(root + "/checksum.json", "p.checksum=\"18446744073709551609\"") +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/checksum.json > " + root + "/checksum.env; " +
     _proof_command(root + "/weighted.json", "p.weighted_checksum=\"18446744073709551612\"") +
@@ -337,7 +422,7 @@ expect(pixel).to_contain("electron_simple_web_engine2d_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -345,6 +430,10 @@ val script = file_read("scripts/check/check-electron-simple-web-engine2d-bitmap-
 expect(script).to_contain("validate-electron-simple-web-engine2d-proof.js")
 expect(script).to_contain("electron_simple_web_engine2d_validation_status")
 expect(script).to_contain("electron_simple_web_engine2d_capture_native_width")
+expect(script).to_contain("electron_simple_web_engine2d_captured_argb_file_status")
+expect(script).to_contain("electron_simple_web_engine2d_captured_argb_format")
+expect(script).to_contain("electron_simple_web_engine2d_captured_argb_nonzero_pixel_count")
+expect(script).to_contain("electron_simple_web_engine2d_proof_renderer")
 expect(script).to_contain("electron-proof.validation.env")
 ```
 
@@ -354,8 +443,8 @@ expect(script).to_contain("electron-proof.validation.env")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
