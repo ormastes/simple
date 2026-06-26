@@ -306,7 +306,9 @@ impl Fat32Core:
             val sector = self.reserved_sectors.to_u64() + i.to_u64()
             val rc = self._device_read_sector(sector)
             if rc.is_ok():
-                self.fat_sector_cache.put(sector, rc.unwrap())
+                match rc:
+                    Ok(buffer): self.fat_sector_cache.put(sector, buffer)
+                    Err(_): pass_dn
             i = i + 1
 
     me fn _preload_root_dir():
@@ -318,10 +320,12 @@ impl Fat32Core:
         while i < keys.len():
             val sector = keys[i]
             val cached = self.fat_sector_cache.get(sector)
-            if cached != nil:
-                val write_rc = self._device_write_sector(sector, cached.unwrap())
-                if write_rc.is_err():
-                    return Err("failed to flush FAT sector")
+            match cached:
+                Some(buffer):
+                    val write_rc = self._device_write_sector(sector, buffer)
+                    if write_rc.is_err():
+                        return Err("failed to flush FAT sector")
+                nil: pass_dn
             i = i + 1
         var dfs = self.dirty_fat_sectors
         dfs = {}
@@ -335,23 +339,24 @@ impl Fat32Core:
         while i < keys.len():
             val cluster = keys[i]
             val cached = self.cluster_data_cache.get(cluster)
-            if cached != nil:
-                val data = cached.unwrap()
-                val start_sector = (self.data_start_sector + (cluster - 2) * self.sectors_per_cluster).to_u64()
-                var sec: u32 = 0
-                while sec < self.sectors_per_cluster:
-                    var sector_buf = self._get_sector_buffer()
-                    var j: u32 = 0
-                    val base = sec * self.bytes_per_sector
-                    while j < self.bytes_per_sector:
-                        val idx = base + j
-                        if idx.to_i32() < data.len():
-                            sector_buf[j.to_i32()] = data[idx.to_i32()]
-                        j = j + 1
-                    val rc = self._device_write_sector(start_sector + sec.to_u64(), sector_buf)
-                    if rc.is_err():
-                        return Err("failed to flush cluster data")
-                    sec = sec + 1
+            match cached:
+                Some(data):
+                    val start_sector = (self.data_start_sector + (cluster - 2) * self.sectors_per_cluster).to_u64()
+                    var sec: u32 = 0
+                    while sec < self.sectors_per_cluster:
+                        var sector_buf = self._get_sector_buffer()
+                        var j: u32 = 0
+                        val base = sec * self.bytes_per_sector
+                        while j < self.bytes_per_sector:
+                            val idx = base + j
+                            if idx.to_i32() < data.len():
+                                sector_buf[j.to_i32()] = data[idx.to_i32()]
+                            j = j + 1
+                        val rc = self._device_write_sector(start_sector + sec.to_u64(), sector_buf)
+                        if rc.is_err():
+                            return Err("failed to flush cluster data")
+                        sec = sec + 1
+                nil: pass_dn
             i = i + 1
         var dcl = self.dirty_clusters
         dcl = {}
@@ -363,13 +368,17 @@ impl Fat32Core:
         self._wb_flush()
         val fat_rc = self.flush_fat()
         if fat_rc.is_err():
-            return Err(fat_rc.unwrap_err())
+            return match fat_rc:
+                Ok(_): Err("failed to flush FAT")
+                Err(err): Err(err)
         self.flush_clusters()
 
     me fn unmount() -> Result<(), text>:
         val sync_rc = self.sync()
         if sync_rc.is_err():
-            return Err(sync_rc.unwrap_err())
+            return match sync_rc:
+                Ok(_): Err("failed to sync filesystem")
+                Err(err): Err(err)
         self.mounted = false
         self.bytes_per_sector = 512
         self.sectors_per_cluster = 0
