@@ -28,7 +28,7 @@ vllm_control_route_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -57,8 +57,8 @@ expect(response).to_contain("\"event\":\"llm_dashboard_vllm_control_panel\"")
 expect(response).to_contain("\"action\":\"preflight\"")
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
-expect(response.contains("base-model")).to_equal(false)
-expect(response.contains(_absence_marker())).to_equal(false)
+expect(response.split("base-model").len()).to_equal(1)
+expect(response.split(_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -96,8 +96,8 @@ val response = server.route_http("GET", "/api/vllm/control?action=preflight&base
 expect(response).to_contain("HTTP/1.1 200 OK")
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
-expect(response.contains("base-model")).to_equal(false)
-expect(response.contains(_absence_marker())).to_equal(false)
+expect(response.split("base-model").len()).to_equal(1)
+expect(response.split(_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -120,7 +120,55 @@ expect(response).to_contain("\"action\":\"start\"")
 expect(response).to_contain("\"status\":\"skipped\"")
 expect(response).to_contain("\"reason\":\"missing_local_vllm\"")
 expect(response).to_contain("\"requires_runtime_executor\":false")
-expect(response.contains(_absence_marker())).to_equal(false)
+expect(response.split(_absence_marker()).len()).to_equal(1)
+```
+
+</details>
+
+#### routes missing GPU start through runtime execution JSONL without spawning
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", _manifest())
+val response = server.route_http("GET", "/api/vllm/control?action=start&vllm_available=true&gpu_available=false", "", "sid")
+
+expect(response).to_contain("HTTP/1.1 200 OK")
+expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
+expect(response).to_contain("\"action\":\"start\"")
+expect(response).to_contain("\"status\":\"skipped\"")
+expect(response).to_contain("\"reason\":\"missing_local_gpu\"")
+expect(response).to_contain("\"models_reason\":\"environment_skipped\"")
+expect(response).to_contain("\"requires_runtime_executor\":false")
+expect(response.split(_absence_marker()).len()).to_equal(1)
+```
+
+</details>
+
+#### routes missing vLLM and GPU start through runtime execution JSONL without spawning
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", _manifest())
+val response = server.route_http("GET", "/api/vllm/control?action=start&vllm_available=false&gpu_available=false", "", "sid")
+
+expect(response).to_contain("HTTP/1.1 200 OK")
+expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
+expect(response).to_contain("\"action\":\"start\"")
+expect(response).to_contain("\"status\":\"skipped\"")
+expect(response).to_contain("\"reason\":\"missing_local_vllm_and_gpu\"")
+expect(response).to_contain("\"models_reason\":\"environment_skipped\"")
+expect(response).to_contain("\"requires_runtime_executor\":false")
+expect(response.split(_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -163,7 +211,7 @@ expect(response).to_contain("id=\"llm-vllm-control-panel\"")
 expect(response).to_contain("action=\"/api/vllm/control\"")
 expect(response).to_contain("value=\"start\"")
 expect(response).to_contain("value=\"probe\"")
-expect(response.contains(_absence_marker())).to_equal(false)
+expect(response.split(_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -188,7 +236,7 @@ expect(server_source).to_contain("_is_vllm_side_effect_action")
 expect(server_source).to_contain("if path.starts_with(\"/api/vllm/control\")")
 expect(server_source).to_contain("vllm_available")
 expect(server_source).to_contain("gpu_available")
-expect(server_source.contains("dashboard_live_control_executor")).to_equal(false)
+expect(server_source.split("dashboard_live_control_executor").len()).to_equal(1)
 expect(collector_source).to_contain("llm_runtime_execute_dashboard_control")
 expect(collector_source).to_contain("requires_runtime_executor")
 expect(runtime_boundary).to_contain("process_access")
@@ -217,8 +265,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
