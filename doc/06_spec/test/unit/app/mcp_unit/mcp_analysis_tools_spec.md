@@ -1,6 +1,6 @@
 # mcp_analysis_tools_spec
 
-> Tests the 4 Tier 3 MCP analysis tool handlers: simple_dependencies, simple_api_diff, simple_context, simple_search
+> Tests the Tier 3 MCP analysis tool handlers: simple_dependencies, simple_api_diff, simple_context, simple_ponytail, simple_search.
 
 <!-- sdn-diagram:id=mcp_analysis_tools_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ mcp_analysis_tools_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 27 | 27 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # mcp_analysis_tools_spec
 
-Tests the 4 Tier 3 MCP analysis tool handlers: simple_dependencies, simple_api_diff, simple_context, simple_search
+Tests the Tier 3 MCP analysis tool handlers: simple_dependencies, simple_api_diff, simple_context, simple_ponytail, simple_search.
 
 ## At a Glance
 
@@ -44,14 +44,31 @@ Tests the 4 Tier 3 MCP analysis tool handlers: simple_dependencies, simple_api_d
 | Category | Tooling |
 | Difficulty | 2/5 |
 | Status | Implemented |
+| Requirements | N/A |
+| Plan | doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md |
+| Design | N/A |
+| Research | doc/01_research/local/llm_tooling_context_ponytail_mimic.md |
 | Source | `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests the 4 Tier 3 MCP analysis tool handlers:
-simple_dependencies, simple_api_diff, simple_context, simple_search
+Tests the Tier 3 MCP analysis tool handlers:
+simple_dependencies, simple_api_diff, simple_context, simple_ponytail,
+simple_search.
+
+## Syntax
+
+```sh
+bin/simple test test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl --mode=interpreter
+bin/simple spipe-docgen test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl --output doc/06_spec
+```
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md
+**Research:** doc/01_research/local/llm_tooling_context_ponytail_mimic.md
+**Design:** N/A
 
 ## Behavior
 
@@ -220,29 +237,37 @@ expect(has_target).to_equal(true)
 
 </details>
 
-#### app MCP context forwards index query sql and db options
+#### app MCP context forwards local index query and sql options
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("val query = extract_field(body, \"query\")")
+expect(source).to_contain("val index = extract_field(body, \"index\")")
+expect(source).to_contain("val sql = extract_field(body, \"sql\")")
+expect(source).to_contain("val db_path = extract_field(body, \"db\")")
+expect(source).to_contain("val source_filter = extract_field(body, \"source_filter\")")
 expect(source).to_contain("var ctx_args = [\"context\"]")
-expect(source).to_contain("ctx_args.push(\"--query=\" + query)")
 expect(source).to_contain("ctx_args.push(\"--index\")")
+expect(source).to_contain("ctx_args.push(\"--query=\" + query)")
 expect(source).to_contain("ctx_args.push(\"--sql\")")
 expect(source).to_contain("ctx_args.push(\"--db=\" + db_path)")
+expect(source).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
 
 val table = rt_file_read_text("src/app/mcp/tool_table.spl") ?? ""
+expect(table).to_contain("prop_str(\"format\", \"Output format: text, markdown, json\")")
 expect(table).to_contain("prop_str(\"index\", \"Emit a local context-pack index (true/false)\")")
 expect(table).to_contain("prop_str(\"file\", \"Source file path; required except when sql=true and query is non-empty\")")
 expect(table).to_contain("prop_str(\"query\", \"Query local or SQL context-pack index\")")
 expect(table).to_contain("prop_str(\"sql\", \"Use Simple embedded SQLite for index/query (true/false)\")")
 expect(table).to_contain("e.required_json = build_required([])")
+expect(table).to_contain("prop_str(\"db\", \"SQLite index database path\")")
+expect(table).to_contain("prop_str(\"source_filter\", \"Filter SQL query rows by stored source path\")")
 ```
 
 </details>
@@ -263,6 +288,78 @@ expect(app_source).to_contain("bootstrap/stage3/simple")
 val lower_source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
 expect(lower_source).to_contain("release/x86_64-unknown-linux-gnu/simple")
 expect(lower_source).to_contain("bootstrap/stage3/simple")
+```
+
+</details>
+
+#### lower MCP context validates requested output format
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
+expect(source).to_contain("val format = _mcp_output_format(body)")
+expect(source).to_contain("Invalid format: ")
+expect(source).to_contain("_mcp_render_context_pack")
+expect(source).to_contain("\\\"line_count\\\"")
+expect(source).to_contain("\\\"target_lines\\\"")
+expect(source).to_contain("_mcp_json_escape(content)")
+expect(source).to_contain("# Context Pack")
+
+val schema = rt_file_read_text("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl") ?? ""
+expect(schema).to_contain("elif name == \"simple_context\"")
+expect(schema).to_contain("jp(\"file\", jo2")
+expect(schema).to_contain("jp(\"target\", jo2")
+expect(schema).to_contain("jp(\"format\", jo2")
+expect(schema).to_contain("jp(\"index\", jo2")
+expect(schema).to_contain("jp(\"query\", jo2")
+expect(schema).to_contain("jp(\"sql\", jo2")
+expect(schema).to_contain("jp(\"db\", jo2")
+expect(schema).to_contain("jp(\"source_filter\", jo2")
+expect(schema).to_contain("Output format: text, markdown, json")
+expect(schema).to_contain("req = \"[]\"")
+```
+
+</details>
+
+#### lower MCP advertises and routes simple_context
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val schema = rt_file_read_text("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl") ?? ""
+expect(schema).to_contain("make_tool_schema(name: \"simple_context\"")
+expect(schema).to_contain("elif name == \"simple_context\"")
+
+val dispatcher = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy.spl") ?? ""
+expect(dispatcher).to_contain("tool_name == \"simple_context\"")
+expect(dispatcher).to_contain("handle_simple_context(id, body)")
+```
+
+</details>
+
+#### adds target lines to the context pack
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
+expect(source).to_contain("target_report")
+expect(source).to_contain("_mcp_render_context_pack")
+expect(source).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
+expect(source).to_contain("ctx_args.push(\"--query=\" + query)")
 ```
 
 </details>
@@ -528,11 +625,17 @@ expect(cmd).to_contain("^type Position")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 27 |
+| Active scenarios | 27 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md](doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md)
+- **Research:** [doc/01_research/local/llm_tooling_context_ponytail_mimic.md](doc/01_research/local/llm_tooling_context_ponytail_mimic.md)
 
 
 </details>

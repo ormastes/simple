@@ -83,7 +83,9 @@ Evidence:
 - `simple check` passed for `src/app/ponytail/audit.spl` and both mirrored
   ponytail audit specs.
 - `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 34/34.
-- `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 24/24.
+- `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 27/27
+  after aligning the canonical mirror with the SQL `db` / `source_filter`
+  schema, source-less SQL routing, and lower-MCP context route assertions.
 - `test/01_unit/app/tooling/context_generate_spec.spl` and
   `test/unit/app/tooling/context_generate_spec.spl` both pass 13/13 cleanly
   after narrowing fixture imports away from broad `app.io.mod`, adding local
@@ -161,7 +163,9 @@ Evidence:
 - `test/01_unit/app/tooling/ponytail_audit_spec.spl` passed with 6/6.
 - `test/unit/app/tooling/ponytail_audit_spec.spl` passed with 6/6.
 - `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 34/34.
-- `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 24/24.
+- `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 27/27
+  after aligning the canonical mirror with the SQL `db` / `source_filter`
+  schema, source-less SQL routing, and lower-MCP context route assertions.
 
 ## Lane 5: Local Pack Index/Query
 
@@ -275,6 +279,11 @@ Evidence:
 - `release/x86_64-unknown-linux-gnu/simple test
   test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl --mode=interpreter` passed
   with 23/23 after adding app MCP source-less SQL context contracts.
+- `release/x86_64-unknown-linux-gnu/simple test
+  test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl --mode=interpreter --clean`
+  passed with 27/27 after adding the missing canonical mirror assertions for
+  SQL `db`, `source_filter`, source-less SQL routing, and lower-MCP
+  `simple_context` schema/dispatch.
 - 2026-06-26 persisted CLI SQL evidence: interpreter-mode `rt_sqlite_open` /
   `rt_sqlite_close` now load and store the facade database at `--db=<path>`,
   so a separate `context --sql --query=<text> --db=<path> --source-filter=<text>`
