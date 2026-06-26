@@ -276,6 +276,12 @@ Check whether an attempt is ready for real training/use:
 node examples/05_stdlib/spipe/cli/spipe.js fine-tune-ready <attempt_id>
 ```
 
+`fine-tune-ready` is release-blocking: when an attempt records a safe
+repo-local checker, readiness includes `data_check_gate_ready` and fails until
+that checker reports PASS. It also prints the checker status and stable gate
+fields so a WARN cache, training, or acceptance gate cannot be bypassed by
+registry rows alone.
+
 Print the next phase required before real training/use:
 
 ```sh
