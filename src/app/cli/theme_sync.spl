@@ -17,14 +17,9 @@ use common.ui.theme_sync_sdn.{dump_stitch_design_system_sdn, parse_stitch_design
 use common.ui.theme_sync_diff.{diff_stitch_design_systems, format_drift_report}
 use std.play.wm.mod.{wm_screenshot}
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_dir_exists(path: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_cli_get_args() -> [text]
+
+use std.io_runtime.{file_read, file_write, file_exists, dir_list, process_run, env_set, get_args}
 
 # =========================================================================
 # Date helper — static for Phase 2 (no date extern needed)
@@ -120,7 +115,7 @@ fn cmd_dump_local(theme: text, out_path: text) -> i32:
         print sdn
         return 0
 
-    val ok = rt_file_write_text(out_path, sdn)
+    val ok = file_write(out_path, sdn)
     if not ok:
         print "Error: failed to write to '{out_path}'"
         return 1
@@ -141,16 +136,16 @@ fn cmd_diff(local_path: text, remote_path: text, color: bool) -> i32:
         print "Error: --remote=<path> is required"
         return 1
 
-    if not rt_file_exists(local_path):
+    if not file_exists(local_path):
         print "Error: local file not found: {local_path}"
         return 1
-    if not rt_file_exists(remote_path):
+    if not file_exists(remote_path):
         print "Error: remote file not found: {remote_path}"
         return 1
 
     # rt_file_read_text returns Option in bootstrap runtime — unwrap with ??
-    val local_text = rt_file_read_text(local_path) ?? ""
-    val remote_text = rt_file_read_text(remote_path) ?? ""
+    val local_text = file_read(local_path) ?? ""
+    val remote_text = file_read(remote_path) ?? ""
 
     val local_ds = parse_stitch_design_system_sdn(local_text)
     val remote_ds = parse_stitch_design_system_sdn(remote_text)
@@ -189,17 +184,17 @@ fn cmd_list(snapshots_root: text) -> i32:
         root = "doc/05_design/ui/stitch_snapshots"
 
     val projects_path = "{root}/projects.sdn"
-    if not rt_file_exists(projects_path):
+    if not file_exists(projects_path):
         print "Error: projects.sdn not found at {projects_path}"
         return 1
 
-    val projects_content = rt_file_read_text(projects_path) ?? ""
+    val projects_content = file_read(projects_path) ?? ""
 
     # Read sync_mode
     val sync_mode_path = "{root}/sync_mode.sdn"
     var sync_mode = "unknown"
-    if rt_file_exists(sync_mode_path):
-        val sm_content = rt_file_read_text(sync_mode_path) ?? ""
+    if file_exists(sync_mode_path):
+        val sm_content = file_read(sync_mode_path) ?? ""
         val sm = _read_sdn_value(sm_content, "mode")
         if sm != "":
             sync_mode = sm
@@ -209,7 +204,7 @@ fn cmd_list(snapshots_root: text) -> i32:
     print ""
 
     # Walk project IDs from the directory listing
-    val entries = rt_dir_list(root)
+    val entries = dir_list(root)
     var i = 0
     while i < entries.len():
         val entry = entries[i]
@@ -223,21 +218,21 @@ fn cmd_list(snapshots_root: text) -> i32:
             val ds_dir = "{project_dir}/design_systems"
             print "Project: {entry}"
             if rt_dir_exists(ds_dir):
-                val ds_entries = rt_dir_list(ds_dir)
+                val ds_entries = dir_list(ds_dir)
                 var j = 0
                 while j < ds_entries.len():
                     val ds_file = ds_entries[j]
                     if ds_file.ends_with(".sdn"):
                         val ds_path = "{ds_dir}/{ds_file}"
-                        val ds_content = rt_file_read_text(ds_path) ?? ""
+                        val ds_content = file_read(ds_path) ?? ""
                         val ds_name = _read_sdn_value(ds_content, "display_name")
                         val ds_pulled_at = _read_sdn_value(ds_content, "pulled_at")
                         print "  design_system: {ds_file}  name={ds_name}  pulled_at={ds_pulled_at}"
                     j = j + 1
             # Check for last_pull.sdn in the project dir
             val last_pull_path = "{project_dir}/last_pull.sdn"
-            if rt_file_exists(last_pull_path):
-                val lp_content = rt_file_read_text(last_pull_path) ?? ""
+            if file_exists(last_pull_path):
+                val lp_content = file_read(last_pull_path) ?? ""
                 val lp_time = _read_sdn_value(lp_content, "pulled_at")
                 print "  last_pull: {lp_time}"
             print ""
@@ -258,11 +253,11 @@ fn cmd_import(snapshot_path: text, out_path: text) -> i32:
         print "Error: --out=<path> is required"
         return 1
     
-    if not rt_file_exists(snapshot_path):
+    if not file_exists(snapshot_path):
         print "Error: snapshot not found: {snapshot_path}"
         return 1
         
-    val sdn_text = rt_file_read_text(snapshot_path) ?? ""
+    val sdn_text = file_read(snapshot_path) ?? ""
     val ds = parse_stitch_design_system_sdn(sdn_text)
 
     val meta = stitch_ds_metadata(ds)
@@ -297,7 +292,7 @@ fn cmd_import(snapshot_path: text, out_path: text) -> i32:
     css = "{css}  --glass-border: {outline_var};\n"
     css = "{css}\}\n"
 
-    val ok = rt_file_write_text(out_path, css)
+    val ok = file_write(out_path, css)
     if not ok:
         print "Error: failed to write to {out_path}"
         return 1
@@ -318,11 +313,11 @@ fn cmd_compile_to_spl(theme_path: text, out_path: text) -> i32:
         print "Error: --out=<path> is required"
         return 1
         
-    if not rt_file_exists(theme_path):
+    if not file_exists(theme_path):
         print "Error: theme file not found: {theme_path}"
         return 1
         
-    val css = rt_file_read_text(theme_path) ?? ""
+    val css = file_read(theme_path) ?? ""
     val theme = SimpleTheme.from_css("compiled", css)
     
     var s = "# Generated by Simple Theme Compiler — DO NOT EDIT\n"
@@ -337,7 +332,7 @@ fn cmd_compile_to_spl(theme_path: text, out_path: text) -> i32:
     # In a full implementation, we'd convert the theme.tokens values 
     # from hex/rgba strings to numeric u64.
     
-    val ok = rt_file_write_text(out_path, s)
+    val ok = file_write(out_path, s)
     if not ok:
         print "Error: failed to write to {out_path}"
         return 1
@@ -393,9 +388,9 @@ fn cmd_render_app(theme: text, entry: text, out_html: text, out_png: text) -> i3
 
     # Propagate dump path via env var as well (script reads $2 positionally,
     # but setting the env var matches the spec and is inherited by children).
-    rt_env_set("SIMPLE_UI_DUMP_HTML_PATH", out_html)
+    env_set("SIMPLE_UI_DUMP_HTML_PATH", out_html)
 
-    val html_result = rt_process_run("sh", ["scripts/export_ui_snapshot.shs", entry_path, out_html])
+    val html_result = process_run("sh", ["scripts/export_ui_snapshot.shs", entry_path, out_html])
     if html_result.2 != 0:
         print "Error: export_ui_snapshot.shs failed (exit {html_result.2})"
         if html_result.1 != "":
@@ -404,7 +399,7 @@ fn cmd_render_app(theme: text, entry: text, out_html: text, out_png: text) -> i3
     print "HTML snapshot written: {out_html}"
 
     if out_png != "":
-        val png_result = rt_process_run("node", ["tools/electron-shell/screenshot.js", out_html, out_png, "1360", "840"])
+        val png_result = process_run("node", ["tools/electron-shell/screenshot.js", out_html, out_png, "1360", "840"])
         if png_result.2 != 0:
             print "Error: screenshot.js failed (exit {png_result.2})"
             if png_result.1 != "":
@@ -438,19 +433,19 @@ fn cmd_build_push_payload(project_id: text, design_system_id: text, local_path: 
 
     # Mode guard — warn if sync_mode.sdn is not set to push_only but still allow.
     val sync_mode_path = "doc/05_design/ui/stitch_snapshots/sync_mode.sdn"
-    if rt_file_exists(sync_mode_path):
-        val sm_content = rt_file_read_text(sync_mode_path) ?? ""
+    if file_exists(sync_mode_path):
+        val sm_content = file_read(sync_mode_path) ?? ""
         val sm = _read_sdn_value(sm_content, "mode")
         if sm != "push_only":
             print "Warning: mode: reconcile — push gated; use /theme_sync push only after flipping sync_mode.sdn to push_only"
     else:
         print "Warning: sync_mode.sdn not found — push gated; use /theme_sync push only after flipping sync_mode.sdn to push_only"
 
-    if not rt_file_exists(local_path):
+    if not file_exists(local_path):
         print "Error: local SDN not found: {local_path}"
         return 2
 
-    val local_text = rt_file_read_text(local_path) ?? ""
+    val local_text = file_read(local_path) ?? ""
     if local_text == "":
         print "Error: local SDN is empty or unreadable: {local_path}"
         return 2
@@ -463,7 +458,7 @@ fn cmd_build_push_payload(project_id: text, design_system_id: text, local_path: 
         target = "doc/05_design/ui/stitch_snapshots/{project_id}/_pending_update_{design_system_id}.sdn"
 
     val payload = emit_push_payload_sdn(parsed, project_id, design_system_id, _today(), design_md)
-    val ok = rt_file_write_text(target, payload)
+    val ok = file_write(target, payload)
     if not ok:
         print "Error: failed to write push payload to '{target}'"
         return 2
@@ -494,13 +489,13 @@ fn cmd_build_verify_report(wm_png: text, app_html: text, app_png: text, stitch_d
         print "Error: --out-dir=<dir> is required"
         return 1
 
-    if not rt_file_exists(wm_png):
+    if not file_exists(wm_png):
         print "Error: --wm file not found: {wm_png}"
         return 1
-    if not rt_file_exists(app_html):
+    if not file_exists(app_html):
         print "Error: --app-html file not found: {app_html}"
         return 1
-    if app_png != "" and not rt_file_exists(app_png):
+    if app_png != "" and not file_exists(app_png):
         print "Error: --app-png file not found: {app_png}"
         return 1
     if stitch_dir != "" and not rt_dir_exists(stitch_dir):
@@ -519,7 +514,7 @@ fn cmd_build_verify_report(wm_png: text, app_html: text, app_png: text, stitch_d
     var stitch_body = "<div class=\"caption\">(no stitch-dir given)</div>"
     if stitch_dir != "":
         var pieces = ""
-        val entries = rt_dir_list(stitch_dir)
+        val entries = dir_list(stitch_dir)
         var i = 0
         while i < entries.len():
             val entry = entries[i]
@@ -537,7 +532,7 @@ fn cmd_build_verify_report(wm_png: text, app_html: text, app_png: text, stitch_d
     val html = "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<title>Theme Verify Report</title>\n<style>\n  body {{ font-family: -apple-system, system-ui, sans-serif; background: #060612; color: #E3E0F3; margin: 0; padding: 20px; }}\n  h1 {{ font-size: 18px; margin: 0 0 16px 0; color: #0A84FF; }}\n  .grid {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }}\n  .col {{ border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 12px; background: rgba(255,255,255,0.03); }}\n  .col h2 {{ font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: #0A84FF; margin: 0 0 12px 0; }}\n  .col iframe, .col img {{ width: 100%; border: 0; background: #0e0820; border-radius: 4px; }}\n  .col iframe {{ height: 520px; }}\n  .caption {{ font-size: 10px; color: rgba(227,224,243,0.6); margin-top: 6px; font-family: monospace; }}\n</style>\n</head>\n<body>\n<h1>Theme Verify Report — {today}</h1>\n<div class=\"grid\">\n  <div class=\"col\">\n    <h2>Local WM</h2>\n    <img src=\"{wm_png}\">\n    <div class=\"caption\">{wm_png}</div>\n  </div>\n  <div class=\"col\">\n    <h2>Local App</h2>\n    {app_body}\n  </div>\n  <div class=\"col\">\n    <h2>Stitch</h2>\n    {stitch_body}\n  </div>\n</div>\n</body>\n</html>\n"
 
     val out_path = "{out_dir}/index.html"
-    val ok = rt_file_write_text(out_path, html)
+    val ok = file_write(out_path, html)
     if not ok:
         print "Error: failed to write verify report to '{out_path}'"
         return 2
@@ -615,7 +610,7 @@ fn cli_theme_sync(args: [text]) -> i32:
     return 1
 
 fn _theme_sync_main_args() -> [text]:
-    val raw = rt_cli_get_args()
+    val raw = get_args()
     var args: [text] = []
     var i = 0
     while i < raw.len():
