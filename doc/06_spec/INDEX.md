@@ -4,16 +4,18 @@
 
 ## Quick Stats
 
-- **Total Features:** 1
-- **Complete Documentation:** 1 (100%)
+- **Total Features:** 2
+- **Complete Documentation:** 2 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 104
+- **Total Lines:** 137
+- **Warnings:** 6
 
 ---
 
-## Tooling (1 features)
+## Tooling (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [LLM Fine-Tune Retry7 Acceptance Gate Specification](test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.md) | Implemented | 2/5 | 6 | 60% | 104 lines |
+| [MCP Analysis Tools (Tier 3) Specification](test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.md) | Implemented | 2/5 | 34 | 60% | 118 lines |
+| [Mcp Analysis Tools Specification](test/unit/app/mcp_unit/mcp_analysis_tools_spec.md) | Implemented | 2/5 | 24 | 20% | 19 lines |
 

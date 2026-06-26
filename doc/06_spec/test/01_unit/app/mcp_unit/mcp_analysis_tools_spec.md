@@ -378,7 +378,7 @@ expect(source).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
 val table = rt_file_read_text("src/app/mcp/tool_table.spl") ?? ""
 expect(table).to_contain("prop_str(\"format\", \"Output format: text, markdown, json\")")
 expect(table).to_contain("prop_str(\"index\", \"Emit a local context-pack index (true/false)\")")
-expect(table).to_contain("prop_str(\"file\", \"Source file path; optional for --sql query with db\")")
+expect(table).to_contain("prop_str(\"file\", \"Source file path; required except when sql=true and query is non-empty\")")
 expect(table).to_contain("prop_str(\"query\", \"Query local or SQL context-pack index\")")
 expect(table).to_contain("prop_str(\"sql\", \"Use Simple embedded SQLite for index/query (true/false)\")")
 expect(table).to_contain("e.required_json = build_required([])")

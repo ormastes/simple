@@ -82,8 +82,8 @@ Evidence:
   analysis specs.
 - `simple check` passed for `src/app/ponytail/audit.spl` and both mirrored
   ponytail audit specs.
-- `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 32/32.
-- `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 22/22.
+- `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 34/34.
+- `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 24/24.
 - `test/01_unit/app/tooling/context_generate_spec.spl` and
   `test/unit/app/tooling/context_generate_spec.spl` both pass 13/13 cleanly
   after narrowing fixture imports away from broad `app.io.mod`, adding local
@@ -160,8 +160,8 @@ Evidence:
 - `simple check` passed for changed ponytail and MCP source/spec files.
 - `test/01_unit/app/tooling/ponytail_audit_spec.spl` passed with 6/6.
 - `test/unit/app/tooling/ponytail_audit_spec.spl` passed with 6/6.
-- `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 32/32.
-- `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 22/22.
+- `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 34/34.
+- `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 24/24.
 
 ## Lane 5: Local Pack Index/Query
 
@@ -384,3 +384,7 @@ Tasks:
    importing the context implementation into source-mode MCP. Status: done.
 3. Advertise `mode` on app MCP `simple_ponytail`. Status: done.
 4. Add focused mirrored unit coverage. Status: done.
+5. Keep app MCP `simple_context` schema wording aligned with the source-less SQL
+   contract. Status: done on 2026-06-26; both mirrored MCP analysis specs now
+   assert `file` is "required except when sql=true and query is non-empty",
+   matching the handler, tool table, lower MCP schema, system spec, and guide.
