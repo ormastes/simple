@@ -208,8 +208,8 @@ class JitInstantiator:
     me set_cache_for_test(name: text, code: [u8], addr: i64):
         var owner = "__jit__"
         val rec = self.exec_mapper.lookup(name)
-        if rec.?:
-            owner = rec.unwrap().owner_id
+        if val mapped_record = rec:
+            owner = mapped_record.owner_id
         self.jit_cache[name] = {"code": code, "address": addr, "owner": owner}
 
     me set_smf_semantic_keys(path: text, keys: [text]):
@@ -264,7 +264,9 @@ class JitInstantiator:
         if not found.?:
             return JitInstantiationResult.NotFound(symbol: name)
 
-        val (path, entry) = found.unwrap()
+        val (path, entry) = match found:
+            case Some(found_entry): found_entry
+            case nil: return JitInstantiationResult.NotFound(symbol: name)
 
         self.depth = self.depth + 1
         self.in_progress = self.in_progress.insert(name)
@@ -288,10 +290,12 @@ class JitInstantiator:
 
         if self.config.update_smf:
             val update_result = self.update_smf_note_sdn(path, entry)
-            if update_result.is_err():
-                self.in_progress = self.in_progress.remove(name)
-                self.depth = self.depth - 1
-                return JitInstantiationResult.UpdateFailed(symbol: name, error: update_result.unwrap_err())
+            match update_result:
+                case Ok(_): ()
+                case Err(update_error):
+                    self.in_progress = self.in_progress.remove(name)
+                    self.depth = self.depth - 1
+                    return JitInstantiationResult.UpdateFailed(symbol: name, error: update_error)
 
         self.in_progress = self.in_progress.remove(name)
         self.depth = self.depth - 1
@@ -352,10 +356,12 @@ class JitSymbolResolver:
         val result = self.jit.try_jit_instantiate(symbol)
         match result:
             case Success(_, resolved_symbol, address):
-                if address.?:
-                    self.symbols[resolved_symbol] = address.unwrap()
-                    return address
-                nil
+                match address:
+                    case Some(resolved_address):
+                        self.symbols[resolved_symbol] = resolved_address
+                        return address
+                    case nil:
+                        nil
             case _:
                 nil
 
