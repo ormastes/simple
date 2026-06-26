@@ -1336,6 +1336,35 @@ function fineTuneDataGateStatus(root, attemptId) {
   };
 }
 
+function parseMetricMap(value) {
+  const metrics = new Map();
+  for (const part of (value || "").split(/[,\s]+/)) {
+    const match = part.match(/^([A-Za-z0-9_.-]+)\s*=\s*(-?\d+(?:\.\d+)?)$/);
+    if (match) metrics.set(match[1], Number(match[2]));
+  }
+  return metrics;
+}
+
+function parseTarget(value) {
+  const match = (value || "").match(/^([A-Za-z0-9_.-]+)\s*>=\s*(-?\d+(?:\.\d+)?)$/);
+  return match ? { metric: match[1], threshold: Number(match[2]) } : null;
+}
+
+function fineTuneEvalTargetStatus(root, attemptId, attemptContent) {
+  const metricsText = registryValueForAttempt(root, "eval_results.sdn", attemptId, "metrics") || readQuotedValue(attemptContent, "metrics");
+  const targetText = registryValueForAttempt(root, "eval_results.sdn", attemptId, "target") || readQuotedValue(attemptContent, "target");
+  const result = registryValueForAttempt(root, "eval_results.sdn", attemptId, "result") || readQuotedValue(attemptContent, "result");
+  const target = parseTarget(targetText);
+  const metrics = parseMetricMap(metricsText);
+  const metricValue = target ? metrics.get(target.metric) : undefined;
+  return Boolean(
+    result === "pass"
+    && target
+    && metricValue !== undefined
+    && metricValue >= target.threshold
+  );
+}
+
 function commandFineTuneReady(args) {
   const [attemptId] = args;
   if (!attemptId) {
@@ -1361,6 +1390,7 @@ function commandFineTuneReady(args) {
   const modelArtifact = registryValueForAttempt(root, "training_scripts.sdn", attemptId, "model_artifact") || readQuotedValue(attemptContent, "model_artifact");
   const status = registryValueForAttempt(root, "decisions.sdn", attemptId, "status") || readQuotedValue(attemptContent, "status");
   const artifactReady = modelArtifactReady(modelArtifact);
+  const evalTargetReached = fineTuneEvalTargetStatus(root, attemptId, attemptContent);
 
   const checks = [
     ["feature_option_selected", featureOption && featureOption !== "pending-user-selection"],
@@ -1368,6 +1398,7 @@ function commandFineTuneReady(args) {
     ["base_model_selected", baseModel && baseModel !== "not-selected"],
     ["tuning_method_real", method && method !== "dry-run-record-only"],
     ["model_artifact_created", artifactReady],
+    ["target_eval_reached", evalTargetReached],
     ["decision_accepted", status === "accepted"]
   ];
 
@@ -1389,11 +1420,13 @@ function readinessChecks(root, attemptId) {
   const method = registryValueForAttempt(root, "tuning_methods.sdn", attemptId, "method") || readQuotedValue(attemptContent, "method");
   const modelArtifact = registryValueForAttempt(root, "training_scripts.sdn", attemptId, "model_artifact") || readQuotedValue(attemptContent, "model_artifact");
   const status = registryValueForAttempt(root, "decisions.sdn", attemptId, "status") || readQuotedValue(attemptContent, "status");
+  const evalTargetReached = fineTuneEvalTargetStatus(root, attemptId, attemptContent);
   return [
     ["requirements-selection", featureOption && featureOption !== "pending-user-selection" && nfrOption && nfrOption !== "pending-user-selection"],
     ["base-model-selection", baseModel && baseModel !== "not-selected"],
     ["tuning-method-selection", method && method !== "dry-run-record-only"],
     ["model-artifact", modelArtifactReady(modelArtifact)],
+    ["target-eval", evalTargetReached],
     ["acceptance-decision", status === "accepted"]
   ];
 }

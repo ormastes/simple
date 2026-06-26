@@ -64,10 +64,10 @@ or accepted decision exists yet.
 The linked retry attempt `llm_backed_app_server_dry_run_retry5` records the
 current licensed data acquisition and cache/checksum gate. The generic
 `fine-tune-ready` command currently fails this attempt on its own readiness
-surface: `model_artifact_created=pending` and `decision_accepted=pending`.
-License approval, cache path, checksum, target eval, and app handoff are not
-`fine-tune-ready` fields; the retry5 wrappers below check those separately
-before any accepted decision or deployment claim.
+surface: `model_artifact_created=pending`, `target_eval_reached=pending`, and
+`decision_accepted=pending`. License approval, cache path, checksum, and app
+handoff are checked by the retry5 wrappers below before any accepted decision or
+deployment claim.
 
 Retry5 has two local evidence wrappers for normal-review handoff:
 
