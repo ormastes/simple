@@ -719,7 +719,7 @@ manifest traceability details from
 the manifest and fixture paths, HTML tag covered/total counts, implemented CSS
 property covered/total counts, missing tag/property lists, fixture scene count,
 and manifest scenes missing fixture HTML. A restart audit should therefore show
-the 105/105 HTML tag coverage and 117/117 implemented CSS property coverage in
+the 105/105 HTML tag coverage and 122/122 implemented CSS property coverage in
 the same evidence env as the Simple, original Chrome, Electron, and production
 parity gates. GUI widget witness provenance is inspectable as widget/class
 pairs through `gui_widget_rendering_fixture_coverage_spec_widget_classes`,

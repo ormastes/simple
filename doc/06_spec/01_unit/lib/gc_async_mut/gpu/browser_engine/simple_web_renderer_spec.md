@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 60 | 60 | 0 | 0 |
+| 61 | 61 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -254,6 +254,29 @@ expect(card.content_rect.height).to_equal(18)
 expect(_draw_ir_style_value(card, "tag")).to_equal("section")
 expect(_draw_ir_style_value(card, "display")).to_equal("block")
 expect(_draw_ir_style_value(card, "padding-left")).to_equal("2")
+```
+
+</details>
+
+#### emits GUI interaction and word wrapping CSS in Draw IR computed style
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>#panel { width:48px; height:20px; cursor:pointer; resize:both; overflow-wrap:anywhere; word-break:break-all; word-wrap:break-word; }</style></head><body><section id='panel'>WRAP</section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 96, 64)
+val batch = composition.batches[0]
+val panel = _draw_ir_command_by_id(batch.commands, "panel")
+
+expect(_draw_ir_style_value(panel, "cursor")).to_equal("pointer")
+expect(_draw_ir_style_value(panel, "resize")).to_equal("both")
+expect(_draw_ir_style_value(panel, "overflow-wrap")).to_equal("break-word")
+expect(_draw_ir_style_value(panel, "word-wrap")).to_equal("break-word")
+expect(_draw_ir_style_value(panel, "word-break")).to_equal("break-all")
 ```
 
 </details>
@@ -1314,8 +1337,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 60 |
-| Active scenarios | 60 |
+| Total scenarios | 61 |
+| Active scenarios | 61 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
