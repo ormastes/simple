@@ -298,6 +298,13 @@ Generate a consolidated handoff report:
 node examples/05_stdlib/spipe/cli/spipe.js fine-tune-report <attempt_id>
 ```
 
+When the attempt records a safe repo-local checker, the report includes a
+`Data Check Execution` section after the registry blocks. That section runs the
+checker and prints `data_check_execution`, `data_check_status`, and stable gate
+fields such as `result`, `target_accuracy`, `required_accuracy`,
+`target_eval_reached`, and `acceptance_allowed`, matching the status/doctor
+surfaces used for normal review.
+
 Record LLM-backed app/server handoff and retune routing:
 
 ```sh
