@@ -56,8 +56,8 @@ expect(result.reason).to_equal("serve_and_models_probe_planned")
 expect(result.models_status).to_equal("not_fetched")
 expect(result.requires_runtime_executor).to_equal(false)
 expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":false")
-expect(result.evidence_jsonl.contains("base-model")).to_equal(false)
-expect(result.evidence_jsonl.contains("nil")).to_equal(false)
+expect(result.evidence_jsonl.split("base-model").len()).to_equal(1)
+expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
 ```
 
 </details>
@@ -178,7 +178,7 @@ val result = llm_runtime_execute_dashboard_control(manifest, "restart", 12345, t
 expect(result.status).to_equal("rejected")
 expect(result.reason).to_equal("unknown_action")
 expect(result.requires_runtime_executor).to_equal(false)
-expect(result.evidence_jsonl.contains("nil")).to_equal(false)
+expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
 ```
 
 </details>
@@ -241,7 +241,7 @@ expect(boundary.reason).to_equal("live_executor_required")
 expect(boundary.live_executor_status).to_equal("runtime_owner_required")
 expect(boundary.process_access).to_equal("runtime_owner_only")
 expect(boundary.http_access).to_equal("runtime_owner_only")
-expect(boundary.evidence_jsonl.contains("nil")).to_equal(false)
+expect(boundary.evidence_jsonl.split("nil").len()).to_equal(1)
 ```
 
 </details>
