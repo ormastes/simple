@@ -287,13 +287,16 @@ Runtime-adjacent decision record:
 
 The dashboard now renders a vLLM control panel with `preflight`, `start`,
 `poll`, `probe`, and `stop` intents and exposes `/api/vllm/control` for
-authenticated JSONL action evidence. This panel validates manifest, action, and
-pid inputs and keeps missing state rendered as `none`.
+authenticated JSONL action evidence. This panel delegates manifest, action, and
+pid decisioning to `app.llm_runtime.dashboard_live_control` and keeps missing
+state rendered as `none`.
 
 This is intentionally not the live execution owner. The dashboard module uses
-pure serve/request planning and does not import live HTTP/process backends during
-ordinary page rendering. Actual process spawn, polling, stop, and endpoint fetch
-remain in `src/app/llm_runtime/serve_lifecycle.spl`,
+the runtime-owned pure control decision boundary and does not import live
+HTTP/process backends during ordinary page rendering. Actual process spawn,
+polling, stop, and endpoint fetch remain in
+`src/app/llm_runtime/dashboard_live_control_executor.spl`,
+`src/app/llm_runtime/serve_lifecycle.spl`,
 `src/app/llm_runtime/live_transport.spl`, and
 `src/app/llm_runtime/serve_readiness.spl`.
 
@@ -301,10 +304,11 @@ Runtime-adjacent decision record:
 
 - `runtime_need`: expose operator controls without forcing dashboard import of
   process or HTTP runtime backends.
-- `facade_checked`: `serve_plan`, `live_request_plan`, and existing
-  `serve_lifecycle`/`serve_readiness` execution facades.
-- `chosen_path`: `reuse-facade` for pure planning in the dashboard; defer live
-  execution to the runtime owner boundary.
+- `facade_checked`: `dashboard_live_control`, `serve_plan`,
+  `live_request_plan`, and existing `serve_lifecycle`/`serve_readiness`
+  execution facades.
+- `chosen_path`: `reuse-facade` for pure runtime control decisions in the
+  dashboard; defer live execution to the runtime owner boundary.
 - `rejected_shortcuts`: raw `rt_process_*`/HTTP imports in the dashboard,
   shelling out from dashboard routes, and treating rendered buttons as proof of
   live vLLM availability.

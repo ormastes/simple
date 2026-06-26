@@ -280,8 +280,9 @@ Tasks:
 6. Add dashboard operator controls for vLLM lifecycle intent. Status: done for
    dashboard action-intent readback. The web dashboard now renders
    `preflight`, `start`, `poll`, `probe`, and `stop` controls and exposes
-   `/api/vllm/control` JSONL evidence for those intents. Live process execution
-   still remains in the existing `app.llm_runtime` lifecycle/readiness facades
+   `/api/vllm/control` JSONL evidence for those intents. The dashboard collector
+   now derives those decisions from `app.llm_runtime.dashboard_live_control`;
+   live process execution remains in runtime-owned lifecycle/readiness facades
    rather than being imported directly by dashboard rendering.
 7. Add owner-side dashboard control execution under `app.llm_runtime`. Status:
    done for runtime-owned control decisions and live wrapper. The pure

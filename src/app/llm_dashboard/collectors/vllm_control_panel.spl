@@ -1,6 +1,5 @@
-use app.llm_runtime.manifest.{LlmRuntimeManifest, llm_runtime_manifest_from_text}
-use app.llm_runtime.serve_plan.{llm_runtime_static_serve_plan}
-use app.llm_runtime.live_request_plan.{llm_runtime_vllm_models_request_plan}
+use app.llm_runtime.manifest.{llm_runtime_manifest_from_text}
+use app.llm_runtime.dashboard_live_control.{LlmRuntimeDashboardControlExecution, llm_runtime_execute_dashboard_control}
 use app.mcp.main_lazy_json.{LB, RB, jp, js}
 
 pub class LlmDashboardVllmControlPanel:
@@ -17,41 +16,14 @@ pub class LlmDashboardVllmControlPanel:
     evidence_jsonl: text
 
 pub fn collect_llm_dashboard_vllm_control_preflight(manifest_text: text) -> LlmDashboardVllmControlPanel:
-    val manifest = llm_runtime_manifest_from_text(manifest_text)
-    val serve_plan = llm_runtime_static_serve_plan(manifest)
-    if serve_plan.status != "planned":
-        return _panel("preflight", "not_started", serve_plan.reason, -1, "not_started", "not_checked", "not_fetched", "serve_not_planned", 0)
-    val models_plan = llm_runtime_vllm_models_request_plan(manifest)
-    if models_plan.status != "planned":
-        return _panel("preflight", "not_ready", models_plan.reason, -1, "not_started", models_plan.endpoint_status, "not_fetched", "models_probe_not_planned", 0)
-    _panel("preflight", "planned", "serve_and_models_probe_planned", -1, "not_started", models_plan.endpoint_status, "not_fetched", "probe_not_run", 0)
+    collect_llm_dashboard_vllm_control_action(manifest_text, "preflight", -1)
 
 pub fn collect_llm_dashboard_vllm_control_action(manifest_text: text, action: text, pid: i64) -> LlmDashboardVllmControlPanel:
     val manifest = llm_runtime_manifest_from_text(manifest_text)
     val selected = action.trim()
     if selected == "" or selected == "preflight":
-        return collect_llm_dashboard_vllm_control_preflight(manifest_text)
-    if selected == "start":
-        val serve_plan = llm_runtime_static_serve_plan(manifest)
-        if serve_plan.status != "planned":
-            return _panel("start", "not_started", serve_plan.reason, -1, "not_started", "not_checked", "not_fetched", "serve_not_planned", 0)
-        return _panel("start", "planned", "start_request_ready", -1, "not_started", "not_checked", "not_fetched", "start_not_executed_by_panel", 0)
-    if selected == "poll":
-        if pid <= 0:
-            return _panel("poll", "rejected", "invalid_pid", pid, "not_running", "not_checked", "not_fetched", "poll_not_executed", 0)
-        return _panel("poll", "planned", "poll_request_ready", pid, "unknown_until_polled", "not_checked", "not_fetched", "poll_not_executed_by_panel", 0)
-    if selected == "probe":
-        val models_plan = llm_runtime_vllm_models_request_plan(manifest)
-        if models_plan.status != "planned":
-            return _panel("probe", "not_ready", models_plan.reason, pid, "unknown_until_polled", models_plan.endpoint_status, "not_fetched", "models_probe_not_planned", 0)
-        if pid <= 0:
-            return _panel("probe", "rejected", "invalid_pid", pid, "not_running", models_plan.endpoint_status, "not_fetched", "probe_not_executed", 0)
-        return _panel("probe", "planned", "models_probe_request_ready", pid, "unknown_until_polled", models_plan.endpoint_status, "not_fetched", "probe_not_executed_by_panel", 0)
-    if selected == "stop":
-        if pid <= 0:
-            return _panel("stop", "not_stopped", "invalid_pid", pid, "not_running", "not_checked", "not_fetched", "stop_not_executed", 0)
-        return _panel("stop", "planned", "stop_request_ready", pid, "unknown_until_polled", "not_checked", "not_fetched", "stop_not_executed_by_panel", 0)
-    _panel(selected, "rejected", "unsupported_action", pid, "not_checked", "not_checked", "not_fetched", "unsupported_action", 0)
+        return _panel_from_runtime(llm_runtime_execute_dashboard_control(manifest, "preflight", -1, true, true))
+    _panel_from_runtime(llm_runtime_execute_dashboard_control(manifest, selected, pid, true, true))
 
 pub fn render_llm_dashboard_vllm_control_panel_text(panel: LlmDashboardVllmControlPanel) -> text:
     "vLLM Controls action=" + _public_absence(panel.action) +
@@ -104,6 +76,9 @@ fn _panel(action: text, status: text, reason: text, pid: i64, running_status: te
     )
     panel.evidence_jsonl = llm_dashboard_vllm_control_panel_jsonl_event(panel)
     panel
+
+fn _panel_from_runtime(result: LlmRuntimeDashboardControlExecution) -> LlmDashboardVllmControlPanel:
+    _panel(result.action, result.status, result.reason, result.pid, result.running_status, result.endpoint_status, result.models_status, result.models_reason, result.http_status)
 
 fn _controls_for(status: text, pid: i64) -> [text]:
     var controls = ["preflight", "start"]

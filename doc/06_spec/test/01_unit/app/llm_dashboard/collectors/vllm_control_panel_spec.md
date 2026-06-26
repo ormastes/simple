@@ -27,7 +27,7 @@ vllm_control_panel_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,10 +74,30 @@ val panel = collect_llm_dashboard_vllm_control_action(fixture_vllm_manifest(), "
 val text = render_llm_dashboard_vllm_control_panel_text(panel)
 
 expect(panel.status).to_equal("rejected")
-expect(panel.reason).to_equal("unsupported_action")
+expect(panel.reason).to_equal("unknown_action")
 expect(panel.pid).to_equal(55)
 expect(text).to_contain("action=restart")
 expect(text.split("nil").len()).to_equal(1)
+```
+
+</details>
+
+#### routes side-effecting action intent through runtime control decisions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val panel = collect_llm_dashboard_vllm_control_action(fixture_vllm_manifest(), "start", -1)
+
+expect(panel.action).to_equal("start")
+expect(panel.status).to_equal("planned")
+expect(panel.reason).to_equal("live_executor_required")
+expect(panel.models_reason).to_equal("probe_not_run")
+expect(panel.evidence_jsonl.split("nil").len()).to_equal(1)
 ```
 
 </details>
@@ -182,8 +202,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
