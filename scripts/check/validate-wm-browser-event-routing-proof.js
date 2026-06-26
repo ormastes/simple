@@ -17,14 +17,30 @@ function decimalIntegerText(value) {
   return null;
 }
 
+function jsonIntegerText(value) {
+  if (typeof value === 'number' && Number.isInteger(value)) return String(value);
+  return null;
+}
+
 function decimalNumberText(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   if (typeof value === 'string' && /^-?(?:[0-9]+)(?:\.[0-9]+)?$/.test(value.trim())) return value.trim();
   return null;
 }
 
+function jsonNumberText(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return null;
+}
+
 function integerAtLeast(value, required) {
   const text = decimalIntegerText(value);
+  if (text === null) return false;
+  return BigInt(text) >= BigInt(required);
+}
+
+function jsonIntegerAtLeast(value, required) {
+  const text = jsonIntegerText(value);
   if (text === null) return false;
   return BigInt(text) >= BigInt(required);
 }
@@ -35,15 +51,15 @@ function decimalAtLeast(value, required) {
   return Number(text) >= required;
 }
 
-function decimalGreaterThan(value, required) {
-  const text = decimalNumberText(value);
+function jsonDecimalGreaterThan(value, required) {
+  const text = jsonNumberText(value);
   if (text === null) return false;
   return Number(text) > required;
 }
 
-function sameInteger(actual, expected) {
-  const a = decimalIntegerText(actual);
-  const e = decimalIntegerText(expected);
+function sameJsonInteger(actual, expected) {
+  const a = jsonIntegerText(actual);
+  const e = jsonIntegerText(expected);
   if (a === null || e === null) return false;
   return BigInt(a) === BigInt(e);
 }
@@ -55,6 +71,16 @@ function integerTextOrBlank(value) {
 
 function decimalTextOrClean(value) {
   const text = decimalNumberText(value);
+  return text === null ? clean(value) : text;
+}
+
+function jsonIntegerTextOrBlank(value) {
+  const text = jsonIntegerText(value);
+  return text === null ? '' : text;
+}
+
+function jsonDecimalTextOrClean(value) {
+  const text = jsonNumberText(value);
   return text === null ? clean(value) : text;
 }
 
@@ -107,24 +133,24 @@ const text = proof.text_payload || {};
 const rows = {
   ready: proof.ready,
   wm_found: proof.wm_found,
-  window_cmd_count: integerTextOrBlank(proof.window_cmd_count),
-  input_event_count: integerTextOrBlank(proof.input_event_count),
-  focus_count: integerTextOrBlank(proof.focus_count),
-  move_count: integerTextOrBlank(proof.move_count),
-  maximize_count: integerTextOrBlank(proof.maximize_count),
-  title_command_count: integerTextOrBlank(proof.title_command_count),
-  text_input_count: integerTextOrBlank(proof.text_input_count),
-  pointer_down_count: integerTextOrBlank(proof.pointer_down_count),
-  pointer_up_count: integerTextOrBlank(proof.pointer_up_count),
+  window_cmd_count: jsonIntegerTextOrBlank(proof.window_cmd_count),
+  input_event_count: jsonIntegerTextOrBlank(proof.input_event_count),
+  focus_count: jsonIntegerTextOrBlank(proof.focus_count),
+  move_count: jsonIntegerTextOrBlank(proof.move_count),
+  maximize_count: jsonIntegerTextOrBlank(proof.maximize_count),
+  title_command_count: jsonIntegerTextOrBlank(proof.title_command_count),
+  text_input_count: jsonIntegerTextOrBlank(proof.text_input_count),
+  pointer_down_count: jsonIntegerTextOrBlank(proof.pointer_down_count),
+  pointer_up_count: jsonIntegerTextOrBlank(proof.pointer_up_count),
   event_sequence: eventSequenceText(proof.event_sequence),
   performance_now_available: proof.performance_now_available,
-  performance_now_delta_ms: decimalTextOrClean(proof.performance_now_delta_ms),
+  performance_now_delta_ms: jsonDecimalTextOrClean(proof.performance_now_delta_ms),
   animation_frame_available: proof.animation_frame_available,
-  animation_frame_count: integerTextOrBlank(proof.animation_frame_count),
+  animation_frame_count: jsonIntegerTextOrBlank(proof.animation_frame_count),
   css_animation_probe: proof.css_animation_probe,
   title_text: proof.title_text,
   title_context_text: proof.title_context_text,
-  traffic_button_count: integerTextOrBlank(proof.traffic_button_count),
+  traffic_button_count: jsonIntegerTextOrBlank(proof.traffic_button_count),
   title_input_tag: proof.title_input_tag,
   titlebar_height: proof.titlebar_height,
   titlebar_display: proof.titlebar_display,
@@ -141,10 +167,10 @@ const rows = {
   close_button_background: proof.close_button_background,
   minimize_button_background: proof.minimize_button_background,
   maximize_button_background: proof.maximize_button_background,
-  expected_move_x: integerTextOrBlank(proof.expected_move_x),
-  expected_move_y: integerTextOrBlank(proof.expected_move_y),
-  move_payload_x: integerTextOrBlank(move.x),
-  move_payload_y: integerTextOrBlank(move.y),
+  expected_move_x: jsonIntegerTextOrBlank(proof.expected_move_x),
+  expected_move_y: jsonIntegerTextOrBlank(proof.expected_move_y),
+  move_payload_x: jsonIntegerTextOrBlank(move.x),
+  move_payload_y: jsonIntegerTextOrBlank(move.y),
   move_payload_source: move.source,
   move_payload_window_id_hint: move.window_id_hint,
   title_command_text: title.command_text,
@@ -157,30 +183,30 @@ if (!boolTrue(proof.pass)) {
 } else if (!boolTrue(proof.ready) || !boolTrue(proof.wm_found)) {
   reason = 'event-routing-ready-missing';
 } else if (
-  !integerAtLeast(proof.focus_count, 1) ||
-  !integerAtLeast(proof.move_count, 1) ||
-  !integerAtLeast(proof.maximize_count, 1) ||
-  !integerAtLeast(proof.title_command_count, 1) ||
-  !integerAtLeast(proof.text_input_count, 1) ||
-  !integerAtLeast(proof.pointer_down_count, 1) ||
-  !integerAtLeast(proof.pointer_up_count, 1)
+  !jsonIntegerAtLeast(proof.focus_count, 1) ||
+  !jsonIntegerAtLeast(proof.move_count, 1) ||
+  !jsonIntegerAtLeast(proof.maximize_count, 1) ||
+  !jsonIntegerAtLeast(proof.title_command_count, 1) ||
+  !jsonIntegerAtLeast(proof.text_input_count, 1) ||
+  !jsonIntegerAtLeast(proof.pointer_down_count, 1) ||
+  !jsonIntegerAtLeast(proof.pointer_up_count, 1)
 ) {
   reason = 'event-routing-contract-missing';
 } else if (!sameEventSequence(proof.event_sequence)) {
   reason = 'event-routing-sequence-contract-missing';
 } else if (
   !boolTrue(proof.performance_now_available) ||
-  !decimalGreaterThan(proof.performance_now_delta_ms, 0) ||
+  !jsonDecimalGreaterThan(proof.performance_now_delta_ms, 0) ||
   !boolTrue(proof.animation_frame_available) ||
-  !integerAtLeast(proof.animation_frame_count, 2) ||
+  !jsonIntegerAtLeast(proof.animation_frame_count, 2) ||
   !boolTrue(proof.css_animation_probe)
 ) {
   reason = 'event-routing-performance-animation-contract-missing';
 } else if (
   move.window_id_hint !== 'win1' ||
   move.source !== 'native_event' ||
-  !sameInteger(move.x, proof.expected_move_x) ||
-  !sameInteger(move.y, proof.expected_move_y) ||
+  !sameJsonInteger(move.x, proof.expected_move_x) ||
+  !sameJsonInteger(move.y, proof.expected_move_y) ||
   title.command_text !== '/tmp/project' ||
   !text.event ||
   text.event.text !== 'Hello Simple'
@@ -189,7 +215,7 @@ if (!boolTrue(proof.pass)) {
 } else if (
   proof.title_text !== 'Terminal' ||
   proof.title_context_text !== 'terminal' ||
-  !integerAtLeast(proof.traffic_button_count, 3) ||
+  !jsonIntegerAtLeast(proof.traffic_button_count, 3) ||
   proof.title_input_tag !== 'input' ||
   proof.titlebar_height !== '34px' ||
   proof.titlebar_display !== 'flex' ||

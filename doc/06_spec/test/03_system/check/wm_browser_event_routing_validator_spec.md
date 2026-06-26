@@ -27,7 +27,7 @@ wm_browser_event_routing_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -81,9 +81,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
   `0` does not prove distinct timing samples.
 - Boolean readiness, timing, animation, and CSS probe fields must be real JSON
   booleans; string values like `"true"` are not structured event proof.
-- Event counts, animation frame counts, traffic button counts, and dispatched
-  move coordinates must be decimal integers; fractional values are not valid
-  DOM event-routing proof.
+- Event counts, animation frame counts, traffic button counts, timing deltas,
+  and dispatched move coordinates must be real JSON numbers; stringified or
+  fractional values are not valid DOM event-routing proof.
 - The live shell evidence wrapper consumes the standalone validator instead of
   trusting only the probe's top-level `pass` flag.
 
@@ -283,6 +283,71 @@ expect(perf).to_contain("wm_browser_event_routing_css_animation_probe=true")
 
 </details>
 
+#### rejects stringified numeric event timing animation UI and payload proof
+
+-  fixture command
+-  fixture command
+-  fixture command
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm stringified numeric evidence is not accepted as live browser proof
+   - Expected: count does not contain `wm_browser_event_routing_focus_count=1`
+   - Expected: frame does not contain `wm_browser_event_routing_animation_frame_count=2`
+   - Expected: ui does not contain `wm_browser_event_routing_traffic_button_count=3`
+   - Expected: payload does not contain `wm_browser_event_routing_move_payload_x=86`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 39 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-string-numbers && mkdir -p build/test-wm-browser-event-validator-string-numbers && " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/count.json", "p.focus_count=\"1\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/count.json > build/test-wm-browser-event-validator-string-numbers/count.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/perf.json", "p.performance_now_delta_ms=\"16.7\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/perf.json > build/test-wm-browser-event-validator-string-numbers/perf.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/frame.json", "p.animation_frame_count=\"2\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/frame.json > build/test-wm-browser-event-validator-string-numbers/frame.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/ui.json", "p.traffic_button_count=\"3\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/ui.json > build/test-wm-browser-event-validator-string-numbers/ui.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/payload.json", "p.move_payload.x=\"86\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/payload.json > build/test-wm-browser-event-validator-string-numbers/payload.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val count = file_read("build/test-wm-browser-event-validator-string-numbers/count.env")
+val perf = file_read("build/test-wm-browser-event-validator-string-numbers/perf.env")
+val frame = file_read("build/test-wm-browser-event-validator-string-numbers/frame.env")
+val ui = file_read("build/test-wm-browser-event-validator-string-numbers/ui.env")
+val payload = file_read("build/test-wm-browser-event-validator-string-numbers/payload.env")
+step("Confirm stringified numeric evidence is not accepted as live browser proof")
+expect(count).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(count).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+expect(count).to_contain("wm_browser_event_routing_focus_count=")
+expect(count.contains("wm_browser_event_routing_focus_count=1")).to_equal(false)
+expect(perf).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(perf).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+expect(perf).to_contain("wm_browser_event_routing_performance_now_delta_ms=16.7")
+expect(frame).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(frame).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+expect(frame).to_contain("wm_browser_event_routing_animation_frame_count=")
+expect(frame.contains("wm_browser_event_routing_animation_frame_count=2")).to_equal(false)
+expect(ui).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(ui).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
+expect(ui).to_contain("wm_browser_event_routing_traffic_button_count=")
+expect(ui.contains("wm_browser_event_routing_traffic_button_count=3")).to_equal(false)
+expect(payload).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(payload).to_contain("wm_browser_event_routing_validation_reason=event-routing-payload-contract-missing")
+expect(payload).to_contain("wm_browser_event_routing_move_payload_x=")
+expect(payload.contains("wm_browser_event_routing_move_payload_x=86")).to_equal(false)
+```
+
+</details>
+
 #### rejects pass true proof when payload details do not match dispatched DOM events
 
 -  fixture command
@@ -400,8 +465,8 @@ expect(script).to_contain("wm_browser_event_routing_event_sequence")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
