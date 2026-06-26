@@ -27,7 +27,7 @@ gui_retained_perf_source_freshness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -127,6 +127,11 @@ positive numeric `frame_avg_ns`, `frame_p50_ns`, `frame_p95_ns`, and checksum
 values; zero timing or nonnumeric checksum values are diagnostics, not 4K/8K
 completion evidence.
 
+Retained perf reports that include an aggregate rerun command must pass both
+produced env files into `check-gui-renderdoc-feature-coverage-status.shs`;
+otherwise the aggregate reports missing 4K/8K evidence even after the producer
+commands pass.
+
 ## Syntax
 
 ```sh
@@ -136,6 +141,31 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/gui_retained_perf_source_fre
 ## Scenarios
 
 ### GUI retained performance source freshness
+
+#### documents aggregate consumption of produced retained perf env files
+
+- Read the retained performance evidence report
+- Assert the aggregate command consumes the produced 4K and 8K env rows
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read the retained performance evidence report")
+val report = file_read("doc/09_report/perf/gui_showcase_retained_perf_2026-06-26.md")
+
+step("Assert the aggregate command consumes the produced 4K and 8K env rows")
+expect(report).to_contain("GUI_SHOWCASE_REQUIRE_CURRENT_SOURCE_REVISION=1")
+expect(report).to_contain("GUI_SHOWCASE_4K_PERF_ENV=build/widget-showcase-4k-200fps/status.env")
+expect(report).to_contain("GUI_SHOWCASE_8K_PERF_ENV=build/widget-showcase-8k-perf/status.env")
+expect(report).to_contain("sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
+```
+
+</details>
 
 #### rejects retained perf rows that point at missing native artifacts
 
@@ -327,8 +357,8 @@ expect(report).to_contain("GUI/web/2D 8K retained perf: fail (invalid-8k-readbac
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

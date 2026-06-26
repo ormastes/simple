@@ -20,6 +20,8 @@ SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple \
   sh scripts/check/check-widget-showcase-4k-200fps.shs
 
 GUI_SHOWCASE_REQUIRE_CURRENT_SOURCE_REVISION=1 \
+GUI_SHOWCASE_4K_PERF_ENV=build/widget-showcase-4k-200fps/status.env \
+GUI_SHOWCASE_8K_PERF_ENV=build/widget-showcase-8k-perf/status.env \
 GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/gui-renderdoc-feature-coverage-static-cache \
 BUILD_DIR=build/gui-renderdoc-feature-coverage-status \
 REPORT_PATH=build/gui-renderdoc-feature-coverage-status/report.md \
