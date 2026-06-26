@@ -98,6 +98,7 @@ const expectedEventSequence = [
   'input_event:pointer_down',
   'input_event:pointer_up',
 ];
+const expectedProofSource = 'tools/web-render-backend/wm_event_check.js';
 
 function eventSequenceText(value) {
   if (!Array.isArray(value)) return '';
@@ -131,6 +132,7 @@ const title = proof.title_payload || {};
 const text = proof.text_payload || {};
 
 const rows = {
+  proof_source: proof.proof_source,
   ready: proof.ready,
   wm_found: proof.wm_found,
   window_cmd_count: jsonIntegerTextOrBlank(proof.window_cmd_count),
@@ -180,6 +182,8 @@ const rows = {
 let reason = 'pass';
 if (!boolTrue(proof.pass)) {
   reason = 'probe-reported-fail';
+} else if (proof.proof_source !== expectedProofSource) {
+  reason = 'event-routing-proof-source-missing';
 } else if (!boolTrue(proof.ready) || !boolTrue(proof.wm_found)) {
   reason = 'event-routing-ready-missing';
 } else if (

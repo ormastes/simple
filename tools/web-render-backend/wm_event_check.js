@@ -93,7 +93,10 @@ async function main() {
   })`);
 
   const result = await win.webContents.executeJavaScript(`(async function(){
-    const out = { ready: !!window.__wmReady };
+    const out = {
+      proof_source: 'tools/web-render-backend/wm_event_check.js',
+      ready: !!window.__wmReady
+    };
     const wm = window.simpleWM;
     out.wm_found = !!wm;
     if (!wm) return out;

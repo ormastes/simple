@@ -27,7 +27,7 @@ wm_browser_event_routing_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -84,6 +84,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 - Event counts, animation frame counts, traffic button counts, timing deltas,
   and dispatched move coordinates must be real JSON numbers; stringified or
   fractional values are not valid DOM event-routing proof.
+- The proof must carry the live WM browser event-check source marker; a
+  hand-authored JSON object with matching counters is not sufficient.
 - The live shell evidence wrapper consumes the standalone validator instead of
   trusting only the probe's top-level `pass` flag.
 
@@ -100,7 +102,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -113,6 +115,7 @@ expect(code).to_equal(0)
 val evidence = file_read("build/test-wm-browser-event-validator-pass/evidence.env")
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=pass")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=pass")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source=tools/web-render-backend/wm_event_check.js")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_available=true")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=16.7")
 expect(evidence).to_contain("wm_browser_event_routing_animation_frame_available=true")
@@ -149,6 +152,42 @@ val evidence = file_read("build/test-wm-browser-event-validator-counts/evidence.
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
 expect(evidence).to_contain("wm_browser_event_routing_focus_count=0")
+```
+
+</details>
+
+#### rejects pass true proof without the live event-check source marker
+
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm WM event proof must identify the live Chromium producer
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-source && mkdir -p build/test-wm-browser-event-validator-source && " +
+    _fixture_command("build/test-wm-browser-event-validator-source/missing.json", "delete p.proof_source") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-source/missing.json > build/test-wm-browser-event-validator-source/missing.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-source/wrong.json", "p.proof_source=\"tools/manual/event.json\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-source/wrong.json > build/test-wm-browser-event-validator-source/wrong.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing = file_read("build/test-wm-browser-event-validator-source/missing.env")
+val wrong = file_read("build/test-wm-browser-event-validator-source/wrong.env")
+step("Confirm WM event proof must identify the live Chromium producer")
+expect(missing).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(missing).to_contain("wm_browser_event_routing_validation_reason=event-routing-proof-source-missing")
+expect(missing).to_contain("wm_browser_event_routing_proof_source=")
+expect(wrong).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(wrong).to_contain("wm_browser_event_routing_validation_reason=event-routing-proof-source-missing")
+expect(wrong).to_contain("wm_browser_event_routing_proof_source=tools/manual/event.json")
 ```
 
 </details>
@@ -447,7 +486,7 @@ expect(payload.contains("wm_browser_event_routing_move_payload_x=86.5")).to_equa
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -456,6 +495,7 @@ expect(script).to_contain("validate-wm-browser-event-routing-proof.js")
 expect(script).to_contain("validator_code")
 expect(script).to_contain("wm_browser_event_routing_validation_status")
 expect(script).to_contain("wm_browser_event_routing_validation_reason")
+expect(script).to_contain("wm_browser_event_routing_proof_source")
 expect(script).to_contain("wm_browser_event_routing_event_sequence")
 ```
 
@@ -465,8 +505,8 @@ expect(script).to_contain("wm_browser_event_routing_event_sequence")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

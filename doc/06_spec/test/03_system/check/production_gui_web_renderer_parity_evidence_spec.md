@@ -173,7 +173,7 @@ the produced `evidence.env` to validate the final release-blocking contract.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -193,6 +193,7 @@ expect(script).to_contain("production_gui_web_renderer_parity_event_routing_perf
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_animation_frame_count")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_css_animation_probe")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_validation_status")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_proof_source")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_event_sequence")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_move_payload_source")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_title_command_text")
