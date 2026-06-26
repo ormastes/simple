@@ -89,6 +89,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 - Capture viewport dimensions must be explicit positive decimal integers and
   are emitted as normalized rows for the live wrapper to compare against the
   requested Chrome viewport.
+- The live Chrome wrapper preserves Chrome geometry file status, size,
+  producer, viewport, and measured item count diagnostics from the validator.
 - Capture viewport, ARGB readback viewport, Chrome geometry viewport, mismatch
   counts, and frame timing values must be real JSON numbers, not stringified
   rows, and malformed live numeric rows must not be re-emitted as normalized
@@ -681,7 +683,7 @@ expect(pixel).to_contain("chrome_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -694,6 +696,12 @@ expect(script).to_contain("capture-viewport-mismatch")
 expect(script).to_contain("chrome_simple_web_layout_capture_width")
 expect(script).to_contain("chrome_simple_web_layout_captured_argb_format")
 expect(script).to_contain("chrome_simple_web_layout_captured_argb_nonzero_pixel_count")
+expect(script).to_contain("chrome_simple_web_layout_geometry_file_status")
+expect(script).to_contain("chrome_simple_web_layout_geometry_size_bytes")
+expect(script).to_contain("chrome_simple_web_layout_geometry_producer")
+expect(script).to_contain("chrome_simple_web_layout_geometry_viewport_width")
+expect(script).to_contain("chrome_simple_web_layout_geometry_viewport_height")
+expect(script).to_contain("chrome_simple_web_layout_geometry_item_count")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
 val capture = file_read("tools/chrome-live-bitmap/capture_html_argb.js")
@@ -714,7 +722,7 @@ expect(capture).to_contain("geometry_path: geometryOutputPath")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -734,6 +742,12 @@ expect(evidence).to_contain("chrome_simple_web_layout_proof_source=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_width=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_height=")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_file_status=fail")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_size_bytes=")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_producer=")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_width=")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_height=")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_item_count=0")
 ```
 
 </details>
