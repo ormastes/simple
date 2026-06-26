@@ -242,16 +242,17 @@ expect(output.split(absence_marker()).len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val (output, exit_code) = run_spipe_command(["fine-tune-doctor", ATTEMPT_ID])
 
 expect(exit_code).to_equal(1)
-expect(output).to_contain("WARN placeholder license_constraints=pending")
-expect(output).to_contain("WARN placeholder safety_eval=not-run")
-expect(output).to_contain("WARN placeholder deployment_evidence=not-deployable")
+expect(output).to_contain("WARN missing_evidence license_constraints=pending")
+expect(output).to_contain("WARN missing_evidence safety_eval=not-run")
+expect(output).to_contain("WARN missing_evidence deployment_evidence=not-deployable")
+expect(output.split(legacy_placeholder_label()).len()).to_equal(1)
 expect(output).to_contain("STATUS: WARN llm-finetune-doctor")
 expect(output.split(absence_marker()).len()).to_equal(1)
 ```
