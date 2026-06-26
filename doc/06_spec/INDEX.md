@@ -7,7 +7,7 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 100
+- **Total Lines:** 112
 
 ---
 
@@ -15,5 +15,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [GUI Showcase Perf Source Revision Contract](test/03_system/check/gui_showcase_perf_source_revision_contract_spec.md) | Partial | N/A | 2 | 60% | 100 lines |
+| [Widget Showcase Malformed Readback Wrapper Contract](test/03_system/check/widget_showcase_malformed_readback_wrapper_spec.md) | Partial | N/A | 2 | 60% | 112 lines |
 
