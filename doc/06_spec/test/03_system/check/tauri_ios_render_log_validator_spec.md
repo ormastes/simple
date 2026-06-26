@@ -85,7 +85,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 - Failure markers such as eval failures fail closed even when render and Metal
   markers are present.
 - The iOS renderer wrapper keeps render-log, Metal, MDI event/capture,
-  performance, and animation diagnostic rows on early unavailable/fail exits.
+  performance, input-to-paint, and animation diagnostic rows on early
+  unavailable/fail exits.
 - The iOS renderer wrapper, mobile aggregate, and Tauri shell source are wired
   to the validator contract.
 
@@ -409,7 +410,7 @@ expect(evidence).to_contain("ios_render_log_failure_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -446,6 +447,8 @@ expect(evidence).to_contain("ios_mdi_event_status=")
 expect(evidence).to_contain("ios_mdi_capture_status=")
 expect(evidence).to_contain("ios_mdi_performance_status=")
 expect(evidence).to_contain("ios_mdi_performance_now_delta_ms=")
+expect(evidence).to_contain("ios_mdi_interaction_latency_status=")
+expect(evidence).to_contain("ios_mdi_input_to_paint_ms=")
 expect(evidence).to_contain("ios_mdi_animation_status=")
 expect(evidence).to_contain("ios_mdi_animation_frame_count=")
 expect(evidence).to_contain("ios_mdi_css_animation_probe=")
@@ -458,7 +461,7 @@ expect(evidence).to_contain("ios_mdi_css_animation_probe=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -469,6 +472,7 @@ expect(direct).to_contain("validate-tauri-ios-render-log-proof.js")
 expect(direct).to_contain("ios_render_log.validation.env")
 expect(direct).to_contain("emit_unavailable_ios_diagnostics")
 expect(direct).to_contain("ios_mdi_animation_frame_count")
+expect(direct).to_contain("ios_mdi_input_to_paint_ms")
 expect(direct).to_contain("ios_mdi_failure_marker_status")
 expect(aggregate).to_contain("TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_requested_source_count")

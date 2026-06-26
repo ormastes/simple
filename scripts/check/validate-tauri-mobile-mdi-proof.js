@@ -132,11 +132,12 @@ const capturePass =
 const performancePass =
   proof.performanceNowAvailable === true &&
   jsonDecimalGreaterThan(proof.performanceNowDeltaMs, 0);
+const interactionLatencyPass = jsonDecimalGreaterThan(proof.inputToPaintMs, 0);
 const animationPass =
   proof.animationFrameAvailable === true &&
   jsonIntegerAtLeast(proof.animationFrameCount, 2) &&
   proof.cssAnimationProbe === true;
-const detailPass = eventPass && renderPass && capturePass && performancePass && animationPass;
+const detailPass = eventPass && renderPass && capturePass && performancePass && interactionLatencyPass && animationPass;
 const status = !failureMarker && detailPass ? "pass" : "fail";
 const reason = failureMarker
   ? "mobile-mdi-failure-marker"
@@ -162,6 +163,8 @@ emit("mdi_capture_viewport_height", jsonIntegerTextOrBlank(proof.viewportHeight)
 emit("mdi_performance_status", performancePass ? "pass" : "fail");
 emit("mdi_performance_now_available", proof.performanceNowAvailable === true ? "true" : "false");
 emit("mdi_performance_now_delta_ms", jsonDecimalTextOrBlank(proof.performanceNowDeltaMs));
+emit("mdi_interaction_latency_status", interactionLatencyPass ? "pass" : "fail");
+emit("mdi_input_to_paint_ms", jsonDecimalTextOrBlank(proof.inputToPaintMs));
 emit("mdi_animation_status", animationPass ? "pass" : "fail");
 emit("mdi_animation_frame_available", proof.animationFrameAvailable === true ? "true" : "false");
 emit("mdi_animation_frame_count", jsonIntegerTextOrBlank(proof.animationFrameCount));

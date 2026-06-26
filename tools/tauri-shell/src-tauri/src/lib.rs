@@ -47,6 +47,7 @@ struct MdiProof {
     viewport_height: u32,
     performance_now_available: bool,
     performance_now_delta_ms: f64,
+    input_to_paint_ms: f64,
     animation_frame_available: bool,
     animation_frame_count: usize,
     css_animation_probe: bool,
@@ -583,6 +584,8 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                 var performanceNowAvailable = !!(window.performance && typeof window.performance.now === 'function');
                 var perfStart = performanceNowAvailable ? window.performance.now() : 0;
                 var performanceNowDeltaMs = 0;
+                var inputToPaintStart = 0;
+                var inputToPaintMs = 0;
                 var animationFrameAvailable = typeof window.requestAnimationFrame === 'function';
                 var animationFrameCount = 0;
                 var cssAnimationProbe = false;
@@ -613,6 +616,7 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                     return rect.width >= 20 && rect.height >= 10 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
                 });
                 if (wm && wm.windows && wm.windows.terminal) {
+                    inputToPaintStart = performanceNowAvailable ? window.performance.now() : 0;
                     var terminal = wm.windows.terminal.win;
                     var body = wm.windows.terminal.body;
                     var titlebar = terminal.querySelector('.wm-titlebar');
@@ -674,6 +678,7 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                     : (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke ? window.__TAURI__.core.invoke : null);
                 var finish = function() {
                     performanceNowDeltaMs = performanceNowAvailable ? Math.max(0, window.performance.now() - perfStart) : 0;
+                    inputToPaintMs = performanceNowAvailable && inputToPaintStart > 0 ? Math.max(0, window.performance.now() - inputToPaintStart) : 0;
                     if (!invoke) return;
                     invoke('report_mdi_proof', {
                         proof: {
@@ -698,6 +703,7 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             viewportHeight: viewportHeight,
                             performanceNowAvailable: performanceNowAvailable,
                             performanceNowDeltaMs: performanceNowDeltaMs,
+                            inputToPaintMs: inputToPaintMs,
                             animationFrameAvailable: animationFrameAvailable,
                             animationFrameCount: animationFrameCount,
                             cssAnimationProbe: cssAnimationProbe
@@ -750,6 +756,7 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             viewport_height: 0,
             performance_now_available: false,
             performance_now_delta_ms: 0.0,
+            input_to_paint_ms: 0.0,
             animation_frame_available: false,
             animation_frame_count: 0,
             css_animation_probe: false,
@@ -1319,9 +1326,7 @@ fn packaged_android_runtime_path() -> Option<String> {
             if !path.ends_with("libsimple_tauri_shell_lib.so") {
                 continue;
             }
-            let candidate = PathBuf::from(path)
-                .parent()
-                .map(|dir| dir.join(filename));
+            let candidate = PathBuf::from(path).parent().map(|dir| dir.join(filename));
             if let Some(candidate) = candidate {
                 if candidate.exists() {
                     return Some(candidate.to_string_lossy().into_owned());
@@ -1337,7 +1342,10 @@ fn packaged_android_runtime_path() -> Option<String> {
             Err(_) => vec![root_path],
         };
         for app_dir in app_dirs {
-            let name = app_dir.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            let name = app_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
             if !name.starts_with("com.simple.ui") {
                 continue;
             }
@@ -1432,8 +1440,7 @@ fn prepare_bundled_ui_bundle() -> Result<Option<String>, String> {
         if bundle_dir.exists() {
             let _ = fs::remove_dir_all(&bundle_dir);
         }
-        fs::create_dir_all(&root)
-            .map_err(|e| format!("failed to create ui-bundle dir: {}", e))?;
+        fs::create_dir_all(&root).map_err(|e| format!("failed to create ui-bundle dir: {}", e))?;
         let decoder = flate2::read::GzDecoder::new(bytes);
         let mut archive = tar::Archive::new(decoder);
         archive
@@ -1490,11 +1497,7 @@ fn simple_subprocess_args_with_main(
             args.extend(["run".to_string(), entry.to_string()]);
         }
     } else if shared_wm {
-        args.extend([
-            "run".to_string(),
-            ui_main.to_string(),
-            "tauri".to_string(),
-        ]);
+        args.extend(["run".to_string(), ui_main.to_string(), "tauri".to_string()]);
     }
     if shared_wm {
         args.push("--shared-wm".to_string());
@@ -1581,10 +1584,7 @@ pub fn run() {
             Ok(None) => {}
             Err(err) => {
                 eprintln!("[tauri-shell] bundled ui source extraction failed: {}", err);
-                startup_error = Some(format!(
-                    "Bundled UI source extraction failed.\n\n{}",
-                    err
-                ));
+                startup_error = Some(format!("Bundled UI source extraction failed.\n\n{}", err));
             }
         }
     }
@@ -1592,7 +1592,10 @@ pub fn run() {
         match prepare_bundled_mobile_entry() {
             Ok(path) => entry_file = path,
             Err(err) => {
-                eprintln!("[tauri-shell] bundled mobile entry extraction failed: {}", err);
+                eprintln!(
+                    "[tauri-shell] bundled mobile entry extraction failed: {}",
+                    err
+                );
                 startup_error = Some(format!(
                     "Bundled mobile entry extraction failed.\n\n{}",
                     err
@@ -2101,6 +2104,7 @@ mod tests {
         assert!(js.contains("send_window_mouse"));
         assert!(include_str!("lib.rs").contains("hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowKey && wm.sendWindowInput && wm.sendWindowMouse)"));
         assert!(include_str!("lib.rs").contains("performanceNowAvailable"));
+        assert!(include_str!("lib.rs").contains("inputToPaintMs"));
         assert!(include_str!("lib.rs").contains("animationFrameCount"));
         assert!(include_str!("lib.rs").contains("cssAnimationProbe"));
         assert!(include_str!("lib.rs").contains("viewportWidth"));

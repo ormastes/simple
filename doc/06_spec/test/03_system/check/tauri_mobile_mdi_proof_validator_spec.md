@@ -27,7 +27,7 @@ tauri_mobile_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,6 +76,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
   companion device log cannot hide a missing requested source artifact.
 - `performanceNowAvailable=true` is not enough: the proof must include an
   explicit finite positive `performanceNowDeltaMs` from distinct samples.
+- Mobile interaction latency must include an explicit positive
+  `inputToPaintMs` sample after routed MDI input and a following paint.
 - Capture viewport and animation-frame details must also be explicit finite
   numeric proof values, not defaulted placeholder values.
 - Render proof must include an explicit rendered image count and HTML render
@@ -103,7 +105,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -134,6 +136,8 @@ expect(evidence).to_contain("ios_mdi_capture_viewport_height=844")
 expect(evidence).to_contain("ios_mdi_performance_status=pass")
 expect(evidence).to_contain("ios_mdi_performance_now_available=true")
 expect(evidence).to_contain("ios_mdi_performance_now_delta_ms=1.25")
+expect(evidence).to_contain("ios_mdi_interaction_latency_status=pass")
+expect(evidence).to_contain("ios_mdi_input_to_paint_ms=2.5")
 expect(evidence).to_contain("ios_mdi_animation_status=pass")
 expect(evidence).to_contain("ios_mdi_animation_frame_available=true")
 expect(evidence).to_contain("ios_mdi_animation_frame_count=2")
@@ -281,6 +285,52 @@ expect(negative).to_contain("android_mdi_performance_now_delta_ms=-1")
 
 </details>
 
+#### rejects missing zero or stringified input-to-paint latency
+
+-  proof log command
+-  proof log command
+-  proof log command
+   - Expected: code equals `1`
+- Confirm mobile MDI proof requires structured input-to-paint timing
+   - Expected: string_latency does not contain `ios_mdi_input_to_paint_ms=2.5`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 25 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-input-to-paint"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_log_command(root + "/missing.log", "delete p.inputToPaintMs") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/missing.json " + root + "/missing.log > " + root + "/missing.env; " +
+    _proof_log_command(root + "/zero.log", "p.inputToPaintMs=0") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/zero.json " + root + "/zero.log > " + root + "/zero.env; " +
+    _proof_log_command(root + "/string.log", "p.inputToPaintMs=\"2.5\"") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/string.json " + root + "/string.log > " + root + "/string.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing = file_read(root + "/missing.env")
+val zero = file_read(root + "/zero.env")
+val string_latency = file_read(root + "/string.env")
+step("Confirm mobile MDI proof requires structured input-to-paint timing")
+expect(missing).to_contain("ios_mdi_proof_status=fail")
+expect(missing).to_contain("ios_mdi_interaction_latency_status=fail")
+expect(missing).to_contain("ios_mdi_input_to_paint_ms=")
+expect(zero).to_contain("android_mdi_proof_status=fail")
+expect(zero).to_contain("android_mdi_interaction_latency_status=fail")
+expect(zero).to_contain("android_mdi_input_to_paint_ms=0")
+expect(string_latency).to_contain("ios_mdi_proof_status=fail")
+expect(string_latency).to_contain("ios_mdi_interaction_latency_status=fail")
+expect(string_latency).to_contain("ios_mdi_input_to_paint_ms=")
+expect(string_latency.contains("ios_mdi_input_to_paint_ms=2.5")).to_equal(false)
+```
+
+</details>
+
 #### rejects missing viewport capture dimensions
 
 -  proof log command
@@ -401,6 +451,7 @@ expect(animation.contains("android_mdi_animation_frame_count=2.5")).to_equal(fal
 -  proof log command
 -  proof log command
 -  proof log command
+-  proof log command
    - Expected: code equals `1`
 - Confirm stringified numeric mobile proof values are rejected
    - Expected: image does not contain `ios_mdi_render_image_count=1`
@@ -408,13 +459,14 @@ expect(animation.contains("android_mdi_animation_frame_count=2.5")).to_equal(fal
    - Expected: taskbar does not contain `android_mdi_event_taskbar_icon_count=4`
    - Expected: viewport does not contain `android_mdi_capture_viewport_width=390`
    - Expected: performance does not contain `ios_mdi_performance_now_delta_ms=1.25`
+   - Expected: latency does not contain `ios_mdi_input_to_paint_ms=2.5`
    - Expected: animation does not contain `android_mdi_animation_frame_count=2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -430,6 +482,8 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/viewport.json " + root + "/viewport.log > " + root + "/viewport.env; " +
     _proof_log_command(root + "/performance.log", "p.performanceNowDeltaMs=\"1.25\"") +
     " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/performance.json " + root + "/performance.log > " + root + "/performance.env; " +
+    _proof_log_command(root + "/latency.log", "p.inputToPaintMs=\"2.5\"") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/latency.json " + root + "/latency.log > " + root + "/latency.env; " +
     _proof_log_command(root + "/animation.log", "p.animationFrameCount=\"2\"") +
     " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/animation.json " + root + "/animation.log > " + root + "/animation.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -440,6 +494,7 @@ val windows = file_read(root + "/windows.env")
 val taskbar = file_read(root + "/taskbar.env")
 val viewport = file_read(root + "/viewport.env")
 val performance = file_read(root + "/performance.env")
+val latency = file_read(root + "/latency.env")
 val animation = file_read(root + "/animation.env")
 step("Confirm stringified numeric mobile proof values are rejected")
 expect(image).to_contain("ios_mdi_proof_status=fail")
@@ -462,6 +517,10 @@ expect(performance).to_contain("ios_mdi_proof_status=fail")
 expect(performance).to_contain("ios_mdi_performance_status=fail")
 expect(performance).to_contain("ios_mdi_performance_now_delta_ms=")
 expect(performance.contains("ios_mdi_performance_now_delta_ms=1.25")).to_equal(false)
+expect(latency).to_contain("ios_mdi_proof_status=fail")
+expect(latency).to_contain("ios_mdi_interaction_latency_status=fail")
+expect(latency).to_contain("ios_mdi_input_to_paint_ms=")
+expect(latency.contains("ios_mdi_input_to_paint_ms=2.5")).to_equal(false)
 expect(animation).to_contain("android_mdi_proof_status=fail")
 expect(animation).to_contain("android_mdi_animation_status=fail")
 expect(animation).to_contain("android_mdi_animation_frame_count=")
@@ -547,7 +606,7 @@ expect(anim).to_contain("android_mdi_animation_frame_count=2")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -568,6 +627,7 @@ expect(evidence).to_contain("ios_mdi_render_status=pass")
 expect(evidence).to_contain("ios_mdi_event_status=pass")
 expect(evidence).to_contain("ios_mdi_capture_status=pass")
 expect(evidence).to_contain("ios_mdi_performance_status=pass")
+expect(evidence).to_contain("ios_mdi_interaction_latency_status=pass")
 expect(evidence).to_contain("ios_mdi_animation_status=pass")
 ```
 
@@ -577,8 +637,8 @@ expect(evidence).to_contain("ios_mdi_animation_status=pass")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
