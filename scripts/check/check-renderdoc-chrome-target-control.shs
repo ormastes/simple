@@ -24,6 +24,9 @@ reason="not-run"
 capture_file=""
 capture_magic=""
 gpu_pid=""
+gpu_env_has_layer=""
+gpu_maps_has_renderdoc=""
+gpu_maps_has_vulkan=""
 target_status=""
 target_reason=""
 target_api=""
@@ -44,6 +47,9 @@ write_env() {
         echo "rdoc_chrome_target_control_chrome=$CHROME_BIN"
         echo "rdoc_chrome_target_control_renderdoc_home=$RENDERDOC_HOME"
         echo "rdoc_chrome_target_control_gpu_pid=$gpu_pid"
+        echo "rdoc_chrome_target_control_gpu_env_has_layer=$gpu_env_has_layer"
+        echo "rdoc_chrome_target_control_gpu_maps_has_renderdoc=$gpu_maps_has_renderdoc"
+        echo "rdoc_chrome_target_control_gpu_maps_has_vulkan=$gpu_maps_has_vulkan"
         echo "rdoc_chrome_target_control_target_status=$target_status"
         echo "rdoc_chrome_target_control_target_reason=$target_reason"
         echo "rdoc_chrome_target_control_target_pid=$target_pid"
@@ -52,6 +58,8 @@ write_env() {
         echo "rdoc_chrome_target_control_capture_file=$capture_file"
         echo "rdoc_chrome_target_control_capture_magic=$capture_magic"
         echo "rdoc_chrome_target_control_chrome_log=$BUILD_DIR/chrome.log"
+        echo "rdoc_chrome_target_control_discovery_log=$BUILD_DIR/discovery.log"
+        echo "rdoc_chrome_target_control_gpu_maps=$BUILD_DIR/gpu.maps"
         echo "rdoc_chrome_target_control_qrenderdoc_log=$BUILD_DIR/qrenderdoc.log"
         echo "rdoc_chrome_target_control_target_env=$BUILD_DIR/target-control.env"
         echo "rdoc_chrome_target_control_required_magic=RDOC"
@@ -127,6 +135,41 @@ echo "$chrome_pid" >"$BUILD_DIR/chrome.pid"
 
 sleep "$WAIT_SECS"
 gpu_pid="$(pgrep -P "$chrome_pid" -af -- '--type=gpu-process' | awk 'NR==1 { print $1 }' || true)"
+
+{
+    echo "parent=$chrome_pid"
+    echo "children:"
+    ps -o pid,ppid,stat,cmd --ppid "$chrome_pid" || true
+} >"$BUILD_DIR/discovery.log"
+
+if [ "$gpu_pid" != "" ] && [ -r "/proc/$gpu_pid/environ" ]; then
+    if tr '\0' '\n' <"/proc/$gpu_pid/environ" | grep -q '^VK_INSTANCE_LAYERS=VK_LAYER_RENDERDOC_Capture$'; then
+        gpu_env_has_layer="1"
+    else
+        gpu_env_has_layer="0"
+    fi
+fi
+if [ "$gpu_pid" != "" ] && [ -r "/proc/$gpu_pid/maps" ]; then
+    if grep -q 'librenderdoc' "/proc/$gpu_pid/maps"; then
+        gpu_maps_has_renderdoc="1"
+    else
+        gpu_maps_has_renderdoc="0"
+    fi
+    if grep -q 'libvulkan' "/proc/$gpu_pid/maps"; then
+        gpu_maps_has_vulkan="1"
+    else
+        gpu_maps_has_vulkan="0"
+    fi
+    cp "/proc/$gpu_pid/maps" "$BUILD_DIR/gpu.maps" 2>/dev/null || true
+fi
+
+if [ "$gpu_pid" = "" ]; then
+    reason="no-gpu-process"
+    write_env
+    kill "$chrome_pid" 2>/dev/null || true
+    cat "$OUT_ENV"
+    exit 1
+fi
 
 set +e
 qrenderdoc_timeout="$((CONTROL_TIMEOUT + 10))"

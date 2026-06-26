@@ -1307,7 +1307,13 @@ RDOC_AUTOCAPTURE_END_EGL_VK_UNLOCK=2 \
   produce `.rdc`.
 - The Chrome target-control diagnostic wraps `qrenderdoc --ui-python` in an
   outer timeout. If qrenderdoc's UI Python startup hangs, the script now records
-  `target-control-no-evidence` instead of leaving the lane running indefinitely:
+  `target-control-no-evidence` instead of leaving the lane running indefinitely.
+  It also records `rdoc_chrome_target_control_gpu_env_has_layer`,
+  `rdoc_chrome_target_control_gpu_maps_has_renderdoc`, and
+  `rdoc_chrome_target_control_gpu_maps_has_vulkan` from the Chromium GPU
+  process. If Chrome does not create a GPU process, the script fails closed with
+  `rdoc_chrome_target_control_reason=no-gpu-process` before qrenderdoc can
+  trigger capture on an unrelated target:
 
 ```sh
 sh scripts/check/check-renderdoc-chrome-target-control.shs

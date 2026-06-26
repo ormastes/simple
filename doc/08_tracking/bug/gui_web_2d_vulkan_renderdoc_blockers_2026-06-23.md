@@ -316,3 +316,17 @@ Current 2026-06-26 browser capture findings:
   1280x720 ARGB file with 405674 nonblank pixels under RenderDoc launch, but
   still fails the gate because `.rdc` is missing:
   `build/renderdoc/electron-display-helper/electron-html/evidence.env`.
+
+2026-06-26 target-control evidence hardening:
+- `scripts/check/check-renderdoc-chrome-target-control.shs` now records
+  Chromium GPU-process diagnostics before invoking qrenderdoc target control:
+  `rdoc_chrome_target_control_gpu_env_has_layer`,
+  `rdoc_chrome_target_control_gpu_maps_has_renderdoc`, and
+  `rdoc_chrome_target_control_gpu_maps_has_vulkan`.
+- The same wrapper now fails closed with
+  `rdoc_chrome_target_control_reason=no-gpu-process` when Chrome does not spawn
+  a GPU process, so qrenderdoc cannot accidentally trigger capture on an
+  unrelated RenderDoc target.
+- The executable contract is covered by
+  `test/03_system/check/renderdoc_chrome_target_control_spec.spl` and mirrored
+  in `doc/06_spec/test/03_system/check/renderdoc_chrome_target_control_spec.md`.
