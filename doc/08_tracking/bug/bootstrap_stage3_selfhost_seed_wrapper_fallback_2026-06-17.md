@@ -27,6 +27,45 @@
   - `src/app/cli/bootstrap_main.spl` (minimal CLI entry used for stage2/stage3)
   - `build/bootstrap/logs/<triple>/stage3-native-build.log`
 
+## UPDATE 2026-06-26 (LLVM bootstrap — stage4 now partially functional)
+
+The "LLVM 18 absent" precondition was itself a **platform-detection bug**, now
+fixed (`scripts/setup/platform-detect.shs`, commit `92e4958`): the bootstrap
+only probed the macOS Homebrew path and fell back to cranelift on Linux despite
+`/usr/lib/llvm-18` being installed. After rebuilding the Rust seed with
+`--features llvm` (stable, no `f128` error, ~3m32s) and running a full LLVM
+bootstrap:
+
+- **Stage 3 still fails** the same structural way — stage2 is built from
+  `bootstrap_main.spl` (minimal entry, no real lowering/codegen) so the
+  self-host step hits the seed-wrapper-fallback guard. The llvm-lib backend
+  never engages: Stage 2 is hardcoded cranelift, Stage 3 runs the broken stage2,
+  Stage 4 falls back to seed+cranelift.
+- **Stage 4 (`build/bootstrap/full/<triple>/simple`) is now PARTIALLY
+  FUNCTIONAL — and no longer SIGSEGVs** (contrast the 2026-06-21 NEEDS-REVISIT
+  note above):
+  - `test` works with **full parity** vs the Rust seed:
+    `parsers_json_core` 90/0, `yaml_coverage` 125/0, `json_coverage` 187/0,
+    `parsers_sdn_coverage` 78/1. `lint`, `fmt --check`, `--version` also work.
+  - `run`, `-c`, and `build` (self-hosted native-build) are **broken**:
+    `-c 'print(1+1)'` exits **248** (3/3), `run main.spl` is a silent no-op
+    (rc 0, no output), `build` produces no binary. Root cause is the
+    **574 stubbed cross-module symbols** the seed's cranelift native-build emits
+    when compiling the full compiler (`Generating 574 stub functions for
+    unresolved symbols`: `*__ParserModule` per-module symbols, `*_dot_*` method
+    symbols, `Dict`, `alloc`, SPIR-V `builder_emit_*`, …). Those symbols are
+    only on the execute/codegen paths, which is why `test`/`lint`/`fmt` (intact
+    interpreter/analysis paths) pass while `run`/`-c`/`build` fail.
+
+**Consequence for tooling:** the stage4 binary is a usable, parity-verified
+**pure-Simple test runner** (so bug fixes can be verified on it), but it must
+**not** replace the global `bin/simple` yet — `run`/`-c`/`build` would break.
+The blocking fix is twofold: (1) build Stage 2 from the full driver
+(`main.spl`, not `bootstrap_main.spl`) so it has real codegen and can self-host;
+(2) close the seed native-build's 574-symbol cross-module resolution gap (see
+`interp_aot_source_pipeline_stubbed_non_functional_2026-06-25`,
+`native_codegen_crossmodule_generic_result_u8_erasure_2026-06-22`).
+
 ## OBSERVED
 
 A full bootstrap (cranelift backend, LLVM 18 absent) runs the manual pipeline
