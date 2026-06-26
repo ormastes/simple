@@ -268,6 +268,12 @@ Evidence:
   `acceptance_allowed` directly. The retry6 system spec covers both public
   surfaces so target-eval blockers are not hidden behind only
   `data_check_status`.
+- 2026-06-26 report-surface hardening: `fine-tune-report` now runs the same
+  safe repo-local checker and prints a `Data Check Execution` section with
+  `data_check_execution`, `data_check_status`, `result`, `target_accuracy`,
+  `required_accuracy`, `target_eval_reached`, and `acceptance_allowed`. The
+  retry6 system spec covers the consolidated report so normal review handoff
+  does not need to rerun the shell checker to see why retry6 is blocked.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS
