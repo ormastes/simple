@@ -20,17 +20,21 @@ impl VhdlBackend:
 
     fn backend_error_at(message: text, span: Span?) -> CompileError:
         var err = self.backend_error(message)
-        if span.?:
-            err.has_location = true
-            err.location = span.unwrap().to_range_string()
+        match span:
+            case Some(value):
+                err.has_location = true
+                err.location = value.to_range_string()
+            case None:
+                ()
         err
 
     fn unsupported_type_error(ty: MirType, context: text, span: Span?) -> CompileError?:
         val diagnostic = self.type_mapper.unsupported_mir_type_diagnostic(ty, context)
-        if diagnostic.?:
-            Some(self.backend_error_at(diagnostic.unwrap(), span))
-        else:
-            nil
+        match diagnostic:
+            case Some(message):
+                Some(self.backend_error_at(message, span))
+            case None:
+                nil
 
     fn module_has_vhdl_hardware(module: MirModule) -> bool:
         for symbol in module.functions.keys():
@@ -47,90 +51,96 @@ impl VhdlBackend:
                 continue
             val safe_name = vhdl_sanitize_identifier(func.name)
             val prior = used.get(safe_name)
-            if prior.?:
-                return Err(self.backend_error(vhdl_helper_collision_message(safe_name, prior.unwrap(), func.name)))
+            match prior:
+                case Some(prior_name):
+                    return Err(self.backend_error(vhdl_helper_collision_message(safe_name, prior_name, func.name)))
+                case None:
+                    ()
             used[safe_name] = func.name
             self.active_helper_name_by_source = self.active_helper_name_by_source.set(func.name, safe_name)
         Ok(())
 
     fn validate_module_supported_before_emit(module: MirModule, hardware_mode: bool) -> Result<(), CompileError>:
         for symbol in module.types.keys():
-            val type_def_result = self.validate_type_def_supported_before_emit(module.types[symbol])
-            if type_def_result.is_err():
-                return Err(type_def_result.unwrap_err())
+            match self.validate_type_def_supported_before_emit(module.types[symbol]):
+                case Ok(_): ()
+                case Err(err): return Err(err)
         for symbol in module.constants.keys():
             val constant = module.constants[symbol]
-            val constant_result = self.validate_vhdl_value_type_supported(constant.type_, "constant `{constant.name}`", nil)
-            if constant_result.is_err():
-                return Err(constant_result.unwrap_err())
-            val constant_value_result = self.validate_vhdl_constant_supported_before_emit(constant.value, constant.type_, "constant `{constant.name}`", nil)
-            if constant_value_result.is_err():
-                return Err(constant_value_result.unwrap_err())
+            match self.validate_vhdl_value_type_supported(constant.type_, "constant `{constant.name}`", nil):
+                case Ok(_): ()
+                case Err(err): return Err(err)
+            match self.validate_vhdl_constant_supported_before_emit(constant.value, constant.type_, "constant `{constant.name}`", nil):
+                case Ok(_): ()
+                case Err(err): return Err(err)
         for symbol in module.functions.keys():
             val func = module.functions[symbol]
             if hardware_mode:
                 if vhdl_function_is_hardware_entity(func):
-                    val entity_result = self.validate_function_supported_before_emit(func, false)
-                    if entity_result.is_err():
-                        return Err(entity_result.unwrap_err())
+                    match self.validate_function_supported_before_emit(func, false):
+                        case Ok(_): ()
+                        case Err(err): return Err(err)
                 elif self.active_helper_name_by_source.get(func.name).?:
-                    val helper_result = self.validate_function_supported_before_emit(func, true)
-                    if helper_result.is_err():
-                        return Err(helper_result.unwrap_err())
+                    match self.validate_function_supported_before_emit(func, true):
+                        case Ok(_): ()
+                        case Err(err): return Err(err)
             else:
-                val result = self.validate_function_supported_before_emit(func, false)
-                if result.is_err():
-                    return Err(result.unwrap_err())
+                match self.validate_function_supported_before_emit(func, false):
+                    case Ok(_): ()
+                    case Err(err): return Err(err)
         Ok(())
 
     fn validate_type_def_supported_before_emit(type_def: MirTypeDef) -> Result<(), CompileError>:
         match type_def.kind:
             case Struct(fields):
                 for field in fields:
-                    val result = self.validate_vhdl_value_type_supported(field.type_, "field `{type_def.name}.{field.name}`", nil)
-                    if result.is_err():
-                        return Err(result.unwrap_err())
+                    match self.validate_vhdl_value_type_supported(field.type_, "field `{type_def.name}.{field.name}`", nil):
+                        case Ok(_): ()
+                        case Err(err): return Err(err)
                 Ok(())
             case Enum(variants):
                 for variant in variants:
-                    if variant.payload.?:
-                        val result = self.validate_vhdl_value_type_supported(variant.payload.unwrap(), "payload `{type_def.name}.{variant.name}`", nil)
-                        if result.is_err():
-                            return Err(result.unwrap_err())
+                    match variant.payload:
+                        case Some(payload):
+                            match self.validate_vhdl_value_type_supported(payload, "payload `{type_def.name}.{variant.name}`", nil):
+                                case Ok(_): ()
+                                case Err(err): return Err(err)
+                        case None:
+                            ()
                 Ok(())
             case Union(members):
                 for member in members:
-                    val result = self.validate_vhdl_value_type_supported(member, "union member `{type_def.name}`", nil)
-                    if result.is_err():
-                        return Err(result.unwrap_err())
+                    match self.validate_vhdl_value_type_supported(member, "union member `{type_def.name}`", nil):
+                        case Ok(_): ()
+                        case Err(err): return Err(err)
                 Ok(())
 
     me validate_vhdl_value_type_supported(ty: MirType, context: text, span: Span?) -> Result<(), CompileError>:
-        val unsupported = self.unsupported_type_error(ty, context, span)
-        if unsupported.?:
-            return Err(unsupported.unwrap())
+        match self.unsupported_type_error(ty, context, span):
+            case Some(err): return Err(err)
+            case None: ()
         match ty.kind:
             case Array(element, _):
                 self.validate_vhdl_value_type_supported(element, context, span)
             case Tuple(elements):
                 for element in elements:
-                    val result = self.validate_vhdl_value_type_supported(element, context, span)
-                    if result.is_err():
-                        return Err(result.unwrap_err())
+                    match self.validate_vhdl_value_type_supported(element, context, span):
+                        case Ok(_): ()
+                        case Err(err): return Err(err)
                 Ok(())
             case Union(members):
                 for member in members:
-                    val result = self.validate_vhdl_value_type_supported(member, context, span)
-                    if result.is_err():
-                        return Err(result.unwrap_err())
+                    match self.validate_vhdl_value_type_supported(member, context, span):
+                        case Ok(_): ()
+                        case Err(err): return Err(err)
                 Ok(())
             case _:
                 Ok(())
 
     me validate_vhdl_constant_supported_before_emit(value: MirConstValue, ty: MirType, context: text, span: Span?) -> Result<(), CompileError>:
-        val unsupported = self.unsupported_type_error(ty, context, span)
-        if unsupported.?:
-            return Err(unsupported.unwrap())
+        match self.unsupported_type_error(ty, context, span):
+            case Some(err): return Err(err)
+            case None: ()
         match value:
             case Float(_):
                 Err(self.backend_error_at("VHDL backend does not support floating-point {context}; floating-point constants require explicit fixed-point or integer lowering before VHDL emission", span))
@@ -140,32 +150,32 @@ impl VhdlBackend:
     fn validate_function_supported_before_emit(func: MirFunction, is_helper: bool) -> Result<(), CompileError>:
         var idx = 0
         while idx < func.signature.params.len():
-            val param_result = self.validate_vhdl_value_type_supported(func.signature.params[idx], "input port `arg{idx}`", Some(func.span))
-            if param_result.is_err():
-                return Err(param_result.unwrap_err())
+            match self.validate_vhdl_value_type_supported(func.signature.params[idx], "input port `arg{idx}`", Some(func.span)):
+                case Ok(_): ()
+                case Err(err): return Err(err)
             idx = idx + 1
         if func.signature.return_type.kind != MirTypeKind.Unit:
-            val output_abi_result = self.validate_hardware_output_abi_supported(func)
-            if output_abi_result.is_err():
-                return Err(output_abi_result.unwrap_err())
-            val return_result = self.validate_vhdl_value_type_supported(func.signature.return_type, "output port", Some(func.span))
-            if return_result.is_err():
-                return Err(return_result.unwrap_err())
+            match self.validate_hardware_output_abi_supported(func):
+                case Ok(_): ()
+                case Err(err): return Err(err)
+            match self.validate_vhdl_value_type_supported(func.signature.return_type, "output port", Some(func.span)):
+                case Ok(_): ()
+                case Err(err): return Err(err)
         for local in func.locals:
             match local.kind:
                 case Var | Temp:
-                    val local_result = self.validate_vhdl_value_type_supported(local.type_, "local signal", Some(func.span))
-                    if local_result.is_err():
-                        return Err(local_result.unwrap_err())
+                    match self.validate_vhdl_value_type_supported(local.type_, "local signal", Some(func.span)):
+                        case Ok(_): ()
+                        case Err(err): return Err(err)
                 case _:
                     ()
         var blocks: Dict<i64, MirBlock> = {}
         for block in func.blocks:
             blocks = blocks.set(block.id.id, block)
         for block in func.blocks:
-            val result = self.validate_block_supported_before_emit(block, blocks, is_helper)
-            if result.is_err():
-                return Err(result.unwrap_err())
+            match self.validate_block_supported_before_emit(block, blocks, is_helper):
+                case Ok(_): ()
+                case Err(err): return Err(err)
         Ok(())
 
     fn validate_hardware_output_abi_supported(func: MirFunction) -> Result<(), CompileError>:
@@ -189,9 +199,9 @@ impl VhdlBackend:
 
     fn validate_block_supported_before_emit(block: MirBlock, blocks: Dict<i64, MirBlock>, is_helper: bool) -> Result<(), CompileError>:
         for inst in block.instructions:
-            val result = self.validate_instruction_supported_before_emit(inst, blocks, is_helper)
-            if result.is_err():
-                return Err(result.unwrap_err())
+            match self.validate_instruction_supported_before_emit(inst, blocks, is_helper):
+                case Ok(_): ()
+                case Err(err): return Err(err)
         Ok(())
 
     fn validate_instruction_supported_before_emit(inst: MirInst, blocks: Dict<i64, MirBlock>, is_helper: bool) -> Result<(), CompileError>:
@@ -219,15 +229,18 @@ impl VhdlBackend:
                     Err(self.unsupported_vhdl_instruction_error(inst))
 
     fn validate_call_supported_before_emit(func: MirOperand) -> Result<(), CompileError>:
-        val target_result = self.call_target_name(func)
-        if target_result.is_err():
-            return Err(target_result.unwrap_err())
-        val target = target_result.unwrap()
+        val target = match self.call_target_name(func):
+            case Ok(result): result
+            case Err(err): return Err(err)
         val helper_name = self.active_helper_name_by_source.get(target)
         if not helper_name.?:
             val known = self.active_function_by_name.get(target)
-            if known.? and vhdl_function_is_hardware_entity(known.unwrap()):
-                return Err(self.backend_error("VHDL helper call `{target}` targets a hardware entity; instantiate entities with VhdlPortMap instead of subprogram calls"))
+            match known:
+                case Some(func_def):
+                    if vhdl_function_is_hardware_entity(func_def):
+                        return Err(self.backend_error("VHDL helper call `{target}` targets a hardware entity; instantiate entities with VhdlPortMap instead of subprogram calls"))
+                case None:
+                    ()
             return Err(self.backend_error("Synthesizable VHDL backend does not support generic Call lowering for `{target}`; only planned pure combinational helpers can be called"))
         Ok(())
 
@@ -289,10 +302,10 @@ impl VhdlBackend:
             var tuple_fields: [(text, text)] = []
             var tuple_idx = 0
             for tuple_element in tuple_elements:
-                val tuple_type_result = self.mir_type_to_vhdl(tuple_element)
-                if tuple_type_result.is_err():
-                    return Err(tuple_type_result.unwrap_err())
-                tuple_fields = tuple_fields.push(("f{tuple_idx}", tuple_type_result.unwrap()))
+                val tuple_type = match self.mir_type_to_vhdl(tuple_element):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                tuple_fields = tuple_fields.push(("f{tuple_idx}", tuple_type))
                 tuple_idx = tuple_idx + 1
             val tuple_def = self.type_mapper.map_record(tuple_fields)
             builder.emit_type_decl(tuple_name, tuple_def)
@@ -305,18 +318,17 @@ impl VhdlBackend:
                 case Struct(fields):
                     var field_pairs: [(text, text)] = []
                     for f in fields:
-                        val mapped_result = self.mir_type_to_vhdl(f.type_)
-                        if mapped_result.is_err():
-                            return Err(mapped_result.unwrap_err())
-                        val mapped = mapped_result.unwrap()
+                        val mapped = match self.mir_type_to_vhdl(f.type_):
+                            case Ok(result): result
+                            case Err(err): return Err(err)
                         field_pairs = field_pairs.push((f.name, mapped))
                     val record_def = self.type_mapper.map_record(field_pairs)
                     builder.emit_type_decl(type_def.name, record_def)
 
                 case Enum(variants):
-                    val enum_result = self.emit_enum_type_decls(builder, type_def, variants)
-                    if enum_result.is_err():
-                        return Err(enum_result.unwrap_err())
+                    match self.emit_enum_type_decls(builder, type_def, variants):
+                        case Ok(_): ()
+                        case Err(err): return Err(err)
 
                 case _:
                     return Err(self.backend_error(
@@ -327,23 +339,21 @@ impl VhdlBackend:
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for symbol in module.constants.keys():
             val constant = module.constants[symbol]
-            val vhdl_type_result = self.mir_type_to_vhdl(constant.type_)
-            if vhdl_type_result.is_err():
-                return Err(vhdl_type_result.unwrap_err())
-            val vhdl_value_result = self.const_value_to_vhdl(constant.value, constant.type_)
-            if vhdl_value_result.is_err():
-                return Err(vhdl_value_result.unwrap_err())
-            val vhdl_type = vhdl_type_result.unwrap()
-            val vhdl_value = vhdl_value_result.unwrap()
+            val vhdl_type = match self.mir_type_to_vhdl(constant.type_):
+                case Ok(result): result
+                case Err(err): return Err(err)
+            val vhdl_value = match self.const_value_to_vhdl(constant.value, constant.type_):
+                case Ok(result): result
+                case Err(err): return Err(err)
             builder.emit_constant_decl(constant.name, vhdl_type, vhdl_value)
 
         for source_name in self.active_helper_name_by_source.keys():
-            val func_result = self.helper_function_by_name(source_name)
-            if func_result.is_err():
-                return Err(func_result.unwrap_err())
-            val decl_result = self.emit_helper_declaration(builder, func_result.unwrap())
-            if decl_result.is_err():
-                return Err(decl_result.unwrap_err())
+            val func = match self.helper_function_by_name(source_name):
+                case Ok(result): result
+                case Err(err): return Err(err)
+            match self.emit_helper_declaration(builder, func):
+                case Ok(_): ()
+                case Err(err): return Err(err)
 
         builder.emit_package_end(module.name)
 
@@ -352,12 +362,12 @@ impl VhdlBackend:
             builder.emit_line("package body {module.name}_pkg is")
             builder.indent_level = builder.indent_level + 1
             for source_name in self.active_helper_name_by_source.keys():
-                val func_result = self.helper_function_by_name(source_name)
-                if func_result.is_err():
-                    return Err(func_result.unwrap_err())
-                val body_result = self.emit_helper_body(builder, func_result.unwrap())
-                if body_result.is_err():
-                    return Err(body_result.unwrap_err())
+                val func = match self.helper_function_by_name(source_name):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                match self.emit_helper_body(builder, func):
+                    case Ok(_): ()
+                    case Err(err): return Err(err)
             builder.indent_level = builder.indent_level - 1
             builder.emit_line("end package body {module.name}_pkg;")
             builder.emit_raw("")
@@ -387,17 +397,20 @@ impl VhdlBackend:
         var record_fields: [(text, text)] = [("tag", "{type_def.name}_tag_t")]
         var used_payload_fields: Dict<text, bool> = {"tag": true}
         for v in variants:
-            if v.payload.?:
-                val field_name = self.payload_enum_field_name(v)
-                if used_payload_fields.get(field_name).?:
-                    return Err(self.backend_error(
-                        "Duplicate VHDL payload enum field after sanitization in `{type_def.name}`: `{field_name}`"
-                    ))
-                used_payload_fields[field_name] = true
-                val payload_type_result = self.mir_type_to_vhdl(v.payload.unwrap())
-                if payload_type_result.is_err():
-                    return Err(payload_type_result.unwrap_err())
-                record_fields = record_fields.push((field_name, payload_type_result.unwrap()))
+            match v.payload:
+                case Some(payload):
+                    val field_name = self.payload_enum_field_name(v)
+                    if used_payload_fields.get(field_name).?:
+                        return Err(self.backend_error(
+                            "Duplicate VHDL payload enum field after sanitization in `{type_def.name}`: `{field_name}`"
+                        ))
+                    used_payload_fields[field_name] = true
+                    val payload_type = match self.mir_type_to_vhdl(payload):
+                        case Ok(result): result
+                        case Err(err): return Err(err)
+                    record_fields = record_fields.push((field_name, payload_type))
+                case None:
+                    ()
         builder.emit_type_decl(type_def.name, self.type_mapper.map_record(record_fields))
         Ok(())
 
@@ -429,8 +442,11 @@ impl VhdlBackend:
                     self.register_tuple_types_in_type(field.type_)
             case Enum(variants):
                 for variant in variants:
-                    if variant.payload.?:
-                        self.register_tuple_types_in_type(variant.payload.unwrap())
+                    match variant.payload:
+                        case Some(payload):
+                            self.register_tuple_types_in_type(payload)
+                        case None:
+                            ()
             case Union(members):
                 for member in members:
                     self.register_tuple_types_in_type(member)
@@ -596,30 +612,29 @@ impl VhdlBackend:
         while idx < func.signature.params.len():
             if self.type_has_general_memory(func.signature.params[idx]):
                 return Err(self.backend_error("VHDL-MEM-GENERAL: Array, slice, pointer, and reference ports require an explicit package-level memory ABI before VHDL emission"))
-            val param_type_result = self.mir_type_to_vhdl_at(func.signature.params[idx], Some(func.span))
-            if param_type_result.is_err():
-                return Err(param_type_result.unwrap_err())
+            val param_type = match self.mir_type_to_vhdl_at(func.signature.params[idx], Some(func.span)):
+                case Ok(result): result
+                case Err(err): return Err(err)
             ports = ports.push(VhdlPortSpec(
                 name: "arg{idx}",
                 direction: "in",
-                type_name: param_type_result.unwrap()
+                type_name: param_type
             ))
             idx = idx + 1
 
-        val abi_result = self.vhdl_return_abi(func)
-        if abi_result.is_err():
-            return Err(abi_result.unwrap_err())
-        val abi = abi_result.unwrap()
+        val abi = match self.vhdl_return_abi(func):
+            case Ok(result): result
+            case Err(err): return Err(err)
         for field in abi.fields:
             if self.type_has_general_memory(field.type_):
                 return Err(self.backend_error("VHDL-MEM-GENERAL: Array, slice, pointer, and reference result ports require an explicit package-level memory ABI before VHDL emission"))
-            val return_type_result = self.mir_type_to_vhdl_at(field.type_, Some(func.span))
-            if return_type_result.is_err():
-                return Err(return_type_result.unwrap_err())
+            val return_type = match self.mir_type_to_vhdl_at(field.type_, Some(func.span)):
+                case Ok(result): result
+                case Err(err): return Err(err)
             ports = ports.push(VhdlPortSpec(
                 name: field.name,
                 direction: "out",
-                type_name: return_type_result.unwrap()
+                type_name: return_type
             ))
 
         Ok(ports)
@@ -640,4 +655,3 @@ impl VhdlBackend:
                 false
             case _:
                 false
-
