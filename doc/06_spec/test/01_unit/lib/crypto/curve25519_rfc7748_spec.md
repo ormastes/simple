@@ -194,7 +194,7 @@ expect(x25519_base_bigint_probe(LIVE_BOOTSTRAP_PRIV)).to_equal(LIVE_BOOTSTRAP_PU
 |-------|-------|
 | Category | Standard Library |
 | Status | Active |
-| Source | `test/01_unit/lib/crypto/curve25519_rfc7748_spec.spl` |
+| Source | `/home/ormastes/dev/pub/simple/test/01_unit/lib/crypto/curve25519_rfc7748_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 

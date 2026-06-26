@@ -654,7 +654,7 @@ expect(idx.?).to_equal(false)
 |-------|-------|
 | Category | Standard Library |
 | Status | Active |
-| Source | `/home/ormastes/dev/pub/simple/test/01_unit/lib/common/algorithm_utils_sort_search_spec.spl` |
+| Source | `test/01_unit/lib/common/algorithm_utils_sort_search_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
