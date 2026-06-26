@@ -1,0 +1,113 @@
+"""
+# WM browser event-routing proof validator
+
+## Overview
+
+Validates the standalone WM browser event-routing proof validator. The
+validator consumes the raw Electron probe JSON and fails closed when a stale or
+forged `pass=true` row omits Chromium event, timing, animation, payload, or UI
+details.
+
+**Plan:** doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md
+**Requirements:** N/A
+**Research:** N/A
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+```sh
+SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_validator_spec.spl --mode=interpreter --clean --fail-fast
+```
+
+## Acceptance
+
+- Complete Electron WM event-routing JSON validates and emits normalized
+  `wm_browser_event_routing_*` rows.
+- `pass=true` JSON still fails when event counts, Chromium timing, animation,
+  payload details, or UI proof rows are missing or malformed.
+- The live shell evidence wrapper consumes the standalone validator instead of
+  trusting only the probe's top-level `pass` flag.
+"""
+
+# @tag: system, gui, renderer, event-routing, electron, evidence
+
+use std.io_runtime.{file_read, process_run}
+use std.spec.*
+
+fn _fixture_command(path: text, mutation: text) -> text:
+    "node -e 'const fs=require(\"fs\");const p={pass:true,ready:true,wm_found:true,window_cmd_count:4,input_event_count:3,focus_count:1,move_count:1,maximize_count:1,title_command_count:1,text_input_count:1,pointer_down_count:1,pointer_up_count:1,performance_now_available:true,performance_now_delta_ms:16.7,animation_frame_available:true,animation_frame_count:2,css_animation_probe:true,title_text:\"Terminal\",title_context_text:\"terminal\",traffic_button_count:3,title_input_tag:\"input\",titlebar_height:\"34px\",titlebar_display:\"flex\",titlebar_cursor:\"grab\",titlebar_background:\"rgb(229, 231, 235)\",title_color:\"rgb(17, 24, 39)\",title_font_weight:\"700\",title_input_min_width:\"142px\",title_input_width:\"158px\",title_input_width_px:158,title_input_height:\"24px\",title_input_cursor:\"text\",title_input_background:\"rgb(241, 245, 249)\",close_button_background:\"rgb(239, 68, 68)\",minimize_button_background:\"rgb(234, 179, 8)\",maximize_button_background:\"rgb(34, 197, 94)\",expected_move_x:86,expected_move_y:86,move_payload:{window_id_hint:\"win1\",source:\"native_event\",x:86,y:86},title_payload:{command_text:\"/tmp/project\"},text_payload:{event:{text:\"Hello Simple\"}}};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+
+describe "WM browser event-routing proof validator":
+
+    it "accepts complete event timing animation payload and UI proof":
+        val command = "rm -rf build/test-wm-browser-event-validator-pass && mkdir -p build/test-wm-browser-event-validator-pass && " +
+            _fixture_command("build/test-wm-browser-event-validator-pass/proof.json", "") +
+            " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-pass/proof.json > build/test-wm-browser-event-validator-pass/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = file_read("build/test-wm-browser-event-validator-pass/evidence.env")
+        expect(evidence).to_contain("wm_browser_event_routing_validation_status=pass")
+        expect(evidence).to_contain("wm_browser_event_routing_validation_reason=pass")
+        expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=16.7")
+        expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=2")
+        expect(evidence).to_contain("wm_browser_event_routing_css_animation_probe=true")
+        expect(evidence).to_contain("wm_browser_event_routing_move_payload_source=native_event")
+        expect(evidence).to_contain("wm_browser_event_routing_title_command_text=/tmp/project")
+        expect(evidence).to_contain("wm_browser_event_routing_text_input_text=Hello Simple")
+
+    it "rejects pass true proof when required event counts are missing":
+        val command = "rm -rf build/test-wm-browser-event-validator-counts && mkdir -p build/test-wm-browser-event-validator-counts && " +
+            _fixture_command("build/test-wm-browser-event-validator-counts/proof.json", "p.focus_count=0") +
+            " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-counts/proof.json > build/test-wm-browser-event-validator-counts/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read("build/test-wm-browser-event-validator-counts/evidence.env")
+        expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+        expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+        expect(evidence).to_contain("wm_browser_event_routing_focus_count=0")
+
+    it "rejects pass true proof when Chromium timing or animation is malformed":
+        val command = "rm -rf build/test-wm-browser-event-validator-animation && mkdir -p build/test-wm-browser-event-validator-animation && " +
+            _fixture_command("build/test-wm-browser-event-validator-animation/proof.json", "p.performance_now_delta_ms=\"not-a-number\";p.animation_frame_count=1") +
+            " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-animation/proof.json > build/test-wm-browser-event-validator-animation/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read("build/test-wm-browser-event-validator-animation/evidence.env")
+        expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+        expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+        expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=not-a-number")
+        expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=1")
+
+    it "rejects pass true proof when payload details do not match dispatched DOM events":
+        val command = "rm -rf build/test-wm-browser-event-validator-payload && mkdir -p build/test-wm-browser-event-validator-payload && " +
+            _fixture_command("build/test-wm-browser-event-validator-payload/proof.json", "p.move_payload.source=\"synthetic\";p.text_payload.event.text=\"\"") +
+            " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-payload/proof.json > build/test-wm-browser-event-validator-payload/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read("build/test-wm-browser-event-validator-payload/evidence.env")
+        expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+        expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-payload-contract-missing")
+        expect(evidence).to_contain("wm_browser_event_routing_move_payload_source=synthetic")
+
+    it "rejects pass true proof when UI readback details are missing":
+        val command = "rm -rf build/test-wm-browser-event-validator-ui && mkdir -p build/test-wm-browser-event-validator-ui && " +
+            _fixture_command("build/test-wm-browser-event-validator-ui/proof.json", "p.titlebar_display=\"block\";p.traffic_button_count=2") +
+            " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-ui/proof.json > build/test-wm-browser-event-validator-ui/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read("build/test-wm-browser-event-validator-ui/evidence.env")
+        expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+        expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
+        expect(evidence).to_contain("wm_browser_event_routing_titlebar_display=block")
+
+    it "keeps the live shell wrapper wired to the validator result":
+        val script = file_read("scripts/check/check-wm-browser-event-routing-evidence.shs")
+        expect(script).to_contain("validate-wm-browser-event-routing-proof.js")
+        expect(script).to_contain("validator_code")
+        expect(script).to_contain("wm_browser_event_routing_validation_status")
+        expect(script).to_contain("wm_browser_event_routing_validation_reason")
