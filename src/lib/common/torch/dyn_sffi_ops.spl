@@ -18,6 +18,14 @@ Consumed by:
 # Availability
 # ============================================================================
 
+struct DynTorchTensorResult:
+    status: text
+    reason: text
+    handle: i64
+
+fn _dyn_torch_tensor_result(status: text, reason: text, handle: i64) -> DynTorchTensorResult:
+    DynTorchTensorResult(status: status, reason: reason, handle: handle)
+
 fn dyn_torch_available() -> bool:
     """Return true if libtorch can be loaded at runtime."""
     rt_torch_available()
@@ -85,9 +93,18 @@ fn dyn_torch_tensor_inverse(handle: i64) -> i64:
 
 fn dyn_torch_tensor_linalg_solve(a: i64, b: i64) -> i64:
     """Solve Ax = b. Returns 0 on failure."""
+    dyn_torch_tensor_linalg_solve_result(a, b).handle
+
+fn dyn_torch_tensor_linalg_solve_result(a: i64, b: i64) -> DynTorchTensorResult:
+    """Solve Ax = b with explicit status for dynamic Torch callers."""
     if not rt_torch_available():
-        return 0
-    rt_torch_torchtensor_linalg_solve(a, b)
+        return _dyn_torch_tensor_result("unavailable", "libtorch_unavailable", 0)
+    if a <= 0 or b <= 0:
+        return _dyn_torch_tensor_result("invalid", "invalid_handle", 0)
+    val handle = rt_torch_torchtensor_linalg_solve(a, b)
+    if handle <= 0:
+        return _dyn_torch_tensor_result("error", "runtime_returned_null_handle", 0)
+    _dyn_torch_tensor_result("ready", "ok", handle)
 
 fn dyn_torch_tensor_det(handle: i64) -> f64:
     """Determinant of a square matrix. Returns 0.0 on failure."""
@@ -469,10 +486,10 @@ extern fn rt_torch_tensor_empty(d0: i64, d1: i64, d2: i64, d3: i64, ndim: i64) -
 # Exports
 # ============================================================================
 
-export dyn_torch_available
+export DynTorchTensorResult, dyn_torch_available
 export dyn_torch_tensor_free, dyn_torch_tensor_clone
 export dyn_torch_tensor_matmul, dyn_torch_tensor_dot, dyn_torch_tensor_inverse
-export dyn_torch_tensor_linalg_solve
+export dyn_torch_tensor_linalg_solve, dyn_torch_tensor_linalg_solve_result
 export dyn_torch_tensor_sum, dyn_torch_tensor_sum_dim
 export dyn_torch_tensor_mean, dyn_torch_tensor_mean_dim
 export dyn_torch_tensor_det, dyn_torch_tensor_norm, dyn_torch_tensor_std, dyn_torch_tensor_var

@@ -144,6 +144,13 @@ Tasks:
    `std.common.torch.dyn_sffi_ops.dyn_torch_tensor_linalg_solve`; it now checks
    `rt_torch_available()` and delegates to existing
    `rt_torch_torchtensor_linalg_solve(a, b)` instead of returning unconditional `0`.
+   A status-returning companion,
+   `dyn_torch_tensor_linalg_solve_result(a, b)`, now reports
+   `libtorch_unavailable`, `invalid_handle`, or
+   `runtime_returned_null_handle` explicitly while the legacy handle-returning
+   API remains compatible. The C++ Torch runtime boundary now returns `0` for
+   missing linalg-solve tensor handles instead of panicking before the Simple
+   status wrapper can classify the failure.
 3. Stop hardcoded CUDA device behavior from being user-visible as correct.
    Status: done for public GC/NoGC backend CUDA placement, `Tensor.cuda`,
    stream creation, and optimizer state initialization. Explicit `device_id`
@@ -193,6 +200,10 @@ Evidence:
   `doc/06_spec/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.md`.
 - The same spec now covers dynamic linalg solve delegation to the existing
   runtime SFFI.
+- The same spec now covers explicit dynamic linalg solve status readback for
+  unavailable or invalid-handle cases without claiming live libtorch execution.
+- The same spec now covers C++ runtime/header alignment so invalid native
+  linalg-solve handles return the failure handle contract instead of panicking.
 - `release/x86_64-unknown-linux-gnu/simple check
   src/lib/nogc_sync_mut/io_runtime.spl
   src/lib/io_runtime.spl

@@ -67,6 +67,7 @@ int64_t     rt_torch_torchtensor_t(int64_t handle);
 double      rt_torch_torchtensor_norm(int64_t handle);
 double      rt_torch_torchtensor_det(int64_t handle);
 int64_t     rt_torch_torchtensor_inverse(int64_t handle);
+int64_t     rt_torch_torchtensor_linalg_solve(int64_t handle, int64_t rhs);
 int64_t     rt_torch_torchtensor_svd(int64_t handle);
 int64_t     rt_torch_torchtensor_eig(int64_t handle);
 

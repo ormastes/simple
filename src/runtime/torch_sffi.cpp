@@ -64,6 +64,10 @@ static int64_t store_tensor(at::Tensor t) {
     return h;
 }
 
+static bool has_tensor(int64_t h) {
+    return g_tensors.find(h) != g_tensors.end();
+}
+
 /* Retrieve a tensor by handle (panics on invalid handle) */
 static at::Tensor get_tensor(int64_t h) {
     auto it = g_tensors.find(h);
@@ -373,6 +377,9 @@ int64_t rt_torch_torchtensor_inverse(int64_t handle) {
 }
 
 int64_t rt_torch_torchtensor_linalg_solve(int64_t handle, int64_t rhs) {
+    if (!has_tensor(handle) || !has_tensor(rhs)) {
+        return 0;
+    }
     try {
         return store_tensor(at::linalg_solve(get_tensor(handle), get_tensor(rhs)));
     } catch (const std::exception& e) {

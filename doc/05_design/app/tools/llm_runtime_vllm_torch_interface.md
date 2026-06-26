@@ -457,7 +457,13 @@ The dynamic Torch SFFI availability helper now delegates to
 owner-module placeholder without claiming full Torch readiness. The dynamic
 Torch linalg-solve helper now checks runtime availability and delegates to the
 documented `rt_torch_torchtensor_linalg_solve(a, b)` SFFI instead of returning an
-unconditional failure handle. Torch training seed helpers now return explicit
+unconditional failure handle. It also exposes
+`dyn_torch_tensor_linalg_solve_result(a, b)` for callers that need explicit
+`libtorch_unavailable`, `invalid_handle`, or `runtime_returned_null_handle`
+status instead of interpreting handle `0` as every failure class. The C++
+runtime linalg-solve bridge prechecks tensor handles and returns `0` for
+invalid native handles so the Simple status wrapper is not bypassed by a
+runtime panic. Torch training seed helpers now return explicit
 `unsupported` status instead of silently no-oping while no owner manual-seed
 SFFI exists. Explicit Torch CUDA device ids now pass through GC/NoGC backend
 placement, `Tensor.cuda`, and stream creation instead of being forced to device
