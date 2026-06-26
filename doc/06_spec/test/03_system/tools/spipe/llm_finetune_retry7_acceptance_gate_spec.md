@@ -180,7 +180,7 @@ expect(output).to_contain("eval_result_exists=false")
 expect(output).to_contain("acceptance_allowed=false")
 expect(output).to_contain("result=BLOCKED_RETRY6_NOT_READY")
 expect(output).to_contain("STATUS: WARN retry7-acceptance-gate")
-expect(output.split(internal_absence_marker()).len()).to_equal(1)
+expect(output.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -203,7 +203,7 @@ expect(output).to_contain("training_scripts=present")
 expect(output).to_contain("data_check_execution=warn")
 expect(output).to_contain("data_check_status=\"STATUS: WARN retry7-acceptance-gate\"")
 expect(output).to_contain("STATUS: WARN llm-finetune-status")
-expect(output.split(internal_absence_marker()).len()).to_equal(1)
+expect(output.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -224,7 +224,7 @@ expect(output).to_contain("model_artifact_created=pending")
 expect(output).to_contain("target_eval_reached=pending")
 expect(output).to_contain("decision_accepted=pending")
 expect(output).to_contain("STATUS: FAIL llm-finetune-ready")
-expect(output.split(internal_absence_marker()).len()).to_equal(1)
+expect(output.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>

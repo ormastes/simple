@@ -28,7 +28,7 @@ context_generate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -141,7 +141,7 @@ val absence_marker = "n" + "il"
 val output = context_generate("build/test/does_not_exist.spl", "", "text")
 expect(output).to_contain("status: missing")
 expect(output).to_contain("content: none")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -158,7 +158,7 @@ Reproduction: this block contains the complete executable scenario source.
 val absence_marker = "n" + "il"
 val output = context_generate("build/test/does_not_exist.spl", "", "json")
 expect(output).to_contain("\"status\":\"missing\"")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -167,7 +167,7 @@ expect(output.contains(absence_marker)).to_equal(false)
 
 - dir create all
 - file write
-   - Expected: output does not contain `absence_marker`
+   - Expected: output.split(absence_marker).len() equals `1`
 
 
 <details>
@@ -184,7 +184,7 @@ file_write(path, "fn marker() -> text:\n    \"SIMPLE_WRITE_EOF\"\n")
 val output = context_generate(path, "marker", "text")
 expect(output).to_contain("status: ready")
 expect(output).to_contain("SIMPLE_WRITE_EOF")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -205,7 +205,7 @@ expect(output).to_contain("Simple context index")
 expect(output).to_contain("pack_count: 1")
 expect(output).to_contain("source: " + path)
 expect(output).to_contain("status: ready")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -227,7 +227,7 @@ expect(output).to_contain("Simple context query")
 expect(output).to_contain("status: ready")
 expect(output).to_contain("matches:")
 expect(output).to_contain("hello context")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -247,7 +247,7 @@ val index = context_index_packs([path], "hello", "text")
 val output = context_query_index(index, "missing_symbol_name", "json")
 expect(output).to_contain("\"status\":\"no_matches\"")
 expect(output).to_contain("\"matches\":0")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -269,7 +269,7 @@ expect(output).to_contain("backend: sqlite")
 if not output.contains("status: unavailable"):
     expect(output).to_contain("pack_count: 1")
     expect(output).to_contain("hello context")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -291,7 +291,73 @@ if not output.contains("\"status\":\"unavailable\""):
     expect(output).to_contain("\"status\":\"ready\"")
     expect(output).to_contain("\"matches\":")
     expect(output).to_contain("hello context")
-expect(output.contains(absence_marker)).to_equal(false)
+expect(output.split(absence_marker).len()).to_equal(1)
+```
+
+</details>
+
+#### allows source-less embedded sql db queries
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val absence_marker = "n" + "il"
+expect(context_args_allow_sourceless_sql_query(["--sql", "--query=hello", "--db=build/test/context.db"])).to_equal(true)
+expect(context_args_allow_sourceless_sql_query(["--query=hello"])).to_equal(false)
+expect(context_args_allow_sourceless_sql_query(["--sql", "--query="])).to_equal(false)
+
+val output = context_sql_query_packs([], "", "hello", "", "text")
+expect(output).to_contain("Simple context SQL query")
+expect(output).to_contain("backend: sqlite")
+if not output.contains("status: unavailable"):
+    expect(output).to_contain("status: no_matches")
+    expect(output).to_contain("matches: 0")
+expect(output.split(absence_marker).len()).to_equal(1)
+```
+
+</details>
+
+#### filters embedded sql query rows by source provenance
+
+- dir create all
+- file write
+- file write
+   - Expected: output.split(beta_path).len() equals `1`
+   - Expected: output.split("beta_only").len() equals `1`
+   - Expected: indexed.split(absence_marker).len() equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val absence_marker = "n" + "il"
+dir_create_all("build/test")
+val alpha_path = "build/test/context_alpha_source.spl"
+val beta_path = "build/test/context_beta_source.spl"
+val db_path = "build/test/context_source_filter.db"
+file_write(alpha_path, "fn alpha_context() -> text:\n    \"shared_context_marker alpha_only\"\n")
+file_write(beta_path, "fn beta_context() -> text:\n    \"shared_context_marker beta_only\"\n")
+
+val indexed = context_sql_index_packs([alpha_path, beta_path], "ctx", db_path, "text")
+expect(indexed).to_contain("backend: sqlite")
+if not indexed.contains("status: unavailable"):
+    val output = context_sql_query_packs_by_source([], "", "shared_context_marker", alpha_path, db_path, "text")
+    expect(output).to_contain("Simple context SQL query")
+    expect(output).to_contain("source_filter: " + alpha_path)
+    expect(output).to_contain("matches: 1")
+    expect(output).to_contain(alpha_path)
+    expect(output).to_contain("alpha_only")
+    expect(output.split(beta_path).len()).to_equal(1)
+    expect(output.split("beta_only").len()).to_equal(1)
+expect(indexed.split(absence_marker).len()).to_equal(1)
 ```
 
 </details>
@@ -315,8 +381,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
