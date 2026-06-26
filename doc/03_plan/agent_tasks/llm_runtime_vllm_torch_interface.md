@@ -248,6 +248,11 @@ Evidence:
   statuses. The default pack readiness reports `blocked` with
   `native_read_range_unavailable`; tests also prove it only reports `ready`
   when all native statuses are `ready`.
+- The streaming readiness gate now emits sanitized JSONL evidence
+  (`svllm_streaming_readiness`) with plan status, execution status, segment
+  count, total byte length, and normalized native capability statuses. Specs
+  prove blocked, ready, loader-error, and unknown-status normalization paths
+  without requiring live NVFS scheduling, pinned buffers, or device staging.
 - `release/x86_64-unknown-linux-gnu/simple check
   src/lib/gc_async_mut/torch/backend.spl
   src/lib/nogc_sync_mut/torch/backend.spl
@@ -270,8 +275,8 @@ Still open:
 
 - Full svLLM streaming through NVFS remains open: async scheduling, native
   `read_range` execution, pinned buffer registration, and device staging are
-  now surfaced by the streaming readiness gate but still report unavailable
-  until real native adapters are implemented.
+  now surfaced by absence-safe JSONL streaming readiness evidence but still
+  report unavailable until real native adapters are implemented.
 - Live CUDA placement against libtorch remains open; source-contract coverage
   now proves optimizer state preserves the parameter device for already-CUDA
   parameters, but end-to-end optimizer execution against a live libtorch CUDA

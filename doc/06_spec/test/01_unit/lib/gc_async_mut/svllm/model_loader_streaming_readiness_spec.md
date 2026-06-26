@@ -27,7 +27,7 @@ model_loader_streaming_readiness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,7 +43,7 @@ model_loader_streaming_readiness_spec -> std
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -58,6 +58,10 @@ expect(readiness.pinned_buffer_status).to_equal("unsupported")
 expect(readiness.device_staging_status).to_equal("unsupported")
 expect(readiness.segment_count).to_equal(1)
 expect(readiness.total_byte_len).to_equal(16)
+expect(readiness.evidence_jsonl).to_contain("\"event\":\"svllm_streaming_readiness\"")
+expect(readiness.evidence_jsonl).to_contain("\"status\":\"blocked\"")
+expect(readiness.evidence_jsonl).to_contain("\"read_range\":\"unsupported\"")
+expect(readiness.evidence_jsonl.contains(absence_marker())).to_equal(false)
 ```
 
 </details>
@@ -67,7 +71,7 @@ expect(readiness.total_byte_len).to_equal(16)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -77,6 +81,8 @@ expect(readiness.status).to_equal("ready")
 expect(readiness.reason).to_equal("ready")
 expect(readiness.plan_status).to_equal("ok")
 expect(readiness.execution_status).to_equal("ready_to_schedule")
+expect(readiness.evidence_jsonl).to_contain("\"status\":\"ready\"")
+expect(readiness.evidence_jsonl).to_contain("\"execution_status\":\"ready_to_schedule\"")
 ```
 
 </details>
@@ -86,7 +92,7 @@ expect(readiness.execution_status).to_equal("ready_to_schedule")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -96,6 +102,29 @@ expect(readiness.status).to_equal("blocked")
 expect(readiness.reason).to_equal("tensor_not_found")
 expect(readiness.plan_status).to_equal("error")
 expect(readiness.segment_count).to_equal(0)
+expect(readiness.evidence_jsonl).to_contain("\"reason\":\"tensor_not_found\"")
+```
+
+</details>
+
+#### normalizes unknown native capability statuses in evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val readiness = svllm_streaming_readiness_from_manifest_text("/tmp/pack", one_tensor_manifest(), "tok_embeddings.weight", "ready", "maybe\\\"bad", "unchecked")
+
+expect(readiness.status).to_equal("blocked")
+expect(readiness.reason).to_equal("pinned_buffer_registration_unavailable")
+expect(readiness.read_range_status).to_equal("ready")
+expect(readiness.pinned_buffer_status).to_equal("unavailable")
+expect(readiness.device_staging_status).to_equal("unchecked")
+expect(readiness.evidence_jsonl).to_contain("\"pinned_buffer\":\"unavailable\"")
+expect(readiness.evidence_jsonl.contains("maybe")).to_equal(false)
 ```
 
 </details>
@@ -119,8 +148,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

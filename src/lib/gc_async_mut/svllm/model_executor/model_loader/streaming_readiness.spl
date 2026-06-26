@@ -1,6 +1,6 @@
 use std.gc_async_mut.svllm.model_executor.model_loader.loader.{LoaderError, load_tensor_stream_plan_from_pack, load_tensor_stream_plan_from_manifest_text}
 
-struct SvllmStreamingReadiness:
+class SvllmStreamingReadiness:
     status: text
     reason: text
     plan_status: text
@@ -10,6 +10,34 @@ struct SvllmStreamingReadiness:
     device_staging_status: text
     segment_count: i64
     total_byte_len: i64
+    evidence_jsonl: text
+
+fn _json_pair(key: text, value: text) -> text:
+    "\"" + key + "\":\"" + _json_safe(value) + "\""
+
+fn _json_num_pair(key: text, value: i64) -> text:
+    "\"" + key + "\":" + str(value)
+
+fn _json_safe(value: text) -> text:
+    var cleaned = value.replace("\\", "_")
+    cleaned = cleaned.replace("\"", "_")
+    cleaned = cleaned.replace("\n", "_")
+    cleaned = cleaned.replace("\r", "_")
+    if cleaned.trim() == "":
+        return "none"
+    cleaned
+
+fn _capability_status(status: text) -> text:
+    val value = status.trim().to_lower()
+    if value == "ready":
+        return "ready"
+    if value == "unsupported":
+        return "unsupported"
+    if value == "unavailable":
+        return "unavailable"
+    if value == "unchecked":
+        return "unchecked"
+    "unavailable"
 
 fn _loader_error_reason(error: LoaderError) -> text:
     match error:
@@ -31,66 +59,62 @@ fn _streaming_reason(read_range_status: text, pinned_buffer_status: text, device
     "ready"
 
 fn svllm_streaming_readiness_from_statuses(pack_root: text, tensor_name: text, read_range_status: text, pinned_buffer_status: text, device_staging_status: text) -> SvllmStreamingReadiness:
+    val normalized_read_range = _capability_status(read_range_status)
+    val normalized_pinned_buffer = _capability_status(pinned_buffer_status)
+    val normalized_device_staging = _capability_status(device_staging_status)
     match load_tensor_stream_plan_from_pack(pack_root, tensor_name, true, true):
         Err(error) =>
-            SvllmStreamingReadiness(
-                status: "blocked",
-                reason: _loader_error_reason(error),
-                plan_status: "error",
-                execution_status: "not_scheduled",
-                read_range_status: read_range_status,
-                pinned_buffer_status: pinned_buffer_status,
-                device_staging_status: device_staging_status,
-                segment_count: 0,
-                total_byte_len: 0
-            )
+            _readiness("blocked", _loader_error_reason(error), "error", "not_scheduled", normalized_read_range, normalized_pinned_buffer, normalized_device_staging, 0, 0)
         Ok(plan) =>
-            val reason = _streaming_reason(read_range_status, pinned_buffer_status, device_staging_status)
+            val reason = _streaming_reason(normalized_read_range, normalized_pinned_buffer, normalized_device_staging)
             val status = if reason == "ready": "ready" else: "blocked"
             val execution_status = if status == "ready": "ready_to_schedule" else: plan.execution_status
-            SvllmStreamingReadiness(
-                status: status,
-                reason: reason,
-                plan_status: "ok",
-                execution_status: execution_status,
-                read_range_status: read_range_status,
-                pinned_buffer_status: pinned_buffer_status,
-                device_staging_status: device_staging_status,
-                segment_count: plan.segment_count,
-                total_byte_len: plan.total_byte_len
-            )
+            _readiness(status, reason, "ok", execution_status, normalized_read_range, normalized_pinned_buffer, normalized_device_staging, plan.segment_count, plan.total_byte_len)
 
 fn svllm_streaming_readiness_from_pack(pack_root: text, tensor_name: text) -> SvllmStreamingReadiness:
     svllm_streaming_readiness_from_statuses(pack_root, tensor_name, "unsupported", "unsupported", "unsupported")
 
 fn svllm_streaming_readiness_from_manifest_text(pack_root: text, manifest_text: text, tensor_name: text, read_range_status: text, pinned_buffer_status: text, device_staging_status: text) -> SvllmStreamingReadiness:
+    val normalized_read_range = _capability_status(read_range_status)
+    val normalized_pinned_buffer = _capability_status(pinned_buffer_status)
+    val normalized_device_staging = _capability_status(device_staging_status)
     match load_tensor_stream_plan_from_manifest_text(pack_root, manifest_text, tensor_name, true, true):
         Err(error) =>
-            SvllmStreamingReadiness(
-                status: "blocked",
-                reason: _loader_error_reason(error),
-                plan_status: "error",
-                execution_status: "not_scheduled",
-                read_range_status: read_range_status,
-                pinned_buffer_status: pinned_buffer_status,
-                device_staging_status: device_staging_status,
-                segment_count: 0,
-                total_byte_len: 0
-            )
+            _readiness("blocked", _loader_error_reason(error), "error", "not_scheduled", normalized_read_range, normalized_pinned_buffer, normalized_device_staging, 0, 0)
         Ok(plan) =>
-            val reason = _streaming_reason(read_range_status, pinned_buffer_status, device_staging_status)
+            val reason = _streaming_reason(normalized_read_range, normalized_pinned_buffer, normalized_device_staging)
             val status = if reason == "ready": "ready" else: "blocked"
             val execution_status = if status == "ready": "ready_to_schedule" else: plan.execution_status
-            SvllmStreamingReadiness(
-                status: status,
-                reason: reason,
-                plan_status: "ok",
-                execution_status: execution_status,
-                read_range_status: read_range_status,
-                pinned_buffer_status: pinned_buffer_status,
-                device_staging_status: device_staging_status,
-                segment_count: plan.segment_count,
-                total_byte_len: plan.total_byte_len
-            )
+            _readiness(status, reason, "ok", execution_status, normalized_read_range, normalized_pinned_buffer, normalized_device_staging, plan.segment_count, plan.total_byte_len)
 
-export SvllmStreamingReadiness, svllm_streaming_readiness_from_pack, svllm_streaming_readiness_from_statuses, svllm_streaming_readiness_from_manifest_text
+fn _readiness(status: text, reason: text, plan_status: text, execution_status: text, read_range_status: text, pinned_buffer_status: text, device_staging_status: text, segment_count: i64, total_byte_len: i64) -> SvllmStreamingReadiness:
+    val result = SvllmStreamingReadiness(
+        status: status,
+        reason: reason,
+        plan_status: plan_status,
+        execution_status: execution_status,
+        read_range_status: read_range_status,
+        pinned_buffer_status: pinned_buffer_status,
+        device_staging_status: device_staging_status,
+        segment_count: segment_count,
+        total_byte_len: total_byte_len,
+        evidence_jsonl: ""
+    )
+    result.evidence_jsonl = svllm_streaming_readiness_jsonl_event(result)
+    result
+
+fn svllm_streaming_readiness_jsonl_event(readiness: SvllmStreamingReadiness) -> text:
+    "{" +
+    _json_pair("event", "svllm_streaming_readiness") +
+    "," + _json_pair("status", readiness.status) +
+    "," + _json_pair("reason", readiness.reason) +
+    "," + _json_pair("plan_status", readiness.plan_status) +
+    "," + _json_pair("execution_status", readiness.execution_status) +
+    "," + _json_pair("read_range", readiness.read_range_status) +
+    "," + _json_pair("pinned_buffer", readiness.pinned_buffer_status) +
+    "," + _json_pair("device_staging", readiness.device_staging_status) +
+    "," + _json_num_pair("segment_count", readiness.segment_count) +
+    "," + _json_num_pair("total_byte_len", readiness.total_byte_len) +
+    "}\n"
+
+export SvllmStreamingReadiness, svllm_streaming_readiness_from_pack, svllm_streaming_readiness_from_statuses, svllm_streaming_readiness_from_manifest_text, svllm_streaming_readiness_jsonl_event

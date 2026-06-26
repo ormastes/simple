@@ -7,13 +7,13 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 117
+- **Total Lines:** 40
 
 ---
 
-## Other (1 features)
+## Standard Library (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Linux Vulkan render-log compare gate](test/03_system/check/linux_vulkan_render_log_compare_spec.md) | Partial | N/A | 8 | 60% | 117 lines |
+| [Model Loader Streaming Readiness Specification](test/unit/lib/gc_async_mut/svllm/model_loader_streaming_readiness_spec.md) | Minimal | N/A | 4 | 20% | 40 lines |
 
