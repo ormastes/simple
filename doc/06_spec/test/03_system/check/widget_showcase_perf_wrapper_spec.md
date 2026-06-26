@@ -27,7 +27,7 @@ widget_showcase_perf_wrapper_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -97,6 +97,9 @@ PLAN_ONLY=1 RESOLUTION=8k sh scripts/check/check-widget-showcase-4k-200fps.shs
 - Plan-only evidence emits the same measured field keys as a real row with empty
   values for FPS, frame timing, observed RSS, checksum, nonzero readback pixels,
   render mode, redraw count, and the readback proof status fields.
+- Producer `frame_elapsed_ns` is trusted only when it is positive and no larger
+  than the wrapper's measured run window; impossible producer timing falls back
+  to measured elapsed time and cannot make a slow probe pass 200 FPS.
 - Native plan-only mode writes the generated alias source that calls the
   selected probe function directly.
 - The GUI showcase app routes `SHOWCASE_8K_PERF=1` through the env facade to
@@ -206,7 +209,7 @@ environment dispatch.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 51 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -230,6 +233,7 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_target_fps=200")
 expect(evidence).to_contain("gui_showcase_4k_200fps_pixels=8294400")
 expect(evidence).to_contain("gui_showcase_4k_200fps_fps_x1000=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frame_avg_ns=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_frame_elapsed_ns_status=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frame_p50_ns=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frame_p95_ns=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_max_rss_kb=")
@@ -275,7 +279,7 @@ expect(alias_src).to_contain("run_4k_perf_probe()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 51 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -299,6 +303,7 @@ expect(evidence).to_contain("gui_showcase_8k_perf_target_fps=200")
 expect(evidence).to_contain("gui_showcase_8k_perf_pixels=33177600")
 expect(evidence).to_contain("gui_showcase_8k_perf_fps_x1000=")
 expect(evidence).to_contain("gui_showcase_8k_perf_frame_avg_ns=")
+expect(evidence).to_contain("gui_showcase_8k_perf_frame_elapsed_ns_status=")
 expect(evidence).to_contain("gui_showcase_8k_perf_frame_p50_ns=")
 expect(evidence).to_contain("gui_showcase_8k_perf_frame_p95_ns=")
 expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_kb=")
@@ -343,7 +348,7 @@ expect(alias_src).to_contain("run_8k_perf_probe()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -351,11 +356,49 @@ step("Read the wrapper source")
 val script = file_read("scripts/check/check-widget-showcase-4k-200fps.shs")
 
 step("Assert p50 and p95 are derived from the retained timing window")
+expect(script).to_contain("frame_elapsed_ns_status=\"$(positive_int_range_status")
+expect(script).to_contain("\"$FRAMES\" \"$elapsed_ns\"")
 expect(script).to_contain("frame_avg_ns=$((fps_elapsed_ns / FRAMES))")
 expect(script).to_contain("frame_p50_ns=$frame_avg_ns")
 expect(script).to_contain("frame_p95_ns=$frame_avg_ns")
+expect(script).to_contain("_frame_elapsed_ns_status=$frame_elapsed_ns_status")
 expect(script).to_contain("_frame_p50_ns=$frame_p50_ns")
 expect(script).to_contain("_frame_p95_ns=$frame_p95_ns")
+```
+
+</details>
+
+#### does not let impossible producer timing pass a slow retained probe
+
+- Run a fake native probe that sleeps but claims a one-nanosecond frame window
+   - Expected: code equals `1`
+- Assert the wrapper rejects the impossible producer timing and uses measured elapsed time
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_status") equals `fail`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_reason") equals `below-200fps`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_frame_elapsed_ns") equals `1`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_frame_elapsed_ns_status") equals `fail`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_fps_elapsed_ns") == "1" is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run a fake native probe that sleeps but claims a one-nanosecond frame window")
+val command = "rm -rf build/test-widget-showcase-impossible-frame-timing && mkdir -p build/test-widget-showcase-impossible-frame-timing && printf '%s\\n' '#!/bin/sh' 'sleep 2' 'echo gui_showcase_4k_perf_width=3840' 'echo gui_showcase_4k_perf_height=2160' 'echo gui_showcase_4k_perf_frame_elapsed_ns=1' 'echo gui_showcase_4k_perf_pixels=8294400' 'echo gui_showcase_4k_perf_nonzero_pixels=100' 'echo gui_showcase_4k_perf_checksum=123456' 'echo gui_showcase_4k_perf_render_mode=retained-static-frame' 'echo gui_showcase_4k_perf_redraw_frames=1' > build/test-widget-showcase-impossible-frame-timing/fake-native && chmod +x build/test-widget-showcase-impossible-frame-timing/fake-native && printf '%s\\n' '#!/bin/sh' 'out=' 'while [ $# -gt 0 ]; do' 'if [ $1 = --output ]; then' 'shift' 'out=$1' 'fi' 'shift || true' 'done' 'cp build/test-widget-showcase-impossible-frame-timing/fake-native $out' 'chmod +x $out' > build/test-widget-showcase-impossible-frame-timing/fake-simple && chmod +x build/test-widget-showcase-impossible-frame-timing/fake-simple && SIMPLE_BIN=build/test-widget-showcase-impossible-frame-timing/fake-simple BUILD_DIR=build/test-widget-showcase-impossible-frame-timing RESOLUTION=4k TIMEOUT_SECS=5 sh scripts/check/check-widget-showcase-4k-200fps.shs > build/test-widget-showcase-impossible-frame-timing/stdout.txt 2> build/test-widget-showcase-impossible-frame-timing/stderr.txt"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+step("Assert the wrapper rejects the impossible producer timing and uses measured elapsed time")
+val evidence = file_read("build/test-widget-showcase-impossible-frame-timing/status.env")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_status")).to_equal("fail")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_reason")).to_equal("below-200fps")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_frame_elapsed_ns")).to_equal("1")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_frame_elapsed_ns_status")).to_equal("fail")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_fps_elapsed_ns") == "1").to_equal(false)
 ```
 
 </details>
@@ -424,8 +467,8 @@ expect(showcase.contains("rt_env_get(")).to_equal(false)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
