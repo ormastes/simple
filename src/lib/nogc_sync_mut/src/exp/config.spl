@@ -89,34 +89,30 @@ impl ExpConfig:
     fn get_text(key: text) -> text?:
         """Get a config value as text."""
         val v = self.get(key)
-        if v.?:
-            v.unwrap().as_text()
-        else:
-            nil
+        match v:
+            case Some(value): value.as_text()
+            case None: nil
 
     fn get_int(key: text) -> i64?:
         """Get a config value as integer."""
         val v = self.get(key)
-        if v.?:
-            v.unwrap().as_int()
-        else:
-            nil
+        match v:
+            case Some(value): value.as_int()
+            case None: nil
 
     fn get_float(key: text) -> f64?:
         """Get a config value as float."""
         val v = self.get(key)
-        if v.?:
-            v.unwrap().as_float()
-        else:
-            nil
+        match v:
+            case Some(value): value.as_float()
+            case None: nil
 
     fn get_bool(key: text) -> bool?:
         """Get a config value as bool."""
         val v = self.get(key)
-        if v.?:
-            v.unwrap().as_bool()
-        else:
-            nil
+        match v:
+            case Some(value): value.as_bool()
+            case None: nil
 
     fn hash() -> text:
         """Compute SHA256 hash of config for deterministic run IDs."""
@@ -155,9 +151,11 @@ pub fn load_exp_config(base_dir: text, cli_overrides: [text]) -> Result<ExpConfi
     val base_path = "{base_dir}/config.sdn"
     if file_exists(base_path):
         val base_result = load_sdn_config(base_path)
-        if base_result.is_err():
-            return Err(base_result.unwrap_err())
-        config = base_result.unwrap()
+        match base_result:
+            case Ok(base_config):
+                config = base_config
+            case Err(err):
+                return Err(err)
         source_files = [base_path]
 
     # Process CLI overrides: split into composition selects and value overrides
@@ -173,9 +171,12 @@ pub fn load_exp_config(base_dir: text, cli_overrides: [text]) -> Result<ExpConfi
         val comp_path = "{base_dir}/configs/{key}/{value}.sdn"
         if not key.contains(".") and file_exists(comp_path):
             val comp_result = load_sdn_config(comp_path)
-            if comp_result.is_ok():
-                config = merge_configs(config, comp_result.unwrap())
-                source_files.push(comp_path)
+            match comp_result:
+                case Ok(comp_config):
+                    config = merge_configs(config, comp_config)
+                    source_files.push(comp_path)
+                case Err(_):
+                    pass_do_nothing
         else:
             overrides[key] = value
 
@@ -199,10 +200,11 @@ pub fn load_sdn_config(path: text) -> Result<ExpConfig, text>:
 
     val content = file_read(path)
     val parsed = parse_sdn(content)
-    if parsed.is_err():
-        return Err("Failed to parse {path}: {parsed.unwrap_err()}")
+    val parsed_sdn = match parsed:
+        case Ok(value): value
+        case Err(err): return Err("Failed to parse {path}: {err}")
 
-    val values = sdn_to_config_values(parsed.unwrap())
+    val values = sdn_to_config_values(parsed_sdn)
     Ok(ExpConfig(values: values, source_files: [path], overrides: {}))
 
 # ============================================================================
@@ -347,12 +349,18 @@ fn parse_config_value(s: text) -> ConfigValue:
         return ConfigValue.Null
     # Try integer
     val as_int = try_parse_int(s)
-    if as_int.?:
-        return ConfigValue.Int(as_int.unwrap())
+    match as_int:
+        case Some(value):
+            return ConfigValue.Int(value)
+        case None:
+            pass_do_nothing
     # Try float
     val as_float = try_parse_float(s)
-    if as_float.?:
-        return ConfigValue.Float(as_float.unwrap())
+    match as_float:
+        case Some(value):
+            return ConfigValue.Float(value)
+        case None:
+            pass_do_nothing
     ConfigValue.Str(s)
 
 fn serialize_config(values: Dict<text, ConfigValue>) -> text:
