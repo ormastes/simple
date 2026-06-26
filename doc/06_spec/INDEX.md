@@ -7,7 +7,7 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 146
+- **Total Lines:** 122
 
 ---
 
@@ -15,5 +15,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Widget Showcase Perf Wrapper Contract](test/03_system/check/widget_showcase_perf_wrapper_spec.md) | Partial | N/A | 6 | 60% | 146 lines |
+| [GUI Showcase Perf Frame Timing Contract](test/03_system/check/gui_showcase_perf_frame_timing_contract_spec.md) | Partial | N/A | 2 | 60% | 122 lines |
 
