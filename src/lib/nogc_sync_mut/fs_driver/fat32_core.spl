@@ -803,11 +803,17 @@ impl Fat32Core:
         while current >= 2 and current < (self.total_clusters + 2) and max_iter > 0:
             val next_result = self.read_fat_entry(current)
             if next_result.is_err():
-                return Err(next_result.unwrap_err())
-            val next = next_result.unwrap()
+                return match next_result:
+                    Ok(_): Err("failed to read FAT entry")
+                    Err(err): Err(err)
+            val next = match next_result:
+                Ok(value): value
+                Err(err): return Err(err)
             val free_result = self.write_fat_entry(current, FAT32_FREE)
             if free_result.is_err():
-                return Err(free_result.unwrap_err())
+                return match free_result:
+                    Ok(_): Err("failed to free FAT entry")
+                    Err(err): Err(err)
             if next >= FAT32_EOC or next < 2:
                 break
             current = next
@@ -826,7 +832,9 @@ impl Fat32Core:
         if keep_bytes == 0u64:
             val freed = self.free_chain(first_cluster)
             if freed.is_err():
-                return Err(freed.unwrap_err())
+                return match freed:
+                    Ok(_): Err("failed to free FAT chain")
+                    Err(err): Err(err)
             self.invalidate_chain(first_cluster)
             return Ok(0)
         var clusters_to_keep = keep_bytes / cluster_size
@@ -837,30 +845,49 @@ impl Fat32Core:
         while kept < clusters_to_keep:
             val next_result = self.read_fat_entry(current)
             if next_result.is_err():
-                return Err(next_result.unwrap_err())
-            val next = next_result.unwrap()
+                return match next_result:
+                    Ok(_): Err("failed to read FAT entry")
+                    Err(err): Err(err)
+            val next = match next_result:
+                Ok(value): value
+                Err(err): return Err(err)
             if next >= FAT32_EOC or next < 2:
                 val ext = self.alloc_cluster()
                 if ext.is_err():
-                    return Err(ext.unwrap_err())
-                val link = self.write_fat_entry(current, ext.unwrap())
+                    return match ext:
+                        Ok(_): Err("failed to allocate FAT cluster")
+                        Err(err): Err(err)
+                val ext_cluster = match ext:
+                    Ok(value): value
+                    Err(err): return Err(err)
+                val link = self.write_fat_entry(current, ext_cluster)
                 if link.is_err():
-                    return Err(link.unwrap_err())
-                current = ext.unwrap()
+                    return match link:
+                        Ok(_): Err("failed to link FAT cluster")
+                        Err(err): Err(err)
+                current = ext_cluster
             else:
                 current = next
             kept = kept + 1u64
         val tail_result = self.read_fat_entry(current)
         if tail_result.is_err():
-            return Err(tail_result.unwrap_err())
-        val tail = tail_result.unwrap()
+            return match tail_result:
+                Ok(_): Err("failed to read FAT tail")
+                Err(err): Err(err)
+        val tail = match tail_result:
+            Ok(value): value
+            Err(err): return Err(err)
         if tail >= 2 and tail < FAT32_EOC:
             val freed_tail = self.free_chain(tail)
             if freed_tail.is_err():
-                return Err(freed_tail.unwrap_err())
+                return match freed_tail:
+                    Ok(_): Err("failed to free FAT tail")
+                    Err(err): Err(err)
         val mark_eoc = self.write_fat_entry(current, FAT32_EOC)
         if mark_eoc.is_err():
-            return Err(mark_eoc.unwrap_err())
+            return match mark_eoc:
+                Ok(_): Err("failed to mark FAT chain end")
+                Err(err): Err(err)
         self.invalidate_chain(first_cluster)
         Ok(first_cluster)
 
