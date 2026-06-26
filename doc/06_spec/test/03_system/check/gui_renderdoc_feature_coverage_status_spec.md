@@ -377,7 +377,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 867 lines folded for reproduction.
+Runnable source: 879 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -898,12 +898,18 @@ val electron_browser_backing_gpu = _value_of(evidence, "gui_web_2d_vulkan_electr
 val electron_browser_backing_display = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_display_type")
 val electron_browser_backing_hardware = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan")
 val electron_browser_backing_gl = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts")
+val electron_browser_backing_skia = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_skia_backend_type")
+val electron_browser_backing_renderer = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_gl_renderer")
+val electron_browser_backing_argb_source = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_argb_source")
+val electron_browser_backing_argb_source_status = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_argb_source_file_status")
 val chrome_browser_backing_status = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_status")
 val chrome_browser_backing_reason = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_reason")
 val chrome_browser_backing_display = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_display_type")
 val chrome_browser_backing_gpu = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_gpu_compositing")
 val chrome_browser_backing_gl = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts")
 val chrome_browser_backing_hardware = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan")
+val chrome_browser_backing_skia = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_skia_backend_type")
+val chrome_browser_backing_renderer = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_gl_renderer")
 val renderdoc_blocker_status = _value_of(evidence, "gui_web_2d_vulkan_renderdoc_blocker_status")
 val renderdoc_blocker_reason = _value_of(evidence, "gui_web_2d_vulkan_renderdoc_blocker_reason")
 val renderdoc_blocker_gate_count = _value_of(evidence, "gui_web_2d_vulkan_renderdoc_blocker_gate_count")
@@ -1145,9 +1151,15 @@ if electron_browser_backing_status.len() > 0:
     expect(electron_browser_backing_gpu.len()).to_be_greater_than(0)
     expect(electron_browser_backing_hardware.len()).to_be_greater_than(0)
     expect(electron_browser_backing_gl.len()).to_be_greater_than(0)
+    expect(electron_browser_backing_skia.len()).to_be_greater_than(0)
+    expect(electron_browser_backing_renderer.len()).to_be_greater_than(0)
+    expect(electron_browser_backing_argb_source.len()).to_be_greater_than(0)
+    expect(electron_browser_backing_argb_source_status.len()).to_be_greater_than(0)
 if chrome_browser_backing_status.len() > 0:
     expect(chrome_browser_backing_gpu.len()).to_be_greater_than(0)
     expect(chrome_browser_backing_hardware.len()).to_be_greater_than(0)
+    expect(chrome_browser_backing_skia.len()).to_be_greater_than(0)
+    expect(chrome_browser_backing_renderer.len()).to_be_greater_than(0)
     if chrome_browser_backing_status == "pass":
         expect(chrome_browser_backing_display + chrome_browser_backing_gl).to_contain("vulkan")
 expect(production_gate_status.len()).to_be_greater_than(0)

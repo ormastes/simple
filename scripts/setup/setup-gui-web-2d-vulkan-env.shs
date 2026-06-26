@@ -544,29 +544,35 @@ if [ "$MODE" = "--browser-backing" ] || [ "$MODE" = "--run" ] || [ "$MODE" = "--
     fi
 
     if [ "$MODE" = "--browser-backing" ] && have node; then
-        node - "$ELECTRON_ARGB" "$CHROME_ARGB_PROOF" >>"$EVIDENCE_ENV" <<'NODE'
+        node - "$ELECTRON_ARGB_PROOF" "$ELECTRON_ARGB" "$CHROME_ARGB_PROOF" >>"$EVIDENCE_ENV" <<'NODE'
 const fs = require("fs");
-const electronPath = process.argv[2] || "";
-const chromeProofPath = process.argv[3] || "";
+const electronProofPath = process.argv[2] || "";
+const electronArgbPath = process.argv[3] || "";
+const chromeProofPath = process.argv[4] || "";
 function emit(k, v) { console.log(`${k}=${v === undefined || v === null ? "" : v}`); }
 function readJson(path) {
   try { return path && fs.existsSync(path) ? JSON.parse(fs.readFileSync(path, "utf8")) : null; }
   catch (_err) { return null; }
 }
-const electron = readJson(electronPath);
+const electronProof = readJson(electronProofPath);
+const electronArgb = readJson(electronArgbPath);
 const chrome = readJson(chromeProofPath);
 function sourceFileStatus(path) {
   return path ? (fs.existsSync(path) ? "pass" : "missing") : "unavailable";
 }
-const electronVulkan = electron && electron.gpuFeatureStatus ? String(electron.gpuFeatureStatus.vulkan || "") : "";
-const electronGpuCompositing = electron && electron.gpuFeatureStatus ? String(electron.gpuFeatureStatus.gpu_compositing || "") : "";
-const electronAux = electron && electron.gpuInfo && electron.gpuInfo.auxAttributes ? electron.gpuInfo.auxAttributes : {};
+const electronFeatureStatus = electronProof && electronProof.gpu_feature_status ? electronProof.gpu_feature_status : (electronArgb && electronArgb.gpuFeatureStatus ? electronArgb.gpuFeatureStatus : {});
+const electronGpuInfo = electronProof && electronProof.gpu_info ? electronProof.gpu_info : (electronArgb && electronArgb.gpuInfo ? electronArgb.gpuInfo : {});
+const electronVulkan = String(electronFeatureStatus.vulkan || "");
+const electronGpuCompositing = String(electronFeatureStatus.gpu_compositing || "");
+const electronAux = electronGpuInfo && electronGpuInfo.auxAttributes ? electronGpuInfo.auxAttributes : {};
 const electronDisplay = String(electronAux.displayType || "");
 const electronHardware = Boolean(electronAux.hardwareSupportsVulkan);
 const electronGlParts = String(electronAux.glImplementationParts || "");
+const electronSkiaBackend = String(electronAux.skiaBackendType || "");
+const electronGlRenderer = String(electronAux.glRenderer || "");
 const electronEnabled = /enabled/i.test(electronVulkan);
 const electronGpuEnabled = /enabled/i.test(electronGpuCompositing);
-const electronMentionsVulkan = /vulkan/i.test(`${electronDisplay} ${electronGlParts}`);
+const electronMentionsVulkan = /vulkan/i.test(`${electronDisplay} ${electronGlParts} ${electronSkiaBackend} ${electronGlRenderer}`);
 const electronStatus = electronEnabled && electronGpuEnabled && electronHardware && electronMentionsVulkan ? "pass" : "fail";
 const electronReason = electronStatus === "pass"
   ? "electron-vulkan-backed"
@@ -577,14 +583,18 @@ const chromeAux = chromeGpuInfo && chromeGpuInfo.gpu ? chromeGpuInfo.gpu.auxAttr
 const chromeDisplay = String(chromeAux.displayType || "");
 const chromeGpuCompositing = String(chromeFeatureStatus.gpu_compositing || "");
 const chromeGl = String(chromeAux.glImplementationParts || "");
+const chromeSkiaBackend = String(chromeAux.skiaBackendType || "");
+const chromeGlRenderer = String(chromeAux.glRenderer || "");
 const chromeHardware = Boolean(chromeAux.hardwareSupportsVulkan);
 const chromeGpuEnabled = /enabled/i.test(chromeGpuCompositing);
-const chromeMentionsVulkan = /vulkan/i.test(`${chromeDisplay} ${chromeGl}`);
+const chromeMentionsVulkan = /vulkan/i.test(`${chromeDisplay} ${chromeGl} ${chromeSkiaBackend} ${chromeGlRenderer}`);
 const chromeStatus = chromeGpuEnabled && chromeHardware && chromeMentionsVulkan ? "pass" : "fail";
 const chromeReason = chromeStatus === "pass" ? "chrome-vulkan-backed" : (chromeGpuInfo ? (!chromeGpuEnabled ? "chrome-vulkan-gpu-compositing-disabled" : (chromeHardware ? "chrome-vulkan-not-proven" : "chrome-vulkan-hardware-missing")) : "chrome-gpu-info-missing");
 emit("gui_web_2d_vulkan_browser_backing_mode", "gpu-feature-status");
-emit("gui_web_2d_vulkan_electron_browser_backing_source", electronPath);
-emit("gui_web_2d_vulkan_electron_browser_backing_source_file_status", sourceFileStatus(electronPath));
+emit("gui_web_2d_vulkan_electron_browser_backing_source", electronProofPath);
+emit("gui_web_2d_vulkan_electron_browser_backing_source_file_status", sourceFileStatus(electronProofPath));
+emit("gui_web_2d_vulkan_electron_browser_backing_argb_source", electronArgbPath);
+emit("gui_web_2d_vulkan_electron_browser_backing_argb_source_file_status", sourceFileStatus(electronArgbPath));
 emit("gui_web_2d_vulkan_electron_browser_backing_status", electronStatus);
 emit("gui_web_2d_vulkan_electron_browser_backing_reason", electronReason);
 emit("gui_web_2d_vulkan_electron_browser_backing_vulkan", electronVulkan);
@@ -592,6 +602,8 @@ emit("gui_web_2d_vulkan_electron_browser_backing_gpu_compositing", electronGpuCo
 emit("gui_web_2d_vulkan_electron_browser_backing_display_type", electronDisplay);
 emit("gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan", electronHardware ? "true" : "false");
 emit("gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts", electronGlParts);
+emit("gui_web_2d_vulkan_electron_browser_backing_skia_backend_type", electronSkiaBackend);
+emit("gui_web_2d_vulkan_electron_browser_backing_gl_renderer", electronGlRenderer);
 emit("gui_web_2d_vulkan_chrome_browser_backing_source", chromeProofPath);
 emit("gui_web_2d_vulkan_chrome_browser_backing_source_file_status", sourceFileStatus(chromeProofPath));
 emit("gui_web_2d_vulkan_chrome_browser_backing_status", chromeStatus);
@@ -599,6 +611,8 @@ emit("gui_web_2d_vulkan_chrome_browser_backing_reason", chromeReason);
 emit("gui_web_2d_vulkan_chrome_browser_backing_display_type", chromeDisplay);
 emit("gui_web_2d_vulkan_chrome_browser_backing_gpu_compositing", chromeGpuCompositing);
 emit("gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts", chromeGl);
+emit("gui_web_2d_vulkan_chrome_browser_backing_skia_backend_type", chromeSkiaBackend);
+emit("gui_web_2d_vulkan_chrome_browser_backing_gl_renderer", chromeGlRenderer);
 emit("gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan", chromeHardware ? "true" : "false");
 emit("gui_web_2d_vulkan_browser_backing_status", electronStatus === "pass" && chromeStatus === "pass" ? "pass" : "fail");
 emit("gui_web_2d_vulkan_browser_backing_reason", electronStatus === "pass" && chromeStatus === "pass" ? "pass" : `${electronReason};${chromeReason}`);

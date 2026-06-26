@@ -249,6 +249,10 @@ Both Electron and Chrome child passes also require their
 enabled in the captured GPU feature status; the `--browser-backing` producer
 emits `*_browser_backing_source_file_status`, and the aggregate verifies or
 recomputes that status for older evidence before accepting proof.
+Electron browser backing uses the compact `electron_argb_proof.json` as its
+`gui_web_2d_vulkan_electron_browser_backing_source`; the full ARGB capture is
+reported separately as `gui_web_2d_vulkan_electron_browser_backing_argb_source`
+so operators do not need to open the large pixel payload to inspect GPU state.
 The aggregate also normalizes stale child rows: a child `pass` without those
 matching proof fields is emitted as `fail` with `electron-vulkan-proof-missing`
 or `chrome-vulkan-proof-missing`, so agents must fix the probe evidence rather
@@ -259,9 +263,13 @@ For failed or partial hosts, inspect
 `gui_web_2d_vulkan_electron_browser_backing_display_type`,
 `gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan`,
 `gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts`,
+`gui_web_2d_vulkan_electron_browser_backing_skia_backend_type`,
+`gui_web_2d_vulkan_electron_browser_backing_gl_renderer`,
 `gui_web_2d_vulkan_chrome_browser_backing_display_type`,
 `gui_web_2d_vulkan_chrome_browser_backing_gpu_compositing`,
-`gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts`, and the
+`gui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts`,
+`gui_web_2d_vulkan_chrome_browser_backing_skia_backend_type`,
+`gui_web_2d_vulkan_chrome_browser_backing_gl_renderer`, and the
 matching `*_browser_backing_source` files before changing Chromium flags.
 RenderDoc capture and gate readiness remains a separate blocker reported by
 `gui_web_2d_vulkan_renderdoc_blocker_*`.
