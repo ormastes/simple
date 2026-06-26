@@ -27,7 +27,7 @@ gui_renderdoc_feature_coverage_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 31 | 31 | 0 | 0 |
+| 32 | 32 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1978,6 +1978,33 @@ expect(evidence).to_contain("gui_showcase_8k_perf_reason=invalid-8k-perf-provena
 
 </details>
 
+#### rejects retained 4K pass rows produced by fallback execution
+
+- Create an otherwise complete retained 4K row with interpreter fallback provenance
+   - Expected: code equals `0`
+- Assert the aggregate fails fallback 4K provenance
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create an otherwise complete retained 4K row with interpreter fallback provenance")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance && mkdir -p build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source && printf 'showcase retained log\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/showcase.log && printf 'elapsed_ms=597\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/time.log && printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_reason=met-target-fps\\ngui_showcase_4k_200fps_resolution=4k\\ngui_showcase_4k_200fps_width=3840\\ngui_showcase_4k_200fps_height=2160\\ngui_showcase_4k_200fps_frames=200\\ngui_showcase_4k_200fps_fps_x1000=201000\\ngui_showcase_4k_200fps_frame_avg_ns=4975124\\ngui_showcase_4k_200fps_frame_p50_ns=4975124\\ngui_showcase_4k_200fps_frame_p95_ns=4975124\\ngui_showcase_4k_200fps_target_fps=200\\ngui_showcase_4k_200fps_max_rss_kb=131072\\ngui_showcase_4k_200fps_max_rss_budget_kb=262144\\ngui_showcase_4k_200fps_rss_status=pass\\ngui_showcase_4k_200fps_pixels=8294400\\ngui_showcase_4k_200fps_nonzero_pixels=1000\\ngui_showcase_4k_200fps_checksum=123456\\ngui_showcase_4k_200fps_render_mode=retained-static-frame\\ngui_showcase_4k_200fps_redraw_frames=1\\ngui_showcase_4k_200fps_source_revision=testrev123\\ngui_showcase_4k_200fps_simple_bin=src/compiler_rust/target/release/simple\\ngui_showcase_4k_200fps_use_native=0\\ngui_showcase_4k_200fps_native_build_mode=interpreter\\ngui_showcase_4k_200fps_fallback_state=interpreter-fallback\\ngui_showcase_4k_200fps_log=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/showcase.log\\ngui_showcase_4k_200fps_time_log=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/status.env && GUI_SHOWCASE_4K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate fails fallback 4K provenance")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/out/evidence.env")
+expect(evidence).to_contain("gui_showcase_4k_200fps_status=fail")
+expect(evidence).to_contain("gui_showcase_4k_200fps_reason=invalid-4k-perf-provenance:use_native=0;native_build_mode=interpreter;fallback_state=interpreter-fallback")
+```
+
+</details>
+
 #### rejects 8K pass rows when RSS budget status is not pass
 
 - Create a retained 8K status env with failing RSS status
@@ -2444,8 +2471,8 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=simple-runtim
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 31 |
-| Active scenarios | 31 |
+| Total scenarios | 32 |
+| Active scenarios | 32 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
