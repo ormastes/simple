@@ -1475,7 +1475,7 @@ expect(blocked_gates.contains("production GUI/web font offload readback evidence
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1490,7 +1490,8 @@ val blocked_gates = _value_of(evidence, "blocked_completion_gates")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=partial-production-parity-source-status")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env_status=pass")
-expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_status=missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_reason=missing-production-parity-source-status")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_partial_status=partial")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_partial_reason=missing-top-level-production-parity-status")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_refresh_command=sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
@@ -2239,7 +2240,7 @@ expect(evidence).to_contain("production GUI/web raw Metal readback evidence")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2250,7 +2251,8 @@ expect(code).to_equal(0)
 
 step("Assert missing Metal readback remains a named blocker")
 val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-metal-missing/out/evidence.env")
-expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readback_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readback_status=missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readback_reason=missing-metal-readback-evidence")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_readback_status=pass")
 expect(evidence).to_contain("blocked_completion_gates=")
 expect(evidence).to_contain("production GUI/web raw Metal readback evidence")

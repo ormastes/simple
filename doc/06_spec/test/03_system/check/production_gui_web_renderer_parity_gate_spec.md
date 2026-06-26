@@ -260,14 +260,14 @@ if status == "pass":
     expect(source_status).to_equal("pass")
 else:
     expect(reason.len()).to_be_greater_than(0)
-if surface_tauri_status.len() > 0:
+if surface_tauri_status.len() > 0 and surface_tauri_status != "missing":
     expect(surface_tauri_backend.len()).to_be_greater_than(0)
     if surface_tauri_backend == "macos-wkwebview-snapshot":
         expect(surface_tauri_required).to_equal("swift,node")
     else:
         expect(surface_tauri_backend).to_equal("x11-xvfb-window-screenshot")
         expect(surface_tauri_required).to_equal("cargo,xvfb-run,dbus-run-session,xdotool,import,convert,node")
-if surface_chrome_status.len() > 0:
+if surface_chrome_status.len() > 0 and surface_chrome_status != "missing":
     expect(surface_chrome_backend.len()).to_be_greater_than(0)
 ```
 
@@ -278,7 +278,7 @@ if surface_chrome_status.len() > 0:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -290,7 +290,8 @@ val evidence = file_read("build/test-production-gui-web-renderer-parity-gate-sta
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=partial-production-parity-source-status")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env_status=pass")
-expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_status=missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_reason=missing-production-parity-source-status")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_partial_status=partial")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_partial_reason=missing-top-level-production-parity-status")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_refresh_command=sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
@@ -506,7 +507,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_man
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -517,6 +518,11 @@ expect(code).to_equal(0)
 val evidence = file_read("build/test-production-gui-web-renderer-parity-gate-surface-missing/out/evidence.env")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=surface-manifest-capture-not-pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_electron_capture_status=missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_status=missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_reason=missing-tauri-capture-evidence")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_status=missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_reason=missing-chrome-capture-evidence")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_surface_manifest_tauri_live_capture=true")
 ```
 
@@ -527,7 +533,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_su
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -540,7 +546,8 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=metal-readback-not-pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_backend_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_font_offload_status=pass")
-expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readback_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readback_status=missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readback_reason=missing-metal-readback-evidence")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_readback_status=pass")
 ```
 
