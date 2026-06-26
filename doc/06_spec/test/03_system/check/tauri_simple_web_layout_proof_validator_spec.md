@@ -27,7 +27,7 @@ tauri_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -85,6 +85,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   count, and include nonzero pixels.
 - Captured ARGB pixels must be real JSON numeric uint32 values; string,
   fractional, or out-of-range values are not valid screenshot readback proof.
+- Requested viewport, ARGB readback dimensions, frame timing, overlay counts,
+  and mismatch counts must be real JSON numbers, not stringified rows.
 - The live Tauri wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 
@@ -389,6 +391,64 @@ expect(evidence).to_contain("tauri_simple_web_layout_requested_height=64.5")
 
 </details>
 
+#### rejects stringified Tauri viewport capture timing overlay and mismatch proof rows
+
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm live Tauri layout numeric proof cannot be stringified
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 36 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-layout-validator-string-numeric-proof"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/requested.json", "p.width=\"96\"") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/requested.json > " + root + "/requested.env; " +
+    _proof_command(root + "/argb.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:\"96\",height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(96*64).fill(4294967295)}))") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/argb.json > " + root + "/argb.env; " +
+    _proof_command(root + "/timing.json", "p.frame_us=\"1250\"") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/timing.json > " + root + "/timing.env; " +
+    _proof_command(root + "/overlay.json", "p.expected_overlay_pixel_count=\"12\"") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/overlay.json > " + root + "/overlay.env; " +
+    _proof_command(root + "/mismatch.json", "p.mismatch_count=\"0\"") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val requested = file_read(root + "/requested.env")
+val argb = file_read(root + "/argb.env")
+val timing = file_read(root + "/timing.env")
+val overlay = file_read(root + "/overlay.env")
+val mismatch = file_read(root + "/mismatch.env")
+step("Confirm live Tauri layout numeric proof cannot be stringified")
+expect(requested).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(requested).to_contain("tauri_simple_web_layout_validation_reason=missing-viewport-proof")
+expect(requested).to_contain("tauri_simple_web_layout_requested_width=96")
+expect(argb).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(argb).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-viewport-mismatch")
+expect(argb).to_contain("tauri_simple_web_layout_captured_argb_width=96")
+expect(timing).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(timing).to_contain("tauri_simple_web_layout_validation_reason=missing-tauri-timing")
+expect(timing).to_contain("tauri_simple_web_layout_tauri_frame_us=1250")
+expect(overlay).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(overlay).to_contain("tauri_simple_web_layout_validation_reason=malformed-expected-overlay-pixel-count")
+expect(overlay).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=12")
+expect(mismatch).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(mismatch).to_contain("tauri_simple_web_layout_validation_reason=malformed-mismatch-count")
+expect(mismatch).to_contain("tauri_simple_web_layout_mismatch_count=0")
+```
+
+</details>
+
 #### rejects blur tolerance and malformed mismatch counts
 
 -  proof command
@@ -487,8 +547,8 @@ expect(converter).to_contain("captured_argb_path: outputPath")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -18,9 +18,21 @@ function decimalIntegerText(value) {
   return null;
 }
 
+function jsonIntegerText(value) {
+  if (typeof value === 'number' && Number.isInteger(value)) return String(value);
+  return null;
+}
+
 function sameInteger(left, right) {
   const l = decimalIntegerText(left);
   const r = decimalIntegerText(right);
+  if (l === null || r === null) return false;
+  return BigInt(l) === BigInt(r);
+}
+
+function sameJsonInteger(left, right) {
+  const l = jsonIntegerText(left);
+  const r = jsonIntegerText(right);
   if (l === null || r === null) return false;
   return BigInt(l) === BigInt(r);
 }
@@ -31,8 +43,19 @@ function integerAtLeast(value, min) {
   return BigInt(text) >= BigInt(min);
 }
 
+function jsonIntegerAtLeast(value, min) {
+  const text = jsonIntegerText(value);
+  if (text === null) return false;
+  return BigInt(text) >= BigInt(min);
+}
+
 function integerTextOrClean(value) {
   const text = decimalIntegerText(value);
+  return text === null ? clean(value) : text;
+}
+
+function jsonIntegerTextOrClean(value) {
+  const text = jsonIntegerText(value);
   return text === null ? clean(value) : text;
 }
 
@@ -47,8 +70,8 @@ function readJsonArtifact(info) {
 
 function pixelCountMatches(pixels, width, height) {
   if (!Array.isArray(pixels)) return false;
-  const w = decimalIntegerText(width);
-  const h = decimalIntegerText(height);
+  const w = jsonIntegerText(width);
+  const h = jsonIntegerText(height);
   if (w === null || h === null) return false;
   return BigInt(pixels.length) === BigInt(w) * BigInt(h);
 }
@@ -117,7 +140,7 @@ const capturedArgbNonzeroPixelCount = nonzeroPixelCount(capturedArgbPixels);
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
   reason = 'blur-or-tolerance-not-allowed';
-} else if (!integerAtLeast(proof.width, 1) || !integerAtLeast(proof.height, 1)) {
+} else if (!jsonIntegerAtLeast(proof.width, 1) || !jsonIntegerAtLeast(proof.height, 1)) {
   reason = 'missing-viewport-proof';
 } else if (decimalIntegerText(proof.checksum) === null || decimalIntegerText(proof.expected_checksum) === null) {
   reason = 'missing-checksum-proof';
@@ -127,9 +150,9 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-weighted-checksum-proof';
 } else if (!sameInteger(proof.weighted_checksum, proof.expected_weighted_checksum)) {
   reason = 'weighted-checksum-mismatch';
-} else if (decimalIntegerText(proof.mismatch_count) === null) {
+} else if (jsonIntegerText(proof.mismatch_count) === null) {
   reason = 'malformed-mismatch-count';
-} else if (!sameInteger(proof.mismatch_count, 0)) {
+} else if (!sameJsonInteger(proof.mismatch_count, 0)) {
   reason = 'pixel-mismatch';
 } else if (proof.captured_argb_written !== true) {
   reason = 'missing-captured-argb';
@@ -143,7 +166,7 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'captured-argb-format-mismatch';
 } else if (capturedArgb.producer !== 'tauri-x11-window-screenshot') {
   reason = 'captured-argb-producer-mismatch';
-} else if (!sameInteger(capturedArgb.width, proof.width) || !sameInteger(capturedArgb.height, proof.height)) {
+} else if (!sameJsonInteger(capturedArgb.width, proof.width) || !sameJsonInteger(capturedArgb.height, proof.height)) {
   reason = 'captured-argb-viewport-mismatch';
 } else if (!argbPixelsAreUint32Numbers(capturedArgb.pixels)) {
   reason = 'captured-argb-pixel-type-mismatch';
@@ -151,11 +174,11 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'captured-argb-pixel-count-mismatch';
 } else if (!integerAtLeast(capturedArgbNonzeroPixelCount, 1)) {
   reason = 'blank-captured-argb';
-} else if (!integerAtLeast(proof.frame_us, 1)) {
+} else if (!jsonIntegerAtLeast(proof.frame_us, 1)) {
   reason = 'missing-tauri-timing';
 } else if (typeof proof.expected_profile !== 'string' || proof.expected_profile === '') {
   reason = 'missing-expected-profile';
-} else if (!integerAtLeast(proof.expected_overlay_pixel_count, 0)) {
+} else if (!jsonIntegerAtLeast(proof.expected_overlay_pixel_count, 0)) {
   reason = 'malformed-expected-overlay-pixel-count';
 }
 
@@ -165,21 +188,21 @@ emit('tauri_simple_web_layout_simple_checksum', integerTextOrClean(proof.expecte
 emit('tauri_simple_web_layout_tauri_checksum', integerTextOrClean(proof.checksum));
 emit('tauri_simple_web_layout_simple_weighted_checksum', integerTextOrClean(proof.expected_weighted_checksum));
 emit('tauri_simple_web_layout_tauri_weighted_checksum', integerTextOrClean(proof.weighted_checksum));
-emit('tauri_simple_web_layout_mismatch_count', integerTextOrClean(proof.mismatch_count));
-emit('tauri_simple_web_layout_requested_width', integerTextOrClean(proof.width));
-emit('tauri_simple_web_layout_requested_height', integerTextOrClean(proof.height));
+emit('tauri_simple_web_layout_mismatch_count', jsonIntegerTextOrClean(proof.mismatch_count));
+emit('tauri_simple_web_layout_requested_width', jsonIntegerTextOrClean(proof.width));
+emit('tauri_simple_web_layout_requested_height', jsonIntegerTextOrClean(proof.height));
 emit('tauri_simple_web_layout_blur_or_tolerance_used', proof.blur_or_tolerance_used === false ? 'false' : clean(proof.blur_or_tolerance_used));
 emit('tauri_simple_web_layout_expected_profile', clean(proof.expected_profile));
-emit('tauri_simple_web_layout_expected_overlay_pixel_count', integerTextOrClean(proof.expected_overlay_pixel_count));
-emit('tauri_simple_web_layout_tauri_frame_us', integerTextOrClean(proof.frame_us));
+emit('tauri_simple_web_layout_expected_overlay_pixel_count', jsonIntegerTextOrClean(proof.expected_overlay_pixel_count));
+emit('tauri_simple_web_layout_tauri_frame_us', jsonIntegerTextOrClean(proof.frame_us));
 emit('tauri_simple_web_layout_captured_argb_path', proof.captured_argb_path);
 emit('tauri_simple_web_layout_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
 emit('tauri_simple_web_layout_captured_argb_file_status', capturedArgbStat === null ? 'fail' : 'pass');
 emit('tauri_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
 emit('tauri_simple_web_layout_captured_argb_format', capturedArgb === null ? '' : capturedArgb.format);
 emit('tauri_simple_web_layout_captured_argb_producer', capturedArgb === null ? '' : capturedArgb.producer);
-emit('tauri_simple_web_layout_captured_argb_width', capturedArgb === null ? '' : integerTextOrClean(capturedArgb.width));
-emit('tauri_simple_web_layout_captured_argb_height', capturedArgb === null ? '' : integerTextOrClean(capturedArgb.height));
+emit('tauri_simple_web_layout_captured_argb_width', capturedArgb === null ? '' : jsonIntegerTextOrClean(capturedArgb.width));
+emit('tauri_simple_web_layout_captured_argb_height', capturedArgb === null ? '' : jsonIntegerTextOrClean(capturedArgb.height));
 emit('tauri_simple_web_layout_captured_argb_pixel_count', capturedArgbPixels === null ? '' : String(capturedArgbPixels.length));
 emit('tauri_simple_web_layout_captured_argb_nonzero_pixel_count', capturedArgbNonzeroPixelCount);
 
