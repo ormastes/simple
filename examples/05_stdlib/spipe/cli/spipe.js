@@ -1392,6 +1392,10 @@ function commandFineTuneReady(args) {
   const method = registryValueForAttempt(root, "tuning_methods.sdn", attemptId, "method") || readQuotedValue(attemptContent, "method");
   const modelArtifact = registryValueForAttempt(root, "training_scripts.sdn", attemptId, "model_artifact") || readQuotedValue(attemptContent, "model_artifact");
   const status = registryValueForAttempt(root, "decisions.sdn", attemptId, "status") || readQuotedValue(attemptContent, "status");
+  const licenseConstraints = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "license_constraints") || readQuotedValue(attemptContent, "license_constraints");
+  const safetyEval = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "safety_eval") || readQuotedValue(attemptContent, "safety_eval");
+  const deploymentEvidence = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "deployment_evidence") || readQuotedValue(attemptContent, "deployment_evidence");
+  const handoffDoc = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "handoff_doc") || readQuotedValue(attemptContent, "handoff_doc");
   const artifactReady = modelArtifactReady(modelArtifact);
   const evalTargetReached = fineTuneEvalTargetStatus(root, attemptId, attemptContent);
 
@@ -1402,7 +1406,11 @@ function commandFineTuneReady(args) {
     ["tuning_method_real", method && method !== "dry-run-record-only"],
     ["model_artifact_created", artifactReady],
     ["target_eval_reached", evalTargetReached],
-    ["decision_accepted", status === "accepted"]
+    ["decision_accepted", status === "accepted"],
+    ["license_constraints_reviewed", licenseConstraints && licenseConstraints !== "pending"],
+    ["safety_eval_complete", safetyEval && safetyEval !== "not-run"],
+    ["deployment_evidence_ready", deploymentEvidence && deploymentEvidence !== "not-deployable"],
+    ["app_handoff_doc_ready", handoffDoc && handoffDoc !== "missing" && handoffDoc !== "pending"]
   ];
 
   console.log(`attempt_id=${attemptId}`);

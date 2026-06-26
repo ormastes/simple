@@ -213,7 +213,7 @@ expect(output.split(absence_marker()).len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -223,6 +223,10 @@ expect(exit_code).to_equal(1)
 expect(output).to_contain("model_artifact_created=pending")
 expect(output).to_contain("target_eval_reached=pending")
 expect(output).to_contain("decision_accepted=pending")
+expect(output).to_contain("license_constraints_reviewed=pending")
+expect(output).to_contain("safety_eval_complete=pending")
+expect(output).to_contain("deployment_evidence_ready=pending")
+expect(output).to_contain("app_handoff_doc_ready=ready")
 expect(output).to_contain("STATUS: FAIL llm-finetune-ready")
 expect(output.split(absence_marker()).len()).to_equal(1)
 ```

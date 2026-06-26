@@ -235,6 +235,14 @@ Evidence:
   marker helper, the focused system spec still passes 4/4, and both generated
   manuals were refreshed so public expected-code snippets do not expose the
   internal absence marker.
+- 2026-06-26 readiness hardening: `fine-tune-ready
+  llm_backed_app_server_dry_run_retry7` now surfaces
+  `license_constraints_reviewed`, `safety_eval_complete`,
+  `deployment_evidence_ready`, and `app_handoff_doc_ready` alongside model,
+  target-eval, and decision checks. The retry7 system spec asserts the current
+  license/safety/deployment blockers remain pending and the app handoff doc is
+  present, so the ready gate fails closed against the full non-acceptance
+  checklist.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS
