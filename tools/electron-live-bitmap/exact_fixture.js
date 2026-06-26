@@ -858,6 +858,7 @@ async function main() {
   if (proofPath) {
     fs.writeFileSync(proofPath, JSON.stringify({
       renderer: "electron-live-capture-page",
+      proof_source: "tools/electron-live-bitmap/exact_fixture.js",
       scene,
       width,
       height,

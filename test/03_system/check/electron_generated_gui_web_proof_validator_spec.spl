@@ -39,8 +39,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   mismatch counts, frame timing, and text-normalization pixel counts must be
   real JSON numbers, not stringified rows, and malformed live numeric rows must
   not be re-emitted as normalized numeric evidence.
-- Proof renderer and scene identity must match the live generated-GUI Electron
-  capture path.
+- Proof renderer, source marker, and scene identity must match the live
+  generated-GUI Electron capture path.
 - The live Electron wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 """
@@ -51,7 +51,7 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);const argb={width:96,height:72,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*72).fill(4294967295)};fs.writeFileSync(path.join(dir,\"captured.json\"),JSON.stringify(argb));const p={renderer:\"electron-live-capture-page\",scene:\"generated-gui-widget-html\",width:96,height:72,iterations:3,checksum:\"100\",expected_checksum:\"100\",weighted_checksum:\"500\",expected_weighted_checksum:\"500\",mismatch_count:0,frame_us:1250,capture_native_width:96,capture_native_height:72,capture_downsampled:false,captured_argb_path:\"captured.json\",captured_argb_written:true,generated_gui_text_normalization_pixels:0,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);const argb={width:96,height:72,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*72).fill(4294967295)};fs.writeFileSync(path.join(dir,\"captured.json\"),JSON.stringify(argb));const p={renderer:\"electron-live-capture-page\",proof_source:\"tools/electron-live-bitmap/exact_fixture.js\",scene:\"generated-gui-widget-html\",width:96,height:72,iterations:3,checksum:\"100\",expected_checksum:\"100\",weighted_checksum:\"500\",expected_weighted_checksum:\"500\",mismatch_count:0,frame_us:1250,capture_native_width:96,capture_native_height:72,capture_downsampled:false,captured_argb_path:\"captured.json\",captured_argb_written:true,generated_gui_text_normalization_pixels:0,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Electron generated GUI Web proof validator":
 
@@ -68,6 +68,7 @@ describe "Electron generated GUI Web proof validator":
         expect(evidence).to_contain("electron_generated_gui_web_validation_status=pass")
         expect(evidence).to_contain("electron_generated_gui_web_validation_reason=pass")
         expect(evidence).to_contain("electron_generated_gui_web_renderer=electron-live-capture-page")
+        expect(evidence).to_contain("electron_generated_gui_web_proof_source=tools/electron-live-bitmap/exact_fixture.js")
         expect(evidence).to_contain("electron_generated_gui_web_scene=generated-gui-widget-html")
         expect(evidence).to_contain("electron_generated_gui_web_mismatch_count=0")
         expect(evidence).to_contain("electron_generated_gui_web_electron_frame_us=1250")
@@ -105,6 +106,26 @@ describe "Electron generated GUI Web proof validator":
         expect(renderer).to_contain("electron_generated_gui_web_validation_reason=unexpected-electron-renderer")
         expect(scene).to_contain("electron_generated_gui_web_validation_status=fail")
         expect(scene).to_contain("electron_generated_gui_web_validation_reason=unexpected-electron-scene")
+
+    it "rejects proof without the live Electron capture source marker":
+        val root = "build/test-electron-generated-gui-validator-source"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/missing.json", "delete p.proof_source") +
+            " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+            _proof_command(root + "/wrong.json", "p.proof_source=\"tools/manual/generated-gui-proof.json\"") +
+            " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/wrong.json > " + root + "/wrong.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val missing = file_read(root + "/missing.env")
+        val wrong = file_read(root + "/wrong.env")
+        step("Confirm generated GUI proof must identify the live capture producer")
+        expect(missing).to_contain("electron_generated_gui_web_validation_status=fail")
+        expect(missing).to_contain("electron_generated_gui_web_validation_reason=unexpected-electron-proof-source")
+        expect(missing).to_contain("electron_generated_gui_web_proof_source=")
+        expect(wrong).to_contain("electron_generated_gui_web_validation_status=fail")
+        expect(wrong).to_contain("electron_generated_gui_web_validation_reason=unexpected-electron-proof-source")
+        expect(wrong).to_contain("electron_generated_gui_web_proof_source=tools/manual/generated-gui-proof.json")
 
     it "rejects large checksum values that differ past JavaScript number precision":
         val root = "build/test-electron-generated-gui-web-validator-large-checksum"
@@ -337,5 +358,6 @@ describe "Electron generated GUI Web proof validator":
         expect(script).to_contain("electron_generated_gui_web_captured_argb_format")
         expect(script).to_contain("electron_generated_gui_web_captured_argb_nonzero_pixel_count")
         expect(script).to_contain("electron_generated_gui_web_proof_renderer")
+        expect(script).to_contain("electron_generated_gui_web_proof_source")
         expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
         expect(script).to_contain("status=divergent")

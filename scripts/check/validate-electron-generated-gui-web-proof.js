@@ -142,12 +142,15 @@ const capturedArgbJson = readJsonArtifact(capturedArgbStat);
 const capturedArgb = capturedArgbJson.value || {};
 const capturedArgbPixels = Array.isArray(capturedArgb.pixels) ? capturedArgb.pixels : [];
 const capturedArgbNonzeroPixels = nonzeroPixelCount(capturedArgbPixels);
+const expectedProofSource = 'tools/electron-live-bitmap/exact_fixture.js';
 
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
   reason = 'blur-or-tolerance-not-allowed';
 } else if (proof.renderer !== 'electron-live-capture-page') {
   reason = 'unexpected-electron-renderer';
+} else if (proof.proof_source !== expectedProofSource) {
+  reason = 'unexpected-electron-proof-source';
 } else if (proof.scene !== 'generated-gui-widget-html') {
   reason = 'unexpected-electron-scene';
 } else if (decimalIntegerText(proof.checksum) === null || decimalIntegerText(proof.expected_checksum) === null) {
@@ -193,6 +196,7 @@ if (proof.blur_or_tolerance_used !== false) {
 emit('electron_generated_gui_web_validation_status', reason === 'pass' ? 'pass' : 'fail');
 emit('electron_generated_gui_web_validation_reason', reason);
 emit('electron_generated_gui_web_renderer', proof.renderer);
+emit('electron_generated_gui_web_proof_source', proof.proof_source);
 emit('electron_generated_gui_web_scene', proof.scene);
 emit('electron_generated_gui_web_simple_checksum', integerTextOrClean(proof.expected_checksum));
 emit('electron_generated_gui_web_electron_checksum', integerTextOrClean(proof.checksum));

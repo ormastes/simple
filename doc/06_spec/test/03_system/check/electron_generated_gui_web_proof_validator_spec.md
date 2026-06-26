@@ -27,7 +27,7 @@ electron_generated_gui_web_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -88,8 +88,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   mismatch counts, frame timing, and text-normalization pixel counts must be
   real JSON numbers, not stringified rows, and malformed live numeric rows must
   not be re-emitted as normalized numeric evidence.
-- Proof renderer and scene identity must match the live generated-GUI Electron
-  capture path.
+- Proof renderer, source marker, and scene identity must match the live
+  generated-GUI Electron capture path.
 - The live Electron wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 
@@ -107,7 +107,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -123,6 +123,7 @@ step("Inspect normalized Electron generated-GUI proof rows")
 expect(evidence).to_contain("electron_generated_gui_web_validation_status=pass")
 expect(evidence).to_contain("electron_generated_gui_web_validation_reason=pass")
 expect(evidence).to_contain("electron_generated_gui_web_renderer=electron-live-capture-page")
+expect(evidence).to_contain("electron_generated_gui_web_proof_source=tools/electron-live-bitmap/exact_fixture.js")
 expect(evidence).to_contain("electron_generated_gui_web_scene=generated-gui-widget-html")
 expect(evidence).to_contain("electron_generated_gui_web_mismatch_count=0")
 expect(evidence).to_contain("electron_generated_gui_web_electron_frame_us=1250")
@@ -177,6 +178,43 @@ expect(renderer).to_contain("electron_generated_gui_web_validation_status=fail")
 expect(renderer).to_contain("electron_generated_gui_web_validation_reason=unexpected-electron-renderer")
 expect(scene).to_contain("electron_generated_gui_web_validation_status=fail")
 expect(scene).to_contain("electron_generated_gui_web_validation_reason=unexpected-electron-scene")
+```
+
+</details>
+
+#### rejects proof without the live Electron capture source marker
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm generated GUI proof must identify the live capture producer
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-generated-gui-validator-source"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/missing.json", "delete p.proof_source") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+    _proof_command(root + "/wrong.json", "p.proof_source=\"tools/manual/generated-gui-proof.json\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/wrong.json > " + root + "/wrong.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing = file_read(root + "/missing.env")
+val wrong = file_read(root + "/wrong.env")
+step("Confirm generated GUI proof must identify the live capture producer")
+expect(missing).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(missing).to_contain("electron_generated_gui_web_validation_reason=unexpected-electron-proof-source")
+expect(missing).to_contain("electron_generated_gui_web_proof_source=")
+expect(wrong).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(wrong).to_contain("electron_generated_gui_web_validation_reason=unexpected-electron-proof-source")
+expect(wrong).to_contain("electron_generated_gui_web_proof_source=tools/manual/generated-gui-proof.json")
 ```
 
 </details>
@@ -586,7 +624,7 @@ expect(pixel).to_contain("electron_generated_gui_web_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -598,6 +636,7 @@ expect(script).to_contain("electron_generated_gui_web_captured_argb_size_bytes")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_format")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_nonzero_pixel_count")
 expect(script).to_contain("electron_generated_gui_web_proof_renderer")
+expect(script).to_contain("electron_generated_gui_web_proof_source")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
 ```
@@ -608,8 +647,8 @@ expect(script).to_contain("status=divergent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
