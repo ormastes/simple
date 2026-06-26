@@ -485,6 +485,8 @@ pin/device-staging intent as explicit flags while reporting
 caller-buffer write primitive or pinned DMA contract exists yet. It now also
 offers a local `read_range_bytes` helper through the owner file facade so
 bounded file-backed byte reads can be tested without claiming async NVFS
-scheduling or GPU staging. Remaining blockers include full async NVFS
+scheduling or GPU staging. Streaming readiness JSONL now carries a separate
+`local_read_bytes` field so clean pack roots can prove local bytes are readable
+without turning native streaming readiness green. Remaining blockers include full async NVFS
 scheduling, pinned/device staging, live CUDA placement evidence, and
 device-preserving optimizer state for already-CUDA parameters.

@@ -257,6 +257,13 @@ Evidence:
   count, total byte length, and normalized native capability statuses. Specs
   prove blocked, ready, loader-error, and unknown-status normalization paths
   without requiring live NVFS scheduling, pinned buffers, or device staging.
+- The streaming readiness gate also records `local_read_bytes` evidence for
+  file-backed pack roots. `svllm_streaming_readiness_from_local_pack(...)`
+  proves local byte reads match the planned byte length and emits
+  `local_read_bytes=ready` while keeping full streaming `blocked` until native
+  `read_range`, pinned-buffer registration, and device staging are ready.
+  Missing tiny pack chunk fixtures were restored so the tensor-byte,
+  stream-plan, and local-read readiness specs execute in clean workspaces.
 - `release/x86_64-unknown-linux-gnu/simple check
   src/lib/gc_async_mut/torch/backend.spl
   src/lib/nogc_sync_mut/torch/backend.spl
@@ -281,8 +288,9 @@ Still open:
   buffer registration, and device staging are now surfaced by absence-safe JSONL
   streaming readiness evidence but still report unavailable until real native
   adapters are implemented. The std_fs adapter only proves local file-backed
-  byte reads through `read_range_bytes`; trait `read_range` remains unsupported
-  because no pointer-write primitive exists for caller buffers.
+  byte reads through `read_range_bytes`, and readiness now reports that local
+  evidence separately as `local_read_bytes`; trait `read_range` remains
+  unsupported because no pointer-write primitive exists for caller buffers.
 - Live CUDA placement against libtorch remains open; source-contract coverage
   now proves optimizer state preserves the parameter device for already-CUDA
   parameters, but end-to-end optimizer execution against a live libtorch CUDA
