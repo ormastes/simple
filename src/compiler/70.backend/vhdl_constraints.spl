@@ -208,12 +208,20 @@ class VhdlConstraintChecker:
         """Add a CDC constraint using registered source/destination domains."""
         val source_domain = self.signal_domains.get(source)
         val dest_domain = self.signal_domains.get(dest)
-        if source_domain.? and dest_domain.? and source_domain.unwrap() != dest_domain.unwrap():
-            self.add_constraint(VhdlConstraint.ClockDomainCrossing(
-                source: source,
-                dest: dest,
-                source_domain: self.domain_display_name(source_domain.unwrap()),
-                dest_domain: self.domain_display_name(dest_domain.unwrap()),
+        if val source_domain_name = source_domain:
+            if val dest_domain_name = dest_domain:
+                if source_domain_name != dest_domain_name:
+                    self.add_constraint(VhdlConstraint.ClockDomainCrossing(
+                        source: source,
+                        dest: dest,
+                        source_domain: self.domain_display_name(source_domain_name),
+                        dest_domain: self.domain_display_name(dest_domain_name),
+                        span: span
+                    ))
+                    return
+            self.add_constraint(VhdlConstraint.SameClockDomain(
+                signal1: source,
+                signal2: dest,
                 span: span
             ))
         else:
@@ -291,17 +299,18 @@ class VhdlConstraintChecker:
             case SameClockDomain(s1, s2, span):
                 val d1 = self.signal_domains.get(s1)
                 val d2 = self.signal_domains.get(s2)
-                if d1.? and d2.? and d1.unwrap() != d2.unwrap():
-                    val src_domain = self.domain_display_name(d1.unwrap())
-                    val dst_domain = self.domain_display_name(d2.unwrap())
-                    Err(VhdlConstraintError(
-                        code: "E0710",
-                        message: "clock domain crossing: source '{s1}' in domain '{src_domain}' reaches destination '{s2}' in domain '{dst_domain}'",
-                        span: span,
-                        kind: VhdlConstraintErrorKind.ClockDomainCrossing
-                    ))
-                else:
-                    Ok(())
+                if val source_domain = d1:
+                    if val dest_domain = d2:
+                        if source_domain != dest_domain:
+                            val src_domain = self.domain_display_name(source_domain)
+                            val dst_domain = self.domain_display_name(dest_domain)
+                            return Err(VhdlConstraintError(
+                                code: "E0710",
+                                message: "clock domain crossing: source '{s1}' in domain '{src_domain}' reaches destination '{s2}' in domain '{dst_domain}'",
+                                span: span,
+                                kind: VhdlConstraintErrorKind.ClockDomainCrossing
+                            ))
+                Ok(())
 
             case ClockDomainCrossing(source, dest, src_domain, dst_domain, span):
                 Err(VhdlConstraintError(
@@ -414,21 +423,24 @@ class VhdlConstraintChecker:
                 ))
             val sanitized = self.sanitize_clock_domain_name(domain.name)
             val previous = sanitized_to_original.get(sanitized)
-            if previous.? and previous.unwrap() != domain.name:
-                result = result.push(VhdlConstraintError(
-                    code: "E0712",
-                    message: "duplicate clock domain after VHDL sanitization: '{previous.unwrap()}' and '{domain.name}' both map to '{sanitized}'",
-                    span: VhdlConstraintChecker.empty_span(),
-                    kind: VhdlConstraintErrorKind.ClockDomainNameCollision
-                ))
+            if val previous_name = previous:
+                if previous_name != domain.name:
+                    result = result.push(VhdlConstraintError(
+                        code: "E0712",
+                        message: "duplicate clock domain after VHDL sanitization: '{previous_name}' and '{domain.name}' both map to '{sanitized}'",
+                        span: VhdlConstraintChecker.empty_span(),
+                        kind: VhdlConstraintErrorKind.ClockDomainNameCollision
+                    ))
+                else:
+                    sanitized_to_original[sanitized] = domain.name
             else:
                 sanitized_to_original[sanitized] = domain.name
         result
 
     fn domain_display_name(domain: text) -> text:
         val registered = self.clock_domains.get(domain)
-        if registered.?:
-            registered.unwrap().name
+        if val clock_domain = registered:
+            clock_domain.name
         else:
             domain
 
