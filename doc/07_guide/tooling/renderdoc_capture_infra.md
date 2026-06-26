@@ -365,16 +365,18 @@ requires Simple Vulkan backend evidence, focused Chrome and Electron Vulkan
 browser backing, `pairwise-argb-diff` mode, and all three pairwise diff lanes to
 pass. Missing RenderDoc `.rdc` evidence is reported through
 `linux_vulkan_render_log_compare_renderdoc_*_status` plus the matching
-`linux_vulkan_render_log_compare_renderdoc_*_reason`; set
-`LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=1` when the host is expected to provide
-real `.rdc` files and `RDOC` magic.
+`linux_vulkan_render_log_compare_renderdoc_*_reason`; by default Simple,
+Chrome, and Electron RenderDoc rows must pass with real `.rdc` files and `RDOC`
+magic. Set `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0` only for diagnostic
+partial-log inspection, and never use that mode to claim Linux platform-matrix
+completion.
 
 Current Linux host evidence on 2026-06-25 has
 `linux_vulkan_render_log_compare_pairwise_status=pass`, Simple RenderDoc
-`pass`, Chrome RenderDoc `fail`, and Electron RenderDoc `fail`. The row remains
-failed because focused Electron browser Vulkan backing is still
-`electron-browser-backing-fail`; do not treat the passing pairwise ARGB result
-as browser Vulkan completion.
+`pass`, Chrome RenderDoc `fail`, and Electron RenderDoc `fail`. Current focused
+browser backing passes, but the row remains failed because the required Chrome
+and Electron native RenderDoc lanes are still not pass; do not treat passing
+pairwise ARGB or browser-GPU proof as RenderDoc completion.
 
 Completion keys:
 

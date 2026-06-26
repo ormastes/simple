@@ -27,7 +27,7 @@ linux_vulkan_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -106,9 +106,11 @@ store both direct-run and browser-backing fields in the same env file.
 The gate is fail-closed. If Electron hardware Vulkan backing fails, the Linux
 row must report `electron-browser-backing-fail`; if Chrome is proven pass in
 the focused browser env, the reason must not report Chrome as missing. Missing
-RenderDoc `.rdc` evidence is reported separately through
-`linux_vulkan_render_log_compare_renderdoc_*_status` and becomes release
-blocking only when `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=1`.
+RenderDoc `.rdc` evidence is required by default. Missing or failed Simple,
+Chrome, or Electron RenderDoc rows are reported through
+`linux_vulkan_render_log_compare_renderdoc_*_status` and make
+`linux_vulkan_render_log_compare_status=fail`. Set
+`LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0` only for diagnostic partial-log runs.
 
 ## Normalized Outputs
 
@@ -131,7 +133,7 @@ schema.
 
 ## Test Matrix
 
-The spec covers three cases:
+The spec covers seven cases:
 
 1. A combined fixture where direct-run, browser-backing, pairwise diff, and
    RenderDoc statuses all pass. This proves the pass contract and source-log
@@ -146,9 +148,12 @@ The spec covers three cases:
    the wrapper does not let stale focused evidence override the current backing
    run.
 5. A RenderDoc failure fixture where Chrome fails with a concrete crash reason.
-   This proves the normalized Linux rollup and Chrome source log preserve
-   failure detail for platform-agent comparison.
-6. A source contract check that keeps the default RenderDoc evidence paths on
+   This proves the normalized Linux rollup fails closed by default and Chrome
+   source log preserves failure detail for platform-agent comparison.
+6. A diagnostic RenderDoc failure fixture with strict RenderDoc disabled. This
+   proves partial native logs can still be inspected without claiming platform
+   completion.
+7. A source contract check that keeps the default RenderDoc evidence paths on
    the focused current-capture rows instead of stale canonical probe rows.
 
 ## Completion Boundaries
@@ -249,7 +254,7 @@ val command = "rm -rf build/test-linux-vulkan-render-log-fail && mkdir -p build/
     "gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass\n" +
     "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass\n" +
     "EOF\n" +
-    "BUILD_DIR=build/test-linux-vulkan-render-log-fail/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-fail/gui.env sh scripts/check/check-linux-vulkan-render-log-compare.shs || true"
+    "BUILD_DIR=build/test-linux-vulkan-render-log-fail/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-fail/gui.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-linux-vulkan-render-log-fail/gui.env LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0 sh scripts/check/check-linux-vulkan-render-log-compare.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -294,7 +299,7 @@ val command = "rm -rf build/test-linux-vulkan-render-log-focused-backing && mkdi
     "gui_web_2d_vulkan_electron_browser_backing_status=fail\n" +
     "gui_web_2d_vulkan_chrome_browser_backing_status=pass\n" +
     "EOF\n" +
-    "BUILD_DIR=build/test-linux-vulkan-render-log-focused-backing/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-focused-backing/run.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-linux-vulkan-render-log-focused-backing/browser.env sh scripts/check/check-linux-vulkan-render-log-compare.shs || true"
+    "BUILD_DIR=build/test-linux-vulkan-render-log-focused-backing/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-focused-backing/run.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-linux-vulkan-render-log-focused-backing/browser.env LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0 sh scripts/check/check-linux-vulkan-render-log-compare.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -347,7 +352,7 @@ val command = "rm -rf build/test-linux-vulkan-render-log-main-browser-backing &&
     "gui_web_2d_vulkan_electron_browser_backing_status=fail\n" +
     "gui_web_2d_vulkan_chrome_browser_backing_status=pass\n" +
     "EOF\n" +
-    "BUILD_DIR=build/test-linux-vulkan-render-log-main-browser-backing/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-main-browser-backing/main.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-linux-vulkan-render-log-main-browser-backing/stale.env sh scripts/check/check-linux-vulkan-render-log-compare.shs"
+    "BUILD_DIR=build/test-linux-vulkan-render-log-main-browser-backing/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-main-browser-backing/main.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-linux-vulkan-render-log-main-browser-backing/stale.env LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0 sh scripts/check/check-linux-vulkan-render-log-compare.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -365,13 +370,13 @@ expect(evidence.contains("browser-backing-fail")).to_equal(false)
 
 - Create passing pixel evidence with a Chrome RenderDoc crash reason
    - Expected: code equals `0`
-- Assert Chrome RenderDoc reason is normalized
+- Assert Chrome RenderDoc failure fails the rollup and is normalized
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -392,17 +397,65 @@ val command = "rm -rf build/test-linux-vulkan-render-log-rdoc-reason && mkdir -p
     "printf 'rdoc_simple_gate_status=pass\\nrdoc_simple_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\n' > build/test-linux-vulkan-render-log-rdoc-reason/rdoc/simple/evidence.env\n" +
     "printf 'rdoc_external_host_capture_gate_status=fail\\nrdoc_external_host_gate_reason=gate-command-failed\\nrdoc_external_host_capture_reason_raw=chromium-gpu-process-crashed-under-renderdoc\\nrdoc_capture_status=fail\\nrdoc_capture_reason=chromium-gpu-process-crashed-under-renderdoc\\n' > build/test-linux-vulkan-render-log-rdoc-reason/rdoc/html/evidence.env\n" +
     "printf 'rdoc_electron_html_gate_status=pass\\nrdoc_electron_html_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\n' > build/test-linux-vulkan-render-log-rdoc-reason/rdoc/electron/evidence.env\n" +
-    "BUILD_DIR=build/test-linux-vulkan-render-log-rdoc-reason/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-rdoc-reason/gui.env RDOC_SIMPLE_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-reason/rdoc/simple/evidence.env RDOC_HTML_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-reason/rdoc/html/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-reason/rdoc/electron/evidence.env sh scripts/check/check-linux-vulkan-render-log-compare.shs"
+    "BUILD_DIR=build/test-linux-vulkan-render-log-rdoc-reason/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-rdoc-reason/gui.env RDOC_SIMPLE_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-reason/rdoc/simple/evidence.env RDOC_HTML_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-reason/rdoc/html/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-reason/rdoc/electron/evidence.env sh scripts/check/check-linux-vulkan-render-log-compare.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
-step("Assert Chrome RenderDoc reason is normalized")
+step("Assert Chrome RenderDoc failure fails the rollup and is normalized")
 val evidence = file_read("build/test-linux-vulkan-render-log-rdoc-reason/out/evidence.env")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=renderdoc-chrome-fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_require_renderdoc=1")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_status=fail")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_reason=gate-command-failed")
 val chrome_log = file_read("build/test-linux-vulkan-render-log-rdoc-reason/out/chrome.srl.env")
 expect(chrome_log).to_contain("simple_render_log_status=fail")
 expect(chrome_log).to_contain("simple_render_log_reason=gate-command-failed")
+```
+
+</details>
+
+#### allows diagnostic partial logs only when RenderDoc strictness is disabled
+
+- Create passing pixel evidence with a Chrome RenderDoc failure and disable strict RenderDoc
+   - Expected: code equals `0`
+- Assert diagnostic mode preserves the failed RenderDoc row without failing compare
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create passing pixel evidence with a Chrome RenderDoc failure and disable strict RenderDoc")
+val command = "rm -rf build/test-linux-vulkan-render-log-rdoc-diagnostic && mkdir -p build/test-linux-vulkan-render-log-rdoc-diagnostic/rdoc/simple build/test-linux-vulkan-render-log-rdoc-diagnostic/rdoc/html build/test-linux-vulkan-render-log-rdoc-diagnostic/rdoc/electron && cat > build/test-linux-vulkan-render-log-rdoc-diagnostic/gui.env <<'EOF'\n" +
+    "gui_web_2d_vulkan_simple_status=pass\n" +
+    "gui_web_2d_vulkan_simple_backend_name=vulkan\n" +
+    "gui_web_2d_vulkan_simple_argb_backend=vulkan\n" +
+    "gui_web_2d_vulkan_electron_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_chrome_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_pixel_comparison_status=pass\n" +
+    "gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff\n" +
+    "gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass\n" +
+    "EOF\n" +
+    "printf 'rdoc_simple_gate_status=pass\\nrdoc_simple_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\n' > build/test-linux-vulkan-render-log-rdoc-diagnostic/rdoc/simple/evidence.env\n" +
+    "printf 'rdoc_external_host_capture_gate_status=fail\\nrdoc_external_host_gate_reason=gate-command-failed\\nrdoc_capture_status=fail\\n' > build/test-linux-vulkan-render-log-rdoc-diagnostic/rdoc/html/evidence.env\n" +
+    "printf 'rdoc_electron_html_gate_status=pass\\nrdoc_electron_html_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\n' > build/test-linux-vulkan-render-log-rdoc-diagnostic/rdoc/electron/evidence.env\n" +
+    "BUILD_DIR=build/test-linux-vulkan-render-log-rdoc-diagnostic/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-rdoc-diagnostic/gui.env RDOC_SIMPLE_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-diagnostic/rdoc/simple/evidence.env RDOC_HTML_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-diagnostic/rdoc/html/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-diagnostic/rdoc/electron/evidence.env LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0 sh scripts/check/check-linux-vulkan-render-log-compare.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert diagnostic mode preserves the failed RenderDoc row without failing compare")
+val evidence = file_read("build/test-linux-vulkan-render-log-rdoc-diagnostic/out/evidence.env")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_require_renderdoc=0")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_status=fail")
 ```
 
 </details>
@@ -444,8 +497,8 @@ expect(script.contains("build/renderdoc/canonical-probe/electron-html/evidence.e
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
