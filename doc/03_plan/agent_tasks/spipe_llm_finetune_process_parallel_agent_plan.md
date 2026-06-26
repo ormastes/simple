@@ -170,6 +170,10 @@ Evidence:
   cache evidence is missing, and carries the manifest/file/checksum proof
   fields from the cache gate. Even after the cache gate passes, acceptance stays
   false until real QLoRA target eval and app handoff evidence are recorded.
+- `.spipe/llm-finetune-process/README.md` now documents the retry5 cache
+  manifest and normal-review handoff commands, including the proof fields and
+  the rule that `acceptance_allowed=false` remains true until target eval plus
+  app handoff evidence exist.
 
 Next normal-LLM work: obtain licensed data approval and write cache/checksum
 evidence for retry5 by copying the retry5 cache manifest template to the

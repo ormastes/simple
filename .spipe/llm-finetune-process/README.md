@@ -62,9 +62,36 @@ license/data-access gate before real QLoRA. It must continue to fail
 `fine-tune-ready` because no licensed data cache, model artifact, target eval,
 or accepted decision exists yet.
 The linked retry attempt `llm_backed_app_server_dry_run_retry5` records the
-current licensed data acquisition and cache/checksum gate. It must continue to
-fail `fine-tune-ready` because no licensed cache path, checksum, model artifact,
-target eval, or accepted decision exists yet.
+current licensed data acquisition and cache/checksum gate. The generic
+`fine-tune-ready` command currently fails this attempt on its own readiness
+surface: `model_artifact_created=pending` and `decision_accepted=pending`.
+License approval, cache path, checksum, target eval, and app handoff are not
+`fine-tune-ready` fields; the retry5 wrappers below check those separately
+before any accepted decision or deployment claim.
+
+Retry5 has two local evidence wrappers for normal-review handoff:
+
+```sh
+.spipe/llm-finetune-process/scripts/check_retry5_cache_manifest.shs \
+  llm_backed_app_server_dry_run_retry5 \
+  .spipe/llm-finetune-process/data/llm_backed_app_server_dry_run_retry5_cache_manifest.sdn
+
+.spipe/llm-finetune-process/scripts/check_retry5_review_handoff.shs \
+  llm_backed_app_server_dry_run_retry5
+```
+
+`check_retry5_cache_manifest.shs` reports `STATUS: WARN
+retry5-cache-manifest` while the manifest is missing or incomplete, and only
+reports PASS when `license_review=approved`, `data_access=granted`, the cache
+path exists, and the recorded checksum matches the cached file. The output
+includes `manifest_exists`, `cache_path_exists`, `expected_checksum`,
+`actual_checksum`, `checksum_match`, and `training_allowed`.
+
+`check_retry5_review_handoff.shs` combines the attempt verifier, cache manifest
+gate, and data-access gate. It may report `STATUS: PASS
+retry5-review-handoff` when the licensed cache is ready for real QLoRA, but it
+still emits `acceptance_allowed=false`; target eval and app handoff evidence
+remain mandatory before any accepted decision or deployment claim.
 
 Record data-download evidence:
 
