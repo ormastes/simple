@@ -108,10 +108,12 @@ sh scripts/check/check-tauri-ios-mobile-renderer-evidence.shs
 
 The script selects an available iPhone simulator, launches the bundled Tauri2
 app without an external dev server, waits for the Simple render/eval log, takes
-a simulator screenshot, validates that the PNG is nonblank, and requires Metal
-log markers. On 2026-06-26 this passed on iPhone 17 Pro with
-`ios_render_log_status=pass`, `ios_layout_status=pass`, and
-`ios_metal_log_status=pass`.
+a simulator screenshot, validates that the PNG is nonblank, and runs
+`scripts/check/validate-tauri-ios-render-log-proof.js`. A pass requires a
+`[tauri-shell] render, html_len=` row, iOS/Tauri WKWebView context, Metal
+context such as `CAMetalLayer`, and no render failure markers. On 2026-06-26
+this passed on iPhone 17 Pro with `ios_render_log_status=pass`,
+`ios_layout_status=pass`, and `ios_metal_log_status=pass`.
 
 ## 5. Architecture Notes
 

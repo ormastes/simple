@@ -62,7 +62,8 @@ Current evidence:
   generated projects.
 - iOS: pass on iPhone 17 Pro simulator via
   `scripts/check/check-tauri-ios-mobile-renderer-evidence.shs`; screenshot
-  validation passed and logs include Metal/Xcode render markers.
+  validation passed and logs include validator-backed Tauri render,
+  WKWebView/iOS context, and Metal/CAMetalLayer markers with no failure marker.
 - Android: pass. The arm64 `simple` runtime builds, is packaged into
   `lib/arm64-v8a/libsimple_mobile_runtime_exec.so`, and the rebuilt APK renders
   the mobile widget showcase through Tauri2 Android WebView.

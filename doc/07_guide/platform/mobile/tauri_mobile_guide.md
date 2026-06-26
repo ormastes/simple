@@ -190,9 +190,11 @@ sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs
 
 The wrapper requires the desktop production parity evidence to pass first, then
 checks generated Tauri2 iOS/Android projects, live iOS simulator rendering with
-Metal log markers, and live Android emulator rendering with Vulkan/skiavk log
-markers plus screenshot proof. It also validates the live `[tauri-shell] mdi
-proof:` JSON from each mobile lane. A pass requires
+validator-backed WKWebView/Metal render-log evidence, and live Android emulator
+rendering with Vulkan/skiavk log markers plus screenshot proof. The iOS
+render-log validator requires a `[tauri-shell] render, html_len=` row, an
+iOS/Tauri webview context marker, a Metal context marker, and no failure marker.
+It also validates the live `[tauri-shell] mdi proof:` JSON from each mobile lane. A pass requires
 `ios_mdi_event_status`, `ios_mdi_capture_status`,
 `ios_mdi_performance_status`, `ios_mdi_animation_status`, and the matching
 Android keys to all be `pass`; those fields prove MDI event routing, live

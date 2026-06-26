@@ -1756,6 +1756,10 @@ pub fn run() {
             let builder = builder
                 .title("Simple Window Manager")
                 .inner_size(1280.0, 720.0);
+            #[cfg(target_os = "ios")]
+            eprintln!(
+                "[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer"
+            );
             let _win = builder.build()?;
             if let Some(ref html) = initial_inline_html {
                 let js = inline_shell_document_script(html);

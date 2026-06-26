@@ -9,6 +9,7 @@ REPORT_PATH="${REPORT_PATH:-doc/09_report/tauri_mobile_renderer_parity_evidence_
 PRODUCTION_ENV="${PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV:-build/production_gui_web_renderer_parity_evidence/evidence.env}"
 IOS_SCRIPT="${TAURI_MOBILE_RENDERER_IOS_SCRIPT:-scripts/check/check-tauri-ios-mobile-renderer-evidence.shs}"
 ANDROID_SCRIPT="${TAURI_MOBILE_RENDERER_ANDROID_SCRIPT:-scripts/check/check-tauri-android-mobile-renderer-evidence.shs}"
+IOS_RENDER_LOG_VALIDATOR="${TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR:-scripts/check/validate-tauri-ios-render-log-proof.js}"
 IOS_LOG_EXTRA="${TAURI_MOBILE_RENDERER_IOS_LOG:-}"
 ANDROID_LOG_EXTRA="${TAURI_MOBILE_RENDERER_ANDROID_LOG:-}"
 OUT_ENV="$BUILD_DIR/evidence.env"
@@ -141,6 +142,12 @@ ios_screenshot=""
 ios_log_stream=""
 ios_dev_log=""
 ios_render_log_status=unavailable
+ios_render_log_validation_status=unavailable
+ios_render_log_validation_reason=not-run
+ios_render_log_marker_status=unavailable
+ios_render_log_metal_marker_status=unavailable
+ios_render_log_tauri_context_status=unavailable
+ios_render_log_failure_marker_status=unavailable
 ios_layout_status=unavailable
 ios_metal_log_status=unavailable
 ios_mdi_proof_json=""
@@ -180,23 +187,47 @@ if [ -x "$IOS_SCRIPT" ] || [ -f "$IOS_SCRIPT" ]; then
     ios_mdi_css_animation_probe="$(value_of ios_mdi_css_animation_probe "$BUILD_DIR/ios.out")"
     ios_screenshot_file_status="$(artifact_file_status "$ios_screenshot")"
     ios_mdi_proof_file_status="$(artifact_file_status "$ios_mdi_proof_json")"
-    if [ "$ios_render_log_status" != "pass" ] && grep_any_file '\[tauri-shell\] render, html_len=' "$ios_log_stream" "$ios_dev_log" "$IOS_LOG_EXTRA"; then
-        ios_render_log_status=pass
-    elif [ "$ios_status" = "pass" ] && [ "$ios_render_log_status" != "pass" ]; then
+    ios_render_log_validation_env="$BUILD_DIR/ios_render_log.validation.env"
+    if [ -f "$IOS_RENDER_LOG_VALIDATOR" ]; then
+        ios_render_validation_code=0
+        node "$IOS_RENDER_LOG_VALIDATOR" "$ios_log_stream" "$ios_dev_log" "$IOS_LOG_EXTRA" >"$ios_render_log_validation_env" \
+            || ios_render_validation_code=$?
+        ios_render_log_validation_status="$(value_of ios_render_log_validation_status "$ios_render_log_validation_env")"
+        ios_render_log_validation_reason="$(value_of ios_render_log_validation_reason "$ios_render_log_validation_env")"
+        ios_render_log_marker_status="$(value_of ios_render_log_marker_status "$ios_render_log_validation_env")"
+        ios_render_log_metal_marker_status="$(value_of ios_render_log_metal_marker_status "$ios_render_log_validation_env")"
+        ios_render_log_tauri_context_status="$(value_of ios_render_log_tauri_context_status "$ios_render_log_validation_env")"
+        ios_render_log_failure_marker_status="$(value_of ios_render_log_failure_marker_status "$ios_render_log_validation_env")"
+        if [ "$ios_render_validation_code" -eq 0 ] && [ "$ios_render_log_validation_status" = "pass" ]; then
+            ios_render_log_status=pass
+            ios_metal_log_status=pass
+        elif [ "$ios_status" = "pass" ]; then
+            ios_render_log_status="$ios_render_log_marker_status"
+            ios_metal_log_status="$ios_render_log_metal_marker_status"
+            if [ "$ios_render_log_failure_marker_status" = "fail" ]; then
+                ios_reason=ios-render-log-failure-marker
+            elif [ "$ios_render_log_marker_status" != "pass" ]; then
+                ios_reason=ios-render-log-marker-missing
+            elif [ "$ios_render_log_metal_marker_status" != "pass" ]; then
+                ios_reason=ios-metal-log-marker-missing
+            elif [ "$ios_render_log_tauri_context_status" != "pass" ]; then
+                ios_reason=ios-tauri-wkwebview-context-missing
+            else
+                ios_reason="${ios_render_log_validation_reason:-ios-render-log-validation-failed}"
+            fi
+        fi
+    elif [ "$ios_status" = "pass" ]; then
         ios_render_log_status=fail
-        ios_reason=ios-render-log-marker-missing
+        ios_metal_log_status=fail
+        ios_render_log_validation_status=fail
+        ios_render_log_validation_reason=ios-render-log-validator-missing
+        ios_reason=ios-render-log-validator-missing
     fi
     if [ "$ios_status" = "pass" ] && [ -n "$ios_screenshot" ] && [ -s "$ios_screenshot" ]; then
         ios_layout_status=pass
     elif [ "$ios_status" = "pass" ]; then
         ios_layout_status=fail
         ios_reason=ios-screenshot-missing
-    fi
-    if grep_any_file 'Metal|CAMetalLayer|MTL|AGX|IOGPU' "$ios_log_stream" "$ios_dev_log" "$IOS_LOG_EXTRA"; then
-        ios_metal_log_status=pass
-    elif [ "$ios_status" = "pass" ]; then
-        ios_metal_log_status=fail
-        ios_reason=ios-metal-log-marker-missing
     fi
 else
     ios_reason=missing-ios-evidence-script
@@ -292,6 +323,9 @@ elif [ "$ios_status" != "pass" ]; then
 elif [ "$ios_render_log_status" != "pass" ]; then
     status=fail
     reason="$ios_reason"
+elif [ "$ios_render_log_validation_status" != "pass" ]; then
+    status=fail
+    reason="${ios_reason:-$ios_render_log_validation_reason}"
 elif [ "$ios_layout_status" != "pass" ]; then
     status=fail
     reason="$ios_reason"
@@ -354,6 +388,12 @@ fi
     echo "tauri_mobile_renderer_parity_ios_expected_gpu_backend=$ios_expected_gpu_backend"
     echo "tauri_mobile_renderer_parity_ios_tauri_backend=tauri2-wkwebview"
     echo "tauri_mobile_renderer_parity_ios_render_log_status=$ios_render_log_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_validation_status=$ios_render_log_validation_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_validation_reason=$ios_render_log_validation_reason"
+    echo "tauri_mobile_renderer_parity_ios_render_log_marker_status=$ios_render_log_marker_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_metal_marker_status=$ios_render_log_metal_marker_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=$ios_render_log_tauri_context_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_failure_marker_status=$ios_render_log_failure_marker_status"
     echo "tauri_mobile_renderer_parity_ios_layout_status=$ios_layout_status"
     echo "tauri_mobile_renderer_parity_ios_metal_log_status=$ios_metal_log_status"
     echo "tauri_mobile_renderer_parity_ios_mdi_proof_json=$ios_mdi_proof_json"
