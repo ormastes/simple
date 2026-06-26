@@ -421,7 +421,10 @@ Chrome, and Electron RenderDoc rows must pass with real `.rdc` files and `RDOC`
 magic in the first four artifact bytes. Env metadata that merely claims
 `rdoc_capture_magic=RDOC` is not completion proof; `env_file_status=pass` plus
 `artifact_file_status=missing` means the diagnostic env exists but the native
-capture artifact still has not been produced. Set
+capture artifact still has not been produced. If the Linux compare env is
+absent, the aggregate reports each Simple/Chrome/Electron RenderDoc source as
+`status=unavailable`, `env_file_status=missing`, and
+`artifact_file_status=missing` instead of leaving those detail rows blank. Set
 `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0` only for diagnostic
 partial-log inspection, and never use that mode to claim Linux platform-matrix
 completion.
