@@ -249,6 +249,13 @@ Evidence:
   `license_constraints=pending`, `safety_eval=not-run`, and
   `deployment_evidence=not-deployable` placeholders explicitly, and the focused
   retry7 system spec now passes 5/5 with that contract.
+- 2026-06-26 retry6 target-eval hardening: `check_retry6_training_eval_gate.shs`
+  no longer treats model/eval file presence as sufficient handoff evidence.
+  Once retry5 is PASS, retry6 only reports `TARGET_EVAL_REVIEW_REQUIRED` when
+  the model manifest is deployable and the eval artifact exposes
+  `target_accuracy` or `final_accuracy` meeting the 90.0 threshold. Retry7 now
+  propagates `target_accuracy` and `target_eval_reached` so normal acceptance
+  cannot advance on empty or below-target eval files.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS

@@ -84,6 +84,7 @@ run reports:
 - `training_allowed=false`
 - `model_manifest_exists=false`
 - `eval_result_exists=false`
+- `target_eval_reached=false`
 - `acceptance_allowed=false`
 - `STATUS: WARN retry7-acceptance-gate`
 
@@ -122,6 +123,7 @@ Retry7 must remain WARN when any of these are true:
 - retry6 training is not allowed
 - retry6 model manifest is absent
 - retry6 target eval result is absent
+- retry6 target eval does not report target_accuracy>=90.0
 - retry7 decision is not `accepted`
 - safety evaluation remains `not-run`
 - deployment evidence remains `not-deployable`
@@ -166,7 +168,7 @@ expect(executable_code).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -177,6 +179,8 @@ expect(output).to_contain("upstream_attempt=llm_backed_app_server_dry_run_retry6
 expect(output).to_contain("training_allowed=false")
 expect(output).to_contain("model_manifest_exists=false")
 expect(output).to_contain("eval_result_exists=false")
+expect(output).to_contain("target_accuracy=missing")
+expect(output).to_contain("target_eval_reached=false")
 expect(output).to_contain("acceptance_allowed=false")
 expect(output).to_contain("result=BLOCKED_RETRY6_NOT_READY")
 expect(output).to_contain("STATUS: WARN retry7-acceptance-gate")

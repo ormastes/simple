@@ -108,7 +108,10 @@ The retry6 checker first reads retry5 normal-review status. While retry5 is not
 `PASS`, retry6 reports `STATUS: WARN retry6-training-eval-gate`,
 `training_allowed=false`, and `acceptance_allowed=false`. After retry5 passes,
 the same checker requires retry6 model and target-eval artifacts before normal
-review may inspect the attempt. It never marks acceptance allowed by itself.
+review may inspect the attempt. The model manifest must be deployable, and the
+eval artifact must expose a numeric `target_accuracy` or `final_accuracy` that
+meets the required 90.0 threshold. File presence alone is not enough. It never
+marks acceptance allowed by itself.
 
 Record data-download evidence:
 
