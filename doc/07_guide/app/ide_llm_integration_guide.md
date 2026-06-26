@@ -114,6 +114,11 @@ The IDE must run on both host platforms and SimpleOS:
 | **Dashboard assistant views** | `src/app/dashboard.views/assistant_*.spl` | Render session status / timeline / tasks / overview |
 | **Dashboard bridge** | `src/app/dashboard/assistant_bridge.spl` | Attach-to-snapshot policy (live / stale / degraded); observer, never source-of-truth |
 
+`assistant_push_signal` is durable: the MCP handler returns success only after
+the signal timeline event is appended. If timeline persistence fails, the MCP
+call fails instead of updating session state and leaving the dashboard without
+the matching event.
+
 ### Shared store (the integration backbone)
 
 ```

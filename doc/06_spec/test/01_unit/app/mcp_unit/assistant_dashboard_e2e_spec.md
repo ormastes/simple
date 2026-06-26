@@ -41,15 +41,18 @@ assistant_dashboard_e2e_spec -> std
 
 #### starts a session, lists it, and the dashboard reads the stored timeline
 
-- file delete
-- file delete
-- file delete
+- Start an assistant session through the MCP handler.
+- List MCP assistant sessions and verify the new session is visible.
+- Push a wake signal and require a successful MCP response.
+- Collect the dashboard snapshot from persisted assistant store files.
+- Read the dashboard timeline and verify the persisted signal event.
+- Remove the fixture session, timeline, and notification files.
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -57,27 +60,33 @@ val token = "assistant_e2e_{rt_getpid()}"
 val start_resp = start_assistant(token)
 val session_id = find_session_by_prompt("Verify assistant store bridge {token}")
 
-expect(session_id != "").to_equal(true)
-expect(start_resp.contains(token)).to_equal(true)
+expect(session_id == "").to_be(false)
+expect(start_resp.contains(token)).to_be(true)
 
 val list_resp = handle_assistant_list_sessions("2", jo1(""))
-expect(list_resp.contains(session_id)).to_equal(true)
-expect(list_resp.contains(token)).to_equal(true)
+expect(list_resp.contains(session_id)).to_be(true)
+expect(list_resp.contains(token)).to_be(true)
+
+val signal_resp = push_wake_signal(session_id)
+expect(signal_resp.contains("\"status\":\"ok\"")).to_be(true)
 
 val snapshot = collect_assistant_snapshot()
 var matched = false
 for session in snapshot.sessions:
     if session.session_id == session_id:
         matched = true
-expect(matched).to_equal(true)
+expect(matched).to_be(true)
 expect(snapshot.total_sessions).to_be_greater_than(0)
 
 val timeline = collect_assistant_timeline(session_id)
 expect(timeline.len()).to_be_greater_than(0)
+var signal_found = false
+for event in timeline:
+    if event.kind == "signal_event" and event.signal == "wake":
+        signal_found = true
+expect(signal_found).to_be(true)
 
-file_delete(assistant_session_path(session_id))
-file_delete(assistant_timeline_path(session_id))
-file_delete(assistant_notifications_path(session_id))
+cleanup_assistant_e2e_session(session_id)
 ```
 
 </details>

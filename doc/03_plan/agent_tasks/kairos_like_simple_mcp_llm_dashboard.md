@@ -85,15 +85,20 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
    - Dashboard collectors use `assistant_store_load_session` so snapshots see
      the same timeline-merged session metadata as MCP views.
    - Signal push fails the MCP call if the timeline event cannot be persisted.
+     Status: done on 2026-06-26; `handle_assistant_push_signal` now checks the
+     `assistant_store_append_event_record` result before state update, and the
+     dashboard e2e spec proves a pushed `wake` signal is persisted as
+     `signal_event` and visible through `collect_assistant_timeline`.
    - Evidence:
-     - `test/01_unit/app/mcp_unit/assistant_surface_spec.spl` passes.
-     - `test/unit/app/mcp_unit/assistant_surface_spec.spl` passes.
+     - `test/01_unit/app/mcp_unit/assistant_surface_spec.spl` passes with 3/3.
+     - `test/unit/app/mcp_unit/assistant_surface_spec.spl` passes with 3/3.
      - `test/01_unit/app/mcp_unit/assistant_task_linking_spec.spl` passes.
      - `test/unit/app/mcp_unit/assistant_task_linking_spec.spl` passes.
      - `test/01_unit/app/mcp_unit/assistant_dashboard_e2e_spec.spl` and
        mirrored `test/unit/app/mcp_unit/assistant_dashboard_e2e_spec.spl` pass
-       without internal process-exit diagnostics after narrowing fixture file
-       operations to `std.io_runtime`.
+       with 1/1, including persisted MCP signal readback in the dashboard
+       timeline and without internal process-exit diagnostics after narrowing
+       fixture file operations to `std.io_runtime`.
 3. Dashboard live mode:
    - `src/app/dashboard/assistant_live_view.spl` connects replay snapshots to
      bridge projections and renders absence-safe dashboard state lines.

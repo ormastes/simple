@@ -27,7 +27,7 @@ assistant_surface_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -48,17 +48,17 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val names = tool_names()
-expect(has_tool(names, "assistant_start")).to_equal(true)
-expect(has_tool(names, "assistant_spawn_task")).to_equal(true)
-expect(has_tool(names, "assistant_pause")).to_equal(true)
-expect(has_tool(names, "assistant_resume")).to_equal(true)
-expect(has_tool(names, "assistant_brief")).to_equal(true)
-expect(has_tool(names, "assistant_list_sessions")).to_equal(true)
-expect(has_tool(names, "assistant_get_session")).to_equal(true)
-expect(has_tool(names, "assistant_get_timeline")).to_equal(true)
-expect(has_tool(names, "assistant_push_signal")).to_equal(true)
-expect(has_tool(names, "assistant_list_tasks")).to_equal(true)
-expect(has_tool(names, "assistant_get_notifications")).to_equal(true)
+expect(has_tool(names, "assistant_start")).to_be(true)
+expect(has_tool(names, "assistant_spawn_task")).to_be(true)
+expect(has_tool(names, "assistant_pause")).to_be(true)
+expect(has_tool(names, "assistant_resume")).to_be(true)
+expect(has_tool(names, "assistant_brief")).to_be(true)
+expect(has_tool(names, "assistant_list_sessions")).to_be(true)
+expect(has_tool(names, "assistant_get_session")).to_be(true)
+expect(has_tool(names, "assistant_get_timeline")).to_be(true)
+expect(has_tool(names, "assistant_push_signal")).to_be(true)
+expect(has_tool(names, "assistant_list_tasks")).to_be(true)
+expect(has_tool(names, "assistant_get_notifications")).to_be(true)
 ```
 
 </details>
@@ -75,6 +75,24 @@ Reproduction: this block contains the complete executable scenario source.
 for entry in get_tool_table():
     if entry.name.starts_with("assistant_"):
         expect(entry.handler_kind).to_equal("in_process")
+```
+
+</details>
+
+#### requires signal timeline append success before state update
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = rt_file_read_text("src/app/mcp/main_lazy_assistant.spl") ?? ""
+expect(source).to_contain("val appended = assistant_store_append_event_record(ASSIST_ROOT, event_obj)")
+expect(source).to_contain("if appended == nil:")
+expect(source).to_contain("Failed to append signal event")
+expect(source).to_contain("val updated = assistant_store_update_state")
 ```
 
 </details>
@@ -98,8 +116,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
