@@ -82,7 +82,7 @@ SIMPLE_LIB=src bin/simple test/03_system/check/production_gui_web_renderer_parit
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -94,6 +94,7 @@ expect(script).to_contain("command -v simple")
 expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE")
 expect(script).to_contain("production_gui_web_renderer_parity_simple_bin=$SIMPLE_BIN")
 expect(script).to_contain("production_gui_web_renderer_parity_simple_bin_source=$SIMPLE_BIN_SOURCE")
+expect(script).to_contain("ELECTRON_LAYOUT_MANIFEST_RESUME=1")
 ```
 
 </details>

@@ -95,6 +95,11 @@ proven, unavailable, or failing.
 If the Simple Web layout manifest times out after writing per-case rows, the
 wrapper still derives and promotes partial case/pass/tracked/fail counts while
 leaving `production_gui_web_renderer_parity_layout_manifest_status=timeout`.
+Production parity runs enable `ELECTRON_LAYOUT_MANIFEST_RESUME=1` for that
+manifest so reruns reuse matching per-case evidence and continue the remaining
+cases. Manifest policies named `track-*-divergence` are counted as tracked when
+they emit divergent or pass evidence with `blur_or_tolerance=false`; exact rows
+still require checksum and pixel-count equality.
 
 The canonical production GUI font offload/readback evidence gate is:
 
