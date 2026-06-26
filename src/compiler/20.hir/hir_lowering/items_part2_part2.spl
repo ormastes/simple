@@ -101,10 +101,11 @@ impl HirLowering:
             fn_symbol_id = bootstrap_hir_symbol_for_name(fn_.name)
         else:
             val fn_symbol_lookup = self.symbols.lookup(fn_.name)
-            if fn_symbol_lookup.?:
-                fn_symbol_id = fn_symbol_lookup.unwrap()
-            else:
-                fn_symbol_id = self.symbols.define(fn_.name, SymbolKind.Function, nil, fn_.span, fn_.visibility, false, nil)
+            match fn_symbol_lookup:
+                case Some(symbol_id):
+                    fn_symbol_id = symbol_id
+                case nil:
+                    fn_symbol_id = self.symbols.define(fn_.name, SymbolKind.Function, nil, fn_.span, fn_.visibility, false, nil)
         self.current_function = Some(fn_symbol_id)
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             self.symbols.push_scope(ScopeKind.Function)
@@ -125,7 +126,9 @@ impl HirLowering:
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             val fn_params = function_params(fn_)
             if fn_.is_method and not fn_.is_static and self.current_method_self_type.? and (fn_params.len() == 0 or fn_params[0].name != "self"):
-                val self_type = self.current_method_self_type.unwrap()
+                val self_type = match self.current_method_self_type:
+                    case Some(value): value
+                    case nil: HirType(kind: HirTypeKind.Error, span: fn_.span)
                 val self_symbol = self.symbols.define("self", SymbolKind.Parameter, Some(self_type), fn_.span, Visibility.Private, false, nil)
                 params = params.push(HirParam(
                     symbol: self_symbol,
@@ -252,7 +255,11 @@ impl HirLowering:
                 class_doc_comment = doc_comment
                 class_span = span
 
-        val symbol = self.symbols.lookup(class_name).unwrap()
+        val symbol = match self.symbols.lookup(class_name):
+            case Some(symbol_id): symbol_id
+            case nil:
+                self.error("unresolved class symbol: {class_name}", class_span)
+                self.symbols.define(class_name, SymbolKind.Class, nil, class_span, class_visibility, false, nil)
         self.symbols.push_scope(ScopeKind.Class)
 
         var type_params: [HirTypeParam] = []
@@ -329,7 +336,11 @@ impl HirLowering:
                 struct_doc_comment = doc_comment
                 struct_span = span
 
-        val symbol = self.symbols.lookup(struct_name).unwrap()
+        val symbol = match self.symbols.lookup(struct_name):
+            case Some(symbol_id): symbol_id
+            case nil:
+                self.error("unresolved struct symbol: {struct_name}", struct_span)
+                self.symbols.define(struct_name, SymbolKind.Struct, nil, struct_span, struct_visibility, false, nil)
         if custom_primitive_is_name(struct_name):
             custom_primitive_bind_symbol(struct_name, symbol.id)
 
@@ -378,8 +389,8 @@ impl HirLowering:
         val symbol = self.symbols.define(f.name, SymbolKind.Field, Some(type_), f.span, f.visibility, false, nil)
 
         # Lower default without closures to avoid bootstrap SSA issues
-        val lowered_default = if f.default.?:
-            Some(self.lower_hir_expr(f.default.unwrap()))
+        val lowered_default = if val Some(default_value) = f.default:
+            Some(self.lower_hir_expr(default_value))
         else:
             nil
 
@@ -413,7 +424,11 @@ impl HirLowering:
                 enum_doc_comment = doc_comment
                 enum_span = span
 
-        val symbol = self.symbols.lookup(enum_name).unwrap()
+        val symbol = match self.symbols.lookup(enum_name):
+            case Some(symbol_id): symbol_id
+            case nil:
+                self.error("unresolved enum symbol: {enum_name}", enum_span)
+                self.symbols.define(enum_name, SymbolKind.Enum, nil, enum_span, enum_visibility, false, nil)
 
         var type_params: [HirTypeParam] = []
         for tp in enum_type_params:
@@ -482,7 +497,11 @@ impl HirLowering:
                 bitfield_doc_comment = doc_comment
                 bitfield_span = span
 
-        val symbol = self.symbols.lookup(bitfield_name).unwrap()
+        val symbol = match self.symbols.lookup(bitfield_name):
+            case Some(symbol_id): symbol_id
+            case nil:
+                self.error("unresolved bitfield symbol: {bitfield_name}", bitfield_span)
+                self.symbols.define(bitfield_name, SymbolKind.Bitfield, nil, bitfield_span, bitfield_visibility, false, nil)
 
         val backing = self.lower_type(bitfield_backing_type)
         val layout_attr = parse_layout_attrs(bitfield_attributes)
@@ -490,8 +509,8 @@ impl HirLowering:
         # Pre-compute bit widths for all fields
         var widths: [i64] = []
         for f in bitfield_fields:
-            val w = if f.bits.?:
-                f.bits.unwrap()
+            val w = if val Some(bits) = f.bits:
+                bits
             elif f.is_reserved:
                 0
             else:
