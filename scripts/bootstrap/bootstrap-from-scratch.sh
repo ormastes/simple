@@ -224,18 +224,19 @@ seed_stale=0
 # Detect LLVM 18 availability for llvm-lib backend
 llvm_features=""
 if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
-  llvm18_prefix="${LLVM_SYS_180_PREFIX:-/opt/homebrew/opt/llvm@18}"
-  if [ -d "${llvm18_prefix}" ] && { [ -f "${llvm18_prefix}/lib/libLLVM.dylib" ] || [ -f "${llvm18_prefix}/lib/libLLVM-18.so" ]; }; then
-    echo "LLVM 18 found: ${llvm18_prefix}"
+  # LLVM is resolved once by the shared platform interface
+  # (scripts/setup/platform-detect.shs, sourced above), which also exports
+  # LLVM_SYS_<major>0_PREFIX and SIMPLE_LLVM_PATH for the Rust build and Simple runtime.
+  if [ "${LLVM_FOUND:-0}" = "1" ]; then
+    echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (lib: ${LLVM_LIB})"
     llvm_features="--features llvm"
-    export LLVM_SYS_180_PREFIX="${llvm18_prefix}"
     # macOS needs LIBRARY_PATH for zstd and other Homebrew libs
     if [ "${host_os}" = "Darwin" ]; then
       export LIBRARY_PATH="${LIBRARY_PATH:+${LIBRARY_PATH}:}/opt/homebrew/lib"
       export SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || true)}"
     fi
   else
-    echo "LLVM 18 not found (checked ${llvm18_prefix}); falling back to cranelift backend"
+    echo "LLVM not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-18}); falling back to cranelift backend"
     backend="cranelift"
   fi
 fi
