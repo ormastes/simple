@@ -96,7 +96,9 @@ const eventPass =
   integerAtLeast(proof.taskbarItemCount, 4) &&
   integerAtLeast(proof.taskbarIconCount, 4) &&
   proof.taskbarIconsVisible === true &&
-  proof.taskbarLabelsVisible === true &&
+  proof.taskbarLabelsVisible === true;
+const renderPass =
+  integerAtLeast(proof.imageCount, 1) &&
   proof.htmlRenderable === true;
 
 const capturePass =
@@ -111,9 +113,12 @@ const animationPass =
   proof.cssAnimationProbe === true;
 
 emit("mdi_proof_json", jsonPath);
-emit("mdi_proof_status", eventPass && capturePass && performancePass && animationPass ? "pass" : "fail");
-emit("mdi_proof_reason", eventPass && capturePass && performancePass && animationPass ? "pass" : "contract-missing");
+emit("mdi_proof_status", eventPass && renderPass && capturePass && performancePass && animationPass ? "pass" : "fail");
+emit("mdi_proof_reason", eventPass && renderPass && capturePass && performancePass && animationPass ? "pass" : "contract-missing");
 emit("mdi_proof_window_count", integerTextOrBlank(proof.count));
+emit("mdi_render_status", renderPass ? "pass" : "fail");
+emit("mdi_render_image_count", integerTextOrBlank(proof.imageCount));
+emit("mdi_render_html_renderable", proof.htmlRenderable === true ? "true" : "false");
 emit("mdi_event_taskbar_item_count", integerTextOrBlank(proof.taskbarItemCount));
 emit("mdi_event_taskbar_icon_count", integerTextOrBlank(proof.taskbarIconCount));
 emit("mdi_event_status", eventPass ? "pass" : "fail");
@@ -128,6 +133,6 @@ emit("mdi_animation_frame_available", proof.animationFrameAvailable === true ? "
 emit("mdi_animation_frame_count", integerTextOrBlank(proof.animationFrameCount));
 emit("mdi_css_animation_probe", proof.cssAnimationProbe === true ? "true" : "false");
 
-if (!(eventPass && capturePass && performancePass && animationPass)) {
+if (!(eventPass && renderPass && capturePass && performancePass && animationPass)) {
   process.exit(1);
 }

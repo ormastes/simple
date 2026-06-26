@@ -90,7 +90,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -104,6 +104,8 @@ step("Inspect normalized mobile artifact gate rows")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_render_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=pass")
 ```
@@ -193,7 +195,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -201,6 +203,8 @@ val script = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidenc
 expect(script).to_contain("png_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_render_image_count")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_now_available")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_frame_available")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status")

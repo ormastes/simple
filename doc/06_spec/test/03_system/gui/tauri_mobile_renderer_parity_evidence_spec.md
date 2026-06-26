@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -61,10 +61,11 @@ render-log markers.
 - Passing iOS evidence requires a screenshot/layout proof and Metal log marker.
 - Passing Android evidence requires a screenshot/layout proof and Vulkan log
   marker.
-- Passing mobile MDI evidence requires validator-derived viewport dimensions,
-  window/taskbar event counts, performance.now availability plus positive
-  timing, requestAnimationFrame availability plus frame count, CSS animation
-  detail rows, and viewport dimensions; stale status-only pass rows fail closed.
+- Passing mobile MDI evidence requires validator-derived render image/HTML
+  proof, viewport dimensions, window/taskbar event counts, performance.now
+  availability plus positive timing, requestAnimationFrame availability plus
+  frame count, CSS animation detail rows, and viewport dimensions; stale
+  status-only pass rows fail closed.
 - Missing render, Metal, or Vulkan markers fail closed and do not masquerade as
   mobile GPU-backed proof.
 
@@ -82,7 +83,7 @@ render-log markers.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 52 lines folded for reproduction.
+Runnable source: 58 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -106,6 +107,9 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_status=
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_layout_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_metal_log_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_image_count=1")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_html_renderable=true")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_window_count=4")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_taskbar_item_count=4")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_taskbar_icon_count=4")
@@ -125,6 +129,9 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_sta
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_layout_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_vulkan_log_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_render_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_render_image_count=1")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_render_html_renderable=true")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_window_count=4")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_taskbar_item_count=4")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_taskbar_icon_count=4")
@@ -342,7 +349,7 @@ expect(code).to_equal(0)
 
 val evidence = file_read(root + "/out/evidence.env")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
-expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-event-capture-performance-animation-proof-missing")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-render-event-capture-performance-animation-proof-missing")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_status=")
 ```
 
@@ -358,7 +365,7 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_status="
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -375,9 +382,45 @@ expect(code).to_equal(0)
 
 val evidence = file_read(root + "/out/evidence.env")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
-expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-event-capture-performance-animation-proof-incomplete")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-render-event-capture-performance-animation-proof-missing")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_image_count=")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_status=pass")
-expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_capture_viewport_width=")
+```
+
+</details>
+
+#### fails closed when stale iOS MDI detail rows omit render image proof
+
+-  write fixture script
+-  write fixture script
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-renderer-parity-ios-no-render-proof"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/source " + root + "/ios " + root + "/android && " +
+    "printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\n' > " + root + "/source/production.env && " +
+    "printf 'pngish' > " + root + "/ios/screenshot.png && printf '[tauri-shell] render, html_len=347702 CAMetalLayer Metal renderer ready\\n' > " + root + "/ios/log_stream.txt && printf 'external_url: Some ios_mdi_probe.html Metal\\n' > " + root + "/ios/dev.log && " +
+    "printf 'pngish' > " + root + "/android/screenshot.png && printf '[tauri-shell] render, html_len=347702 Vulkan renderer ready\\n' > " + root + "/android/logcat.txt && " +
+    _write_fixture_script(root + "/ios.sh", "echo ios_tooling=available\necho ios_screenshot=" + root + "/ios/screenshot.png\necho ios_log_stream=" + root + "/ios/log_stream.txt\necho ios_dev_log=" + root + "/ios/dev.log\n" + _mobile_proof_lines("ios", root) + "\necho ios_mdi_render_image_count=\necho status=pass") + " && " +
+    _write_fixture_script(root + "/android.sh", "echo android_screenshot=" + root + "/android/screenshot.png\necho android_logcat=" + root + "/android/logcat.txt\n" + _mobile_proof_lines("android", root) + "\necho status=pass") + " && " +
+    "PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=" + root + "/source/production.env TAURI_MOBILE_RENDERER_IOS_SCRIPT=" + root + "/ios.sh TAURI_MOBILE_RENDERER_ANDROID_SCRIPT=" + root + "/android.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-render-event-capture-performance-animation-proof-incomplete")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_image_count=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_status=pass")
 ```
 
 </details>
@@ -409,7 +452,7 @@ expect(code).to_equal(0)
 
 val evidence = file_read(root + "/out/evidence.env")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
-expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-event-capture-performance-animation-proof-missing")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-render-event-capture-performance-animation-proof-missing")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_status=")
 ```
 
@@ -425,7 +468,7 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_stat
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -442,9 +485,45 @@ expect(code).to_equal(0)
 
 val evidence = file_read(root + "/out/evidence.env")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
-expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-event-capture-performance-animation-proof-incomplete")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-render-event-capture-performance-animation-proof-missing")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_render_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_render_image_count=")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_status=pass")
-expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_viewport_width=")
+```
+
+</details>
+
+#### fails closed when stale Android MDI detail rows omit render image proof
+
+-  write fixture script
+-  write fixture script
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-renderer-parity-android-no-render-proof"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/source " + root + "/ios " + root + "/android && " +
+    "printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\n' > " + root + "/source/production.env && " +
+    "printf 'pngish' > " + root + "/ios/screenshot.png && printf '[tauri-shell] render, html_len=347702 CAMetalLayer Metal renderer ready\\n' > " + root + "/ios/log_stream.txt && printf 'external_url: Some ios_mdi_probe.html Metal\\n' > " + root + "/ios/dev.log && " +
+    "printf 'pngish' > " + root + "/android/screenshot.png && printf '[tauri-shell] render, html_len=347702 Vulkan renderer ready\\n' > " + root + "/android/logcat.txt && " +
+    _write_fixture_script(root + "/ios.sh", "echo ios_tooling=available\necho ios_screenshot=" + root + "/ios/screenshot.png\necho ios_log_stream=" + root + "/ios/log_stream.txt\necho ios_dev_log=" + root + "/ios/dev.log\n" + _mobile_proof_lines("ios", root) + "\necho status=pass") + " && " +
+    _write_fixture_script(root + "/android.sh", "echo android_screenshot=" + root + "/android/screenshot.png\necho android_logcat=" + root + "/android/logcat.txt\n" + _mobile_proof_lines("android", root) + "\necho android_mdi_render_image_count=\necho status=pass") + " && " +
+    "PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=" + root + "/source/production.env TAURI_MOBILE_RENDERER_IOS_SCRIPT=" + root + "/ios.sh TAURI_MOBILE_RENDERER_ANDROID_SCRIPT=" + root + "/android.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-render-event-capture-performance-animation-proof-incomplete")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_render_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_render_image_count=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_status=pass")
 ```
 
 </details>
@@ -453,8 +532,8 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_vi
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

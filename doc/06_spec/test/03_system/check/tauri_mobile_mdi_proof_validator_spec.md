@@ -27,7 +27,7 @@ tauri_mobile_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,6 +76,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
   explicit finite positive `performanceNowDeltaMs` from distinct samples.
 - Capture viewport and animation-frame details must also be explicit finite
   numeric proof values, not defaulted placeholder values.
+- Render proof must include an explicit rendered image count and HTML render
+  marker; event routing alone is not enough to prove the mobile MDI surface
+  actually rendered.
 - Event counts, viewport dimensions, and animation-frame counts must be decimal
   integers; fractional counts do not prove routed events or full animation
   frames.
@@ -94,7 +97,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -109,6 +112,9 @@ val evidence = file_read(root + "/evidence.env")
 step("Inspect normalized proof rows")
 expect(evidence).to_contain("ios_mdi_proof_status=pass")
 expect(evidence).to_contain("ios_mdi_proof_window_count=4")
+expect(evidence).to_contain("ios_mdi_render_status=pass")
+expect(evidence).to_contain("ios_mdi_render_image_count=1")
+expect(evidence).to_contain("ios_mdi_render_html_renderable=true")
 expect(evidence).to_contain("ios_mdi_event_status=pass")
 expect(evidence).to_contain("ios_mdi_event_taskbar_item_count=4")
 expect(evidence).to_contain("ios_mdi_event_taskbar_icon_count=4")
@@ -122,6 +128,45 @@ expect(evidence).to_contain("ios_mdi_animation_status=pass")
 expect(evidence).to_contain("ios_mdi_animation_frame_available=true")
 expect(evidence).to_contain("ios_mdi_animation_frame_count=2")
 expect(evidence).to_contain("ios_mdi_css_animation_probe=true")
+```
+
+</details>
+
+#### rejects missing mobile render image and HTML proof
+
+-  proof log command
+-  proof log command
+   - Expected: code equals `1`
+- Confirm mobile MDI render proof is separate from event routing proof
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-render-proof"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_log_command(root + "/image.log", "delete p.imageCount") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/image.json " + root + "/image.log > " + root + "/image.env; " +
+    _proof_log_command(root + "/html.log", "p.htmlRenderable=false") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/html.json " + root + "/html.log > " + root + "/html.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val image = file_read(root + "/image.env")
+val html = file_read(root + "/html.env")
+step("Confirm mobile MDI render proof is separate from event routing proof")
+expect(image).to_contain("ios_mdi_proof_status=fail")
+expect(image).to_contain("ios_mdi_render_status=fail")
+expect(image).to_contain("ios_mdi_render_image_count=")
+expect(image).to_contain("ios_mdi_event_status=pass")
+expect(html).to_contain("android_mdi_proof_status=fail")
+expect(html).to_contain("android_mdi_render_status=fail")
+expect(html).to_contain("android_mdi_render_html_renderable=false")
+expect(html).to_contain("android_mdi_event_status=pass")
 ```
 
 </details>
@@ -377,8 +422,8 @@ expect(anim).to_contain("android_mdi_animation_frame_count=2")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
