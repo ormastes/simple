@@ -37,7 +37,7 @@ agent_dashboard_hardening_spec -> app
 
 ## Scenarios
 
-### AgentTree — empty and nil safety
+### AgentTree — empty and absence safety
 
 #### starts with zero agents
 
@@ -69,7 +69,10 @@ expect(tree.root_agents().len()).to_equal(0)
 
 </details>
 
-#### get_agent returns nil for unknown id
+#### get_agent returns no result for unknown id
+
+- expect agent absent
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -80,7 +83,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val tree = AgentTree.new()
 val result = tree.get_agent("no-such-agent")
-expect(result == nil).to_equal(true)
+expect_agent_absent(result)
 ```
 
 </details>
@@ -177,7 +180,7 @@ expect(tree.agent_count()).to_equal(1)
 #### get_agent finds an agent after ensure
 
 - tree ensure agent
-   - Expected: found == nil is false
+- expect agent id
 
 
 <details>
@@ -190,7 +193,7 @@ Reproduction: this block contains the complete executable scenario source.
 val tree = AgentTree.new()
 tree.ensure_agent("a2", LLMProvider.Gemini, "pro")
 val found = tree.get_agent("a2")
-expect(found == nil).to_equal(false)
+expect_agent_id(found, "a2")
 ```
 
 </details>
@@ -992,7 +995,7 @@ expect(pos.slot).to_be_greater_than(-1)
 ## Overview
 
 Tests covering:
-- AgentTree — empty and nil safety
+- AgentTree — empty and absence safety
 - AgentPosition — slot and room boundary safety
 - AgentPanel — render_agent_tree boundary cases
 - AgentSprites — provider and activity coverage
