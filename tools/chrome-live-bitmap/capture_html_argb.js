@@ -65,6 +65,19 @@ function findChromeBinary() {
     "/usr/bin/chromium-browser",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   ];
+  if (process.platform === "win32") {
+    for (const root of [
+      process.env.LOCALAPPDATA,
+      process.env.PROGRAMFILES,
+      process.env["PROGRAMFILES(X86)"],
+    ]) {
+      if (!root) continue;
+      candidates.push(
+        path.join(root, "Google", "Chrome", "Application", "chrome.exe"),
+        path.join(root, "Microsoft", "Edge", "Application", "msedge.exe"),
+      );
+    }
+  }
   for (const candidate of candidates) {
     if (executableExists(candidate)) return candidate;
   }
@@ -87,7 +100,7 @@ function findChromeBinary() {
       // Playwright-managed Chromium is optional.
     }
   }
-  for (const name of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]) {
+  for (const name of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome.exe", "msedge.exe"]) {
     const candidate = findOnPath(name);
     if (candidate) return candidate;
   }

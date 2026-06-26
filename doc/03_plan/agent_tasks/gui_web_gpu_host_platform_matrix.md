@@ -138,6 +138,13 @@ SIMPLE_BIN=bin/simple \
 sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
 ```
 
+Focused Windows browser-backing evidence:
+
+```sh
+GUI_WEB_2D_DIRECTX_BUILD_DIR=build/gui-web-2d-directx-env \
+sh scripts/setup/setup-gui-web-2d-directx-env.shs --browser-backing
+```
+
 Acceptance:
 - Keep the DirectX wrapper fail-closed until the real D3D/DXVK readback command
   returns `device_readback` with a positive handle and matching checksum.
@@ -145,6 +152,10 @@ Acceptance:
 - Production evidence must include a positive DirectX backend handle with
   same-frame device-readback receipt, not merely `swapchain_present`, or remain
   typed unavailable.
+- Browser-backed Windows evidence must record the native DirectX readback gate
+  plus Electron and Chrome captures launched with ANGLE D3D11
+  (`--use-angle=d3d11`); launch flags alone are not proof without captured ARGB
+  and browser proof artifacts.
 
 ### WebGPU Agent
 
@@ -224,7 +235,7 @@ unavailable/provenance-only to production proof.
   readback command exists.
 - Files: `src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl`,
   `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_directx_spec.spl`,
-  production wrapper/report.
+  `scripts/setup/setup-gui-web-2d-directx-env.shs`, production wrapper/report.
 - Command: run the production wrapper on a Windows/DXVK evidence host after the
   DirectX readback command exists.
 - Expected evidence keys before real readback:
