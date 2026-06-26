@@ -10,15 +10,39 @@ function emit(key, value) {
   console.log(`${key}=${clean(value)}`);
 }
 
-function numberValue(value) {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
-  if (typeof value === 'string' && value.trim() !== '') return Number(value);
-  return NaN;
+function decimalIntegerText(value) {
+  if (typeof value === 'number' && Number.isInteger(value)) return String(value);
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'string' && /^-?[0-9]+$/.test(value.trim())) return value.trim();
+  return null;
 }
 
-function min(value, required) {
-  const n = numberValue(value);
-  return Number.isFinite(n) && n >= required;
+function decimalNumberText(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'string' && /^-?(?:[0-9]+)(?:\.[0-9]+)?$/.test(value.trim())) return value.trim();
+  return null;
+}
+
+function integerAtLeast(value, required) {
+  const text = decimalIntegerText(value);
+  if (text === null) return false;
+  return BigInt(text) >= BigInt(required);
+}
+
+function decimalAtLeast(value, required) {
+  const text = decimalNumberText(value);
+  if (text === null) return false;
+  return Number(text) >= required;
+}
+
+function integerTextOrBlank(value) {
+  const text = decimalIntegerText(value);
+  return text === null ? '' : text;
+}
+
+function decimalTextOrBlank(value) {
+  const text = decimalNumberText(value);
+  return text === null ? '' : text;
 }
 
 const [proofPath, screenshotPath] = process.argv.slice(2);
@@ -38,9 +62,9 @@ try {
 }
 
 const eventChecks = {
-  count: min(proof.count, 4),
+  count: integerAtLeast(proof.count, 4),
   hasDesktop: proof.hasDesktop === true,
-  imageCount: min(proof.imageCount, 1),
+  imageCount: integerAtLeast(proof.imageCount, 1),
   hasDragRuntime: proof.hasDragRuntime === true,
   hasDragEvents: proof.hasDragEvents === true,
   dragMoved: proof.dragMoved === true,
@@ -53,7 +77,7 @@ const eventChecks = {
   trafficMinimizeRouted: proof.trafficMinimizeRouted === true,
   trafficMaximizeRouted: proof.trafficMaximizeRouted === true,
   trafficCloseRouted: proof.trafficCloseRouted === true,
-  bridgeIpcFrameCount: min(proof.bridgeIpcFrameCount, 8),
+  bridgeIpcFrameCount: integerAtLeast(proof.bridgeIpcFrameCount, 8),
   bridgeBodyActionFrameRouted: proof.bridgeBodyActionFrameRouted === true,
   bridgeBodyInputFrameRouted: proof.bridgeBodyInputFrameRouted === true,
   bridgeBodyKeyFrameRouted: proof.bridgeBodyKeyFrameRouted === true,
@@ -62,8 +86,8 @@ const eventChecks = {
   bridgeMinimizeFrameRouted: proof.bridgeMinimizeFrameRouted === true,
   bridgeMaximizeFrameRouted: proof.bridgeMaximizeFrameRouted === true,
   bridgeCloseFrameRouted: proof.bridgeCloseFrameRouted === true,
-  taskbarItemCount: min(proof.taskbarItemCount, 4),
-  taskbarIconCount: min(proof.taskbarIconCount, 4),
+  taskbarItemCount: integerAtLeast(proof.taskbarItemCount, 4),
+  taskbarIconCount: integerAtLeast(proof.taskbarIconCount, 4),
   taskbarIconsVisible: proof.taskbarIconsVisible === true,
   taskbarLabelsVisible: proof.taskbarLabelsVisible === true,
   htmlRenderable: proof.htmlRenderable === true,
@@ -73,11 +97,11 @@ const captureChecks = {
 };
 const performanceChecks = {
   performanceNowAvailable: proof.performanceNowAvailable === true,
-  performanceNowDeltaMs: min(proof.performanceNowDeltaMs, 0),
+  performanceNowDeltaMs: decimalAtLeast(proof.performanceNowDeltaMs, 0),
 };
 const animationChecks = {
   animationFrameAvailable: proof.animationFrameAvailable === true,
-  animationFrameCount: min(proof.animationFrameCount, 2),
+  animationFrameCount: integerAtLeast(proof.animationFrameCount, 2),
   cssAnimationProbe: proof.cssAnimationProbe === true,
 };
 
@@ -107,12 +131,12 @@ emit('electron_mdi_event_status', eventFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_capture_status', captureFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_performance_status', performanceFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_animation_status', animationFailed.length ? 'fail' : 'pass');
-emit('electron_mdi_window_count', Number.isFinite(numberValue(proof.count)) ? numberValue(proof.count) : '');
-emit('electron_mdi_bridge_ipc_frame_count', Number.isFinite(numberValue(proof.bridgeIpcFrameCount)) ? numberValue(proof.bridgeIpcFrameCount) : '');
+emit('electron_mdi_window_count', integerTextOrBlank(proof.count));
+emit('electron_mdi_bridge_ipc_frame_count', integerTextOrBlank(proof.bridgeIpcFrameCount));
 emit('electron_mdi_performance_now_available', proof.performanceNowAvailable === true ? 'true' : 'false');
-emit('electron_mdi_performance_now_delta_ms', Number.isFinite(numberValue(proof.performanceNowDeltaMs)) ? numberValue(proof.performanceNowDeltaMs) : '');
+emit('electron_mdi_performance_now_delta_ms', decimalTextOrBlank(proof.performanceNowDeltaMs));
 emit('electron_mdi_animation_frame_available', proof.animationFrameAvailable === true ? 'true' : 'false');
-emit('electron_mdi_animation_frame_count', Number.isFinite(numberValue(proof.animationFrameCount)) ? numberValue(proof.animationFrameCount) : '');
+emit('electron_mdi_animation_frame_count', integerTextOrBlank(proof.animationFrameCount));
 emit('electron_mdi_css_animation_probe', proof.cssAnimationProbe === true ? 'true' : 'false');
 emit('electron_mdi_screenshot_path_matches', proof.screenshotPath === screenshotPath ? 'true' : 'false');
 if (reason !== 'pass') {

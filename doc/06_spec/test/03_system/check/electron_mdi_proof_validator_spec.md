@@ -27,7 +27,7 @@ electron_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,6 +78,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
 - Performance and animation pass require `performance.now()`, an explicit
   non-negative timing delta, at least two animation frames, and a CSS animation
   probe.
+- Event counts, bridge frame counts, taskbar counts, image counts, and animation
+  frame counts must be decimal integers; fractional counts are not valid
+  routed-event or full-frame proof.
 
 ## Scenarios
 
@@ -234,6 +237,49 @@ expect(evidence).to_contain("electron_mdi_css_animation_probe=false")
 
 </details>
 
+#### rejects fractional event and animation count proof values
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm fractional count values are not accepted as Electron MDI proof
+   - Expected: event does not contain `electron_mdi_bridge_ipc_frame_count=8.5`
+   - Expected: animation does not contain `electron_mdi_animation_frame_count=2.5`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-mdi-validator-fractional-counts"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/event.json", "p.bridgeIpcFrameCount=8.5") +
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/event.json build/electron-proof/screen.png > " + root + "/event.env; " +
+    _proof_command(root + "/animation.json", "p.animationFrameCount=2.5") +
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/animation.json build/electron-proof/screen.png > " + root + "/animation.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val event = file_read(root + "/event.env")
+val animation = file_read(root + "/animation.env")
+step("Confirm fractional count values are not accepted as Electron MDI proof")
+expect(event).to_contain("electron_mdi_json_proof=fail")
+expect(event).to_contain("electron_mdi_event_status=fail")
+expect(event).to_contain("bridgeIpcFrameCount")
+expect(event).to_contain("electron_mdi_bridge_ipc_frame_count=")
+expect(event.contains("electron_mdi_bridge_ipc_frame_count=8.5")).to_equal(false)
+expect(animation).to_contain("electron_mdi_json_proof=fail")
+expect(animation).to_contain("electron_mdi_animation_status=fail")
+expect(animation).to_contain("animationFrameCount")
+expect(animation).to_contain("electron_mdi_animation_frame_count=")
+expect(animation.contains("electron_mdi_animation_frame_count=2.5")).to_equal(false)
+```
+
+</details>
+
 #### keeps the live Electron producer and shell wrapper wired to timing proof
 
 <details>
@@ -257,8 +303,8 @@ expect(wrapper).to_contain("validate-electron-mdi-proof.js")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
