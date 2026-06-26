@@ -379,6 +379,14 @@ Tasks:
     `native-build --source src/app --source src/lib --entry-closure --entry
     src/app/cli/main.spl --strip --threads 1 --timeout 240 --output
     build/llm_runtime/simple_cli_full` hit the 300s external cap with no binary.
+    Release artifact evidence is now done for the tracked
+    `release/x86_64-unknown-linux-gnu/simple` binary: it was refreshed from
+    `cargo build --manifest-path src/compiler_rust/Cargo.toml --release -p
+    simple-driver --bin simple`, and
+    `test/03_system/feature/app/cli/llm_runtime_control_binary_smoke_spec.spl`
+    proves `simple llm-runtime-control --action preflight ...` emits
+    `llm_runtime_vllm_dashboard_control_execution` JSONL instead of
+    `file not found: llm-runtime-control`.
 13. Move web dashboard control route onto the dashboard-safe vLLM collector
     facade. Status: done for `/api/vllm/control` returning
     `llm_dashboard_vllm_control_panel` JSONL from
@@ -423,13 +431,6 @@ Tasks:
   installed local `vllm`; the runtime owner now has a live wrapper, but the web
   dashboard route remains intent-only until integration evidence proves the
   process/HTTP imports do not reintroduce dashboard test teardown diagnostics.
-- Full rebuilt release-binary evidence for top-level
-  `simple llm-runtime-control`; source dispatch and Rust-driver app-command
-  registration now have mirrored SPipe evidence, and the standalone command
-  binary has native evidence, but full `src/app/cli/main.spl` native-build hit a
-  300s timeout on this host and the checked-in prebuilt release binary still
-  predates the new top-level command until a deploy artifact is refreshed from
-  the rebuilt driver/source tree.
 
 Runtime-adjacent decision record for live HTTP transport:
 
