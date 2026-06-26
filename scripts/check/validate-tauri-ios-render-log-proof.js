@@ -14,13 +14,25 @@ const files = process.argv.slice(2).filter(Boolean);
 let sourceCount = 0;
 let text = '';
 let coherentSource = false;
+let htmlLen = '';
+
+const validRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=([1-9][0-9]*)(?:\s|$)/;
+const anyRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=/;
+
+function renderHtmlLen(content) {
+  const match = content.match(validRenderMarkerPattern);
+  return match ? match[1] : '';
+}
+
 for (const file of files) {
   if (!file || !fs.existsSync(file) || !fs.statSync(file).isFile()) continue;
   const content = fs.readFileSync(file, 'utf8');
   if (content.length === 0) continue;
   sourceCount += 1;
   text += `\n${content}`;
-  const sourceRenderMarker = /\[tauri-shell\]\s+render,\s+html_len=[1-9][0-9]*/.test(content);
+  const sourceHtmlLen = renderHtmlLen(content);
+  const sourceRenderMarker = sourceHtmlLen !== '';
+  if (htmlLen === '' && sourceHtmlLen !== '') htmlLen = sourceHtmlLen;
   const sourceMetalMarker = /(CAMetalLayer|Metal renderer ready|MetalKit\.framework|Metal\.framework|-framework Metal|\bMTL[A-Za-z0-9_]*\b|\bAGX\b|\bIOGPU\b)/i.test(content);
   const sourceTauriIosContext = /(\[tauri-shell\]\s+ios renderer context:.*WKWebView|Tauri iOS external_url|ios_mdi_probe\.html|\[tauri-shell\]\s+creating window (from|with)|mobile inline shell base)/i.test(content);
   const sourceMetalContext = /\[tauri-shell\]\s+ios renderer context:(?=.*WKWebView)(?=.*metal_expected=true)(?=.*metal_layer=CAMetalLayer)/i.test(content);
@@ -29,7 +41,8 @@ for (const file of files) {
   }
 }
 
-const renderMarker = /\[tauri-shell\]\s+render,\s+html_len=[1-9][0-9]*/.test(text);
+const hasAnyRenderMarker = anyRenderMarkerPattern.test(text);
+const renderMarker = renderHtmlLen(text) !== '';
 const metalMarker = /(CAMetalLayer|Metal renderer ready|MetalKit\.framework|Metal\.framework|-framework Metal|\bMTL[A-Za-z0-9_]*\b|\bAGX\b|\bIOGPU\b)/i.test(text);
 const tauriIosContext = /(\[tauri-shell\]\s+ios renderer context:.*WKWebView|Tauri iOS external_url|ios_mdi_probe\.html|\[tauri-shell\]\s+creating window (from|with)|mobile inline shell base)/i.test(text);
 const metalContext = /\[tauri-shell\]\s+ios renderer context:(?=.*WKWebView)(?=.*metal_expected=true)(?=.*metal_layer=CAMetalLayer)/i.test(text);
@@ -40,6 +53,8 @@ if (sourceCount === 0) {
   reason = 'missing-ios-render-log-source';
 } else if (failureMarker) {
   reason = 'ios-render-log-failure-marker';
+} else if (hasAnyRenderMarker && !renderMarker) {
+  reason = 'ios-render-log-html-len-malformed';
 } else if (!renderMarker) {
   reason = 'ios-render-log-marker-missing';
 } else if (!metalMarker) {
@@ -57,6 +72,7 @@ emit('ios_render_log_validation_reason', reason);
 emit('ios_render_log_source_count', sourceCount);
 emit('ios_render_log_source_coherence_status', coherentSource ? 'pass' : 'fail');
 emit('ios_render_log_marker_status', renderMarker ? 'pass' : 'fail');
+emit('ios_render_log_html_len', htmlLen);
 emit('ios_render_log_metal_marker_status', metalMarker ? 'pass' : 'fail');
 emit('ios_render_log_tauri_context_status', tauriIosContext ? 'pass' : 'fail');
 emit('ios_render_log_metal_context_status', metalContext ? 'pass' : 'fail');

@@ -27,7 +27,7 @@ tauri_ios_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -70,6 +70,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 ## Acceptance
 
 - Complete iOS Tauri/WKWebView/Metal logs validate and emit normalized rows.
+- The Tauri render marker must include a clean positive decimal `html_len`.
 - Render-only or generic Metal-only logs fail closed.
 - Bare `WKWebView` text is not enough; the context marker must be tied to the
   Tauri shell or the mobile MDI probe source.
@@ -96,7 +97,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -114,10 +115,47 @@ expect(evidence).to_contain("ios_render_log_validation_reason=pass")
 expect(evidence).to_contain("ios_render_log_source_count=1")
 expect(evidence).to_contain("ios_render_log_source_coherence_status=pass")
 expect(evidence).to_contain("ios_render_log_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_html_len=347702")
 expect(evidence).to_contain("ios_render_log_metal_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_tauri_context_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 expect(evidence).to_contain("ios_render_log_failure_marker_status=pass")
+```
+
+</details>
+
+#### rejects malformed iOS render html length markers
+
+- Confirm iOS render html_len must be a clean positive decimal row
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-ios-render-log-validator-html-len"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702px\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/suffix.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/suffix.log > " + root + "/suffix.env; " +
+    "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=0\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/zero.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/zero.log > " + root + "/zero.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val suffix = file_read(root + "/suffix.env")
+val zero = file_read(root + "/zero.env")
+step("Confirm iOS render html_len must be a clean positive decimal row")
+expect(suffix).to_contain("ios_render_log_validation_status=fail")
+expect(suffix).to_contain("ios_render_log_validation_reason=ios-render-log-html-len-malformed")
+expect(suffix).to_contain("ios_render_log_marker_status=fail")
+expect(suffix).to_contain("ios_render_log_html_len=")
+expect(zero).to_contain("ios_render_log_validation_status=fail")
+expect(zero).to_contain("ios_render_log_validation_reason=ios-render-log-html-len-malformed")
+expect(zero).to_contain("ios_render_log_marker_status=fail")
+expect(zero).to_contain("ios_render_log_html_len=")
 ```
 
 </details>
@@ -357,8 +395,8 @@ expect(tauri).to_contain("metal_layer=CAMetalLayer")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
