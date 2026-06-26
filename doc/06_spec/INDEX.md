@@ -15,6 +15,6 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Vllm Control Cli Specification](test/01_unit/app/llm_runtime/vllm_control_cli_spec.md) | Partial | N/A | 9 | 40% | 90 lines |
-| [Vllm Control Cli Specification](test/unit/app/llm_runtime/vllm_control_cli_spec.md) | Partial | N/A | 9 | 40% | 90 lines |
+| [Diagnostics Jsonl Collector Specification](test/01_unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.md) | Partial | N/A | 9 | 40% | 90 lines |
+| [Diagnostics Jsonl Collector Specification](test/unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.md) | Partial | N/A | 9 | 40% | 90 lines |
 

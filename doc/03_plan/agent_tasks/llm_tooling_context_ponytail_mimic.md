@@ -357,6 +357,10 @@ Dedicated dashboard view evidence:
 - 2026-06-26 public manual hardening: Ponytail audit specs now route internal
   absence-marker checks through a helper so generated public manuals do not
   display the marker literal in expected-code snippets.
+- 2026-06-26 diagnostics JSONL hardening: the LLM dashboard diagnostics
+  collector now decodes escaped JSON string fields before rendering vLLM status
+  and reason text. Both mirrored collector specs cover quoted/backslash JSONL
+  fields, pass 9/9 scenarios, and the generated manuals were refreshed.
 
 ## Lane 7: MCP Context Index/Query Options
 

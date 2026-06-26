@@ -28,7 +28,7 @@ diagnostics_jsonl_collector_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -293,6 +293,41 @@ remove_file_if_exists(path)
 
 </details>
 
+#### decodes escaped JSONL string fields before dashboard rendering
+
+- mkdir p
+- remove file if exists
+- write file
+   - Expected: panel.vllm_event_count equals `1`
+   - Expected: panel.last_vllm_status equals `ready"quoted`
+   - Expected: panel.last_vllm_reason equals `models\\endpoint`
+- expect absence marker hidden
+- remove file if exists
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val path = fixture_diag_path()
+mkdir_p(".build/llm_dashboard/diagnostics")
+remove_file_if_exists(path)
+write_file(path, "{\"event\":\"llm_runtime_vllm_models_probe\",\"status\":\"ready\\\"quoted\",\"reason\":\"models\\\\endpoint\"}\n")
+val panel = collect_llm_diagnostics_jsonl(path)
+expect(panel.vllm_event_count).to_equal(1)
+expect(panel.last_vllm_status).to_equal("ready\"quoted")
+expect(panel.last_vllm_reason).to_equal("models\\endpoint")
+val html = render_llm_diagnostics_panel_html(panel)
+expect(html).to_contain("ready&quot;quoted")
+expect_absence_marker_hidden(html)
+remove_file_if_exists(path)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -312,8 +347,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
