@@ -23,8 +23,8 @@ function integerAtLeast(value, min) {
   return BigInt(text) >= BigInt(min);
 }
 
-function finiteNumberAtLeast(value, min) {
-  return typeof value === 'number' && Number.isFinite(value) && value >= min;
+function finiteNumberGreaterThan(value, min) {
+  return typeof value === 'number' && Number.isFinite(value) && value > min;
 }
 
 function intText(value) {
@@ -74,7 +74,7 @@ if (proof.target !== 'electron') {
   reason = 'missing-app-element';
 } else if (!integerAtLeast(proof.body_text_length, 1)) {
   reason = 'missing-rendered-text';
-} else if (proof.performance_now_available !== true || !finiteNumberAtLeast(proof.performance_now_delta_ms, 0)) {
+} else if (proof.performance_now_available !== true || !finiteNumberGreaterThan(proof.performance_now_delta_ms, 0)) {
   reason = 'missing-performance-now';
 } else if (proof.animation_frame_available !== true || !integerAtLeast(proof.animation_frame_count, 2)) {
   reason = 'missing-animation-frames';

@@ -29,10 +29,10 @@ function integerAtLeast(value, required) {
   return BigInt(text) >= BigInt(required);
 }
 
-function decimalAtLeast(value, required) {
+function decimalGreaterThan(value, required) {
   const text = decimalNumberText(value);
   if (text === null) return false;
-  return Number(text) >= required;
+  return Number(text) > required;
 }
 
 function integerTextOrBlank(value) {
@@ -97,7 +97,7 @@ const captureChecks = {
 };
 const performanceChecks = {
   performanceNowAvailable: proof.performanceNowAvailable === true,
-  performanceNowDeltaMs: decimalAtLeast(proof.performanceNowDeltaMs, 0),
+  performanceNowDeltaMs: decimalGreaterThan(proof.performanceNowDeltaMs, 0),
 };
 const animationChecks = {
   animationFrameAvailable: proof.animationFrameAvailable === true,

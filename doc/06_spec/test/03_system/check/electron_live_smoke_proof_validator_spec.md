@@ -10,6 +10,7 @@
 @layout dag
 @direction LR
 
+electron_live_smoke_proof_validator_spec -> fail closed
 electron_live_smoke_proof_validator_spec -> std
 ```
 
@@ -71,8 +72,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 
 - A complete live Electron proof validates and emits normalized
   `electron_live_smoke_*` rows.
-- Missing DOM render text, missing `performance.now`, missing two animation
-  frames, missing CSS animation support, and blur/tolerance use fail closed.
+- Missing DOM render text, missing `performance.now`, zero timing deltas,
+  missing two animation frames, missing CSS animation support, and blur/tolerance
+  use fail closed.
 - Requested capture viewport dimensions must be explicit decimal integers; the
   proof validator must not accept exponent or fractional notation as a capture
   size contract.
@@ -156,13 +158,14 @@ expect(text).to_contain("electron_live_smoke_validation_reason=missing-rendered-
 -  proof command
 -  proof command
 -  proof command
+-  proof command
    - Expected: code equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -170,6 +173,8 @@ val root = "build/test-electron-live-smoke-validator-animation"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/perf.json", "p.performance_now_available=false") +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/perf.json 1280 720 > " + root + "/perf.env; " +
+    _proof_command(root + "/zero.json", "p.performance_now_delta_ms=0") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/zero.json 1280 720 > " + root + "/zero.env; " +
     _proof_command(root + "/frames.json", "p.animation_frame_count=1") +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/frames.json 1280 720 > " + root + "/frames.env; " +
     _proof_command(root + "/css.json", "p.css_animation_probe=false") +
@@ -178,9 +183,13 @@ val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val perf = file_read(root + "/perf.env")
+val zero = file_read(root + "/zero.env")
 val frames = file_read(root + "/frames.env")
 val css = file_read(root + "/css.env")
 expect(perf).to_contain("electron_live_smoke_validation_reason=missing-performance-now")
+expect(zero).to_contain("electron_live_smoke_validation_reason=missing-performance-now")
+expect(zero).to_contain("electron_live_smoke_performance_now_available=true")
+expect(zero).to_contain("electron_live_smoke_performance_now_delta_ms=0")
 expect(frames).to_contain("electron_live_smoke_validation_reason=missing-animation-frames")
 expect(css).to_contain("electron_live_smoke_validation_reason=missing-css-animation")
 ```

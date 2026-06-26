@@ -27,7 +27,7 @@ electron_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,8 +76,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
 - Capture pass requires the proof screenshot path to match the captured
   screenshot artifact.
 - Performance and animation pass require `performance.now()`, an explicit
-  non-negative timing delta, at least two animation frames, and a CSS animation
-  probe.
+  positive timing delta, at least two animation frames, and a CSS animation
+  probe. A zero delta does not prove distinct timing samples.
 - Event counts, bridge frame counts, taskbar counts, image counts, and animation
   frame counts must be decimal integers; fractional counts are not valid
   routed-event or full-frame proof.
@@ -208,6 +208,36 @@ expect(evidence.contains("electron_mdi_performance_now_delta_ms=0")).to_equal(fa
 
 </details>
 
+#### rejects performance timing that does not advance
+
+-  proof command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-mdi-validator-zero-performance"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "p.performanceNowDeltaMs=0") +
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+expect(evidence).to_contain("electron_mdi_json_proof=fail")
+expect(evidence).to_contain("electron_mdi_json_proof_reason=performance-contract-missing:performanceNowDeltaMs")
+expect(evidence).to_contain("electron_mdi_performance_status=fail")
+expect(evidence).to_contain("electron_mdi_performance_now_available=true")
+expect(evidence).to_contain("electron_mdi_performance_now_delta_ms=0")
+```
+
+</details>
+
 #### rejects missing animation frame proof
 
 -  proof command
@@ -303,8 +333,8 @@ expect(wrapper).to_contain("validate-electron-mdi-proof.js")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
