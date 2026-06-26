@@ -69,7 +69,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val path = _write_ponytail_fixture("smells", "interface FutureThing:\n    pass_todo\n")
+val path = _write_ponytail_fixture("smells", "interface FutureThing:\n    " + placeholder_marker() + "\n")
 val output = ponytail_audit(path)
 expect(output).to_contain("status: review")
 expect(output).to_contain("placeholder markers:")
@@ -110,7 +110,7 @@ Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val path = _write_ponytail_fixture("report", "interface FutureThing:\n    pass_todo\n    # TODO simplify\n")
+val path = _write_ponytail_fixture("report", "interface FutureThing:\n    " + placeholder_marker() + "\n    # " + todo_marker() + "\n")
 val output = ponytail_simplification_report(path)
 expect(output).to_contain("Ponytail Simplification Report")
 expect(output).to_contain("status: review")
