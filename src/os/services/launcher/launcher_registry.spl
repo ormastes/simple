@@ -1,0 +1,710 @@
+# Launcher Registry — app registry state, process tracking, and helper functions
+#
+# MDSOC: feature dimension, desktop layer
+#
+# Owns all flat-array state for the app registry and process table.
+# All helper functions that read/write this state live here.
+# launcher.spl (hub) imports this module and provides the public service API.
+
+use os.userlib.syscall_raw.{syscall}
+use os.kernel.process_compat.{posix_spawn_with_args, posix_kill}
+use os.userlib.process.{spawn, get_task_info}
+
+use os.kernel.log.klog_api.{log_raw_println}
+use os.services.vfs.vfs_init.{g_vfs_read_file_text}
+use os.services.launcher.launcher_path_helpers.{
+    launcher_path_exists,
+    text_has_prefix,
+    canonical_sys_app_name,
+    canonical_sys_app_identity
+}
+
+# ============================================================================
+# IPC Method IDs
+# ============================================================================
+
+val LAUNCHER_REGISTER: u32 = 1
+val LAUNCHER_LAUNCH: u32 = 2
+val LAUNCHER_LIST: u32 = 3
+val LAUNCHER_SHORTCUT: u32 = 4
+
+# ============================================================================
+# Syscall IDs
+# ============================================================================
+
+# Canonical values from src/os/kernel/ipc/syscall.spl dispatcher cases 20..23.
+# Keep in sync with test/01_unit/os/kernel/ipc/syscall_number_consistency_spec.spl.
+val SYS_IPC_SEND: u64 = 20
+val SYS_IPC_RECV: u64 = 21
+val SYS_IPC_CREATE_PORT: u64 = 22
+val SYS_IPC_CONNECT: u64 = 23
+val SIGTERM: i32 = 15
+
+# ============================================================================
+# App Registry (flat arrays for baremetal safety)
+# ============================================================================
+
+val MAX_APPS: u64 = 32
+val MAX_PROCESSES: u64 = 64
+
+var app_name: [text; 32] = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+var app_path: [text; 32] = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+var app_icon: [text; 32] = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+var app_shortcut_key: [u32; 32] = [0; 32]     # key code (USB HID / ASCII)
+var app_shortcut_mod: [u32; 32] = [0; 32]     # modifier flags (bit 0=Meta, bit 1=Ctrl, bit 2=Alt, bit 3=Shift)
+var app_pid: [u64; 32] = [0; 32]              # PID of running instance (0 = not running)
+var app_launch_state: [text; 32] = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]    # idle, running, exited, terminated, failed
+var app_window_count: [u64; 32] = [0; 32]
+var app_exit_code: [i32; 32] = [0; 32]
+var app_launch_count: [u64; 32] = [0; 32]
+var app_last_pid: [u64; 32] = [0; 32]
+var app_is_headless: [bool; 32] = [false; 32]
+var app_active: [bool; 32] = [false; 32]          # slot in use
+var app_count: u64 = 0
+
+var process_pid: [u64; 64] = [0; 64]
+var process_app_index: [i64; 64] = [0; 64]
+var process_app_id: [text; 64] = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+var process_name: [text; 64] = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+var process_path: [text; 64] = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+var process_icon: [text; 64] = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+var process_state: [text; 64] = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+var process_exit_code: [i32; 64] = [0; 64]
+var process_window_count: [u64; 64] = [0; 64]
+var process_is_headless: [bool; 64] = [false; 64]
+var process_launch_seq: [u64; 64] = [0; 64]
+var process_signal_backed: [bool; 64] = [false; 64]
+var process_active: [bool; 64] = [false; 64]
+var process_count: u64 = 0
+var process_sequence: u64 = 1
+var launcher_last_launch_pid: u64 = 0
+
+# ============================================================================
+# Modifier Flag Constants
+# ============================================================================
+
+val MOD_META: u32 = 1
+val MOD_CTRL: u32 = 2
+val MOD_ALT: u32 = 4
+val MOD_SHIFT: u32 = 8
+
+# Task priority for launched apps (Normal)
+val APP_PRIORITY: u8 = 2
+
+pub fn launcher_command_resolution_candidates(command: text, cwd: text, path_env: text) -> [text]:
+    """Return filesystem candidates in the order the shell/launcher resolve them."""
+    if command == "":
+        return []
+    if command.contains("/"):
+        val direct = _resolve_against_cwd(command, cwd)
+        if direct == "":
+            return []
+        return [direct]
+
+    val app_name = canonical_sys_app_name(command)
+    var candidates = [
+        "/sys/apps/{app_name}.smf",
+        "/sys/apps/{app_name}"
+    ]
+    val path_parts = path_env.split(":")
+    var i: u64 = 0
+    while i < path_parts.len().to_u64():
+        val dir = path_parts[i as i64].trim()
+        if dir != "":
+            val candidate = if dir == "/": "/{command}" else: "{dir}/{command}"
+            candidates = candidates.push(candidate)
+        i = i + 1
+    candidates
+
+fn _preferred_app_exec_path(path: text) -> text:
+    val sys_app = canonical_sys_app_identity(path)
+    if sys_app != "":
+        if sys_app.ends_with(".smf"):
+            return sys_app
+        return "{sys_app}.smf"
+    val smf_path = "{path}.smf"
+    if launcher_path_exists(smf_path):
+        return smf_path
+    path
+
+fn _canonical_app_identity(path: text) -> text:
+    val sys_app = canonical_sys_app_identity(path)
+    if sys_app != "":
+        return sys_app
+    path
+
+fn _is_synthetic_pid(pid: u64) -> bool:
+    pid >= 0x40000000
+
+fn _is_process_backed_record(pid: u64, state: text) -> bool:
+    val _state = state
+    pid > 0 and not _is_synthetic_pid(pid)
+
+fn _set_process_signal_backed(pid: u64, backed: bool):
+    val idx = _process_index_by_pid(pid)
+    if idx >= 0:
+        process_signal_backed[idx.to_u64()] = backed
+
+fn launcher_process_can_signal(pid: u64) -> bool:
+    val idx = _process_index_by_pid(pid)
+    if idx < 0:
+        return pid != 0 and pid == launcher_last_launch_pid and not _is_synthetic_pid(pid)
+    process_signal_backed[idx.to_u64()]
+
+fn _app_name(idx: u64) -> text:
+    if idx >= app_count:
+        return ""
+    app_name[idx]
+
+fn _app_path(idx: u64) -> text:
+    if idx >= app_count:
+        return ""
+    app_path[idx]
+
+fn _app_icon(idx: u64) -> text:
+    if idx >= app_count:
+        return ""
+    app_icon[idx]
+
+fn _app_key(idx: u64) -> u32:
+    if idx >= app_count:
+        return 0
+    app_shortcut_key[idx]
+
+fn _app_mod(idx: u64) -> u32:
+    if idx >= app_count:
+        return 0
+    app_shortcut_mod[idx]
+
+fn _app_index_by_name(name: text) -> i64:
+    var i: u64 = 0
+    while i < app_count:
+        if app_name[i] == name:
+            return i.to_i64()
+        i = i + 1
+    -1
+
+fn _app_index_by_path(path: text) -> i64:
+    var i: u64 = 0
+    while i < app_count:
+        if app_path[i] == path:
+            return i.to_i64()
+        i = i + 1
+    -1
+
+fn _seeded_app_index_by_path(path: text) -> i64:
+    """Return the canonical slot for seeded desktop apps.
+
+    The x86 baremetal desktop lane can observe array-backed registry staleness
+    across module boundaries immediately after `_launch_seeded_app()` repairs a
+    slot. Short-circuiting the known canonical app paths avoids re-reading the
+    fragile global array state before spawn.
+    """
+    match path:
+        "/sys/apps/hello_world": 0
+        "/sys/apps/hello_world.smf": 0
+        "/sys/apps/calculator": 1
+        "/sys/apps/calculator.smf": 1
+        "/sys/apps/clock": 2
+        "/sys/apps/clock.smf": 2
+        "/sys/apps/file_manager": 3
+        "/sys/apps/file_manager.smf": 3
+        "/sys/apps/shell": 4
+        "/sys/apps/shell.smf": 4
+        "/sys/apps/browser_demo": 5
+        "/sys/apps/browser_demo.smf": 5
+        "/sys/apps/editor": 6
+        "/sys/apps/editor.smf": 6
+        "/sys/apps/simple_browser": 7
+        "/sys/apps/simple_browser.smf": 7
+        "/sys/apps/sbrowser.smf": 7
+        "/sys/apps/simple_compiler": 8
+        "/sys/apps/simple_compiler.smf": 8
+        "/sys/apps/scompiler.smf": 8
+        "/sys/apps/simple_interpreter": 9
+        "/sys/apps/simple_interpreter.smf": 9
+        "/sys/apps/sinterp.smf": 9
+        "/sys/apps/simple_loader": 10
+        "/sys/apps/simple_loader.smf": 10
+        "/sys/apps/sloader.smf": 10
+        "/sys/apps/llvm": 11
+        "/sys/apps/llvm.smf": 11
+        "/sys/apps/clang": 12
+        "/sys/apps/clang.smf": 12
+        "/sys/apps/rust": 13
+        "/sys/apps/rust.smf": 13
+        "/sys/apps/simple": 14
+        "/sys/apps/simple.smf": 14
+        "/usr/bin/simple": 14
+        "/bin/simple": 14
+        "/SYS/APPS/SBROWSMF.SMF": 7
+        "/SYS/APPS/SCOMPSMF.SMF": 8
+        "/SYS/APPS/SINTSMF.SMF": 9
+        "/SYS/APPS/SLOADSMF.SMF": 10
+        "/SYS/APPS/LLVMSMF.SMF": 11
+        "/SYS/APPS/CLANGSMF.SMF": 12
+        "/SYS/APPS/RUSTSMF.SMF": 13
+        "/SYS/APPS/SIMPLSTC.SMF": 14
+        "/SIMPLSTC.SMF": 14
+        _: -1
+
+fn _seeded_app_name_for_path(path: text) -> text:
+    match _seeded_app_index_by_path(path):
+        0: "Hello World"
+        1: "Calculator"
+        2: "Clock"
+        3: "File Manager"
+        4: "Terminal"
+        5: "Browser Demo"
+        6: "Editor"
+        7: "Simple Browser"
+        8: "Simple Compiler"
+        9: "Simple Interpreter"
+        10: "Simple Loader"
+        11: "LLVM"
+        12: "Clang"
+        13: "Rust"
+        14: "Simple"
+        _: ""
+
+fn _seeded_app_icon_for_path(path: text) -> text:
+    match _seeded_app_index_by_path(path):
+        0: "H"
+        1: "="
+        2: "T"
+        3: "F"
+        4: ">"
+        5: "B"
+        6: "E"
+        7: "W"
+        8: "C"
+        9: "I"
+        10: "O"
+        11: "L"
+        12: "K"
+        13: "R"
+        14: "S"
+        _: ""
+
+fn _seeded_app_key_for_path(path: text) -> u32:
+    match _seeded_app_index_by_path(path):
+        0: 0x48
+        1: 0x41
+        2: 0x59
+        3: 0x46
+        4: 0x54
+        5: 0x42
+        6: 0x45
+        7: 0x57
+        8: 0x43
+        9: 0x49
+        10: 0x4F
+        11: 0x4C
+        12: 0x47
+        13: 0x52
+        14: 0x53
+        _: 0
+
+fn _ensure_seeded_app_slot(slot: u64, path: text):
+    if slot >= MAX_APPS:
+        return
+    val name = _seeded_app_name_for_path(path)
+    if name == "":
+        return
+    if slot < app_count and app_active[slot] and _canonical_app_identity(app_path[slot]) != _canonical_app_identity(path):
+        if app_count >= MAX_APPS:
+            return
+        var i = app_count
+        while i > slot:
+            app_name[i] = app_name[i - 1]
+            app_path[i] = app_path[i - 1]
+            app_icon[i] = app_icon[i - 1]
+            app_shortcut_key[i] = app_shortcut_key[i - 1]
+            app_shortcut_mod[i] = app_shortcut_mod[i - 1]
+            app_pid[i] = app_pid[i - 1]
+            app_launch_state[i] = app_launch_state[i - 1]
+            app_window_count[i] = app_window_count[i - 1]
+            app_exit_code[i] = app_exit_code[i - 1]
+            app_launch_count[i] = app_launch_count[i - 1]
+            app_last_pid[i] = app_last_pid[i - 1]
+            app_is_headless[i] = app_is_headless[i - 1]
+            app_active[i] = app_active[i - 1]
+            i = i - 1
+        app_count = app_count + 1
+        var p: u64 = 0
+        while p < MAX_PROCESSES:
+            if process_app_index[p] >= slot.to_i64():
+                process_app_index[p] = process_app_index[p] + 1
+            p = p + 1
+    app_name[slot] = name
+    app_path[slot] = path
+    app_icon[slot] = _seeded_app_icon_for_path(path)
+    app_shortcut_key[slot] = _seeded_app_key_for_path(path)
+    app_shortcut_mod[slot] = MOD_META
+    app_active[slot] = true
+    if slot >= app_count:
+        app_count = slot + 1
+
+fn _path_basename(path: text) -> text:
+    val last_slash = path.last_index_of("/")
+    match last_slash:
+        case Some(idx):
+            if idx + 1 >= path.len():
+                return ""
+            path.slice(idx + 1, path.len())
+        case _:
+            path
+
+fn _is_directory_path(path: text) -> bool:
+    """Return true if path looks like a directory (ends with '/' or last segment has no '.')."""
+    if path.ends_with("/"):
+        return true
+    val last_slash = path.last_index_of("/")
+    val segment = match last_slash:
+        case Some(idx): path.slice(idx + 1, path.len())
+        case _: path
+    not segment.contains(".")
+
+fn _resolve_against_cwd(path: text, cwd: text) -> text:
+    if path == "":
+        return ""
+    if path.starts_with("/"):
+        return path
+    if cwd == "" or cwd == "/":
+        return "/{path}"
+    "{cwd}/{path}"
+
+fn _record_detached_process(pid: u64, path: text):
+    var existing = _process_index_by_pid(pid)
+    val canonical_app_id = _canonical_app_identity(path)
+    val seeded_index = _seeded_app_index_by_path(path)
+    val name = if seeded_index >= 0: _seeded_app_name_for_path(path) else: _path_basename(path)
+    val icon = if seeded_index >= 0: _seeded_app_icon_for_path(path) else: ""
+    if existing >= 0:
+        val slot = existing.to_u64()
+        process_app_index[slot] = seeded_index
+        process_app_id[slot] = canonical_app_id
+        process_name[slot] = name
+        process_path[slot] = path
+        process_icon[slot] = icon
+        process_state[slot] = "running"
+        process_exit_code[slot] = 0
+        process_window_count[slot] = 0
+        process_is_headless[slot] = true
+        process_signal_backed[slot] = true
+        process_active[slot] = true
+        return
+    if process_count >= MAX_PROCESSES:
+        log_raw_println("[launcher] Process registry full ({MAX_PROCESSES} slots)")
+        return
+    process_pid[process_count] = pid
+    process_app_index[process_count] = seeded_index
+    process_app_id[process_count] = canonical_app_id
+    process_name[process_count] = name
+    process_path[process_count] = path
+    process_icon[process_count] = icon
+    process_state[process_count] = "running"
+    process_exit_code[process_count] = 0
+    process_window_count[process_count] = 0
+    process_is_headless[process_count] = true
+    process_launch_seq[process_count] = process_sequence
+    process_signal_backed[process_count] = true
+    process_active[process_count] = true
+    process_sequence = process_sequence + 1
+    process_count = process_count + 1
+
+fn _looks_like_executable_path(path: text) -> bool:
+    if path == "":
+        return false
+    if path.starts_with("/sys/apps/"):
+        return true
+    if path.starts_with("/bin/") or path.starts_with("/usr/bin/") or path.starts_with("/usr/local/bin/"):
+        return true
+    if path.ends_with(".elf") or path.ends_with(".bin") or path.ends_with(".app") or path.ends_with(".smf"):
+        return true
+    false
+
+pub fn launcher_associated_app_for_path(path: text) -> text:
+    """Return the default GUI app path for a regular file, or empty when none."""
+    if path.ends_with(".txt") or path.ends_with(".md") or path.ends_with(".log") or path.ends_with(".sdn") or path.ends_with(".spl"):
+        return "/sys/apps/editor"
+    if path.ends_with(".png") or path.ends_with(".jpg") or path.ends_with(".jpeg") or path.ends_with(".bmp") or path.ends_with(".gif") or path.ends_with(".ppm"):
+        return "/sys/apps/image_viewer"
+    ""
+
+pub fn launcher_resolve_command_path(command: text, cwd: text, path_env: text) -> text:
+    """Resolve a command name or relative path into a filesystem path."""
+    for candidate in launcher_command_resolution_candidates(command, cwd, path_env):
+        if launcher_path_exists(candidate):
+            return candidate
+    ""
+
+pub fn launcher_launch_path_with_args(path: text, args: [text]) -> i64:
+    """Launch a binary by canonical filesystem path and track it in the registry."""
+    if path == "":
+        return -1
+    log_raw_println("[launcher] launch_path begin path={path}")
+    val tracked_path = _canonical_app_identity(path)
+    val seeded_index = _seeded_app_index_by_path(tracked_path)
+    var app_index = seeded_index
+    if app_index < 0:
+        app_index = _app_index_by_path(tracked_path)
+    if app_index >= 0:
+        val slot = app_index.to_u64()
+        if seeded_index >= 0:
+            _ensure_seeded_app_slot(slot, tracked_path)
+        val name = if seeded_index >= 0: _seeded_app_name_for_path(path) else: app_name[slot]
+        log_raw_println("[launcher] posix_spawn begin name={name} path={path}")
+        val pid_result = posix_spawn_with_args(path, args, APP_PRIORITY)
+        log_raw_println("[launcher] posix_spawn returned name={name} result={pid_result}")
+        if pid_result < 0:
+            app_launch_state[slot] = "failed"
+            app_exit_code[slot] = pid_result.to_i32()
+            log_raw_println("[launcher] Failed to launch {name}: {pid_result}")
+            return pid_result
+        return _finalize_launch(slot, name, pid_result.to_u64(), tracked_path)
+
+    val pid_result = posix_spawn_with_args(path, args, APP_PRIORITY)
+    log_raw_println("[launcher] detached posix_spawn returned path={path} result={pid_result}")
+    if pid_result < 0:
+        log_raw_println("[launcher] Failed to launch path={path}: {pid_result}")
+        return pid_result
+    launcher_last_launch_pid = pid_result.to_u64()
+    _record_detached_process(pid_result.to_u64(), tracked_path)
+    log_raw_println("[launcher] Started detached path={tracked_path} pid={pid_result}")
+    pid_result
+
+pub fn launcher_open_path(path: text, cwd: text) -> i64:
+    """Open a filesystem path via the shared launcher path.
+
+    Executables launch directly. Non-executable files use the default
+    app association table when one exists.
+    """
+    val resolved = _resolve_against_cwd(path, cwd)
+    if resolved == "":
+        return -1
+    if _is_directory_path(resolved):
+        return launcher_launch_path_with_args("/sys/apps/file_explorer", [resolved])
+    if _looks_like_executable_path(resolved):
+        return launcher_launch_path_with_args(resolved, [])
+    val associated_app = launcher_associated_app_for_path(resolved)
+    if associated_app == "":
+        return -1
+    launcher_launch_path_with_args(associated_app, [resolved])
+
+fn _app_index_by_pid(pid: u64) -> i64:
+    var i: u64 = 0
+    while i < app_count:
+        if app_pid[i] == pid:
+            return i.to_i64()
+        i = i + 1
+    -1
+
+fn _process_index_by_pid(pid: u64) -> i64:
+    # Scan up to MAX_PROCESSES rather than process_count: in the baremetal
+    # build `process_count` is a module global whose write from
+    # launcher_record_process does not always propagate to reads at this
+    # call site (cross-module staleness), which makes
+    # launcher_process_is_process_backed miss freshly-recorded entries
+    # even though process_pid[slot] was correctly set. O(64) is negligible.
+    var i: u64 = 0
+    while i < MAX_PROCESSES:
+        if process_pid[i] == pid:
+            return i.to_i64()
+        i = i + 1
+    -1
+
+fn _is_running_state(state: text) -> bool:
+    state == "running" or state == "launching" or state == "terminating"
+
+fn _default_app_identity(slot: u64) -> text:
+    if slot >= app_count:
+        return ""
+    _canonical_app_identity(app_path[slot])
+
+fn _process_app_identity(app_index: i64, path: text) -> text:
+    if path != "":
+        return _canonical_app_identity(path)
+    if app_index >= 0:
+        return _default_app_identity(app_index.to_u64())
+    ""
+
+fn _classify_final_state(previous_state: text, exit_code: i32) -> text:
+    if previous_state == "terminating":
+        return "terminated"
+    if exit_code == 0 or exit_code == -1:
+        return "exited"
+    "crashed"
+
+fn _sync_app_slot(slot: u64, pid: u64, state: text, exit_code: i32, window_count: u64, is_headless: bool):
+    if slot >= app_count:
+        return
+    app_pid[slot] = pid
+    app_launch_state[slot] = state
+    app_exit_code[slot] = exit_code
+    app_window_count[slot] = window_count
+    app_is_headless[slot] = is_headless
+    if state == "running":
+        app_last_pid[slot] = pid
+
+pub fn launcher_record_process(pid: u64, app_index: i64, state: text, exit_code: i32, window_count: u64, is_headless: bool) -> bool:
+    """Record or append a process snapshot for the launcher registry."""
+    var existing = _process_index_by_pid(pid)
+    if existing >= 0 and not _is_running_state(process_state[existing.to_u64()]) and _is_running_state(state):
+        existing = -1
+    var name = ""
+    var path = ""
+    var icon = ""
+    if app_index >= 0:
+        val app_slot = app_index.to_u64()
+        if app_slot < app_count:
+            name = app_name[app_slot]
+            path = app_path[app_slot]
+            icon = app_icon[app_slot]
+            if app_pid[app_slot] == pid or app_pid[app_slot] == 0:
+                _sync_app_slot(app_slot, pid, state, exit_code, window_count, is_headless)
+    if existing >= 0:
+        val slot = existing.to_u64()
+        process_app_index[slot] = app_index
+        process_app_id[slot] = _process_app_identity(app_index, path)
+        process_name[slot] = name
+        process_path[slot] = path
+        process_icon[slot] = icon
+        process_state[slot] = state
+        process_exit_code[slot] = exit_code
+        process_window_count[slot] = window_count
+        process_is_headless[slot] = is_headless
+        if not process_active[slot]:
+            process_signal_backed[slot] = false
+        process_active[slot] = _is_running_state(state)
+        if app_index >= 0:
+            val existing_app_slot = app_index.to_u64()
+            if existing_app_slot < app_count and (app_pid[existing_app_slot] == pid or app_pid[existing_app_slot] == 0):
+                _sync_app_slot(existing_app_slot, pid, state, exit_code, window_count, is_headless)
+        return true
+
+    if process_count >= MAX_PROCESSES:
+        log_raw_println("[launcher] Process registry full ({MAX_PROCESSES} slots)")
+        return false
+
+    process_pid[process_count] = pid
+    process_app_index[process_count] = app_index
+    process_app_id[process_count] = _process_app_identity(app_index, path)
+    process_name[process_count] = name
+    process_path[process_count] = path
+    process_icon[process_count] = icon
+    process_state[process_count] = state
+    process_exit_code[process_count] = exit_code
+    process_window_count[process_count] = window_count
+    process_is_headless[process_count] = is_headless
+    process_launch_seq[process_count] = process_sequence
+    process_signal_backed[process_count] = false
+    process_active[process_count] = _is_running_state(state)
+    process_sequence = process_sequence + 1
+    process_count = process_count + 1
+    true
+
+fn _update_process_state(pid: u64, state: text, exit_code: i32):
+    var i: u64 = 0
+    while i < MAX_PROCESSES:
+        if process_pid[i] == pid:
+            process_state[i] = state
+            process_exit_code[i] = exit_code
+            process_active[i] = _is_running_state(state)
+            return
+        i = i + 1
+
+fn _update_process_window_count(pid: u64, window_count: u64):
+    var i: u64 = 0
+    while i < MAX_PROCESSES:
+        if process_pid[i] == pid:
+            process_window_count[i] = window_count
+            process_is_headless[i] = window_count == 0
+            if process_state[i] == "running":
+                process_active[i] = true
+            return
+        i = i + 1
+
+fn _clear_app_slot_by_pid(pid: u64, state: text, exit_code: i32):
+    var app_idx = _app_index_by_pid(pid)
+    if app_idx < 0:
+        return
+    val slot = app_idx.to_u64()
+    app_pid[slot] = 0
+    app_launch_state[slot] = state
+    app_exit_code[slot] = exit_code
+    app_window_count[slot] = 0
+    app_is_headless[slot] = false
+
+fn _remove_app_slot(slot: u64):
+    var i: u64 = slot
+    while i + 1 < app_count:
+        app_name[i] = app_name[i + 1]
+        app_path[i] = app_path[i + 1]
+        app_icon[i] = app_icon[i + 1]
+        app_shortcut_key[i] = app_shortcut_key[i + 1]
+        app_shortcut_mod[i] = app_shortcut_mod[i + 1]
+        app_pid[i] = app_pid[i + 1]
+        app_launch_state[i] = app_launch_state[i + 1]
+        app_window_count[i] = app_window_count[i + 1]
+        app_exit_code[i] = app_exit_code[i + 1]
+        app_launch_count[i] = app_launch_count[i + 1]
+        app_last_pid[i] = app_last_pid[i + 1]
+        app_is_headless[i] = app_is_headless[i + 1]
+        app_active[i] = app_active[i + 1]
+        i = i + 1
+
+    if app_count > 0:
+        val last = app_count - 1
+        app_name[last] = ""
+        app_path[last] = ""
+        app_icon[last] = ""
+        app_shortcut_key[last] = 0
+        app_shortcut_mod[last] = 0
+        app_pid[last] = 0
+        app_launch_state[last] = ""
+        app_window_count[last] = 0
+        app_exit_code[last] = 0
+        app_launch_count[last] = 0
+        app_last_pid[last] = 0
+        app_is_headless[last] = false
+        app_active[last] = false
+        app_count = app_count - 1
+
+    var j: u64 = 0
+    while j < MAX_PROCESSES:
+        if process_app_index[j] == slot.to_i64():
+            process_app_index[j] = -1
+            process_app_id[j] = ""
+        elif process_app_index[j] > slot.to_i64():
+            process_app_index[j] = process_app_index[j] - 1
+        j = j + 1
+
+fn _finalize_launch(slot: u64, name: text, pid: u64, app_id: text) -> i64:
+    app_launch_count[slot] = app_launch_count[slot] + 1
+    app_last_pid[slot] = pid
+    launcher_last_launch_pid = pid
+    _sync_app_slot(slot, pid, "running", 0, 0, true)
+    launcher_record_process(pid, slot.to_i64(), "running", 0, 0, true)
+    _set_process_signal_backed(pid, true)
+    val canonical_app_id = _canonical_app_identity(app_id)
+    log_raw_println("[launcher] Started {name} (PID {pid})")
+    log_raw_println("[launcher] spawned app_id={app_id} pid={pid} name={name}")
+    if launcher_process_is_process_backed(pid):
+        log_raw_println("[launcher] process-backed app_id={canonical_app_id} pid={pid}")
+    pid.to_i64()
+
+pub fn launcher_process_is_process_backed(pid: u64) -> bool:
+    """Return true when a launcher row maps to a scheduler-owned PID."""
+    val idx = _process_index_by_pid(pid)
+    if idx < 0:
+        if pid == 0 or _is_synthetic_pid(pid):
+            return false
+        var app_idx: u64 = 0
+        while app_idx < app_count:
+            if (app_pid[app_idx] == pid or app_last_pid[app_idx] == pid) and _is_running_state(app_launch_state[app_idx]):
+                return true
+            app_idx = app_idx + 1
+        return pid == launcher_last_launch_pid
+    val slot = idx.to_u64()
+    _is_process_backed_record(process_pid[slot], process_state[slot])

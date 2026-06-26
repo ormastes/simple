@@ -1,0 +1,249 @@
+# T32 GDB Bridge Full Flow Tests
+# Tests config -> adapter -> trace -> coverage -> practice -> flash -> reset.
+# T32 connects to its own JTAG target (Lauterbach Power Debug II), NOT STM32 boards.
+
+# --- Local simulation of T32 GDB Bridge session ---
+
+class T32GdbSession:
+    target_name: text
+    t32_port: i32
+    gdb_port: i32
+    t32_cfg: text
+    state: text
+    gdb_server_enabled: bool
+    flashed: bool
+    trace_data: text
+    coverage_data: text
+    practice_result: text
+    breakpoints: [text]
+
+impl T32GdbSession:
+    static fn for_t32_target() -> T32GdbSession:
+        T32GdbSession(
+            target_name: "T32 Power Debug",
+            t32_port: 20000,
+            gdb_port: 2331,
+            t32_cfg: "t32_startup.cmm",
+            state: "disconnected",
+            gdb_server_enabled: false,
+            flashed: false,
+            trace_data: "",
+            coverage_data: "",
+            practice_result: "",
+            breakpoints: []
+        )
+
+    # Step 1: Connect t32rem
+    me connect_t32() -> Result<text, text>:
+        self.state = "t32_connected"
+        Ok("t32rem connected on port {self.t32_port}")
+
+    # Step 2: Enable GDB server via PRACTICE
+    me enable_gdb_server() -> Result<text, text>:
+        if self.state != "t32_connected":
+            return Err("t32rem not connected")
+        self.gdb_server_enabled = true
+        Ok("System.Option GDBSERVER ON; GDBSERVER.PORT {self.gdb_port}")
+
+    # Step 3: Connect GDB to T32's GDB server
+    me connect_gdb() -> Result<text, text>:
+        if not self.gdb_server_enabled:
+            return Err("GDB server not enabled")
+        self.state = "connected"
+        Ok("GDB connected to T32 on port {self.gdb_port}")
+
+    # Full connect sequence
+    me connect() -> Result<text, text>:
+        self.connect_t32()?
+        self.enable_gdb_server()?
+        self.connect_gdb()
+
+    me system_reset() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.state = "halted"
+        Ok("SYStem.Up")
+
+    me flash_program(elf_path: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.flashed = true
+        self.state = "halted"
+        Ok("FLASH.ReProgram {elf_path}")
+
+    me halt() -> Result<text, text>:
+        if self.state != "running":
+            return Err("target not running")
+        self.state = "halted"
+        Ok("halted via GDB -exec-interrupt")
+
+    me resume() -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target not halted")
+        self.state = "running"
+        Ok("resumed via GDB -exec-continue")
+
+    me single_step() -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target not halted")
+        Ok("stepped via GDB -exec-step")
+
+    # T32-unique ops (via PRACTICE through t32rem)
+    me trace_capture(duration_ms: i32) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.trace_data = "ETM trace: {duration_ms}ms, records=1024"
+        Ok(self.trace_data)
+
+    me coverage_collect(module: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.coverage_data = "Coverage {module}: 85% (34/40 functions)"
+        Ok(self.coverage_data)
+
+    me practice_script(script: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.practice_result = "DO {script} completed"
+        Ok(self.practice_result)
+
+    me set_breakpoint(location: text) -> Result<i32, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.breakpoints = self.breakpoints + [location]
+        Ok(self.breakpoints.len())
+
+    me read_memory(addr: i64, size: i32) -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted")
+        Ok("0x00,0x00,0x00,0x00")
+
+    me disconnect():
+        self.gdb_server_enabled = false
+        self.state = "disconnected"
+
+# --- T32 Power Debug via T32 GDB Bridge Tests ---
+
+describe "T32 Power Debug GDB Bridge config":
+    it "has T32 port 20000":
+        val s = T32GdbSession.for_t32_target()
+        expect(s.t32_port).to_equal(20000)
+
+    it "has GDB port 2331":
+        val s = T32GdbSession.for_t32_target()
+        expect(s.gdb_port).to_equal(2331)
+
+    it "has correct T32 config":
+        val s = T32GdbSession.for_t32_target()
+        expect(s.t32_cfg).to_equal("t32_startup.cmm")
+
+    it "target name is T32 Power Debug":
+        val s = T32GdbSession.for_t32_target()
+        expect(s.target_name).to_equal("T32 Power Debug")
+
+describe "T32 Power Debug GDB Bridge connection":
+    it "full connect enables GDB server and connects GDB":
+        var s = T32GdbSession.for_t32_target()
+        s.connect()
+        expect(s.state).to_equal("connected")
+        expect(s.gdb_server_enabled).to_equal(true)
+
+    it "connect without t32rem fails GDB server":
+        var s = T32GdbSession.for_t32_target()
+        val result = s.enable_gdb_server()
+        expect(s.gdb_server_enabled).to_equal(false)
+
+describe "T32 Power Debug GDB Bridge flash and reset":
+    it "flash via PRACTICE":
+        var s = T32GdbSession.for_t32_target()
+        s.connect()
+        s.flash_program("target_app.elf")
+        expect(s.flashed).to_equal(true)
+        expect(s.state).to_equal("halted")
+
+    it "system reset via PRACTICE":
+        var s = T32GdbSession.for_t32_target()
+        s.connect()
+        s.system_reset()
+        expect(s.state).to_equal("halted")
+
+describe "T32 Power Debug GDB Bridge trace and coverage":
+    it "trace capture via PRACTICE":
+        val s = T32GdbSession.for_t32_target()
+        s.connect()
+        s.trace_capture(500)
+        expect(s.trace_data).to_contain("ETM trace")
+        expect(s.trace_data).to_contain("500ms")
+
+    it "coverage collect via PRACTICE":
+        val s = T32GdbSession.for_t32_target()
+        s.connect()
+        s.coverage_collect("main")
+        expect(s.coverage_data).to_contain("Coverage main")
+        expect(s.coverage_data).to_contain("85%")
+
+    it "trace when disconnected fails":
+        var s = T32GdbSession.for_t32_target()
+        val result = s.trace_capture(1000)
+        expect(s.trace_data).to_equal("")
+
+describe "T32 Power Debug GDB Bridge practice script":
+    it "run practice script":
+        var s = T32GdbSession.for_t32_target()
+        s.connect()
+        s.practice_script("t32_startup.cmm")
+        expect(s.practice_result).to_contain("DO t32_startup.cmm completed")
+
+    it "practice script when disconnected fails":
+        var s = T32GdbSession.for_t32_target()
+        val result = s.practice_script("test.cmm")
+        expect(s.practice_result).to_equal("")
+
+describe "T32 Power Debug GDB Bridge debug ops via GDB":
+    it "halt via GDB":
+        var s = T32GdbSession.for_t32_target()
+        s.connect()
+        s.flash_program("app.elf")
+        s.resume()
+        s.halt()
+        expect(s.state).to_equal("halted")
+
+    it "single step via GDB":
+        var s = T32GdbSession.for_t32_target()
+        s.connect()
+        s.flash_program("app.elf")
+        s.single_step()
+        expect(s.state).to_equal("halted")
+
+    it "set breakpoint via GDB":
+        var s = T32GdbSession.for_t32_target()
+        s.connect()
+        s.set_breakpoint("main.c:10")
+        expect(s.breakpoints.len()).to_equal(1)
+
+    it "read memory via GDB while halted":
+        var s = T32GdbSession.for_t32_target()
+        s.connect()
+        s.flash_program("app.elf")
+        val mem = s.read_memory(0x08000000, 4)
+        expect(s.state).to_equal("halted")
+
+    it "full debug cycle: flash -> resume -> halt -> step":
+        var s = T32GdbSession.for_t32_target()
+        s.connect()
+        s.flash_program("target_app.elf")
+        expect(s.state).to_equal("halted")
+        s.resume()
+        expect(s.state).to_equal("running")
+        s.halt()
+        expect(s.state).to_equal("halted")
+        s.single_step()
+        expect(s.state).to_equal("halted")
+
+    it "disconnect disables GDB server":
+        var s = T32GdbSession.for_t32_target()
+        s.connect()
+        expect(s.gdb_server_enabled).to_equal(true)
+        s.disconnect()
+        expect(s.gdb_server_enabled).to_equal(false)
+        expect(s.state).to_equal("disconnected")

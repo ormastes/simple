@@ -1,0 +1,99 @@
+# @tag: rendering, engine2d, backend, lifecycle
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_cpu.spl 40%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 40%
+#
+# Engine2D Backend Lifecycle Smoke Tests
+#
+# Verifies the always-available Engine2D software/cpu backend lifecycle without
+# loading the full Engine2D auto-discovery facade. Hardware backend discovery is
+# covered by slower targeted specs because probing those backends can exceed the
+# GUI renderer restart smoke timeout on hosts without matching devices.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.color.{rgb}
+
+fn quick_lifecycle_backends() -> [text]:
+    ["software", "cpu"]
+
+describe "Engine2D Backend Lifecycle Smoke":
+
+    context "quick lifecycle backend list":
+
+        it "returns at least software and cpu":
+            val backends = quick_lifecycle_backends()
+            var has_software = false
+            var has_cpu = false
+            for b in backends:
+                if b == "software":
+                    has_software = true
+                if b == "cpu":
+                    has_cpu = true
+            expect(has_software).to_equal(true)
+            expect(has_cpu).to_equal(true)
+
+        it "returns a non-empty list":
+            val backends = quick_lifecycle_backends()
+            expect(backends.len()).to_be_greater_than(1)
+
+    context "software backend":
+
+        it "initializes with correct dimensions":
+            var backend = SoftwareBackend.create()
+            expect(backend.init(100, 100)).to_equal(true)
+            expect(backend.name()).to_equal("software")
+            expect(backend.width()).to_equal(100)
+            expect(backend.height()).to_equal(100)
+            backend.shutdown()
+
+        it "read_pixels works after initialization":
+            var backend = SoftwareBackend.create()
+            expect(backend.init(10, 10)).to_equal(true)
+            val pixels = backend.read_pixels()
+            expect(pixels.len()).to_equal(100)
+            backend.shutdown()
+
+        it "shutdown releases dimensions and pixels":
+            var backend = SoftwareBackend.create()
+            expect(backend.init(16, 16)).to_equal(true)
+            backend.clear(rgb(0, 0, 0))
+            backend.present()
+            expect(backend.read_pixels().len()).to_equal(256)
+            backend.shutdown()
+            expect(backend.width()).to_equal(0)
+            expect(backend.height()).to_equal(0)
+            expect(backend.read_pixels().len()).to_equal(0)
+
+    context "cpu backend":
+
+        it "initializes through the software raster surface":
+            var backend = CpuBackend.create()
+            expect(backend.init(100, 100)).to_equal(true)
+            expect(backend.name()).to_equal("cpu")
+            expect(backend.width()).to_equal(100)
+            expect(backend.height()).to_equal(100)
+            backend.shutdown()
+
+        it "draws and reads pixels":
+            var backend = CpuBackend.create()
+            expect(backend.init(12, 12)).to_equal(true)
+            backend.clear(rgb(1, 2, 3))
+            backend.draw_rect_filled(2, 2, 4, 4, rgb(10, 20, 30))
+            backend.present()
+            val pixels = backend.read_pixels()
+            expect(pixels.len()).to_equal(144)
+            expect(pixels[2 * 12 + 2]).to_equal(rgb(10, 20, 30))
+            backend.shutdown()
+
+        it "can create multiple backends sequentially":
+            var e1 = SoftwareBackend.create()
+            expect(e1.init(64, 64)).to_equal(true)
+            e1.shutdown()
+            var e2 = CpuBackend.create()
+            expect(e2.init(128, 128)).to_equal(true)
+            e2.shutdown()
+            var e3 = SoftwareBackend.create()
+            expect(e3.init(32, 32)).to_equal(true)
+            expect(e3.width()).to_equal(32)
+            e3.shutdown()

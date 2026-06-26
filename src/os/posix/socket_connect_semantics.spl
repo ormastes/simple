@@ -1,0 +1,93 @@
+"""
+Socket Connect Semantics
+
+POSIX-compatible connect completion for blocking and nonblocking sockets.
+Wraps TCP connect results into socket-layer error codes and readiness signals.
+
+Feature IDs: FR-NET-0001
+Plan: doc/03_plan/agent_tasks/net_acceleration_remaining_2026-04-21.md
+"""
+
+# Poll readiness flags reported to callers after connect.
+struct SocketReadiness:
+    """Readiness bits for poll/select after a connect attempt."""
+    readable: bool
+    writable: bool
+    error: bool
+
+fn socket_readiness_none() -> SocketReadiness:
+    SocketReadiness(readable: false, writable: false, error: false)
+
+fn socket_readiness_writable() -> SocketReadiness:
+    """ESTABLISHED: socket transitions to writable."""
+    SocketReadiness(readable: false, writable: true, error: false)
+
+fn socket_readiness_error() -> SocketReadiness:
+    """Connect failed: error bit set, caller reads error code."""
+    SocketReadiness(readable: false, writable: false, error: true)
+
+# Connect outcome visible at the socket API layer.
+struct SocketConnectOutcome:
+    """Connect result translated to POSIX-style socket semantics."""
+    ready: bool
+    in_progress: bool
+    error_code: text
+    readiness: SocketReadiness
+
+fn socket_connect_ok() -> SocketConnectOutcome:
+    """Blocking connect succeeded; socket is writable."""
+    SocketConnectOutcome(
+        ready: true,
+        in_progress: false,
+        error_code: "",
+        readiness: socket_readiness_writable()
+    )
+
+fn socket_connect_in_progress() -> SocketConnectOutcome:
+    """Nonblocking connect; caller should poll for writability."""
+    SocketConnectOutcome(
+        ready: false,
+        in_progress: true,
+        error_code: "EINPROGRESS",
+        readiness: socket_readiness_none()
+    )
+
+fn socket_connect_refused() -> SocketConnectOutcome:
+    SocketConnectOutcome(
+        ready: false,
+        in_progress: false,
+        error_code: "ECONNREFUSED",
+        readiness: socket_readiness_error()
+    )
+
+fn socket_connect_timed_out() -> SocketConnectOutcome:
+    SocketConnectOutcome(
+        ready: false,
+        in_progress: false,
+        error_code: "ETIMEDOUT",
+        readiness: socket_readiness_error()
+    )
+
+fn socket_connect_unreachable() -> SocketConnectOutcome:
+    SocketConnectOutcome(
+        ready: false,
+        in_progress: false,
+        error_code: "EHOSTUNREACH",
+        readiness: socket_readiness_error()
+    )
+
+fn socket_connect_outcome_label(o: SocketConnectOutcome) -> text:
+    """Human-readable label for logging and diagnostics."""
+    if o.ready:
+        return "connected"
+    if o.in_progress:
+        return "in-progress"
+    "failed:{o.error_code}"
+
+fn socket_connect_is_hard_error(o: SocketConnectOutcome) -> bool:
+    """True when the connect attempt ended with an unrecoverable error."""
+    o.readiness.error
+
+fn socket_connect_needs_poll(o: SocketConnectOutcome) -> bool:
+    """True when the caller must poll before using the socket."""
+    o.in_progress

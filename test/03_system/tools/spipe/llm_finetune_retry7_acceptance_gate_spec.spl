@@ -1,0 +1,92 @@
+# @cover .spipe/llm-finetune-process/scripts/check_retry7_acceptance_gate.shs 80%
+# @cover examples/05_stdlib/spipe/cli/spipe.js 10%
+"""
+# LLM Fine-Tune Retry7 Acceptance Gate Specification
+
+**Feature IDs:** #SP-FINETUNE-RETRY7-001
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** Draft
+**Requirements:** doc/02_requirements/language/tools/spipe_llm_finetune_process.md
+**Plan:** doc/03_plan/ml/spipe_llm_finetune_process.md
+**Design:** doc/05_design/app/spipe/spipe_llm_finetune_process.md
+
+## Overview
+
+Retry7 is a normal-review acceptance gate for the SPipe LLM fine-tune process.
+It must remain blocked until retry6 has real training, target evaluation,
+license, safety, deployment, app handoff, and accepted-decision evidence.
+"""
+
+# @req REQ-SP-FINETUNE-RETRY7-001
+# @feature spipe_llm_finetune_process
+# tag: system, tooling
+
+use std.spec.*
+use std.io_runtime.{file_exists, process_run}
+
+val ATTEMPT_ID = "llm_backed_app_server_dry_run_retry7"
+val GATE_SCRIPT = ".spipe/llm-finetune-process/scripts/check_retry7_acceptance_gate.shs"
+val SPipe_CLI = "examples/05_stdlib/spipe/cli/spipe.js"
+
+fn run_retry7_gate() -> text:
+    val (out_text, err_text, _) = process_run(GATE_SCRIPT, [ATTEMPT_ID])
+    out_text + err_text
+
+fn run_spipe_command(args: list<text>) -> (text, i64):
+    val (out_text, err_text, exit_code) = process_run("node", [SPipe_CLI] + args)
+    (out_text + err_text, exit_code)
+
+describe "SPipe LLM fine-tune retry7 acceptance gate":
+    """
+    ## Retry7 Gate
+
+    The retry7 attempt is an acceptance-review gate, not a training run. The
+    gate exposes why acceptance is blocked and keeps the public CLI output free
+    of raw internal nil values.
+    """
+
+    it "has an executable retry7 gate and a concrete attempt record":
+        expect(file_exists(GATE_SCRIPT)).to_equal(true)
+        expect(file_exists(".spipe/llm-finetune-process/attempts/{ATTEMPT_ID}.sdn")).to_equal(true)
+
+        val (_, _, executable_code) = process_run("test", ["-x", GATE_SCRIPT])
+        expect(executable_code).to_equal(0)
+
+    it "reports retry7 as blocked by retry6 training and eval evidence":
+        val output = run_retry7_gate()
+
+        expect(output).to_contain("attempt_id={ATTEMPT_ID}")
+        expect(output).to_contain("upstream_attempt=llm_backed_app_server_dry_run_retry6")
+        expect(output).to_contain("training_allowed=false")
+        expect(output).to_contain("model_manifest_exists=false")
+        expect(output).to_contain("eval_result_exists=false")
+        expect(output).to_contain("acceptance_allowed=false")
+        expect(output).to_contain("result=BLOCKED_RETRY6_NOT_READY")
+        expect(output).to_contain("STATUS: WARN retry7-acceptance-gate")
+        val contains_nil = output.contains("nil")
+        expect(contains_nil).to_equal(false)
+
+    it "surfaces retry7 status through the SPipe fine-tune status command":
+        val (output, exit_code) = run_spipe_command(["fine-tune-status", ATTEMPT_ID])
+
+        expect(exit_code).to_equal(0)
+        expect(output).to_contain("attempt_record=present")
+        expect(output).to_contain("data_checks=present")
+        expect(output).to_contain("training_scripts=present")
+        expect(output).to_contain("data_check_execution=warn")
+        expect(output).to_contain("data_check_status=\"STATUS: WARN retry7-acceptance-gate\"")
+        expect(output).to_contain("STATUS: WARN llm-finetune-status")
+        val contains_nil = output.contains("nil")
+        expect(contains_nil).to_equal(false)
+
+    it "keeps fine-tune-ready failed until model eval and decision evidence exist":
+        val (output, exit_code) = run_spipe_command(["fine-tune-ready", ATTEMPT_ID])
+
+        expect(exit_code).to_equal(1)
+        expect(output).to_contain("model_artifact_created=pending")
+        expect(output).to_contain("target_eval_reached=pending")
+        expect(output).to_contain("decision_accepted=pending")
+        expect(output).to_contain("STATUS: FAIL llm-finetune-ready")
+        val contains_nil = output.contains("nil")
+        expect(contains_nil).to_equal(false)

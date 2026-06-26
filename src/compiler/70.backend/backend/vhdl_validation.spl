@@ -1,0 +1,643 @@
+# VHDL Backend - Validation, Package, and Tuple Type Registration
+#
+# Validation rules for MIR-to-VHDL lowering, package emission,
+# and tuple type handling. Extension of VhdlBackend via impl block.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTerminator}
+use compiler.backend.backend_api.*
+use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
+use compiler.backend.vhdl_type_mapper.VhdlTypeMapper
+use compiler.backend.vhdl.vhdl_builder.{VhdlBuilder}
+use .vhdl.vhdl_builder.{VhdlBuilder}
+use compiler.backend.vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity, vhdl_helper_is_procedure, vhdl_helper_collision_message}
+use compiler.common.diagnostics.span.{Span}
+use .vhdl_backend.{VhdlBackend, VhdlPortSpec, VhdlReturnField, VhdlReturnAbi}
+
+impl VhdlBackend:
+    fn backend_error(message: text) -> CompileError:
+        compileerror_backend_error(BackendKind.Vhdl, message)
+
+    fn backend_error_at(message: text, span: Span?) -> CompileError:
+        var err = self.backend_error(message)
+        if span.?:
+            err.has_location = true
+            err.location = span.unwrap().to_range_string()
+        err
+
+    fn unsupported_type_error(ty: MirType, context: text, span: Span?) -> CompileError?:
+        val diagnostic = self.type_mapper.unsupported_mir_type_diagnostic(ty, context)
+        if diagnostic.?:
+            Some(self.backend_error_at(diagnostic.unwrap(), span))
+        else:
+            nil
+
+    fn module_has_vhdl_hardware(module: MirModule) -> bool:
+        for symbol in module.functions.keys():
+            if vhdl_function_is_hardware_entity(module.functions[symbol]):
+                return true
+        false
+
+    me prepare_helper_subprograms(module: MirModule) -> Result<(), CompileError>:
+        var used: Dict<text, text> = {}
+        self.active_helper_name_by_source = {}
+        for symbol in module.functions.keys():
+            val func = module.functions[symbol]
+            if vhdl_function_is_hardware_entity(func):
+                continue
+            val safe_name = vhdl_sanitize_identifier(func.name)
+            val prior = used.get(safe_name)
+            if prior.?:
+                return Err(self.backend_error(vhdl_helper_collision_message(safe_name, prior.unwrap(), func.name)))
+            used[safe_name] = func.name
+            self.active_helper_name_by_source = self.active_helper_name_by_source.set(func.name, safe_name)
+        Ok(())
+
+    fn validate_module_supported_before_emit(module: MirModule, hardware_mode: bool) -> Result<(), CompileError>:
+        for symbol in module.types.keys():
+            val type_def_result = self.validate_type_def_supported_before_emit(module.types[symbol])
+            if type_def_result.is_err():
+                return Err(type_def_result.unwrap_err())
+        for symbol in module.constants.keys():
+            val constant = module.constants[symbol]
+            val constant_result = self.validate_vhdl_value_type_supported(constant.type_, "constant `{constant.name}`", nil)
+            if constant_result.is_err():
+                return Err(constant_result.unwrap_err())
+            val constant_value_result = self.validate_vhdl_constant_supported_before_emit(constant.value, constant.type_, "constant `{constant.name}`", nil)
+            if constant_value_result.is_err():
+                return Err(constant_value_result.unwrap_err())
+        for symbol in module.functions.keys():
+            val func = module.functions[symbol]
+            if hardware_mode:
+                if vhdl_function_is_hardware_entity(func):
+                    val entity_result = self.validate_function_supported_before_emit(func, false)
+                    if entity_result.is_err():
+                        return Err(entity_result.unwrap_err())
+                elif self.active_helper_name_by_source.get(func.name).?:
+                    val helper_result = self.validate_function_supported_before_emit(func, true)
+                    if helper_result.is_err():
+                        return Err(helper_result.unwrap_err())
+            else:
+                val result = self.validate_function_supported_before_emit(func, false)
+                if result.is_err():
+                    return Err(result.unwrap_err())
+        Ok(())
+
+    fn validate_type_def_supported_before_emit(type_def: MirTypeDef) -> Result<(), CompileError>:
+        match type_def.kind:
+            case Struct(fields):
+                for field in fields:
+                    val result = self.validate_vhdl_value_type_supported(field.type_, "field `{type_def.name}.{field.name}`", nil)
+                    if result.is_err():
+                        return Err(result.unwrap_err())
+                Ok(())
+            case Enum(variants):
+                for variant in variants:
+                    if variant.payload.?:
+                        val result = self.validate_vhdl_value_type_supported(variant.payload.unwrap(), "payload `{type_def.name}.{variant.name}`", nil)
+                        if result.is_err():
+                            return Err(result.unwrap_err())
+                Ok(())
+            case Union(members):
+                for member in members:
+                    val result = self.validate_vhdl_value_type_supported(member, "union member `{type_def.name}`", nil)
+                    if result.is_err():
+                        return Err(result.unwrap_err())
+                Ok(())
+
+    me validate_vhdl_value_type_supported(ty: MirType, context: text, span: Span?) -> Result<(), CompileError>:
+        val unsupported = self.unsupported_type_error(ty, context, span)
+        if unsupported.?:
+            return Err(unsupported.unwrap())
+        match ty.kind:
+            case Array(element, _):
+                self.validate_vhdl_value_type_supported(element, context, span)
+            case Tuple(elements):
+                for element in elements:
+                    val result = self.validate_vhdl_value_type_supported(element, context, span)
+                    if result.is_err():
+                        return Err(result.unwrap_err())
+                Ok(())
+            case Union(members):
+                for member in members:
+                    val result = self.validate_vhdl_value_type_supported(member, context, span)
+                    if result.is_err():
+                        return Err(result.unwrap_err())
+                Ok(())
+            case _:
+                Ok(())
+
+    me validate_vhdl_constant_supported_before_emit(value: MirConstValue, ty: MirType, context: text, span: Span?) -> Result<(), CompileError>:
+        val unsupported = self.unsupported_type_error(ty, context, span)
+        if unsupported.?:
+            return Err(unsupported.unwrap())
+        match value:
+            case Float(_):
+                Err(self.backend_error_at("VHDL backend does not support floating-point {context}; floating-point constants require explicit fixed-point or integer lowering before VHDL emission", span))
+            case _:
+                Ok(())
+
+    fn validate_function_supported_before_emit(func: MirFunction, is_helper: bool) -> Result<(), CompileError>:
+        var idx = 0
+        while idx < func.signature.params.len():
+            val param_result = self.validate_vhdl_value_type_supported(func.signature.params[idx], "input port `arg{idx}`", Some(func.span))
+            if param_result.is_err():
+                return Err(param_result.unwrap_err())
+            idx = idx + 1
+        if func.signature.return_type.kind != MirTypeKind.Unit:
+            val output_abi_result = self.validate_hardware_output_abi_supported(func)
+            if output_abi_result.is_err():
+                return Err(output_abi_result.unwrap_err())
+            val return_result = self.validate_vhdl_value_type_supported(func.signature.return_type, "output port", Some(func.span))
+            if return_result.is_err():
+                return Err(return_result.unwrap_err())
+        for local in func.locals:
+            match local.kind:
+                case Var | Temp:
+                    val local_result = self.validate_vhdl_value_type_supported(local.type_, "local signal", Some(func.span))
+                    if local_result.is_err():
+                        return Err(local_result.unwrap_err())
+                case _:
+                    ()
+        var blocks: Dict<i64, MirBlock> = {}
+        for block in func.blocks:
+            blocks = blocks.set(block.id.id, block)
+        for block in func.blocks:
+            val result = self.validate_block_supported_before_emit(block, blocks, is_helper)
+            if result.is_err():
+                return Err(result.unwrap_err())
+        Ok(())
+
+    fn validate_hardware_output_abi_supported(func: MirFunction) -> Result<(), CompileError>:
+        if not vhdl_function_is_hardware_entity(func):
+            return Ok(())
+        match func.signature.return_type.kind:
+            case Tuple(elements):
+                if not func.has_vhdl_metadata:
+                    return Err(self.backend_error_at("Anonymous VHDL hardware tuple outputs require labels; write the return type as `(name: type, ...)` so output ports have a stable public API", Some(func.span)))
+                val fields = func.vhdl_metadata.return_fields
+                if fields.len() < elements.len():
+                    return Err(self.backend_error_at("Anonymous VHDL hardware tuple outputs require labels; write the return type as `(name: type, ...)` so output ports have a stable public API", Some(func.span)))
+                var field_index = 0
+                while field_index < elements.len():
+                    if fields[field_index].label.trim() == "":
+                        return Err(self.backend_error_at("Anonymous VHDL hardware tuple outputs require labels; write the return type as `(name: type, ...)` so output ports have a stable public API", Some(func.span)))
+                    field_index = field_index + 1
+                Ok(())
+            case _:
+                Ok(())
+
+    fn validate_block_supported_before_emit(block: MirBlock, blocks: Dict<i64, MirBlock>, is_helper: bool) -> Result<(), CompileError>:
+        for inst in block.instructions:
+            val result = self.validate_instruction_supported_before_emit(inst, blocks, is_helper)
+            if result.is_err():
+                return Err(result.unwrap_err())
+        Ok(())
+
+    fn validate_instruction_supported_before_emit(inst: MirInst, blocks: Dict<i64, MirBlock>, is_helper: bool) -> Result<(), CompileError>:
+        if is_helper:
+            match inst.kind:
+                case Const(_, _, _) | Copy(_, _) | Move(_, _) | BinOp(_, _, _, _) | CheckedBinOp(_, _, _, _) | UnaryOp(_, _, _) | Cast(_, _, _) | Bitcast(_, _, _) | Aggregate(_, _, _) | GetField(_, _, _) | VhdlResize(_, _, _, _) | VhdlSlice(_, _, _, _) | VhdlConcat(_, _) | Nop:
+                    Ok(())
+                case Call(_, func, _):
+                    self.validate_call_supported_before_emit(func)
+                case _:
+                    Err(self.unsupported_vhdl_helper_instruction_error(inst))
+        else:
+            match inst.kind:
+                case Const(_, _, _) | Copy(_, _) | Move(_, _) | BinOp(_, _, _, _) | CheckedBinOp(_, _, _, _) | UnaryOp(_, _, _) | Aggregate(_, _, _) | GetField(_, _, _) | SetField(_, _, _) | Cast(_, _, _) | Bitcast(_, _, _) | VhdlSignalAssign(_, _, _) | VhdlVarAssign(_, _) | VhdlPortMap(_, _, _) | VhdlResize(_, _, _, _) | VhdlSlice(_, _, _, _) | VhdlConcat(_, _) | Nop:
+                    Ok(())
+                case VhdlProcess(_, body_block):
+                    val block = blocks.get(body_block.id)
+                    if block.?:
+                        self.validate_block_supported_before_emit(block, blocks, false)
+                    else:
+                        Err(self.backend_error("VHDL process references unknown block BB{body_block.id}"))
+                case Call(_, func, _):
+                    self.validate_call_supported_before_emit(func)
+                case _:
+                    Err(self.unsupported_vhdl_instruction_error(inst))
+
+    fn validate_call_supported_before_emit(func: MirOperand) -> Result<(), CompileError>:
+        val target_result = self.call_target_name(func)
+        if target_result.is_err():
+            return Err(target_result.unwrap_err())
+        val target = target_result.unwrap()
+        val helper_name = self.active_helper_name_by_source.get(target)
+        if not helper_name.?:
+            val known = self.active_function_by_name.get(target)
+            if known.? and vhdl_function_is_hardware_entity(known.unwrap()):
+                return Err(self.backend_error("VHDL helper call `{target}` targets a hardware entity; instantiate entities with VhdlPortMap instead of subprogram calls"))
+            return Err(self.backend_error("Synthesizable VHDL backend does not support generic Call lowering for `{target}`; only planned pure combinational helpers can be called"))
+        Ok(())
+
+    fn unsupported_vhdl_helper_instruction_error(inst: MirInst) -> CompileError:
+        match inst.kind:
+            case Load(_, _) | Store(_, _) | Alloc(_, _) | GetElementPtr(_, _, _):
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer or memory instruction in helper subprogram: {inst.kind}", Some(inst.span))
+            case CallIndirect(_, _, _, _):
+                self.backend_error("Unsupported VHDL helper subprogram indirect call behavior: {inst.kind}; helpers must use direct planned calls")
+            case VhdlProcess(_, _) | VhdlPortMap(_, _, _) | VhdlSignalAssign(_, _, _) | VhdlVarAssign(_, _):
+                self.backend_error("Unsupported VHDL helper subprogram hardware behavior: {inst.kind}; keep public hardware as entity lowering")
+            case Intrinsic(_, name, _):
+                self.backend_error("Unsupported VHDL helper subprogram intrinsic `{name}`; helpers must be pure combinational")
+            case _:
+                self.backend_error("Unsupported VHDL helper subprogram instruction: {inst.kind}")
+
+    fn unsupported_vhdl_instruction_error(inst: MirInst) -> CompileError:
+        match inst.kind:
+            case Alloc(_, _):
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer Alloc storage allocation", Some(inst.span))
+            case Load(_, _):
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer Load lowering", Some(inst.span))
+            case Store(_, _):
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer Store lowering", Some(inst.span))
+            case GetElementPtr(_, _, _):
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer GetElementPtr lowering", Some(inst.span))
+            case CallIndirect(_, _, _, _):
+                self.backend_error("Synthesizable VHDL backend does not support CallIndirect lowering")
+            case CheckedBinOp(_, _, _, _):
+                self.backend_error("Synthesizable VHDL backend does not support checked arithmetic MIR instruction: {inst.kind}")
+            case Intrinsic(_, name, _):
+                self.backend_error("Synthesizable VHDL backend does not support intrinsic '{name}'")
+            case SimdAddF32x4(_, _, _) | SimdSubF32x4(_, _, _) | SimdMulF32x4(_, _, _) | SimdDivF32x4(_, _, _) | SimdFmaF32x4(_, _, _, _) | SimdAddF32x8(_, _, _) | SimdSubF32x8(_, _, _) | SimdMulF32x8(_, _, _) | SimdDivF32x8(_, _, _) | SimdFmaF32x8(_, _, _, _) | SimdAddF64x4(_, _, _) | SimdSubF64x4(_, _, _) | SimdMulF64x4(_, _, _) | SimdDivF64x4(_, _, _) | SimdFmaF64x4(_, _, _, _) | SimdAddI32x4(_, _, _) | SimdSubI32x4(_, _, _) | SimdMulI32x4(_, _, _) | SimdXorI32x4(_, _, _) | SimdAndI32x4(_, _, _) | SimdOrI32x4(_, _, _) | SimdShlI32x4(_, _, _) | SimdShrI32x4(_, _, _) | SimdAddI32x8(_, _, _) | SimdSubI32x8(_, _, _) | SimdMulI32x8(_, _, _) | SimdXorI32x8(_, _, _) | SimdAndI32x8(_, _, _) | SimdOrI32x8(_, _, _) | SimdShlI32x8(_, _, _) | SimdShrI32x8(_, _, _) | SimdHaddF32x4(_, _) | SimdHmaxF32x4(_, _) | SimdHminF32x4(_, _):
+                self.backend_error("Synthesizable VHDL backend does not support SIMD MIR instruction: {inst.kind}")
+            case InlineAsm(_, _, _, _, _):
+                self.backend_error("Synthesizable VHDL backend does not support inline assembly MIR instruction")
+            case PipeForward(_, _, _) | Compose(_, _, _, _) | Parallel(_, _) | LayerConnect(_, _, _):
+                self.backend_error("Synthesizable VHDL backend does not support functional pipeline MIR instruction: {inst.kind}")
+            case DebugValue(_, _):
+                self.backend_error("Synthesizable VHDL backend does not support debug metadata MIR instruction: {inst.kind}")
+            case CreatePromise(_, _, _) | Await(_, _) | Yield(_) | Spawn(_, _, _) | Send(_, _) | Receive(_, _):
+                self.backend_error("Synthesizable VHDL backend does not support async or actor MIR instruction: {inst.kind}")
+            case Ref(_, _, _):
+                self.backend_error("Synthesizable VHDL backend does not support borrow/reference MIR instruction: {inst.kind}")
+            case GpuKernelDef(_) | GpuLaunch(_) | GpuGlobalId(_, _) | GpuLocalId(_, _) | GpuBlockId(_, _) | GpuBlockDim(_, _) | GpuGridDim(_, _) | GpuBarrier(_) | GpuMemFence(_) | GpuSharedAlloc(_, _, _) | GpuAtomicOp(_, _, _, _) | GpuAtomicCas(_, _, _, _):
+                self.backend_error("Synthesizable VHDL backend does not support GPU MIR instruction: {inst.kind}")
+            case _:
+                self.backend_error("Synthesizable VHDL backend does not support MIR instruction: {inst.kind}")
+
+    me compile_package_into(builder: VhdlBuilder, module: MirModule) -> Result<(), CompileError>:
+        """Compile type and constant definitions into a VHDL package."""
+        builder.emit_package_begin(module.name)
+
+        for tuple_key in self.active_tuple_type_order:
+            val tuple_name = self.active_tuple_type_names[tuple_key]
+            val tuple_elements = self.active_tuple_type_shapes[tuple_key]
+            if tuple_elements.len() == 0:
+                return Err(self.backend_error("Empty tuple types are not supported by the VHDL backend"))
+            var tuple_fields: [(text, text)] = []
+            var tuple_idx = 0
+            for tuple_element in tuple_elements:
+                val tuple_type_result = self.mir_type_to_vhdl(tuple_element)
+                if tuple_type_result.is_err():
+                    return Err(tuple_type_result.unwrap_err())
+                tuple_fields = tuple_fields.push(("f{tuple_idx}", tuple_type_result.unwrap()))
+                tuple_idx = tuple_idx + 1
+            val tuple_def = self.type_mapper.map_record(tuple_fields)
+            builder.emit_type_decl(tuple_name, tuple_def)
+
+        # Emit type definitions
+        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
+        for symbol in module.types.keys():
+            val type_def = module.types[symbol]
+            match type_def.kind:
+                case Struct(fields):
+                    var field_pairs: [(text, text)] = []
+                    for f in fields:
+                        val mapped_result = self.mir_type_to_vhdl(f.type_)
+                        if mapped_result.is_err():
+                            return Err(mapped_result.unwrap_err())
+                        val mapped = mapped_result.unwrap()
+                        field_pairs = field_pairs.push((f.name, mapped))
+                    val record_def = self.type_mapper.map_record(field_pairs)
+                    builder.emit_type_decl(type_def.name, record_def)
+
+                case Enum(variants):
+                    val enum_result = self.emit_enum_type_decls(builder, type_def, variants)
+                    if enum_result.is_err():
+                        return Err(enum_result.unwrap_err())
+
+                case _:
+                    return Err(self.backend_error(
+                        "Unsupported VHDL package type definition: {type_def.name}"
+                    ))
+
+        # Emit constants
+        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
+        for symbol in module.constants.keys():
+            val constant = module.constants[symbol]
+            val vhdl_type_result = self.mir_type_to_vhdl(constant.type_)
+            if vhdl_type_result.is_err():
+                return Err(vhdl_type_result.unwrap_err())
+            val vhdl_value_result = self.const_value_to_vhdl(constant.value, constant.type_)
+            if vhdl_value_result.is_err():
+                return Err(vhdl_value_result.unwrap_err())
+            val vhdl_type = vhdl_type_result.unwrap()
+            val vhdl_value = vhdl_value_result.unwrap()
+            builder.emit_constant_decl(constant.name, vhdl_type, vhdl_value)
+
+        for source_name in self.active_helper_name_by_source.keys():
+            val func_result = self.helper_function_by_name(source_name)
+            if func_result.is_err():
+                return Err(func_result.unwrap_err())
+            val decl_result = self.emit_helper_declaration(builder, func_result.unwrap())
+            if decl_result.is_err():
+                return Err(decl_result.unwrap_err())
+
+        builder.emit_package_end(module.name)
+
+        if self.active_helper_name_by_source.len() > 0:
+            builder.emit_library_header()
+            builder.emit_line("package body {module.name}_pkg is")
+            builder.indent_level = builder.indent_level + 1
+            for source_name in self.active_helper_name_by_source.keys():
+                val func_result = self.helper_function_by_name(source_name)
+                if func_result.is_err():
+                    return Err(func_result.unwrap_err())
+                val body_result = self.emit_helper_body(builder, func_result.unwrap())
+                if body_result.is_err():
+                    return Err(body_result.unwrap_err())
+            builder.indent_level = builder.indent_level - 1
+            builder.emit_line("end package body {module.name}_pkg;")
+            builder.emit_raw("")
+
+        Ok(())
+
+    fn emit_enum_type_decls(builder: VhdlBuilder, type_def: MirTypeDef, variants: [MirVariantDef]) -> Result<(), CompileError>:
+        var names: [text] = []
+        var used_names: Dict<text, bool> = {}
+        var has_payload = false
+        for v in variants:
+            val safe_name = self.sanitize_vhdl_identifier(v.name)
+            if used_names.get(safe_name).?:
+                return Err(self.backend_error(
+                    "Duplicate VHDL enum literal after sanitization in `{type_def.name}`: `{safe_name}`"
+                ))
+            used_names[safe_name] = true
+            names = names.push(safe_name)
+            if v.payload.?:
+                has_payload = true
+        if not has_payload:
+            val enum_def = self.type_mapper.map_enum_type(names)
+            builder.emit_type_decl(type_def.name, enum_def)
+            return Ok(())
+
+        builder.emit_type_decl("{type_def.name}_tag_t", self.type_mapper.map_enum_type(names))
+        var record_fields: [(text, text)] = [("tag", "{type_def.name}_tag_t")]
+        var used_payload_fields: Dict<text, bool> = {"tag": true}
+        for v in variants:
+            if v.payload.?:
+                val field_name = self.payload_enum_field_name(v)
+                if used_payload_fields.get(field_name).?:
+                    return Err(self.backend_error(
+                        "Duplicate VHDL payload enum field after sanitization in `{type_def.name}`: `{field_name}`"
+                    ))
+                used_payload_fields[field_name] = true
+                val payload_type_result = self.mir_type_to_vhdl(v.payload.unwrap())
+                if payload_type_result.is_err():
+                    return Err(payload_type_result.unwrap_err())
+                record_fields = record_fields.push((field_name, payload_type_result.unwrap()))
+        builder.emit_type_decl(type_def.name, self.type_mapper.map_record(record_fields))
+        Ok(())
+
+    me prepare_tuple_types_for_module(module: MirModule):
+        self.active_tuple_type_names = {}
+        self.active_tuple_type_shapes = {}
+        self.active_tuple_type_order = []
+
+        for symbol in module.types.keys():
+            val type_def = module.types[symbol]
+            self.register_tuple_types_in_type_def(type_def)
+
+        for symbol in module.constants.keys():
+            val constant = module.constants[symbol]
+            self.register_tuple_types_in_type(constant.type_)
+
+        for symbol in module.functions.keys():
+            val func = module.functions[symbol]
+            self.register_tuple_types_in_type(func.signature.return_type)
+            for param_type in func.signature.params:
+                self.register_tuple_types_in_type(param_type)
+            for local in func.locals:
+                self.register_tuple_types_in_type(local.type_)
+
+    me register_tuple_types_in_type_def(type_def: MirTypeDef):
+        match type_def.kind:
+            case Struct(fields):
+                for field in fields:
+                    self.register_tuple_types_in_type(field.type_)
+            case Enum(variants):
+                for variant in variants:
+                    if variant.payload.?:
+                        self.register_tuple_types_in_type(variant.payload.unwrap())
+            case Union(members):
+                for member in members:
+                    self.register_tuple_types_in_type(member)
+
+    me register_tuple_types_in_type(ty: MirType):
+        match ty.kind:
+            case Tuple(elements):
+                for element in elements:
+                    self.register_tuple_types_in_type(element)
+                val tuple_key = self.tuple_type_key(ty)
+                if not self.active_tuple_type_names.get(tuple_key).?:
+                    val tuple_name = "tuple_t_{self.active_tuple_type_order.len()}"
+                    self.active_tuple_type_names[tuple_key] = tuple_name
+                    self.active_tuple_type_shapes[tuple_key] = elements
+                    self.active_tuple_type_order = self.active_tuple_type_order.push(tuple_key)
+            case Array(element, _):
+                self.register_tuple_types_in_type(element)
+            case Slice(element):
+                self.register_tuple_types_in_type(element)
+            case Ptr(pointee, _):
+                self.register_tuple_types_in_type(pointee)
+            case Ref(referent, _):
+                self.register_tuple_types_in_type(referent)
+            case FuncPtr(signature):
+                for param_type in signature.params:
+                    self.register_tuple_types_in_type(param_type)
+                self.register_tuple_types_in_type(signature.return_type)
+            case Promise(inner):
+                self.register_tuple_types_in_type(inner)
+            case Generator(yield_ty, return_ty):
+                self.register_tuple_types_in_type(yield_ty)
+                self.register_tuple_types_in_type(return_ty)
+            case ActorType(message):
+                self.register_tuple_types_in_type(message)
+            case Union(members):
+                for member in members:
+                    self.register_tuple_types_in_type(member)
+            case _:
+                ()
+
+    fn tuple_type_key(ty: MirType) -> text:
+        match ty.kind:
+            case Tuple(elements):
+                var element_keys: [text] = []
+                for element in elements:
+                    element_keys = element_keys.push(self.tuple_type_key_or_leaf(element))
+                "tuple({element_keys.join(\",\")})"
+            case _:
+                self.tuple_type_key_or_leaf(ty)
+
+    fn tuple_type_key_or_leaf(ty: MirType) -> text:
+        match ty.kind:
+            case I8: "i8"
+            case I16: "i16"
+            case I32: "i32"
+            case I64: "i64"
+            case U8: "u8"
+            case U16: "u16"
+            case U32: "u32"
+            case U64: "u64"
+            case F32: "f32"
+            case F64: "f64"
+            case Bool: "bool"
+            case Char: "char"
+            case Unit: "unit"
+            case Vec4f: "vec4f"
+            case Vec8f: "vec8f"
+            case Vec4d: "vec4d"
+            case Vec4i: "vec4i"
+            case Vec8i: "vec8i"
+            case Array(element, size): "array({self.tuple_type_key_or_leaf(element)};{size})"
+            case Slice(element): "slice({self.tuple_type_key_or_leaf(element)})"
+            case Tuple(elements):
+                var nested_keys: [text] = []
+                for element in elements:
+                    nested_keys = nested_keys.push(self.tuple_type_key_or_leaf(element))
+                "tuple({nested_keys.join(\",\")})"
+            case Struct(symbol): "struct#{symbol.id}"
+            case Enum(symbol): "enum#{symbol.id}"
+            case Union(members):
+                var member_keys: [text] = []
+                for member in members:
+                    member_keys = member_keys.push(self.tuple_type_key_or_leaf(member))
+                "union({member_keys.join(\",\")})"
+            case Ptr(pointee, mutable):
+                "ptr({self.tuple_type_key_or_leaf(pointee)},{mutable})"
+            case Ref(referent, mutable):
+                "ref({self.tuple_type_key_or_leaf(referent)},{mutable})"
+            case FuncPtr(signature):
+                var param_keys: [text] = []
+                for param_type in signature.params:
+                    param_keys = param_keys.push(self.tuple_type_key_or_leaf(param_type))
+                "fn({param_keys.join(\",\")})->{self.tuple_type_key_or_leaf(signature.return_type)}"
+            case Promise(inner):
+                "promise({self.tuple_type_key_or_leaf(inner)})"
+            case Generator(yield_ty, return_ty):
+                "gen({self.tuple_type_key_or_leaf(yield_ty)}->{self.tuple_type_key_or_leaf(return_ty)})"
+            case ActorType(message):
+                "actor({self.tuple_type_key_or_leaf(message)})"
+            case Never: "never"
+            case Opaque(name): "opaque({name})"
+            case _: "type#{ty.kind}"
+
+    fn sanitize_vhdl_identifier(name: text) -> text:
+        """Return a deterministic VHDL-safe identifier fragment."""
+        var result = name.trim()
+        if result.len() == 0:
+            result = "out"
+        result = result.replace(" ", "_")
+        result = result.replace("-", "_")
+        result = result.replace(".", "_")
+        result = result.replace(":", "_")
+        result = result.replace("/", "_")
+        result = result.replace("\\", "_")
+        result = result.replace("(", "_")
+        result = result.replace(")", "_")
+        result = result.replace("[", "_")
+        result = result.replace("]", "_")
+        result
+
+    fn vhdl_return_field_name(func: MirFunction, index: i64) -> text:
+        if func.has_vhdl_metadata:
+            val meta = func.vhdl_metadata
+            if index < meta.return_fields.len():
+                val label = meta.return_fields[index].label
+                if label.len() > 0:
+                    return self.sanitize_vhdl_identifier(label)
+        "out{index}"
+
+    fn vhdl_return_abi(func: MirFunction) -> Result<VhdlReturnAbi, CompileError>:
+        match func.signature.return_type.kind:
+            case Unit:
+                Ok(VhdlReturnAbi(is_tuple: false, fields: []))
+            case Tuple(elements):
+                var fields: [VhdlReturnField] = []
+                var used: Dict<text, bool> = {}
+                var idx = 0
+                while idx < elements.len():
+                    val name = self.vhdl_return_field_name(func, idx)
+                    if used.get(name).?:
+                        return Err(self.backend_error("Duplicate VHDL output port after sanitization: {name}"))
+                    used[name] = true
+                    fields = fields.push(VhdlReturnField(
+                        name: name,
+                        type_: elements[idx],
+                        index: idx
+                    ))
+                    idx = idx + 1
+                Ok(VhdlReturnAbi(is_tuple: true, fields: fields))
+            case _:
+                Ok(VhdlReturnAbi(is_tuple: false, fields: [
+                    VhdlReturnField(
+                        name: "result_out",
+                        type_: func.signature.return_type,
+                        index: 0
+                    )
+                ]))
+
+    fn vhdl_ports_for_function(func: MirFunction) -> Result<[VhdlPortSpec], CompileError>:
+        var ports: [VhdlPortSpec] = []
+
+        var idx = 0
+        while idx < func.signature.params.len():
+            if self.type_has_general_memory(func.signature.params[idx]):
+                return Err(self.backend_error("VHDL-MEM-GENERAL: Array, slice, pointer, and reference ports require an explicit package-level memory ABI before VHDL emission"))
+            val param_type_result = self.mir_type_to_vhdl_at(func.signature.params[idx], Some(func.span))
+            if param_type_result.is_err():
+                return Err(param_type_result.unwrap_err())
+            ports = ports.push(VhdlPortSpec(
+                name: "arg{idx}",
+                direction: "in",
+                type_name: param_type_result.unwrap()
+            ))
+            idx = idx + 1
+
+        val abi_result = self.vhdl_return_abi(func)
+        if abi_result.is_err():
+            return Err(abi_result.unwrap_err())
+        val abi = abi_result.unwrap()
+        for field in abi.fields:
+            if self.type_has_general_memory(field.type_):
+                return Err(self.backend_error("VHDL-MEM-GENERAL: Array, slice, pointer, and reference result ports require an explicit package-level memory ABI before VHDL emission"))
+            val return_type_result = self.mir_type_to_vhdl_at(field.type_, Some(func.span))
+            if return_type_result.is_err():
+                return Err(return_type_result.unwrap_err())
+            ports = ports.push(VhdlPortSpec(
+                name: field.name,
+                direction: "out",
+                type_name: return_type_result.unwrap()
+            ))
+
+        Ok(ports)
+
+    fn type_has_general_memory(ty: MirType) -> bool:
+        match ty.kind:
+            case Array(_, _) | Slice(_) | Ptr(_, _) | Ref(_, _):
+                true
+            case Tuple(elements):
+                for element in elements:
+                    if self.type_has_general_memory(element):
+                        return true
+                false
+            case Union(members):
+                for member in members:
+                    if self.type_has_general_memory(member):
+                        return true
+                false
+            case _:
+                false
+

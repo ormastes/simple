@@ -1,0 +1,417 @@
+# @cover src/lib/nogc_sync_mut/test_runner/test_runner_coverage.spl 80%
+# @feature coverage_test_runner
+# tag: system
+#
+# System tests for test_runner_coverage module.
+# Documents the coverage data accumulation, parsing, rendering, and threshold APIs.
+# Requires compiled mode -- interpreter only verifies file loading.
+"""
+# Coverage Test Runner Specification
+
+**Feature IDs:** #674
+**Category:** Testing/Coverage
+**Status:** Implemented
+
+## Overview
+
+Tests for the test runner coverage integration module that handles
+in-memory aggregation of decision/condition coverage data, SDN parsing
+and rendering, file tracking, sorting, and threshold enforcement.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| FileCoverage | Per-file coverage stats (decisions + conditions) |
+| CoverageData | Aggregate coverage across all tracked files |
+| SDN format | Coverage data serialization (decisions/conditions tables) |
+| Decision coverage | Both true and false branches must be taken |
+| Condition coverage | Individual boolean sub-expressions evaluated both ways |
+"""
+
+use std.spec
+use std.test_runner.test_runner_coverage.{FileCoverage, CoverageData, reset_coverage_state, decision_key, condition_key, merge_counts, parse_i64_safe, accumulate_coverage_sdn, build_coverage_data_from_state, render_coverage_sdn, find_or_add_file, sort_files_by_coverage, check_coverage_threshold, parse_coverage_sdn, record_coverage_sdn}
+
+# ============================================================================
+# Struct Construction
+# ============================================================================
+
+describe "FileCoverage and CoverageData construction":
+
+    it "creates FileCoverage with all fields":
+        val fc = FileCoverage(
+            path: "src/main.spl",
+            decisions_total: 10,
+            decisions_covered: 7,
+            conditions_total: 5,
+            conditions_covered: 3,
+            decision_pct: 70,
+            condition_pct: 60
+        )
+        expect(fc.path).to_equal("src/main.spl")
+        expect(fc.decisions_total).to_equal(10)
+        expect(fc.decisions_covered).to_equal(7)
+        expect(fc.conditions_total).to_equal(5)
+        expect(fc.conditions_covered).to_equal(3)
+        expect(fc.decision_pct).to_equal(70)
+        expect(fc.condition_pct).to_equal(60)
+
+    it "creates CoverageData with all fields":
+        val data = CoverageData(
+            raw_sdn: "# empty",
+            files: [],
+            total_decisions: 20,
+            total_decisions_covered: 15,
+            total_conditions: 10,
+            total_conditions_covered: 8,
+            decision_pct: 75,
+            condition_pct: 80
+        )
+        expect(data.raw_sdn).to_equal("# empty")
+        expect(data.files.len()).to_equal(0)
+        expect(data.total_decisions).to_equal(20)
+        expect(data.total_decisions_covered).to_equal(15)
+        expect(data.total_conditions).to_equal(10)
+        expect(data.total_conditions_covered).to_equal(8)
+        expect(data.decision_pct).to_equal(75)
+        expect(data.condition_pct).to_equal(80)
+
+# ============================================================================
+# parse_i64_safe
+# ============================================================================
+
+describe "parse_i64_safe":
+
+    it "parses a normal integer string":
+        val result = parse_i64_safe("42")
+        expect(result).to_equal(42)
+
+    it "returns 0 for empty string":
+        val result = parse_i64_safe("")
+        expect(result).to_equal(0)
+
+    it "trims whitespace before parsing":
+        val result = parse_i64_safe("  7  ")
+        expect(result).to_equal(7)
+
+# ============================================================================
+# decision_key / condition_key
+# ============================================================================
+
+describe "decision_key and condition_key":
+
+    it "builds pipe-delimited decision key from four args":
+        val key = decision_key("src/a.spl", "10", "5", "1")
+        expect(key).to_equal("src/a.spl|10|5|1")
+
+    it "builds pipe-delimited condition key from five args":
+        val key = condition_key("src/b.spl", "20", "3", "1", "2")
+        expect(key).to_equal("src/b.spl|20|3|1|2")
+
+# ============================================================================
+# accumulate_coverage_sdn
+# ============================================================================
+
+describe "accumulate_coverage_sdn":
+
+    before_each:
+        reset_coverage_state()
+
+    context "event-format lines":
+
+        it "accumulates a decision event with true taken":
+            val sdn = "decision src/a.spl:10 1 true"
+            accumulate_coverage_sdn(sdn)
+            val data = build_coverage_data_from_state("")
+            expect(data.total_decisions).to_equal(1)
+
+        it "accumulates a condition event with true result":
+            val sdn = "condition src/a.spl:10 1 true"
+            accumulate_coverage_sdn(sdn)
+            val data = build_coverage_data_from_state("")
+            expect(data.total_conditions).to_equal(1)
+
+        it "accumulates both true and false decision events for full coverage":
+            val sdn = "decision src/a.spl:10 1 true\ndecision src/a.spl:10 1 false"
+            accumulate_coverage_sdn(sdn)
+            val data = build_coverage_data_from_state("")
+            expect(data.total_decisions).to_equal(1)
+            expect(data.total_decisions_covered).to_equal(1)
+
+    context "SDN table format":
+
+        it "parses decisions section table rows":
+            val sdn = "decisions |id, file, line, column, true_count, false_count|\n    1, a.spl, 10, 5, 3, 2"
+            accumulate_coverage_sdn(sdn)
+            val data = build_coverage_data_from_state("")
+            expect(data.total_decisions).to_equal(1)
+            expect(data.total_decisions_covered).to_equal(1)
+
+        it "parses conditions section table rows":
+            val sdn = "conditions |decision_id, condition_id, file, line, column, true_count, false_count|\n    1, 2, a.spl, 10, 5, 3, 2"
+            accumulate_coverage_sdn(sdn)
+            val data = build_coverage_data_from_state("")
+            expect(data.total_conditions).to_equal(1)
+            expect(data.total_conditions_covered).to_equal(1)
+
+    context "line filtering":
+
+        it "skips empty lines and comments":
+            val sdn = "# This is a comment\n\n# Another comment\ndecision src/x.spl:1 1 true"
+            accumulate_coverage_sdn(sdn)
+            val data = build_coverage_data_from_state("")
+            expect(data.total_decisions).to_equal(1)
+
+        it "handles section transitions from decisions to conditions to summary":
+            var sdn = "decisions |id, file, line, column, true_count, false_count|\n"
+            sdn = sdn + "    1, f.spl, 1, 0, 5, 5\n"
+            sdn = sdn + "conditions |decision_id, condition_id, file, line, column, true_count, false_count|\n"
+            sdn = sdn + "    1, 1, f.spl, 1, 0, 3, 3\n"
+            sdn = sdn + "summary:\n"
+            sdn = sdn + "    total_decisions: 1"
+            accumulate_coverage_sdn(sdn)
+            val data = build_coverage_data_from_state("")
+            expect(data.total_decisions).to_equal(1)
+            expect(data.total_conditions).to_equal(1)
+
+# ============================================================================
+# build_coverage_data_from_state
+# ============================================================================
+
+describe "build_coverage_data_from_state":
+
+    before_each:
+        reset_coverage_state()
+
+    it "returns all zeros for empty state":
+        val data = build_coverage_data_from_state("")
+        expect(data.total_decisions).to_equal(0)
+        expect(data.total_decisions_covered).to_equal(0)
+        expect(data.total_conditions).to_equal(0)
+        expect(data.total_conditions_covered).to_equal(0)
+        expect(data.decision_pct).to_equal(0)
+        expect(data.condition_pct).to_equal(0)
+        expect(data.files.len()).to_equal(0)
+
+    it "marks decision as covered when both true and false taken":
+        val sdn = "decision src/a.spl:10 1 true\ndecision src/a.spl:10 1 false"
+        accumulate_coverage_sdn(sdn)
+        val data = build_coverage_data_from_state("")
+        expect(data.total_decisions_covered).to_equal(1)
+        expect(data.decision_pct).to_equal(100)
+
+    it "marks decision as not covered when only true taken":
+        val sdn = "decision src/a.spl:10 1 true"
+        accumulate_coverage_sdn(sdn)
+        val data = build_coverage_data_from_state("")
+        expect(data.total_decisions).to_equal(1)
+        expect(data.total_decisions_covered).to_equal(0)
+        expect(data.decision_pct).to_equal(0)
+
+    it "computes condition percentages from accumulated data":
+        var sdn = "condition src/a.spl:10 1 true\ncondition src/a.spl:10 1 false\n"
+        sdn = sdn + "condition src/a.spl:20 2 true"
+        accumulate_coverage_sdn(sdn)
+        val data = build_coverage_data_from_state("")
+        expect(data.total_conditions).to_equal(2)
+        expect(data.total_conditions_covered).to_equal(1)
+        expect(data.condition_pct).to_equal(50)
+
+    it "builds per-file FileCoverage entries":
+        var sdn = "decision src/a.spl:10 1 true\ndecision src/a.spl:10 1 false\n"
+        sdn = sdn + "decision src/b.spl:5 1 true"
+        accumulate_coverage_sdn(sdn)
+        val data = build_coverage_data_from_state("")
+        expect(data.files.len()).to_equal(2)
+
+# ============================================================================
+# find_or_add_file
+# ============================================================================
+
+describe "find_or_add_file":
+
+    it "adds a new file and returns its index":
+        var paths: [text] = []
+        var dt: [i64] = []
+        var dc: [i64] = []
+        var ct: [i64] = []
+        var cc: [i64] = []
+        val idx = find_or_add_file(paths, dt, dc, ct, cc, "src/new.spl")
+        expect(idx).to_equal(0)
+        expect(paths.len()).to_equal(1)
+
+    it "returns existing index for already-added file":
+        var paths: [text] = []
+        var dt: [i64] = []
+        var dc: [i64] = []
+        var ct: [i64] = []
+        var cc: [i64] = []
+        val idx1 = find_or_add_file(paths, dt, dc, ct, cc, "src/existing.spl")
+        val idx2 = find_or_add_file(paths, dt, dc, ct, cc, "src/existing.spl")
+        expect(idx1).to_equal(idx2)
+        expect(paths.len()).to_equal(1)
+
+    it "assigns distinct indices for different files":
+        var paths: [text] = []
+        var dt: [i64] = []
+        var dc: [i64] = []
+        var ct: [i64] = []
+        var cc: [i64] = []
+        val idx_a = find_or_add_file(paths, dt, dc, ct, cc, "a.spl")
+        val idx_b = find_or_add_file(paths, dt, dc, ct, cc, "b.spl")
+        expect(idx_a).to_equal(0)
+        expect(idx_b).to_equal(1)
+        expect(paths.len()).to_equal(2)
+
+# ============================================================================
+# render_coverage_sdn
+# ============================================================================
+
+describe "render_coverage_sdn":
+
+    before_each:
+        reset_coverage_state()
+
+    it "renders decisions and conditions sections when data present":
+        val sdn = "decision src/a.spl:10 1 true\ndecision src/a.spl:10 1 false"
+        accumulate_coverage_sdn(sdn)
+        val rendered = render_coverage_sdn()
+        expect(rendered).to_contain("decisions")
+        expect(rendered).to_contain("conditions")
+        expect(rendered).to_contain("summary:")
+
+    it "renders summary with zeros for empty state":
+        val rendered = render_coverage_sdn()
+        expect(rendered).to_contain("summary:")
+        expect(rendered).to_contain("total_decisions: 0")
+        expect(rendered).to_contain("covered_decisions: 0")
+        expect(rendered).to_contain("total_conditions: 0")
+        expect(rendered).to_contain("covered_conditions: 0")
+
+# ============================================================================
+# parse_coverage_sdn (round-trip)
+# ============================================================================
+
+describe "parse_coverage_sdn":
+
+    before_each:
+        reset_coverage_state()
+
+    it "round-trips through render then parse with matching totals":
+        # Set up state with known data
+        val input_sdn = "decision src/a.spl:10 1 true\ndecision src/a.spl:10 1 false\ncondition src/a.spl:10 1 true\ncondition src/a.spl:10 1 false"
+        accumulate_coverage_sdn(input_sdn)
+        val rendered = render_coverage_sdn()
+
+        # Parse the rendered SDN
+        val data = parse_coverage_sdn(rendered)
+        expect(data.total_decisions).to_equal(1)
+        expect(data.total_decisions_covered).to_equal(1)
+        expect(data.total_conditions).to_equal(1)
+        expect(data.total_conditions_covered).to_equal(1)
+
+    it "parse sets file list from SDN content":
+        val sdn = "decisions |id, file, line, column, true_count, false_count|\n    1, src/x.spl, 5, 0, 4, 4"
+        val data = parse_coverage_sdn(sdn)
+        expect(data.files.len()).to_be_greater_than(0)
+        if data.files.len() > 0:
+            expect(data.files[0].path).to_equal("src/x.spl")
+
+# ============================================================================
+# record_coverage_sdn
+# ============================================================================
+
+describe "record_coverage_sdn":
+
+    before_each:
+        reset_coverage_state()
+
+    it "skips empty string without changing state":
+        record_coverage_sdn("")
+        val data = build_coverage_data_from_state("")
+        expect(data.total_decisions).to_equal(0)
+
+    it "accumulates valid SDN content":
+        record_coverage_sdn("decision src/a.spl:10 1 true")
+        val data = build_coverage_data_from_state("")
+        expect(data.total_decisions).to_equal(1)
+
+    it "accumulates multiple SDN records":
+        record_coverage_sdn("decision src/a.spl:10 1 true")
+        record_coverage_sdn("decision src/a.spl:10 1 false")
+        val data = build_coverage_data_from_state("")
+        expect(data.total_decisions).to_equal(1)
+        expect(data.total_decisions_covered).to_equal(1)
+
+# ============================================================================
+# sort_files_by_coverage
+# ============================================================================
+
+describe "sort_files_by_coverage":
+
+    it "sorts files by decision_pct ascending":
+        val high = FileCoverage(path: "high.spl", decisions_total: 10, decisions_covered: 9, conditions_total: 0, conditions_covered: 0, decision_pct: 90, condition_pct: 0)
+        val low = FileCoverage(path: "low.spl", decisions_total: 10, decisions_covered: 2, conditions_total: 0, conditions_covered: 0, decision_pct: 20, condition_pct: 0)
+        val mid = FileCoverage(path: "mid.spl", decisions_total: 10, decisions_covered: 5, conditions_total: 0, conditions_covered: 0, decision_pct: 50, condition_pct: 0)
+        val sorted = sort_files_by_coverage([high, low, mid])
+        expect(sorted[0].path).to_equal("low.spl")
+        expect(sorted[1].path).to_equal("mid.spl")
+        expect(sorted[2].path).to_equal("high.spl")
+
+    it "returns empty list for empty input":
+        val sorted = sort_files_by_coverage([])
+        expect(sorted.len()).to_equal(0)
+
+    it "returns single element unchanged":
+        val only = FileCoverage(path: "only.spl", decisions_total: 5, decisions_covered: 5, conditions_total: 0, conditions_covered: 0, decision_pct: 100, condition_pct: 0)
+        val sorted = sort_files_by_coverage([only])
+        expect(sorted.len()).to_equal(1)
+        expect(sorted[0].path).to_equal("only.spl")
+
+# ============================================================================
+# check_coverage_threshold
+# ============================================================================
+
+describe "check_coverage_threshold":
+
+    it "returns true when coverage is above threshold":
+        val data = CoverageData(
+            raw_sdn: "",
+            files: [],
+            total_decisions: 10,
+            total_decisions_covered: 8,
+            total_conditions: 0,
+            total_conditions_covered: 0,
+            decision_pct: 80,
+            condition_pct: 0
+        )
+        val result = check_coverage_threshold(data, 70)
+        expect(result).to_equal(true)
+
+    it "returns false when coverage is below threshold":
+        val data = CoverageData(
+            raw_sdn: "",
+            files: [],
+            total_decisions: 10,
+            total_decisions_covered: 3,
+            total_conditions: 0,
+            total_conditions_covered: 0,
+            decision_pct: 30,
+            condition_pct: 0
+        )
+        val result = check_coverage_threshold(data, 50)
+        expect(result).to_equal(false)
+
+    it "returns true when coverage equals threshold exactly":
+        val data = CoverageData(
+            raw_sdn: "",
+            files: [],
+            total_decisions: 10,
+            total_decisions_covered: 5,
+            total_conditions: 0,
+            total_conditions_covered: 0,
+            decision_pct: 50,
+            condition_pct: 0
+        )
+        val result = check_coverage_threshold(data, 50)
+        expect(result).to_equal(true)

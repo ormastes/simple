@@ -1,0 +1,117 @@
+# ACPI RSDP Scanner — FR-SIMPLEOS-ACPI-001
+#
+# Scans the BIOS shadow region (0x000E0000..0x00100000) on 16-byte boundaries
+# for the 8-byte "RSD PTR " signature.  Verifies the 1-byte checksum over the
+# first 20 bytes (ACPI 1.0).  For revision >= 2 also verifies the extended
+# checksum over the full structure.
+#
+# All addresses passed into / returned from this module are PHYSICAL.
+# Callers that need to read ACPI tables must convert via
+#   os.kernel.boot.limine_boot.phys_to_virt(phys)
+# before handing the address to mmio_read* helpers.
+
+use os.kernel.boot.mmio.{mmio_read8, mmio_read32}
+use os.kernel.boot.limine_boot.{phys_to_virt, g_hhdm_offset}
+
+# ============================================================================
+# RSDP layout constants
+# ============================================================================
+
+# "RSD PTR " encoded as two u32 LE words for quick scan
+# Byte sequence: 52 53 44 20 50 54 52 20
+val RSDP_SIG_LO: u32 = 0x20445352   # "RSD "
+val RSDP_SIG_HI: u32 = 0x20525450   # "PTR "
+
+# BIOS shadow region physical bounds (inclusive start, exclusive end)
+val RSDP_SCAN_START: u64 = 0x000E0000
+val RSDP_SCAN_END:   u64 = 0x00100000
+val RSDP_ALIGN:      u64 = 16
+
+# RSDP field offsets (physical struct, accessed via HHDM virtual address)
+val RSDP_OFF_REVISION:  u64 = 15   # u8 — 0 = ACPI 1.0, 2 = ACPI 2.0+
+val RSDP_OFF_RSDT_ADDR: u64 = 16   # u32 — physical address of RSDT
+val RSDP_OFF_LENGTH:    u64 = 20   # u32 — total RSDP length (ACPI 2.0+)
+val RSDP_OFF_XSDT_ADDR: u64 = 24   # u64 — physical address of XSDT (ACPI 2.0+)
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _byte_sum(virt: u64, len: u64) -> u8:
+    """Sum len bytes starting at virtual address virt; return low 8 bits."""
+    var sum: u32 = 0
+    var i: u64 = 0
+    while i < len:
+        sum = sum + (mmio_read8(virt + i) as u32)
+        i = i + 1
+    (sum & 0xFF) as u8
+
+fn _check_rsdp_v1(virt: u64) -> bool:
+    """Validate ACPI 1.0 RSDP checksum (first 20 bytes must sum to 0)."""
+    _byte_sum(virt, 20) == 0
+
+fn _check_rsdp_v2(virt: u64, length: u64) -> bool:
+    """Validate ACPI 2.0+ extended checksum (full structure must sum to 0)."""
+    _byte_sum(virt, length) == 0
+
+fn _sig_matches(virt: u64) -> bool:
+    """Check 8-byte 'RSD PTR ' signature at virtual address virt."""
+    val lo = mmio_read32(virt)
+    val hi = mmio_read32(virt + 4)
+    (lo == RSDP_SIG_LO) and (hi == RSDP_SIG_HI)
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn acpi_find_rsdp() -> u64?:
+    """Scan BIOS shadow (0xE0000..0x100000) for a valid RSDP.
+
+    Returns the PHYSICAL address of the first valid RSDP found, or nil if
+    none is present.  Checks both ACPI 1.0 (20-byte) and 2.0+ (full-length)
+    checksums.
+
+    Returns nil immediately if the HHDM mapping has not been established
+    (g_hhdm_offset == 0), which prevents dereferencing raw physical addresses
+    in host-side tests or before the boot HHDM response is parsed.
+
+    Note: Limine normally provides RSDP via BootOutputPort.rsdp_addr.
+    Call acpi_set_rsdp() early in kernel init and use acpi_rsdp_available()
+    before falling back to this scan.
+    """
+    if g_hhdm_offset == 0:
+        return nil
+    var phys: u64 = RSDP_SCAN_START
+    while phys < RSDP_SCAN_END:
+        val virt = phys_to_virt(phys)
+        if _sig_matches(virt):
+            if _check_rsdp_v1(virt):
+                val rev = mmio_read8(virt + RSDP_OFF_REVISION)
+                if rev >= 2:
+                    val length = mmio_read32(virt + RSDP_OFF_LENGTH) as u64
+                    if _check_rsdp_v2(virt, length):
+                        return phys
+                else:
+                    return phys
+        phys = phys + RSDP_ALIGN
+    nil
+
+fn acpi_rsdp_revision(rsdp_phys: u64) -> u8:
+    """Read RSDP revision byte (0 = ACPI 1.0, 2 = ACPI 2.0+)."""
+    val virt = phys_to_virt(rsdp_phys)
+    mmio_read8(virt + RSDP_OFF_REVISION)
+
+fn acpi_rsdp_rsdt_phys(rsdp_phys: u64) -> u64:
+    """Return physical address of RSDT from RSDP (used for ACPI 1.0)."""
+    val virt = phys_to_virt(rsdp_phys)
+    mmio_read32(virt + RSDP_OFF_RSDT_ADDR) as u64
+
+fn acpi_rsdp_xsdt_phys(rsdp_phys: u64) -> u64:
+    """Return physical address of XSDT from RSDP (used for ACPI 2.0+).
+
+    Low 32 bits at RSDP+24, high 32 bits at RSDP+28.
+    """
+    val virt = phys_to_virt(rsdp_phys)
+    val lo = mmio_read32(virt + RSDP_OFF_XSDT_ADDR) as u64
+    val hi = mmio_read32(virt + RSDP_OFF_XSDT_ADDR + 4) as u64
+    (hi << 32) | lo

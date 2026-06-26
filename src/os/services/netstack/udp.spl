@@ -1,0 +1,290 @@
+# UDP -- User Datagram Protocol
+#
+# MDSOC: feature dimension, network layer
+# Connectionless, unreliable datagram transport.
+# Includes port binding table for demultiplexing incoming datagrams.
+#
+# Header format (8 bytes):
+#   src_port(2) dst_port(2) length(2) checksum(2)
+
+use os.services.netstack.ipv4.{Ipv4Address}
+
+val UDP_HEADER_SIZE: u64 = 8
+
+# ============================================================================
+# UDP Header / Datagram
+# ============================================================================
+
+struct UdpHeader:
+    """Parsed UDP header."""
+    src_port: u16
+    dst_port: u16
+    length: u16     # Total UDP length (header + data)
+    checksum: u16
+
+struct UdpDatagram:
+    """Complete UDP datagram: header + data."""
+    header: UdpHeader
+    data: [u8]
+
+# ============================================================================
+# Parse
+# ============================================================================
+
+fn udp_parse(data: [u8]) -> Result<UdpDatagram, text>:
+    """Parse a UDP datagram from raw bytes.
+
+    Validates minimum length. Checksum verification is optional
+    (UDP checksum may be 0, meaning not computed).
+    """
+    if data.len() < UDP_HEADER_SIZE:
+        return Err("UDP datagram too short: {data.len()} < {UDP_HEADER_SIZE}")
+
+    val src_port: u16 = (data[0].to_u16() << 8) | data[1].to_u16()
+    val dst_port: u16 = (data[2].to_u16() << 8) | data[3].to_u16()
+    val length: u16 = (data[4].to_u16() << 8) | data[5].to_u16()
+    val checksum: u16 = (data[6].to_u16() << 8) | data[7].to_u16()
+
+    if length.to_u64() < UDP_HEADER_SIZE:
+        return Err("UDP length too small: {length}")
+    if length.to_u64() > data.len():
+        return Err("UDP length exceeds data: {length} > {data.len()}")
+
+    # Extract payload
+    var payload: [u8] = []
+    var i: u64 = UDP_HEADER_SIZE
+    while i < length.to_u64():
+        payload.push(data[i])
+        i = i + 1
+
+    Ok(UdpDatagram(
+        header: UdpHeader(
+            src_port: src_port, dst_port: dst_port,
+            length: length, checksum: checksum
+        ),
+        data: payload
+    ))
+
+# ============================================================================
+# Build
+# ============================================================================
+
+fn udp_build(src_port: u16, dst_port: u16, data: [u8]) -> [u8]:
+    """Build a UDP datagram (header + data).
+
+    Checksum is set to 0 (optional in UDP over IPv4).
+    The caller wraps this in an IPv4 packet.
+    """
+    val total_len: u16 = (UDP_HEADER_SIZE + data.len()).to_u16()
+    var pkt: [u8] = []
+
+    # Source port (big-endian)
+    pkt.push(((src_port >> 8) & 0xFF).to_u8())
+    pkt.push((src_port & 0xFF).to_u8())
+    # Destination port (big-endian)
+    pkt.push(((dst_port >> 8) & 0xFF).to_u8())
+    pkt.push((dst_port & 0xFF).to_u8())
+    # Length (big-endian)
+    pkt.push(((total_len >> 8) & 0xFF).to_u8())
+    pkt.push((total_len & 0xFF).to_u8())
+    # Checksum = 0 (not computed)
+    pkt.push(0)
+    pkt.push(0)
+
+    # Data payload
+    var i: u64 = 0
+    while i < data.len():
+        pkt.push(data[i])
+        i = i + 1
+
+    pkt
+
+fn udp_build_with_checksum(src_port: u16, dst_port: u16, data: [u8], src_ip: Ipv4Address, dst_ip: Ipv4Address) -> [u8]:
+    """Build a UDP datagram with computed pseudo-header checksum."""
+    val total_len: u16 = (UDP_HEADER_SIZE + data.len()).to_u16()
+    var pkt: [u8] = []
+
+    # Source port (big-endian)
+    pkt.push(((src_port >> 8) & 0xFF).to_u8())
+    pkt.push((src_port & 0xFF).to_u8())
+    # Destination port (big-endian)
+    pkt.push(((dst_port >> 8) & 0xFF).to_u8())
+    pkt.push((dst_port & 0xFF).to_u8())
+    # Length (big-endian)
+    pkt.push(((total_len >> 8) & 0xFF).to_u8())
+    pkt.push((total_len & 0xFF).to_u8())
+    # Checksum placeholder
+    pkt.push(0)
+    pkt.push(0)
+
+    # Data payload
+    var i: u64 = 0
+    while i < data.len():
+        pkt.push(data[i])
+        i = i + 1
+
+    # Compute UDP checksum with pseudo-header
+    val cksum = udp_checksum(src_ip, dst_ip, pkt)
+    pkt[6] = ((cksum >> 8) & 0xFF).to_u8()
+    pkt[7] = (cksum & 0xFF).to_u8()
+
+    pkt
+
+# ============================================================================
+# Checksum
+# ============================================================================
+
+fn udp_checksum(src_ip: Ipv4Address, dst_ip: Ipv4Address, udp_data: [u8]) -> u16:
+    """Compute UDP checksum including IPv4 pseudo-header.
+
+    Pseudo-header: src_ip(4) + dst_ip(4) + zero(1) + proto=17(1) + udp_length(2)
+    """
+    var sum: u32 = 0
+
+    # Pseudo-header: source IP
+    sum = sum + ((src_ip.value >> 16) & 0xFFFF)
+    sum = sum + (src_ip.value & 0xFFFF)
+    # Pseudo-header: destination IP
+    sum = sum + ((dst_ip.value >> 16) & 0xFFFF)
+    sum = sum + (dst_ip.value & 0xFFFF)
+    # Pseudo-header: zero + protocol (17)
+    sum = sum + 17
+    # Pseudo-header: UDP length
+    sum = sum + udp_data.len().to_u32()
+
+    # Sum over UDP header + data
+    var i: u64 = 0
+    while i + 1 < udp_data.len():
+        val word: u32 = (udp_data[i].to_u32() << 8) | udp_data[i + 1].to_u32()
+        sum = sum + word
+        i = i + 2
+    if i < udp_data.len():
+        sum = sum + (udp_data[i].to_u32() << 8)
+
+    # Fold carries
+    while (sum >> 16) > 0:
+        sum = (sum & 0xFFFF) + (sum >> 16)
+
+    val result: u16 = (~sum & 0xFFFF).to_u16()
+    # UDP: if result is 0, use 0xFFFF (RFC 768)
+    if result == 0:
+        return 0xFFFF
+    result
+
+# ============================================================================
+# UDP Binding Table
+# ============================================================================
+
+struct UdpBinding:
+    """A bound UDP port with incoming datagram queue."""
+    port: u16
+    task_id: u64        # Owner task
+    notif_id: u64       # Notification ID for incoming data
+    recv_queue: [UdpQueueEntry]  # Queued incoming datagrams
+    active: bool
+
+struct UdpQueueEntry:
+    """A queued incoming UDP datagram with sender info."""
+    data: [u8]
+    src_addr: Ipv4Address
+    src_port: u16
+
+struct UdpTable:
+    """UDP port binding table for demultiplexing incoming datagrams."""
+    bindings: [UdpBinding]
+
+impl UdpTable:
+    static fn new() -> UdpTable:
+        UdpTable(bindings: [])
+
+    me bind(port: u16, task_id: u64, notif_id: u64) -> Result<bool, text>:
+        """Bind a UDP port to a task.
+
+        Returns Err if the port is already bound by another task.
+        """
+        # Check for existing binding
+        var i: u64 = 0
+        while i < self.bindings.len():
+            if self.bindings[i].active and self.bindings[i].port == port:
+                if self.bindings[i].task_id == task_id:
+                    return Ok(true)  # Already bound by same task
+                return Err("port {port} already bound")
+            i = i + 1
+
+        # Find an inactive slot or append
+        i = 0
+        while i < self.bindings.len():
+            if not self.bindings[i].active:
+                self.bindings[i] = UdpBinding(
+                    port: port, task_id: task_id, notif_id: notif_id,
+                    recv_queue: [], active: true
+                )
+                return Ok(true)
+            i = i + 1
+
+        self.bindings.push(UdpBinding(
+            port: port, task_id: task_id, notif_id: notif_id,
+            recv_queue: [], active: true
+        ))
+        Ok(true)
+
+    me unbind(port: u16, task_id: u64) -> bool:
+        """Unbind a UDP port. Only the owning task can unbind."""
+        var i: u64 = 0
+        while i < self.bindings.len():
+            if (self.bindings[i].active and self.bindings[i].port == port and
+                self.bindings[i].task_id == task_id):
+                self.bindings[i] = UdpBinding(
+                    port: self.bindings[i].port,
+                    task_id: self.bindings[i].task_id,
+                    notif_id: self.bindings[i].notif_id,
+                    recv_queue: [],
+                    active: false
+                )
+                return true
+            i = i + 1
+        false
+
+    me deliver(port: u16, data: [u8], src_addr: Ipv4Address, src_port: u16) -> bool:
+        """Deliver a received UDP datagram to the bound port.
+
+        Queues the datagram and returns true if the port is bound,
+        false if no binding exists.
+        """
+        var i: u64 = 0
+        while i < self.bindings.len():
+            if self.bindings[i].active and self.bindings[i].port == port:
+                self.bindings[i].recv_queue.push(UdpQueueEntry(
+                    data: data, src_addr: src_addr, src_port: src_port
+                ))
+                return true
+            i = i + 1
+        false
+
+    fn find_binding(port: u16) -> UdpBinding?:
+        """Find the binding for a given port."""
+        var i: u64 = 0
+        while i < self.bindings.len():
+            if self.bindings[i].active and self.bindings[i].port == port:
+                return self.bindings[i]
+            i = i + 1
+        nil
+
+    me dequeue(port: u16) -> UdpQueueEntry?:
+        """Dequeue the oldest datagram from a bound port's receive queue."""
+        var i: u64 = 0
+        while i < self.bindings.len():
+            if self.bindings[i].active and self.bindings[i].port == port:
+                if self.bindings[i].recv_queue.len() > 0:
+                    val entry = self.bindings[i].recv_queue[0]
+                    # Shift remaining entries
+                    var new_queue: [UdpQueueEntry] = []
+                    var j: u64 = 1
+                    while j < self.bindings[i].recv_queue.len():
+                        new_queue.push(self.bindings[i].recv_queue[j])
+                        j = j + 1
+                    self.bindings[i].recv_queue = new_queue
+                    return entry
+                return nil
+            i = i + 1
+        nil

@@ -1,0 +1,279 @@
+# Visibility Checker - Warnings for Non-Public Access
+#
+# Emits W0401 warnings when code accesses private items from other modules.
+# Extended with friend access control: supports Internal, Package, and
+# friend-based visibility checks.
+
+use compiler.hir.hir_types.{Symbol, SymbolId, SymbolTable}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility, DirManifest, check_friend_access}
+
+extern fn rt_file_exists(path: text) -> bool
+
+fn checker_parent_dir(path: text) -> text:
+    val slash = path.last_index_of("/") ?? -1
+    if slash <= 0:
+        return ""
+    path.substring(0, slash)
+
+fn checker_nearest_boundary_dir(path: text) -> text:
+    var current = checker_parent_dir(path)
+    while current != "":
+        val manifest = current + "/__init__.spl"
+        if rt_file_exists(manifest):
+            return current
+        val next = checker_parent_dir(current)
+        if next == current:
+            break
+        current = next
+    ""
+
+fn checker_relative_to_src(path: text) -> text:
+    val marker = "/src/"
+    val idx = path.index_of(marker) ?? -1
+    if idx >= 0:
+        return path.substring(idx + 5)
+    if path.starts_with("src/"):
+        return path.substring(4)
+    path
+
+fn checker_layer_dir_name(path: text) -> text:
+    val rel = checker_relative_to_src(path)
+    val parts = rel.split("/")
+    if parts.len() >= 2 and parts[0] == "compiler":
+        return parts[1]
+    if parts.len() >= 1:
+        return parts[0]
+    ""
+
+fn checker_peer_path_tail(path: text) -> text:
+    val rel = checker_relative_to_src(path)
+    val parts = rel.split("/")
+    if parts.len() >= 3 and parts[0] == "compiler":
+        return parts[2..].join("/")
+    if parts.len() >= 2:
+        return parts[1..].join("/")
+    rel
+
+fn checker_same_boundary(a: text, b: text) -> bool:
+    val a_boundary = checker_nearest_boundary_dir(a)
+    val b_boundary = checker_nearest_boundary_dir(b)
+    if a_boundary != "" and b_boundary != "":
+        return a_boundary == b_boundary
+    checker_parent_dir(a) == checker_parent_dir(b)
+
+fn checker_same_peer_path(requester: text, owner: text) -> bool:
+    if requester == "" or owner == "":
+        return false
+    if not checker_same_boundary(requester, owner):
+        return false
+    val requester_tail = checker_peer_path_tail(requester)
+    val owner_tail = checker_peer_path_tail(owner)
+    if requester_tail == "" or owner_tail == "":
+        return false
+    if requester_tail != owner_tail:
+        return false
+    val requester_layer = checker_layer_dir_name(requester)
+    val owner_layer = checker_layer_dir_name(owner)
+    if requester_layer == "" or owner_layer == "":
+        return false
+    requester_layer != owner_layer
+
+fn checker_is_parent_facade(requester: text, owner: text) -> bool:
+    val owner_dir = checker_parent_dir(owner)
+    if owner_dir == "":
+        return false
+    requester == owner_dir + "/__init__.spl"
+
+# Warning for accessing a private symbol
+struct VisibilityWarning:
+    message: text
+    symbol_name: text
+    accessing_module: text
+    defining_module: text
+    span: Span
+    code: text  # "W0401" for private, "W0402" for friend, "W0403" for package
+
+
+# ============================================================================
+# VisibilityWarning Methods (was: impl VisibilityWarning:)
+# ============================================================================
+
+# Visibility checker for cross-module access
+class VisibilityChecker:
+    """Checks visibility and emits warnings for private access.
+
+    Extended to support 4-level visibility (Public/Internal/Package/Private)
+    and friend-based access control.
+
+    Usage:
+        val checker = VisibilityChecker.new("current_module.spl", "current_package")
+        val warnings = checker_check_symbol_access(checker, symbol, symbol_table, access_span)
+    """
+    current_module: text        # Module doing the accessing
+    current_package: text       # Package of the accessing module
+    warnings: [VisibilityWarning]
+
+    static fn new(current_module: text) -> VisibilityChecker:
+        VisibilityChecker(
+            current_module: current_module,
+            current_package: "",
+            warnings: []
+        )
+
+    static fn with_package(current_module: text, current_package: text) -> VisibilityChecker:
+        VisibilityChecker(
+            current_module: current_module,
+            current_package: current_package,
+            warnings: []
+        )
+
+    fn check_symbol_access(
+        symbol: Symbol,
+        symbol_module: text,
+        access_span: Span
+    ) -> has_VisibilityWarning:
+        """Check if accessing a symbol from another module is allowed.
+
+        Returns warning if accessing a private symbol from another module.
+        Returns nil if access is allowed (public symbol or same module).
+        """
+        # Same module? Always allowed
+        if symbol_module == self.current_module:
+            return nil
+
+        # Public symbol? Allowed from any module
+        if symbol.is_public:
+            return nil
+
+        # Private symbol from another module - emit warning
+        VisibilityWarning(
+            message: "accessing private symbol `{symbol.name}` from `{self.current_module}`",
+            symbol_name: symbol.name,
+            accessing_module: self.current_module,
+            defining_module: symbol_module,
+            span: access_span,
+            code: "W0401"
+        )
+
+    fn check_symbol_access_with_friends(
+        symbol_name: text,
+        symbol_visibility: Visibility,
+        symbol_module: text,
+        symbol_package: text,
+        target_manifest: DirManifest?,
+        access_span: Span
+    ) -> VisibilityWarning?:
+        """Check symbol access considering friend relationships.
+
+        Uses the scoped visibility model:
+        - Public: always allowed
+        - Peer: allowed for same-path sibling layers
+        - Up: allowed for immediate parent facade
+        - Internal: allowed for same package or declared friends
+        - Package: allowed for same package only
+        - Private: allowed for same file only
+        """
+        # Same module? Always allowed
+        if symbol_module == self.current_module:
+            return nil
+
+        match symbol_visibility:
+            case Visibility.Public:
+                return nil
+            case Visibility.Peer:
+                if checker_same_peer_path(self.current_module, symbol_module):
+                    return nil
+                return Some(VisibilityWarning(
+                    message: "accessing peer-visible symbol `{symbol_name}` outside same-path sibling layer",
+                    symbol_name: symbol_name,
+                    accessing_module: self.current_module,
+                    defining_module: symbol_module,
+                    span: access_span,
+                    code: "W0405"
+                ))
+            case Visibility.Up:
+                if checker_is_parent_facade(self.current_module, symbol_module):
+                    return nil
+                return Some(VisibilityWarning(
+                    message: "accessing parent-visible symbol `{symbol_name}` from non-parent facade",
+                    symbol_name: symbol_name,
+                    accessing_module: self.current_module,
+                    defining_module: symbol_module,
+                    span: access_span,
+                    code: "W0404"
+                ))
+            case Visibility.Internal:
+                # Same package? Allowed
+                if self.current_package == symbol_package:
+                    return nil
+                # Friend check if manifest available
+                if target_manifest.?:
+                    val manifest = target_manifest ?? DirManifest.new("")
+                    if manifest.is_friend(self.current_package):
+                        return nil
+                # Not a friend — warning
+                return Some(VisibilityWarning(
+                    message: "accessing internal symbol `{symbol_name}` from non-friend package `{self.current_package}` (target package: `{symbol_package}`)",
+                    symbol_name: symbol_name,
+                    accessing_module: self.current_module,
+                    defining_module: symbol_module,
+                    span: access_span,
+                    code: "W0402"
+                ))
+            case Visibility.Package:
+                # Same package? Allowed
+                if self.current_package == symbol_package:
+                    return nil
+                return Some(VisibilityWarning(
+                    message: "accessing package-private symbol `{symbol_name}` from outside package `{symbol_package}`",
+                    symbol_name: symbol_name,
+                    accessing_module: self.current_module,
+                    defining_module: symbol_module,
+                    span: access_span,
+                    code: "W0403"
+                ))
+            case Visibility.Private:
+                return Some(VisibilityWarning(
+                    message: "accessing private symbol `{symbol_name}` from `{self.current_module}`",
+                    symbol_name: symbol_name,
+                    accessing_module: self.current_module,
+                    defining_module: symbol_module,
+                    span: access_span,
+                    code: "W0401"
+                ))
+
+    me record_warning(warning: VisibilityWarning):
+        """Record a visibility warning."""
+        self.warnings.push(warning)
+
+    fn get_warnings() -> [VisibilityWarning]:
+        """Get all recorded warnings."""
+        self.warnings
+
+    fn warning_count() -> i64:
+        """Get count of warnings."""
+        self.warnings.len()
+
+# Integration helper for symbol lookup
+fn check_and_warn(
+    checker: VisibilityChecker,
+    symbol: Symbol,
+    symbol_module: text,
+    access_span: Span
+):
+    """Check visibility and record warning if needed.
+
+    This should be called after each symbol lookup that crosses module boundaries.
+
+    Example integration:
+        val sym = symbol_table_lookup(symbol_table, name)
+        if has_sym:
+            val symbol = symbol_table_get(symbol_table, sym_value).unwrap()
+            check_and_warn(visibility_checker, symbol, defining_module, current_span)
+    """
+    val warning = checker.check_symbol_access(symbol, symbol_module, access_span)
+    if has_warning:
+        checker.record_warning(warning_value)
+
+# Export public API

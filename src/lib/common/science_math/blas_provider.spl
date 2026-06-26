@@ -1,0 +1,79 @@
+"""BLAS Provider Trait — Phase 3 BLAS Provider Boundary.
+
+Defines the provider interface that all BLAS backends implement.
+Consumers acquire a handle and call operations through this trait.
+
+Import path: use std.common.science_math.blas_provider.*
+
+Backends:
+  - MockCpuBlasProvider (blas.spl) — always available; computes correct values
+  - CpuBlasProvider (nogc_sync_mut/linalg/blas_cpu.spl) — pure-Simple scalar
+  - OpenBlasProvider (nogc_sync_mut/linalg/blas_openblas.spl) — SFFI boundary
+
+Selection order (SIMPLE_BLAS_BACKEND env var):
+  mock → scalar (CpuBlasProvider) → openblas → cublas
+"""
+
+# ============================================================
+# Error types
+# ============================================================
+
+pub enum BlasProviderError:
+    DimensionMismatch
+    Singular
+    BackendUnavailable(text)
+    UnsupportedOperation(text)
+
+# ============================================================
+# SwapResult — returned by blas_swap (Simple v1 has no tuple syntax)
+# ============================================================
+
+pub class SwapResult:
+    new_x: [f64]
+    new_y: [f64]
+
+# ============================================================
+# BlasProvider trait
+#
+# All operations are Float64 (non-generic; PERF-SUGAR-003 deferred to v1.1).
+# Vectors are [f64] flat buffers.  Matrices are flat row-major [f64] buffers
+# with explicit rows/cols dimensions.
+#
+# PERF-SUGAR-003: generic <T> variants deferred to v1.1 (interp dispatch erasure).
+# v1.1: fn blas_axpy<T>(alpha: T, n: i64, x: [T], y: [T]) -> Result<[T], BlasProviderError>
+# ============================================================
+
+pub trait BlasProvider:
+    # BLAS Level-1 — axpy: y = alpha*x + y
+    # n: length; x, y: [f64] length n; returns new y buffer
+    fn blas_axpy(self, alpha: f64, n: i64, x: [f64], y: [f64]) -> Result<[f64], BlasProviderError>
+
+    # BLAS Level-1 — scal: x = alpha*x  (in-place; returns same buffer)
+    fn blas_scal(self, alpha: f64, n: i64, x: [f64]) -> Result<[f64], BlasProviderError>
+
+    # BLAS Level-1 — dot: sum(x[i]*y[i])
+    fn blas_dot(self, n: i64, x: [f64], y: [f64]) -> Result<f64, BlasProviderError>
+
+    # BLAS Level-1 — nrm2: sqrt(sum(x[i]^2))
+    fn blas_nrm2(self, n: i64, x: [f64]) -> Result<f64, BlasProviderError>
+
+    # BLAS Level-2 — gemv: y = alpha*A*x + beta*y
+    # A: row-major m×n matrix; x: length n; y: length m
+    # gemv operand-swap: pass row-major A with CUBLAS_OP_T at Layer A.
+    # Do NOT use (AB)^T = B^T A^T (that is gemm only).
+    fn blas_gemv(self, alpha: f64, a: [f64], m: i64, n: i64, x: [f64], beta: f64, y: [f64]) -> Result<[f64], BlasProviderError>
+
+    # BLAS Level-3 — gemm: C = alpha*A*B + beta*C_in
+    # All matrices are row-major.  A: m×k, B: k×n, C: m×n.
+    # Operand-swap (AB)^T = B^T A^T is applied at Layer A (not here).
+    fn blas_gemm(self, alpha: f64, a: [f64], m: i64, k: i64, b: [f64], bn: i64, beta: f64, c: [f64]) -> Result<[f64], BlasProviderError>
+
+    # BLAS Level-1 — copy: returns a new buffer equal to x (BLAS dcopy)
+    fn blas_copy(self, n: i64, x: [f64]) -> Result<[f64], BlasProviderError>
+
+    # BLAS Level-1 — swap: exchanges x and y element-wise; returns SwapResult{new_x, new_y}
+    # Returns a struct because Simple v1 has no tuple syntax.
+    fn blas_swap(self, n: i64, x: [f64], y: [f64]) -> Result<SwapResult, BlasProviderError>
+
+    # Diagnostic name for this provider (used in BlasHandle.backend_name)
+    fn provider_name(self) -> text

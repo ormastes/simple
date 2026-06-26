@@ -1,0 +1,95 @@
+# Benchmark Workload Generator
+#
+# Creates static HTML files of specified sizes under a target directory.
+# These files are served by both Simple and nginx during benchmark runs.
+#
+# Depends on: std.io_runtime
+
+use std.io_runtime.{write_file, shell_output_trimmed, print}
+
+# ============================================================================
+# Named fixture tiers (deterministic)
+# ============================================================================
+
+class FixtureInfo:
+    """Metadata about a generated fixture file."""
+    label: text   # "small", "medium", or "large"
+    size: i64     # target file size in bytes
+    path: text    # absolute path to the generated file
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _html_header(size: i64) -> text:
+    """Minimal HTML header for a test file of the given target size."""
+    "<!DOCTYPE html>\n<html><head><title>bench-{size}</title></head><body>\n"
+
+fn _html_footer() -> text:
+    "</body></html>\n"
+
+fn _repeat_chunk(chunk: text, target_len: i64) -> text:
+    """Repeat `chunk` until the accumulated text is at least `target_len` chars."""
+    var result = ""
+    while result.len() < target_len:
+        result = result + chunk
+    result.slice(0, target_len)
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn generate_test_files(output_dir: text, sizes: [i64]):
+    """Create one HTML file per entry in `sizes` under `output_dir/bench/`.
+
+    Each file is named `<size>.html` and padded with repetitive content
+    to reach exactly the target size in bytes.
+
+    output_dir must already exist; this function creates output_dir/bench/.
+    """
+    val bench_dir = "{output_dir}/bench"
+    shell_output_trimmed("mkdir -p '{bench_dir}' 2>&1", "")
+
+    val content_chunk = "<!-- padding: the quick brown fox jumps over the lazy dog 0123456789 -->\n"
+
+    var idx = 0
+    while idx < sizes.len():
+        val sz = sizes[idx]
+        val header = _html_header(sz)
+        val footer = _html_footer()
+        val fixed_len = header.len() + footer.len()
+
+        var body = ""
+        if sz > fixed_len:
+            val body_target = sz - fixed_len
+            body = _repeat_chunk(content_chunk, body_target)
+
+        val content = header + body + footer
+        val path = "{bench_dir}/{sz}.html"
+        write_file(path, content)
+        print("generated {path} ({content.len()} bytes)")
+        idx = idx + 1
+
+pub fn generate_named_fixtures(output_dir: text) -> [FixtureInfo]:
+    """Create deterministic test fixtures at three tiers: small (1 KB),
+    medium (64 KB), and large (1 MB).
+
+    The content is byte-exact and reproducible: the same padding chunk is
+    repeated to fill the target size.  Do not change the chunk text or tier
+    sizes without updating the spec.
+
+    Returns a list of FixtureInfo describing each generated file.
+    """
+    val small_size: i64 = 1024
+    val medium_size: i64 = 65536
+    val large_size: i64 = 1048576
+
+    val tier_sizes: [i64] = [small_size, medium_size, large_size]
+    generate_test_files(output_dir, tier_sizes)
+
+    val bench_dir = "{output_dir}/bench"
+    var infos: [FixtureInfo] = []
+    infos.push(FixtureInfo(label: "small", size: small_size, path: "{bench_dir}/{small_size}.html"))
+    infos.push(FixtureInfo(label: "medium", size: medium_size, path: "{bench_dir}/{medium_size}.html"))
+    infos.push(FixtureInfo(label: "large", size: large_size, path: "{bench_dir}/{large_size}.html"))
+    infos

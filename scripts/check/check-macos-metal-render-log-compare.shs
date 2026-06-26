@@ -1,0 +1,159 @@
+#!/bin/sh
+# Normalize and compare macOS Metal Simple/Chrome/Electron render logs.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+. "$ROOT_DIR/scripts/lib/render-log-common.shs"
+
+BUILD_DIR="${BUILD_DIR:-build/macos-metal-render-log-compare}"
+REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
+METAL_GENERATED_2D_READBACK_ENV="${METAL_GENERATED_2D_READBACK_ENV:-build/metal_generated_2d_readback/evidence.env}"
+METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV="${METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV:-build/metal_engine2d_framebuffer_readback_evidence/evidence.env}"
+MACOS_METAL_BROWSER_ENV="${MACOS_METAL_BROWSER_ENV:-build/macos-metal-browser-backing/evidence.env}"
+MACOS_METAL_CAPTURE_ENV="${MACOS_METAL_CAPTURE_ENV:-build/macos-metal-gpu-capture/evidence.env}"
+
+OUT_ENV="$BUILD_DIR/evidence.env"
+SIMPLE_LOG="$BUILD_DIR/simple.srl.env"
+CHROME_LOG="$BUILD_DIR/chrome.srl.env"
+ELECTRON_LOG="$BUILD_DIR/electron.srl.env"
+COMPARE_LOG="$BUILD_DIR/compare.srl.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$SIMPLE_LOG" "$CHROME_LOG" "$ELECTRON_LOG" "$COMPARE_LOG" "$REPORT_PATH"
+
+compare_status="pass"
+reason_parts=""
+add_reason() {
+    reason="$1"
+    if [ -z "$reason_parts" ]; then reason_parts="$reason"; else reason_parts="$reason_parts;$reason"; fi
+}
+
+if [ ! -s "$METAL_GENERATED_2D_READBACK_ENV" ]; then
+    compare_status="unavailable"
+    add_reason "missing-metal-generated-2d-readback-env"
+fi
+if [ ! -s "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV" ]; then
+    compare_status="unavailable"
+    add_reason "missing-metal-engine2d-framebuffer-env"
+fi
+if [ ! -s "$MACOS_METAL_BROWSER_ENV" ]; then
+    compare_status="unavailable"
+    add_reason "missing-macos-metal-browser-env"
+fi
+
+metal_status="$(render_log_value_of metal_generated_2d_readback_status "$METAL_GENERATED_2D_READBACK_ENV")"
+metal_module="$(render_log_value_of metal_generated_2d_readback_module_verified "$METAL_GENERATED_2D_READBACK_ENV")"
+metal_submit="$(render_log_value_of metal_generated_2d_readback_submit_attempted "$METAL_GENERATED_2D_READBACK_ENV")"
+metal_readback="$(render_log_value_of metal_generated_2d_readback_readback_available "$METAL_GENERATED_2D_READBACK_ENV")"
+metal_actual="$(render_log_value_of metal_generated_2d_readback_actual_checksum "$METAL_GENERATED_2D_READBACK_ENV")"
+metal_expected="$(render_log_value_of metal_generated_2d_readback_expected_checksum "$METAL_GENERATED_2D_READBACK_ENV")"
+framebuffer_status="$(render_log_value_of metal_engine2d_framebuffer_readback_status "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV")"
+framebuffer_readback="$(render_log_value_of metal_engine2d_framebuffer_gpu_readback_available "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV")"
+framebuffer_blur="$(render_log_value_of metal_engine2d_framebuffer_blur_or_tolerance_used "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV")"
+electron_backing="$(render_log_value_of macos_metal_electron_browser_backing_status "$MACOS_METAL_BROWSER_ENV")"
+chrome_backing="$(render_log_value_of macos_metal_chrome_browser_backing_status "$MACOS_METAL_BROWSER_ENV")"
+browser_backing="$(render_log_value_of macos_metal_browser_backing_status "$MACOS_METAL_BROWSER_ENV")"
+pixel_status="$(render_log_value_of macos_metal_pixel_comparison_status "$MACOS_METAL_BROWSER_ENV")"
+pixel_mode="$(render_log_value_of macos_metal_pixel_comparison_mode "$MACOS_METAL_BROWSER_ENV")"
+ec_diff="$(render_log_value_of macos_metal_electron_chrome_pairwise_diff_status "$MACOS_METAL_BROWSER_ENV")"
+es_diff="$(render_log_value_of macos_metal_electron_simple_pairwise_diff_status "$MACOS_METAL_BROWSER_ENV")"
+cs_diff="$(render_log_value_of macos_metal_chrome_simple_pairwise_diff_status "$MACOS_METAL_BROWSER_ENV")"
+capture_status="$(render_log_value_of macos_metal_gpu_capture_status "$MACOS_METAL_CAPTURE_ENV")"
+capture_tool="$(render_log_value_of macos_metal_gpu_capture_tool "$MACOS_METAL_CAPTURE_ENV")"
+capture_artifact="$(render_log_value_of macos_metal_gpu_capture_artifact "$MACOS_METAL_CAPTURE_ENV")"
+capture_artifact_magic="$(render_log_value_of macos_metal_gpu_capture_artifact_magic "$MACOS_METAL_CAPTURE_ENV")"
+
+if [ "$metal_status" != "pass" ] || [ "$metal_module" != "true" ] || [ "$metal_submit" != "true" ] || [ "$metal_readback" != "true" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "metal-generated-readback-${metal_status:-missing}"
+fi
+if [ -n "$metal_expected" ] && [ -n "$metal_actual" ] && [ "$metal_expected" != "$metal_actual" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "metal-generated-checksum-mismatch"
+fi
+if [ "$framebuffer_status" != "pass" ] || [ "$framebuffer_readback" != "true" ] || [ "$framebuffer_blur" != "false" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "metal-framebuffer-readback-${framebuffer_status:-missing}"
+fi
+if [ "$electron_backing" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "electron-metal-backing-${electron_backing:-missing}"; fi
+if [ "$chrome_backing" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "chrome-metal-backing-${chrome_backing:-missing}"; fi
+if [ "$browser_backing" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "browser-metal-backing-${browser_backing:-missing}"; fi
+if [ "$pixel_status" != "pass" ] || [ "$pixel_mode" != "pairwise-argb-diff" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "pixel-comparison-${pixel_status:-missing}"; fi
+if [ "$ec_diff" != "pass" ] || [ "$es_diff" != "pass" ] || [ "$cs_diff" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "pairwise-diff-incomplete-or-fail"; fi
+for source_name in simple chrome electron; do
+    argb_reason="$(render_log_argb_source_reason macos_metal "$source_name" "$MACOS_METAL_BROWSER_ENV")"
+    if [ "$argb_reason" != "pass" ]; then
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "$argb_reason"
+    fi
+done
+argb_viewport_reason="$(render_log_argb_viewport_match_reason macos_metal "$MACOS_METAL_BROWSER_ENV")"
+if [ "$argb_viewport_reason" != "pass" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "$argb_viewport_reason"
+fi
+if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}" = "1" ] && [ "$capture_status" != "pass" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "macos-metal-gpu-capture-${capture_status:-missing}"
+fi
+if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}" = "1" ] && [ "$capture_status" = "pass" ]; then
+    if [ -z "$capture_artifact" ]; then
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "macos-metal-gpu-capture-artifact-missing"
+    fi
+    if [ "$capture_artifact_magic" != "XCODE-GPUTRACE" ]; then
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "macos-metal-gpu-capture-magic-${capture_artifact_magic:-missing}"
+    fi
+fi
+[ -n "$reason_parts" ] || reason_parts="pass"
+
+render_log_write_native_log "$SIMPLE_LOG" "macos" "metal" "simple" "${capture_tool:-xcode-gpu-frame-capture}" "$METAL_GENERATED_2D_READBACK_ENV" "$metal_status" "metal" "$(render_log_value_of macos_metal_simple_argb_width "$MACOS_METAL_BROWSER_ENV")" "$(render_log_value_of macos_metal_simple_argb_height "$MACOS_METAL_BROWSER_ENV")" "$(render_log_value_of macos_metal_simple_argb_nonblank_pixel_count "$MACOS_METAL_BROWSER_ENV")" "$capture_artifact" "$capture_artifact_magic" "$metal_actual" "generated-readback=$metal_status;framebuffer-readback=$framebuffer_status"
+render_log_write_native_log "$CHROME_LOG" "macos" "metal" "chrome" "browser-gpu-metadata" "$MACOS_METAL_BROWSER_ENV" "$chrome_backing" "metal" "$(render_log_value_of macos_metal_chrome_argb_width "$MACOS_METAL_BROWSER_ENV")" "$(render_log_value_of macos_metal_chrome_argb_height "$MACOS_METAL_BROWSER_ENV")" "$(render_log_value_of macos_metal_chrome_argb_nonblank_pixel_count "$MACOS_METAL_BROWSER_ENV")" "" "" "$(render_log_value_of macos_metal_chrome_argb_checksum "$MACOS_METAL_BROWSER_ENV")" "browser-backing=$chrome_backing"
+render_log_write_native_log "$ELECTRON_LOG" "macos" "metal" "electron" "browser-gpu-metadata" "$MACOS_METAL_BROWSER_ENV" "$electron_backing" "metal" "$(render_log_value_of macos_metal_electron_argb_width "$MACOS_METAL_BROWSER_ENV")" "$(render_log_value_of macos_metal_electron_argb_height "$MACOS_METAL_BROWSER_ENV")" "$(render_log_value_of macos_metal_electron_argb_nonblank_pixel_count "$MACOS_METAL_BROWSER_ENV")" "" "" "$(render_log_value_of macos_metal_electron_argb_checksum "$MACOS_METAL_BROWSER_ENV")" "browser-backing=$electron_backing"
+
+{
+    render_log_append_kv "simple_render_log_format" "simple-render-log-v1"
+    render_log_append_kv "simple_render_log_platform" "macos"
+    render_log_append_kv "simple_render_log_native_api" "metal"
+    render_log_append_kv "simple_render_log_source" "compare"
+    render_log_append_kv "simple_render_log_capture_tool" "aggregate"
+    render_log_append_kv "simple_render_log_scene" "gui-web-2d-native"
+    render_log_append_kv "simple_render_log_status" "$compare_status"
+    render_log_append_kv "simple_render_log_pairwise_reference" "$MACOS_METAL_BROWSER_ENV"
+    render_log_append_kv "simple_render_log_pairwise_electron_chrome_status" "$ec_diff"
+    render_log_append_kv "simple_render_log_pairwise_electron_simple_status" "$es_diff"
+    render_log_append_kv "simple_render_log_pairwise_chrome_simple_status" "$cs_diff"
+    render_log_append_kv "simple_render_log_native_info" "$reason_parts"
+} >"$COMPARE_LOG"
+
+{
+    render_log_append_kv "macos_metal_render_log_compare_status" "$compare_status"
+    render_log_append_kv "macos_metal_render_log_compare_reason" "$reason_parts"
+    render_log_append_kv "macos_metal_render_log_compare_required_api" "metal"
+    render_log_append_kv "macos_metal_render_log_compare_simple_log" "$SIMPLE_LOG"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_log" "$CHROME_LOG"
+    render_log_append_kv "macos_metal_render_log_compare_electron_log" "$ELECTRON_LOG"
+    render_log_append_kv "macos_metal_render_log_compare_compare_log" "$COMPARE_LOG"
+    render_log_append_kv "macos_metal_render_log_compare_pairwise_status" "$pixel_status"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_status" "${capture_status:-unavailable}"
+    render_log_append_kv "macos_metal_render_log_compare_require_gpu_capture" "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}"
+} >"$OUT_ENV"
+
+{
+    echo "# macOS Metal Render Log Compare"
+    echo
+    echo "- status: $compare_status"
+    echo "- reason: $reason_parts"
+    echo "- simple log: $SIMPLE_LOG"
+    echo "- chrome log: $CHROME_LOG"
+    echo "- electron log: $ELECTRON_LOG"
+    echo
+    echo "## Evidence"
+    sed 's/^/- /' "$OUT_ENV"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+[ "$compare_status" = "pass" ]

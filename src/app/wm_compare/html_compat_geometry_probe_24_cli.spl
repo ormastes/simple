@@ -1,0 +1,60 @@
+use app.wm_compare.electron_geometry_compare.{electron_geometry_json_to_boxes}
+use app.wm_compare.html_compat_geometry_probe.{simple_layout_boxes_to_structural}
+use app.wm_compare.structural_layout_report.{structural_box_layout_compare, structural_box_layout_report_sdn}
+use gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir}
+use std.io_runtime.{file_read, file_write}
+
+fn main() -> i64:
+    val fixture_id = "24_flex_wrap_reverse_basic"
+    val geometry_path = "build/electron_html_compat_geometry_evidence/24_flex_wrap_reverse_basic_geometry.json"
+    val output_path = "build/electron_html_compat_geometry_evidence/24_flex_wrap_reverse_basic_structural_report.sdn"
+    val viewport_width = 320
+    val viewport_height = 240
+
+    val geometry_json = file_read(geometry_path)
+    if geometry_json == "":
+        print "status=fail"
+        print "reason=missing-geometry-json"
+        return 1
+
+    val electron_boxes = electron_geometry_json_to_boxes(geometry_json)
+    val fixture_html = file_read("test/fixtures/html_compat/24_flex_wrap_reverse_basic.html")
+    val composition = simple_web_layout_render_html_draw_ir(fixture_html, viewport_width, viewport_height)
+    val command_count = if composition.batches.len() > 0: composition.batches[0].commands.len() else: 0
+    val labels = ["wrap_reverse_shell", "wrap_reverse_a", "wrap_reverse_b", "wrap_reverse_c"]
+    val simple_boxes = if composition.batches.len() > 0:
+        simple_layout_boxes_to_structural(fixture_id, composition.batches[0].commands, labels)
+    else:
+        []
+    if simple_boxes.len() == 0:
+        print "status=fail"
+        print "reason=unsupported-fixture"
+        print "fixture_html_len=" + fixture_html.len().to_string()
+        print "batch_count=" + composition.batches.len().to_string()
+        print "command_count=" + command_count.to_string()
+        return 1
+
+    val report = structural_box_layout_compare(
+        "electron_geometry", "simple_renderer_geometry",
+        viewport_width, viewport_height,
+        electron_boxes, simple_boxes,
+        "simple_renderer:24_flex_wrap_reverse_basic", geometry_path
+    )
+    val sdn = structural_box_layout_report_sdn(report, electron_boxes, simple_boxes)
+    file_write(output_path, sdn)
+
+    if report.status == "layout_match":
+        print "status=pass"
+    else:
+        print "status=fail"
+    print "report_status=" + report.status
+    print "mismatch_count=" + report.mismatch_count.to_string()
+    print "source_a_count=" + report.source_a_count.to_string()
+    print "source_b_count=" + report.source_b_count.to_string()
+    print "fixture=24_flex_wrap_reverse_basic"
+    print "geometry_json=" + geometry_path
+    print "report_path=" + output_path
+
+    if report.status == "layout_match":
+        return 0
+    1

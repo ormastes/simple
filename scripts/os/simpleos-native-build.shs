@@ -1,0 +1,107 @@
+#!/usr/bin/env sh
+# Build a static SimpleOS x86_64 binary of the Simple compiler.
+#
+# Usage:
+#   sh scripts/simpleos-native-build.shs [--target <triple>]
+#
+# Defaults:
+#   --target x86_64-unknown-none
+#   output:  build/simpleos/x86_64/simple
+#
+# Target examples:
+#   x86_64-unknown-none   (default)
+#   riscv64gc-unknown-none
+#   aarch64-unknown-none
+set -eu
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+
+# ---- defaults ----
+TARGET="x86_64-unknown-none"
+ARCH="x86_64"
+
+# ---- parse args ----
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --target)
+      shift
+      TARGET="$1"
+      ;;
+    --target=*)
+      TARGET="${1#*=}"
+      ;;
+    --help|-h)
+      echo "Usage: sh scripts/simpleos-native-build.shs [--target <triple>]"
+      echo ""
+      echo "  --target <triple>  Target triple (default: x86_64-unknown-none)"
+      echo "                     e.g. riscv64gc-unknown-none, aarch64-unknown-none"
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option '$1'" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+# ---- derive arch from target ----
+case "$TARGET" in
+  x86_64-*)    ARCH="x86_64"  ;;
+  riscv64*)    ARCH="riscv64" ;;
+  aarch64-*)   ARCH="aarch64" ;;
+  riscv32*)    ARCH="riscv32" ;;
+  arm-*|armv*) ARCH="arm32"   ;;
+  *)           ARCH=$(echo "$TARGET" | cut -d- -f1) ;;
+esac
+
+OUTPUT="build/simpleos/${ARCH}/simple"
+
+# ---- find compiler ----
+COMPILER=""
+if [ -x "bin/simple" ]; then
+  COMPILER="bin/simple"
+elif [ -x "simple" ]; then
+  COMPILER="./simple"
+elif [ -x "src/compiler_rust/target/bootstrap/simple" ]; then
+  COMPILER="src/compiler_rust/target/bootstrap/simple"
+else
+  echo "error: no compiler found" >&2
+  echo "  expected: bin/simple" >&2
+  echo "       or:  ./simple" >&2
+  echo "       or:  src/compiler_rust/target/bootstrap/simple" >&2
+  exit 1
+fi
+
+echo "Compiler:  ${COMPILER}"
+echo "Target:    ${TARGET}"
+echo "Output:    ${OUTPUT}"
+echo ""
+
+# ---- create output directory ----
+mkdir -p "$(dirname "$OUTPUT")"
+
+# ---- run native-build ----
+echo "[1/2] Building SimpleOS ${ARCH} binary..."
+SIMPLE_BOOTSTRAP=1 "$COMPILER" native-build \
+  --source src/compiler --source src/lib --source src/app \
+  --entry src/app/cli/bootstrap_main.spl \
+  --target "$TARGET" \
+  -o "$OUTPUT"
+
+# ---- verify output ----
+echo ""
+echo "[2/2] Verifying output..."
+if [ ! -f "$OUTPUT" ]; then
+  echo "FAILED: output file not found: ${OUTPUT}" >&2
+  exit 1
+fi
+
+file "$OUTPUT"
+
+SIZE=$(wc -c < "$OUTPUT")
+SIZE_KB=$((SIZE / 1024))
+
+echo ""
+echo "SUCCESS: ${OUTPUT}  (${SIZE_KB} KiB)"

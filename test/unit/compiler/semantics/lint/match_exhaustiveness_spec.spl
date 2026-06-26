@@ -1,0 +1,95 @@
+# Match Exhaustiveness Lint Specification
+#
+# Tests for MEXH002 detection of non-exhaustive match expressions.
+#
+# Uses text-based heuristic (mirrors _check_match_exhaustiveness_text in query_rich.spl).
+
+# ============================================================================
+# Text-based lint helpers
+# ============================================================================
+
+fn check_match_exhaustiveness_text(source: text) -> [text]:
+    """Text-based heuristic for match exhaustiveness.
+    Returns list of diagnostic codes found."""
+    var codes: [text] = []
+    val lines = source.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        if trimmed.starts_with("match ") and trimmed.ends_with(":"):
+            val match_indent = _count_indent(line)
+            var has_wildcard = false
+            var arm_count = 0
+            var ai = li + 1
+            while ai < lines.len():
+                val aline = lines[ai]
+                val at = aline.trim()
+                if at == "":
+                    ai = ai + 1
+                    continue
+                val aindent = _count_indent(aline)
+                if aindent <= match_indent:
+                    break
+                if at.starts_with("case _:") or at.starts_with("case _\n") or at == "case _":
+                    has_wildcard = true
+                arm_count = arm_count + 1
+                ai = ai + 1
+            if arm_count > 0 and not has_wildcard:
+                codes.push("MEXH002")
+        li = li + 1
+    codes
+
+fn _count_indent(line: text) -> i64:
+    """Count leading spaces in a line."""
+    var count = 0
+    for ch in line:
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
+
+fn codes_contain(codes: [text], target: text) -> bool:
+    """Check if codes list contains a target code."""
+    for c in codes:
+        if c == target:
+            return true
+    false
+
+# ============================================================================
+# Match with all variants covered
+# ============================================================================
+
+describe "Match Exhaustiveness Lint":
+    context "exhaustive matches":
+        it "does not flag match with wildcard arm":
+            val code = "fn classify(x: i64) -> text:\n    match x:\n        case 1: \"one\"\n        case 2: \"two\"\n        case _: \"other\"\n"
+            val codes = check_match_exhaustiveness_text(code)
+            val has_warning = codes_contain(codes, "MEXH002")
+            expect(has_warning).to_equal(false)
+
+        it "does not flag match with default catch-all":
+            val code = "fn test(x: i64) -> text:\n    match x:\n        case 0: \"zero\"\n        case _: \"nonzero\"\n"
+            val codes = check_match_exhaustiveness_text(code)
+            val has_warning = codes_contain(codes, "MEXH002")
+            expect(has_warning).to_equal(false)
+
+    # ============================================================================
+    # Non-exhaustive matches
+    # ============================================================================
+
+    context "non-exhaustive matches":
+        it "flags match without wildcard or default case":
+            val code = "fn test(x: i64) -> text:\n    match x:\n        case 1: \"one\"\n        case 2: \"two\"\n"
+            val codes = check_match_exhaustiveness_text(code)
+            val has_warning = codes_contain(codes, "MEXH002")
+            expect(has_warning).to_equal(true)
+
+        it "flags match with only one case and no default":
+            val code = "fn test(x: i64) -> text:\n    match x:\n        case 42: \"the answer\"\n"
+            val codes = check_match_exhaustiveness_text(code)
+            val has_warning = codes_contain(codes, "MEXH002")
+            expect(has_warning).to_equal(true)

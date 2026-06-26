@@ -1,0 +1,165 @@
+# @cover src/app/sfm_samples/arg_parser/arg_parser_layer.spl 80%
+# @cover src/app/sfm_samples/log_level/log_level_sfm.spl 80%
+# @cover src/app/sfm_samples/web_login/login_sfm.spl 80%
+# @cover src/app/sfm_samples/vcs/vcs_layer.spl 80%
+# @cover src/app/sfm_samples/help_info/help_menu.spl 80%
+# @cover src/app/sfm_samples/reuse_consumer/consumer.spl 80%
+# @cover src/lib/nogc_sync_mut/sfm/version.spl 80%
+"""
+# SFM Sample Apps & Reuse
+
+**Feature IDs:** #SFM
+**Category:** Infrastructure
+**Status:** Draft
+**Requirements:** doc/04_architecture/language/simple_feature_module.md
+**Plan:** N/A
+**Design:** doc/05_design/simple_feature_module.md
+**Research:** N/A
+
+## Overview
+
+The SFM infra ships sample feature modules that exercise the public API end-to-end:
+a native arg-parser app (AC-7), a runtime log-level changer (AC-8), a web-app login
+(AC-9), a version-control layer (AC-10), a UI Help/Info menu surfacing the version
+(AC-11), VERSION build integration (AC-12), and an in-repo reuse consumer distinct
+from the samples (AC-13).
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| arg_parse_sample | Parses sample args via the arg-parser front-end layer |
+| sfm_set_log_level | Changes the active log level at runtime, observable in output |
+| web_login_attempt | Authenticates a credential; rejects invalid ones |
+| vcs_status | A VCS status/commit operation consumed via the SFM infra |
+| help_info_text | Help/Info menu text surfacing module + VERSION version |
+| read_version_md | Build-time VERSION reader feeding manifest.version |
+
+## Syntax
+
+These scenarios exercise public SFM sample calls directly: `arg_parse_sample(args)`,
+`sfm_set_log_level(level)`, `web_login_attempt(user, password)`, `vcs_status()`,
+`help_info_text()`, `consumer_describe_module()`, and `read_version_md()`.
+
+## Examples
+
+The examples cover a valid login returning a token, an invalid login returning an
+error message, arg parsing with `--name alice deploy`, and version text surfaced
+through both Help/Info and the reuse consumer.
+
+## Related Specifications
+
+- [sfm_codec_spec.spl](sfm_codec_spec.spl) — manifest/codec these samples build on
+- [sfm_di_authz_spec.spl](sfm_di_authz_spec.spl) — DI/authz the samples resolve through
+"""
+
+use std.spec.*
+use app.sfm_samples.arg_parser.arg_parser_layer.{arg_parse_sample}
+use app.sfm_samples.log_level.log_level_sfm.{sfm_set_log_level, sfm_get_log_level}
+use app.sfm_samples.web_login.login_sfm.{web_login_attempt}
+use app.sfm_samples.vcs.vcs_layer.{vcs_status}
+use app.sfm_samples.help_info.help_menu.{help_info_text}
+use app.sfm_samples.reuse_consumer.consumer.{consumer_describe_module}
+use std.sfm.version.{read_version_md}
+
+
+# ============================================================================
+# AC-7: native arg-parser sample
+# ============================================================================
+
+describe "SFM sample: arg-parser app (AC-7)":
+    # @capture(exec)
+    it "should parse a flag and a positional argument from sample args":
+        val parsed = arg_parse_sample(["--name", "alice", "deploy"])
+        expect(parsed.get_str("name")).to_equal("alice")
+        expect(parsed.positionals[0]).to_equal("deploy")
+
+    # @capture(exec)
+    it "should expose the arg parser as a front-end layer entry":
+        val parsed = arg_parse_sample(["--verbose"])
+        expect(parsed.get_bool("verbose")).to_equal(true)
+
+
+# ============================================================================
+# AC-8: log-level changer sample
+# ============================================================================
+
+fn parse_debug_level() -> i64:
+    return 4
+
+fn parse_info_level() -> i64:
+    return 3
+
+describe "SFM sample: log-level changer (AC-8)":
+    # @capture(log)
+    it "should change the active log level at runtime":
+        sfm_set_log_level(parse_debug_level())
+        expect(sfm_get_log_level()).to_equal(parse_debug_level())
+
+    # @capture(log)
+    it "should switch back from debug to info":
+        sfm_set_log_level(parse_debug_level())
+        sfm_set_log_level(parse_info_level())
+        expect(sfm_get_log_level()).to_equal(parse_info_level())
+
+
+# ============================================================================
+# AC-9: web-app login sample
+# ============================================================================
+
+describe "SFM sample: web login (AC-9)":
+    # @capture(api)
+    it "should authenticate a valid credential":
+        match web_login_attempt("admin", "s3cret"):
+            Ok(token): expect(token.len()).to_be_greater_than(0)
+            Err(e): expect("valid login rejected: " + e).to_equal("ok")
+
+    # @capture(api)
+    it "should reject an invalid credential":
+        match web_login_attempt("admin", "wrong"):
+            Ok(_):  expect("invalid login accepted").to_equal("ok")
+            Err(e): expect(e.len()).to_be_greater_than(0)
+
+
+# ============================================================================
+# AC-10: version-control support sample
+# ============================================================================
+
+describe "SFM sample: version-control layer (AC-10)":
+    # @capture(exec)
+    it "should report a VCS status through the SFM infra":
+        val status = vcs_status(".")
+        expect(status).to_contain("branch")
+
+
+# ============================================================================
+# AC-11 / AC-12: Help/Info menu surfaces the VERSION version
+# ============================================================================
+
+describe "SFM sample: UI Help/Info menu (AC-11, AC-12)":
+    # @capture(exec)
+    it "should surface the module info in the help menu":
+        val text = help_info_text()
+        expect(text).to_contain("SFM")
+
+    # @capture(exec)
+    it "should surface a version string from VERSION in the help menu":
+        val ver = read_version_md("VERSION")
+        val text = help_info_text()
+        expect(text).to_contain(ver)
+
+    # @capture(exec)
+    it "should read a non-empty version string from VERSION (AC-12)":
+        val ver = read_version_md("VERSION")
+        expect(ver.len()).to_be_greater_than(0)
+
+
+# ============================================================================
+# AC-13: reuse by an in-repo consumer distinct from the samples
+# ============================================================================
+
+describe "SFM reuse: in-repo consumer (AC-13)":
+    # @capture(api)
+    it "should consume the public SFM API to describe a module":
+        val desc = consumer_describe_module()
+        expect(desc).to_contain("name")

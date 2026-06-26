@@ -1,0 +1,107 @@
+#!/bin/bash
+# GHDL runner for the generated RV64 FW_JUMP smoke lane.
+#
+# Usage:
+#   ./ghdl_generated_rv64_fw_jump_runner.shs <program.s> [--timeout=30]
+
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+SIMPLE_RUN_BIN="${SIMPLE_RUN_BINARY:-$PROJECT_ROOT/bin/simple}"
+RTL_SRC="$PROJECT_ROOT/examples/09_embedded/fpga_riscv/rtl"
+LINKER_SCRIPT="$PROJECT_ROOT/examples/09_embedded/fpga_riscv/sw/generated_rv64_fw_jump.ld"
+TIMEOUT=30
+PROGRAM=""
+
+for arg in "$@"; do
+    case "$arg" in
+        --timeout=*) TIMEOUT="${arg#--timeout=}" ;;
+        *) [ -z "$PROGRAM" ] && PROGRAM="$arg" ;;
+    esac
+done
+
+if [ -z "$PROGRAM" ]; then
+    echo "Usage: $0 <program.s> [--timeout=N]"
+    exit 1
+fi
+
+if [ ! -f "$PROGRAM" ]; then
+    echo "Error: Program not found: $PROGRAM"
+    exit 1
+fi
+
+TMP_DIR=$(mktemp -d /tmp/ghdl_generated_rv64_fw_jump_XXXXXX)
+trap "rm -rf $TMP_DIR" EXIT
+
+TEST_BASE="$TMP_DIR/program"
+TEST_ELF="$TEST_BASE.elf"
+FW_BIN="$TEST_BASE.fw.bin"
+PAYLOAD_BIN="$TEST_BASE.payload.bin"
+TEST_PKG="$TMP_DIR/test_program.vhd"
+
+riscv64-linux-gnu-as -march=rv64i_zicsr -mabi=lp64 -o "$TEST_BASE.o" "$PROGRAM"
+riscv64-linux-gnu-ld -m elf64lriscv -T "$LINKER_SCRIPT" --no-relax -o "$TEST_ELF" "$TEST_BASE.o"
+
+riscv64-linux-gnu-objcopy -O binary -j .text.fw "$TEST_ELF" "$FW_BIN"
+riscv64-linux-gnu-objcopy -O binary -j .text.payload "$TEST_ELF" "$PAYLOAD_BIN"
+python3 - "$FW_BIN" "$PAYLOAD_BIN" "$TEST_PKG" <<'PY'
+import pathlib
+import sys
+
+fw_data = pathlib.Path(sys.argv[1]).read_bytes()
+payload_data = pathlib.Path(sys.argv[2]).read_bytes()
+out = pathlib.Path(sys.argv[3])
+
+def bytes_literal(name, data):
+    lines = [
+        f"    constant {name}_SIZE_BYTES : integer := {len(data)};",
+        f"    constant {name}_BYTES : byte_array_t(0 to {max(len(data) - 1, 0)}) := (",
+    ]
+    if data:
+        for i, b in enumerate(data):
+            comma = "," if i < len(data) - 1 else ""
+            lines.append(f"        x\"{b:02x}\"{comma}")
+    else:
+        lines.append("        x\"00\"")
+    lines.append("    );")
+    return "\n".join(lines)
+
+out.write_text(
+    "library ieee;\n"
+    "use ieee.std_logic_1164.all;\n"
+    "package test_program is\n"
+    "    constant TEST_KIND : integer := 2;\n"
+    "    type byte_array_t is array (natural range <>) of std_logic_vector(7 downto 0);\n"
+    f"{bytes_literal('FW', fw_data)}\n"
+    f"{bytes_literal('PAYLOAD', payload_data)}\n"
+    "end package test_program;\n",
+    encoding="ascii",
+)
+PY
+
+cd "$TMP_DIR"
+ghdl -a --std=08 \
+    "$RTL_SRC/simple_rv64i_core_pkg.vhd" \
+    "$TEST_PKG" \
+    "$RTL_SRC/simple_rv64gc_core.vhd" \
+    "$RTL_SRC/tb_generated_rv64_fw_jump.vhd"
+ghdl -e --std=08 tb_generated_rv64_fw_jump
+
+STOP_MS=$((TIMEOUT * 1000))
+OUTPUT=$(timeout "$TIMEOUT" ghdl -r --std=08 tb_generated_rv64_fw_jump --stop-time="${STOP_MS}ms" 2>&1) || EXIT_STATUS=$?
+EXIT_STATUS=${EXIT_STATUS:-0}
+
+echo "$OUTPUT" | grep -E "CYCLES:|PASS_WORD:|A0_LOW32:|A1_LOW32:|A1_HIGH32:|UART_BYTES_LOW32:|PRIV_MODE:|PC_LOW32:|GENERATED_RV64_FW_JUMP:" || true
+
+if [ "$EXIT_STATUS" = "124" ]; then
+    echo "[GHDL-GEN-RV64-FW-JUMP] TIMEOUT after ${TIMEOUT}s"
+    exit 124
+fi
+
+if echo "$OUTPUT" | grep -q "GENERATED_RV64_FW_JUMP: PASS"; then
+    echo "[GHDL-GEN-RV64-FW-JUMP] PASS"
+    exit 0
+fi
+
+echo "[GHDL-GEN-RV64-FW-JUMP] FAIL"
+exit 1

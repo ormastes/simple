@@ -1,0 +1,322 @@
+# Part 3 of src/app/traceability/core.spl
+use app.traceability.core.*
+# Traceability Checker Core
+#
+# Builds a lightweight traceability index over src/, test/, and doc/ and emits
+# warnings for missing source/test links, missing backwards documentation links,
+# and uncovered REQ/NFR identifiers.
+
+use app.io.mod (file_exists, file_read, dir_walk, is_dir)
+use common.text_advanced.{escape_json}
+
+fn extract_paths_for_field(content: text, field_name: text) -> [text]:
+    if field_name == "requirement":
+        val direct = merge_unique(
+            a: extract_prefixed_paths(content: content, prefix: "doc/02_requirements/feature/"),
+            b: extract_prefixed_paths(content: content, prefix: "doc/02_requirements/nfr/")
+        )
+        return merge_unique(a: direct, b: extract_prefixed_paths(content: content, prefix: "doc/requirement/"))
+    if field_name == "plan":
+        var result: [text] = []
+        for path in extract_prefixed_paths(content: content, prefix: "doc/03_plan/"):
+            if has_prefix(s: path, prefix: "doc/02_requirements/feature/") == false and has_prefix(s: path, prefix: "doc/02_requirements/nfr/") == false:
+                result.push(path)
+        return unique_texts(result)
+    if field_name == "design":
+        return merge_unique(
+            a: extract_prefixed_paths(content: content, prefix: "doc/05_design/"),
+            b: extract_prefixed_paths(content: content, prefix: "doc/04_architecture/")
+        )
+    if field_name == "research":
+        return extract_prefixed_paths(content: content, prefix: "doc/01_research/")
+    []
+
+fn find_header_field_value(content: text, marker: text) -> text:
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if has_prefix(s: trimmed, prefix: marker):
+            val marker_len = text_len(marker)
+            return strip_quotes(trimmed[marker_len:trimmed.len()].trim())
+    ""
+
+fn parse_traceability_manifest(manifest: text) -> [text]:
+    val lines = manifest.split("\n")
+    var file_pairs: [text] = []
+    var current_path = ""
+    var current_content = ""
+    var line_idx = 0
+    while line_idx < lines.len():
+        val line = lines[line_idx]
+        if has_prefix(s: line, prefix: "@@ "):
+            if current_path != "":
+                file_pairs.push(current_path)
+                file_pairs.push(current_content)
+            current_path = line[3:line.len()].trim()
+            current_content = ""
+        else:
+            if current_path != "":
+                if current_content == "":
+                    current_content = line
+                else:
+                    current_content = current_content + "\n" + line
+        line_idx = line_idx + 1
+    if current_path != "":
+        file_pairs.push(current_path)
+        file_pairs.push(current_content)
+    file_pairs
+
+fn format_traceability_warning(warning: TraceabilityWarning) -> text:
+    "{warning.path}:{str(warning.line)}: warning[{warning.code}]: {warning.message}"
+
+fn traceability_report_to_json(warnings: [TraceabilityWarning]) -> text:
+    if warnings.len() == 0:
+        return "{\"warnings\":[]}"
+    var parts: [text] = []
+    parts.push("{\"warnings\":[")
+    var i = 0
+    while i < warnings.len():
+        val warning = warnings[i]
+        parts.push("{\"code\":\"{escape_json(warning.code)}\",\"path\":\"{escape_json(warning.path)}\",\"line\":{str(warning.line)},\"message\":\"{escape_json(warning.message)}\"}")
+        if i < warnings.len() - 1:
+            parts.push(",")
+        i = i + 1
+    parts.push("]}")
+    parts.join("")
+
+fn make_warning(code: text, path: text, line_num: i64, message: text) -> TraceabilityWarning:
+    TraceabilityWarning(code: code, path: path, line: line_num, message: message)
+
+fn capitalize(value: text) -> text:
+    if value == "":
+        return ""
+    val first = value[0:1].upper()
+    val rest = value[1:value.len()]
+    first + rest
+
+fn basename(path: text) -> text:
+    val slash_idx = find_last_index(s: path, needle: "/")
+    if slash_idx < 0:
+        return path
+    val start_idx = slash_idx + 1
+    path[start_idx:path.len()]
+
+fn dirname(path: text) -> text:
+    val idx = find_last_index(s: path, needle: "/")
+    if idx < 0:
+        return ""
+    path[0:idx]
+
+fn basename_no_ext(path: text) -> text:
+    val base = basename(path)
+    val dot_idx = find_last_index(s: base, needle: ".")
+    if dot_idx < 0:
+        return base
+    base[0:dot_idx]
+
+fn drop_first_segment(path: text) -> text:
+    val slash = find_index(s: path, needle: "/")
+    if slash < 0:
+        return path
+    val start_idx = slash + 1
+    path[start_idx:path.len()]
+
+fn strip_quotes(value: text) -> text:
+    var result = value
+    if text_len(result) >= 2 and has_prefix(s: result, prefix: "\"") and has_suffix(s: result, suffix: "\""):
+        val end_idx = text_len(result) - 1
+        result = result[1:end_idx]
+    result
+
+fn path_list_contains(paths: [text], target: text) -> bool:
+    for path in paths:
+        if path == target:
+            return true
+    false
+
+fn requirement_path_matches_slug(paths: [text], slug: text) -> bool:
+    for path in paths:
+        if normalize_slug(basename_no_ext(path)) == slug:
+            return true
+    false
+
+fn any_path_exists(paths: [text], existing_paths: [text]) -> bool:
+    for path in paths:
+        if path_list_contains(existing_paths, path):
+            return true
+    false
+
+fn count_warning_code_list(warnings: [TraceabilityWarning], code: text) -> i64:
+    var count = 0
+    var i = 0
+    while i < warnings.len():
+        val warning = warnings[i]
+        if warning.code == code:
+            count = count + 1
+        i = i + 1
+    count
+
+fn count_if_code(target_code: text, actual_code: text) -> i64:
+    if target_code == actual_code:
+        return 1
+    0
+
+fn is_executable_spec_kind(kind: text) -> bool:
+    kind == "spec_feature" or kind == "spec_system" or kind == "spec_unit" or kind == "spec_integration"
+
+fn expected_generated_spec_path(source_path: text, config: TraceabilityConfig) -> text:
+    if not has_prefix(s: source_path, prefix: "test/"):
+        return ""
+    if not has_suffix(s: source_path, suffix: ".spl"):
+        return ""
+    val rel = source_path[5:source_path.len()]
+    val rel_md = remove_spl_extension(rel) + ".md"
+    config.generated_spec_root + "/" + rel_md
+
+fn find_mismatched_generated_spec_path(expected: text, source_path: text, parsed: [ParsedTraceFile], config: TraceabilityConfig) -> text:
+    val expected_base = basename(expected)
+    for file in parsed:
+        if file.kind != "spec_md":
+            continue
+        if file.path == expected:
+            continue
+        if not has_prefix(s: file.path, prefix: config.generated_spec_root + "/"):
+            continue
+        if basename(file.path) == expected_base:
+            return file.path
+    ""
+
+fn count_generated_spec_layout_pair_warnings_by_code(file_pairs: [text], existing_paths: [text], config: TraceabilityConfig, scope: text, target_code: text) -> i64:
+    if scope != "all" and scope != "spec":
+        return 0
+
+    var parsed: [ParsedTraceFile] = []
+    var file_idx = 0
+    while file_idx + 1 < file_pairs.len():
+        parsed.push(parse_trace_file(VirtualFile(path: file_pairs[file_idx], content: file_pairs[file_idx + 1])))
+        file_idx = file_idx + 2
+
+    var count = 0
+    for file in parsed:
+        if not is_executable_spec_kind(file.kind):
+            continue
+        val expected = expected_generated_spec_path(file.path, config)
+        if expected == "":
+            continue
+        if path_list_contains(existing_paths, expected) == false:
+            count = count + count_if_code(target_code: target_code, actual_code: "TRC231")
+        val wrong = find_mismatched_generated_spec_path(expected: expected, source_path: file.path, parsed: parsed, config: config)
+        if wrong != "":
+            count = count + count_if_code(target_code: target_code, actual_code: "TRC232")
+    count
+
+fn extend_warnings(base: [TraceabilityWarning], extra: [TraceabilityWarning]) -> [TraceabilityWarning]:
+    var result = base
+    var i = 0
+    while i < extra.len():
+        result.push(extra[i])
+        i = i + 1
+    result
+
+fn count_parsed_files(items: [ParsedTraceFile]) -> i64:
+    var count = 0
+    for _ in items:
+        count = count + 1
+    count
+
+fn is_under_warn_root(path: text, warn_source_roots: [text]) -> bool:
+    for root in warn_source_roots:
+        if path == root:
+            return true
+        if has_prefix(s: path, prefix: root + "/"):
+            return true
+    false
+
+fn merge_unique(a: [text], b: [text]) -> [text]:
+    unique_texts(a + b)
+
+fn unique_texts(items: [text]) -> [text]:
+    var result: [text] = []
+    for item in items:
+        if item == "":
+            continue
+        if path_list_contains(result, item) == false:
+            result.push(item)
+    result
+
+fn join_list(items: [text]) -> text:
+    if items.len() == 0:
+        return ""
+    items.join(", ")
+
+fn matches_at(s: text, start_idx: i64, needle: text) -> bool:
+    if start_idx < 0:
+        return false
+    val s_len = text_len(s)
+    val needle_len = text_len(needle)
+    if start_idx + needle_len > s_len:
+        return false
+    var i = 0
+    while i < needle_len:
+        val s_idx = start_idx + i
+        val s_ch = s[s_idx:s_idx + 1]
+        val n_ch = needle[i:i + 1]
+        if s_ch != n_ch:
+            return false
+        i = i + 1
+    true
+
+fn join_parts_prefix(parts: [text], count: i64, separator: text) -> text:
+    if count <= 0:
+        return ""
+    var result = ""
+    var i = 0
+    while i < count:
+        if i > 0:
+            result = result + separator
+        result = result + parts[i]
+        i = i + 1
+    result
+
+fn take_text_parts(parts: [text], count: i64) -> [text]:
+    var result: [text] = []
+    var i = 0
+    while i < count:
+        result.push(parts[i])
+        i = i + 1
+    result
+
+fn join_source_segments(parts: [text], start_idx: i64, normalize_first: bool, remove_last_ext: bool) -> text:
+    var result_parts: [text] = []
+    val last_idx = parts.len() - 1
+    var i = start_idx
+    while i < parts.len():
+        var segment = parts[i]
+        if i == start_idx and normalize_first:
+            segment = strip_compiler_layer(segment)
+        if remove_last_ext and i == last_idx:
+            segment = remove_spl_extension(segment)
+        result_parts.push(segment)
+        i = i + 1
+    result_parts.join("/")
+
+fn remove_spl_extension(path: text) -> text:
+    if has_suffix(s: path, suffix: ".spl"):
+        val end_idx = text_len(path) - 4
+        return path[0:end_idx]
+    path
+
+fn has_prefix(s: text, prefix: text) -> bool:
+    s.starts_with(prefix)
+
+fn has_suffix(s: text, suffix: text) -> bool:
+    s.ends_with(suffix)
+
+fn text_len(s: text) -> i64:
+    s.len()
+
+fn find_index(s: text, needle: text) -> i64:
+    s.index_of(needle) ?? -1
+
+fn find_last_index(s: text, needle: text) -> i64:
+    s.last_index_of(needle) ?? -1

@@ -1,0 +1,260 @@
+use std.database.core.{SdnDatabase, SdnTable, SdnRow}
+use std.database.vector.types.{VectorDbConfig, VectorDbError, VectorEntry, SearchResult, DistanceMetric, default_vector_config}
+use std.database.vector.distance.{compute_distance, l2_norm}
+use std.database.vector.codec.{encode_vector, decode_vector, encode_metadata, decode_metadata}
+use std.database.vector.index.{BruteForceIndex}
+
+class VectorDatabase:
+    meta_db: SdnDatabase
+    config: VectorDbConfig
+    index: BruteForceIndex
+    entry_count: i64
+
+    static fn create(path: text, config: VectorDbConfig) -> Result<VectorDatabase, VectorDbError>:
+        val db_path = path + ".vdb.sdn"
+        var meta_db = SdnDatabase.new(db_path)
+        var config_table = SdnTable.new("config", ["key", "value"])
+        var dim_row = SdnRow.empty()
+        dim_row.set("key", "dimensions")
+        dim_row.set("value", config.dimensions.to_text())
+        config_table.add_row(dim_row)
+        var metric_row = SdnRow.empty()
+        metric_row.set("key", "metric")
+        val metric_text = match config.metric:
+            DistanceMetric.Cosine: "cosine"
+            DistanceMetric.Euclidean: "euclidean"
+            DistanceMetric.DotProduct: "dot_product"
+        metric_row.set("value", metric_text)
+        config_table.add_row(metric_row)
+        var max_row = SdnRow.empty()
+        max_row.set("key", "max_entries")
+        max_row.set("value", config.max_entries.to_text())
+        config_table.add_row(max_row)
+        meta_db.set_table("config", config_table)
+        val entries_table = SdnTable.new("entries", ["id", "vector", "norm", "metadata", "valid"])
+        meta_db.set_table("entries", entries_table)
+        val idx = BruteForceIndex.create(config.dimensions)
+        Ok(VectorDatabase(
+            meta_db: meta_db,
+            config: config,
+            index: idx,
+            entry_count: 0
+        ))
+
+    static fn load(path: text) -> Result<VectorDatabase, VectorDbError>:
+        val db_path = path + ".vdb.sdn"
+        val loaded = SdnDatabase.load(db_path)
+        if not loaded.?:
+            return Err(VectorDbError.StorageError(message: "Cannot load database at " + db_path))
+        var meta_db = loaded
+        val config_table = meta_db.get_table("config")
+        if not config_table.?:
+            return Err(VectorDbError.StorageError(message: "Missing config table"))
+        var dimensions: i64 = 0
+        var metric = DistanceMetric.Cosine
+        var max_entries: i64 = 0
+        val config_rows = config_table.valid_rows()
+        var i = 0
+        while i < config_rows.len():
+            val row = config_rows[i]
+            val k = row.get("key")
+            val v = row.get("value")
+            if k.? and v.?:
+                if k == "dimensions":
+                    val parsed = v.parse_i64()
+                    if parsed.?:
+                        dimensions = parsed
+                if k == "metric":
+                    if v == "euclidean":
+                        metric = DistanceMetric.Euclidean
+                    else if v == "dot_product":
+                        metric = DistanceMetric.DotProduct
+                if k == "max_entries":
+                    val parsed = v.parse_i64()
+                    if parsed.?:
+                        max_entries = parsed
+            i = i + 1
+        val config = VectorDbConfig(
+            dimensions: dimensions,
+            metric: metric,
+            max_entries: max_entries
+        )
+        var idx = BruteForceIndex.create(dimensions)
+        val entries_table = meta_db.get_table("entries")
+        var count: i64 = 0
+        if entries_table.?:
+            val entry_rows = entries_table.valid_rows()
+            var j = 0
+            while j < entry_rows.len():
+                val row = entry_rows[j]
+                val valid = row.get("valid")
+                val id = row.get("id")
+                val vec_text = row.get("vector")
+                if valid.? and id.? and vec_text.? and valid == "1":
+                    val vec = decode_vector(vec_text)
+                    if vec.?:
+                        val add_result = idx.add(id, vec)
+                        if add_result.?:
+                            count = count + 1
+                j = j + 1
+        Ok(VectorDatabase(
+            meta_db: meta_db,
+            config: config,
+            index: idx,
+            entry_count: count
+        ))
+
+    me insert(id: text, vector: [f64], metadata: Dict<text, text>) -> Result<(), VectorDbError>:
+        if vector.len() as i64 != me.config.dimensions:
+            return Err(VectorDbError.DimensionMismatch(
+                expected: me.config.dimensions,
+                got: vector.len() as i64
+            ))
+        val norm = l2_norm(vector)
+        val add_result = me.index.add(id, vector)
+        match add_result:
+            Err(e): return Err(e)
+            Ok(_): pass_dn
+        var row = SdnRow.empty()
+        row.set("id", id)
+        row.set("vector", encode_vector(vector))
+        row.set("norm", norm.to_text())
+        row.set("metadata", encode_metadata(metadata))
+        row.set("valid", "1")
+        me.meta_db.add_row_to_table("entries", row)
+        me.entry_count = me.entry_count + 1
+        Ok(())
+
+    me upsert(id: text, vector: [f64], metadata: Dict<text, text>) -> Result<(), VectorDbError>:
+        if vector.len() as i64 != me.config.dimensions:
+            return Err(VectorDbError.DimensionMismatch(
+                expected: me.config.dimensions,
+                got: vector.len() as i64
+            ))
+        val existing = me.index.remove(id)
+        if existing.?:
+            me.entry_count = me.entry_count - 1
+        me.insert(id, vector, metadata)
+
+    fn get(id: text) -> VectorEntry?:
+        val entries_table = me.meta_db.get_table("entries")
+        if not entries_table.?:
+            return nil
+        val row = entries_table.get_row(id)
+        if not row.?:
+            return nil
+        val vec_text = row.get("vector")
+        val meta_text = row.get("metadata")
+        val norm_text = row.get("norm")
+        if not vec_text.?:
+            return nil
+        val vec = decode_vector(vec_text)
+        if not vec.?:
+            return nil
+        val meta = if meta_text.?: decode_metadata(meta_text) else {}
+        var norm = 0.0
+        if norm_text.?:
+            val parsed = norm_text.parse_f64()
+            if parsed.?:
+                norm = parsed
+        VectorEntry(
+            id: id,
+            vector: vec,
+            metadata: meta,
+            norm: norm
+        )
+
+    me delete(id: text) -> Result<(), VectorDbError>:
+        val rm = me.index.remove(id)
+        match rm:
+            Err(e): return Err(e)
+            Ok(_): pass_dn
+        val entries_table = me.meta_db.get_table("entries")
+        if entries_table.?:
+            entries_table.mark_deleted(id)
+        me.entry_count = me.entry_count - 1
+        Ok(())
+
+    fn search(query: [f64], k: i64) -> Result<[SearchResult], VectorDbError>:
+        if query.len() as i64 != me.config.dimensions:
+            return Err(VectorDbError.DimensionMismatch(
+                expected: me.config.dimensions,
+                got: query.len() as i64
+            ))
+        val raw = me.index.search(query, k, me.config.metric)
+        var results: [SearchResult] = []
+        var i = 0
+        while i < raw.len():
+            val r = raw[i]
+            val entry = me.get(r.id)
+            val meta = if entry.?: entry.metadata else {}
+            results.push(SearchResult(
+                id: r.id,
+                distance: r.distance,
+                metadata: meta
+            ))
+            i = i + 1
+        Ok(results)
+
+    fn search_with_filter(query: [f64], k: i64, filter: Dict<text, text>) -> Result<[SearchResult], VectorDbError>:
+        if query.len() as i64 != me.config.dimensions:
+            return Err(VectorDbError.DimensionMismatch(
+                expected: me.config.dimensions,
+                got: query.len() as i64
+            ))
+        val raw = me.index.search(query, me.entry_count, me.config.metric)
+        var results: [SearchResult] = []
+        val filter_keys = filter.keys()
+        var i = 0
+        while i < raw.len() and (results.len() as i64) < k:
+            val r = raw[i]
+            val entry = me.get(r.id)
+            if entry.?:
+                var matches = true
+                var fk = 0
+                while fk < filter_keys.len() and matches:
+                    val fkey = filter_keys[fk]
+                    val expected = filter.get(fkey)
+                    val actual = entry.metadata.get(fkey)
+                    if expected.? and (not actual.? or actual != expected):
+                        matches = false
+                    fk = fk + 1
+                if matches:
+                    results.push(SearchResult(
+                        id: r.id,
+                        distance: r.distance,
+                        metadata: entry.metadata
+                    ))
+            i = i + 1
+        Ok(results)
+
+    fn count() -> i64:
+        me.entry_count
+
+    fn all_ids() -> [text]:
+        me.index.entries.keys()
+
+    me save() -> bool:
+        me.meta_db.save()
+
+    me rebuild_index():
+        me.index.clear()
+        val entries_table = me.meta_db.get_table("entries")
+        if not entries_table.?:
+            return
+        val rows = entries_table.valid_rows()
+        var count: i64 = 0
+        var i = 0
+        while i < rows.len():
+            val row = rows[i]
+            val valid = row.get("valid")
+            val id = row.get("id")
+            val vec_text = row.get("vector")
+            if valid.? and id.? and vec_text.? and valid == "1":
+                val vec = decode_vector(vec_text)
+                if vec.?:
+                    val res = me.index.add(id, vec)
+                    if res.?:
+                        count = count + 1
+            i = i + 1
+        me.entry_count = count

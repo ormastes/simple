@@ -1,0 +1,348 @@
+# CodeView Record Parsers
+# Decodes CodeView type records, symbol records, and line number info from PDB streams.
+
+use std.binary_io.{BinaryReader, ByteOrder}
+use std.debug.formats.debug_types.{SourceLocation, DebugLineEntry}
+use std.debug.formats.pdb_constants.{
+    LF_STRUCTURE, LF_CLASS, LF_UNION, LF_ENUM, LF_PROCEDURE,
+    LF_POINTER, LF_ARRAY, LF_MODIFIER, LF_ARGLIST, LF_FIELDLIST,
+    LF_MEMBER, LF_ENUMERATE, LF_NESTTYPE, LF_ONEMETHOD, LF_METHOD,
+    LF_FUNC_ID, LF_MFUNC_ID, LF_STRING_ID, LF_BUILDINFO,
+    LF_UDT_SRC_LINE, LF_UDT_MOD_SRC_LINE,
+    S_GPROC32, S_LPROC32, S_GPROC32_ID, S_LPROC32_ID,
+    S_GDATA32, S_LDATA32, S_PUB32, S_UDT,
+    S_CONSTANT, S_COMPILE3, S_COMPILE2, S_OBJNAME, S_END,
+    S_PROC_ID_END, S_BLOCK32, S_LABEL32,
+    S_BPREL32, S_REGREL32, S_LOCAL, S_REGISTER,
+    DEBUG_S_LINES, DEBUG_S_STRINGTABLE, DEBUG_S_FILECHKSMS,
+}
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct CvTypeRecord:
+    leaf: i64
+    size: i64
+    data: [u8]
+
+struct CvSymRecord:
+    kind: i64
+    size: i64
+    data: [u8]
+
+struct CvProcSymbol:
+    name: text
+    offset: i64
+    segment: i64
+    code_size: i64
+    type_index: i64
+    is_global: bool
+
+struct CvDataSymbol:
+    name: text
+    offset: i64
+    segment: i64
+    type_index: i64
+
+struct CvPublicSymbol:
+    name: text
+    offset: i64
+    segment: i64
+
+struct CvLineBlock:
+    file_index: i64
+    lines: [CvLinePair]
+
+struct CvLinePair:
+    offset: i64
+    line_start: i64
+
+struct CvFileChecksum:
+    name_offset: i64
+    checksum_size: i64
+    checksum_type: i64
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn _read_u16_at(data: [u8], offset: i64) -> i64:
+    if offset + 1 >= data.len():
+        return 0
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8)
+
+fn _read_u32_at(data: [u8], offset: i64) -> i64:
+    if offset + 3 >= data.len():
+        return 0
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8) | ((data[offset + 2] as i64) << 16) | ((data[offset + 3] as i64) << 24)
+
+fn _read_cstr(data: [u8], offset: i64) -> text:
+    if offset >= data.len():
+        return ""
+    var result = ""
+    var pos = offset
+    while pos < data.len():
+        val b = data[pos]
+        if b == 0:
+            break
+        result = result + text.from_char_code(b)
+        pos = pos + 1
+    result
+
+# ============================================================================
+# Type Record Parsing
+# ============================================================================
+
+fn cv_parse_type_records(stream_data: [u8]) -> [CvTypeRecord]:
+    if stream_data.len() < 8:
+        return []
+
+    val version = _read_u32_at(stream_data, 0)
+    val header_size = _read_u32_at(stream_data, 4)
+    var pos = header_size
+    if pos == 0:
+        pos = 56
+
+    var records: [CvTypeRecord] = []
+    while pos + 4 <= stream_data.len():
+        val rec_len = _read_u16_at(stream_data, pos)
+        val rec_kind = _read_u16_at(stream_data, pos + 2)
+
+        if rec_len < 2:
+            break
+
+        val data_start = pos + 4
+        val data_end = pos + 2 + rec_len
+        var rec_data: [u8] = []
+        var i = data_start
+        while i < data_end and i < stream_data.len():
+            rec_data = rec_data.push(stream_data[i])
+            i = i + 1
+
+        records = records.push(CvTypeRecord(
+            leaf: rec_kind,
+            size: rec_len,
+            data: rec_data,
+        ))
+
+        pos = pos + 2 + rec_len
+        if pos % 4 != 0:
+            pos = pos + (4 - (pos % 4))
+
+    records
+
+# ============================================================================
+# Symbol Record Parsing
+# ============================================================================
+
+fn cv_parse_symbol_records(stream_data: [u8]) -> [CvSymRecord]:
+    var records: [CvSymRecord] = []
+    var pos = 0
+
+    while pos + 4 <= stream_data.len():
+        val rec_len = _read_u16_at(stream_data, pos)
+        val rec_kind = _read_u16_at(stream_data, pos + 2)
+
+        if rec_len < 2:
+            break
+
+        val data_start = pos + 4
+        val data_end = pos + 2 + rec_len
+        var rec_data: [u8] = []
+        var i = data_start
+        while i < data_end and i < stream_data.len():
+            rec_data = rec_data.push(stream_data[i])
+            i = i + 1
+
+        records = records.push(CvSymRecord(
+            kind: rec_kind,
+            size: rec_len,
+            data: rec_data,
+        ))
+
+        pos = pos + 2 + rec_len
+        if pos % 4 != 0:
+            pos = pos + (4 - (pos % 4))
+
+    records
+
+fn cv_decode_proc_symbol(rec: CvSymRecord) -> CvProcSymbol?:
+    if rec.kind != S_GPROC32 and rec.kind != S_LPROC32 and rec.kind != S_GPROC32_ID and rec.kind != S_LPROC32_ID:
+        return nil
+    if rec.data.len() < 35:
+        return nil
+
+    val code_size = _read_u32_at(rec.data, 16)
+    val type_index = _read_u32_at(rec.data, 24)
+    val offset = _read_u32_at(rec.data, 28)
+    val segment = _read_u16_at(rec.data, 32)
+    val name = _read_cstr(rec.data, 35)
+
+    CvProcSymbol(
+        name: name,
+        offset: offset,
+        segment: segment,
+        code_size: code_size,
+        type_index: type_index,
+        is_global: rec.kind == S_GPROC32 or rec.kind == S_GPROC32_ID,
+    )
+
+fn cv_decode_data_symbol(rec: CvSymRecord) -> CvDataSymbol?:
+    if rec.kind != S_GDATA32 and rec.kind != S_LDATA32:
+        return nil
+    if rec.data.len() < 11:
+        return nil
+
+    val type_index = _read_u32_at(rec.data, 0)
+    val offset = _read_u32_at(rec.data, 4)
+    val segment = _read_u16_at(rec.data, 8)
+    val name = _read_cstr(rec.data, 10)
+
+    CvDataSymbol(
+        name: name,
+        offset: offset,
+        segment: segment,
+        type_index: type_index,
+    )
+
+fn cv_decode_public_symbol(rec: CvSymRecord) -> CvPublicSymbol?:
+    if rec.kind != S_PUB32:
+        return nil
+    if rec.data.len() < 11:
+        return nil
+
+    val flags = _read_u32_at(rec.data, 0)
+    val offset = _read_u32_at(rec.data, 4)
+    val segment = _read_u16_at(rec.data, 8)
+    val name = _read_cstr(rec.data, 10)
+
+    CvPublicSymbol(name: name, offset: offset, segment: segment)
+
+# ============================================================================
+# Line Number Subsection Parsing
+# ============================================================================
+
+fn cv_parse_line_subsections(subsection_data: [u8]) -> [CvLineBlock]:
+    var blocks: [CvLineBlock] = []
+    var pos = 0
+
+    while pos + 8 <= subsection_data.len():
+        val sub_type = _read_u32_at(subsection_data, pos)
+        val sub_size = _read_u32_at(subsection_data, pos + 4)
+        val sub_start = pos + 8
+        val sub_end = sub_start + sub_size
+
+        if sub_type == DEBUG_S_LINES:
+            val parsed = _parse_lines_subsection(subsection_data, sub_start, sub_end)
+            for block in parsed:
+                blocks = blocks.push(block)
+
+        pos = sub_end
+        if pos % 4 != 0:
+            pos = pos + (4 - (pos % 4))
+
+    blocks
+
+fn _parse_lines_subsection(data: [u8], start: i64, end_pos: i64) -> [CvLineBlock]:
+    if start + 12 > data.len():
+        return []
+
+    val off_con = _read_u32_at(data, start)
+    val seg = _read_u16_at(data, start + 4)
+    val flags = _read_u16_at(data, start + 6)
+    val cb = _read_u32_at(data, start + 8)
+    var pos = start + 12
+
+    var blocks: [CvLineBlock] = []
+
+    while pos + 12 <= end_pos and pos + 12 <= data.len():
+        val file_id = _read_u32_at(data, pos)
+        val n_lines = _read_u32_at(data, pos + 4)
+        val block_size = _read_u32_at(data, pos + 8)
+        pos = pos + 12
+
+        var lines: [CvLinePair] = []
+        var li = 0
+        while li < n_lines and pos + 8 <= data.len():
+            val line_offset = _read_u32_at(data, pos)
+            val line_info = _read_u32_at(data, pos + 4)
+            val line_num = line_info & 0x00ffffff
+            lines = lines.push(CvLinePair(
+                offset: off_con + line_offset,
+                line_start: line_num,
+            ))
+            pos = pos + 8
+            li = li + 1
+
+        if (flags & 1) != 0:
+            pos = pos + (n_lines * 4)
+
+        blocks = blocks.push(CvLineBlock(file_index: file_id, lines: lines))
+
+    blocks
+
+# ============================================================================
+# File Checksum Parsing
+# ============================================================================
+
+fn cv_parse_file_checksums(subsection_data: [u8]) -> [CvFileChecksum]:
+    var checksums: [CvFileChecksum] = []
+    var pos = 0
+
+    while pos + 8 <= subsection_data.len():
+        val sub_type = _read_u32_at(subsection_data, pos)
+        val sub_size = _read_u32_at(subsection_data, pos + 4)
+        val sub_start = pos + 8
+        val sub_end = sub_start + sub_size
+
+        if sub_type == DEBUG_S_FILECHKSMS:
+            var fc_pos = sub_start
+            while fc_pos + 6 <= sub_end and fc_pos + 6 <= subsection_data.len():
+                val name_off = _read_u32_at(subsection_data, fc_pos)
+                val cb_val = subsection_data[fc_pos + 4] as i64
+                val hash_type = subsection_data[fc_pos + 5] as i64
+
+                checksums = checksums.push(CvFileChecksum(
+                    name_offset: name_off,
+                    checksum_size: cb_val,
+                    checksum_type: hash_type,
+                ))
+
+                val entry_size = 6 + cb_val
+                fc_pos = fc_pos + entry_size
+                if fc_pos % 4 != 0:
+                    fc_pos = fc_pos + (4 - (fc_pos % 4))
+
+        pos = sub_end
+        if pos % 4 != 0:
+            pos = pos + (4 - (pos % 4))
+
+    checksums
+
+# ============================================================================
+# String Table
+# ============================================================================
+
+fn cv_string_table_get(string_table_data: [u8], offset: i64) -> text:
+    _read_cstr(string_table_data, offset)
+
+fn cv_extract_string_table(subsection_data: [u8]) -> [u8]:
+    var pos = 0
+    while pos + 8 <= subsection_data.len():
+        val sub_type = _read_u32_at(subsection_data, pos)
+        val sub_size = _read_u32_at(subsection_data, pos + 4)
+        val sub_start = pos + 8
+
+        if sub_type == DEBUG_S_STRINGTABLE:
+            var result: [u8] = []
+            var i = sub_start
+            while i < sub_start + sub_size and i < subsection_data.len():
+                result = result.push(subsection_data[i])
+                i = i + 1
+            return result
+
+        pos = sub_start + sub_size
+        if pos % 4 != 0:
+            pos = pos + (4 - (pos % 4))
+    []

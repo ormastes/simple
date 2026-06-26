@@ -1,0 +1,152 @@
+# Rasterizer — stamps brush tips onto pixel buffers
+#
+# Given brush parameters and a stroke position, produces
+# sparse pixel modification lists for blending onto a layer.
+# Packed format: (y * buf_width + x) * 256 + alpha
+
+use std.common.drawing.vector.{SkPoint}
+use std.nogc_sync_mut.drawing.brush.{BrushConfig, BrushTip}
+
+# ============================================================================
+# Stamp Point
+# ============================================================================
+
+struct StampPoint:
+    x: f64
+    y: f64
+    pressure: f64
+
+# ============================================================================
+# Point interpolation
+# ============================================================================
+
+fn interpolate_points(from: StampPoint, to: StampPoint, spacing: f64) -> [StampPoint]:
+    """Generate intermediate stamp points between from and to.
+
+    Spacing is a fraction of the brush size. Returns points
+    including 'to' but not 'from'.
+    """
+    if spacing <= 0.0:
+        return [to]
+
+    val dx = to.x - from.x
+    val dy = to.y - from.y
+    val dist_sq = dx * dx + dy * dy
+    val dist = dist_sq ** 0.5
+
+    if dist < spacing:
+        return [to]
+
+    val steps_f = dist / spacing
+    var steps = steps_f.to_i32()
+    if steps < 1:
+        steps = 1
+
+    var result: [StampPoint] = []
+    var i = 1
+    while i <= steps:
+        val t = i.to_f64() / steps.to_f64()
+        val px = from.x + dx * t
+        val py = from.y + dy * t
+        val pp = from.pressure + (to.pressure - from.pressure) * t
+        result = result.push(StampPoint(x: px, y: py, pressure: pp))
+        i = i + 1
+    result
+
+# ============================================================================
+# Round stamp
+# ============================================================================
+
+fn stamp_round(cx: f64, cy: f64, radius: f64, hardness: f64, opacity: f64, color: i64, buf_width: i32, buf_height: i32) -> [i64]:
+    """Stamp a round brush tip at (cx, cy).
+
+    Returns a sparse list of packed i64 values:
+    each entry = (y * buf_width + x) * 256 + alpha
+    """
+    var result: [i64] = []
+    if radius <= 0.0:
+        return result
+
+    val r_int = radius.to_i32() + 1
+    val cx_int = cx.to_i32()
+    val cy_int = cy.to_i32()
+
+    var dy_i = -r_int
+    while dy_i <= r_int:
+        val py = cy_int + dy_i
+        if py >= 0 and py < buf_height:
+            var dx_i = -r_int
+            while dx_i <= r_int:
+                val px = cx_int + dx_i
+                if px >= 0 and px < buf_width:
+                    val fdx = px.to_f64() - cx + 0.5
+                    val fdy = py.to_f64() - cy + 0.5
+                    val dist = (fdx * fdx + fdy * fdy) ** 0.5
+                    if dist <= radius:
+                        # Compute alpha from hardness falloff
+                        var alpha_f = opacity
+                        if hardness < 1.0:
+                            val edge = radius * hardness
+                            if dist > edge:
+                                val falloff = (dist - edge) / (radius - edge)
+                                alpha_f = opacity * (1.0 - falloff)
+                        var alpha = (alpha_f * 255.0).to_i32()
+                        if alpha > 255:
+                            alpha = 255
+                        if alpha > 0:
+                            val idx = (py * buf_width + px).to_i64()
+                            val packed = idx * 256 + alpha.to_i64()
+                            result = result.push(packed)
+                dx_i = dx_i + 1
+        dy_i = dy_i + 1
+    result
+
+# ============================================================================
+# Square stamp
+# ============================================================================
+
+fn stamp_square(cx: f64, cy: f64, half_size: f64, opacity: f64, color: i64, buf_width: i32, buf_height: i32) -> [i64]:
+    """Stamp a square brush tip at (cx, cy).
+
+    Returns a sparse list of packed i64 values:
+    each entry = (y * buf_width + x) * 256 + alpha
+    """
+    var result: [i64] = []
+    if half_size <= 0.0:
+        return result
+
+    val hs_int = half_size.to_i32() + 1
+    val cx_int = cx.to_i32()
+    val cy_int = cy.to_i32()
+    var alpha = (opacity * 255.0).to_i32()
+    if alpha > 255:
+        alpha = 255
+
+    if alpha <= 0:
+        return result
+
+    val alpha_i64 = alpha.to_i64()
+
+    var dy_i = -hs_int
+    while dy_i <= hs_int:
+        val py = cy_int + dy_i
+        if py >= 0 and py < buf_height:
+            var dx_i = -hs_int
+            while dx_i <= hs_int:
+                val px = cx_int + dx_i
+                if px >= 0 and px < buf_width:
+                    val fdx = px.to_f64() - cx + 0.5
+                    val fdy = py.to_f64() - cy + 0.5
+                    var abs_fdx = fdx
+                    if abs_fdx < 0.0:
+                        abs_fdx = -abs_fdx
+                    var abs_fdy = fdy
+                    if abs_fdy < 0.0:
+                        abs_fdy = -abs_fdy
+                    if abs_fdx <= half_size and abs_fdy <= half_size:
+                        val idx = (py * buf_width + px).to_i64()
+                        val packed = idx * 256 + alpha_i64
+                        result = result.push(packed)
+                dx_i = dx_i + 1
+        dy_i = dy_i + 1
+    result

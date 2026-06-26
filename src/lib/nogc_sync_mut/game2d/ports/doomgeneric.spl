@@ -1,0 +1,172 @@
+# std.game2d.ports.doomgeneric — pure Simple Doom-style port proof.
+
+class DoomPortInput:
+    forward: bool
+    back: bool
+    turn_left: bool
+    turn_right: bool
+    fire: bool
+
+    static fn empty() -> DoomPortInput:
+        DoomPortInput(forward: false, back: false, turn_left: false, turn_right: false, fire: false)
+
+class DoomPortState:
+    x: f64
+    y: f64
+    angle: i64
+    tick: i64
+    wad_bytes: i64
+    shots: i64
+
+    static fn boot(wad_bytes: [u8]) -> DoomPortState:
+        DoomPortState(x: 3.5, y: 3.5, angle: 0, tick: 0, wad_bytes: wad_bytes.len() as i64, shots: 0)
+
+class DoomFrame:
+    width: i64
+    height: i64
+    pixels: [i64]
+
+    static fn create(width: i64, height: i64) -> DoomFrame:
+        var pixels: [i64] = []
+        var i: i64 = 0
+        while i < width * height:
+            pixels.push(0)
+            i = i + 1
+        DoomFrame(width: width, height: height, pixels: pixels)
+
+    me put(self, x: i64, y: i64, color: i64):
+        if x < 0 or y < 0 or x >= self.width or y >= self.height:
+            return
+        self.pixels[y * self.width + x] = color
+
+    me fill_rect(self, x0: i64, y0: i64, w: i64, h: i64, color: i64):
+        var y = y0
+        while y < y0 + h:
+            var x = x0
+            while x < x0 + w:
+                self.put(x, y, color)
+                x = x + 1
+            y = y + 1
+
+    fn non_black_count() -> i64:
+        var count: i64 = 0
+        var i: i64 = 0
+        while i < self.pixels.len():
+            if self.pixels[i] != 0:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn hash() -> i64:
+        var h: i64 = 1469598103934665603
+        var i: i64 = 0
+        while i < self.pixels.len():
+            h = h ^ self.pixels[i]
+            h = h * 1099511628211
+            i = i + 1
+        h
+
+fn proof_wad() -> [u8]:
+    [73u8, 87u8, 65u8, 68u8, 1u8, 0u8, 0u8, 0u8, 12u8, 0u8, 0u8, 0u8]
+
+fn _map_cell(mx: i64, my: i64) -> i64:
+    if mx < 0 or my < 0 or mx >= 8 or my >= 8:
+        return 1
+    if mx == 0 or my == 0 or mx == 7 or my == 7:
+        return 1
+    if mx == 4 and my >= 2 and my <= 6:
+        return 2
+    if my == 5 and mx >= 2 and mx <= 5:
+        return 3
+    0
+
+fn _dir_x(angle: i64) -> f64:
+    val a = angle % 4
+    if a == 0:
+        return 1.0
+    if a == 2:
+        return -1.0
+    0.0
+
+fn _dir_y(angle: i64) -> f64:
+    val a = angle % 4
+    if a == 1:
+        return 1.0
+    if a == 3:
+        return -1.0
+    0.0
+
+fn _turn_left(angle: i64) -> i64:
+    (angle + 3) % 4
+
+fn _turn_right(angle: i64) -> i64:
+    (angle + 1) % 4
+
+fn doom_tick(state: DoomPortState, input: DoomPortInput) -> DoomPortState:
+    var next_angle = state.angle
+    if input.turn_left:
+        next_angle = _turn_left(next_angle)
+    if input.turn_right:
+        next_angle = _turn_right(next_angle)
+    var next_x = state.x
+    var next_y = state.y
+    val dx = _dir_x(next_angle) * 0.18
+    val dy = _dir_y(next_angle) * 0.18
+    if input.forward:
+        val tx = next_x + dx
+        val ty = next_y + dy
+        if _map_cell(tx as i64, ty as i64) == 0:
+            next_x = tx
+            next_y = ty
+    if input.back:
+        val tx = next_x - dx
+        val ty = next_y - dy
+        if _map_cell(tx as i64, ty as i64) == 0:
+            next_x = tx
+            next_y = ty
+    val shot_inc = if input.fire: 1 else: 0
+    DoomPortState(x: next_x, y: next_y, angle: next_angle, tick: state.tick + 1, wad_bytes: state.wad_bytes, shots: state.shots + shot_inc)
+
+fn _wall_distance(state: DoomPortState, column: i64, width: i64) -> (i64, i64):
+    val center = width / 2
+    val spread = (column - center) / 18
+    var ray_angle = state.angle
+    if spread < 0:
+        ray_angle = _turn_left(ray_angle)
+    elif spread > 0:
+        ray_angle = _turn_right(ray_angle)
+    val dx = _dir_x(ray_angle)
+    val dy = _dir_y(ray_angle)
+    var dist: i64 = 1
+    while dist < 12:
+        val fx = state.x + dx * (dist as f64) * 0.35
+        val fy = state.y + dy * (dist as f64) * 0.35
+        val cell = _map_cell(fx as i64, fy as i64)
+        if cell != 0:
+            return (dist, cell)
+        dist = dist + 1
+    (12, 1)
+
+fn _wall_color(cell: i64, dist: i64) -> i64:
+    val shade = if dist < 3: 0xCC else: if dist < 7: 0x88 else: 0x44
+    if cell == 2:
+        return 0xFF0000 + (shade << 8)
+    if cell == 3:
+        return 0x00FF00 + shade
+    shade
+
+fn render_frame(state: DoomPortState, width: i64, height: i64) -> DoomFrame:
+    var frame = DoomFrame.create(width, height)
+    frame.fill_rect(0, 0, width, height / 2, 0x101820)
+    frame.fill_rect(0, height / 2, width, height / 2, 0x302820)
+    var col: i64 = 0
+    while col < width:
+        val hit = _wall_distance(state, col, width)
+        val dist = hit[0]
+        val cell = hit[1]
+        val wall_h = (height * 2) / (dist + 1)
+        val y0 = (height - wall_h) / 2
+        frame.fill_rect(col, y0, 1, wall_h, _wall_color(cell, dist))
+        col = col + 1
+    frame.fill_rect(width / 2 - 4, height / 2 - 1, 8, 2, 0xD8D080)
+    frame

@@ -1,0 +1,168 @@
+"""
+Macro Expander - Phase 7C: Macro expansion with parameter substitution
+
+Contains:
+- SubstitutionMap: maps parameter names to argument expressions
+- MacroExpander: expands macros by substituting parameters with arguments
+
+Split from macro_checker.spl
+"""
+
+# ============================================================================
+# Substitution Map
+# ============================================================================
+
+class SubstitutionMap:
+    """
+    Maps parameter names to argument expressions
+
+    Examples:
+        {"x" -> IntLit(5), "y" -> IntLit(10)}
+        {"msgs" -> Block([StrLit("a"), StrLit("b")])}
+    """
+    mapping: text  # Dict<Symbol, Expr>
+
+impl SubstitutionMap:
+    static fn empty() -> SubstitutionMap:
+        SubstitutionMap(mapping: {})
+
+    me bind(name: Symbol, expr: Expr):
+        """Bind parameter to expression"""
+        self.mapping[name] = expr
+
+    fn lookup(name: Symbol) -> Expr:
+        """Lookup parameter binding"""
+        if name in self.mapping:
+            return self.mapping[name]
+        Expr.Var(name: name)  # Not found, return as-is
+
+    fn has(name: Symbol) -> bool:
+        """Check if parameter is bound"""
+        name in self.mapping
+
+# ============================================================================
+# Macro Expander
+# ============================================================================
+
+class MacroExpander:
+    """
+    Expands macros by substituting parameters with arguments
+
+    Algorithm:
+    1. Build substitution map (param -> arg)
+    2. Recursively substitute in macro body
+    3. Type check expanded expression
+    4. Verify expansion type matches definition
+    """
+    type_checker: MacroTypeChecker
+
+impl MacroExpander:
+    static fn new_expander(type_checker: MacroTypeChecker) -> MacroExpander:
+        MacroExpander(type_checker: type_checker)
+
+    fn expand_macro(call: MacroCall) -> Expr:
+        """
+        Expand macro call
+
+        Returns: expanded expression (or error expr if invalid)
+        """
+        # 1. Check call is valid
+        if not self.type_checker.check_macro_call(call):
+            return Expr.IntLit(value: 0)  # Error: invalid call
+
+        # 2. Get macro definition
+        val macro_def = self.type_checker.registry.lookup_macro(call.name)
+
+        # 3. Build substitution map
+        val subst = self.build_substitution(macro_def.params, call.args)
+
+        # 4. Substitute in body
+        self.substitute_in_expr(macro_def.body, subst)
+
+    fn build_substitution(params: [MacroParam], args: [Expr]) -> SubstitutionMap:
+        """
+        Build substitution map from parameters and arguments
+
+        Handles:
+        - Regular parameters: param -> arg (one-to-one)
+        - Variadic parameters: param -> [remaining args]
+        """
+        val subst = SubstitutionMap.empty()
+
+        var arg_idx = 0
+
+        for param in params:
+            if param.is_variadic:
+                # Collect remaining arguments into block
+                var remaining = []
+                while arg_idx < args.len():
+                    remaining.push(args[arg_idx])
+                    arg_idx = arg_idx + 1
+
+                # Bind variadic parameter to block of remaining args
+                subst.bind(param.name, Expr.Block(stmts: remaining))
+            else:
+                # Regular parameter: bind to single argument
+                if arg_idx < args.len():
+                    subst.bind(param.name, args[arg_idx])
+                    arg_idx = arg_idx + 1
+
+        subst
+
+    fn substitute_in_expr(expr: Expr, subst: SubstitutionMap) -> Expr:
+        """
+        Recursively substitute parameters in expression
+
+        Replaces all occurrences of parameters with their arguments
+        """
+        match expr:
+            case Var(name):
+                # Check if this is a parameter
+                if subst.has(name):
+                    subst.lookup(name)
+                else:
+                    expr
+
+            case Call(func, args):
+                # Recursively substitute in function and arguments
+                val new_func = self.substitute_in_expr(func, subst)
+                var new_args = []
+                for arg in args:
+                    new_args.push(self.substitute_in_expr(arg, subst))
+                Expr.Call(func: new_func, args: new_args)
+
+            case If(cond, then_branch, else_branch):
+                # Recursively substitute in all branches
+                val new_cond = self.substitute_in_expr(cond, subst)
+                val new_then = self.substitute_in_expr(then_branch, subst)
+                val new_else = self.substitute_in_expr(else_branch, subst)
+                Expr.If(cond: new_cond, then_branch: new_then, else_branch: new_else)
+
+            case Block(stmts):
+                # Recursively substitute in all statements
+                var new_stmts = []
+                for stmt in stmts:
+                    new_stmts.push(self.substitute_in_expr(stmt, subst))
+                Expr.Block(stmts: new_stmts)
+
+            case Let(name, value, rest):
+                # Substitute in value and rest
+                val new_value = self.substitute_in_expr(value, subst)
+                val new_rest = self.substitute_in_expr(rest, subst)
+                Expr.Let(name: name, value: new_value, rest: new_rest)
+
+            case _:
+                # Literals: no substitution needed
+                expr
+
+    fn expand_and_infer(call: MacroCall) -> HirType:
+        """
+        Expand macro and infer result type
+
+        Returns: inferred type of expansion
+        """
+        # 1. Expand
+        val expanded = self.expand_macro(call)
+
+        # 2. Infer type
+        self.type_checker.type_env.infer_expr(expanded)

@@ -1,0 +1,94 @@
+use std.io_runtime
+use std.spec.{describe, it, expect}
+use std.common.math.{math_sqrt, math_abs}
+use std.nogc_sync_mut.engine.physics.joints.{
+    BodyRef, JointForce,
+    DistanceJoint, RevoluteJoint, PrismaticJoint,
+    SpringJoint, WeldJoint,
+    JointRegistry, JointId
+}
+
+fn make_body(id: i32) -> BodyRef:
+    BodyRef(body_id: id)
+
+fn check_spring_force_magnitude() -> f64:
+    val ba = make_body(0)
+    val bb = make_body(1)
+    val sj = SpringJoint.new(ba, bb, 100.0, 0.1)
+    val force = sj.compute_spring_force(0.0, 0.0, 2.5, 0.0)
+    math_abs(force.fx)
+
+fn build_registry_three() -> JointRegistry:
+    var reg = JointRegistry.new()
+    val ba = make_body(0)
+    val bb = make_body(1)
+    val bc = make_body(2)
+    val bd = make_body(3)
+    val dj = DistanceJoint.new(ba, bb, 1.0)
+    val rj = RevoluteJoint.new(bc, bd, 0.0, 0.0)
+    val sj = SpringJoint.new(ba, bc, 50.0, 0.0)
+    val _id1 = reg.add_distance(dj)
+    val _id2 = reg.add_revolute(rj)
+    val _id3 = reg.add_spring(sj)
+    reg
+
+fn build_registry_remove() -> JointRegistry:
+    var reg = JointRegistry.new()
+    val ba = make_body(0)
+    val bb = make_body(1)
+    val bc = make_body(2)
+    val dj1 = DistanceJoint.new(ba, bb, 1.0)
+    val dj2 = DistanceJoint.new(bb, bc, 1.0)
+    val id1 = reg.add_distance(dj1)
+    val _id2 = reg.add_distance(dj2)
+    reg.remove_joint(id1)
+    reg
+
+describe "Physics2 Joints":
+    it "distance joint force at stretch":
+        val ba = make_body(0)
+        val bb = make_body(1)
+        val dj = DistanceJoint.new(ba, bb, 2.0)
+        val force = dj.compute_force(0.0, 0.0, 3.0, 0.0)
+        # bodies at (0,0) and (3,0), rest=2.0 => stretch=1.0, stiffness=1.0 => fx=1.0
+        expect(math_abs(force.fx)).to_be_greater_than(0.0)
+
+    it "distance joint zero force at rest":
+        val ba = make_body(0)
+        val bb = make_body(1)
+        val dj = DistanceJoint.new(ba, bb, 2.0)
+        val force = dj.compute_force(0.0, 0.0, 2.0, 0.0)
+        # dist == rest_length => stretch == 0 => force == 0
+        expect(math_abs(force.fx)).to_be_less_than(0.0001)
+
+    it "spring joint Hooke law":
+        val mag = check_spring_force_magnitude()
+        expect(mag).to_be_greater_than(0.0)
+
+    it "revolute joint with limits":
+        val ba = make_body(0)
+        val bb = make_body(1)
+        val rj = RevoluteJoint.with_limits(ba, bb, 0.0, 0.0, -1.0, 1.0)
+        expect(rj.enable_limit).to_equal(true)
+
+    it "prismatic joint normalizes axis":
+        val ba = make_body(0)
+        val bb = make_body(1)
+        val pj = PrismaticJoint.new(ba, bb, 0.0, 0.0, 3.0, 4.0)
+        # norm = 3/5 = 0.6
+        expect(pj.axis_x).to_be_greater_than(0.599)
+        expect(pj.axis_x).to_be_less_than(0.601)
+
+    it "weld joint stores anchor":
+        val ba = make_body(0)
+        val bb = make_body(1)
+        val wj = WeldJoint.new(ba, bb, 1.5, 2.5)
+        expect(wj.anchor_x).to_equal(1.5)
+
+    it "registry add and count":
+        val reg = build_registry_three()
+        expect(reg.joint_count()).to_equal(3)
+
+    it "registry remove":
+        val reg = build_registry_remove()
+        expect(reg.joint_count()).to_equal(1)

@@ -1,0 +1,165 @@
+# Editor Document — file path, language ID, and cached metadata for open files.
+#
+# Provides: EditorDocument.
+
+use std.editor.buffer.buffer.{EditorBuffer}
+use std.editor.common.types.{EditorBufferId, EditorDocumentId}
+use std.editor.services.md_doc_stats.{MdDocStats, md_compute_stats}
+use std.editor.view.markdown_state.{MarkdownState}
+use std.editor.view.md_editing.{MdEditorState, md_editor_state_new}
+use std.editor.view.outline_panel.{OutlineItem, OutlinePanel, outline_panel_from_items, outline_panel_new}
+use std.editor.view.preview_pane.{preview_pane_create}
+use std.io_runtime.{file_read, file_write}
+
+fn _language_id_from_path(path: text) -> text:
+    if path.ends_with(".md") or path.ends_with(".markdown"):
+        return "markdown"
+    if path.ends_with(".spl"):
+        return "simple"
+    if path.ends_with(".rs"):
+        return "rust"
+    if path.ends_with(".json"):
+        return "json"
+    if path.ends_with(".ts") or path.ends_with(".tsx"):
+        return "typescript"
+    if path.ends_with(".js") or path.ends_with(".jsx"):
+        return "javascript"
+    "plaintext"
+
+class EditorDocument:
+    id: EditorDocumentId
+    _path: text
+    language_id: text
+    content: text
+    cached_md_stats: MdDocStats
+    modified: bool
+    buffer: EditorBuffer
+    md_state: MarkdownState?
+
+    static fn from_path(path: text) -> EditorDocument:
+        val content = file_read(path)
+        val lang = _language_id_from_path(path)
+        EditorDocument(
+            id: EditorDocumentId(value: 0),
+            _path: path,
+            language_id: lang,
+            content: content,
+            cached_md_stats: md_compute_stats(content),
+            modified: false,
+            buffer: EditorBuffer.from_text(EditorBufferId(value: 0), content),
+            md_state: nil
+        )
+
+    static fn empty() -> EditorDocument:
+        EditorDocument(
+            id: EditorDocumentId(value: 0),
+            _path: "",
+            language_id: "plaintext",
+            content: "",
+            cached_md_stats: md_compute_stats(""),
+            modified: false,
+            buffer: EditorBuffer.new(),
+            md_state: nil
+        )
+
+    fn path() -> text:
+        me._path
+
+    fn display_name() -> text:
+        if me._path == "":
+            return "[No Name]"
+        val parts = me._path.split("/")
+        if parts.len() == 0:
+            return "[No Name]"
+        parts[parts.len() - 1]
+
+    fn has_markdown_state() -> bool:
+        me.md_state != nil
+
+    fn markdown_state() -> MdEditorState:
+        val ms = me.md_state
+        if ms == nil:
+            return md_editor_state_new()
+        MdEditorState(preview_visible: ms.preview_visible, outline_visible: ms.outline_visible)
+
+    me set_markdown_state(state: MdEditorState):
+        val current = me.md_state
+        val preview = if current == nil then preview_pane_create(0) else: current.preview
+        val outline = if current == nil then outline_panel_new() else: current.outline
+        me.md_state = MarkdownState(preview_visible: state.preview_visible, preview: preview, outline_visible: state.outline_visible, outline: outline)
+
+    me set_markdown_outline_panel(outline: OutlinePanel):
+        val current = me.md_state
+        val preview_visible = if current == nil then false else: current.preview_visible
+        val preview = if current == nil then preview_pane_create(0) else: current.preview
+        val outline_visible = if current == nil then true else: current.outline_visible
+        me.md_state = MarkdownState(preview_visible: preview_visible, preview: preview, outline_visible: outline_visible, outline: outline)
+
+    fn markdown_preview_visible() -> bool:
+        val ms = me.md_state
+        if ms == nil:
+            return false
+        ms.preview_visible
+
+    fn markdown_outline_visible() -> bool:
+        val ms = me.md_state
+        if ms == nil:
+            return false
+        ms.outline_visible
+
+    me toggle_markdown_preview(content: text) -> bool:
+        val current = me.md_state
+        val next_visible = if current == nil then true else: not current.preview_visible
+        val preview = if current == nil then preview_pane_create(0) else: current.preview
+        val outline_visible = if current == nil then false else: current.outline_visible
+        val outline = if current == nil then outline_panel_new() else: current.outline
+        me.md_state = MarkdownState(preview_visible: next_visible, preview: preview, outline_visible: outline_visible, outline: outline)
+        next_visible
+
+    me toggle_markdown_outline(content: text) -> bool:
+        val current = me.md_state
+        val preview_visible = if current == nil then false else: current.preview_visible
+        val preview = if current == nil then preview_pane_create(0) else: current.preview
+        val next_visible = if current == nil then true else: not current.outline_visible
+        val outline = _editor_document_outline_from_content(content)
+        me.md_state = MarkdownState(preview_visible: preview_visible, preview: preview, outline_visible: next_visible, outline: outline)
+        next_visible
+
+    fn doc_id() -> EditorDocumentId:
+        me.id
+
+    me save(new_content: text) -> bool:
+        if me._path == "":
+            return false
+        val ok = file_write(me._path, new_content)
+        if ok:
+            me.content = new_content
+            me.cached_md_stats = md_compute_stats(new_content)
+            me.modified = false
+        ok
+
+fn _editor_document_outline_from_content(content: text) -> OutlinePanel:
+    val lines = content.split("\n")
+    var items: [OutlineItem] = []
+    var i = 0
+    while i < lines.len():
+        val level = _editor_document_heading_level(lines[i])
+        if level > 0:
+            items.push(OutlineItem(kind: "heading", label: _editor_document_heading_label(lines[i], level), line: i, depth: level - 1))
+        i = i + 1
+    outline_panel_from_items(items)
+
+fn _editor_document_heading_level(line: text) -> i64:
+    val trimmed = line.trim()
+    var level = 0
+    while level < trimmed.len() and trimmed.char_at(level) == "#":
+        level = level + 1
+    if level == 0 or level > 6:
+        return 0
+    if level < trimmed.len() and trimmed.char_at(level) == " ":
+        return level
+    0
+
+fn _editor_document_heading_label(line: text, level: i64) -> text:
+    val trimmed = line.trim()
+    trimmed.slice(level, trimmed.len()).trim()

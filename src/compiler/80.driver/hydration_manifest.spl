@@ -1,0 +1,157 @@
+# Hydration Manifest
+#
+# Generates hydration manifests for WASM client block hydration.
+# Maps server-side rendered HTML DOM elements to WASM event handlers.
+#
+# Port of rust/compiler/src/hydration_manifest.rs (451 lines)
+
+
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct EventOptions:
+    once: bool?
+    passive: bool?
+    capture: bool?
+
+struct EventBinding:
+    selector: text
+    event: text
+    handler: text
+    options: EventOptions?
+
+struct ManifestMetadata:
+    compiled_at: text
+    source: text
+    wasm_size: i64?
+
+# ============================================================================
+# Hydration Manifest
+# ============================================================================
+
+class HydrationManifest:
+    """Maps DOM elements to WASM event handlers for hydration."""
+    version: i64
+    exports: [text]
+    bindings: [EventBinding]
+    state: {text: text}
+    metadata: ManifestMetadata?
+
+impl HydrationManifest:
+    static fn create() -> HydrationManifest:
+        HydrationManifest(version: 2, exports: [], bindings: [],
+                          state: {}, metadata: nil)
+
+    me add_export(function_name: text):
+        if not self.exports.contains(function_name):
+            self.exports = self.exports.push(function_name)
+
+    me add_binding(selector: text, event: text, handler: text):
+        self.bindings = self.bindings.push(
+            EventBinding(selector: selector, event: event,
+                         handler: handler, options: nil))
+        self.add_export(handler)
+
+    me add_binding_with_options(selector: text, event: text,
+                                handler: text, options: EventOptions):
+        self.bindings = self.bindings.push(
+            EventBinding(selector: selector, event: event,
+                         handler: handler, options: Some(options)))
+        self.add_export(handler)
+
+    me set_state(key: text, value: text):
+        self.state[key] = value
+
+    me set_metadata(metadata: ManifestMetadata):
+        self.metadata = Some(metadata)
+
+    fn to_sdn() -> text:
+        """Serialize to SDN format."""
+        var lines: [text] = [
+            "hydration_manifest:",
+            "  version: {self.version}"
+        ]
+
+        if self.exports.?:
+            lines = lines.push("  exports: [{self.exports.map(\"\\\"{_1}\\\"\").join(\", \")}]")
+
+        if self.state.?:
+            lines = lines.push("  state:")
+            # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
+            for k in self.state.keys():
+                val v = self.state[k]
+                lines = lines.push("    {k}: \"{v}\"")
+
+        if self.bindings.?:
+            lines = lines.push("")
+            lines = lines.push("bindings |selector, event, handler, once, passive, capture|")
+            for binding in self.bindings:
+                val options = binding.options
+                val once = match options:
+                    case Some(o):
+                        if o.once.?: "true" else: "false"
+                    case nil:
+                        "false"
+                val passive = match options:
+                    case Some(o):
+                        if o.passive.?: "true" else: "false"
+                    case nil:
+                        "false"
+                val capture = match options:
+                    case Some(o):
+                        if o.capture.?: "true" else: "false"
+                    case nil:
+                        "false"
+                lines = lines.push(
+                    "    \"{binding.selector}\", {binding.event}, {binding.handler}, {once}, {passive}, {capture}")
+
+        match self.metadata:
+            case Some(meta):
+                lines = lines.push("")
+                lines = lines.push("metadata:")
+                lines = lines.push("  compiled_at: \"{meta.compiled_at}\"")
+                lines = lines.push("  source: \"{meta.source}\"")
+                match meta.wasm_size:
+                    case Some(wasm_size):
+                        lines = lines.push("  wasm_size: {wasm_size}")
+                    case nil:
+                        pass
+            case nil:
+                pass
+
+        lines.join("\n")
+
+    fn generate_hydration_script() -> text:
+        """Generate JavaScript hydration code."""
+        var script: [text] = [
+            "// Generated hydration script",
+            "export async function hydrate(wasm) {"
+        ]
+
+        # Verify exports
+        script = script.push("  // Verify WASM exports")
+        for exp in self.exports:
+            script = script.push("  if (typeof wasm.{exp} !== 'function') {")
+            script = script.push("    console.warn('Missing WASM export: {exp}');")
+            script = script.push("  }")
+        script = script.push("")
+
+        # Bind events
+        script = script.push("  // Bind event handlers")
+        for binding in self.bindings:
+            val opts = match binding.options:
+                case Some(o):
+                    var parts: [text] = []
+                    if o.once.?: parts = parts.push("once: true")
+                    if o.passive.?: parts = parts.push("passive: true")
+                    if o.capture.?: parts = parts.push("capture: true")
+                    if parts.?: ", { {parts.join(\", \")} }" else: ""
+                case nil:
+                    ""
+            script = script.push(
+                "  document.querySelector('{binding.selector}').addEventListener('{binding.event}', wasm.{binding.handler}{opts});")
+
+        script = script.push("}")
+        script.join("\n")

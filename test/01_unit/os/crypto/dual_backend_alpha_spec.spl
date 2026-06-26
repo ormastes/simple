@@ -1,0 +1,48 @@
+use std.spipe.*
+use os.crypto.dual_backend.{dual_backend_alpha_default_mode, dual_backend_beta_default_mode, dual_backend_choose_bool, dual_backend_choose_bytes, dual_backend_choose_text, dual_backend_choose_u64}
+
+# Alpha is fail-CLOSED (alpha_mode_not_fail_closed_2026-06-15 fixed): a true
+# runtime/pure mismatch calls rt_exit(70) and aborts the process. That abort
+# CANNOT be asserted in-process (it would crash this spec file's child process),
+# so it is verified out-of-process by a bin/simple run probe that triggers a
+# mismatch and checks the non-zero exit code. In-process we assert:
+#   (a) alpha AGREEMENT returns the agreed value (no halt), and
+#   (b) BETA mode on mismatch logs and returns the preferred side (no halt) —
+#       which proves the comparison/diff path itself still works.
+
+describe "os.crypto.dual_backend alpha agreement (no halt)":
+    it "returns the agreed bytes when runtime and pure match":
+        val out = dual_backend_choose_bytes(
+            "unit",
+            "bytes",
+            dual_backend_alpha_default_mode(),
+            ["case=bytes"],
+            [0x01, 0x02],
+            [0x01, 0x02]
+        )
+        expect(out.len()).to_equal(2)
+        expect(out[0]).to_equal(0x01)
+        expect(out[1]).to_equal(0x02)
+
+    it "returns the agreed scalar values when runtime and pure match":
+        val config = dual_backend_alpha_default_mode()
+        expect(dual_backend_choose_bool("unit", "bool", config, [], true, true)).to_equal(true)
+        expect(dual_backend_choose_u64("unit", "u64", config, [], 7, 7)).to_equal(7)
+        expect(dual_backend_choose_text("unit", "text", config, [], "same", "same")).to_equal("same")
+
+describe "os.crypto.dual_backend beta mismatch (logs, returns preferred)":
+    it "returns the preferred runtime bytes on mismatch in beta mode":
+        val beta_out = dual_backend_choose_bytes(
+            "unit",
+            "bytes",
+            dual_backend_beta_default_mode(),
+            ["case=beta"],
+            [0xAA],
+            [0xBB]
+        )
+        expect(beta_out.len()).to_equal(1)
+        expect(beta_out[0]).to_equal(0xAA)
+
+    it "returns the preferred runtime scalar on mismatch in beta mode":
+        val config = dual_backend_beta_default_mode()
+        expect(dual_backend_choose_u64("unit", "u64", config, [], 7, 8)).to_equal(7)

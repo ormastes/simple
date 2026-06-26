@@ -1,0 +1,282 @@
+# FAT32 — Test device registry and per-device operation wrappers.
+#
+# Provides a global Fat32Core registry keyed by DeviceId for use in tests.
+
+use std.driver.types.{DeviceId, DriverClass}
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.types.{FileHandle, DirEntry}
+use std.fs_driver.fat32_core.{Fat32Core, fat32_write_4k_overwrite}
+
+var __fat32_test_devices: [Fat32Core] = []
+var __fat32_test_devices_ready: bool = false
+
+fn _fat32_test_devices_init():
+    if not __fat32_test_devices_ready:
+        __fat32_test_devices = []
+        __fat32_test_devices_ready = true
+
+fn fat32_reset_test_devices():
+    __fat32_test_devices = []
+    __fat32_test_devices_ready = true
+
+fn fat32_register_test_device(device: BlockDevice) -> DeviceId:
+    _fat32_test_devices_init()
+    val slot = __fat32_test_devices.len() as i64
+    var devices = __fat32_test_devices
+    devices.push(Fat32Core.new(device))
+    __fat32_test_devices = devices
+    DeviceId(value: slot, dclass: DriverClass.Block)
+
+fn _fat32_active_index() -> Result<i32, text>:
+    _fat32_test_devices_init()
+    if __fat32_test_devices.len() <= 0:
+        return Err("unknown FAT32 device")
+    Ok(0)
+
+fn fat32_active_mount() -> Result<(), text>:
+    val idx = match _fat32_active_index():
+        case Err(e): return Err(e)
+        case Ok(v): v
+    var core = __fat32_test_devices[idx]
+    val rc = core.mount()
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_active_create_file(path: text) -> Result<FileHandle, text>:
+    val idx = match _fat32_active_index():
+        case Err(e): return Err(e)
+        case Ok(v): v
+    var core = __fat32_test_devices[idx]
+    val rc = core.create_file(path)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_active_create_read4k_file() -> Result<FileHandle, text>:
+    val idx = match _fat32_active_index():
+        case Err(e): return Err(e)
+        case Ok(v): v
+    var core = __fat32_test_devices[idx]
+    val cluster = match core.alloc_cluster():
+        case Err(e):
+            __fat32_test_devices[idx] = core
+            return Err(e)
+        case Ok(v): v
+    val rc = Ok(core.alloc_file_handle(cluster, 0, false))
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_active_create_write4k_file() -> Result<FileHandle, text>:
+    val idx = match _fat32_active_index():
+        case Err(e): return Err(e)
+        case Ok(v): v
+    var core = __fat32_test_devices[idx]
+    val cluster = match core.alloc_cluster():
+        case Err(e):
+            __fat32_test_devices[idx] = core
+            return Err(e)
+        case Ok(v): v
+    val rc = Ok(core.alloc_file_handle(cluster, 0, false))
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_active_close(handle: FileHandle) -> Result<(), text>:
+    val idx = match _fat32_active_index():
+        case Err(e): return Err(e)
+        case Ok(v): v
+    var core = __fat32_test_devices[idx]
+    val rc = core.close(handle)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_active_seek(handle: FileHandle, position: i64) -> Result<(), text>:
+    val idx = match _fat32_active_index():
+        case Err(e): return Err(e)
+        case Ok(v): v
+    var core = __fat32_test_devices[idx]
+    val rc = core.seek(handle, position)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_active_read(handle: FileHandle, buf: [u8], len: i64) -> Result<i64, text>:
+    val idx = match _fat32_active_index():
+        case Err(e): return Err(e)
+        case Ok(v): v
+    var core = __fat32_test_devices[idx]
+    val rc = core.read(handle, buf, len)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_active_write(handle: FileHandle, buf: [u8], len: i64) -> Result<i64, text>:
+    val idx = match _fat32_active_index():
+        case Err(e): return Err(e)
+        case Ok(v): v
+    var core = __fat32_test_devices[idx]
+    val rc = core.write(handle, buf, len)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_active_write_4k_overwrite(handle: FileHandle, buf: [u8]) -> Result<i64, text>:
+    val idx = match _fat32_active_index():
+        case Err(e): return Err(e)
+        case Ok(v): v
+    var core = __fat32_test_devices[idx]
+    val rc = fat32_write_4k_overwrite(core, handle, buf)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_test_device_probe(dev: DeviceId) -> Result<bool, text>:
+    if dev.dclass != DriverClass.Block or dev.value < 0:
+        return Ok(false)
+    val idx = dev.value.to_i32()
+    if idx < 0 or idx >= __fat32_test_devices.len():
+        return Ok(false)
+    var core = __fat32_test_devices[idx]
+    val rc = core.probe_boot_sector()
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_test_device_mount(dev: DeviceId) -> Result<(), text>:
+    if dev.dclass != DriverClass.Block or dev.value < 0:
+        return Err("invalid FAT32 device")
+    val idx = dev.value.to_i32()
+    if idx < 0 or idx >= __fat32_test_devices.len():
+        return Err("unknown FAT32 device")
+    var core = __fat32_test_devices[idx]
+    val rc = core.mount()
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_test_device_unmount(dev: DeviceId) -> Result<(), text>:
+    if dev.dclass != DriverClass.Block or dev.value < 0:
+        return Err("invalid FAT32 device")
+    val idx = dev.value.to_i32()
+    if idx < 0 or idx >= __fat32_test_devices.len():
+        return Err("unknown FAT32 device")
+    var core = __fat32_test_devices[idx]
+    val rc = core.unmount()
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_test_device_is_mounted(dev: DeviceId) -> Result<bool, text>:
+    if dev.dclass != DriverClass.Block or dev.value < 0:
+        return Ok(false)
+    val idx = dev.value.to_i32()
+    if idx < 0 or idx >= __fat32_test_devices.len():
+        return Ok(false)
+    Ok(__fat32_test_devices[idx].mounted)
+
+fn fat32_test_device_open(dev: DeviceId, path: text) -> Result<FileHandle, text>:
+    if dev.dclass != DriverClass.Block or dev.value < 0:
+        return Err("invalid FAT32 device")
+    val idx = dev.value.to_i32()
+    if idx < 0 or idx >= __fat32_test_devices.len():
+        return Err("unknown FAT32 device")
+    var core = __fat32_test_devices[idx]
+    val rc = core.open(path)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_test_device_create_file(dev: DeviceId, path: text) -> Result<FileHandle, text>:
+    if dev.dclass != DriverClass.Block or dev.value < 0:
+        return Err("invalid FAT32 device")
+    val idx = dev.value.to_i32()
+    if idx < 0 or idx >= __fat32_test_devices.len():
+        return Err("unknown FAT32 device")
+    var core = __fat32_test_devices[idx]
+    val rc = core.create_file(path)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_test_device_close(dev: DeviceId, handle: FileHandle) -> Result<(), text>:
+    if dev.dclass != DriverClass.Block or dev.value < 0:
+        return Err("invalid FAT32 device")
+    val idx = dev.value.to_i32()
+    if idx < 0 or idx >= __fat32_test_devices.len():
+        return Err("unknown FAT32 device")
+    var core = __fat32_test_devices[idx]
+    val rc = core.close(handle)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_test_device_seek(dev: DeviceId, handle: FileHandle, position: i64) -> Result<(), text>:
+    if dev.dclass != DriverClass.Block or dev.value < 0:
+        return Err("invalid FAT32 device")
+    val idx = dev.value.to_i32()
+    if idx < 0 or idx >= __fat32_test_devices.len():
+        return Err("unknown FAT32 device")
+    var core = __fat32_test_devices[idx]
+    val rc = core.seek(handle, position)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_test_device_read_bytes(dev: DeviceId, handle: FileHandle, len: i64) -> Result<[u8], text>:
+    if dev.dclass != DriverClass.Block or dev.value < 0:
+        return Err("invalid FAT32 device")
+    val idx = dev.value.to_i32()
+    if idx < 0 or idx >= __fat32_test_devices.len():
+        return Err("unknown FAT32 device")
+    var core = __fat32_test_devices[idx]
+    val rc = core.read_bytes(handle, len)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_test_device_read(dev: DeviceId, handle: FileHandle, buf: [u8], len: i64) -> Result<i64, text>:
+    if dev.dclass != DriverClass.Block or dev.value < 0:
+        return Err("invalid FAT32 device")
+    val idx = dev.value.to_i32()
+    if idx < 0 or idx >= __fat32_test_devices.len():
+        return Err("unknown FAT32 device")
+    var core = __fat32_test_devices[idx]
+    val rc = core.read(handle, buf, len)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_test_device_write(dev: DeviceId, handle: FileHandle, buf: [u8], len: i64) -> Result<i64, text>:
+    if dev.dclass != DriverClass.Block or dev.value < 0:
+        return Err("invalid FAT32 device")
+    val idx = dev.value.to_i32()
+    if idx < 0 or idx >= __fat32_test_devices.len():
+        return Err("unknown FAT32 device")
+    var core = __fat32_test_devices[idx]
+    val rc = core.write(handle, buf, len)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_test_device_write_4k_overwrite(dev: DeviceId, handle: FileHandle, buf: [u8]) -> Result<i64, text>:
+    if dev.dclass != DriverClass.Block or dev.value < 0:
+        return Err("invalid FAT32 device")
+    val idx = dev.value.to_i32()
+    if idx < 0 or idx >= __fat32_test_devices.len():
+        return Err("unknown FAT32 device")
+    var core = __fat32_test_devices[idx]
+    val rc = fat32_write_4k_overwrite(core, handle, buf)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_test_device_readdir(dev: DeviceId, path: text) -> Result<[DirEntry], text>:
+    if dev.dclass != DriverClass.Block or dev.value < 0:
+        return Err("invalid FAT32 device")
+    val idx = dev.value.to_i32()
+    if idx < 0 or idx >= __fat32_test_devices.len():
+        return Err("unknown FAT32 device")
+    var core = __fat32_test_devices[idx]
+    val rc = core.readdir(path)
+    __fat32_test_devices[idx] = core
+    rc
+
+fn fat32_test_device_truncate(dev: DeviceId, handle: FileHandle, size: i64) -> Result<(), text>:
+    if dev.dclass != DriverClass.Block or dev.value < 0:
+        return Err("invalid FAT32 device")
+    val idx = dev.value.to_i32()
+    if idx < 0 or idx >= __fat32_test_devices.len():
+        return Err("unknown FAT32 device")
+    var core = __fat32_test_devices[idx]
+    val rc = core.truncate(handle, size)
+    __fat32_test_devices[idx] = core
+    rc
+
+export fat32_test_device_probe, fat32_test_device_mount, fat32_test_device_unmount
+export fat32_test_device_is_mounted, fat32_test_device_open, fat32_test_device_create_file
+export fat32_test_device_close, fat32_test_device_seek, fat32_test_device_read_bytes
+export fat32_test_device_read, fat32_test_device_write, fat32_test_device_write_4k_overwrite
+export fat32_test_device_readdir, fat32_test_device_truncate

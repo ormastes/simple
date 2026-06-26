@@ -1,0 +1,91 @@
+# @cover src/app/mcp/main_lazy_query_tools.spl 80%
+"""
+# Context/Ponytail Mimic System Specification
+
+**Feature:** LLM tooling context/ponytail mimic
+**Requirements:** REQ-012, REQ-013, REQ-014, REQ-015
+**Plan:** doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md
+**System Test Plan:** doc/03_plan/sys_test/llm_tooling_context_ponytail_mimic.md
+
+## Overview
+
+This system spec verifies the shipped tool surfaces for the local
+context-mode mimic and Ponytail mimic pair. It proves the CLI, app MCP, lower
+MCP, operator guide, and verification guard all describe the same public
+contract.
+"""
+
+use std.spec
+use std.io_runtime.{file_read}
+
+fn read(path: text) -> text:
+    file_read(path)
+
+describe "context/ponytail mimic system surface":
+    it "REQ-012 exposes source-less SQL context DB query through the CLI":
+        val cli = read("src/app/context/main.spl")
+        expect(cli).to_contain("context_args_allow_sourceless_sql_query(args)")
+        expect(cli).to_contain("context_sql_query_packs_by_source([], \"\", sourceless_query, sourceless_source_filter, sourceless_db_path, sourceless_format)")
+        expect(cli).to_contain("--source-filter=")
+
+    it "REQ-013 and REQ-015 expose SQL query and source filter through app MCP":
+        val handler = read("src/app/mcp/main_lazy_query_tools.spl")
+        val table = read("src/app/mcp/tool_table.spl")
+        val static_tools = read("src/app/mcp/main_static_tools.spl")
+        val dispatch = read("src/app/mcp/main_dispatch.spl")
+        expect(handler).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
+        expect(handler).to_contain("if file == \"\" and not sourceless_sql_query")
+        expect(handler).to_contain("ctx_args.push(\"--query=\" + query)")
+        expect(handler).to_contain("ctx_args.push(\"--sql\")")
+        expect(handler).to_contain("ctx_args.push(\"--db=\" + db_path)")
+        expect(handler).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
+        expect(table).to_contain("tool_entry(\"simple_context\"")
+        expect(table).to_contain("prop_str(\"source_filter\", \"Filter SQL query rows by stored source path\")")
+        expect(table).to_contain("e.required_json = build_required([])")
+        expect(static_tools).to_contain("_mcp_static_tool(\"simple_context\"")
+        expect(dispatch).to_contain("return handle_simple_context(id, body)")
+
+    it "REQ-013 and REQ-015 expose SQL query and source filter through lower MCP":
+        val handler = read("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl")
+        val schema = read("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl")
+        val dispatch = read("src/lib/nogc_async_mut/mcp/main_lazy.spl")
+        expect(handler).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
+        expect(handler).to_contain("if file == \"\" and not sourceless_sql_query")
+        expect(handler).to_contain("ctx_args.push(\"--sql\")")
+        expect(handler).to_contain("ctx_args.push(\"--db=\" + db_path)")
+        expect(handler).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
+        expect(schema).to_contain("make_tool_schema(name: \"simple_context\"")
+        expect(schema).to_contain("jp(\"source_filter\", jo2")
+        expect(schema).to_contain("req = \"[]\"")
+        expect(dispatch).to_contain("tool_name == \"simple_context\"")
+        expect(dispatch).to_contain("handle_simple_context(id, body)")
+
+    it "REQ-014 preserves SQL source filter documentation and absence-safe public output":
+        val context_ops = read("src/app/io/context_ops.spl")
+        val guide = read("doc/07_guide/app/mcp/mcp.md")
+        val guard = read("scripts/check/check-llm-tooling-public-absence-rendering.shs")
+        expect(context_ops).to_contain("context_sql_query_packs_by_source")
+        expect(context_ops).to_contain("source_filter")
+        expect(guide).to_contain("context --sql --query=<text> --db=<path> --source-filter=<text>")
+        expect(guide).to_contain("The MCP tool accepts `file`, optional `target`, `format`")
+        expect(guide).to_contain("source_filter")
+        expect(guard).to_contain("llm_tooling_context_ponytail_mimic.md")
+        expect(guard).to_contain("context_generate_spec.md")
+        expect(guard).to_contain("ponytail_audit_spec.md")
+        expect(guard).to_contain("Public absence-rendering gate")
+
+    it "exposes Ponytail audit and simplification modes through app and lower MCP":
+        val app_handler = read("src/app/mcp/main_lazy_query_tools.spl")
+        val app_table = read("src/app/mcp/tool_table.spl")
+        val lower_handler = read("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl")
+        val lower_schema = read("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl")
+        expect(app_handler).to_contain("ponytail_audit")
+        expect(app_handler).to_contain("ponytail_simplification_report")
+        expect(app_handler).to_contain("Invalid mode: ")
+        expect(app_handler).to_contain("_render_ponytail_mcp(file, mode, result, format)")
+        expect(app_table).to_contain("prop_str(\"mode\", \"Mode: audit, simplification\")")
+        expect(lower_handler).to_contain("ponytail_audit_source")
+        expect(lower_handler).to_contain("ponytail_simplification_report_source")
+        expect(lower_handler).to_contain("_mcp_render_ponytail_report")
+        expect(lower_schema).to_contain("make_tool_schema(name: \"simple_ponytail\"")
+        expect(lower_schema).to_contain("Mode: audit, simplification")

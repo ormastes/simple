@@ -1,0 +1,120 @@
+# Object Pool — generic slot-based pool with acquire/release
+#
+# Maintains a fixed-capacity pool of tagged slots that can be
+# acquired and released by index or tag. Inactive slots are
+# recycled on subsequent acquire calls.
+
+# ============================================================================
+# PoolSlot — single slot in the object pool
+# ============================================================================
+
+struct PoolSlot:
+    value: text
+    active: bool
+    generation: i64
+
+# ============================================================================
+# ObjectPool — fixed-capacity tagged slot manager
+# ============================================================================
+
+class ObjectPool:
+    slots: [PoolSlot]
+    capacity: i32
+    active_count: i32
+
+impl ObjectPool:
+    static fn new(capacity: i32) -> ObjectPool:
+        """Create an empty pool with the given capacity."""
+        ObjectPool(
+            slots: [],
+            capacity: capacity,
+            active_count: 0
+        )
+
+    me acquire(tag: text) -> i32:
+        """Acquire a slot with the given tag.
+        Reuses an inactive slot if available. Returns the slot index,
+        or -1 if the pool is full."""
+        # Try to reuse an inactive slot
+        var i = 0
+        while i < self.slots.len():
+            val slot = self.slots[i]
+            if not slot.active:
+                val new_slot = PoolSlot(
+                    value: tag,
+                    active: true,
+                    generation: slot.generation + 1
+                )
+                self.slots = self._replace_slot(i, new_slot)
+                self.active_count = self.active_count + 1
+                return i
+            i = i + 1
+
+        # No inactive slot — add new if under capacity
+        if self.slots.len() < self.capacity:
+            val new_slot = PoolSlot(
+                value: tag,
+                active: true,
+                generation: 0
+            )
+            self.slots = self.slots.push(new_slot)
+            self.active_count = self.active_count + 1
+            return self.slots.len() - 1
+
+        -1
+
+    me release(index: i32):
+        """Deactivate the slot at the given index."""
+        if index >= 0 and index < self.slots.len():
+            val old = self.slots[index]
+            if old.active:
+                val new_slot = PoolSlot(
+                    value: old.value,
+                    active: false,
+                    generation: old.generation
+                )
+                self.slots = self._replace_slot(index, new_slot)
+                self.active_count = self.active_count - 1
+
+    me release_by_tag(tag: text):
+        """Release all slots matching the given tag."""
+        var i = 0
+        while i < self.slots.len():
+            val slot = self.slots[i]
+            if slot.active and slot.value == tag:
+                self.release(i)
+            i = i + 1
+
+    fn get_tag(self, index: i32) -> text:
+        """Get the tag at the given index."""
+        self.slots[index].value
+
+    fn is_active(self, index: i32) -> bool:
+        """Check if the slot at the given index is active."""
+        if index >= 0 and index < self.slots.len():
+            return self.slots[index].active
+        false
+
+    fn count(self) -> i32:
+        """Return the number of active slots."""
+        self.active_count
+
+    me clear():
+        """Release all slots."""
+        var i = 0
+        while i < self.slots.len():
+            self.release(i)
+            i = i + 1
+
+    # --- internal helper ---
+    me _replace_slot(index: i32, new_slot: PoolSlot) -> [PoolSlot]:
+        """Replace slot at index, returning new list."""
+        var result: [PoolSlot] = []
+        var i = 0
+        while i < self.slots.len():
+            if i == index:
+                result = result.push(new_slot)
+            else:
+                result = result.push(self.slots[i])
+            i = i + 1
+        result

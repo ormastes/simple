@@ -1,0 +1,238 @@
+
+# Size budget tracker — AC-3, AC-4, AC-9
+# Tracks binary size budgets, strip configurations, and before/after comparisons.
+
+class SizeBudget:
+    binary_name: text
+    budget_bytes: i64
+    actual_bytes: i64
+    warning_pct: i32
+
+    static fn create(binary_name: text, budget_bytes: i64, warning_pct: i32) -> SizeBudget:
+        return SizeBudget(
+            binary_name: binary_name,
+            budget_bytes: budget_bytes,
+            actual_bytes: 0,
+            warning_pct: warning_pct
+        )
+
+    me record(actual_bytes: i64) -> SizeBudget:
+        return SizeBudget(
+            binary_name: self.binary_name,
+            budget_bytes: self.budget_bytes,
+            actual_bytes: actual_bytes,
+            warning_pct: self.warning_pct
+        )
+
+    me usage_pct() -> i32:
+        if self.budget_bytes == 0:
+            return 0
+        return (self.actual_bytes * 100 / self.budget_bytes).to_i32()
+
+    me status() -> text:
+        if self.actual_bytes <= self.budget_bytes:
+            var threshold: i64 = self.budget_bytes * self.warning_pct.to_i64() / 100
+            if self.actual_bytes > threshold:
+                return "warning"
+            return "pass"
+        return "fail"
+
+    me summary() -> text:
+        var pct: i32 = self.usage_pct()
+        var st: text = self.status()
+        return self.binary_name + ": " + self.actual_bytes.to_text() + "/" + self.budget_bytes.to_text() + " bytes (" + pct.to_text() + "%) [" + st + "]"
+
+
+class StripConfig:
+    strip_debug: bool
+    strip_symbols: bool
+    keep_dwarf: bool
+    compress_debug: bool
+
+    static fn release() -> StripConfig:
+        return StripConfig(
+            strip_debug: true,
+            strip_symbols: true,
+            keep_dwarf: false,
+            compress_debug: false
+        )
+
+    static fn debug_release() -> StripConfig:
+        return StripConfig(
+            strip_debug: false,
+            strip_symbols: true,
+            keep_dwarf: true,
+            compress_debug: false
+        )
+
+    static fn none() -> StripConfig:
+        return StripConfig(
+            strip_debug: false,
+            strip_symbols: false,
+            keep_dwarf: false,
+            compress_debug: false
+        )
+
+    me estimated_reduction_pct() -> i32:
+        if self.strip_debug == true and self.strip_symbols == true and self.keep_dwarf == false:
+            return 60
+        if self.strip_symbols == true and self.keep_dwarf == true:
+            return 30
+        return 0
+
+    me summary() -> text:
+        var pct: i32 = self.estimated_reduction_pct()
+        var dbg_part: text = "strip_debug=" + self.strip_debug.to_text()
+        var sym_part: text = "strip_symbols=" + self.strip_symbols.to_text()
+        var dw_part: text = "keep_dwarf=" + self.keep_dwarf.to_text()
+        var cmp_part: text = "compress_debug=" + self.compress_debug.to_text()
+        return "StripConfig[" + dbg_part + ", " + sym_part + ", " + dw_part + ", " + cmp_part + "] ~" + pct.to_text() + "% reduction"
+
+
+class SizeComparison:
+    binary_name: text
+    before_bytes: i64
+    after_bytes: i64
+
+    static fn create(binary_name: text, before_bytes: i64, after_bytes: i64) -> SizeComparison:
+        return SizeComparison(
+            binary_name: binary_name,
+            before_bytes: before_bytes,
+            after_bytes: after_bytes
+        )
+
+    me reduction_bytes() -> i64:
+        return self.before_bytes - self.after_bytes
+
+    me reduction_pct() -> i32:
+        if self.before_bytes == 0:
+            return 0
+        return ((self.before_bytes - self.after_bytes) * 100 / self.before_bytes).to_i32()
+
+    me is_regression() -> bool:
+        return self.after_bytes > self.before_bytes
+
+    me summary() -> text:
+        var rb: i64 = self.reduction_bytes()
+        var rp: i32 = self.reduction_pct()
+        var reg_tag: text = ""
+        if self.is_regression() == true:
+            reg_tag = " [REGRESSION]"
+        return self.binary_name + ": " + self.before_bytes.to_text() + " -> " + self.after_bytes.to_text() + " bytes (delta " + rb.to_text() + ", " + rp.to_text() + "% reduction)" + reg_tag
+
+
+class SizeTrackingReport:
+    report_name: text
+    total_before: i64
+    total_after: i64
+    entry_count: i32
+    b0_name: text
+    b1_name: text
+    b2_name: text
+    b3_name: text
+    b4_name: text
+    b5_name: text
+    b6_name: text
+    b7_name: text
+    b0_before: i64
+    b1_before: i64
+    b2_before: i64
+    b3_before: i64
+    b4_before: i64
+    b5_before: i64
+    b6_before: i64
+    b7_before: i64
+    b0_after: i64
+    b1_after: i64
+    b2_after: i64
+    b3_after: i64
+    b4_after: i64
+    b5_after: i64
+    b6_after: i64
+    b7_after: i64
+
+    static fn create(report_name: text) -> SizeTrackingReport:
+        return SizeTrackingReport(
+            report_name: report_name,
+            total_before: 0,
+            total_after: 0,
+            entry_count: 0,
+            b0_name: "", b1_name: "", b2_name: "", b3_name: "",
+            b4_name: "", b5_name: "", b6_name: "", b7_name: "",
+            b0_before: 0, b1_before: 0, b2_before: 0, b3_before: 0,
+            b4_before: 0, b5_before: 0, b6_before: 0, b7_before: 0,
+            b0_after: 0, b1_after: 0, b2_after: 0, b3_after: 0,
+            b4_after: 0, b5_after: 0, b6_after: 0, b7_after: 0
+        )
+
+    me add_entry(name: text, before: i64, after: i64) -> bool:
+        if self.entry_count >= 8:
+            return false
+        var slot: i32 = self.entry_count
+        if slot == 0:
+            self.b0_name = name
+            self.b0_before = before
+            self.b0_after = after
+        if slot == 1:
+            self.b1_name = name
+            self.b1_before = before
+            self.b1_after = after
+        if slot == 2:
+            self.b2_name = name
+            self.b2_before = before
+            self.b2_after = after
+        if slot == 3:
+            self.b3_name = name
+            self.b3_before = before
+            self.b3_after = after
+        if slot == 4:
+            self.b4_name = name
+            self.b4_before = before
+            self.b4_after = after
+        if slot == 5:
+            self.b5_name = name
+            self.b5_before = before
+            self.b5_after = after
+        if slot == 6:
+            self.b6_name = name
+            self.b6_before = before
+            self.b6_after = after
+        if slot == 7:
+            self.b7_name = name
+            self.b7_before = before
+            self.b7_after = after
+        self.total_before = self.total_before + before
+        self.total_after = self.total_after + after
+        self.entry_count = self.entry_count + 1
+        return true
+
+    me has_regression() -> bool:
+        if self.entry_count > 0 and self.b0_after > self.b0_before:
+            return true
+        if self.entry_count > 1 and self.b1_after > self.b1_before:
+            return true
+        if self.entry_count > 2 and self.b2_after > self.b2_before:
+            return true
+        if self.entry_count > 3 and self.b3_after > self.b3_before:
+            return true
+        if self.entry_count > 4 and self.b4_after > self.b4_before:
+            return true
+        if self.entry_count > 5 and self.b5_after > self.b5_before:
+            return true
+        if self.entry_count > 6 and self.b6_after > self.b6_before:
+            return true
+        if self.entry_count > 7 and self.b7_after > self.b7_before:
+            return true
+        return false
+
+    me total_reduction_pct() -> i32:
+        if self.total_before == 0:
+            return 0
+        return ((self.total_before - self.total_after) * 100 / self.total_before).to_i32()
+
+    me summary() -> text:
+        var pct: i32 = self.total_reduction_pct()
+        var reg_tag: text = ""
+        if self.has_regression() == true:
+            reg_tag = " [HAS REGRESSION]"
+        return self.report_name + ": " + self.entry_count.to_text() + " entries, total " + self.total_before.to_text() + " -> " + self.total_after.to_text() + " bytes (" + pct.to_text() + "% reduction)" + reg_tag

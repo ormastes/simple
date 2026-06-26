@@ -1,0 +1,65 @@
+"""IPC Error Code Enumeration Specification.
+
+Documents the meaning of numeric error values returned from the IPC
+subsystem at the kernel syscall dispatcher and baremetal runtime boundary.
+
+Agent R research slice (2026-04-13): wm-service observed '-38' during live
+QEMU desktop bring-up. This spec pins down what -38 means in SimpleOS.
+
+Findings:
+  * SimpleOS reuses POSIX errno numbering. ENOSYS = 38 is defined in
+    src/os/posix/errno.spl and src/os/libc/include/errno.h.
+  * The kernel ipc/syscall.spl VFS-IPC stubs explicitly return
+    SyscallResult(value: -38)  # ENOSYS
+    for not-yet-wired payload paths.
+  * The x86_64 baremetal syscall dispatcher
+    (examples/simple_os/arch/x86_64/boot/baremetal_stubs.c) ends its
+    switch with 'default: return -38; /* ENOSYS */' for any syscall id
+    it does not handle.
+
+Therefore '-38' is **POSIX ENOSYS**, not a SimpleOS-specific constant.
+"""
+
+use std.spec
+use os.posix.errno.{ENOSYS, EAGAIN, EPERM, EINVAL}
+
+describe "IPC error code -38 semantics":
+    it "matches POSIX ENOSYS (38)":
+        expect(ENOSYS).to_equal(38)
+
+    it "encodes as -38 when returned from a syscall handler":
+        val returned: i32 = 0 - ENOSYS
+        expect(returned).to_equal(-38)
+
+    it "is distinct from EAGAIN (-11) used by non-blocking IPC recv":
+        expect(EAGAIN).to_equal(11)
+        val eagain_ret: i32 = 0 - EAGAIN
+        expect(eagain_ret).to_equal(-11)
+        val enosys_ret: i32 = 0 - ENOSYS
+        val different = enosys_ret != eagain_ret
+        expect(different).to_equal(true)
+
+    it "is distinct from EPERM (-1) used by capability rejection":
+        expect(EPERM).to_equal(1)
+        val eperm_ret: i32 = 0 - EPERM
+        expect(eperm_ret).to_equal(-1)
+
+    it "is distinct from EINVAL":
+        val different = ENOSYS != EINVAL
+        expect(different).to_equal(true)
+
+describe "IPC error code semantic documentation":
+    it "records -38 as 'function not implemented' (ENOSYS)":
+        # Documentation anchor — if someone changes the numeric value of
+        # ENOSYS, this spec fails loudly so callers depending on -38 as a
+        # sentinel (ps_tool/top_tool/log_viewer) can be updated in lockstep.
+        val semantic_value = 38
+        expect(ENOSYS).to_equal(semantic_value)
+
+    it "proves the baremetal default branch convention":
+        # The x86_64 baremetal syscall dispatcher's default branch returns
+        # -38. Any unrecognized syscall id therefore surfaces as ENOSYS at
+        # the Simple caller. This is expected behaviour for this spec.
+        val expected_default: i32 = -38
+        val enosys_return: i32 = 0 - ENOSYS
+        expect(enosys_return).to_equal(expected_default)

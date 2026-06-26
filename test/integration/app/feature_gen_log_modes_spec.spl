@@ -1,0 +1,46 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val FIXTURE_DIR = "/tmp/simple_feature_gen_log_mode_fixture"
+
+fn _setup_fixture():
+    val (_out, _err, _code) = rt_process_run("/bin/sh", [
+        "-c",
+        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR + "/doc/02_requirements/feature && cat > " + FIXTURE_DIR + "/doc/02_requirements/feature/feature_db.sdn <<'EOF'\nfeatures |\nREQ-001,core,Sample feature,Does work,doc/06_spec/sample.md,pass,pass,pass,pass,linux,complete,true\nREQ-002,tools,Planned feature,Does later,doc/06_spec/planned.md,pass,pass,pass,pass,linux,planned,true\nEOF"
+    ])
+
+fn _run_feature_gen(args: [text]) -> (text, text, i64):
+    val joined = args.join(" ")
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); cd " + FIXTURE_DIR + " && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/feature_gen/main.spl\" " + joined
+    ])
+
+describe "feature-gen log mode CLI options":
+    it "shows shared log options in help":
+        _setup_fixture()
+        val (out, err, code) = _run_feature_gen(["--help"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("--log-mode")
+        expect(out).to_contain("--progress")
+
+    it "supports log-mode json":
+        _setup_fixture()
+        val (out, err, code) = _run_feature_gen(["--log-mode=json"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("\"command\":\"feature-gen\"")
+        expect(out).to_contain("\"status\":\"ok\"")
+        expect(out).to_contain("\"features\":2")
+
+    it "supports dot progress":
+        _setup_fixture()
+        val (out, err, code) = _run_feature_gen(["--progress=dot"])
+        expect(code).to_equal(0)
+        expect(out).to_contain(".")
+        expect(out).to_contain("Done. Generated docs for 2 features")
+
+    it "rejects invalid log mode":
+        _setup_fixture()
+        val (out, err, code) = _run_feature_gen(["--log-mode=noisy"])
+        expect(code).to_equal(1)

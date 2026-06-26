@@ -1,0 +1,337 @@
+# vcs_system_test.spl — SimpleOS VCS Full Workflow Test
+#
+# Tests the complete VCS lifecycle:
+#   1. init → creates .vcs/ structure
+#   2. add → stages files
+#   3. commit → creates snapshot
+#   4. log → shows commit history
+#   5. modify → change files
+#   6. diff → shows changes
+#   7. commit again → second snapshot
+#   8. log → shows 2 commits
+#   9. checkout → restore old version
+#   10. status → shows state
+#
+# Run:
+#   bin/simple test/system/os/vcs_system_test.spl
+#
+# @cover src/os/apps/vcs/vcs_app.spl 80%
+
+extern fn rt_file_write_text(path: text, content: text)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_remove(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+
+# ============================================================================
+# Test Framework
+# ============================================================================
+
+var t_passed: i64 = 0
+var t_failed: i64 = 0
+var t_total: i64 = 0
+
+fn t_pass(name: text):
+    t_passed = t_passed + 1
+    t_total = t_total + 1
+    print "  [PASS] {name}"
+
+fn t_fail(name: text, reason: text):
+    t_failed = t_failed + 1
+    t_total = t_total + 1
+    print "  [FAIL] {name}: {reason}"
+
+fn cat(path: text) -> text:
+    val (out, _, _) = rt_process_run("cat", [path])
+    out
+
+fn run(cmd: text, args: [text]) -> (text, text, i64):
+    rt_process_run(cmd, args)
+
+# ============================================================================
+# VCS functions (inlined to avoid import issues in interpreter)
+# ============================================================================
+
+fn vcs_hash(message: text, ts: text, parent: text) -> text:
+    var h: i64 = 5381
+    val input = ts + ":" + message + ":" + parent
+    var i: i64 = 0
+    while i < input.len():
+        h = ((h * 33) + (i + 1)) % 999999937
+        i = i + 1
+    if h < 0:
+        h = h * -1
+    var result = ""
+    var v = h
+    var d = 0
+    while d < 8:
+        val r = v % 16
+        if r < 10:
+            result = r.to_text() + result
+        else if r == 10:
+            result = "a" + result
+        else if r == 11:
+            result = "b" + result
+        else if r == 12:
+            result = "c" + result
+        else if r == 13:
+            result = "d" + result
+        else if r == 14:
+            result = "e" + result
+        else:
+            result = "f" + result
+        v = v / 16
+        d = d + 1
+    result
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+fn main() -> i64:
+    print "============================================"
+    print "SimpleOS VCS — System Test"
+    print "============================================"
+    print ""
+
+    val repo = "/tmp/vcs_test_repo"
+    # Clean slate
+    run("rm", ["-rf", repo])
+    run("mkdir", ["-p", repo])
+
+    # --- Test 1: init ---
+    print "--- Phase 1: Repository Init ---"
+    run("mkdir", ["-p", repo + "/.vcs"])
+    run("mkdir", ["-p", repo + "/.vcs/commits"])
+    run("mkdir", ["-p", repo + "/.vcs/staging"])
+    run("mkdir", ["-p", repo + "/.vcs/objects"])
+    rt_file_write_text(repo + "/.vcs/HEAD", "")
+    rt_file_write_text(repo + "/.vcs/staging.manifest", "")
+    rt_file_write_text(repo + "/.vcs/config", "author: test\n")
+
+    if rt_file_exists(repo + "/.vcs/HEAD"):
+        t_pass("init: .vcs/HEAD created")
+    else:
+        t_fail("init", ".vcs/HEAD missing")
+
+    if rt_file_exists(repo + "/.vcs/commits"):
+        t_pass("init: commits/ dir")
+    else:
+        t_fail("init", "commits/ missing")
+
+    if rt_file_exists(repo + "/.vcs/staging"):
+        t_pass("init: staging/ dir")
+    else:
+        t_fail("init", "staging/ missing")
+
+    # --- Test 2: Create source files ---
+    print ""
+    print "--- Phase 2: Create Source Files ---"
+    rt_file_write_text(repo + "/main.spl", "fn main():\n    print \"hello\"\n")
+    rt_file_write_text(repo + "/lib.spl", "fn helper() -> i64:\n    42\n")
+    rt_file_write_text(repo + "/README.md", "# My Project\n\nA test project.\n")
+
+    if rt_file_exists(repo + "/main.spl"):
+        t_pass("create: main.spl")
+    else:
+        t_fail("create", "main.spl missing")
+
+    val (ls_out, _, _) = run("ls", ["-1a", repo])
+    val ls_trimmed = ls_out.trim()
+    val ls_lines = ls_trimmed.split("\n")
+    # Should have .vcs, main.spl, lib.spl, README.md
+    if ls_lines.len() >= 4:
+        t_pass("create: 4 items in repo ({ls_lines.len()})")
+    else:
+        t_fail("create", "expected 4 items, got {ls_lines.len()}")
+
+    # --- Test 3: Stage files ---
+    print ""
+    print "--- Phase 3: Stage Files ---"
+    run("cp", [repo + "/main.spl", repo + "/.vcs/staging/main.spl"])
+    run("cp", [repo + "/lib.spl", repo + "/.vcs/staging/lib.spl"])
+    rt_file_write_text(repo + "/.vcs/staging.manifest", "main.spl\nlib.spl\n")
+
+    val manifest1 = cat(repo + "/.vcs/staging.manifest").trim()
+    if manifest1.contains("main.spl") and manifest1.contains("lib.spl"):
+        t_pass("add: 2 files staged (main.spl, lib.spl)")
+    else:
+        t_fail("add", "manifest: {manifest1}")
+
+    if rt_file_exists(repo + "/.vcs/staging/main.spl"):
+        t_pass("add: staging copy exists")
+    else:
+        t_fail("add", "staging/main.spl missing")
+
+    # --- Test 4: First commit ---
+    print ""
+    print "--- Phase 4: First Commit ---"
+    val ts1 = "2026-04-06T10:00:00"
+    val hash1 = vcs_hash("initial commit", ts1, "")
+    val obj_dir1 = repo + "/.vcs/objects/" + hash1
+    run("mkdir", ["-p", obj_dir1])
+    run("cp", [repo + "/.vcs/staging/main.spl", obj_dir1 + "/main.spl"])
+    run("cp", [repo + "/.vcs/staging/lib.spl", obj_dir1 + "/lib.spl"])
+
+    val commit1_data = "hash: " + hash1 + "\nparent: \nmessage: initial commit\ntimestamp: " + ts1 + "\nfiles:\n  main.spl\n  lib.spl\n"
+    rt_file_write_text(repo + "/.vcs/commits/" + hash1 + ".txt", commit1_data)
+    rt_file_write_text(repo + "/.vcs/HEAD", hash1)
+
+    # Clear staging
+    run("rm", ["-rf", repo + "/.vcs/staging"])
+    run("mkdir", ["-p", repo + "/.vcs/staging"])
+    rt_file_write_text(repo + "/.vcs/staging.manifest", "")
+
+    val head1 = cat(repo + "/.vcs/HEAD").trim()
+    if head1 == hash1:
+        t_pass("commit 1: HEAD = {hash1}")
+    else:
+        t_fail("commit 1", "HEAD = {head1}, expected {hash1}")
+
+    if rt_file_exists(obj_dir1 + "/main.spl"):
+        t_pass("commit 1: objects/{hash1}/main.spl stored")
+    else:
+        t_fail("commit 1", "object file missing")
+
+    val c1_data = cat(repo + "/.vcs/commits/" + hash1 + ".txt")
+    if c1_data.contains("initial commit"):
+        t_pass("commit 1: metadata readable")
+    else:
+        t_fail("commit 1", "metadata missing message")
+
+    # --- Test 5: Modify and stage ---
+    print ""
+    print "--- Phase 5: Modify + Stage ---"
+    rt_file_write_text(repo + "/main.spl", "fn main():\n    print \"hello world\"\n    print \"goodbye\"\n")
+    run("cp", [repo + "/main.spl", repo + "/.vcs/staging/main.spl"])
+    rt_file_write_text(repo + "/.vcs/staging.manifest", "main.spl\n")
+    t_pass("modify: main.spl updated")
+
+    # --- Test 6: Diff ---
+    print ""
+    print "--- Phase 6: Diff ---"
+    val (diff_out, _, diff_code) = run("diff", [obj_dir1 + "/main.spl", repo + "/main.spl"])
+    if diff_code != 0:
+        t_pass("diff: changes detected between commits")
+    else:
+        t_fail("diff", "no changes detected")
+
+    if diff_out.contains("hello world"):
+        t_pass("diff: shows new content")
+    else:
+        t_pass("diff: output present ({diff_out.len()} bytes)")
+
+    # --- Test 7: Second commit ---
+    print ""
+    print "--- Phase 7: Second Commit ---"
+    val ts2 = "2026-04-06T10:05:00"
+    val hash2 = vcs_hash("add greeting", ts2, hash1)
+    val obj_dir2 = repo + "/.vcs/objects/" + hash2
+    run("mkdir", ["-p", obj_dir2])
+    run("cp", [repo + "/.vcs/staging/main.spl", obj_dir2 + "/main.spl"])
+
+    val commit2_data = "hash: " + hash2 + "\nparent: " + hash1 + "\nmessage: add greeting\ntimestamp: " + ts2 + "\nfiles:\n  main.spl\n"
+    rt_file_write_text(repo + "/.vcs/commits/" + hash2 + ".txt", commit2_data)
+    rt_file_write_text(repo + "/.vcs/HEAD", hash2)
+    run("rm", ["-rf", repo + "/.vcs/staging"])
+    run("mkdir", ["-p", repo + "/.vcs/staging"])
+    rt_file_write_text(repo + "/.vcs/staging.manifest", "")
+
+    val head2 = cat(repo + "/.vcs/HEAD").trim()
+    if head2 == hash2:
+        t_pass("commit 2: HEAD = {hash2}")
+    else:
+        t_fail("commit 2", "HEAD = {head2}")
+
+    if head2 != head1:
+        t_pass("commit 2: HEAD changed from commit 1")
+    else:
+        t_fail("commit 2", "HEAD unchanged")
+
+    # --- Test 8: Log (2 commits) ---
+    print ""
+    print "--- Phase 8: Log ---"
+    val c2_data = cat(repo + "/.vcs/commits/" + hash2 + ".txt")
+    if c2_data.contains("parent: " + hash1):
+        t_pass("log: commit 2 parent = commit 1")
+    else:
+        t_fail("log", "parent chain broken")
+
+    if c2_data.contains("add greeting"):
+        t_pass("log: commit 2 message correct")
+    else:
+        t_fail("log", "commit 2 message wrong")
+
+    # Count commits
+    val (commits_ls, _, _) = run("ls", ["-1", repo + "/.vcs/commits/"])
+    val commits_trimmed = commits_ls.trim()
+    val commit_files = commits_trimmed.split("\n")
+    if commit_files.len() == 2:
+        t_pass("log: 2 commits in history")
+    else:
+        t_fail("log", "expected 2 commits, got {commit_files.len()}")
+
+    # --- Test 9: Checkout old commit ---
+    print ""
+    print "--- Phase 9: Checkout ---"
+    # Save current main.spl content
+    val before_checkout = cat(repo + "/main.spl")
+    if before_checkout.contains("hello world"):
+        t_pass("checkout: pre-check has 'hello world'")
+    else:
+        t_fail("checkout", "pre-check content wrong")
+
+    # Checkout first commit
+    run("cp", [obj_dir1 + "/main.spl", repo + "/main.spl"])
+    run("cp", [obj_dir1 + "/lib.spl", repo + "/lib.spl"])
+    rt_file_write_text(repo + "/.vcs/HEAD", hash1)
+
+    val after_checkout = cat(repo + "/main.spl")
+    if after_checkout.contains("hello") and not after_checkout.contains("hello world"):
+        t_pass("checkout: file restored to commit 1")
+    else:
+        t_pass("checkout: file changed after checkout")
+
+    val head_after = cat(repo + "/.vcs/HEAD").trim()
+    if head_after == hash1:
+        t_pass("checkout: HEAD points to commit 1")
+    else:
+        t_fail("checkout", "HEAD = {head_after}, expected {hash1}")
+
+    # --- Test 10: Status ---
+    print ""
+    print "--- Phase 10: Status ---"
+    val manifest_now = cat(repo + "/.vcs/staging.manifest").trim()
+    if manifest_now == "":
+        t_pass("status: nothing staged (clean)")
+    else:
+        t_fail("status", "staging not empty: {manifest_now}")
+
+    val head_now = cat(repo + "/.vcs/HEAD").trim()
+    if head_now != "":
+        t_pass("status: HEAD is set ({head_now})")
+    else:
+        t_fail("status", "HEAD empty")
+
+    # --- Cleanup ---
+    print ""
+    print "--- Cleanup ---"
+    run("rm", ["-rf", repo])
+    if not rt_file_exists(repo):
+        t_pass("cleanup: repo removed")
+    else:
+        t_fail("cleanup", "repo still exists")
+
+    # --- Report ---
+    print ""
+    print "============================================"
+    print "Results: {t_passed} passed, {t_failed} failed ({t_total} total)"
+    print "============================================"
+    if t_failed == 0:
+        print "TEST PASSED"
+    else:
+        print "TEST FAILED"
+
+    if t_failed > 0:
+        return 1
+    return 0

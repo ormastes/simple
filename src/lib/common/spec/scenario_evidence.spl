@@ -1,0 +1,485 @@
+# Scenario manual evidence and capture policy helpers.
+#
+# This module is intentionally pure. Concrete TUI, GUI, API, execution, and
+# binary capture providers can depend on it without pulling in runner code.
+
+pub enum ScenarioCaptureMode:
+    off
+    after_step
+    after_scenario
+    on_failure
+
+pub enum ScenarioCaptureKind:
+    tui
+    gui
+    html
+    api
+    protocol
+    text
+    exec
+    binary
+    log
+    artifact
+
+pub enum ScenarioHtmlCheckTool:
+    simple_html_heuristic
+    nu_html_checker
+    html_validate
+    axe_core
+    playwright_locator
+
+pub struct ScenarioCapturePolicy:
+    enabled: bool
+    mode: ScenarioCaptureMode
+    kind: ScenarioCaptureKind
+
+pub struct ScenarioCapturePolicyOverride:
+    present: bool
+    policy: ScenarioCapturePolicy
+
+pub struct ScenarioCapturePolicyResolution:
+    policy: ScenarioCapturePolicy
+    source: text
+
+pub struct ScenarioEvidenceArtifact:
+    kind: ScenarioCaptureKind
+    title: text
+    mime: text
+    path: text
+    body: text
+    scenario_id: text
+    step_id: text
+    redacted: bool
+
+pub struct ScenarioCheckerEvidence:
+    assertion: text
+    passed: bool
+    artifact: ScenarioEvidenceArtifact
+
+pub struct ScenarioHtmlCheckResult:
+    tool: ScenarioHtmlCheckTool
+    passed: bool
+    summary: text
+    messages: text
+    artifact: ScenarioEvidenceArtifact
+
+pub fn scenario_html_check_tool_name(tool: ScenarioHtmlCheckTool) -> text:
+    match tool:
+        case ScenarioHtmlCheckTool.simple_html_heuristic: "simple_html_heuristic"
+        case ScenarioHtmlCheckTool.nu_html_checker: "nu_html_checker"
+        case ScenarioHtmlCheckTool.html_validate: "html_validate"
+        case ScenarioHtmlCheckTool.axe_core: "axe_core"
+        case ScenarioHtmlCheckTool.playwright_locator: "playwright_locator"
+
+pub fn scenario_capture_kind_name(kind: ScenarioCaptureKind) -> text:
+    match kind:
+        case ScenarioCaptureKind.tui: "tui"
+        case ScenarioCaptureKind.gui: "gui"
+        case ScenarioCaptureKind.html: "html"
+        case ScenarioCaptureKind.api: "api"
+        case ScenarioCaptureKind.protocol: "protocol"
+        case ScenarioCaptureKind.text: "text"
+        case ScenarioCaptureKind.exec: "exec"
+        case ScenarioCaptureKind.binary: "binary"
+        case ScenarioCaptureKind.log: "log"
+        case ScenarioCaptureKind.artifact: "artifact"
+
+pub fn scenario_capture_mode_name(mode: ScenarioCaptureMode) -> text:
+    match mode:
+        case ScenarioCaptureMode.off: "off"
+        case ScenarioCaptureMode.after_step: "after_step"
+        case ScenarioCaptureMode.after_scenario: "after_scenario"
+        case ScenarioCaptureMode.on_failure: "on_failure"
+
+pub fn scenario_capture_off() -> ScenarioCapturePolicy:
+    ScenarioCapturePolicy(
+        enabled: false,
+        mode: ScenarioCaptureMode.off,
+        kind: ScenarioCaptureKind.tui
+    )
+
+pub fn scenario_capture_bare() -> ScenarioCapturePolicy:
+    ScenarioCapturePolicy(
+        enabled: true,
+        mode: ScenarioCaptureMode.after_step,
+        kind: ScenarioCaptureKind.tui
+    )
+
+pub fn scenario_capture_policy(
+    mode: ScenarioCaptureMode,
+    kind: ScenarioCaptureKind
+) -> ScenarioCapturePolicy:
+    ScenarioCapturePolicy(
+        enabled: mode != ScenarioCaptureMode.off,
+        mode: mode,
+        kind: kind
+    )
+
+pub fn scenario_capture_policy_absent() -> ScenarioCapturePolicyOverride:
+    ScenarioCapturePolicyOverride(
+        present: false,
+        policy: scenario_capture_off()
+    )
+
+pub fn scenario_capture_policy_override(
+    policy: ScenarioCapturePolicy
+) -> ScenarioCapturePolicyOverride:
+    ScenarioCapturePolicyOverride(
+        present: true,
+        policy: policy
+    )
+
+pub fn scenario_capture_policy_resolution(
+    policy: ScenarioCapturePolicy,
+    source: text
+) -> ScenarioCapturePolicyResolution:
+    ScenarioCapturePolicyResolution(
+        policy: policy,
+        source: source
+    )
+
+pub fn resolve_scenario_capture_policy(
+    step_policy: ScenarioCapturePolicyOverride,
+    function_policy: ScenarioCapturePolicyOverride,
+    scenario_policy: ScenarioCapturePolicyOverride,
+    file_policy: ScenarioCapturePolicyOverride,
+    folder_policy: ScenarioCapturePolicyOverride,
+    root_policy: ScenarioCapturePolicyOverride
+) -> ScenarioCapturePolicyResolution:
+    if step_policy.present:
+        return scenario_capture_policy_resolution(step_policy.policy, "step")
+    if function_policy.present:
+        return scenario_capture_policy_resolution(function_policy.policy, "function")
+    if scenario_policy.present:
+        return scenario_capture_policy_resolution(scenario_policy.policy, "scenario")
+    if file_policy.present:
+        return scenario_capture_policy_resolution(file_policy.policy, "file")
+    if folder_policy.present:
+        return scenario_capture_policy_resolution(folder_policy.policy, "folder")
+    if root_policy.present:
+        return scenario_capture_policy_resolution(root_policy.policy, "root")
+    scenario_capture_policy_resolution(scenario_capture_off(), "built-in")
+
+pub fn scenario_evidence_artifact(
+    kind: ScenarioCaptureKind,
+    title: text,
+    mime: text,
+    path: text,
+    body: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    ScenarioEvidenceArtifact(
+        kind: kind,
+        title: title,
+        mime: mime,
+        path: path,
+        body: body,
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: false
+    )
+
+pub fn scenario_redacted_evidence_artifact(
+    kind: ScenarioCaptureKind,
+    title: text,
+    mime: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    ScenarioEvidenceArtifact(
+        kind: kind,
+        title: title,
+        mime: mime,
+        path: "",
+        body: "",
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: true
+    )
+
+pub fn scenario_api_evidence(
+    title: text,
+    method: text,
+    path: text,
+    status: i64,
+    response_summary: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    val body = method + " " + path + "\nstatus: " + "{status}" + "\n" + response_summary
+    ScenarioEvidenceArtifact(
+        kind: ScenarioCaptureKind.api,
+        title: title,
+        mime: "text/plain",
+        path: "",
+        body: body,
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: false
+    )
+
+pub fn scenario_html_evidence(
+    title: text,
+    html_text: text,
+    visible_text_summary: text,
+    artifact_path: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    var body = html_text
+    if visible_text_summary != "":
+        body = "visible text: " + visible_text_summary + "\nhtml:\n" + html_text
+    ScenarioEvidenceArtifact(
+        kind: ScenarioCaptureKind.html,
+        title: title,
+        mime: "text/html",
+        path: artifact_path,
+        body: body,
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: false
+    )
+
+pub fn scenario_simple_gui_html_evidence(
+    title: text,
+    html_text: text,
+    visible_text_summary: text,
+    artifact_path: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    var body = "simple gui html capture"
+    if visible_text_summary != "":
+        body = body + "\nvisible text: " + visible_text_summary
+    body = body + "\nhtml:\n" + html_text
+    ScenarioEvidenceArtifact(
+        kind: ScenarioCaptureKind.html,
+        title: title,
+        mime: "text/html",
+        path: artifact_path,
+        body: body,
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: false
+    )
+
+pub fn scenario_api_protocol_evidence(
+    title: text,
+    method: text,
+    path: text,
+    params_summary: text,
+    headers_summary: text,
+    response_fields: text,
+    redacted_values: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    var body = method + " " + path
+    if params_summary != "":
+        body = body + "\nparams: " + params_summary
+    if headers_summary != "":
+        body = body + "\nheaders: " + headers_summary
+    if response_fields != "":
+        body = body + "\nresponse fields: " + response_fields
+    if redacted_values != "":
+        body = body + "\nredacted: " + redacted_values
+    ScenarioEvidenceArtifact(
+        kind: ScenarioCaptureKind.protocol,
+        title: title,
+        mime: "message/json",
+        path: "",
+        body: body,
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: redacted_values != ""
+    )
+
+pub fn scenario_exec_evidence(
+    title: text,
+    command: text,
+    exit_code: i64,
+    output_summary: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    val body = "$ " + command + "\nexit: " + "{exit_code}" + "\n" + output_summary
+    ScenarioEvidenceArtifact(
+        kind: ScenarioCaptureKind.exec,
+        title: title,
+        mime: "text/plain",
+        path: "",
+        body: body,
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: false
+    )
+
+pub fn scenario_exec_detailed_evidence(
+    title: text,
+    command: text,
+    args_summary: text,
+    input_trigger: text,
+    stdout_summary: text,
+    stderr_summary: text,
+    exit_code: i64,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    var body = "$ " + command
+    if args_summary != "":
+        body = body + "\nargs: " + args_summary
+    if input_trigger != "":
+        body = body + "\ninput: " + input_trigger
+    if stdout_summary != "":
+        body = body + "\nstdout: " + stdout_summary
+    if stderr_summary != "":
+        body = body + "\nstderr: " + stderr_summary
+    body = body + "\nexit: " + "{exit_code}"
+    ScenarioEvidenceArtifact(
+        kind: ScenarioCaptureKind.exec,
+        title: title,
+        mime: "text/plain",
+        path: "",
+        body: body,
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: false
+    )
+
+pub fn scenario_binary_evidence(
+    title: text,
+    format_name: text,
+    field_summary: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    val body = "format: " + format_name + "\n" + field_summary
+    ScenarioEvidenceArtifact(
+        kind: ScenarioCaptureKind.binary,
+        title: title,
+        mime: "application/octet-stream",
+        path: "",
+        body: body,
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: false
+    )
+
+pub fn scenario_binary_detailed_evidence(
+    title: text,
+    format_name: text,
+    raw_bytes_summary: text,
+    decoded_fields: text,
+    field_comments: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    var body = "format: " + format_name
+    if raw_bytes_summary != "":
+        body = body + "\nraw bytes: " + raw_bytes_summary
+    if decoded_fields != "":
+        body = body + "\ndecoded fields: " + decoded_fields
+    if field_comments != "":
+        body = body + "\nfield comments: " + field_comments
+    ScenarioEvidenceArtifact(
+        kind: ScenarioCaptureKind.binary,
+        title: title,
+        mime: "application/octet-stream",
+        path: "",
+        body: body,
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: false
+    )
+
+pub fn scenario_ui_selection_evidence(
+    kind: ScenarioCaptureKind,
+    title: text,
+    selected_rectangle: text,
+    highlight_target: text,
+    inverted_active_menu: text,
+    visible_state_summary: text,
+    artifact_path: text,
+    scenario_id: text,
+    step_id: text
+) -> ScenarioEvidenceArtifact:
+    var body = ""
+    if selected_rectangle != "":
+        body = body + "selected rectangle: " + selected_rectangle
+    if highlight_target != "":
+        if body != "":
+            body = body + "\n"
+        body = body + "highlight: " + highlight_target
+    if inverted_active_menu != "":
+        if body != "":
+            body = body + "\n"
+        body = body + "inverted active menu: " + inverted_active_menu
+    if visible_state_summary != "":
+        if body != "":
+            body = body + "\n"
+        body = body + "visible state: " + visible_state_summary
+    ScenarioEvidenceArtifact(
+        kind: kind,
+        title: title,
+        mime: if kind == ScenarioCaptureKind.gui: "image/png" else: "text/plain",
+        path: artifact_path,
+        body: body,
+        scenario_id: scenario_id,
+        step_id: step_id,
+        redacted: false
+    )
+
+pub fn scenario_checker_evidence(
+    assertion: text,
+    passed: bool,
+    artifact: ScenarioEvidenceArtifact
+) -> ScenarioCheckerEvidence:
+    ScenarioCheckerEvidence(
+        assertion: assertion,
+        passed: passed,
+        artifact: artifact
+    )
+
+pub fn scenario_html_check_result(
+    tool: ScenarioHtmlCheckTool,
+    passed: bool,
+    summary: text,
+    messages: text,
+    artifact: ScenarioEvidenceArtifact
+) -> ScenarioHtmlCheckResult:
+    ScenarioHtmlCheckResult(
+        tool: tool,
+        passed: passed,
+        summary: summary,
+        messages: messages,
+        artifact: artifact
+    )
+
+pub fn scenario_policy_manual_summary(policy: ScenarioCapturePolicy) -> text:
+    if not policy.enabled:
+        return "capture off"
+    val mode = scenario_capture_mode_name(policy.mode)
+    val kind = scenario_capture_kind_name(policy.kind)
+    "capture {kind} {mode}"
+
+pub fn scenario_policy_resolution_manual_summary(
+    resolution: ScenarioCapturePolicyResolution
+) -> text:
+    scenario_policy_manual_summary(resolution.policy) + " from " + resolution.source
+
+pub fn scenario_evidence_manual_summary(artifact: ScenarioEvidenceArtifact) -> text:
+    val kind = scenario_capture_kind_name(artifact.kind)
+    if artifact.redacted:
+        return "{artifact.title} ({kind}, redacted)"
+    if artifact.path.len() > 0:
+        return "{artifact.title} ({kind}, {artifact.mime}) -> {artifact.path}"
+    "{artifact.title} ({kind}, {artifact.mime})"
+
+pub fn scenario_checker_manual_summary(evidence: ScenarioCheckerEvidence) -> text:
+    val status = if evidence.passed: "passed" else: "failed"
+    evidence.assertion + " (" + status + ") — " + scenario_evidence_manual_summary(evidence.artifact)
+
+pub fn scenario_html_check_manual_summary(result: ScenarioHtmlCheckResult) -> text:
+    val status = if result.passed: "passed" else: "failed"
+    scenario_html_check_tool_name(result.tool) + " " + status + ": " + result.summary + " — " + scenario_evidence_manual_summary(result.artifact)

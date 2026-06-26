@@ -1,0 +1,226 @@
+# SQL Schema Specification
+#
+# Tests ColumnDef constructors, constraint builders, to_sql output,
+# TableSchema construction, convenience methods, and DDL generation.
+
+use std.database.sql.schema.{ColumnDef, ColumnConstraint, TableSchema}
+use std.database.sql.types.{DbType}
+
+describe "ColumnDef":
+    context "constructors":
+        it "creates integer column":
+            val col = ColumnDef.integer("age")
+            expect(col.name).to_equal("age")
+            expect(col.constraints.len()).to_equal(0)
+
+        it "creates text column":
+            val col = ColumnDef.text_col("name")
+            expect(col.name).to_equal("name")
+            expect(col.constraints.len()).to_equal(0)
+
+        it "creates real column":
+            val col = ColumnDef.real("score")
+            expect(col.name).to_equal("score")
+            expect(col.constraints.len()).to_equal(0)
+
+        it "creates blob column":
+            val col = ColumnDef.blob("data")
+            expect(col.name).to_equal("data")
+            expect(col.constraints.len()).to_equal(0)
+
+    context "constraint builders":
+        it "adds primary key and autoincrement with pk()":
+            var col = ColumnDef.integer("id")
+            col = col.pk()
+            expect(col.constraints.len()).to_equal(2)
+
+        it "adds not_null constraint":
+            var col = ColumnDef.text_col("name")
+            col = col.not_null()
+            expect(col.constraints.len()).to_equal(1)
+
+        it "adds unique constraint":
+            var col = ColumnDef.text_col("email")
+            col = col.unique()
+            expect(col.constraints.len()).to_equal(1)
+
+        it "adds default value constraint":
+            var col = ColumnDef.integer("status")
+            col = col.default_val("0")
+            expect(col.constraints.len()).to_equal(1)
+
+        it "adds foreign key constraint":
+            var col = ColumnDef.integer("user_id")
+            col = col.fk("users", "id")
+            expect(col.constraints.len()).to_equal(1)
+
+        it "adds check constraint":
+            var col = ColumnDef.integer("age")
+            col = col.check("age >= 0")
+            expect(col.constraints.len()).to_equal(1)
+
+        it "chains multiple constraints via intermediate vars":
+            var col = ColumnDef.text_col("email")
+            col = col.not_null()
+            col = col.unique()
+            expect(col.constraints.len()).to_equal(2)
+
+    context "to_sql output":
+        it "generates integer column SQL":
+            val col = ColumnDef.integer("age")
+            val sql = col.to_sql()
+            expect(sql).to_contain("INTEGER")
+            expect(sql).to_contain("age")
+
+        it "generates text column SQL":
+            val col = ColumnDef.text_col("name")
+            val sql = col.to_sql()
+            expect(sql).to_contain("TEXT")
+
+        it "generates column with primary key SQL":
+            var col = ColumnDef.integer("id")
+            col = col.pk()
+            val sql = col.to_sql()
+            expect(sql).to_contain("PRIMARY KEY")
+            expect(sql).to_contain("AUTOINCREMENT")
+
+        it "generates column with not_null SQL":
+            var col = ColumnDef.text_col("name")
+            col = col.not_null()
+            val sql = col.to_sql()
+            expect(sql).to_contain("NOT NULL")
+
+        it "generates column with unique SQL":
+            var col = ColumnDef.text_col("email")
+            col = col.unique()
+            val sql = col.to_sql()
+            expect(sql).to_contain("UNIQUE")
+
+        it "generates column with default value SQL":
+            var col = ColumnDef.integer("status")
+            col = col.default_val("0")
+            val sql = col.to_sql()
+            expect(sql).to_contain("DEFAULT 0")
+
+describe "ColumnConstraint":
+    context "to_sql":
+        it "generates PRIMARY KEY":
+            val c = ColumnConstraint.PrimaryKey
+            expect(c.to_sql()).to_equal("PRIMARY KEY")
+
+        it "generates AUTOINCREMENT":
+            val c = ColumnConstraint.AutoIncrement
+            expect(c.to_sql()).to_equal("AUTOINCREMENT")
+
+        it "generates NOT NULL":
+            val c = ColumnConstraint.NotNull
+            expect(c.to_sql()).to_equal("NOT NULL")
+
+        it "generates UNIQUE":
+            val c = ColumnConstraint.Unique
+            expect(c.to_sql()).to_equal("UNIQUE")
+
+        it "generates DEFAULT with value":
+            val c = ColumnConstraint.Default(value: "42")
+            expect(c.to_sql()).to_equal("DEFAULT 42")
+
+        it "generates CHECK with expression":
+            val c = ColumnConstraint.Check(expr: "age >= 0")
+            expect(c.to_sql()).to_equal("CHECK (age >= 0)")
+
+describe "TableSchema":
+    context "construction":
+        it "creates empty schema with name":
+            val schema = TableSchema.new("users")
+            expect(schema.name).to_equal("users")
+            expect(schema.columns.len()).to_equal(0)
+
+        it "adds columns with col()":
+            var schema = TableSchema.new("users")
+            val col = ColumnDef.text_col("name")
+            schema = schema.col(col)
+            expect(schema.columns.len()).to_equal(1)
+
+    context "convenience methods":
+        it "adds auto-increment id column with id_col()":
+            var schema = TableSchema.new("users")
+            schema = schema.id_col()
+            expect(schema.columns.len()).to_equal(1)
+            expect(schema.columns[0].name).to_equal("id")
+
+        it "adds NOT NULL text column with text_col()":
+            var schema = TableSchema.new("users")
+            schema = schema.text_col("name")
+            expect(schema.columns.len()).to_equal(1)
+            expect(schema.columns[0].name).to_equal("name")
+
+        it "adds NOT NULL integer column with int_col()":
+            var schema = TableSchema.new("users")
+            schema = schema.int_col("age")
+            expect(schema.columns.len()).to_equal(1)
+            expect(schema.columns[0].name).to_equal("age")
+
+        it "adds NOT NULL real column with real_col()":
+            var schema = TableSchema.new("metrics")
+            schema = schema.real_col("score")
+            expect(schema.columns.len()).to_equal(1)
+            expect(schema.columns[0].name).to_equal("score")
+
+        it "adds nullable text column with nullable_text()":
+            var schema = TableSchema.new("users")
+            schema = schema.nullable_text("bio")
+            expect(schema.columns.len()).to_equal(1)
+            expect(schema.columns[0].name).to_equal("bio")
+            expect(schema.columns[0].constraints.len()).to_equal(0)
+
+        it "adds nullable integer column with nullable_int()":
+            var schema = TableSchema.new("users")
+            schema = schema.nullable_int("score")
+            expect(schema.columns.len()).to_equal(1)
+            expect(schema.columns[0].constraints.len()).to_equal(0)
+
+    context "column_names":
+        it "returns list of column names":
+            var schema = TableSchema.new("users")
+            schema = schema.id_col()
+            schema = schema.text_col("name")
+            schema = schema.int_col("age")
+            val names = schema.column_names()
+            expect(names.len()).to_equal(3)
+            expect(names[0]).to_equal("id")
+            expect(names[1]).to_equal("name")
+            expect(names[2]).to_equal("age")
+
+        it "returns empty list for empty schema":
+            val schema = TableSchema.new("empty")
+            val names = schema.column_names()
+            expect(names.len()).to_equal(0)
+
+    context "to_create_sql":
+        it "generates CREATE TABLE statement":
+            var schema = TableSchema.new("users")
+            schema = schema.id_col()
+            schema = schema.text_col("name")
+            val sql = schema.to_create_sql()
+            expect(sql).to_start_with("CREATE TABLE")
+            expect(sql).to_contain("users")
+            expect(sql).to_contain("name")
+
+        it "generates CREATE TABLE IF NOT EXISTS statement":
+            var schema = TableSchema.new("users")
+            schema = schema.id_col()
+            val sql = schema.to_create_if_not_exists_sql()
+            expect(sql).to_contain("IF NOT EXISTS")
+
+    context "full schema":
+        it "builds complete users table schema":
+            var schema = TableSchema.new("users")
+            schema = schema.id_col()
+            schema = schema.text_col("name")
+            schema = schema.text_col("email")
+            schema = schema.int_col("age")
+            expect(schema.columns.len()).to_equal(4)
+            val sql = schema.to_create_sql()
+            expect(sql).to_contain("INTEGER")
+            expect(sql).to_contain("TEXT")
+            expect(sql).to_contain("PRIMARY KEY")

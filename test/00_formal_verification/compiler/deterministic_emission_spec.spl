@@ -1,0 +1,210 @@
+# @cover src/compiler_rust/lib/std/src/verification/lean/codegen.spl 70%
+"""
+# Deterministic Lean Emission Specification
+
+**Feature IDs:** #LEAN-DET-001
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Verifies that LeanCodegen produces byte-identical output regardless of the
+order in which items (structures, inductives, functions, theorems, imports)
+are added. Both `emit()` and `generate()` must sort by `.name` before
+rendering.
+
+## Behavior
+
+- All structured items are sorted alphabetically by name before emission
+- Imports are sorted alphabetically before emission
+- Two codegen instances with items added in different orders produce identical output
+"""
+
+use verification.lean.codegen as codegen
+
+# ============================================================================
+# Test Group 1: Deterministic emit() output
+# ============================================================================
+
+describe "Deterministic Lean Emission":
+    context "emit() determinism":
+        it "produces identical output regardless of insertion order":
+            # Build codegen A: add items in alphabetical order
+            var opts_a = codegen.LeanCodegenOptions.new()
+            opts_a = opts_a.with_module_name("DetTest")
+            var cg_a = codegen.LeanCodegen.new(opts_a)
+
+            var struct_alpha = codegen.LeanStructure.new("Alpha")
+            struct_alpha = struct_alpha.add_field("x", "Int")
+            var struct_beta = codegen.LeanStructure.new("Beta")
+            struct_beta = struct_beta.add_field("y", "Int")
+
+            cg_a = cg_a.add_structure(struct_alpha)
+            cg_a = cg_a.add_structure(struct_beta)
+
+            var func_add = codegen.LeanFunction.new("add")
+            func_add = func_add.add_param("a", "Nat")
+            func_add = func_add.with_return_type("Nat")
+            func_add = func_add.with_body("a")
+            var func_mul = codegen.LeanFunction.new("mul")
+            func_mul = func_mul.add_param("b", "Nat")
+            func_mul = func_mul.with_return_type("Nat")
+            func_mul = func_mul.with_body("b")
+
+            cg_a = cg_a.add_function(func_add)
+            cg_a = cg_a.add_function(func_mul)
+
+            var thm_a = codegen.LeanTheorem.new("add_comm", "a + b = b + a")
+            var thm_b = codegen.LeanTheorem.new("mul_comm", "a * b = b * a")
+            cg_a = cg_a.add_theorem(thm_a)
+            cg_a = cg_a.add_theorem(thm_b)
+
+            val output_a = cg_a.emit()
+
+            # Build codegen B: add items in REVERSE order
+            var opts_b = codegen.LeanCodegenOptions.new()
+            opts_b = opts_b.with_module_name("DetTest")
+            var cg_b = codegen.LeanCodegen.new(opts_b)
+
+            # Reverse order: Beta before Alpha
+            var struct_beta2 = codegen.LeanStructure.new("Beta")
+            struct_beta2 = struct_beta2.add_field("y", "Int")
+            var struct_alpha2 = codegen.LeanStructure.new("Alpha")
+            struct_alpha2 = struct_alpha2.add_field("x", "Int")
+
+            cg_b = cg_b.add_structure(struct_beta2)
+            cg_b = cg_b.add_structure(struct_alpha2)
+
+            # Reverse order: mul before add
+            var func_mul2 = codegen.LeanFunction.new("mul")
+            func_mul2 = func_mul2.add_param("b", "Nat")
+            func_mul2 = func_mul2.with_return_type("Nat")
+            func_mul2 = func_mul2.with_body("b")
+            var func_add2 = codegen.LeanFunction.new("add")
+            func_add2 = func_add2.add_param("a", "Nat")
+            func_add2 = func_add2.with_return_type("Nat")
+            func_add2 = func_add2.with_body("a")
+
+            cg_b = cg_b.add_function(func_mul2)
+            cg_b = cg_b.add_function(func_add2)
+
+            # Reverse order: mul_comm before add_comm
+            var thm_b2 = codegen.LeanTheorem.new("mul_comm", "a * b = b * a")
+            var thm_a2 = codegen.LeanTheorem.new("add_comm", "a + b = b + a")
+            cg_b = cg_b.add_theorem(thm_b2)
+            cg_b = cg_b.add_theorem(thm_a2)
+
+            val output_b = cg_b.emit()
+
+            # Both must be identical
+            expect(output_a).to_equal(output_b)
+
+        it "sorts inductives deterministically in emit()":
+            var opts = codegen.LeanCodegenOptions.new()
+            opts = opts.with_module_name("IndTest")
+
+            # Codegen with Z before A
+            var cg1 = codegen.LeanCodegen.new(opts)
+            var ind_z = codegen.LeanInductive.new("Zebra")
+            ind_z = ind_z.add_constructor("Striped", [])
+            var ind_a = codegen.LeanInductive.new("Ant")
+            ind_a = ind_a.add_constructor("Worker", [])
+            cg1 = cg1.add_inductive(ind_z)
+            cg1 = cg1.add_inductive(ind_a)
+            val out1 = cg1.emit()
+
+            # Codegen with A before Z
+            var cg2 = codegen.LeanCodegen.new(opts)
+            var ind_a2 = codegen.LeanInductive.new("Ant")
+            ind_a2 = ind_a2.add_constructor("Worker", [])
+            var ind_z2 = codegen.LeanInductive.new("Zebra")
+            ind_z2 = ind_z2.add_constructor("Striped", [])
+            cg2 = cg2.add_inductive(ind_a2)
+            cg2 = cg2.add_inductive(ind_z2)
+            val out2 = cg2.emit()
+
+            expect(out1).to_equal(out2)
+
+    context "generate() determinism":
+        it "produces identical generate() output regardless of insertion order":
+            var opts_a = codegen.LeanCodegenOptions.new()
+            opts_a = opts_a.with_module_name("GenTest")
+            var cg_a = codegen.LeanCodegen.new(opts_a)
+
+            var s1 = codegen.LeanStructure.new("Config")
+            s1 = s1.add_field("name", "String")
+            var s2 = codegen.LeanStructure.new("App")
+            s2 = s2.add_field("id", "Nat")
+
+            cg_a = cg_a.add_structure(s1)
+            cg_a = cg_a.add_structure(s2)
+
+            var f1 = codegen.LeanFunction.new("run")
+            f1 = f1.with_return_type("Unit")
+            f1 = f1.with_body("()")
+            var f2 = codegen.LeanFunction.new("init")
+            f2 = f2.with_return_type("Unit")
+            f2 = f2.with_body("()")
+
+            cg_a = cg_a.add_function(f1)
+            cg_a = cg_a.add_function(f2)
+
+            val gen_a = cg_a.generate()
+
+            # Same items, opposite order
+            var opts_b = codegen.LeanCodegenOptions.new()
+            opts_b = opts_b.with_module_name("GenTest")
+            var cg_b = codegen.LeanCodegen.new(opts_b)
+
+            var s2b = codegen.LeanStructure.new("App")
+            s2b = s2b.add_field("id", "Nat")
+            var s1b = codegen.LeanStructure.new("Config")
+            s1b = s1b.add_field("name", "String")
+
+            cg_b = cg_b.add_structure(s2b)
+            cg_b = cg_b.add_structure(s1b)
+
+            var f2b = codegen.LeanFunction.new("init")
+            f2b = f2b.with_return_type("Unit")
+            f2b = f2b.with_body("()")
+            var f1b = codegen.LeanFunction.new("run")
+            f1b = f1b.with_return_type("Unit")
+            f1b = f1b.with_body("()")
+
+            cg_b = cg_b.add_function(f2b)
+            cg_b = cg_b.add_function(f1b)
+
+            val gen_b = cg_b.generate()
+
+            expect(gen_a).to_equal(gen_b)
+
+    context "import sorting":
+        it "sorts imports alphabetically in emit()":
+            var opts = codegen.LeanCodegenOptions.new()
+            opts = opts.with_module_name("ImportTest")
+            var cg = codegen.LeanCodegen.new(opts)
+
+            # Add imports in non-alphabetical order
+            cg = cg.add_import("Std.Data.List")
+            cg = cg.add_import("Aesop")
+            cg = cg.add_import("Mathlib.Tactic")
+
+            val output = cg.generate()
+
+            # Verify Aesop comes before Mathlib which comes before Std
+            val aesop_pos = output.find("import Aesop")
+            val mathlib_basic_pos = output.find("import Mathlib.Data.Nat.Basic")
+            val mathlib_tactic_pos = output.find("import Mathlib.Tactic")
+            val std_pos = output.find("import Std.Data.List")
+
+            # Aesop should come first (alphabetically before Mathlib)
+            expect(aesop_pos < mathlib_basic_pos).to_equal(true)
+            # Mathlib.Data should come before Mathlib.Tactic
+            expect(mathlib_basic_pos < mathlib_tactic_pos).to_equal(true)
+            # Mathlib.Tactic should come before Std
+            expect(mathlib_tactic_pos < std_pos).to_equal(true)

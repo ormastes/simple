@@ -1,0 +1,126 @@
+# DWARF Abbreviation Table Decoder
+# Parses .debug_abbrev sections into structured abbreviation entries.
+
+use std.binary_io.{BinaryReader, ByteOrder}
+use std.debug.formats.dwarf_constants.{DW_FORM_implicit_const}
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct DwarfAttrSpec:
+    attr: i64
+    form: i64
+    implicit_value: i64
+
+struct DwarfAbbrevEntry:
+    code: i64
+    tag: i64
+    has_children: bool
+    attrs: [DwarfAttrSpec]
+
+struct DwarfAbbrevTable:
+    entries: [DwarfAbbrevEntry]
+
+# ============================================================================
+# LEB128 Decoding
+# ============================================================================
+
+fn read_uleb128(data: [u8], offset: i64) -> (i64, i64):
+    var result: i64 = 0
+    var shift: i64 = 0
+    var pos = offset
+    while pos < data.len():
+        val byte = data[pos] as i64
+        result = result | ((byte & 0x7f) << shift)
+        pos = pos + 1
+        if (byte & 0x80) == 0:
+            return (result, pos)
+        shift = shift + 7
+        if shift > 63:
+            break
+    (result, pos)
+
+fn read_sleb128(data: [u8], offset: i64) -> (i64, i64):
+    var result: i64 = 0
+    var shift: i64 = 0
+    var pos = offset
+    var byte: i64 = 0
+    while pos < data.len():
+        byte = data[pos] as i64
+        result = result | ((byte & 0x7f) << shift)
+        pos = pos + 1
+        shift = shift + 7
+        if (byte & 0x80) == 0:
+            break
+        if shift > 63:
+            break
+    if shift < 64 and (byte & 0x40) != 0:
+        result = result | (-(1 << shift))
+    (result, pos)
+
+# ============================================================================
+# Abbreviation Table Parsing
+# ============================================================================
+
+fn dwarf_parse_abbrev_table(data: [u8], offset: i64) -> DwarfAbbrevTable:
+    var entries: [DwarfAbbrevEntry] = []
+    var pos = offset
+
+    while pos < data.len():
+        val code_result = read_uleb128(data, pos)
+        val code = code_result.0
+        pos = code_result.1
+
+        if code == 0:
+            break
+
+        val tag_result = read_uleb128(data, pos)
+        val tag = tag_result.0
+        pos = tag_result.1
+
+        if pos >= data.len():
+            break
+        val children_byte = data[pos] as i64
+        pos = pos + 1
+        val has_children = children_byte != 0
+
+        var attrs: [DwarfAttrSpec] = []
+        while pos < data.len():
+            val attr_result = read_uleb128(data, pos)
+            val attr_name = attr_result.0
+            pos = attr_result.1
+
+            val form_result = read_uleb128(data, pos)
+            val form = form_result.0
+            pos = form_result.1
+
+            if attr_name == 0 and form == 0:
+                break
+
+            var implicit_value: i64 = 0
+            if form == DW_FORM_implicit_const:
+                val iv_result = read_sleb128(data, pos)
+                implicit_value = iv_result.0
+                pos = iv_result.1
+
+            attrs = attrs.push(DwarfAttrSpec(
+                attr: attr_name,
+                form: form,
+                implicit_value: implicit_value,
+            ))
+
+        entries = entries.push(DwarfAbbrevEntry(
+            code: code,
+            tag: tag,
+            has_children: has_children,
+            attrs: attrs,
+        ))
+
+    DwarfAbbrevTable(entries: entries)
+
+fn dwarf_find_abbrev(table: DwarfAbbrevTable, code: i64) -> DwarfAbbrevEntry?:
+    for entry in table.entries:
+        if entry.code == code:
+            return entry
+    return nil

@@ -1,0 +1,174 @@
+# Env Render Adapter
+#
+# Bridges environment info to the shared ui.render contract.
+# Produces text (environment info table) and html (environment
+# dashboard with sections for compiler, runtime, and platform).
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.html.{html_page, html_card, html_badge, html_kv_table,
+    html_section, html_grid, html_escape,
+    css_reset, css_dark_theme, css_light_theme}
+use app.ui.render.fmt.{fmt_bytes, pad_right}
+use app.ui.render.ansi.{RESET, BOLD, DIM, CYAN, GREEN, colorize}
+
+extern fn rt_env_get(key: text) -> text
+
+# =========================================================================
+# Data Types
+# =========================================================================
+
+struct EnvInfo:
+    compiler_version: text
+    compiler_backend: text
+    build_profile: text
+    platform_os: text
+    platform_arch: text
+    platform_triple: text
+    simple_home: text
+    simple_env: text
+    simple_modules: text
+    path: text
+
+# =========================================================================
+# Info Collection
+# =========================================================================
+
+fn collect_env_info() -> EnvInfo:
+    """Collect environment information from env vars and system."""
+    EnvInfo(
+        compiler_version: rt_env_get("SIMPLE_VERSION"),
+        compiler_backend: rt_env_get("SIMPLE_BACKEND"),
+        build_profile: rt_env_get("SIMPLE_PROFILE"),
+        platform_os: rt_env_get("SIMPLE_OS"),
+        platform_arch: rt_env_get("SIMPLE_ARCH"),
+        platform_triple: rt_env_get("SIMPLE_TRIPLE"),
+        simple_home: rt_env_get("SIMPLE_HOME"),
+        simple_env: rt_env_get("SIMPLE_ENV"),
+        simple_modules: rt_env_get("SIMPLE_MODULES"),
+        path: rt_env_get("PATH")
+    )
+
+# =========================================================================
+# Render Entry Point
+# =========================================================================
+
+fn render_env(config: RenderConfig) -> RenderResult:
+    """Render environment info via the shared render contract."""
+    val info = collect_env_info()
+
+    match config.format:
+        "html":
+            return render_env_html(info, config)
+        "both":
+            val text_out = render_env_text(info, config)
+            val html_out = render_env_html(info, config)
+            return RenderResult.both(text_out.text_output, html_out.html_output)
+        _:
+            return render_env_text(info, config)
+
+# =========================================================================
+# Text Rendering
+# =========================================================================
+
+fn render_env_text(info: EnvInfo, config: RenderConfig) -> RenderResult:
+    """Render environment info as a formatted text table."""
+    var lines: [text] = []
+
+    lines.push("{BOLD}Environment Information{RESET}")
+    lines.push("")
+
+    lines.push("{BOLD}Compiler:{RESET}")
+    lines.push("  Version:  {env_val(info.compiler_version)}")
+    lines.push("  Backend:  {env_val(info.compiler_backend)}")
+    lines.push("  Profile:  {env_val(info.build_profile)}")
+    lines.push("")
+
+    lines.push("{BOLD}Platform:{RESET}")
+    lines.push("  OS:       {env_val(info.platform_os)}")
+    lines.push("  Arch:     {env_val(info.platform_arch)}")
+    lines.push("  Triple:   {env_val(info.platform_triple)}")
+    lines.push("")
+
+    lines.push("{BOLD}Runtime:{RESET}")
+    lines.push("  Home:     {env_val(info.simple_home)}")
+    lines.push("  Env:      {env_val(info.simple_env)}")
+    lines.push("  Modules:  {env_val(info.simple_modules)}")
+
+    var text_out = ""
+    var first = true
+    for line in lines:
+        if not first:
+            text_out = "{text_out}\n"
+        text_out = "{text_out}{line}"
+        first = false
+
+    RenderResult.text(text_out)
+
+fn env_val(v: text) -> text:
+    """Format an env value, showing (not set) if empty."""
+    if v == "":
+        return "{DIM}(not set){RESET}"
+    v
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn render_env_html(info: EnvInfo, config: RenderConfig) -> RenderResult:
+    """Render environment info as HTML dashboard with section cards."""
+    val theme_css = if config.theme == "light": css_light_theme() else: css_dark_theme()
+    val css = "{css_reset()}\n{theme_css}\n{env_css()}"
+
+    var body = "<h1>Environment Dashboard</h1>\n"
+
+    # Compiler section
+    var compiler_pairs: [(text, text)] = []
+    compiler_pairs.push(("Version", env_html_val(info.compiler_version)))
+    compiler_pairs.push(("Backend", env_html_val(info.compiler_backend)))
+    compiler_pairs.push(("Profile", env_html_val(info.build_profile)))
+    val compiler_table = html_kv_table(compiler_pairs)
+    var compiler_body = compiler_table
+    if info.compiler_version != "":
+        compiler_body = "{html_badge(info.compiler_version, \"#58a6ff\")} {compiler_table}"
+    val compiler_card = html_card("Compiler", compiler_body)
+
+    # Platform section
+    var platform_pairs: [(text, text)] = []
+    platform_pairs.push(("OS", env_html_val(info.platform_os)))
+    platform_pairs.push(("Architecture", env_html_val(info.platform_arch)))
+    platform_pairs.push(("Triple", env_html_val(info.platform_triple)))
+    val platform_table = html_kv_table(platform_pairs)
+    var platform_body = platform_table
+    if info.platform_triple != "":
+        platform_body = "{html_badge(info.platform_triple, \"#8b949e\")} {platform_table}"
+    val platform_card = html_card("Platform", platform_body)
+
+    # Runtime section
+    var runtime_pairs: [(text, text)] = []
+    runtime_pairs.push(("SIMPLE_HOME", env_html_val(info.simple_home)))
+    runtime_pairs.push(("SIMPLE_ENV", env_html_val(info.simple_env)))
+    runtime_pairs.push(("SIMPLE_MODULES", env_html_val(info.simple_modules)))
+    val runtime_table = html_kv_table(runtime_pairs)
+    var runtime_body = runtime_table
+    if info.simple_env != "":
+        runtime_body = "{html_badge(\"active\", \"#3fb950\")} {runtime_table}"
+    val runtime_card = html_card("Runtime", runtime_body)
+
+    body = "{body}{html_grid(3, \"12px\", [compiler_card, platform_card, runtime_card])}\n"
+
+    RenderResult.html(html_page("Environment Dashboard", css, body))
+
+fn env_html_val(v: text) -> text:
+    """Format env value for HTML display."""
+    if v == "":
+        return "(not set)"
+    v
+
+fn env_css() -> text:
+    """Additional CSS for env dashboard."""
+    var s = ""
+    s = "{s}.card { background:var(--bg-card); border:1px solid var(--border); border-radius:8px; padding:16px; }\n"
+    s = "{s}.card h3 { font-size:14px; margin-bottom:8px; }\n"
+    s = "{s}table td { padding:4px 8px; font-size:13px; }\n"
+    s = "{s}table td:first-child { font-family:monospace; color:var(--blue, #58a6ff); }\n"
+    s

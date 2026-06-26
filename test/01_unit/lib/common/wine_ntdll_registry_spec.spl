@@ -1,0 +1,44 @@
+use common.wine_ntdll_registry.{wine_ntdll_execute_registry_query, wine_ntdll_registry_hive_default}
+
+describe "Wine NTDLL registry bridge":
+    it "executes bounded key open, value query, and close":
+        val result = wine_ntdll_execute_registry_query(
+            ["NtOpenKey", "NtQueryValueKey", "NtClose"],
+            wine_ntdll_registry_hive_default(),
+            "\\Registry\\Machine\\Software\\Wine",
+            "InstallRoot"
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.handle).to_equal(0x600)
+        expect(result.value).to_equal("C:\\windows")
+        expect(result.operations).to_equal("NtOpenKey NtQueryValueKey NtClose")
+
+    it "keeps NTDLL registry dispatch ordered and bounded":
+        val out_of_order = wine_ntdll_execute_registry_query(
+            ["NtQueryValueKey", "NtOpenKey", "NtClose"],
+            wine_ntdll_registry_hive_default(),
+            "\\Registry\\Machine\\Software\\Wine",
+            "InstallRoot"
+        )
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("ntdll-registry-sequence-expected:NtOpenKey")
+
+        val wrong_family = wine_ntdll_execute_registry_query(
+            ["NtOpenKey", "NtQueryValueKey", "NtCreateFile"],
+            wine_ntdll_registry_hive_default(),
+            "\\Registry\\Machine\\Software\\Wine",
+            "InstallRoot"
+        )
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:NtCreateFile")
+
+    it "rejects missing registry values":
+        val result = wine_ntdll_execute_registry_query(
+            ["NtOpenKey", "NtQueryValueKey", "NtClose"],
+            wine_ntdll_registry_hive_default(),
+            "\\Registry\\Machine\\Software\\Wine",
+            "Missing"
+        )
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("NtQueryValueKey:value-not-found")

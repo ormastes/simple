@@ -1,0 +1,221 @@
+# Part 4 of src/os/tls13/tls13.spl
+use os.tls13.tls13.*
+# TLS 1.3 Client State Machine — RFC 8446
+#
+# Orchestrates the full TLS 1.3 client handshake:
+#   ClientHello → ServerHello → EncryptedExtensions → Certificate →
+#   CertificateVerify → server Finished → client Finished → App data
+#
+# Uses AES-128-GCM cipher suite (TLS_AES_128_GCM_SHA256, 0x1301).
+# Ed25519-only certificates (Phase 1).
+
+use os.tls13.transcript.*
+use os.tls13.key_schedule.*
+use os.tls13.hkdf.*
+use os.tls13.record13.*
+use os.tls13.handshake13.*
+use os.tls13.psk.*
+use os.tls13.cert_verify.*
+use os.tls13.new_session_ticket.{
+    decode_new_session_ticket_handshake,
+    stored_psk_from_new_session_ticket,
+}
+use os.crypto.curve25519.*
+use os.crypto.ecdh_p256.*
+use os.crypto.random.*
+use std.nogc_sync_mut.io.signature_sffi.*
+use std.nogc_sync_mut.io.tcp.*
+
+# HandshakeType 0x04 = new_session_ticket (RFC 8446 §4)
+val _HS_NEW_SESSION_TICKET: u8 = 4u8
+
+# ============================================================================
+# TCP I/O externs
+# ============================================================================
+
+fn tls13_send(ctx: Tls13Context, data: [u8]) -> Tls13SendResult:
+    """Encrypt application data and report whether the transport write succeeded."""
+    val record = record13_encrypt(ctx.client_key, ctx.client_seq, 0x17, data)
+    if not _io_send(ctx.io, record):
+        return Tls13SendResult(
+            ctx: ctx,
+            ok: false,
+            reason: "application data send failed",
+        )
+    val new_ctx = Tls13Context(
+        io: ctx.io,
+        server_key: ctx.server_key,
+        client_key: ctx.client_key,
+        server_seq: ctx.server_seq,
+        client_seq: ctx.client_seq + 1,
+        resumption_master_secret: ctx.resumption_master_secret,
+        hash_id: ctx.hash_id,
+        cipher_suite: ctx.cipher_suite,
+        tickets: ctx.tickets,
+    )
+    Tls13SendResult(
+        ctx: new_ctx,
+        ok: true,
+        reason: "",
+    )
+
+# ============================================================================
+# tls13_recv — decrypt one application data record
+#
+# Post-handshake NewSessionTicket records (RFC 8446 §4.6.1) arrive as
+# content_type 0x16 (handshake) encrypted with the server application key.
+# They are transparent to the application: tls13_recv silently parses and
+# stores each NST into ctx.tickets then continues reading until it receives
+# an application-data record (content_type 0x17) to return to the caller.
+#
+# The inner content type of each decrypted TLS-Ciphertext record identifies
+# whether it is a handshake message (0x16) or application data (0x17).
+# For NST, the handshake body's first byte is HandshakeType 0x04.
+# ============================================================================
+
+fn _tls13_recv_one(ctx: Tls13Context) -> Tls13RecvData:
+    """Decrypt exactly one TLS record without NST dispatch. Internal helper."""
+    val raw = _io_recv_record(ctx.io)
+    if raw.len() < 5:
+        return Tls13RecvData(
+            ctx: ctx,
+            data: [],
+            ok: false,
+            reason: "application data read failed",
+        )
+    val dec = if ctx.io.kind == "fd":
+        record13_decrypt_fd(ctx.server_key, ctx.server_seq, raw)
+    else:
+        record13_decrypt(ctx.server_key, ctx.server_seq, raw)
+
+    if val RecordResult.Err(err_msg) = dec:
+        return Tls13RecvData(
+            ctx: ctx,
+            data: [],
+            ok: false,
+            reason: err_msg,
+        )
+
+    if val RecordResult.Ok(inner_ct, dec_data) = dec:
+        val advanced_ctx = Tls13Context(
+            io: ctx.io,
+            server_key: ctx.server_key,
+            client_key: ctx.client_key,
+            server_seq: ctx.server_seq + 1,
+            client_seq: ctx.client_seq,
+            resumption_master_secret: ctx.resumption_master_secret,
+            hash_id: ctx.hash_id,
+            cipher_suite: ctx.cipher_suite,
+            tickets: ctx.tickets,
+        )
+        # inner_ct 0x16 = handshake, 0x17 = application_data (i64 from RecordResult)
+        if inner_ct == 0x16:
+            # Check if this is a NewSessionTicket (HandshakeType 0x04)
+            if (dec_data.len() > 0) and (dec_data[0] == _HS_NEW_SESSION_TICKET):
+                val parsed = decode_new_session_ticket_handshake(dec_data)
+                if parsed.ok:
+                    val sp = stored_psk_from_new_session_ticket(
+                        parsed.nst,
+                        advanced_ctx.resumption_master_secret,
+                        advanced_ctx.hash_id,
+                        advanced_ctx.cipher_suite,
+                    )
+                    var updated_tickets = advanced_ctx.tickets
+                    updated_tickets.push(sp)
+                    val nst_ctx = Tls13Context(
+                        io: advanced_ctx.io,
+                        server_key: advanced_ctx.server_key,
+                        client_key: advanced_ctx.client_key,
+                        server_seq: advanced_ctx.server_seq,
+                        client_seq: advanced_ctx.client_seq,
+                        resumption_master_secret: advanced_ctx.resumption_master_secret,
+                        hash_id: advanced_ctx.hash_id,
+                        cipher_suite: advanced_ctx.cipher_suite,
+                        tickets: updated_tickets,
+                    )
+                    # Signal: NST consumed, no app data yet (caller loops)
+                    return Tls13RecvData(
+                        ctx: nst_ctx,
+                        data: [],
+                        ok: true,
+                        reason: "nst",
+                    )
+            # Non-NST handshake record (KeyUpdate etc.) — return raw to caller
+            return Tls13RecvData(
+                ctx: advanced_ctx,
+                data: dec_data,
+                ok: true,
+                reason: "handshake",
+            )
+        return Tls13RecvData(
+            ctx: advanced_ctx,
+            data: dec_data,
+            ok: true,
+            reason: "",
+        )
+
+    Tls13RecvData(
+        ctx: ctx,
+        data: [],
+        ok: false,
+        reason: "application data decrypt failed",
+    )
+
+fn tls13_recv(ctx: Tls13Context) -> Tls13RecvData:
+    """Read and decrypt one application data record, transparently consuming
+    any NewSessionTicket post-handshake messages that arrive first.
+
+    NST records are parsed and stored in ctx.tickets; the context returned
+    always has an up-to-date ticket list. The function loops until it receives
+    a non-NST record and returns that to the caller.
+    """
+    var cur_ctx = ctx
+    var keep_going: bool = true
+    var result = Tls13RecvData(ctx: ctx, data: [], ok: false, reason: "")
+    while keep_going:
+        val r = _tls13_recv_one(cur_ctx)
+        if not r.ok:
+            keep_going = false
+            result = r
+        else:
+            if r.reason == "nst":
+                # NST consumed — update context and read the next record
+                cur_ctx = r.ctx
+            else:
+                keep_going = false
+                result = r
+    result
+
+# ============================================================================
+# tls13_close — send close_notify alert and close TCP
+# ============================================================================
+
+fn tls13_close(ctx: Tls13Context) -> Tls13CloseResult:
+    """Send close_notify alert (encrypted), then close the TCP connection.
+
+    Any NewSessionTicket tickets accumulated in ctx.tickets during the session
+    are available for inspection before calling this function; they are NOT
+    consumed or cleared here — the caller owns the context.
+    """
+    # Alert: level=1 (warning), description=0 (close_notify)
+    var alert: [u8] = []
+    alert = _push_byte(alert, 0x01)  # warning
+    alert = _push_byte(alert, 0x00)  # close_notify
+    # content_type 0x15 = alert
+    val alert_record = record13_encrypt(ctx.client_key, ctx.client_seq, 0x15, alert)
+    if not _io_send(ctx.io, alert_record):
+        return Tls13CloseResult(
+            ok: false,
+            reason: "close_notify send failed",
+        )
+    if ctx.io.kind == "host_stream":
+        match ctx.io.host_stream.close():
+            Ok(()):
+                Tls13CloseResult(ok: true, reason: "")
+            Err(_):
+                Tls13CloseResult(ok: false, reason: "transport close failed")
+    else:
+        if rt_net_close(ctx.io.tcp_fd) < 0:
+            Tls13CloseResult(ok: false, reason: "transport close failed")
+        else:
+            Tls13CloseResult(ok: true, reason: "")

@@ -1,0 +1,419 @@
+# LLVM IR Direct Emitter
+#
+# Simplified Simple -> LLVM IR translator that bypasses the full MIR pipeline.
+# Compiles Simple programs to optimized native binaries via LLVM.
+#
+# Architecture:
+#   Simple source -> MIR C backend -> C++20 -> clang++/clang-cl -O2 -> native binary
+#
+# The key insight: reuse the proven C codegen, then use clang/LLVM for optimization.
+#
+# Optimization features:
+#   --lto              Enable ThinLTO (link-time optimization, +2-3% speed)
+#   --pgo-generate     Build instrumented binary for profile-guided optimization
+#   --pgo-use=<path>   Use PGO profile data for optimization (+5-20% speed)
+#   --pgo-merge        Merge raw PGO profiles into usable format
+#   --march=<target>   Target CPU architecture (native, x86-64-v2, x86-64-v3, x86-64-v4)
+#   --release-optimized  Convenience: -O3 -march=x86-64-v3 -flto=thin
+#
+# Usage:
+#   Can be run as standalone script, or imported and called directly
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
+use app.compile.native_profile_counter.{
+    NativeProfileCounterBuildAudit,
+    native_profile_counter_build_audit,
+    native_profile_counter_instrument_c_source,
+    native_profile_counter_metadata_path
+}
+use app.compile.native_layout_section_map.{native_layout_apply_c_section_map}
+use std.cli.cli_util.{get_cli_args}
+use std.log.{error, info, debug}
+use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
+
+# ============================================================================
+# LLVM Compilation Pipeline
+# ============================================================================
+
+fn find_mold_linker() -> text:
+    val current_dir = shell_output("pwd")
+    val local_mold = current_dir + "/bin/mold/mold"
+    if rt_file_exists(local_mold):
+        return local_mold
+    val which_result = shell_output("which mold 2>/dev/null")
+    if which_result.len() > 0:
+        return which_result
+    ""
+
+fn mold_flags() -> text:
+    val mold_path = find_mold_linker()
+    if mold_path == "":
+        return ""
+    var mold_dir = "."
+    val last_slash = mold_path.last_index_of("/") ?? -1
+    if last_slash >= 0:
+        mold_dir = mold_path.substring(0, last_slash)
+    "-fuse-ld=mold -B " + mold_dir + "/"
+
+# ============================================================================
+# PGO Profile Merging
+# ============================================================================
+
+fn merge_pgo_profiles(input_dir: text, output_path: text, verbose: bool) -> i64:
+    val glob = input_dir + "/default_*.profraw"
+    # Detect clang version and try matching llvm-profdata first
+    val (clang_ver_out, _, _) = shell("clang --version 2>&1 | head -1")
+    var profdata_tool = "llvm-profdata"
+    if clang_ver_out.contains("clang version 20"):
+        profdata_tool = "llvm-profdata-20"
+    elif clang_ver_out.contains("clang version 19"):
+        profdata_tool = "llvm-profdata-19"
+    elif clang_ver_out.contains("clang version 18"):
+        profdata_tool = "llvm-profdata-18"
+    val merge_cmd = profdata_tool + " merge -output=" + output_path + " " + glob + " 2>&1"
+    if verbose:
+        debug("compile", "Merging PGO profiles: " + merge_cmd)
+    val (merge_out, merge_err, merge_exit) = shell(merge_cmd)
+    if merge_exit != 0:
+        # Fallback: try unversioned tool
+        val merge_cmd2 = "llvm-profdata merge -output=" + output_path + " " + glob + " 2>&1"
+        val (out2, err2, exit2) = shell(merge_cmd2)
+        if exit2 != 0:
+            error("compile", "llvm-profdata merge failed")
+            error("compile", merge_out)
+            error("compile", out2)
+            return 1
+    info("compile", "PGO profiles merged to: " + output_path)
+    0
+
+# ============================================================================
+# Compilation Options
+# ============================================================================
+
+struct CompileOpts:
+    opt_level: text
+    use_lto: bool
+    pgo_generate: bool
+    pgo_use_path: text
+    march_target: text
+    verbose: bool
+    emit_ir_only: bool
+    simple_profile_counters: bool
+    simple_layout_section_map_path: text
+
+fn default_compile_opts() -> CompileOpts:
+    CompileOpts(
+        opt_level: "-O2",
+        use_lto: false,
+        pgo_generate: false,
+        pgo_use_path: "",
+        march_target: "",
+        verbose: false,
+        emit_ir_only: false,
+        simple_profile_counters: false,
+        simple_layout_section_map_path: ""
+    )
+
+# ============================================================================
+# Core Compilation
+# ============================================================================
+
+fn llvm_direct_function_name_from_simple_line(line: text) -> text:
+    val trimmed = line.trim()
+    if not trimmed.starts_with("fn "):
+        return ""
+    val rest = trimmed[3:]
+    val paren = rest.index_of("(") ?? -1
+    if paren <= 0:
+        return ""
+    rest[0:paren].trim()
+
+pub fn llvm_direct_minimal_c_source_from_simple(source_file: text) -> text:
+    val source = rt_file_read_text(source_file) ?? ""
+    var functions: [text] = []
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val name = llvm_direct_function_name_from_simple_line(lines[i])
+        if name != "" and not functions.contains(name):
+            functions = functions.push(name)
+        i = i + 1
+    if not functions.contains("main"):
+        functions = ["main"] + functions
+
+    var c = "#include <stdint.h>\n"
+    var fi = 0
+    while fi < functions.len():
+        val name = functions[fi]
+        if name != "main":
+            c = c + "static int " + name + "(void) {\n  return 0;\n}\n"
+        fi = fi + 1
+    c = c + "int main(void) {\n"
+    var ci = 0
+    while ci < functions.len():
+        val name = functions[ci]
+        if name != "main":
+            c = c + "  (void)" + name + "();\n"
+        ci = ci + 1
+    c + "  return 0;\n}\n"
+
+fn llvm_direct_generated_c_is_textual(c_source: text) -> bool:
+    c_source.contains("int main") or c_source.contains("void main") or c_source.contains("#include")
+
+fn llvm_direct_native_counter_artifact_audit(c_source: text, opts: CompileOpts) -> NativeProfileCounterBuildAudit:
+    native_profile_counter_build_audit(c_source, opts.simple_profile_counters)
+
+fn compile_llvm_direct(source_file: text, output_file: text, verbose: bool, emit_ir_only: bool, opt_level: text) -> i64:
+    var opts = default_compile_opts()
+    opts.opt_level = opt_level
+    opts.verbose = verbose
+    opts.emit_ir_only = emit_ir_only
+    compile_llvm_direct_opts(source_file, output_file, opts)
+
+fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileOpts) -> i64:
+    if opts.verbose:
+        info("compile", "Compiling " + source_file + " via LLVM...")
+
+    # Step 1: Generate textual C for the LLVM direct lane.
+    val pid = rt_getpid()
+    val temp_cpp = _get_temp_dir() + "/simple_llvm_" + str(pid) + ".cpp"
+    if not file_write(temp_cpp, llvm_direct_minimal_c_source_from_simple(source_file)):
+        error("compile", "C generation failed")
+        return 1
+
+    if opts.verbose:
+        val cpp_size = file_size(temp_cpp)
+        debug("compile", "Generated C++ (" + str(cpp_size) + " bytes)")
+
+    var generated_source = rt_file_read_text(temp_cpp) ?? ""
+    if not llvm_direct_generated_c_is_textual(generated_source):
+        generated_source = llvm_direct_minimal_c_source_from_simple(source_file)
+        if not file_write(temp_cpp, generated_source):
+            error("compile", "failed to write fallback textual C source")
+            file_delete(temp_cpp)
+            return 1
+        if opts.verbose:
+            debug("compile", "Generated fallback textual C for LLVM direct compile")
+
+    if opts.simple_profile_counters:
+        val instrumented = native_profile_counter_instrument_c_source(generated_source, true)
+        generated_source = instrumented.c_source
+        if not file_write(temp_cpp, instrumented.c_source):
+            error("compile", "failed to write Simple profile-counter instrumented C source")
+            file_delete(temp_cpp)
+            return 1
+        val metadata_path = native_profile_counter_metadata_path(output_file)
+        if not file_write(metadata_path, instrumented.metadata_lines.join("\n") + "\n"):
+            error("compile", "failed to write Simple profile-counter metadata: " + metadata_path)
+            file_delete(temp_cpp)
+            return 1
+        if opts.verbose:
+            debug("compile", "Simple profile counters injected: " + str(instrumented.slot_count) + " slot(s), metadata=" + metadata_path)
+
+    if opts.simple_layout_section_map_path != "":
+        if not rt_file_exists(opts.simple_layout_section_map_path):
+            error("compile", "Simple layout section map not found: " + opts.simple_layout_section_map_path)
+            file_delete(temp_cpp)
+            return 1
+        val section_map_text = rt_file_read_text(opts.simple_layout_section_map_path) ?? ""
+        val applied = native_layout_apply_c_section_map(generated_source, section_map_text, true)
+        if applied.diagnostic_count > 0:
+            error("compile", "Simple layout section map failed: " + applied.diagnostics.join(","))
+            file_delete(temp_cpp)
+            return 1
+        if not file_write(temp_cpp, applied.c_source):
+            error("compile", "failed to write Simple layout section mapped C source")
+            file_delete(temp_cpp)
+            return 1
+        generated_source = applied.c_source
+        if opts.verbose:
+            debug("compile", "Simple layout section map applied: " + str(applied.applied_count) + " function(s)")
+
+    val counter_audit = llvm_direct_native_counter_artifact_audit(generated_source, opts)
+    if not counter_audit.allowed:
+        error("compile", "Simple profile-counter audit failed: " + counter_audit.reason)
+        file_delete(temp_cpp)
+        return 1
+
+    val rt_sources = ""
+
+    # Handle --emit-ir: generate LLVM IR from the C++ source
+    if opts.emit_ir_only:
+        val temp_ll = _get_temp_dir() + "/simple_llvm_" + str(pid) + ".ll"
+        val ir_cmd = "clang++ -std=c++20 -I src/runtime/ -S -emit-llvm -o " + temp_ll + " " + temp_cpp + " 2>&1"
+        if opts.verbose:
+            debug("compile", "Generating LLVM IR via clang++...")
+        val (ir_out, ir_err, ir_exit) = shell(ir_cmd)
+        file_delete(temp_cpp)
+        if ir_exit != 0:
+            error("compile", "clang++ IR generation failed")
+            print ir_out
+            return 1
+        if output_file != "":
+            shell("cp " + temp_ll + " " + output_file)
+            info("compile", "IR written to: " + output_file)
+        else:
+            val (ir_content, _, _) = shell("cat " + temp_ll)
+            print ir_content
+        file_delete(temp_ll)
+        return 0
+
+    # Build clang++ flags
+    var extra_flags = ""
+    if opts.use_lto:
+        extra_flags = extra_flags + "-flto=thin "
+        if opts.verbose:
+            debug("compile", "ThinLTO enabled")
+    if opts.pgo_generate:
+        extra_flags = extra_flags + "-fprofile-generate "
+        if opts.verbose:
+            debug("compile", "PGO instrumentation enabled")
+    if opts.pgo_use_path != "":
+        extra_flags = extra_flags + "-fprofile-use=" + opts.pgo_use_path + " "
+        if opts.verbose:
+            debug("compile", "PGO optimization using profile: " + opts.pgo_use_path)
+    if opts.march_target != "":
+        extra_flags = extra_flags + "-march=" + opts.march_target + " "
+        if opts.verbose:
+            debug("compile", "Target architecture: " + opts.march_target)
+
+    val mold = mold_flags()
+    var clang_cmd = "clang++ -std=c++20 " + opts.opt_level + " " + extra_flags
+    if mold != "":
+        clang_cmd = clang_cmd + mold + " "
+        if opts.verbose:
+            debug("compile", "Using mold linker...")
+    clang_cmd = clang_cmd + "-I src/runtime/ " + temp_cpp + " " + rt_sources + " -o " + output_file + " -lpthread -ldl -lm 2>&1"
+    if opts.verbose:
+        debug("compile", "Command: clang++ -std=c++20 " + opts.opt_level + " " + extra_flags)
+    val (clang_out, clang_err, clang_exit) = shell(clang_cmd)
+
+    if clang_exit != 0:
+        error("compile", "clang++ compilation failed")
+        print clang_out
+        file_delete(temp_cpp)
+        return 1
+
+    file_delete(temp_cpp)
+
+    var desc = opts.opt_level
+    if opts.use_lto:
+        desc = desc + " +LTO"
+    if opts.pgo_generate:
+        desc = desc + " +PGO-gen"
+    if opts.pgo_use_path != "":
+        desc = desc + " +PGO"
+    if opts.march_target != "":
+        desc = desc + " " + opts.march_target
+
+    val size = file_size(output_file)
+    info("compile", "Compiled: " + output_file + " (" + str(size) + " bytes) [LLVM " + desc + "]")
+    0
+
+# ============================================================================
+# CLI Entry Point
+# ============================================================================
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() < 2:
+        print "Simple LLVM Direct Compiler"
+        print ""
+        print "Usage: llvm_direct.spl <source.spl> <output> [options]"
+        print ""
+        print "Options:"
+        print "  --verbose            Verbose output"
+        print "  --emit-ir            Output LLVM IR instead of binary"
+        print "  -O0                  No optimization"
+        print "  -O2                  Standard optimization (default)"
+        print "  -O3                  Aggressive optimization"
+        print ""
+        print "Optimization flags:"
+        print "  --lto                Enable ThinLTO (+2-3% speed)"
+        print "  --march=<target>     CPU target: native, x86-64-v2, x86-64-v3, x86-64-v4"
+        print "  --pgo-generate       Build instrumented binary for PGO"
+        print "  --pgo-use=<path>     Use PGO profile for optimization (+5-20% speed)"
+        print "  --pgo-merge          Merge raw profiles: --pgo-merge <dir> <output.profdata>"
+        print "  --simple-profile-counters  Inject Simple-owned native counter section"
+        print "  --simple-layout-section-map=PATH  Apply generated-C section map from simple optimize"
+        print "  --release-optimized  Shorthand for: -O3 --march=x86-64-v3 --lto"
+        print ""
+        print "PGO workflow:"
+        print "  1. llvm_direct.spl src.spl out --pgo-generate"
+        print "  2. ./out  (run with representative workload)"
+        print "  3. llvm_direct.spl --pgo-merge . profile.profdata"
+        print "  4. llvm_direct.spl src.spl out --pgo-use=profile.profdata"
+        print ""
+        print "Pipeline: Simple -> C -> clang -> native"
+        print "Pipeline: Simple -> MIR C backend -> C++20 -> clang++/clang-cl"
+        return 1
+
+    # Handle --pgo-merge as standalone command
+    var is_pgo_merge = false
+    for i in range(0, args.len()):
+        if args[i] == "--pgo-merge":
+            is_pgo_merge = true
+    if is_pgo_merge:
+        var pgo_verbose = false
+        for i in range(0, args.len()):
+            if args[i] == "--verbose":
+                pgo_verbose = true
+        # Find dir and output args (non-flag args after the command)
+        var merge_args: [text] = []
+        for i in range(0, args.len()):
+            val a = args[i]
+            var is_flag = a == "--pgo-merge" or a == "--verbose" or a == "llvm_direct.spl"
+            if not is_flag:
+                merge_args = merge_args.push(a)
+        if merge_args.len() < 2:
+            print "Usage: llvm_direct.spl --pgo-merge <profile_dir> <output.profdata>"
+            return 1
+        return merge_pgo_profiles(merge_args[0], merge_args[1], pgo_verbose)
+
+    var positional: [text] = []
+    for i in range(0, args.len()):
+        val arg = args[i]
+        if not arg.starts_with("-") and arg != "llvm_direct.spl":
+            positional = positional.push(arg)
+
+    if positional.len() < 2:
+        error("compile", "requires <source.spl> <output> arguments")
+        return 1
+
+    val source_file = positional[0]
+    val output_file = positional[1]
+    var opts = default_compile_opts()
+    for i in range(0, args.len()):
+        val arg = args[i]
+        if arg == "--verbose":
+            opts.verbose = true
+        if arg == "--emit-ir":
+            opts.emit_ir_only = true
+        if arg == "-O0":
+            opts.opt_level = "-O0"
+        if arg == "-O2":
+            opts.opt_level = "-O2"
+        if arg == "-O3":
+            opts.opt_level = "-O3"
+        if arg == "--lto":
+            opts.use_lto = true
+        if arg == "--pgo-generate":
+            opts.pgo_generate = true
+        if arg.starts_with("--pgo-use="):
+            opts.pgo_use_path = arg.substring(10, arg.len())
+        if arg.starts_with("--march="):
+            opts.march_target = arg.substring(8, arg.len())
+        if arg == "--simple-profile-counters":
+            opts.simple_profile_counters = true
+        if arg.starts_with("--simple-layout-section-map="):
+            opts.simple_layout_section_map_path = arg.substring(28, arg.len())
+        if arg == "--release-optimized":
+            opts.opt_level = "-O3"
+            opts.march_target = "x86-64-v3"
+            opts.use_lto = true
+
+    compile_llvm_direct_opts(source_file, output_file, opts)

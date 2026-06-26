@@ -1,0 +1,363 @@
+# INI parser/writer specification
+#
+# NOTE: All module-level helper functions are used to avoid the it-block
+# var-mutation footgun (see .claude/memory/feedback_it_block_var_mutation.md).
+
+use std.spipe.*
+use std.common.encoding.ini.{ini_parse, ini_get, ini_set, ini_remove,
+    ini_sections, ini_keys, ini_encode}
+
+# ============================================================================
+# Parse helpers
+# ============================================================================
+
+fn _parse_global_key_count() -> i64:
+    val content = "name = Alice\nage = 30\n"
+    val entries = ini_parse(content)
+    entries.length()
+
+fn _parse_global_key_name() -> text:
+    val content = "name = Alice\nage = 30\n"
+    val entries = ini_parse(content)
+    ini_get(entries, "", "name")
+
+fn _parse_global_key_age() -> text:
+    val content = "name = Alice\nage = 30\n"
+    val entries = ini_parse(content)
+    ini_get(entries, "", "age")
+
+fn _parse_section_key_count() -> i64:
+    val content = "[server]\nhost = localhost\nport = 8080\n"
+    val entries = ini_parse(content)
+    entries.length()
+
+fn _parse_section_host() -> text:
+    val content = "[server]\nhost = localhost\nport = 8080\n"
+    val entries = ini_parse(content)
+    ini_get(entries, "server", "host")
+
+fn _parse_section_port() -> text:
+    val content = "[server]\nhost = localhost\nport = 8080\n"
+    val entries = ini_parse(content)
+    ini_get(entries, "server", "port")
+
+fn _parse_semicolon_comment_count() -> i64:
+    val content = "; this is a comment\n[db]\nuser = root\n"
+    val entries = ini_parse(content)
+    entries.length()
+
+fn _parse_hash_comment_count() -> i64:
+    val content = "# hash comment\n[db]\nuser = root\n"
+    val entries = ini_parse(content)
+    entries.length()
+
+fn _parse_spaces_around_eq() -> text:
+    val content = "[section]\nkey   =   spaced value   \n"
+    val entries = ini_parse(content)
+    ini_get(entries, "section", "key")
+
+fn _parse_no_spaces_around_eq() -> text:
+    val content = "[section]\nkey=nospace\n"
+    val entries = ini_parse(content)
+    ini_get(entries, "section", "key")
+
+fn _parse_multiple_sections_count() -> i64:
+    val content = "[alpha]\na = 1\n[beta]\nb = 2\nc = 3\n"
+    val entries = ini_parse(content)
+    entries.length()
+
+fn _parse_multiple_sections_alpha_a() -> text:
+    val content = "[alpha]\na = 1\n[beta]\nb = 2\nc = 3\n"
+    val entries = ini_parse(content)
+    ini_get(entries, "alpha", "a")
+
+fn _parse_multiple_sections_beta_b() -> text:
+    val content = "[alpha]\na = 1\n[beta]\nb = 2\nc = 3\n"
+    val entries = ini_parse(content)
+    ini_get(entries, "beta", "b")
+
+fn _parse_multiple_sections_beta_c() -> text:
+    val content = "[alpha]\na = 1\n[beta]\nb = 2\nc = 3\n"
+    val entries = ini_parse(content)
+    ini_get(entries, "beta", "c")
+
+# ============================================================================
+# Get/Set/Remove helpers
+# ============================================================================
+
+fn _get_missing_returns_empty() -> text:
+    val content = "[s]\nk = v\n"
+    val entries = ini_parse(content)
+    ini_get(entries, "s", "missing")
+
+fn _set_update_existing() -> text:
+    val content = "[s]\nk = old\n"
+    val entries = ini_parse(content)
+    val updated = ini_set(entries, "s", "k", "new")
+    ini_get(updated, "s", "k")
+
+fn _set_update_count_unchanged() -> i64:
+    val content = "[s]\nk = old\n"
+    val entries = ini_parse(content)
+    val updated = ini_set(entries, "s", "k", "new")
+    updated.length()
+
+fn _set_add_new_entry() -> text:
+    val content = "[s]\nk = v\n"
+    val entries = ini_parse(content)
+    val updated = ini_set(entries, "s", "newkey", "newval")
+    ini_get(updated, "s", "newkey")
+
+fn _set_add_new_count() -> i64:
+    val content = "[s]\nk = v\n"
+    val entries = ini_parse(content)
+    val updated = ini_set(entries, "s", "newkey", "newval")
+    updated.length()
+
+fn _remove_entry_count() -> i64:
+    val content = "[s]\nk1 = v1\nk2 = v2\n"
+    val entries = ini_parse(content)
+    val removed = ini_remove(entries, "s", "k1")
+    removed.length()
+
+fn _remove_entry_missing() -> text:
+    val content = "[s]\nk1 = v1\nk2 = v2\n"
+    val entries = ini_parse(content)
+    val removed = ini_remove(entries, "s", "k1")
+    ini_get(removed, "s", "k1")
+
+fn _remove_nonexistent_count() -> i64:
+    val content = "[s]\nk = v\n"
+    val entries = ini_parse(content)
+    val removed = ini_remove(entries, "s", "nope")
+    removed.length()
+
+# ============================================================================
+# Sections/Keys helpers
+# ============================================================================
+
+fn _sections_count() -> i64:
+    val content = "[alpha]\na = 1\n[beta]\nb = 2\n"
+    val entries = ini_parse(content)
+    val sects = ini_sections(entries)
+    sects.len()
+
+fn _sections_first() -> text:
+    val content = "[alpha]\na = 1\n[beta]\nb = 2\n"
+    val entries = ini_parse(content)
+    val sects = ini_sections(entries)
+    sects[0]
+
+fn _sections_second() -> text:
+    val content = "[alpha]\na = 1\n[beta]\nb = 2\n"
+    val entries = ini_parse(content)
+    val sects = ini_sections(entries)
+    sects[1]
+
+fn _sections_includes_global() -> i64:
+    val content = "g = 0\n[s]\nk = v\n"
+    val entries = ini_parse(content)
+    val sects = ini_sections(entries)
+    sects.len()
+
+fn _keys_in_section_count() -> i64:
+    val content = "[s]\na = 1\nb = 2\nc = 3\n"
+    val entries = ini_parse(content)
+    val ks = ini_keys(entries, "s")
+    ks.len()
+
+fn _keys_in_section_first() -> text:
+    val content = "[s]\na = 1\nb = 2\nc = 3\n"
+    val entries = ini_parse(content)
+    val ks = ini_keys(entries, "s")
+    ks[0]
+
+fn _keys_in_section_second() -> text:
+    val content = "[s]\na = 1\nb = 2\nc = 3\n"
+    val entries = ini_parse(content)
+    val ks = ini_keys(entries, "s")
+    ks[1]
+
+# ============================================================================
+# Encode / round-trip helpers
+# ============================================================================
+
+fn _encode_has_section_header() -> bool:
+    val content = "[s]\nk = v\n"
+    val entries = ini_parse(content)
+    val encoded = ini_encode(entries)
+    encoded.contains("[s]")
+
+fn _encode_has_kv() -> bool:
+    val content = "[s]\nk = v\n"
+    val entries = ini_parse(content)
+    val encoded = ini_encode(entries)
+    encoded.contains("k = v")
+
+fn _roundtrip_count() -> i64:
+    val content = "[alpha]\na = 1\nb = 2\n[beta]\nc = 3\n"
+    val entries = ini_parse(content)
+    val encoded = ini_encode(entries)
+    val reparsed = ini_parse(encoded)
+    reparsed.length()
+
+fn _roundtrip_alpha_a() -> text:
+    val content = "[alpha]\na = 1\nb = 2\n[beta]\nc = 3\n"
+    val entries = ini_parse(content)
+    val encoded = ini_encode(entries)
+    val reparsed = ini_parse(encoded)
+    ini_get(reparsed, "alpha", "a")
+
+fn _roundtrip_alpha_b() -> text:
+    val content = "[alpha]\na = 1\nb = 2\n[beta]\nc = 3\n"
+    val entries = ini_parse(content)
+    val encoded = ini_encode(entries)
+    val reparsed = ini_parse(encoded)
+    ini_get(reparsed, "alpha", "b")
+
+fn _roundtrip_beta_c() -> text:
+    val content = "[alpha]\na = 1\nb = 2\n[beta]\nc = 3\n"
+    val entries = ini_parse(content)
+    val encoded = ini_encode(entries)
+    val reparsed = ini_parse(encoded)
+    ini_get(reparsed, "beta", "c")
+
+fn _roundtrip_sections_count() -> i64:
+    val content = "[alpha]\na = 1\nb = 2\n[beta]\nc = 3\n"
+    val entries = ini_parse(content)
+    val encoded = ini_encode(entries)
+    val reparsed = ini_parse(encoded)
+    val sects = ini_sections(reparsed)
+    sects.len()
+
+fn _encode_global_no_header() -> bool:
+    val entries = ini_parse("g = 0\n")
+    val encoded = ini_encode(entries)
+    not encoded.contains("[")
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "INI parse — global keys":
+
+    it "parses two global keys into two entries":
+        expect(_parse_global_key_count()).to_equal(2)
+
+    it "gets global key 'name'":
+        expect(_parse_global_key_name()).to_equal("Alice")
+
+    it "gets global key 'age'":
+        expect(_parse_global_key_age()).to_equal("30")
+
+describe "INI parse — sections":
+
+    it "parses two keys under [server] into two entries":
+        expect(_parse_section_key_count()).to_equal(2)
+
+    it "gets section key 'host'":
+        expect(_parse_section_host()).to_equal("localhost")
+
+    it "gets section key 'port'":
+        expect(_parse_section_port()).to_equal("8080")
+
+    it "skips semicolon comments":
+        expect(_parse_semicolon_comment_count()).to_equal(1)
+
+    it "skips hash comments":
+        expect(_parse_hash_comment_count()).to_equal(1)
+
+    it "trims spaces around = in value":
+        expect(_parse_spaces_around_eq()).to_equal("spaced value")
+
+    it "parses key=value without spaces":
+        expect(_parse_no_spaces_around_eq()).to_equal("nospace")
+
+describe "INI parse — multiple sections":
+
+    it "parses three entries across two sections":
+        expect(_parse_multiple_sections_count()).to_equal(3)
+
+    it "gets alpha.a":
+        expect(_parse_multiple_sections_alpha_a()).to_equal("1")
+
+    it "gets beta.b":
+        expect(_parse_multiple_sections_beta_b()).to_equal("2")
+
+    it "gets beta.c":
+        expect(_parse_multiple_sections_beta_c()).to_equal("3")
+
+describe "INI get/set/remove":
+
+    it "returns empty string for missing key":
+        expect(_get_missing_returns_empty()).to_equal("")
+
+    it "updates existing entry value":
+        expect(_set_update_existing()).to_equal("new")
+
+    it "update does not change entry count":
+        expect(_set_update_count_unchanged()).to_equal(1)
+
+    it "adds new entry when key not found":
+        expect(_set_add_new_entry()).to_equal("newval")
+
+    it "add increments entry count":
+        expect(_set_add_new_count()).to_equal(2)
+
+    it "removes entry decrements count":
+        expect(_remove_entry_count()).to_equal(1)
+
+    it "removed entry returns empty on get":
+        expect(_remove_entry_missing()).to_equal("")
+
+    it "removing nonexistent key leaves count unchanged":
+        expect(_remove_nonexistent_count()).to_equal(1)
+
+describe "INI sections and keys":
+
+    it "lists two unique sections":
+        expect(_sections_count()).to_equal(2)
+
+    it "first section is 'alpha'":
+        expect(_sections_first()).to_equal("alpha")
+
+    it "second section is 'beta'":
+        expect(_sections_second()).to_equal("beta")
+
+    it "includes global section '' when global keys exist":
+        expect(_sections_includes_global()).to_equal(2)
+
+    it "lists three keys in section":
+        expect(_keys_in_section_count()).to_equal(3)
+
+    it "first key in section is 'a'":
+        expect(_keys_in_section_first()).to_equal("a")
+
+    it "second key in section is 'b'":
+        expect(_keys_in_section_second()).to_equal("b")
+
+describe "INI encode and round-trip":
+
+    it "encoded output contains section header":
+        expect(_encode_has_section_header()).to_equal(true)
+
+    it "encoded output contains key = value pair":
+        expect(_encode_has_kv()).to_equal(true)
+
+    it "round-trip preserves entry count":
+        expect(_roundtrip_count()).to_equal(3)
+
+    it "round-trip preserves alpha.a":
+        expect(_roundtrip_alpha_a()).to_equal("1")
+
+    it "round-trip preserves alpha.b":
+        expect(_roundtrip_alpha_b()).to_equal("2")
+
+    it "round-trip preserves beta.c":
+        expect(_roundtrip_beta_c()).to_equal("3")
+
+    it "round-trip preserves section count":
+        expect(_roundtrip_sections_count()).to_equal(2)
+
+    it "global keys encoded without section header":
+        expect(_encode_global_no_header()).to_equal(true)

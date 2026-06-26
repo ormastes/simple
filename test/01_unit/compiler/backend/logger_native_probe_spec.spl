@@ -1,0 +1,52 @@
+use std.spec
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_compile_to_native(source_path: text, output_path: text) -> (bool, text)
+extern fn rt_execute_native(binary_path: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _probe_source() -> text:
+    "use lib.nogc_async_mut_noalloc.log.{simple_log_c_init, simple_log_c_write, log_set_targets, LOG_INFO, TARGET_DEVICE}\n" +
+        "extern fn rt_string_data(value: text) -> i64\n" +
+        "extern fn rt_string_len(value: text) -> i64\n" +
+        "\n" +
+        "fn main() -> i64:\n" +
+        "    simple_log_c_init(LOG_INFO.to_i64(), 0)\n" +
+        "    val drop = \"drop-me\"\n" +
+        "    simple_log_c_write(LOG_INFO.to_i64(), rt_string_data(drop), rt_string_len(drop))\n" +
+        "    log_set_targets(TARGET_DEVICE)\n" +
+        "    val keep = \"keep-me\"\n" +
+        "    simple_log_c_write(LOG_INFO.to_i64(), rt_string_data(keep), rt_string_len(keep))\n" +
+        "    0\n"
+
+describe "logger native probe":
+    it "gates simple_log_c_write output behind log_set_targets on hosted fallback":
+        val source_path = "/tmp/simple_logger_native_probe.spl"
+        val binary_path = "/tmp/simple_logger_native_probe"
+        expect(rt_file_write_text(source_path, _probe_source())).to_equal(true)
+
+        val compile_result = rt_compile_to_native(source_path, binary_path)
+        expect(compile_result[0]).to_equal(true)
+
+        val exec_result = rt_execute_native(binary_path, [], 5000)
+        val stdout = exec_result[0]
+        val exit_code = exec_result[2]
+
+        expect(exit_code).to_equal(0)
+        expect(stdout).to_contain("keep-me")
+        expect(stdout.contains("drop-me")).to_equal(false)
+
+        rt_file_delete(source_path)
+        rt_file_delete(binary_path)
+
+    it "does not borrow repo context for ordinary external paths":
+        val source_path = "../simple_logger_native_probe_outside.spl"
+        val binary_path = "../simple_logger_native_probe_outside"
+        expect(rt_file_write_text(source_path, _probe_source())).to_equal(true)
+
+        val compile_result = rt_compile_to_native(source_path, binary_path)
+        expect(compile_result[0]).to_equal(false)
+        expect(compile_result[1] == "").to_equal(false)
+
+        rt_file_delete(source_path)
+        rt_file_delete(binary_path)

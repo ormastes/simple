@@ -1,0 +1,294 @@
+# LDAP BER encoders (RFC 4511 §5.1 — BER, restricted to DER definite-length).
+#
+# Works at the [u8] level: a single ldap_tlv primitive emits tag + DER length +
+# content, and operation encoders concatenate child TLVs then wrap them.  This
+# is necessary because std.common.net.ber only emits UNIVERSAL-class tags
+# (0x01..0x30) and hardcodes 0x30 for SEQUENCE; LDAP needs APPLICATION and
+# CONTEXT class tags.  Universal leaves (INTEGER, OCTET STRING) are emitted by
+# small local helpers that mirror ber.spl's DER rules.
+#
+# BUG(cross_module_match_arm_array_mutation_no_propagate): every builder is
+# RETURN-STYLE — it takes `out` and returns the extended array.  In-place push
+# into a [u8] argument does not propagate across cross-module calls.
+# BUG(bytereader_by_value_param_no_cursor_propagation): no ByteReader is passed
+# by value here; encode recursion returns [u8] (safe, mirrors ber_encode).
+
+use std.nogc_sync_mut.ldap.types.*
+
+# =============================================================================
+# Low-level: DER length + TLV
+# =============================================================================
+
+# Append the DER definite-length encoding of n to out; return extended array.
+fn _ldap_encode_length(n: u64, out: [u8]) -> [u8]:
+    if n < 128:
+        out.push(n.to_u8())
+        return out
+    var groups: [u8] = []
+    var x: u64 = n
+    while x > 0:
+        groups.push((x & 0xFF).to_u8())
+        x = x >> 8
+    out.push((0x80 | groups.len()).to_u8())
+    var idx: u64 = groups.len()
+    while idx > 0:
+        idx = idx - 1
+        out.push(groups[idx])
+    out
+
+# Append src bytes to dst; return extended array.
+fn _ldap_append(dst: [u8], src: [u8]) -> [u8]:
+    var i: u64 = 0
+    while i < src.len():
+        dst.push(src[i])
+        i = i + 1
+    dst
+
+# Convert text -> [u8] (ASCII / UTF-8 byte values).
+# BUG(interp_text_bytes_corrupts_across_frame): text.bytes() / rt_text_to_bytes
+# read as garbage once they cross a function-frame boundary; building the array
+# with char_code_at + to_u8 produces a genuine [u8] that survives parameter
+# passing.  See doc/08_tracking/bug/interp_text_bytes_corrupts_across_frame_2026-06-15.md
+fn ldap_text_bytes(s: text) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < s.len():
+        out.push(s.char_code_at(i).to_u8())
+        i = i + 1
+    out
+
+# Emit a complete TLV (tag, DER length, content) appended to out.
+fn ldap_tlv(tag_byte: u8, content: [u8], out: [u8]) -> [u8]:
+    var acc = out
+    acc.push(tag_byte)
+    acc = _ldap_encode_length(content.len(), acc)
+    acc = _ldap_append(acc, content)
+    acc
+
+# Build a fresh TLV as its own [u8].
+fn ldap_tlv_bytes(tag_byte: u8, content: [u8]) -> [u8]:
+    var out: [u8] = []
+    out = ldap_tlv(tag_byte, content, out)
+    out
+
+# =============================================================================
+# Universal leaf encoders (mirror ber.spl DER rules)
+# =============================================================================
+
+# INTEGER content (two's complement, minimal length) — positive/zero only path
+# is sufficient for LDAP message IDs, versions and limits, but negatives are
+# handled too for completeness.
+fn _ldap_int_content(n: i64) -> [u8]:
+    var out: [u8] = []
+    if n == 0:
+        out.push(0)
+        return out
+    if n > 0:
+        var groups: [u8] = []
+        var x: u64 = n.to_u64()
+        while x > 0:
+            groups.push((x & 0xFF).to_u8())
+            x = x >> 8
+        var idx: u64 = groups.len()
+        if (groups[idx - 1] & 0x80) != 0:
+            out.push(0)
+        while idx > 0:
+            idx = idx - 1
+            out.push(groups[idx])
+        return out
+    val u = n.to_u64()
+    var full: [u8] = []
+    var i: u64 = 0
+    while i < 8:
+        val sh = (7 - i) * 8
+        full.push(((u >> sh) & 0xFF).to_u8())
+        i = i + 1
+    var start: u64 = 0
+    while start < 7:
+        if full[start] == 0xFF and (full[start + 1] & 0x80) != 0:
+            start = start + 1
+        else:
+            break
+    var j: u64 = start
+    while j < 8:
+        out.push(full[j])
+        j = j + 1
+    out
+
+# Append a universal INTEGER (tag 0x02) to out.
+fn ldap_encode_integer(n: i64, out: [u8]) -> [u8]:
+    val content = _ldap_int_content(n)
+    ldap_tlv(0x02, content, out)
+
+# Append a universal ENUMERATED (tag 0x0A) to out — used for scope/deref/result.
+fn ldap_encode_enumerated(n: i64, out: [u8]) -> [u8]:
+    val content = _ldap_int_content(n)
+    ldap_tlv(LDAP_TAG_ENUMERATED, content, out)
+
+# Append a universal OCTET STRING (tag 0x04) to out.
+fn ldap_encode_octet_string(bytes: [u8], out: [u8]) -> [u8]:
+    ldap_tlv(0x04, bytes, out)
+
+# Append a universal OCTET STRING built from a text value.
+fn ldap_encode_text(s: text, out: [u8]) -> [u8]:
+    ldap_encode_octet_string(ldap_text_bytes(s), out)
+
+# Append a universal BOOLEAN (tag 0x01).
+fn ldap_encode_boolean(b: bool, out: [u8]) -> [u8]:
+    var content: [u8] = []
+    if b:
+        content.push(0xFF)
+    else:
+        content.push(0x00)
+    ldap_tlv(0x01, content, out)
+
+# =============================================================================
+# Filter encoding (recursive; returns [u8])
+# =============================================================================
+
+# Encode a filter into its TLV bytes (context-tagged).
+fn ldap_encode_filter_bytes(filter: LdapFilter) -> [u8]:
+    if filter.kind == LDAP_FILTER_PRESENT:
+        # present [7] primitive: content = attribute description bytes
+        return ldap_tlv_bytes(LDAP_FILTER_TAG_PRESENT, ldap_text_bytes(filter.attribute))
+    elif filter.kind == LDAP_FILTER_EQUALITY:
+        # equalityMatch [3] = AttributeValueAssertion SEQUENCE { desc, value }
+        var ava: [u8] = []
+        ava = ldap_encode_text(filter.attribute, ava)
+        ava = ldap_encode_octet_string(filter.value, ava)
+        return ldap_tlv_bytes(LDAP_FILTER_TAG_EQUALITY, ava)
+    elif filter.kind == LDAP_FILTER_AND:
+        var body: [u8] = []
+        var i: u64 = 0
+        while i < filter.children.len():
+            val child = ldap_encode_filter_bytes(filter.children[i])
+            body = _ldap_append(body, child)
+            i = i + 1
+        return ldap_tlv_bytes(LDAP_FILTER_TAG_AND, body)
+    elif filter.kind == LDAP_FILTER_OR:
+        var body: [u8] = []
+        var i: u64 = 0
+        while i < filter.children.len():
+            val child = ldap_encode_filter_bytes(filter.children[i])
+            body = _ldap_append(body, child)
+            i = i + 1
+        return ldap_tlv_bytes(LDAP_FILTER_TAG_OR, body)
+    elif filter.kind == LDAP_FILTER_NOT:
+        var body: [u8] = []
+        if filter.children.len() > 0:
+            body = ldap_encode_filter_bytes(filter.children[0])
+        return ldap_tlv_bytes(LDAP_FILTER_TAG_NOT, body)
+    else:
+        # Unknown kind -> empty present-like; return empty TLV to stay total.
+        return ldap_tlv_bytes(LDAP_FILTER_TAG_PRESENT, ldap_text_bytes(filter.attribute))
+
+# Append a filter to out.
+fn ldap_encode_filter(filter: LdapFilter, out: [u8]) -> [u8]:
+    val fb = ldap_encode_filter_bytes(filter)
+    _ldap_append(out, fb)
+
+# =============================================================================
+# Operation encoders -> raw protocol-op TLV bytes
+# =============================================================================
+
+# BindRequest [APPLICATION 0]: { version INTEGER, name OCTET STRING,
+#   authentication [0] simple OCTET STRING }
+fn ldap_encode_bind_request_bytes(req: LdapBindRequest) -> [u8]:
+    var content: [u8] = []
+    content = ldap_encode_integer(req.version, content)
+    content = ldap_encode_text(req.name.value, content)
+    # simple auth = [CONTEXT 0] primitive holding the password bytes
+    content = ldap_tlv(LDAP_TAG_AUTH_SIMPLE, req.password, content)
+    ldap_tlv_bytes(LDAP_TAG_BIND_REQUEST, content)
+
+# SearchRequest [APPLICATION 3]: { baseObject, scope ENUM, derefAliases ENUM,
+#   sizeLimit INT, timeLimit INT, typesOnly BOOL, filter, attributes SEQUENCE OF }
+fn ldap_encode_search_request_bytes(req: LdapSearchRequest) -> [u8]:
+    var content: [u8] = []
+    content = ldap_encode_text(req.base_dn.value, content)
+    content = ldap_encode_enumerated(req.scope, content)
+    content = ldap_encode_enumerated(req.deref_aliases, content)
+    content = ldap_encode_integer(req.size_limit, content)
+    content = ldap_encode_integer(req.time_limit, content)
+    content = ldap_encode_boolean(req.types_only, content)
+    content = ldap_encode_filter(req.filter, content)
+    # attributes: SEQUENCE OF OCTET STRING (universal 0x30)
+    var attrs: [u8] = []
+    var i: u64 = 0
+    while i < req.attributes.len():
+        attrs = ldap_encode_text(req.attributes[i], attrs)
+        i = i + 1
+    content = ldap_tlv(0x30, attrs, content)
+    ldap_tlv_bytes(LDAP_TAG_SEARCH_REQUEST, content)
+
+# UnbindRequest [APPLICATION 2] primitive NULL — empty content.
+fn ldap_encode_unbind_request_bytes() -> [u8]:
+    var empty: [u8] = []
+    ldap_tlv_bytes(LDAP_TAG_UNBIND_REQUEST, empty)
+
+# LDAPResult shared content: resultCode ENUM, matchedDN, diagnosticMessage.
+fn _ldap_encode_result_content(res: LdapResult) -> [u8]:
+    var content: [u8] = []
+    content = ldap_encode_enumerated(res.code, content)
+    content = ldap_encode_text(res.matched_dn.value, content)
+    content = ldap_encode_text(res.diagnostic_message, content)
+    content
+
+# BindResponse [APPLICATION 1] = LDAPResult.
+fn ldap_encode_bind_response_bytes(resp: LdapBindResponse) -> [u8]:
+    val content = _ldap_encode_result_content(resp.result)
+    ldap_tlv_bytes(LDAP_TAG_BIND_RESPONSE, content)
+
+# SearchResultDone [APPLICATION 5] = LDAPResult.
+fn ldap_encode_search_done_bytes(done: LdapSearchResultDone) -> [u8]:
+    val content = _ldap_encode_result_content(done.result)
+    ldap_tlv_bytes(LDAP_TAG_SEARCH_RES_DONE, content)
+
+# SearchResultEntry [APPLICATION 4]: { objectName, PartialAttributeList }
+# PartialAttributeList = SEQUENCE OF SEQUENCE { type, SET OF value }
+fn ldap_encode_search_entry_bytes(entry: LdapEntry) -> [u8]:
+    var palist: [u8] = []
+    var i: u64 = 0
+    while i < entry.attributes.len():
+        val attr = entry.attributes[i]
+        # SET OF values (universal SET = 0x31)
+        var setof: [u8] = []
+        var j: u64 = 0
+        while j < attr.values.len():
+            setof = ldap_encode_octet_string(attr.values[j], setof)
+            j = j + 1
+        var one: [u8] = []
+        one = ldap_encode_text(attr.attr_type, one)
+        one = ldap_tlv(0x31, setof, one)
+        palist = ldap_tlv(0x30, one, palist)
+        i = i + 1
+    var content: [u8] = []
+    content = ldap_encode_text(entry.dn.value, content)
+    content = ldap_tlv(0x30, palist, content)
+    ldap_tlv_bytes(LDAP_TAG_SEARCH_RES_ENTRY, content)
+
+# =============================================================================
+# Message envelope encoder
+# =============================================================================
+
+# Wrap message_id + raw protocol-op bytes into a top-level LDAPMessage SEQUENCE.
+fn ldap_encode_message(message_id: i64, protocol_op: [u8]) -> [u8]:
+    var inner: [u8] = []
+    inner = ldap_encode_integer(message_id, inner)
+    inner = _ldap_append(inner, protocol_op)
+    ldap_tlv_bytes(0x30, inner)
+
+# Convenience: encode a full BindRequest message.
+fn ldap_encode_bind_request(message_id: i64, req: LdapBindRequest) -> [u8]:
+    val op = ldap_encode_bind_request_bytes(req)
+    ldap_encode_message(message_id, op)
+
+# Convenience: encode a full SearchRequest message.
+fn ldap_encode_search_request(message_id: i64, req: LdapSearchRequest) -> [u8]:
+    val op = ldap_encode_search_request_bytes(req)
+    ldap_encode_message(message_id, op)
+
+# Convenience: encode a full UnbindRequest message.
+fn ldap_encode_unbind_request(message_id: i64) -> [u8]:
+    val op = ldap_encode_unbind_request_bytes()
+    ldap_encode_message(message_id, op)

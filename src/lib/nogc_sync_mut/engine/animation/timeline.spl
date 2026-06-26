@@ -1,0 +1,161 @@
+# Animation — Cinematic Timeline / Sequencer
+#
+# Timeline with tracks and keyframes for sequenced playback.
+# Supports linear, ease_in, ease_out, and ease_in_out easing.
+
+# --------------------------------------------------------------------------
+# TimelineKey — single keyframe
+# --------------------------------------------------------------------------
+
+struct TimelineKey:
+    time: f64
+    value: f64
+    easing: text
+
+# --------------------------------------------------------------------------
+# TimelineTrack — a sequence of keyframes targeting a property
+# --------------------------------------------------------------------------
+
+struct TimelineTrack:
+    name: text
+    target_property: text
+    keys: [TimelineKey]
+
+impl TimelineTrack:
+    static fn new(name: text, target_property: text) -> TimelineTrack:
+        TimelineTrack(
+            name: name,
+            target_property: target_property,
+            keys: []
+        )
+
+    me add_key(time: f64, value: f64, easing: text):
+        val key = TimelineKey(time: time, value: value, easing: easing)
+        self.keys.push(key)
+
+    fn key_count() -> i32:
+        self.keys.len()
+
+    fn duration() -> f64:
+        if self.keys.len() == 0:
+            return 0.0
+        # Find max time among keys
+        var max_t = 0.0
+        var i = 0
+        while i < self.keys.len():
+            val k = self.keys[i]
+            if k.time > max_t:
+                max_t = k.time
+            i = i + 1
+        max_t
+
+    fn sample(time: f64) -> f64:
+        val n = self.keys.len()
+        if n == 0:
+            return 0.0
+        # Before first key
+        if time <= self.keys[0].time:
+            return self.keys[0].value
+        # After last key
+        if time >= self.keys[n - 1].time:
+            return self.keys[n - 1].value
+        # Find surrounding keys
+        var idx = 0
+        while idx < n - 1:
+            val k0 = self.keys[idx]
+            val k1 = self.keys[idx + 1]
+            if time >= k0.time and time <= k1.time:
+                val span = k1.time - k0.time
+                if span < 0.0001:
+                    return k0.value
+                var t = (time - k0.time) / span
+                # Apply easing
+                t = apply_easing(t, k0.easing)
+                return k0.value + (k1.value - k0.value) * t
+            idx = idx + 1
+        self.keys[n - 1].value
+
+# --------------------------------------------------------------------------
+# Easing helper
+# --------------------------------------------------------------------------
+
+fn apply_easing(t: f64, easing: text) -> f64:
+    if easing == "ease_in":
+        return t * t
+    if easing == "ease_out":
+        return t * (2.0 - t)
+    if easing == "ease_in_out":
+        if t < 0.5:
+            return 2.0 * t * t
+        return -1.0 + (4.0 - 2.0 * t) * t
+    # "linear" or unknown — identity
+    t
+
+# --------------------------------------------------------------------------
+# Timeline — multi-track sequencer
+# --------------------------------------------------------------------------
+
+class Timeline:
+    name: text
+    tracks: [TimelineTrack]
+    current_time: f64
+    playing: bool
+    looping: bool
+    duration: f64
+
+impl Timeline:
+    static fn new(name: text, duration: f64) -> Timeline:
+        Timeline(
+            name: name,
+            tracks: [],
+            current_time: 0.0,
+            playing: false,
+            looping: false,
+            duration: duration
+        )
+
+    me add_track(track: TimelineTrack):
+        self.tracks.push(track)
+
+    me play():
+        self.playing = true
+
+    me stop():
+        self.playing = false
+        self.current_time = 0.0
+
+    me pause():
+        self.playing = false
+
+    me seek(time: f64):
+        self.current_time = time
+
+    me update(dt: f64):
+        if self.playing == false:
+            return
+        self.current_time = self.current_time + dt
+        if self.current_time >= self.duration:
+            if self.looping:
+                self.current_time = self.current_time - self.duration
+            else:
+                self.current_time = self.duration
+                self.playing = false
+
+    fn is_playing() -> bool:
+        self.playing
+
+    fn get_current_time() -> f64:
+        self.current_time
+
+    fn track_count() -> i32:
+        self.tracks.len()
+
+    fn sample_track(track_index: i32, time: f64) -> f64:
+        if track_index < 0:
+            return 0.0
+        if track_index >= self.tracks.len():
+            return 0.0
+        self.tracks[track_index].sample(time)
+
+    fn is_finished() -> bool:
+        self.current_time >= self.duration and self.looping == false
