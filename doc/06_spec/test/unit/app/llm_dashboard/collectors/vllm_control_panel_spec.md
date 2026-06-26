@@ -27,7 +27,7 @@ vllm_control_panel_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -102,6 +102,46 @@ expect(panel.evidence_jsonl.split("nil").len()).to_equal(1)
 
 </details>
 
+#### honors dashboard resource flags before side-effecting actions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val panel = collect_llm_dashboard_vllm_control_action_with_resources(fixture_vllm_manifest(), "start", -1, false, true)
+
+expect(panel.action).to_equal("start")
+expect(panel.status).to_equal("skipped")
+expect(panel.reason).to_equal("missing_local_vllm")
+expect(panel.running_status).to_equal("not_started")
+expect(panel.evidence_jsonl.split("nil").len()).to_equal(1)
+```
+
+</details>
+
+#### applies dashboard base model and endpoint overrides
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val panel = collect_llm_dashboard_vllm_control_action_with_overrides("", "preflight", -1, "base-model", "http://127.0.0.1:8000/v1", true, true)
+
+expect(panel.action).to_equal("preflight")
+expect(panel.status).to_equal("planned")
+expect(panel.reason).to_equal("serve_and_models_probe_planned")
+expect(panel.endpoint_status).to_equal("configured")
+expect(panel.evidence_jsonl.contains("base-model")).to_equal(false)
+```
+
+</details>
+
 #### rejects stop requests with invalid pids before live execution
 
 <details>
@@ -164,6 +204,46 @@ expect(response.split("nil").len()).to_equal(1)
 
 </details>
 
+#### accepts query-style dashboard control resource flags
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", fixture_vllm_manifest())
+val response = server.route_http("GET", "/api/vllm/control?action=start&vllm_available=false&gpu_available=true", "", "sid")
+
+expect(response).to_contain("HTTP/1.1 200 OK")
+expect(response).to_contain("\"status\":\"skipped\"")
+expect(response).to_contain("\"reason\":\"missing_local_vllm\"")
+expect(response.split("nil").len()).to_equal(1)
+```
+
+</details>
+
+#### accepts query-style dashboard model and endpoint overrides
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", "")
+val response = server.route_http("GET", "/api/vllm/control?action=preflight&base_model=base-model&endpoint=http://127.0.0.1:8000/v1", "", "sid")
+
+expect(response).to_contain("HTTP/1.1 200 OK")
+expect(response).to_contain("\"status\":\"planned\"")
+expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
+expect(response.contains("base-model")).to_equal(false)
+```
+
+</details>
+
 #### embeds the vLLM control panel in dashboard HTML
 
 <details>
@@ -202,8 +282,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

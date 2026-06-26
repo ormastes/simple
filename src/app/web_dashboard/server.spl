@@ -1,7 +1,7 @@
 use app.web_dashboard.dashboard_html.{generate_full_dashboard_html_with_diagnostics_and_tooling}
 use app.llm_dashboard.collectors.diagnostics_jsonl_collector.{collect_llm_diagnostics_jsonl, render_llm_diagnostics_panel_html}
 use app.llm_dashboard.collectors.tooling_artifact_collector.{collect_llm_tooling_artifacts, render_llm_tooling_artifacts_panel_html}
-use app.llm_dashboard.collectors.vllm_control_panel.{collect_llm_dashboard_vllm_control_preflight, collect_llm_dashboard_vllm_control_action, render_llm_dashboard_vllm_control_panel_html}
+use app.llm_dashboard.collectors.vllm_control_panel.{collect_llm_dashboard_vllm_control_preflight, collect_llm_dashboard_vllm_control_action_with_overrides, render_llm_dashboard_vllm_control_panel_html}
 use app.dashboard.assistant_bridge.{assistant_bridge_default_policy}
 use app.dashboard.assistant_collectors.{collect_assistant_snapshot_from_root}
 use app.dashboard.assistant_live_view.{assistant_dashboard_live_view_from_snapshot, assistant_dashboard_render_live_view}
@@ -109,7 +109,14 @@ pub struct DashboardServer:
     fn _route_vllm_control(path: text) -> text:
         val action = _query_value(path, "action")
         val pid = _query_i64(path, "pid", -1)
-        collect_llm_dashboard_vllm_control_action(self.vllm_manifest_text, action, pid).evidence_jsonl
+        val base_model = _query_value(path, "base_model")
+        val fallback_base_model = _query_value(path, "base-model")
+        val endpoint = _query_value(path, "endpoint")
+        val vllm_available = _query_bool_either(path, "vllm_available", "vllm-available", true)
+        val gpu_available = _query_bool_either(path, "gpu_available", "gpu-available", true)
+        if base_model.trim() != "":
+            return collect_llm_dashboard_vllm_control_action_with_overrides(self.vllm_manifest_text, action, pid, base_model, endpoint, vllm_available, gpu_available).evidence_jsonl
+        collect_llm_dashboard_vllm_control_action_with_overrides(self.vllm_manifest_text, action, pid, fallback_base_model, endpoint, vllm_available, gpu_available).evidence_jsonl
 
 fn _render_tooling_panel_if_configured(path: text, target: text) -> text:
     if path.trim() == "":
@@ -153,3 +160,15 @@ fn _query_i64(path: text, key: text, fallback: i64) -> i64:
     if value.trim() == "":
         return fallback
     value.to_i64() ?? fallback
+
+fn _query_bool(path: text, key: text, fallback: bool) -> bool:
+    val value = _query_value(path, key).trim().to_lower()
+    if value == "":
+        return fallback
+    value == "true" or value == "1" or value == "yes"
+
+fn _query_bool_either(path: text, first: text, second: text, fallback: bool) -> bool:
+    val first_value = _query_value(path, first)
+    if first_value.trim() != "":
+        return _query_bool(path, first, fallback)
+    _query_bool(path, second, fallback)

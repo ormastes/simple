@@ -401,6 +401,12 @@ Tasks:
     and resource flags. This keeps direct app execution and future dashboard
     bridge calls from degrading to usage JSONL when arguments arrive in
     query-string shape.
+16. Accept dashboard web route query-style runtime control arguments. Status:
+    done for `/api/vllm/control?action=...&base_model=...&endpoint=...` plus
+    `vllm_available`/`gpu_available` resource flags. The route forwards these
+    values through the dashboard-safe collector facade into the runtime-owned
+    planner, so missing local resources produce explicit `skipped` evidence and
+    endpoint/model overrides can plan preflight without exposing model ids.
 
 ## Sidecars
 
@@ -477,4 +483,8 @@ Runtime-adjacent decision record for runtime control resource detection:
 - `rejected_shortcuts`: raw `rt_process_run` imports, shell pipelines, dashboard
   owned detection, and treating local tool presence as endpoint readiness.
 
-- Full dashboard controls for vLLM lifecycle.
+- Live-executed dashboard controls for vLLM lifecycle. The dashboard route now
+  accepts query-style action/model/endpoint/resource inputs and returns
+  runtime-owned plan evidence, but it still deliberately avoids owning live
+  process or HTTP side effects until integration evidence proves the
+  `dashboard_live_control_executor` path is safe to call from the web route.

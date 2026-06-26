@@ -445,6 +445,25 @@ Runtime-adjacent decision record:
 - `rejected_shortcuts`: raw `rt_process_run` imports, shell pipelines, dashboard
   owned detection, and treating command availability as endpoint readiness.
 
+## Implemented Dashboard Query Control Slice
+
+- `src/app/llm_dashboard/collectors/vllm_control_panel.spl`
+- `src/app/web_dashboard/server.spl`
+- `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
+- `test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
+- `doc/06_spec/test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
+- `doc/06_spec/test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
+
+The web dashboard `/api/vllm/control` route now accepts query-style control
+inputs for `action`, `pid`, `base_model`/`base-model`, `endpoint`,
+`vllm_available`/`vllm-available`, and `gpu_available`/`gpu-available`. The
+route applies model and endpoint overrides to the configured manifest text, then
+delegates to the dashboard-safe vLLM collector facade. Resource flags feed the
+runtime-owned planner before side-effecting actions can be reported as planned;
+missing local resources return explicit `skipped` evidence. This remains
+planner/intent evidence only. The web dashboard still does not import live
+process or HTTP execution modules.
+
 ## Implemented Torch Readiness Slice
 
 - `src/lib/common/torch/dyn_sffi_ops.spl`

@@ -205,6 +205,11 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
      evidence. This slice is intentionally action-intent only: live process
      execution remains owned by `app.llm_runtime` lifecycle/readiness facades so
      importing the dashboard does not load HTTP/process backends.
+   - The route now accepts query-style `base_model`/`base-model`, `endpoint`,
+     `vllm_available`/`vllm-available`, and
+     `gpu_available`/`gpu-available` overrides, matching the runtime control
+     command's dashboard-friendly argument shape while preserving the
+     intent-only dashboard boundary.
    - Evidence:
      - `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
        passes.
