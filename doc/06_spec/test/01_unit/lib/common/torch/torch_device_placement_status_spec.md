@@ -27,7 +27,7 @@ torch_device_placement_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -114,6 +114,25 @@ assert_optimizer_does_not_force_cuda_zero("src/lib/nogc_sync_mut/torch/optim.spl
 
 </details>
 
+#### initializes optimizer state on the parameter device
+
+- assert optimizer state uses parameter device
+- assert optimizer state uses parameter device
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+assert_optimizer_state_uses_parameter_device("src/lib/gc_async_mut/torch/optim.spl")
+assert_optimizer_state_uses_parameter_device("src/lib/nogc_sync_mut/torch/optim.spl")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -133,8 +152,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
