@@ -373,6 +373,11 @@ Tasks:
     `http_access=not_used`, and `acceptance_status=not_live_evidence`. This is
     not live endpoint proof; it is a dashboard-safe gate that keeps process/HTTP
     execution owned by `dashboard_live_control_executor`.
+15. Accept dashboard/query-style runtime control arguments. Status: done for
+    `--key=value` and `key=value` forms on action, base model, endpoint, pid,
+    and resource flags. This keeps direct app execution and future dashboard
+    bridge calls from degrading to usage JSONL when arguments arrive in
+    query-string shape.
 
 ## Sidecars
 

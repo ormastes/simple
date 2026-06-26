@@ -27,7 +27,7 @@ vllm_control_cli_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -77,6 +77,27 @@ expect(opts.gpu_available).to_equal(false)
 
 </details>
 
+#### accepts equals and query style control arguments
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val opts = llm_runtime_control_cli_options(["llm-runtime-control", "--action=probe", "base_model=base-model", "endpoint=http://127.0.0.1:8000/v1", "pid=42", "vllm_available=true", "gpu_available=true"])
+
+expect(opts.action).to_equal("probe")
+expect(opts.base_model).to_equal("base-model")
+expect(opts.endpoint).to_equal("http://127.0.0.1:8000/v1")
+expect(opts.pid).to_equal(42)
+expect(opts.vllm_available).to_equal(true)
+expect(opts.gpu_available).to_equal(true)
+```
+
+</details>
+
 #### emits runtime control JSONL for preflight without live process imports
 
 <details>
@@ -109,6 +130,24 @@ val response = llm_runtime_control_cli_response(["simple", "run", "src/app/llm_r
 
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"endpoint\":\"configured\"")
+expect(response.split("nil").len()).to_equal(1)
+```
+
+</details>
+
+#### emits planned JSONL from equals-style direct app arguments
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val response = llm_runtime_control_cli_response(["simple", "run", "src/app/llm_runtime/control_cli.spl", "--", "--action=preflight", "--base-model=base-model", "--endpoint=http://127.0.0.1:8000/v1", "--vllm-available", "--gpu-available"])
+
+expect(response).to_contain("\"status\":\"planned\"")
+expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
 expect(response.split("nil").len()).to_equal(1)
 ```
 
@@ -169,8 +208,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
