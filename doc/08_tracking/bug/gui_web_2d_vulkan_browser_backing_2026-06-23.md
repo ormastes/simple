@@ -61,6 +61,12 @@ That makes the next actionable work an Electron host/runtime proof change
 or a CDP/SystemInfo-backed Electron proof if Electron can expose it), not simply
 adding more launch flags to the current Xvfb run.
 
+An in-process Electron page-debugger CDP probe is also not sufficient. Calling
+`SystemInfo.getInfo` through `win.webContents.debugger` returns
+`SystemInfo.getInfo is only supported on the browser target`, so a CDP-based
+Electron proof must connect to Electron's browser-level DevTools target, not a
+page target.
+
 When the focused browser proof is absent, the gate must report:
 
 ```text
