@@ -39,9 +39,11 @@ EXPECTED_ARGB="$BUILD_DIR/expected-argb.json"
 CAPTURED_ARGB="$BUILD_DIR/electron-argb.json"
 ELECTRON_OUT="$BUILD_DIR/electron.out"
 ELECTRON_PROOF="$BUILD_DIR/electron-proof.json"
+VALIDATED_ENV="$BUILD_DIR/electron-proof.validation.env"
+VALIDATOR="scripts/check/validate-electron-simple-web-layout-proof.js"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$HTML_PATH" "$EXPECTED_ARGB" "$CAPTURED_ARGB" "$ELECTRON_OUT" "$ELECTRON_PROOF" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$HTML_PATH" "$EXPECTED_ARGB" "$CAPTURED_ARGB" "$ELECTRON_OUT" "$ELECTRON_PROOF" "$VALIDATED_ENV" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
 
 have() {
     command -v "$1" >/dev/null 2>&1
@@ -51,6 +53,14 @@ field_of() {
     key="$1"
     file="$2"
     sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+field_of_env() {
+    key="$1"
+    file="$2"
+    if [ -s "$file" ]; then
+        sed -n "s/^${key}=//p" "$file" | tail -n 1
+    fi
 }
 
 emit_unavailable() {
@@ -93,6 +103,11 @@ fi
 
 if [ ! -x "$SIMPLE_BIN" ]; then
     emit_unavailable "missing-simple-bin"
+    exit 1
+fi
+
+if [ ! -f "$VALIDATOR" ]; then
+    emit_unavailable "missing-electron-proof-validator"
     exit 1
 fi
 
@@ -343,24 +358,40 @@ fi
 set -e
 
 if [ -f "$ELECTRON_PROOF" ]; then
-    electron_checksum="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.checksum||'')" "$ELECTRON_PROOF")"
-    electron_expected="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.expected_checksum||'')" "$ELECTRON_PROOF")"
-    electron_weighted="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.weighted_checksum||'')" "$ELECTRON_PROOF")"
-    electron_expected_weighted="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p.expected_weighted_checksum||'')" "$ELECTRON_PROOF")"
-    mismatch_count="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.mismatch_count ?? ''))" "$ELECTRON_PROOF")"
-    electron_frame_us="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.frame_us ?? ''))" "$ELECTRON_PROOF")"
-    captured_argb_written="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.captured_argb_written ?? ''))" "$ELECTRON_PROOF")"
-    blur_used="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p.blur_or_tolerance_used ?? ''))" "$ELECTRON_PROOF")"
+    set +e
+    node "$VALIDATOR" "$ELECTRON_PROOF" >"$VALIDATED_ENV"
+    validation_code=$?
+    set -e
 else
-    electron_checksum="$(field_of checksum "$ELECTRON_OUT")"
-    electron_expected="$(field_of expected_checksum "$ELECTRON_OUT")"
-    electron_weighted="$(field_of weighted_checksum "$ELECTRON_OUT")"
-    electron_expected_weighted="$(field_of expected_weighted_checksum "$ELECTRON_OUT")"
-    mismatch_count="$(field_of mismatch_count "$ELECTRON_OUT")"
-    electron_frame_us="$(field_of frame_us "$ELECTRON_OUT")"
-    captured_argb_written="$(field_of captured_argb_written "$ELECTRON_OUT")"
-    blur_used="$(field_of blur_or_tolerance_used "$ELECTRON_OUT")"
+    validation_code=1
+    {
+        echo "electron_simple_web_layout_validation_status=fail"
+        echo "electron_simple_web_layout_validation_reason=missing-electron-proof"
+        echo "electron_simple_web_layout_simple_checksum=$simple_checksum"
+        echo "electron_simple_web_layout_electron_checksum="
+        echo "electron_simple_web_layout_simple_weighted_checksum=$simple_weighted"
+        echo "electron_simple_web_layout_electron_weighted_checksum="
+        echo "electron_simple_web_layout_mismatch_count="
+        echo "electron_simple_web_layout_blur_or_tolerance_used="
+        echo "electron_simple_web_layout_electron_frame_us="
+        echo "electron_simple_web_layout_capture_native_width="
+        echo "electron_simple_web_layout_capture_native_height="
+        echo "electron_simple_web_layout_capture_downsampled="
+        echo "electron_simple_web_layout_captured_argb_written=false"
+    } >"$VALIDATED_ENV"
 fi
+
+validation_status="$(field_of_env electron_simple_web_layout_validation_status "$VALIDATED_ENV")"
+validation_reason="$(field_of_env electron_simple_web_layout_validation_reason "$VALIDATED_ENV")"
+electron_checksum="$(field_of_env electron_simple_web_layout_electron_checksum "$VALIDATED_ENV")"
+electron_weighted="$(field_of_env electron_simple_web_layout_electron_weighted_checksum "$VALIDATED_ENV")"
+mismatch_count="$(field_of_env electron_simple_web_layout_mismatch_count "$VALIDATED_ENV")"
+electron_frame_us="$(field_of_env electron_simple_web_layout_electron_frame_us "$VALIDATED_ENV")"
+capture_native_width="$(field_of_env electron_simple_web_layout_capture_native_width "$VALIDATED_ENV")"
+capture_native_height="$(field_of_env electron_simple_web_layout_capture_native_height "$VALIDATED_ENV")"
+capture_downsampled="$(field_of_env electron_simple_web_layout_capture_downsampled "$VALIDATED_ENV")"
+captured_argb_written="$(field_of_env electron_simple_web_layout_captured_argb_written "$VALIDATED_ENV")"
+blur_used="$(field_of_env electron_simple_web_layout_blur_or_tolerance_used "$VALIDATED_ENV")"
 
 RESIDUAL_ENV="$BUILD_DIR/residual.env"
 if [ -s "$EXPECTED_ARGB" ] && [ -s "$CAPTURED_ARGB" ]; then
@@ -431,24 +462,19 @@ reason=pass
 if [ "$electron_code" -ne 0 ] && [ ! -f "$ELECTRON_PROOF" ]; then
     status=fail
     reason=electron-live-capture-failed
-elif [ "$blur_used" != "false" ]; then
+elif [ "$validation_code" -ne 0 ] || [ "$validation_status" != "pass" ]; then
+    case "$validation_reason" in
+        checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch)
+            status=divergent
+            ;;
+        *)
+            status=fail
+            ;;
+    esac
+    reason="${validation_reason:-electron-proof-validation-failed}"
+elif [ ! -s "$CAPTURED_ARGB" ]; then
     status=fail
-    reason=blur-or-tolerance-not-allowed
-elif [ "$electron_checksum" != "$simple_checksum" ] || [ "$electron_expected" != "$simple_checksum" ]; then
-    status=divergent
-    reason=checksum-mismatch
-elif [ "$electron_weighted" != "$simple_weighted" ] || [ "$electron_expected_weighted" != "$simple_weighted" ]; then
-    status=divergent
-    reason=weighted-checksum-mismatch
-elif [ "$mismatch_count" != "0" ]; then
-    status=divergent
-    reason=pixel-mismatch
-elif [ ! -s "$CAPTURED_ARGB" ] || [ "$captured_argb_written" != "true" ]; then
-    status=fail
-    reason=missing-captured-argb
-elif [ -z "$electron_frame_us" ] || [ "$electron_frame_us" -le 0 ]; then
-    status=fail
-    reason=missing-electron-timing
+    reason=missing-captured-argb-file
 elif [ "$electron_code" -ne 0 ]; then
     reason=pass-with-electron-teardown-warning
 fi
@@ -464,6 +490,8 @@ fi
     echo "electron_simple_web_layout_width=$WIDTH"
     echo "electron_simple_web_layout_height=$HEIGHT"
     echo "electron_simple_web_layout_iterations=$ITERATIONS"
+    echo "electron_simple_web_layout_validation_status=${validation_status:-}"
+    echo "electron_simple_web_layout_validation_reason=${validation_reason:-}"
     echo "electron_simple_web_layout_simple_checksum=$simple_checksum"
     echo "electron_simple_web_layout_electron_checksum=${electron_checksum:-0}"
     echo "electron_simple_web_layout_simple_weighted_checksum=$simple_weighted"
@@ -476,6 +504,9 @@ fi
     echo "electron_simple_web_layout_surface_geometry_pixels=${surface_geometry_pixels:-}"
     echo "electron_simple_web_layout_blur_or_tolerance_used=${blur_used:-}"
     echo "electron_simple_web_layout_electron_frame_us=${electron_frame_us:-0}"
+    echo "electron_simple_web_layout_capture_native_width=${capture_native_width:-}"
+    echo "electron_simple_web_layout_capture_native_height=${capture_native_height:-}"
+    echo "electron_simple_web_layout_capture_downsampled=${capture_downsampled:-}"
     echo "electron_simple_web_layout_html_path=$HTML_PATH"
     echo "electron_simple_web_layout_expected_argb_path=$EXPECTED_ARGB"
     echo "electron_simple_web_layout_captured_argb_path=$CAPTURED_ARGB"
