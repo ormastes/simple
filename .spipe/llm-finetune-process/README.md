@@ -290,7 +290,9 @@ node examples/05_stdlib/spipe/cli/spipe.js fine-tune-next <attempt_id>
 
 `fine-tune-next` exits nonzero unless the attempt is ready. In shell automation,
 capture its output explicitly instead of chaining it as a green check for retry
-states.
+states. If the attempt has a safe checker, `fine-tune-next` also prints the
+checker status and stable gate fields, so the route and concrete blocker remain
+visible in one command.
 
 An attempt is expected to fail `fine-tune-ready` until it has an accepted
 decision backed by target-reaching eval evidence. When the best available model
