@@ -148,12 +148,40 @@ async function main() {
     const closeButton = eventTarget('.wm-btn-close');
     const minimizeButton = eventTarget('.wm-btn-minimize');
     const maximizeButton = eventTarget('.wm-btn-maximize');
+    const performanceNowAvailable = !!(window.performance && typeof window.performance.now === 'function');
+    const perfStart = performanceNowAvailable ? window.performance.now() : 0;
+    const animationFrameAvailable = typeof window.requestAnimationFrame === 'function';
+    let animationFrameCount = 0;
+    const styleProbe = document.createElement('style');
+    styleProbe.textContent = '@keyframes simple-wm-proof-pulse { from { opacity: 0.25; } to { opacity: 0.95; } } .simple-wm-proof-animation { animation: simple-wm-proof-pulse 120ms linear 2; }';
+    document.head.appendChild(styleProbe);
+    const animationProbe = document.createElement('div');
+    animationProbe.className = 'simple-wm-proof-animation';
+    animationProbe.style.cssText = 'position:fixed;left:-1000px;top:-1000px;width:8px;height:8px;';
+    document.body.appendChild(animationProbe);
+    if (animationFrameAvailable) {
+      await new Promise(resolve => {
+        requestAnimationFrame(() => {
+          animationFrameCount += 1;
+          requestAnimationFrame(() => {
+            animationFrameCount += 1;
+            resolve();
+          });
+        });
+      });
+    }
     const titlebarStyle = getComputedStyle(titlebar);
     const titleStyle = getComputedStyle(title);
     const titleInputStyle = getComputedStyle(titleInput);
     const closeStyle = getComputedStyle(closeButton);
     const minimizeStyle = getComputedStyle(minimizeButton);
     const maximizeStyle = getComputedStyle(maximizeButton);
+    const animationProbeStyle = getComputedStyle(animationProbe);
+    out.performance_now_available = performanceNowAvailable;
+    out.performance_now_delta_ms = performanceNowAvailable ? Math.max(0, window.performance.now() - perfStart) : 0;
+    out.animation_frame_available = animationFrameAvailable;
+    out.animation_frame_count = animationFrameCount;
+    out.css_animation_probe = animationProbeStyle.animationName === 'simple-wm-proof-pulse';
     out.title_text = title.textContent;
     out.title_context_text = eventTarget('.wm-title-context').textContent;
     out.traffic_button_count = document.querySelectorAll('.wm-traffic-lights button').length;
@@ -215,6 +243,11 @@ async function main() {
       out.text_input_count >= 1 &&
       out.pointer_down_count >= 1 &&
       out.pointer_up_count >= 1 &&
+      out.performance_now_available === true &&
+      out.performance_now_delta_ms >= 0 &&
+      out.animation_frame_available === true &&
+      out.animation_frame_count >= 2 &&
+      out.css_animation_probe === true &&
       out.move_payload.window_id_hint === 'win1' &&
       out.move_payload.source === 'native_event' &&
       out.move_payload.x === expectedMoveX &&

@@ -30,3 +30,5 @@ dev-done
 - dev: Created state file with 6 acceptance criteria (type: feature).
 - implementation: Added production GUI/web event-routing evidence to the parity wrapper and non-launching gate.
 - implementation: Added Tauri mobile MDI proof validation for event routing, viewport capture, performance timer, animation frames, and CSS animation support on iOS and Android lanes.
+- implementation: Added Electron production event-routing performance/animation proof to the live probe, production parity wrapper, non-launching gate, SSpec coverage, and process docs.
+- implementation: Promoted Electron event-routing performance/animation rows through the aggregate GUI RenderDoc coverage audit and refreshed stale retained-performance/Metal production fixtures for the stricter gate.

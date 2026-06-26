@@ -379,8 +379,9 @@ native raw Metal readback evidence on macOS. A production renderer pass must
 also forward `scripts/check/check-wm-browser-event-routing-evidence.shs` under
 `production_gui_web_renderer_parity_event_routing_*` and require focus, window
 move/maximize, title-command keyboard input, body text input, pointer down/up,
-and `blur_or_tolerance=false`; render/capture parity without interaction
-delivery is incomplete evidence.
+`performance.now()`, at least two `requestAnimationFrame` ticks, CSS animation
+application, and `blur_or_tolerance=false`; render/capture parity without
+interaction delivery and browser timing/animation proof is incomplete evidence.
 For GUI/web queue proof, runtime queue/drain receipts are necessary but not
 sufficient. Production proof requires same-frame backend `device_readback`, a
 positive backend handle, and matching checksum; runtime-only, synthetic-handle,

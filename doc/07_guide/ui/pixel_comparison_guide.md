@@ -102,6 +102,11 @@ the wrapper forwards that as `ELECTRON_LAYOUT_MANIFEST_RESUME=1`. Manifest
 policies named `track-*` are counted as tracked when they emit divergent or pass
 evidence with `blur_or_tolerance=false`; exact rows still require checksum and
 pixel-count equality.
+The same production wrapper now treats Electron event routing as both an
+interaction and browser-loop proof. A pass must promote focus/move/maximize,
+title-command, text-input, pointer-down/up, `performance.now()`, two
+`requestAnimationFrame` ticks, a CSS animation probe, and no blur/tolerance
+under `production_gui_web_renderer_parity_event_routing_*`.
 
 The canonical production GUI font offload/readback evidence gate is:
 
