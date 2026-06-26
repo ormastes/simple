@@ -27,7 +27,7 @@ tauri_ios_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -73,6 +73,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 - Render-only or generic Metal-only logs fail closed.
 - Bare `WKWebView` text is not enough; the context marker must be tied to the
   Tauri shell or the mobile MDI probe source.
+- Metal evidence must be tied to the Tauri iOS WKWebView context line; generic
+  Metal log text elsewhere is not enough.
 - Failure markers such as eval failures fail closed even when render and Metal
   markers are present.
 - The iOS renderer wrapper, mobile aggregate, and Tauri shell source are wired
@@ -90,7 +92,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -108,6 +110,7 @@ expect(evidence).to_contain("ios_render_log_validation_reason=pass")
 expect(evidence).to_contain("ios_render_log_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_tauri_context_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 expect(evidence).to_contain("ios_render_log_failure_marker_status=pass")
 ```
 
@@ -135,6 +138,37 @@ expect(evidence).to_contain("ios_render_log_validation_reason=ios-tauri-wkwebvie
 expect(evidence).to_contain("ios_render_log_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_tauri_context_status=fail")
+```
+
+</details>
+
+#### rejects generic Metal text that is not tied to the iOS context line
+
+- Confirm iOS Metal proof is bound to the WKWebView context row
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-ios-render-log-validator-metal-context"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/ios.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm iOS Metal proof is bound to the WKWebView context row")
+expect(evidence).to_contain("ios_render_log_validation_status=fail")
+expect(evidence).to_contain("ios_render_log_validation_reason=ios-metal-context-missing")
+expect(evidence).to_contain("ios_render_log_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_tauri_context_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_context_status=fail")
 ```
 
 </details>
@@ -225,7 +259,7 @@ expect(evidence).to_contain("ios_render_log_failure_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -236,7 +270,9 @@ expect(direct).to_contain("validate-tauri-ios-render-log-proof.js")
 expect(direct).to_contain("ios_render_log.validation.env")
 expect(aggregate).to_contain("TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status")
 expect(aggregate).to_contain("ios-tauri-wkwebview-context-missing")
+expect(aggregate).to_contain("ios-metal-context-missing")
 expect(tauri).to_contain("ios renderer context: backend=WKWebView")
 expect(tauri).to_contain("metal_layer=CAMetalLayer")
 ```
@@ -247,8 +283,8 @@ expect(tauri).to_contain("metal_layer=CAMetalLayer")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
