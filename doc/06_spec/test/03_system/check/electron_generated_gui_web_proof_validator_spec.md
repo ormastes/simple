@@ -27,7 +27,7 @@ electron_generated_gui_web_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -85,8 +85,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   match the proof viewport, include the expected pixel count, and contain
   nonzero pixels with numeric uint32 JSON pixel values.
 - Requested viewport, native capture provenance, ARGB readback dimensions,
-  frame timing, and text-normalization pixel counts must be real JSON numbers,
-  not stringified rows.
+  mismatch counts, frame timing, and text-normalization pixel counts must be
+  real JSON numbers, not stringified rows, and malformed live numeric rows must
+  not be re-emitted as normalized numeric evidence.
 - Proof renderer and scene identity must match the live generated-GUI Electron
   capture path.
 - The live Electron wrapper consumes the validator and still maps real pixel
@@ -217,12 +218,13 @@ expect(evidence).to_contain("electron_generated_gui_web_simple_weighted_checksum
 
 -  proof command
    - Expected: code equals `1`
+   - Expected: evidence does not contain `electron_generated_gui_web_electron_frame_us=not-a-number`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -236,7 +238,8 @@ expect(code).to_equal(1)
 val evidence = file_read(root + "/evidence.env")
 expect(evidence).to_contain("electron_generated_gui_web_validation_status=fail")
 expect(evidence).to_contain("electron_generated_gui_web_validation_reason=missing-electron-timing")
-expect(evidence).to_contain("electron_generated_gui_web_electron_frame_us=not-a-number")
+expect(evidence).to_contain("electron_generated_gui_web_electron_frame_us=")
+expect(evidence.contains("electron_generated_gui_web_electron_frame_us=not-a-number")).to_equal(false)
 ```
 
 </details>
@@ -417,12 +420,17 @@ expect(mismatch).to_contain("electron_generated_gui_web_capture_native_width=95"
 -  proof command
    - Expected: code equals `1`
 - Confirm live Electron generated GUI numeric proof cannot be stringified
+   - Expected: requested does not contain `electron_generated_gui_web_requested_width=96`
+   - Expected: argb does not contain `electron_generated_gui_web_captured_argb_width=96`
+   - Expected: native does not contain `electron_generated_gui_web_capture_native_width=96`
+   - Expected: timing does not contain `electron_generated_gui_web_electron_frame_us=1250`
+   - Expected: normalization does not contain `electron_generated_gui_web_text_normalization_pixels=0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -449,19 +457,52 @@ val normalization = file_read(root + "/normalization.env")
 step("Confirm live Electron generated GUI numeric proof cannot be stringified")
 expect(requested).to_contain("electron_generated_gui_web_validation_status=fail")
 expect(requested).to_contain("electron_generated_gui_web_validation_reason=missing-viewport-proof")
-expect(requested).to_contain("electron_generated_gui_web_requested_width=96")
+expect(requested).to_contain("electron_generated_gui_web_requested_width=")
+expect(requested.contains("electron_generated_gui_web_requested_width=96")).to_equal(false)
 expect(argb).to_contain("electron_generated_gui_web_validation_status=fail")
 expect(argb).to_contain("electron_generated_gui_web_validation_reason=captured-argb-viewport-mismatch")
-expect(argb).to_contain("electron_generated_gui_web_captured_argb_width=96")
+expect(argb).to_contain("electron_generated_gui_web_captured_argb_width=")
+expect(argb.contains("electron_generated_gui_web_captured_argb_width=96")).to_equal(false)
 expect(native).to_contain("electron_generated_gui_web_validation_status=fail")
 expect(native).to_contain("electron_generated_gui_web_validation_reason=missing-capture-provenance")
-expect(native).to_contain("electron_generated_gui_web_capture_native_width=96")
+expect(native).to_contain("electron_generated_gui_web_capture_native_width=")
+expect(native.contains("electron_generated_gui_web_capture_native_width=96")).to_equal(false)
 expect(timing).to_contain("electron_generated_gui_web_validation_status=fail")
 expect(timing).to_contain("electron_generated_gui_web_validation_reason=missing-electron-timing")
-expect(timing).to_contain("electron_generated_gui_web_electron_frame_us=1250")
+expect(timing).to_contain("electron_generated_gui_web_electron_frame_us=")
+expect(timing.contains("electron_generated_gui_web_electron_frame_us=1250")).to_equal(false)
 expect(normalization).to_contain("electron_generated_gui_web_validation_status=fail")
 expect(normalization).to_contain("electron_generated_gui_web_validation_reason=malformed-text-normalization")
-expect(normalization).to_contain("electron_generated_gui_web_text_normalization_pixels=0")
+expect(normalization).to_contain("electron_generated_gui_web_text_normalization_pixels=")
+expect(normalization.contains("electron_generated_gui_web_text_normalization_pixels=0")).to_equal(false)
+```
+
+</details>
+
+#### rejects missing generated GUI text-normalization proof
+
+-  proof command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-generated-gui-web-validator-missing-normalization"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "delete p.generated_gui_text_normalization_pixels") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+expect(evidence).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(evidence).to_contain("electron_generated_gui_web_validation_reason=malformed-text-normalization")
+expect(evidence).to_contain("electron_generated_gui_web_text_normalization_pixels=")
 ```
 
 </details>
@@ -470,13 +511,16 @@ expect(normalization).to_contain("electron_generated_gui_web_text_normalization_
 
 -  proof command
 -  proof command
+-  proof command
    - Expected: code equals `1`
+   - Expected: mismatch does not contain `electron_generated_gui_web_mismatch_count=bad`
+   - Expected: string_zero does not contain `electron_generated_gui_web_mismatch_count=0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -485,15 +529,22 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=true") +
     " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/blur.json > " + root + "/blur.env; " +
     _proof_command(root + "/mismatch.json", "p.mismatch_count=\"bad\"") +
-    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env"
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env; " +
+    _proof_command(root + "/string-zero.json", "p.mismatch_count=\"0\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/string-zero.json > " + root + "/string-zero.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val blur = file_read(root + "/blur.env")
 val mismatch = file_read(root + "/mismatch.env")
+val string_zero = file_read(root + "/string-zero.env")
 expect(blur).to_contain("electron_generated_gui_web_validation_reason=blur-or-tolerance-not-allowed")
 expect(mismatch).to_contain("electron_generated_gui_web_validation_reason=malformed-mismatch-count")
-expect(mismatch).to_contain("electron_generated_gui_web_mismatch_count=bad")
+expect(mismatch).to_contain("electron_generated_gui_web_mismatch_count=")
+expect(mismatch.contains("electron_generated_gui_web_mismatch_count=bad")).to_equal(false)
+expect(string_zero).to_contain("electron_generated_gui_web_validation_reason=malformed-mismatch-count")
+expect(string_zero).to_contain("electron_generated_gui_web_mismatch_count=")
+expect(string_zero.contains("electron_generated_gui_web_mismatch_count=0")).to_equal(false)
 ```
 
 </details>
@@ -557,8 +608,8 @@ expect(script).to_contain("status=divergent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -54,9 +54,9 @@ function integerTextOrClean(value) {
   return text === null ? clean(value) : text;
 }
 
-function jsonIntegerTextOrClean(value) {
+function jsonIntegerTextOrBlank(value) {
   const text = jsonIntegerText(value);
-  return text === null ? clean(value) : text;
+  return text === null ? '' : text;
 }
 
 function booleanString(value) {
@@ -158,9 +158,9 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-weighted-checksum-proof';
 } else if (!sameInteger(proof.weighted_checksum, proof.expected_weighted_checksum)) {
   reason = 'weighted-checksum-mismatch';
-} else if (decimalIntegerText(proof.mismatch_count) === null) {
+} else if (jsonIntegerText(proof.mismatch_count) === null) {
   reason = 'malformed-mismatch-count';
-} else if (!sameInteger(proof.mismatch_count, 0)) {
+} else if (!sameJsonInteger(proof.mismatch_count, 0)) {
   reason = 'pixel-mismatch';
 } else if (!jsonIntegerAtLeast(proof.width, 1) || !jsonIntegerAtLeast(proof.height, 1)) {
   reason = 'missing-viewport-proof';
@@ -186,7 +186,7 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'capture-viewport-mismatch';
 } else if (!jsonIntegerAtLeast(proof.frame_us, 1)) {
   reason = 'missing-electron-timing';
-} else if (!jsonIntegerAtLeast(proof.generated_gui_text_normalization_pixels ?? 0, 0)) {
+} else if (!jsonIntegerAtLeast(proof.generated_gui_text_normalization_pixels, 0)) {
   reason = 'malformed-text-normalization';
 }
 
@@ -198,13 +198,13 @@ emit('electron_generated_gui_web_simple_checksum', integerTextOrClean(proof.expe
 emit('electron_generated_gui_web_electron_checksum', integerTextOrClean(proof.checksum));
 emit('electron_generated_gui_web_simple_weighted_checksum', integerTextOrClean(proof.expected_weighted_checksum));
 emit('electron_generated_gui_web_electron_weighted_checksum', integerTextOrClean(proof.weighted_checksum));
-emit('electron_generated_gui_web_mismatch_count', integerTextOrClean(proof.mismatch_count));
+emit('electron_generated_gui_web_mismatch_count', jsonIntegerTextOrBlank(proof.mismatch_count));
 emit('electron_generated_gui_web_blur_or_tolerance_used', proof.blur_or_tolerance_used === false ? 'false' : clean(proof.blur_or_tolerance_used));
-emit('electron_generated_gui_web_electron_frame_us', jsonIntegerTextOrClean(proof.frame_us));
-emit('electron_generated_gui_web_requested_width', jsonIntegerTextOrClean(proof.width));
-emit('electron_generated_gui_web_requested_height', jsonIntegerTextOrClean(proof.height));
-emit('electron_generated_gui_web_capture_native_width', jsonIntegerTextOrClean(proof.capture_native_width));
-emit('electron_generated_gui_web_capture_native_height', jsonIntegerTextOrClean(proof.capture_native_height));
+emit('electron_generated_gui_web_electron_frame_us', jsonIntegerTextOrBlank(proof.frame_us));
+emit('electron_generated_gui_web_requested_width', jsonIntegerTextOrBlank(proof.width));
+emit('electron_generated_gui_web_requested_height', jsonIntegerTextOrBlank(proof.height));
+emit('electron_generated_gui_web_capture_native_width', jsonIntegerTextOrBlank(proof.capture_native_width));
+emit('electron_generated_gui_web_capture_native_height', jsonIntegerTextOrBlank(proof.capture_native_height));
 emit('electron_generated_gui_web_capture_downsampled', booleanString(proof.capture_downsampled));
 emit('electron_generated_gui_web_captured_argb_path', proof.captured_argb_path);
 emit('electron_generated_gui_web_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
@@ -212,11 +212,11 @@ emit('electron_generated_gui_web_captured_argb_file_status', capturedArgbStat ==
 emit('electron_generated_gui_web_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
 emit('electron_generated_gui_web_captured_argb_format', capturedArgb.format);
 emit('electron_generated_gui_web_captured_argb_producer', capturedArgb.producer);
-emit('electron_generated_gui_web_captured_argb_width', jsonIntegerTextOrClean(capturedArgb.width));
-emit('electron_generated_gui_web_captured_argb_height', jsonIntegerTextOrClean(capturedArgb.height));
+emit('electron_generated_gui_web_captured_argb_width', jsonIntegerTextOrBlank(capturedArgb.width));
+emit('electron_generated_gui_web_captured_argb_height', jsonIntegerTextOrBlank(capturedArgb.height));
 emit('electron_generated_gui_web_captured_argb_pixel_count', String(capturedArgbPixels.length));
 emit('electron_generated_gui_web_captured_argb_nonzero_pixel_count', String(capturedArgbNonzeroPixels));
-emit('electron_generated_gui_web_text_normalization_pixels', jsonIntegerTextOrClean(proof.generated_gui_text_normalization_pixels ?? 0));
+emit('electron_generated_gui_web_text_normalization_pixels', jsonIntegerTextOrBlank(proof.generated_gui_text_normalization_pixels));
 
 if (reason !== 'pass') {
   process.exit(1);
