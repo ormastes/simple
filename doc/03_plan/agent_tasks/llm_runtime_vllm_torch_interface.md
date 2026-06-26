@@ -272,6 +272,11 @@ Tasks:
 4. Add skipped evidence state for missing local vLLM/GPU. Status: done for the
    pure evidence classifier and resource-aware serve-readiness preflight.
    Missing resources emit explicit `skipped` reasons before spawn/fetch.
+5. Surface vLLM readiness evidence in the dashboard diagnostics panel. Status:
+   done for JSONL readback; the dashboard collector recognizes
+   `llm_runtime_vllm_*` events and renders latest status/reason without
+   exposing internal absence markers. This is evidence readback only, not a
+   live start/stop control surface.
 
 ## Sidecars
 
@@ -284,7 +289,8 @@ Tasks:
 - Dynamic LoRA resolver.
 - Torch model execution beyond readiness probes.
 - Live endpoint availability evidence against an installed local `vllm`.
-- Dashboard controls for starting, polling, probing, and stopping vLLM.
+- Dashboard controls for starting, polling, probing, and stopping vLLM; the
+  current dashboard slice only reads already-recorded vLLM evidence.
 
 Runtime-adjacent decision record for live HTTP transport:
 

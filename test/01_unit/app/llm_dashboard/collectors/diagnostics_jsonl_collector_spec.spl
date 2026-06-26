@@ -18,6 +18,10 @@ fn fixture_missing_fields_jsonl() -> text:
     "{\"ts\":1710000000000,\"data\":{}}\n" +
         "{\"ts\":1710000000100,\"event\":\"PostToolUse\"}\n"
 
+fn fixture_vllm_jsonl() -> text:
+    "{\"event\":\"llm_runtime_vllm_serve_readiness_run\",\"status\":\"skipped\",\"reason\":\"missing_local_vllm_and_gpu\"}\n" +
+        "{\"event\":\"llm_runtime_vllm_models_probe\",\"status\":\"ready\",\"reason\":\"models_endpoint_ready\"}\n"
+
 describe "LLM diagnostics dashboard JSONL collector":
     it "summarizes hook JSONL for dashboard panels":
         val path = fixture_diag_path()
@@ -29,6 +33,23 @@ describe "LLM diagnostics dashboard JSONL collector":
         expect(panel.session_count).to_equal(2)
         expect(panel.tool_event_count).to_equal(2)
         expect(panel.last_session_id).to_equal("sid-b")
+        remove_file_if_exists(path)
+
+    it "summarizes vLLM runtime evidence for dashboard panels":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, fixture_vllm_jsonl())
+        val panel = collect_llm_diagnostics_jsonl(path)
+        expect(panel.event_count).to_equal(2)
+        expect(panel.vllm_event_count).to_equal(2)
+        expect(panel.last_vllm_status).to_equal("ready")
+        expect(panel.last_vllm_reason).to_equal("models_endpoint_ready")
+        val text = render_llm_diagnostics_panel_text(panel)
+        expect(text).to_contain("vllm_events=2")
+        expect(text).to_contain("vllm_status=ready")
+        expect(text).to_contain("vllm_reason=models_endpoint_ready")
+        expect(text.contains("nil")).to_equal(false)
         remove_file_if_exists(path)
 
     it "renders absence-safe diagnostics panel summary":
@@ -74,6 +95,7 @@ describe "LLM diagnostics dashboard JSONL collector":
         expect(text).to_contain("events=0")
         expect(text).to_contain("last_event=none")
         expect(text).to_contain("last_session=none")
+        expect(text).to_contain("vllm_status=none")
         expect(text.contains("nil")).to_equal(false)
 
     it "escapes diagnostics field text in html":
@@ -85,5 +107,18 @@ describe "LLM diagnostics dashboard JSONL collector":
         expect(html).to_contain("PreToolUse&lt;tag&gt;")
         expect(html).to_contain("sid&amp;")
         expect(html.contains("<tag>")).to_equal(false)
+        expect(html.contains("nil")).to_equal(false)
+        remove_file_if_exists(path)
+
+    it "escapes vLLM status fields in html":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, "{\"event\":\"llm_runtime_vllm_models_probe\",\"status\":\"ready<tag>\",\"reason\":\"models&endpoint\"}\n")
+        val html = render_llm_diagnostics_panel_html(collect_llm_diagnostics_jsonl(path))
+        expect(html).to_contain("vllm_events=1")
+        expect(html).to_contain("ready&lt;tag&gt;")
+        expect(html).to_contain("models&amp;endpoint")
+        expect(html.contains("ready<tag>")).to_equal(false)
         expect(html.contains("nil")).to_equal(false)
         remove_file_if_exists(path)

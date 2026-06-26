@@ -166,6 +166,18 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
    - Evidence:
      - `test/01_unit/app/llm_dashboard/jsonl_watcher_spec.spl` passes.
      - `test/unit/app/llm_dashboard/jsonl_watcher_spec.spl` passes.
+9. vLLM runtime evidence panel:
+   - `src/app/llm_dashboard/collectors/diagnostics_jsonl_collector.spl`
+     recognizes `llm_runtime_vllm_*` JSONL evidence from the runtime lane and
+     surfaces `vllm_events`, latest status, and latest reason in the existing
+     diagnostics text/HTML panels.
+   - Missing vLLM evidence renders as `none`; HTML escapes status/reason fields
+     and public output remains absence-marker-free.
+   - Evidence:
+     - `test/01_unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.spl`
+       passes with vLLM evidence count/status/reason coverage.
+     - `test/unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.spl`
+       mirrors the same coverage.
 
 ## Open Bugs Found During This Lane
 
