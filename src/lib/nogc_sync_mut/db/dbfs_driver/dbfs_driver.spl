@@ -278,7 +278,9 @@ fn _dbfs_write_device_bytes(inst_id: i64, base_block: i64, block_count: i64, off
         val intra = absolute - sector_idx * sector_size
         val lba = (base_block + 1 + sector_idx) as u64
         val read = _dbfs_device_store_devices[dev_idx].read_sector(lba)
-        var sector: [u8] = if read.is_ok(): read.unwrap() else: _dbfs_zero_sector(sector_size)
+        var sector: [u8] = match read:
+            Ok(bytes): bytes
+            Err(_): _dbfs_zero_sector(sector_size)
         if sector.len() == 0:
             sector = _dbfs_zero_sector(sector_size)
         var pos = intra
@@ -308,7 +310,9 @@ fn _dbfs_read_device_bytes(inst_id: i64, base_block: i64, offset: i64, length: i
         val read = _dbfs_device_store_devices[dev_idx].read_sector(lba)
         if read.is_err():
             return Err(FsError.IoError(code: 0))
-        val sector: [u8] = read.unwrap()
+        val sector: [u8] = match read:
+            Ok(bytes): bytes
+            Err(_): return Err(FsError.IoError(code: 0))
         var pos = intra
         while pos < sector_size and read_count < length and pos < sector.len():
             out.push(sector[pos])
@@ -344,7 +348,10 @@ fn _dbfs_replay_namespace(inst_id: i64, dev: BlockDevice, base_block: i64, block
     val read = dev.read_sector(_dbfs_namespace_lba(base_block, block_count))
     if read.is_err():
         return 2u64
-    val text_data: text = _dbfs_bytes_to_text(read.unwrap(), dev.sector_size() as i64)
+    val namespace_bytes = match read:
+        Ok(bytes): bytes
+        Err(_): return 2u64
+    val text_data: text = _dbfs_bytes_to_text(namespace_bytes, dev.sector_size() as i64)
     if not text_data.starts_with("DBFSNS1\n"):
         return 2u64
     var max_id: u64 = 1u64
@@ -462,7 +469,9 @@ impl DbFsDriver:
         val opened = DbFsDriver.open_on_device(dev, base_block, block_count)
         if opened.is_err():
             return opened
-        var driver = opened.unwrap()
+        var driver = match opened:
+            Ok(value): value
+            Err(err): return Err(err)
         driver.direct_io = Some(direct_io)
         Ok(driver)
 
@@ -477,7 +486,9 @@ impl DbFsDriver:
         val opened = DbFsDriver.open_on_device(dev, base_block, block_count)
         if opened.is_err():
             return opened
-        var driver = opened.unwrap()
+        var driver = match opened:
+            Ok(value): value
+            Err(err): return Err(err)
         val facts = samsung_mzql2960hcjr_sysfs_facts()
         val policy = nvme_policy_for_class(facts, StorageClass.DB_WAL)
         driver.io_unit_bytes = policy.io_unit_bytes
@@ -569,7 +580,9 @@ impl DbFsDriver:
         val r = _dbfs_write_device_bytes(self.inst_id, self.arena_base, self.arena_block_count, offset, data)
         if r.is_err():
             return Err(FsError.IoError(code: 0))
-        val written = r.unwrap()
+        val written = match r:
+            Ok(value): value
+            Err(_): return Err(FsError.IoError(code: 0))
         if written != data.len() as i64:
             return Err(FsError.IoError(code: 0))
         _dbfs_record_device_blob(self.inst_id, inode_id, offset, written)
@@ -590,7 +603,9 @@ impl DbFsDriver:
         val bytes = _dbfs_read_device_bytes(self.inst_id, self.arena_base, _dbfs_device_blob_offsets[blob_idx], want)
         if bytes.is_err():
             return bytes
-        val out = bytes.unwrap()
+        val out = match bytes:
+            Ok(value): value
+            Err(err): return Err(err)
         if out.len() < want:
             return Err(FsError.IoError(code: 0))
         Ok(out)
@@ -691,9 +706,11 @@ impl DbFsDriver:
             return Ok("")
         if self.arena_base >= 0:
             val device = self._read_inode_bytes_from_device(_dbfs_inodes[inode_idx].id, length)
-            if device.is_ok():
-                val bytes = device.unwrap()
-                return Ok(_dbfs_bytes_to_text(bytes, bytes.len() as i64))
+            match device:
+                Ok(bytes):
+                    return Ok(_dbfs_bytes_to_text(bytes, bytes.len() as i64))
+                Err(_):
+                    pass_do_nothing("fall back to in-memory content")
         val content = _dbfs_inodes[inode_idx].content
         var result: text = ""
         var i: i64 = 0
@@ -730,20 +747,22 @@ impl DbFsDriver:
             return Err(FsError.NotFound)
         if self.arena_base >= 0:
             val device = self._read_inode_bytes_from_device(_dbfs_inodes[inode_idx].id, offset + length)
-            if device.is_ok():
-                val bytes = device.unwrap()
-                val full = _dbfs_bytes_to_text(bytes, bytes.len() as i64)
-                var device_result: text = ""
-                var di: i64 = offset
-                val device_end: i64 = if offset + length < full.len(): offset + length else: full.len()
-                while di < device_end:
-                    device_result = device_result + full[di:di + 1]
-                    di = di + 1
-                var device_pad: i64 = device_end - offset
-                while device_pad < length:
-                    device_result = device_result + "\0"
-                    device_pad = device_pad + 1
-                return Ok(device_result)
+            match device:
+                Ok(bytes):
+                    val full = _dbfs_bytes_to_text(bytes, bytes.len() as i64)
+                    var device_result: text = ""
+                    var di: i64 = offset
+                    val device_end: i64 = if offset + length < full.len(): offset + length else: full.len()
+                    while di < device_end:
+                        device_result = device_result + full[di:di + 1]
+                        di = di + 1
+                    var device_pad: i64 = device_end - offset
+                    while device_pad < length:
+                        device_result = device_result + "\0"
+                        device_pad = device_pad + 1
+                    return Ok(device_result)
+                Err(_):
+                    pass_do_nothing("fall back to in-memory content")
         val content = _dbfs_inodes[inode_idx].content
         var result: text = ""
         var i: i64 = offset
@@ -1004,10 +1023,11 @@ impl DbFsDriver:
         """Return capability extension handle for DBFS-supported capabilities."""
         match cap:
             case DirectIo:
-                if self.direct_io.is_some():
-                    Some(Extension.DirectIo(ext: self.direct_io.unwrap()))
-                else:
-                    None
+                match self.direct_io:
+                    Some(ext):
+                        Some(Extension.DirectIo(ext: ext))
+                    None:
+                        None
             case PosixCompat:
                 Some(Extension.PosixCompat(ext: PosixCompatExt(flags: 0, mode: 0)))
             case Xattr:
