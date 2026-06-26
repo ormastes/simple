@@ -89,8 +89,10 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 - Capture viewport dimensions must be explicit positive decimal integers and
   are emitted as normalized rows for the live wrapper to compare against the
   requested Chrome viewport.
-- Capture viewport, ARGB readback viewport, Chrome geometry viewport, and
-  frame timing values must be real JSON numbers, not stringified rows.
+- Capture viewport, ARGB readback viewport, Chrome geometry viewport, mismatch
+  counts, and frame timing values must be real JSON numbers, not stringified
+  rows, and malformed live numeric rows must not be re-emitted as normalized
+  numeric evidence.
 - The live Chrome wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 
@@ -190,12 +192,13 @@ expect(fail_evidence).to_contain("chrome_simple_web_layout_chrome_checksum=18446
 
 -  proof command
    - Expected: code equals `1`
+   - Expected: evidence does not contain `chrome_simple_web_layout_chrome_frame_us=not-a-number`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -209,7 +212,8 @@ expect(code).to_equal(1)
 val evidence = file_read(root + "/evidence.env")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-timing")
-expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=not-a-number")
+expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=")
+expect(evidence.contains("chrome_simple_web_layout_chrome_frame_us=not-a-number")).to_equal(false)
 ```
 
 </details>
@@ -463,12 +467,13 @@ expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_width=95
 -  proof command
    - Expected: code equals `1`
 - Confirm capture dimensions are explicit integer proof rows
+   - Expected: fractional does not contain `chrome_simple_web_layout_capture_height=64.5`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -489,7 +494,8 @@ expect(missing).to_contain("chrome_simple_web_layout_validation_reason=missing-c
 expect(missing).to_contain("chrome_simple_web_layout_capture_width=")
 expect(fractional).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(fractional).to_contain("chrome_simple_web_layout_validation_reason=missing-capture-viewport")
-expect(fractional).to_contain("chrome_simple_web_layout_capture_height=64.5")
+expect(fractional).to_contain("chrome_simple_web_layout_capture_height=")
+expect(fractional.contains("chrome_simple_web_layout_capture_height=64.5")).to_equal(false)
 ```
 
 </details>
@@ -500,14 +506,20 @@ expect(fractional).to_contain("chrome_simple_web_layout_capture_height=64.5")
 -  proof command
 -  proof command
 -  proof command
+-  proof command
    - Expected: code equals `1`
 - Confirm Chrome live numeric proof cannot be stringified
+   - Expected: capture does not contain `chrome_simple_web_layout_capture_width=96`
+   - Expected: mismatch does not contain `chrome_simple_web_layout_mismatch_count=0`
+   - Expected: argb does not contain `chrome_simple_web_layout_captured_argb_width=96`
+   - Expected: geometry does not contain `chrome_simple_web_layout_geometry_viewport_width=96`
+   - Expected: timing does not contain `chrome_simple_web_layout_chrome_frame_us=1250`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -515,6 +527,8 @@ val root = "build/test-chrome-layout-validator-string-numeric-proof"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/capture.json", "p.width=\"96\"") +
     " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/capture.json > " + root + "/capture.env; " +
+    _proof_command(root + "/mismatch.json", "p.mismatch_count=\"0\"") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env; " +
     _proof_command(root + "/argb.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:\"96\",height:64,format:\"argb-u32\",producer:\"chrome-headless-screenshot\",pixels:Array(96*64).fill(4294967295)}))") +
     " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/argb.json > " + root + "/argb.env; " +
     _proof_command(root + "/geometry.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),JSON.stringify({producer:\"chrome-headless-geometry\",viewport:{width:\"96\",height:64},items:[{label:\"root\",tag:\"div\",x:0,y:0,width:96,height:64}]}))") +
@@ -525,22 +539,31 @@ val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val capture = file_read(root + "/capture.env")
+val mismatch = file_read(root + "/mismatch.env")
 val argb = file_read(root + "/argb.env")
 val geometry = file_read(root + "/geometry.env")
 val timing = file_read(root + "/timing.env")
 step("Confirm Chrome live numeric proof cannot be stringified")
 expect(capture).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(capture).to_contain("chrome_simple_web_layout_validation_reason=missing-capture-viewport")
-expect(capture).to_contain("chrome_simple_web_layout_capture_width=96")
+expect(capture).to_contain("chrome_simple_web_layout_capture_width=")
+expect(capture.contains("chrome_simple_web_layout_capture_width=96")).to_equal(false)
+expect(mismatch).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(mismatch).to_contain("chrome_simple_web_layout_validation_reason=malformed-mismatch-count")
+expect(mismatch).to_contain("chrome_simple_web_layout_mismatch_count=")
+expect(mismatch.contains("chrome_simple_web_layout_mismatch_count=0")).to_equal(false)
 expect(argb).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(argb).to_contain("chrome_simple_web_layout_validation_reason=captured-argb-viewport-mismatch")
-expect(argb).to_contain("chrome_simple_web_layout_captured_argb_width=96")
+expect(argb).to_contain("chrome_simple_web_layout_captured_argb_width=")
+expect(argb.contains("chrome_simple_web_layout_captured_argb_width=96")).to_equal(false)
 expect(geometry).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(geometry).to_contain("chrome_simple_web_layout_validation_reason=chrome-geometry-viewport-mismatch")
-expect(geometry).to_contain("chrome_simple_web_layout_geometry_viewport_width=96")
+expect(geometry).to_contain("chrome_simple_web_layout_geometry_viewport_width=")
+expect(geometry.contains("chrome_simple_web_layout_geometry_viewport_width=96")).to_equal(false)
 expect(timing).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(timing).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-timing")
-expect(timing).to_contain("chrome_simple_web_layout_chrome_frame_us=1250")
+expect(timing).to_contain("chrome_simple_web_layout_chrome_frame_us=")
+expect(timing.contains("chrome_simple_web_layout_chrome_frame_us=1250")).to_equal(false)
 ```
 
 </details>
@@ -550,12 +573,13 @@ expect(timing).to_contain("chrome_simple_web_layout_chrome_frame_us=1250")
 -  proof command
 -  proof command
    - Expected: code equals `1`
+   - Expected: mismatch does not contain `chrome_simple_web_layout_mismatch_count=bad`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -572,7 +596,8 @@ val blur = file_read(root + "/blur.env")
 val mismatch = file_read(root + "/mismatch.env")
 expect(blur).to_contain("chrome_simple_web_layout_validation_reason=blur-or-tolerance-not-allowed")
 expect(mismatch).to_contain("chrome_simple_web_layout_validation_reason=malformed-mismatch-count")
-expect(mismatch).to_contain("chrome_simple_web_layout_mismatch_count=bad")
+expect(mismatch).to_contain("chrome_simple_web_layout_mismatch_count=")
+expect(mismatch.contains("chrome_simple_web_layout_mismatch_count=bad")).to_equal(false)
 ```
 
 </details>
