@@ -541,3 +541,22 @@ Evidence:
 - Targeted source scan found no remaining direct literal-marker split
   assertions in `test/01_unit/app/llm_runtime` or
   `test/unit/app/llm_runtime`.
+
+## 2026-06-26 vLLM Runtime Manual Sync
+
+The stale canonical `doc/06_spec/01_unit/app/llm_runtime/` and
+`doc/06_spec/unit/app/llm_runtime/` manual copies for the seven vLLM
+live/serve specs were synced from their generated mirrors. This keeps the
+operator manuals aligned with the current absence-safe generated scenario
+blocks for live chat, environment, models, request plan, transport, serve
+lifecycle, and serve readiness.
+
+Evidence:
+
+- `simple check` passed for the seven affected `test/01_unit/app/llm_runtime`
+  source specs.
+- Interpreter smoke passed for `vllm_live_chat_probe_spec.spl`.
+- Canonical/manual duplicate comparisons returned `0` for the seven synced
+  `01_unit` and `unit` vLLM manuals.
+- `check-llm-tooling-public-absence-rendering.shs`, direct env/runtime guards,
+  and the `doc/06_spec` executable-spec layout guard passed.
