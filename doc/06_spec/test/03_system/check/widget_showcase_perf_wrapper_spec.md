@@ -27,7 +27,7 @@ widget_showcase_perf_wrapper_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -99,6 +99,9 @@ PLAN_ONLY=1 RESOLUTION=8k sh scripts/check/check-widget-showcase-4k-200fps.shs
   render mode, and redraw count.
 - Native plan-only mode writes the generated alias source that calls the
   selected probe function directly.
+- The GUI showcase app routes `SHOWCASE_8K_PERF=1` through the env facade to
+  `run_8k_perf_probe()` before normal GUI startup, and does not reintroduce a
+  raw `rt_env_get` shortcut.
 
 ## Evidence Contract
 
@@ -178,7 +181,8 @@ showcase source imports and helper definitions.
 The spec covers plan-only 4K and 8K routing. It verifies the selected probe
 function, evidence prefix, environment flag, resolution, frame count, target
 FPS, pixel count, native provenance fields, empty measured field placeholders,
-plan-only log artifact status, and generated native alias source.
+plan-only log artifact status, generated native alias source, and app-level 8K
+environment dispatch.
 
 ## Scenarios
 
@@ -340,12 +344,47 @@ expect(script).to_contain("_frame_p95_ns=$frame_p95_ns")
 
 </details>
 
+#### keeps the GUI showcase 8K env flag wired through the facade
+
+- Read the GUI showcase source
+- Assert 8K dispatch uses env_ops and enters the retained 8K probe
+- Assert raw runtime env access stays out of the app
+   - Expected: showcase does not contain `extern fn rt_env_get`
+   - Expected: showcase does not contain `rt_env_get(`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read the GUI showcase source")
+val showcase = file_read("examples/06_io/ui/widget_showcase_gui.spl")
+
+step("Assert 8K dispatch uses env_ops and enters the retained 8K probe")
+expect(showcase).to_contain("use std.nogc_sync_mut.io.env_ops.{env_get}")
+expect(showcase).to_contain("fn run_8k_perf_probe() -> i64:")
+expect(showcase).to_contain("run_widget_showcase_perf_probe(7680, 4320, 200, \"gui_showcase_8k_perf\")")
+expect(showcase).to_contain("if (env_get(\"SHOWCASE_8K_PERF\") ?? \"\") == \"1\":")
+expect(showcase).to_contain("return run_8k_perf_probe()")
+expect(showcase).to_contain("val ppm_path = env_get(\"SHOWCASE_PPM\") ?? \"\"")
+expect(showcase).to_contain("if (env_get(\"SIMPLE_GUI\") ?? \"\") != \"1\":")
+
+step("Assert raw runtime env access stays out of the app")
+expect(showcase.contains("extern fn rt_env_get")).to_equal(false)
+expect(showcase.contains("rt_env_get(")).to_equal(false)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
