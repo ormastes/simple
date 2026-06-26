@@ -1,6 +1,6 @@
-# Vllm Control Route Specification
+# vLLM Dashboard Control Route Specification
 
-> <details>
+> This system spec verifies the authenticated web-dashboard control route for vLLM runtime operations. The route is intentionally split between pure dashboard planning and runtime-owned live execution so a web request cannot silently start processes, poll process state, fetch HTTP endpoints, or stop processes unless the response explicitly advertises that a runtime executor is required.
 
 <!-- sdn-diagram:id=vllm_control_route_spec.arch -->
 <details class="sdn-source">
@@ -28,12 +28,122 @@ vllm_control_route_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Vllm Control Route Specification
+# vLLM Dashboard Control Route Specification
+
+This system spec verifies the authenticated web-dashboard control route for vLLM runtime operations. The route is intentionally split between pure dashboard planning and runtime-owned live execution so a web request cannot silently start processes, poll process state, fetch HTTP endpoints, or stop processes unless the response explicitly advertises that a runtime executor is required.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Requirements | doc/02_requirements/nfr/llm_runtime_vllm_torch_interface.md |
+| Plan | doc/03_plan/agent_tasks/llm_runtime_vllm_torch_interface.md |
+| Design | doc/05_design/app/tools/llm_runtime_vllm_torch_interface.md |
+| Research | doc/01_research/domain/llm_runtime_vllm_torch_interface.md |
+| Source | `test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+This system spec verifies the authenticated web-dashboard control route for
+vLLM runtime operations. The route is intentionally split between pure
+dashboard planning and runtime-owned live execution so a web request cannot
+silently start processes, poll process state, fetch HTTP endpoints, or stop
+processes unless the response explicitly advertises that a runtime executor is
+required.
+
+The spec covers three boundaries:
+
+- `preflight` stays on the dashboard-safe collector and returns plan evidence.
+- `start`, `poll`, `probe`, and `stop` return runtime-owned JSONL evidence.
+- Live-capable inputs still return `requires_runtime_executor=true` rather
+  than importing or calling the live executor from the route.
+
+## Syntax
+
+Authenticated dashboard control route:
+
+```text
+GET /api/vllm/control?action=<preflight|start|poll|probe|stop>&pid=<pid>&vllm_available=<bool>&gpu_available=<bool>
+```
+
+Optional query overrides:
+
+```text
+base_model=<redacted model id>
+endpoint=http://127.0.0.1:8000/v1
+```
+
+The response is JSONL. Public output must redact model identifiers, must render
+missing local resources as explicit status/reason fields, and must not leak
+implementation-level absence markers.
+
+## Examples
+
+Missing local vLLM:
+
+```text
+GET /api/vllm/control?action=start&vllm_available=false&gpu_available=true
+```
+
+Expected JSONL fields:
+
+```json
+{"action":"start","status":"skipped","reason":"missing_local_vllm","requires_runtime_executor":false}
+```
+
+Local vLLM and GPU available:
+
+```text
+GET /api/vllm/control?action=start&vllm_available=true&gpu_available=true
+```
+
+Expected JSONL fields:
+
+```json
+{"action":"start","status":"planned","reason":"live_executor_required","requires_runtime_executor":true}
+```
+
+This is not live evidence. It proves the dashboard route knows a runtime owner
+must perform the side effect and leaves the side effect outside the web route.
+
+## Evidence Matrix
+
+| Boundary | Evidence in this spec |
+|----------|-----------------------|
+| Auth | Unauthenticated `/api/vllm/control` returns `401`. |
+| Redaction | Model overrides do not appear in route output. |
+| Missing resources | Start requests return skipped JSONL without executor requirement. |
+| Live-capable resources | Start/poll/probe/stop return executor-required JSONL. |
+| Ownership | Server imports the runtime boundary, not the live executor module. |
+
+## Acceptance Notes
+
+The dashboard route is allowed to assemble a manifest from query overrides and
+to call the runtime boundary that emits safe JSONL. It is not allowed to call
+the live executor module directly. That separation matters because live
+execution can spawn `vllm`, inspect process state, fetch `/models`, or stop a
+process. Those side effects belong to runtime-owned evidence wrappers where
+resource checks, redaction, and host capability reporting are explicit.
+
+The `requires_runtime_executor` field is the handoff flag. A value of `false`
+means the route handled the request completely as planning or skipped evidence.
+A value of `true` means the route found a live-capable intent, but the operator
+or a runtime owner must run the live executor path to produce real live
+evidence. This spec therefore does not claim a live vLLM server was started or
+probed. It proves the route exposes the right boundary for a later live run.
+
+The redaction checks use split-count assertions for the configured base model
+and absence-marker helper assertions for public output. Generated manuals should
+show the public behavior and helper names, not implementation sentinel values.
 
 ## Scenarios
 
@@ -190,6 +300,47 @@ expect_absence_marker_hidden(response)
 
 </details>
 
+#### routes live-capable side-effect actions as executor-required JSONL without importing the live executor
+
+- expect absence marker hidden
+- expect absence marker hidden
+- expect absence marker hidden
+- expect absence marker hidden
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", _manifest())
+val start_response = server.route_http("GET", "/api/vllm/control?action=start&vllm_available=true&gpu_available=true", "", "sid")
+val poll_response = server.route_http("GET", "/api/vllm/control?action=poll&pid=123&vllm_available=true&gpu_available=true", "", "sid")
+val probe_response = server.route_http("GET", "/api/vllm/control?action=probe&pid=123&vllm_available=true&gpu_available=true", "", "sid")
+val stop_response = server.route_http("GET", "/api/vllm/control?action=stop&pid=123&vllm_available=true&gpu_available=true", "", "sid")
+val server_source = _read_source(SERVER_PATH)
+
+expect(start_response).to_contain("\"action\":\"start\"")
+expect(start_response).to_contain("\"status\":\"planned\"")
+expect(start_response).to_contain("\"reason\":\"live_executor_required\"")
+expect(start_response).to_contain("\"requires_runtime_executor\":true")
+expect(poll_response).to_contain("\"action\":\"poll\"")
+expect(poll_response).to_contain("\"requires_runtime_executor\":true")
+expect(probe_response).to_contain("\"action\":\"probe\"")
+expect(probe_response).to_contain("\"requires_runtime_executor\":true")
+expect(stop_response).to_contain("\"action\":\"stop\"")
+expect(stop_response).to_contain("\"requires_runtime_executor\":true")
+expect(server_source.split("dashboard_live_control_executor").len()).to_equal(1)
+expect_absence_marker_hidden(start_response)
+expect_absence_marker_hidden(poll_response)
+expect_absence_marker_hidden(probe_response)
+expect_absence_marker_hidden(stop_response)
+```
+
+</details>
+
 #### routes poll, probe, and stop through runtime execution JSONL with safe invalid-pid inputs
 
 -  assert safe runtime action
@@ -266,30 +417,23 @@ expect(live_executor).to_contain("llm_runtime_execute_dashboard_control_live")
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- vLLM dashboard control web route
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [doc/02_requirements/nfr/llm_runtime_vllm_torch_interface.md](doc/02_requirements/nfr/llm_runtime_vllm_torch_interface.md)
+- **Plan:** [doc/03_plan/agent_tasks/llm_runtime_vllm_torch_interface.md](doc/03_plan/agent_tasks/llm_runtime_vllm_torch_interface.md)
+- **Design:** [doc/05_design/app/tools/llm_runtime_vllm_torch_interface.md](doc/05_design/app/tools/llm_runtime_vllm_torch_interface.md)
+- **Research:** [doc/01_research/domain/llm_runtime_vllm_torch_interface.md](doc/01_research/domain/llm_runtime_vllm_torch_interface.md)
 
 
 </details>
