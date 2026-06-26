@@ -212,7 +212,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -230,7 +230,17 @@ expect(evidence).to_contain("native_render_log_platform_matrix_macos_metal_comma
 expect(evidence).to_contain("native_render_log_platform_matrix_windows_d3d12_command=WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1 BUILD_DIR=build/windows-d3d12-render-log-compare sh scripts/check/check-windows-d3d12-render-log-compare.shs")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_status=unavailable")
+expect(evidence).to_contain("macos_metal_render_log_compare_pairwise_status=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_status=unavailable")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact=missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=missing")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_status=unavailable")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_pairwise_status=missing")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_status=unavailable")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact=missing")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_magic=missing")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_gpu_debugger_status=unavailable")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_gpu_debugger_artifact=missing")
 ```
 
 </details>

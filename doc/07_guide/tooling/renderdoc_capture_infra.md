@@ -452,6 +452,14 @@ browser backing passes, but the row remains failed because the required Chrome
 and Electron native RenderDoc lanes are still not pass; do not treat passing
 pairwise ARGB or browser-GPU proof as RenderDoc completion.
 
+Absent macOS Metal and Windows D3D12 compare env files stay classified as
+missing platform rows, but the aggregate still emits explicit details for
+parallel agents: macOS uses `pairwise_status=missing`,
+`gpu_capture_status=unavailable`, and `gpu_capture_artifact*=missing`; Windows
+uses `pairwise_status=missing`, `pix_status=unavailable`,
+`pix_artifact*=missing`, `gpu_debugger_status=unavailable`, and
+`gpu_debugger_artifact=missing`. Blank fields in those rows are regressions.
+
 Completion keys:
 
 ```text
