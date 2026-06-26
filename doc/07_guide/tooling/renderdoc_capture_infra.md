@@ -813,6 +813,13 @@ explicit: `html_css_full_rendering_goal_html_tag_status=pass` and
 the broader goal can progress, while
 `html_css_full_rendering_goal_full_css_status=incomplete` remains the honest
 state until every W3C CSS inventory property has rendered fixture coverage.
+For direct readiness answers, consume
+`html_css_full_rendering_goal_ready_status`,
+`html_css_full_rendering_goal_all_html_elements_ready_status`,
+`html_css_full_rendering_goal_all_implemented_css_ready_status`, and
+`html_css_full_rendering_goal_all_css_properties_ready_status`. A pass for the
+HTML or implemented-CSS readiness keys does not imply that all CSS properties
+are ready; the full CSS readiness key must also be `pass`.
 Animation-related CSS is also reported as its own sub-goal:
 `html_css_full_rendering_goal_animation_css_status`,
 `html_css_full_rendering_goal_animation_css_total_count`,
