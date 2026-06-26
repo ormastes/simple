@@ -75,8 +75,11 @@ impl Trial:
     me report(step: i64, value: f64):
         """Report an intermediate objective value."""
         self.intermediate_values[step] = value
-        if self.run.?:
-            self.run.unwrap().log_metric("objective", value, step)
+        match self.run:
+            case Some(run):
+                run.log_metric("objective", value, step)
+            case None:
+                pass_do_nothing
 
     fn should_prune() -> bool:
         """Check if this trial should be pruned (set by study's pruner)."""
@@ -242,10 +245,13 @@ impl Study:
         var trial_num = 0
         while trial_num < max:
             # Check time limit
-            if self.config.time_limit_secs.?:
-                val elapsed = (time_now_unix_micros() - self.start_time_micros) / 1000000
-                if elapsed >= self.config.time_limit_secs.unwrap():
-                    break
+            match self.config.time_limit_secs:
+                case Some(limit_secs):
+                    val elapsed = (time_now_unix_micros() - self.start_time_micros) / 1000000
+                    if elapsed >= limit_secs:
+                        break
+                case None:
+                    pass_do_nothing
 
             var trial = Trial(
                 trial_id: self.trials.len(),
@@ -268,14 +274,18 @@ impl Study:
 
             # Update best
             if trial.status == TrialStatus.Completed:
-                if not self.best_trial.?:
-                    self.best_trial = Some(trial)
-                else:
-                    val current_best = self.best_trial.unwrap()
-                    val is_better = match self.config.direction:
-                        case "minimize": value < current_best.value.unwrap()
-                        case _: value > current_best.value.unwrap()
-                    if is_better:
+                match self.best_trial:
+                    case Some(current_best):
+                        match current_best.value:
+                            case Some(current_value):
+                                val is_better = match self.config.direction:
+                                    case "minimize": value < current_value
+                                    case _: value > current_value
+                                if is_better:
+                                    self.best_trial = Some(trial)
+                            case None:
+                                self.best_trial = Some(trial)
+                    case None:
                         self.best_trial = Some(trial)
 
             self.trials.push(trial)
@@ -291,17 +301,15 @@ impl Study:
 
     fn best_value() -> f64?:
         """Get best objective value."""
-        if self.best_trial.?:
-            self.best_trial.unwrap().value
-        else:
-            nil
+        match self.best_trial:
+            case Some(trial): trial.value
+            case None: nil
 
     fn best_params() -> Dict<text, f64>:
         """Get best hyperparameters."""
-        if self.best_trial.?:
-            self.best_trial.unwrap().params
-        else:
-            {}
+        match self.best_trial:
+            case Some(trial): trial.params
+            case None: {}
 
 # ============================================================================
 # Exports
