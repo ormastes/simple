@@ -41,6 +41,9 @@ ponytail_audit_spec -> app
 
 #### renders clean audit output
 
+- expect absence marker hidden
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -52,7 +55,7 @@ val path = _write_ponytail_fixture("clean", "fn hello() -> text:\n    \"ok\"\n")
 val output = ponytail_audit(path)
 expect(output).to_contain("Ponytail Audit")
 expect(output).to_contain("status: ok")
-expect(output.split(internal_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(output)
 ```
 
 </details>
@@ -77,6 +80,9 @@ expect(output).to_contain("abstraction smells:")
 
 #### returns explicit missing status for absent source
 
+- expect absence marker hidden
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -87,12 +93,15 @@ Reproduction: this block contains the complete executable scenario source.
 val output = ponytail_audit("build/test/ponytail/missing.spl")
 expect(output).to_contain("status: missing")
 expect(output).to_contain("reason: source unavailable")
-expect(output.split(internal_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(output)
 ```
 
 </details>
 
 #### renders simplification report suggestions
+
+- expect absence marker hidden
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -109,7 +118,7 @@ expect(output).to_contain("cut placeholder passes:")
 expect(output).to_contain("cut speculative abstraction:")
 expect(output).to_contain("resolve todo markers:")
 expect(output).to_contain("total_suggestions:")
-expect(output.split(internal_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(output)
 ```
 
 </details>
@@ -134,6 +143,9 @@ expect(output).to_contain("total_suggestions: 0")
 
 #### renders missing simplification report as explicit absence
 
+- expect absence marker hidden
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -145,7 +157,7 @@ val output = ponytail_simplification_report("build/test/ponytail/report_missing.
 expect(output).to_contain("status: missing")
 expect(output).to_contain("reason: source unavailable")
 expect(output).to_contain("total_suggestions: 0")
-expect(output.split(internal_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(output)
 ```
 
 </details>

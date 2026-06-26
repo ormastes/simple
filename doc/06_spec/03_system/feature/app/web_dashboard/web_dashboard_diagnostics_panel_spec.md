@@ -94,7 +94,7 @@ expect(html).to_contain("LLM Tooling Artifacts")
 - mkdir p
 - remove file if exists
 - write file
-   - Expected: response.split(internal_absence_marker()).len() equals `1`
+- expect absence marker hidden
 - remove file if exists
 
 
@@ -118,7 +118,7 @@ expect(response).to_contain("events=2")
 expect(response).to_contain("sessions=1")
 expect(response).to_contain("tool_events=1")
 expect(response).to_contain("last_session=sid-web")
-expect(response.split(internal_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(response)
 remove_file_if_exists(path)
 ```
 
@@ -129,7 +129,7 @@ remove_file_if_exists(path)
 - mkdir p
 - remove file if exists
 - write file
-   - Expected: response.split(internal_absence_marker()).len() equals `1`
+- expect absence marker hidden
 - remove file if exists
 
 
@@ -149,7 +149,7 @@ val response = server.route_http("GET", "/", "", "simple-dashboard-session")
 expect(response).to_contain("events=1")
 expect(response).to_contain("last_event=none")
 expect(response).to_contain("last_session=none")
-expect(response.split(internal_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(response)
 remove_file_if_exists(path)
 ```
 
@@ -161,7 +161,7 @@ remove_file_if_exists(path)
 - remove file if exists
 - write file
    - Expected: diagnostics_view.split("llm-tooling-artifacts-panel").len() equals `1`
-   - Expected: response.split(internal_absence_marker()).len() equals `1`
+- expect absence marker hidden
 - remove file if exists
 - remove file if exists
 
@@ -192,7 +192,7 @@ expect(response).to_contain("LLM Tooling Artifacts")
 expect(response).to_contain("context_status=ready")
 expect(response).to_contain("ponytail_status=review")
 expect(response).to_contain("FutureThing")
-expect(response.split(internal_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(response)
 remove_file_if_exists(diagnostics_path)
 remove_file_if_exists(tooling_path)
 ```
@@ -205,7 +205,7 @@ remove_file_if_exists(tooling_path)
 - remove file if exists
 - write file
 - remove file if exists
-   - Expected: response.split(internal_absence_marker()).len() equals `1`
+- expect absence marker hidden
 - remove file if exists
 
 
@@ -230,13 +230,16 @@ expect(response).to_contain("<div id=\"view-tooling\" class=\"view\">")
 expect(response).to_contain("context_status=missing")
 expect(response).to_contain("ponytail_status=missing")
 expect(response).to_contain("ponytail_reason=source unavailable")
-expect(response.split(internal_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(response)
 remove_file_if_exists(diagnostics_path)
 ```
 
 </details>
 
 #### keeps the operator guide aligned with diagnostics, tooling, and vLLM panels
+
+- expect absence marker hidden
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -254,7 +257,7 @@ expect(guide).to_contain("llm-tooling-artifacts-panel")
 expect(guide).to_contain("/api/vllm/control")
 expect(guide).to_contain("simple_context")
 expect(guide).to_contain("simple_ponytail")
-expect(guide.split(internal_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(guide)
 ```
 
 </details>

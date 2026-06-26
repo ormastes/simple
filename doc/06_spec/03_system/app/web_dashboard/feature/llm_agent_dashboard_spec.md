@@ -77,6 +77,9 @@ expect(response).to_contain("Location: /login")
 
 #### renders authenticated /agents as an absence-safe dashboard
 
+- expect absence marker hidden
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -90,7 +93,7 @@ val response = server.route_http("GET", "/agents", "", "sid")
 expect(response).to_contain("HTTP/1.1 200 OK")
 expect(response).to_contain("id=\"agent-dashboard\"")
 expect(response).to_contain("selected session unavailable")
-expect(response.split(internal_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(response)
 ```
 
 </details>

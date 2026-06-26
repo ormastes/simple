@@ -63,6 +63,11 @@ failure mode where the release binary treats the command name as a source file.
 
 #### ships a release binary with llm-runtime-control dispatch
 
+- expect text absent
+- expect text absent
+- expect absence marker hidden
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -84,9 +89,9 @@ expect(output).to_contain("\"action\":\"preflight\"")
 expect(output).to_contain("\"status\":\"skipped\"")
 expect(output).to_contain("\"reason\":\"missing_local_vllm_and_gpu\"")
 expect(output).to_contain("\"models_reason\":\"environment_skipped\"")
-expect(output.contains("file not found: llm-runtime-control")).to_equal(false)
-expect(output.contains("base-model")).to_equal(false)
-expect(output.contains(_absence_marker())).to_equal(false)
+expect_text_absent(output, "file not found: llm-runtime-control")
+expect_text_absent(output, "base-model")
+expect_absence_marker_hidden(output)
 ```
 
 </details>
