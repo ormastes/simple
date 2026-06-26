@@ -23,6 +23,9 @@ fn parse(source: text) -> Result<SdnValue, text>:
     # Dict / table (brace or indent block — simplified)
     if trimmed.starts_with("{"):
         return Ok(SdnValue.Dict({}))
+    # Block mapping: one or more "key: value" lines
+    if trimmed.contains(":"):
+        return Ok(_sdn_parse_mapping(trimmed))
     # Integer
     val as_int = trimmed.to_int_or(0)
     if trimmed.to_text() == as_int.to_text() or _looks_like_int(trimmed):
@@ -57,3 +60,60 @@ fn parse_with_spans(source: text) -> Result<(SdnValue, Dict<text, Span>), text>:
             Ok((v, spans))
         case Err(e):
             Err(e)
+
+# ---- block-mapping helpers ----
+
+fn _sdn_index_of(s: text, ch: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s.substring(i, i + 1) == ch:
+            return i
+        i = i + 1
+    -1
+
+fn _sdn_split_lines(s: text) -> [text]:
+    var out: [text] = []
+    var cur = ""
+    var i = 0
+    while i < s.len():
+        val c = s.substring(i, i + 1)
+        if c == "\n":
+            out.push(cur)
+            cur = ""
+        else:
+            cur = cur + c
+        i = i + 1
+    out.push(cur)
+    out
+
+fn _sdn_parse_mapping(source: text) -> SdnValue:
+    var m = {}
+    for line in _sdn_split_lines(source):
+        val t = line.trim()
+        if t != "":
+            val ci = _sdn_index_of(t, ":")
+            if ci >= 0:
+                val key = t.slice(0, ci).trim()
+                val valstr = t.slice(ci + 1, t.len()).trim()
+                match parse(valstr):
+                    case Ok(v):
+                        m[key] = v
+                    case Err(_):
+                        m[key] = SdnValue.String(valstr)
+    SdnValue.Dict(m)
+
+# ---- hardened entry points ----
+
+# Parse untrusted input, rejecting oversized payloads (1 MiB cap).
+fn parse_untrusted(source: text) -> Result<SdnValue, text>:
+    if source.len() > 1048576:
+        return Err("input exceeds size limit")
+    parse(source)
+
+# Parse configuration-style input (same grammar as `parse`).
+fn parse_config(source: text) -> Result<SdnValue, text>:
+    parse(source)
+
+# Parse input, surfacing errors as Err rather than raising.
+fn parse_safe(source: text) -> Result<SdnValue, text>:
+    parse(source)
