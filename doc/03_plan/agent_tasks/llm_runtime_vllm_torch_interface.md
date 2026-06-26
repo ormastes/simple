@@ -283,6 +283,14 @@ Tasks:
    `/api/vllm/control` JSONL evidence for those intents. Live process execution
    still remains in the existing `app.llm_runtime` lifecycle/readiness facades
    rather than being imported directly by dashboard rendering.
+7. Add owner-side dashboard control execution under `app.llm_runtime`. Status:
+   done for runtime-owned control decisions and live wrapper. The pure
+   `dashboard_live_control` module validates `preflight`, `start`, `poll`,
+   `probe`, and `stop` without importing process/HTTP backends; the
+   `dashboard_live_control_executor` module composes `serve_lifecycle`,
+   `serve_readiness`, and `live_transport` for actual live execution when the
+   runtime owner wires it. Unit coverage stays on the pure boundary to avoid
+   live process teardown diagnostics.
 
 ## Sidecars
 
@@ -295,9 +303,10 @@ Tasks:
 - Dynamic LoRA resolver.
 - Torch model execution beyond readiness probes.
 - Live endpoint availability evidence against an installed local `vllm`.
-- Live dashboard execution of start, poll, probe, and stop against an installed
-  local `vllm`; the current dashboard slice validates and renders operator
-  intents while keeping live execution at the runtime owner boundary.
+- Live dashboard route wiring of start, poll, probe, and stop against an
+  installed local `vllm`; the runtime owner now has a live wrapper, but the web
+  dashboard route remains intent-only until integration evidence proves the
+  process/HTTP imports do not reintroduce dashboard test teardown diagnostics.
 
 Runtime-adjacent decision record for live HTTP transport:
 
@@ -327,5 +336,18 @@ Runtime-adjacent decision record for vLLM serve-readiness orchestration:
   and transport result objects.
 - `rejected_shortcuts`: hidden process polling inside unit-only readiness,
   shell/curl readiness checks, and treating spawned PID as endpoint readiness.
+
+Runtime-adjacent decision record for dashboard live control execution:
+
+- `runtime_need`: execute dashboard-requested vLLM `preflight`, `start`,
+  `poll`, `probe`, and `stop` actions without making dashboard rendering own
+  process or HTTP backends.
+- `facade_checked`: `serve_lifecycle`, `serve_readiness`, `live_transport`,
+  `serve_plan`, `live_request_plan`, and `live_environment`.
+- `chosen_path`: split pure decision evidence from `dashboard_live_control`
+  and live execution in `dashboard_live_control_executor`.
+- `rejected_shortcuts`: importing process/HTTP modules into dashboard
+  collectors, shell lifecycle wrappers, and exposing model ids or response
+  bodies in JSONL evidence.
 
 - Full dashboard controls for vLLM lifecycle.

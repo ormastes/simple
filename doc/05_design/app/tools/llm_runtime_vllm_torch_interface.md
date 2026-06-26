@@ -309,6 +309,39 @@ Runtime-adjacent decision record:
   shelling out from dashboard routes, and treating rendered buttons as proof of
   live vLLM availability.
 
+## Implemented Runtime Dashboard Live-Control Slice
+
+- `src/app/llm_runtime/dashboard_live_control.spl`
+- `src/app/llm_runtime/dashboard_live_control_executor.spl`
+- `test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl`
+- `test/unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl`
+- `doc/06_spec/test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
+- `doc/06_spec/test/unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
+
+The runtime now owns dashboard-requested vLLM control execution. The pure
+control module validates `preflight`, `start`, `poll`, `probe`, and `stop`
+actions, applies explicit local vLLM/GPU resource gates, and emits public JSONL
+without model ids, response bodies, or internal absence markers. It returns
+`live_executor_required` for valid side-effecting actions so dashboard and tests
+can prove intent without importing process or HTTP backends.
+
+The live executor module remains under `app.llm_runtime` and composes the
+existing `serve_lifecycle`, `serve_readiness`, and `live_transport` facades for
+actual process spawn, pid polling, `/v1/models` probing, and stop requests. It
+is intentionally not imported by dashboard rendering yet; route-level live
+wiring still needs integration evidence against an installed local `vllm`.
+
+Runtime-adjacent decision record:
+
+- `runtime_need`: honor operator dashboard controls through the runtime owner
+  boundary.
+- `facade_checked`: `live_environment`, `serve_plan`, `live_request_plan`,
+  `serve_lifecycle`, `serve_readiness`, and `live_transport`.
+- `chosen_path`: keep unit-testable control decisions pure; place live
+  process/HTTP composition in a separate runtime executor module.
+- `rejected_shortcuts`: dashboard-owned process/HTTP imports, shell/curl
+  execution, and treating a valid pid as endpoint readiness.
+
 ## Implemented Torch Readiness Slice
 
 - `src/lib/common/torch/dyn_sffi_ops.spl`
