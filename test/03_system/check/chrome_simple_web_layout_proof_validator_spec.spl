@@ -31,6 +31,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   mismatch counts, and checksum mismatches are rejected.
 - ARGB capture and Chrome geometry proof paths must resolve to nonempty files
   instead of relying on boolean flags alone.
+- Chrome geometry proof must parse as Chrome geometry, match the captured
+  viewport, and include at least one measured layout item.
 - Capture viewport dimensions must be explicit positive decimal integers and
   are emitted as normalized rows for the live wrapper to compare against the
   requested Chrome viewport.
@@ -44,10 +46,10 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);fs.writeFileSync(path.join(dir,\"captured.json\"),\"{}\");fs.writeFileSync(path.join(dir,\"geometry.json\"),\"{}\");const p={checksum:100,expected_checksum:100,weighted_checksum:500,expected_weighted_checksum:500,mismatch_count:0,width:96,height:64,frame_us:1250,captured_argb_path:\"captured.json\",captured_argb_written:true,geometry_path:\"geometry.json\",geometry_written:true,blur_or_tolerance_used:false,chrome_bin:\"/usr/bin/google-chrome\"};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);fs.writeFileSync(path.join(dir,\"captured.json\"),\"{}\");const g={producer:\"chrome-headless-geometry\",viewport:{width:96,height:64},items:[{label:\"root\",tag:\"div\",x:0,y:0,width:96,height:64}]};fs.writeFileSync(path.join(dir,\"geometry.json\"),JSON.stringify(g));const p={checksum:100,expected_checksum:100,weighted_checksum:500,expected_weighted_checksum:500,mismatch_count:0,width:96,height:64,frame_us:1250,captured_argb_path:\"captured.json\",captured_argb_written:true,geometry_path:\"geometry.json\",geometry_written:true,blur_or_tolerance_used:false,chrome_bin:\"/usr/bin/google-chrome\"};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 fn _large_proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);fs.writeFileSync(path.join(dir,\"captured.json\"),\"{}\");fs.writeFileSync(path.join(dir,\"geometry.json\"),\"{}\");const p={checksum:\"18446744073709551610\",expected_checksum:\"18446744073709551610\",weighted_checksum:\"18446744073709551611\",expected_weighted_checksum:\"18446744073709551611\",mismatch_count:0,width:96,height:64,frame_us:1250,captured_argb_path:\"captured.json\",captured_argb_written:true,geometry_path:\"geometry.json\",geometry_written:true,blur_or_tolerance_used:false,chrome_bin:\"/usr/bin/google-chrome\"};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);fs.writeFileSync(path.join(dir,\"captured.json\"),\"{}\");const g={producer:\"chrome-headless-geometry\",viewport:{width:96,height:64},items:[{label:\"root\",tag:\"div\",x:0,y:0,width:96,height:64}]};fs.writeFileSync(path.join(dir,\"geometry.json\"),JSON.stringify(g));const p={checksum:\"18446744073709551610\",expected_checksum:\"18446744073709551610\",weighted_checksum:\"18446744073709551611\",expected_weighted_checksum:\"18446744073709551611\",mismatch_count:0,width:96,height:64,frame_us:1250,captured_argb_path:\"captured.json\",captured_argb_written:true,geometry_path:\"geometry.json\",geometry_written:true,blur_or_tolerance_used:false,chrome_bin:\"/usr/bin/google-chrome\"};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Chrome Simple Web layout proof validator":
 
@@ -74,7 +76,10 @@ describe "Chrome Simple Web layout proof validator":
         expect(evidence).to_contain("chrome_simple_web_layout_geometry_path=geometry.json")
         expect(evidence).to_contain("chrome_simple_web_layout_geometry_written=true")
         expect(evidence).to_contain("chrome_simple_web_layout_geometry_file_status=pass")
-        expect(evidence).to_contain("chrome_simple_web_layout_geometry_size_bytes=2")
+        expect(evidence).to_contain("chrome_simple_web_layout_geometry_producer=chrome-headless-geometry")
+        expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_width=96")
+        expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_height=64")
+        expect(evidence).to_contain("chrome_simple_web_layout_geometry_item_count=1")
         expect(evidence).to_contain("chrome_simple_web_layout_blur_or_tolerance_used=false")
 
     it "compares large Chrome checksum proof values exactly":
@@ -165,6 +170,42 @@ describe "Chrome Simple Web layout proof validator":
         expect(empty).to_contain("chrome_simple_web_layout_validation_reason=empty-chrome-geometry-file")
         expect(empty).to_contain("chrome_simple_web_layout_geometry_file_status=pass")
         expect(empty).to_contain("chrome_simple_web_layout_geometry_size_bytes=0")
+
+    it "rejects malformed Chrome geometry and empty geometry item lists":
+        val root = "build/test-chrome-layout-validator-geometry-shape"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/malformed.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),\"{}\")") +
+            " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/malformed.json > " + root + "/malformed.env; " +
+            _proof_command(root + "/empty-items.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),JSON.stringify({producer:\"chrome-headless-geometry\",viewport:{width:96,height:64},items:[]}))") +
+            " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/empty-items.json > " + root + "/empty-items.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val malformed = file_read(root + "/malformed.env")
+        val empty_items = file_read(root + "/empty-items.env")
+        step("Confirm nonempty files must still contain Chrome layout readback shape")
+        expect(malformed).to_contain("chrome_simple_web_layout_validation_status=fail")
+        expect(malformed).to_contain("chrome_simple_web_layout_validation_reason=malformed-chrome-geometry")
+        expect(malformed).to_contain("chrome_simple_web_layout_geometry_item_count=0")
+        expect(empty_items).to_contain("chrome_simple_web_layout_validation_status=fail")
+        expect(empty_items).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-geometry-items")
+        expect(empty_items).to_contain("chrome_simple_web_layout_geometry_producer=chrome-headless-geometry")
+        expect(empty_items).to_contain("chrome_simple_web_layout_geometry_item_count=0")
+
+    it "rejects Chrome geometry viewport that differs from captured pixels":
+        val root = "build/test-chrome-layout-validator-geometry-viewport"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/proof.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),JSON.stringify({producer:\"chrome-headless-geometry\",viewport:{width:95,height:64},items:[{label:\"root\",tag:\"div\",x:0,y:0,width:95,height:64}]}))") +
+            " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/evidence.env")
+        step("Confirm geometry viewport must match captured Chrome ARGB dimensions")
+        expect(evidence).to_contain("chrome_simple_web_layout_validation_status=fail")
+        expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=chrome-geometry-viewport-mismatch")
+        expect(evidence).to_contain("chrome_simple_web_layout_capture_width=96")
+        expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_width=95")
 
     it "rejects missing or fractional capture viewport proof rows":
         val root = "build/test-chrome-layout-validator-viewport-proof"

@@ -27,7 +27,7 @@ chrome_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,6 +80,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   mismatch counts, and checksum mismatches are rejected.
 - ARGB capture and Chrome geometry proof paths must resolve to nonempty files
   instead of relying on boolean flags alone.
+- Chrome geometry proof must parse as Chrome geometry, match the captured
+  viewport, and include at least one measured layout item.
 - Capture viewport dimensions must be explicit positive decimal integers and
   are emitted as normalized rows for the live wrapper to compare against the
   requested Chrome viewport.
@@ -100,7 +102,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -126,7 +128,10 @@ expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_size_bytes=2
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_path=geometry.json")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_written=true")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_file_status=pass")
-expect(evidence).to_contain("chrome_simple_web_layout_geometry_size_bytes=2")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_producer=chrome-headless-geometry")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_width=96")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_height=64")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_item_count=1")
 expect(evidence).to_contain("chrome_simple_web_layout_blur_or_tolerance_used=false")
 ```
 
@@ -302,6 +307,75 @@ expect(empty).to_contain("chrome_simple_web_layout_geometry_size_bytes=0")
 
 </details>
 
+#### rejects malformed Chrome geometry and empty geometry item lists
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm nonempty files must still contain Chrome layout readback shape
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-validator-geometry-shape"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/malformed.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),\"{}\")") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/malformed.json > " + root + "/malformed.env; " +
+    _proof_command(root + "/empty-items.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),JSON.stringify({producer:\"chrome-headless-geometry\",viewport:{width:96,height:64},items:[]}))") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/empty-items.json > " + root + "/empty-items.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val malformed = file_read(root + "/malformed.env")
+val empty_items = file_read(root + "/empty-items.env")
+step("Confirm nonempty files must still contain Chrome layout readback shape")
+expect(malformed).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(malformed).to_contain("chrome_simple_web_layout_validation_reason=malformed-chrome-geometry")
+expect(malformed).to_contain("chrome_simple_web_layout_geometry_item_count=0")
+expect(empty_items).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(empty_items).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-geometry-items")
+expect(empty_items).to_contain("chrome_simple_web_layout_geometry_producer=chrome-headless-geometry")
+expect(empty_items).to_contain("chrome_simple_web_layout_geometry_item_count=0")
+```
+
+</details>
+
+#### rejects Chrome geometry viewport that differs from captured pixels
+
+-  proof command
+   - Expected: code equals `1`
+- Confirm geometry viewport must match captured Chrome ARGB dimensions
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-validator-geometry-viewport"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),JSON.stringify({producer:\"chrome-headless-geometry\",viewport:{width:95,height:64},items:[{label:\"root\",tag:\"div\",x:0,y:0,width:95,height:64}]}))") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm geometry viewport must match captured Chrome ARGB dimensions")
+expect(evidence).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=chrome-geometry-viewport-mismatch")
+expect(evidence).to_contain("chrome_simple_web_layout_capture_width=96")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_width=95")
+```
+
+</details>
+
 #### rejects missing or fractional capture viewport proof rows
 
 -  proof command
@@ -431,8 +505,8 @@ expect(capture).to_contain("geometry_path: geometryOutputPath")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

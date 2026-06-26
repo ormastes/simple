@@ -57,6 +57,15 @@ function artifactStat(value, proofPath) {
   return null;
 }
 
+function readJsonArtifact(artifact, fallback) {
+  if (!artifact) return { ok: false, value: null };
+  try {
+    return { ok: true, value: JSON.parse(fs.readFileSync(artifact.path, 'utf8')) };
+  } catch (_err) {
+    return { ok: false, value: fallback };
+  }
+}
+
 const proofPath = process.argv[2];
 if (!proofPath) {
   emit('chrome_simple_web_layout_validation_status', 'fail');
@@ -75,6 +84,10 @@ try {
 
 const capturedArgbStat = artifactStat(proof.captured_argb_path, proofPath);
 const geometryStat = artifactStat(proof.geometry_path, proofPath);
+const geometryJson = readJsonArtifact(geometryStat, {});
+const geometry = geometryJson.value || {};
+const geometryViewport = geometry.viewport || {};
+const geometryItems = Array.isArray(geometry.items) ? geometry.items : [];
 
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
@@ -103,8 +116,14 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-chrome-geometry-file';
 } else if (geometryStat.stat.size <= 0) {
   reason = 'empty-chrome-geometry-file';
+} else if (!geometryJson.ok || geometry.producer !== 'chrome-headless-geometry') {
+  reason = 'malformed-chrome-geometry';
 } else if (!integerAtLeast(proof.width, 1) || !integerAtLeast(proof.height, 1)) {
   reason = 'missing-capture-viewport';
+} else if (!sameInteger(geometryViewport.width, proof.width) || !sameInteger(geometryViewport.height, proof.height)) {
+  reason = 'chrome-geometry-viewport-mismatch';
+} else if (geometryItems.length < 1) {
+  reason = 'missing-chrome-geometry-items';
 } else if (!integerAtLeast(proof.frame_us, 1)) {
   reason = 'missing-chrome-timing';
 }
@@ -128,6 +147,10 @@ emit('chrome_simple_web_layout_geometry_path', proof.geometry_path);
 emit('chrome_simple_web_layout_geometry_written', proof.geometry_written === true ? 'true' : 'false');
 emit('chrome_simple_web_layout_geometry_file_status', geometryStat === null ? 'fail' : 'pass');
 emit('chrome_simple_web_layout_geometry_size_bytes', geometryStat === null ? '' : String(geometryStat.stat.size));
+emit('chrome_simple_web_layout_geometry_producer', geometry.producer);
+emit('chrome_simple_web_layout_geometry_viewport_width', integerTextOrClean(geometryViewport.width));
+emit('chrome_simple_web_layout_geometry_viewport_height', integerTextOrClean(geometryViewport.height));
+emit('chrome_simple_web_layout_geometry_item_count', String(geometryItems.length));
 emit('chrome_simple_web_layout_chrome_bin', proof.chrome_bin);
 
 if (reason !== 'pass') {
