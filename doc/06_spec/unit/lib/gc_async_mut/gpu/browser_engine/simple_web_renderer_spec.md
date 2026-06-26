@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 63 | 63 | 0 | 0 |
+| 64 | 64 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -322,6 +322,30 @@ expect(_draw_ir_style_value(label, "text-decoration-thickness")).to_equal("2px")
 expect(_draw_ir_style_value(label, "text-underline-offset")).to_equal("2px")
 expect(_draw_ir_style_value(label, "text-underline-position")).to_equal("under")
 expect(_count_color(pixels, 0xFFDC2626u32)).to_be_greater_than(40)
+```
+
+</details>
+
+#### renders text-align-last on the final wrapped line
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val left_html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.label{color:#111827;font-size:8px;width:32px;text-align:left;text-align-last:left}</style></head><body><div id='label' class='label'>AAAA BBBB</div></body></html>"
+val right_html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.label{color:#111827;font-size:8px;width:32px;text-align:left;text-align-last:right}</style></head><body><div id='label' class='label'>AAAA BBBB</div></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(right_html, 80, 48)
+val batch = composition.batches[0]
+val label = _draw_ir_command_by_id(batch.commands, "label")
+val left_pixels = simple_web_render_html_to_pixels(left_html, 80, 48)
+val right_pixels = simple_web_render_html_to_pixels(right_html, 80, 48)
+
+expect(_draw_ir_style_value(label, "text-align-last")).to_equal("right")
+expect(_count_color(right_pixels, 0xFF111827u32)).to_be_greater_than(0)
+expect(_pixels_equal(left_pixels, right_pixels)).to_equal(false)
 ```
 
 </details>
@@ -1382,8 +1406,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 63 |
-| Active scenarios | 63 |
+| Total scenarios | 64 |
+| Active scenarios | 64 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
