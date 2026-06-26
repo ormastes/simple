@@ -155,10 +155,21 @@ Evidence:
   is the deterministic cache/checksum gate for retry5. It reports
   `STATUS: WARN retry5-cache-manifest` while the manifest is missing, and only
   reports PASS when `license_review=approved`, `data_access=granted`, the cache
-  path exists, and `checksum` matches the cached file's `sha256:<hex>`.
+  path exists, and `checksum` matches the cached file's `sha256:<hex>`. The
+  gate now emits parseable proof fields for review:
+  `manifest_exists`, `cache_path_exists`, `expected_checksum`,
+  `actual_checksum`, and `checksum_match`.
 - `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry5.sdn`
   records the retry target as licensed data acquisition, cache/checksum
   verification, QLoRA rerun, and target eval.
+- `.spipe/llm-finetune-process/scripts/check_retry5_review_handoff.shs
+  llm_backed_app_server_dry_run_retry5` wraps the attempt verifier, cache
+  manifest gate, and data-access gate into the normal-review handoff surface.
+  It reports `STATUS: WARN retry5-review-handoff`,
+  `normal_review_status=blocked`, and `acceptance_allowed=false` while licensed
+  cache evidence is missing, and carries the manifest/file/checksum proof
+  fields from the cache gate. Even after the cache gate passes, acceptance stays
+  false until real QLoRA target eval and app handoff evidence are recorded.
 
 Next normal-LLM work: obtain licensed data approval and write cache/checksum
 evidence for retry5 by copying the retry5 cache manifest template to the
