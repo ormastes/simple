@@ -18,9 +18,21 @@ function decimalIntegerText(value) {
   return null;
 }
 
+function jsonIntegerText(value) {
+  if (typeof value === 'number' && Number.isInteger(value)) return String(value);
+  return null;
+}
+
 function sameInteger(left, right) {
   const l = decimalIntegerText(left);
   const r = decimalIntegerText(right);
+  if (l === null || r === null) return false;
+  return BigInt(l) === BigInt(r);
+}
+
+function sameJsonInteger(left, right) {
+  const l = jsonIntegerText(left);
+  const r = jsonIntegerText(right);
   if (l === null || r === null) return false;
   return BigInt(l) === BigInt(r);
 }
@@ -31,8 +43,19 @@ function integerAtLeast(value, min) {
   return BigInt(text) >= BigInt(min);
 }
 
+function jsonIntegerAtLeast(value, min) {
+  const text = jsonIntegerText(value);
+  if (text === null) return false;
+  return BigInt(text) >= BigInt(min);
+}
+
 function integerTextOrClean(value) {
   const text = decimalIntegerText(value);
+  return text === null ? clean(value) : text;
+}
+
+function jsonIntegerTextOrClean(value) {
+  const text = jsonIntegerText(value);
   return text === null ? clean(value) : text;
 }
 
@@ -73,8 +96,8 @@ function readJsonArtifact(artifact) {
 }
 
 function pixelCountMatches(pixels, width, height) {
-  const w = decimalIntegerText(width);
-  const h = decimalIntegerText(height);
+  const w = jsonIntegerText(width);
+  const h = jsonIntegerText(height);
   if (!Array.isArray(pixels) || w === null || h === null) return false;
   return BigInt(pixels.length) === BigInt(w) * BigInt(h);
 }
@@ -139,7 +162,7 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'malformed-mismatch-count';
 } else if (!sameInteger(proof.mismatch_count, 0)) {
   reason = 'pixel-mismatch';
-} else if (!integerAtLeast(proof.width, 1) || !integerAtLeast(proof.height, 1)) {
+} else if (!jsonIntegerAtLeast(proof.width, 1) || !jsonIntegerAtLeast(proof.height, 1)) {
   reason = 'missing-viewport-proof';
 } else if (proof.captured_argb_written !== true) {
   reason = 'missing-captured-argb';
@@ -149,7 +172,7 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'empty-captured-argb-file';
 } else if (!capturedArgbJson.ok || capturedArgb.format !== 'argb-u32' || capturedArgb.producer !== 'electron-live-capture-page') {
   reason = 'malformed-captured-argb';
-} else if (!sameInteger(capturedArgb.width, proof.width) || !sameInteger(capturedArgb.height, proof.height)) {
+} else if (!sameJsonInteger(capturedArgb.width, proof.width) || !sameJsonInteger(capturedArgb.height, proof.height)) {
   reason = 'captured-argb-viewport-mismatch';
 } else if (!argbPixelsAreUint32Numbers(capturedArgbPixels)) {
   reason = 'captured-argb-pixel-type-mismatch';
@@ -157,11 +180,11 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'captured-argb-pixel-count-mismatch';
 } else if (capturedArgbNonzeroPixels < 1) {
   reason = 'blank-captured-argb';
-} else if (!integerAtLeast(proof.capture_native_width, 1) || !integerAtLeast(proof.capture_native_height, 1) || typeof proof.capture_downsampled !== 'boolean') {
+} else if (!jsonIntegerAtLeast(proof.capture_native_width, 1) || !jsonIntegerAtLeast(proof.capture_native_height, 1) || typeof proof.capture_downsampled !== 'boolean') {
   reason = 'missing-capture-provenance';
-} else if (!sameInteger(proof.capture_native_width, proof.width) || !sameInteger(proof.capture_native_height, proof.height)) {
+} else if (!sameJsonInteger(proof.capture_native_width, proof.width) || !sameJsonInteger(proof.capture_native_height, proof.height)) {
   reason = 'capture-viewport-mismatch';
-} else if (!integerAtLeast(proof.frame_us, 1)) {
+} else if (!jsonIntegerAtLeast(proof.frame_us, 1)) {
   reason = 'missing-electron-timing';
 }
 
@@ -175,11 +198,11 @@ emit('electron_simple_web_layout_simple_weighted_checksum', integerTextOrClean(p
 emit('electron_simple_web_layout_electron_weighted_checksum', integerTextOrClean(proof.weighted_checksum));
 emit('electron_simple_web_layout_mismatch_count', integerTextOrClean(proof.mismatch_count));
 emit('electron_simple_web_layout_blur_or_tolerance_used', proof.blur_or_tolerance_used === false ? 'false' : clean(proof.blur_or_tolerance_used));
-emit('electron_simple_web_layout_electron_frame_us', integerTextOrClean(proof.frame_us));
-emit('electron_simple_web_layout_requested_width', integerTextOrClean(proof.width));
-emit('electron_simple_web_layout_requested_height', integerTextOrClean(proof.height));
-emit('electron_simple_web_layout_capture_native_width', integerTextOrClean(proof.capture_native_width));
-emit('electron_simple_web_layout_capture_native_height', integerTextOrClean(proof.capture_native_height));
+emit('electron_simple_web_layout_electron_frame_us', jsonIntegerTextOrClean(proof.frame_us));
+emit('electron_simple_web_layout_requested_width', jsonIntegerTextOrClean(proof.width));
+emit('electron_simple_web_layout_requested_height', jsonIntegerTextOrClean(proof.height));
+emit('electron_simple_web_layout_capture_native_width', jsonIntegerTextOrClean(proof.capture_native_width));
+emit('electron_simple_web_layout_capture_native_height', jsonIntegerTextOrClean(proof.capture_native_height));
 emit('electron_simple_web_layout_capture_downsampled', booleanString(proof.capture_downsampled));
 emit('electron_simple_web_layout_captured_argb_path', proof.captured_argb_path);
 emit('electron_simple_web_layout_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
@@ -187,8 +210,8 @@ emit('electron_simple_web_layout_captured_argb_file_status', capturedArgbStat ==
 emit('electron_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
 emit('electron_simple_web_layout_captured_argb_format', capturedArgb.format);
 emit('electron_simple_web_layout_captured_argb_producer', capturedArgb.producer);
-emit('electron_simple_web_layout_captured_argb_width', integerTextOrClean(capturedArgb.width));
-emit('electron_simple_web_layout_captured_argb_height', integerTextOrClean(capturedArgb.height));
+emit('electron_simple_web_layout_captured_argb_width', jsonIntegerTextOrClean(capturedArgb.width));
+emit('electron_simple_web_layout_captured_argb_height', jsonIntegerTextOrClean(capturedArgb.height));
 emit('electron_simple_web_layout_captured_argb_pixel_count', String(capturedArgbPixels.length));
 emit('electron_simple_web_layout_captured_argb_nonzero_pixel_count', String(capturedArgbNonzeroPixels));
 
