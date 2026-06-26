@@ -430,6 +430,14 @@ Tasks:
     in `app.llm_runtime.dashboard_live_control_executor`. The route spec also
     proves authenticated preflight and query-style override preflight keep
     `requires_runtime_executor=false`, preserving the dashboard-intent boundary.
+18. Make dashboard/control execution evidence explicit about live endpoint
+    proof. Status: done for `llm_runtime_vllm_dashboard_control_execution`
+    JSONL. Planned, skipped, rejected, invalid-pid, and standalone CLI outputs
+    now emit `live_evidence_status=not_live_evidence`; runtime-owner probe
+    observation emits `live_evidence_status=live_endpoint_observed` only when it
+    represents a running process, ready models status, and 2xx HTTP result.
+    Focused unit and web route specs cover the field so planned control output
+    cannot be mistaken for installed local vLLM/GPU serving proof.
 
 ## Sidecars
 

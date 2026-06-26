@@ -43,7 +43,7 @@ vllm_dashboard_live_control_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -55,7 +55,9 @@ expect(result.status).to_equal("planned")
 expect(result.reason).to_equal("serve_and_models_probe_planned")
 expect(result.models_status).to_equal("not_fetched")
 expect(result.requires_runtime_executor).to_equal(false)
+expect(result.live_evidence_status).to_equal("not_live_evidence")
 expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":false")
+expect(result.evidence_jsonl).to_contain("\"live_evidence_status\":\"not_live_evidence\"")
 expect(result.evidence_jsonl.split("base-model").len()).to_equal(1)
 expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
@@ -67,7 +69,7 @@ expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -78,6 +80,7 @@ expect(result).to_contain("\"action\":\"preflight\"")
 expect(result).to_contain("\"status\":\"planned\"")
 expect(result).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
 expect(result).to_contain("\"requires_runtime_executor\":false")
+expect(result).to_contain("\"live_evidence_status\":\"not_live_evidence\"")
 expect(result.split("base-model").len()).to_equal(1)
 expect(result.split(absence_marker()).len()).to_equal(1)
 ```
@@ -89,7 +92,7 @@ expect(result.split(absence_marker()).len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -101,6 +104,7 @@ expect(result.reason).to_equal("missing_local_vllm_and_gpu")
 expect(result.started_pid).to_equal(-1)
 expect(result.models_status).to_equal("not_fetched")
 expect(result.requires_runtime_executor).to_equal(false)
+expect(result.live_evidence_status).to_equal("not_live_evidence")
 ```
 
 </details>
@@ -210,7 +214,7 @@ expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -221,6 +225,7 @@ expect(result.status).to_equal("planned")
 expect(result.reason).to_equal("live_executor_required")
 expect(result.requires_runtime_executor).to_equal(true)
 expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":true")
+expect(result.evidence_jsonl).to_contain("\"live_evidence_status\":\"not_live_evidence\"")
 ```
 
 </details>
@@ -292,7 +297,7 @@ expect(jsonl).to_contain("\"acceptance_status\":\"not_live_evidence\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -305,6 +310,7 @@ expect(result.reason).to_equal("missing_local_vllm_and_gpu")
 expect(result.running_status).to_equal("not_started")
 expect(result.models_reason).to_equal("environment_skipped")
 expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":false")
+expect(result.evidence_jsonl).to_contain("\"live_evidence_status\":\"not_live_evidence\"")
 expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
@@ -315,7 +321,7 @@ expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -327,6 +333,7 @@ expect(result.status).to_equal("skipped")
 expect(result.reason).to_equal("missing_local_vllm")
 expect(result.started_pid).to_equal(-1)
 expect(result.requires_runtime_executor).to_equal(false)
+expect(result.live_evidence_status).to_equal("not_live_evidence")
 ```
 
 </details>
@@ -362,7 +369,7 @@ expect(stop.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -374,6 +381,8 @@ expect(result.reason).to_equal("models_ready")
 expect(result.evidence_jsonl).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
 expect(result.evidence_jsonl).to_contain("\"http_status\":200")
 expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":true")
+expect(result.live_evidence_status).to_equal("live_endpoint_observed")
+expect(result.evidence_jsonl).to_contain("\"live_evidence_status\":\"live_endpoint_observed\"")
 expect(result.evidence_jsonl.split("base-model").len()).to_equal(1)
 expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
