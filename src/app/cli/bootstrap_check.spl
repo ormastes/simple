@@ -4,9 +4,13 @@
 # Usage: bin/simple bootstrap-check
 #   Or:  SIMPLE_LIB=src bin/simple run src/app/cli/bootstrap_check.spl
 
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_env_get(name: text) -> text
 extern fn rt_platform_name() -> text
 
-use std.io_runtime.{file_exists, file_read_bytes, env_get}
 use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
 use app.io.rt_compile_stub.{rt_compile_to_llvm_ir}
 
@@ -28,30 +32,30 @@ fn get_multi_fn_program() -> text:
     "fn add(a: i64, b: i64) -> i64:\n    a + b\n\nfn main():\n    val result = add(20, 22)\n    print \"Sum: {open_brace}result{close_brace}\"\n"
 
 fn find_simple_binary() -> text:
-    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
     if env_bin != "":
         return env_bin
 
     val is_win = rt_platform_name() == "windows"
     val ext = if is_win: ".exe" else: ""
 
-    if file_exists("bin/simple{ext}"):
+    if rt_file_exists("bin/simple{ext}"):
         return "bin/simple{ext}"
     if not is_win:
-        if file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
             return "bin/release/aarch64-apple-darwin-macho/simple"
-        if file_exists("bin/release/macos-arm64/simple"):
+        if rt_file_exists("bin/release/macos-arm64/simple"):
             return "bin/release/macos-arm64/simple"
-        if file_exists("bin/release/darwin-aarch64/simple"):
+        if rt_file_exists("bin/release/darwin-aarch64/simple"):
             return "bin/release/darwin-aarch64/simple"
-        if file_exists("bin/release/macos-x86_64/simple"):
+        if rt_file_exists("bin/release/macos-x86_64/simple"):
             return "bin/release/macos-x86_64/simple"
-        if file_exists("bin/release/linux-x86_64/simple"):
+        if rt_file_exists("bin/release/linux-x86_64/simple"):
             return "bin/release/linux-x86_64/simple"
     else:
-        if file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
+        if rt_file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
             return "bin/release/x86_64-pc-windows-msvc/simple.exe"
-        if file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
+        if rt_file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
             return "bin/release/x86_64-pc-windows-gnu/simple.exe"
     "bin/simple{ext}"
 
@@ -62,7 +66,7 @@ fn find_simple_binary() -> text:
 fn check_bootstrap_binary() -> bool:
     print "--- Check 1: Bootstrap Binary ---"
     val simple_bin = find_simple_binary()
-    if file_exists(simple_bin):
+    if rt_file_exists(simple_bin):
         val size = file_size(simple_bin)
         print "  PASS: Simple runtime found at {simple_bin} ({size} bytes)"
         val (out, err, code) = shell("{simple_bin} --version 2>&1")
@@ -167,7 +171,7 @@ fn check_smf_compile() -> bool:
         file_delete(test_src)
         return false
 
-    if not file_exists(test_smf):
+    if not rt_file_exists(test_smf):
         print "  FAIL: SMF file not created"
         file_delete(test_src)
         return false
@@ -180,7 +184,7 @@ fn check_smf_compile() -> bool:
         print "  WARN: SMF is likely a stub ({smf_size} bytes - too small for real bytecode)"
 
     # Check SMF magic
-    val smf_bytes_raw = file_read_bytes(test_smf)
+    val smf_bytes_raw = rt_file_read_bytes(test_smf)
     val smf_bytes = smf_bytes_raw ?? []
     var has_magic = false
     if smf_bytes.len() >= 3:
@@ -419,7 +423,7 @@ fn check_binary_purity() -> bool:
             print "  FAIL: '{cmd_name}' has no Simple implementation"
             rust_only.push(cmd_name)
             all_pure = false
-        elif file_exists(app_path):
+        elif rt_file_exists(app_path):
             pure_count = pure_count + 1
         else:
             print "  WARN: '{cmd_name}' app not found: {app_path}"
@@ -438,7 +442,7 @@ fn check_binary_purity() -> bool:
     ]
     var env_overrides_active = 0
     for env_var in rust_env_vars:
-        val val_str = env_get(env_var)
+        val val_str = rt_env_get(env_var)
         if val_str != "" and val_str != nil:
             print "  WARN: Rust override active: {env_var}={val_str}"
             env_overrides_active = env_overrides_active + 1
