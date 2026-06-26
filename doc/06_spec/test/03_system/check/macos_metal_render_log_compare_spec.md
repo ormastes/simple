@@ -27,7 +27,7 @@ macos_metal_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -148,7 +148,9 @@ macos_metal_render_log_compare_pairwise_status=pass
 2. Reject missing Engine2D framebuffer GPU readback.
 3. Reject browser fallback and non-pairwise comparisons even when native Metal
    readback exists.
-4. Reject missing Xcode GPU capture when strict capture mode is enabled.
+4. Reject pairwise rows whose Simple, Chrome, or Electron ARGB evidence is
+   blank or uses mismatched viewport geometry.
+5. Reject missing Xcode GPU capture when strict capture mode is enabled.
 
 ## Scenarios
 
@@ -235,6 +237,33 @@ expect(evidence).to_contain("macos_metal_render_log_compare_pairwise_status=pass
 
 </details>
 
+#### rejects Metal pairwise rows without comparable nonblank ARGB viewports
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-macos-metal-render-log-argb-geometry && mkdir -p build/test-macos-metal-render-log-argb-geometry && " +
+    "printf 'metal_generated_2d_readback_status=pass\\nmetal_generated_2d_readback_module_verified=true\\nmetal_generated_2d_readback_submit_attempted=true\\nmetal_generated_2d_readback_readback_available=true\\nmetal_generated_2d_readback_expected_checksum=7\\nmetal_generated_2d_readback_actual_checksum=7\\n' > build/test-macos-metal-render-log-argb-geometry/generated.env && " +
+    "printf 'metal_engine2d_framebuffer_readback_status=pass\\nmetal_engine2d_framebuffer_gpu_readback_available=true\\nmetal_engine2d_framebuffer_blur_or_tolerance_used=false\\n' > build/test-macos-metal-render-log-argb-geometry/framebuffer.env && " +
+    "printf 'macos_metal_electron_browser_backing_status=pass\\nmacos_metal_chrome_browser_backing_status=pass\\nmacos_metal_browser_backing_status=pass\\nmacos_metal_pixel_comparison_status=pass\\nmacos_metal_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_electron_simple_pairwise_diff_status=pass\\nmacos_metal_chrome_simple_pairwise_diff_status=pass\\nmacos_metal_simple_argb_width=3840\\nmacos_metal_simple_argb_height=2160\\nmacos_metal_simple_argb_nonblank_pixel_count=42\\nmacos_metal_chrome_argb_width=3840\\nmacos_metal_chrome_argb_height=2160\\nmacos_metal_chrome_argb_nonblank_pixel_count=0\\nmacos_metal_electron_argb_width=1920\\nmacos_metal_electron_argb_height=1080\\nmacos_metal_electron_argb_nonblank_pixel_count=42\\n' > build/test-macos-metal-render-log-argb-geometry/browser.env && " +
+    "BUILD_DIR=build/test-macos-metal-render-log-argb-geometry/out METAL_GENERATED_2D_READBACK_ENV=build/test-macos-metal-render-log-argb-geometry/generated.env METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=build/test-macos-metal-render-log-argb-geometry/framebuffer.env MACOS_METAL_BROWSER_ENV=build/test-macos-metal-render-log-argb-geometry/browser.env sh scripts/check/check-macos-metal-render-log-compare.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-macos-metal-render-log-argb-geometry/out/evidence.env")
+expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
+expect(evidence).to_contain("chrome-argb-blank")
+expect(evidence).to_contain("argb-viewport-mismatch")
+val chrome_log = file_read("build/test-macos-metal-render-log-argb-geometry/out/chrome.srl.env")
+expect(chrome_log).to_contain("simple_render_log_nonblank_status=fail")
+```
+
+</details>
+
 #### requires Xcode GPU capture evidence in strict Metal mode
 
 <details>
@@ -264,8 +293,8 @@ expect(evidence).to_contain("macos_metal_render_log_compare_require_gpu_capture=
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

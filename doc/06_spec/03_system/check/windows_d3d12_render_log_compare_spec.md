@@ -27,7 +27,7 @@ windows_d3d12_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -149,7 +149,9 @@ windows_d3d12_render_log_compare_pairwise_status=pass
 2. Reject legacy D3D11/DirectX evidence when explicit D3D12 proof is missing.
 3. Reject browser fallback and non-pairwise comparisons even when native D3D12
    readback exists.
-4. Reject missing PIX/GPU debugger evidence when strict capture mode is enabled.
+4. Reject pairwise rows whose Simple, Chrome, or Electron ARGB evidence is
+   blank or uses mismatched viewport geometry.
+5. Reject missing PIX/GPU debugger evidence when strict capture mode is enabled.
 
 ## Scenarios
 
@@ -235,6 +237,32 @@ expect(evidence).to_contain("windows_d3d12_render_log_compare_pairwise_status=pa
 
 </details>
 
+#### rejects D3D12 pairwise rows without comparable nonblank ARGB viewports
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-windows-d3d12-render-log-argb-geometry && mkdir -p build/test-windows-d3d12-render-log-argb-geometry && " +
+    "printf 'windows_d3d12_native_readback_status=pass\\nwindows_d3d12_native_readback_api=d3d12\\nwindows_d3d12_native_readback_source=device_readback\\nwindows_d3d12_native_readback_backend_handle=44\\nwindows_d3d12_native_readback_expected_checksum=9\\nwindows_d3d12_native_readback_actual_checksum=9\\n' > build/test-windows-d3d12-render-log-argb-geometry/native.env && " +
+    "printf 'windows_d3d12_electron_browser_backing_status=pass\\nwindows_d3d12_chrome_browser_backing_status=pass\\nwindows_d3d12_browser_backing_status=pass\\nwindows_d3d12_pixel_comparison_status=pass\\nwindows_d3d12_pixel_comparison_mode=pairwise-argb-diff\\nwindows_d3d12_electron_chrome_pairwise_diff_status=pass\\nwindows_d3d12_electron_simple_pairwise_diff_status=pass\\nwindows_d3d12_chrome_simple_pairwise_diff_status=pass\\nwindows_d3d12_simple_argb_width=3840\\nwindows_d3d12_simple_argb_height=2160\\nwindows_d3d12_simple_argb_nonblank_pixel_count=42\\nwindows_d3d12_chrome_argb_width=3840\\nwindows_d3d12_chrome_argb_height=2160\\nwindows_d3d12_chrome_argb_nonblank_pixel_count=0\\nwindows_d3d12_electron_argb_width=1920\\nwindows_d3d12_electron_argb_height=1080\\nwindows_d3d12_electron_argb_nonblank_pixel_count=42\\n' > build/test-windows-d3d12-render-log-argb-geometry/browser.env && " +
+    "BUILD_DIR=build/test-windows-d3d12-render-log-argb-geometry/out WINDOWS_D3D12_NATIVE_READBACK_ENV=build/test-windows-d3d12-render-log-argb-geometry/native.env WINDOWS_D3D12_BROWSER_ENV=build/test-windows-d3d12-render-log-argb-geometry/browser.env sh scripts/check/check-windows-d3d12-render-log-compare.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-windows-d3d12-render-log-argb-geometry/out/evidence.env")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_status=fail")
+expect(evidence).to_contain("chrome-argb-blank")
+expect(evidence).to_contain("argb-viewport-mismatch")
+val chrome_log = file_read("build/test-windows-d3d12-render-log-argb-geometry/out/chrome.srl.env")
+expect(chrome_log).to_contain("simple_render_log_nonblank_status=fail")
+```
+
+</details>
+
 #### requires PIX or GPU debugger evidence in strict D3D12 mode
 
 <details>
@@ -263,8 +291,8 @@ expect(evidence).to_contain("windows_d3d12_render_log_compare_require_pix=1")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
