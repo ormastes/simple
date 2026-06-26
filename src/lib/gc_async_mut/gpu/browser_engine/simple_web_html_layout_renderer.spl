@@ -1098,6 +1098,21 @@ fn decl_last_pos(decls: text, prop: text) -> i32:
         pos = semi + 1
     found
 
+fn parse_line_height_value(raw: text) -> i32:
+    if raw.contains("px"):
+        val lh = parse_int(raw)
+        if lh > 0:
+            return lh
+        return 0
+    val whole = parse_int(raw)
+    var mult10 = whole * 10
+    val dot = find_from(raw, ".", 0)
+    if dot >= 0 and dot + 1 < raw.len():
+        mult10 = whole * 10 + parse_int(raw.substring(dot + 1, dot + 2))
+    if mult10 > 0:
+        return 0 - mult10
+    0
+
 # ---------------------------------------------------------------------------
 # Computed style
 # ---------------------------------------------------------------------------
@@ -1368,6 +1383,27 @@ fn apply_decls(st: Style, decls: text) -> Style:
     var transform_box_v = st.transform_box
     var transform_style_v = st.transform_style
     var bold_v = st.bold
+    val font_decl = decl_get(decls, "font")
+    val font_pos = decl_last_pos(decls, "font")
+    if font_decl.len() > 0:
+        val font_norm = font_decl.trim().lower()
+        font_style_italic_v = false
+        bold_v = false
+        if font_norm.contains("italic") or font_norm.contains("oblique"):
+            font_style_italic_v = true
+        if font_norm.contains("bold") or font_norm.contains("700") or font_norm.contains("600") or font_norm.contains("800"):
+            bold_v = true
+        val parsed_font_size = parse_int(font_norm)
+        if parsed_font_size > 0:
+            font_size_v = parsed_font_size
+        val slash = find_from(font_norm, "/", 0)
+        if slash >= 0 and slash + 1 < font_norm.len():
+            val after_slash = font_norm.substring(slash + 1, font_norm.len()).trim()
+            val slash_space = find_from(after_slash, " ", 0)
+            val line_part = if slash_space >= 0: after_slash.substring(0, slash_space) else: after_slash
+            val parsed_line_height = parse_line_height_value(line_part)
+            if parsed_line_height != 0:
+                line_height_v = parsed_line_height
     val bg = decl_get(decls, "background-color")
     val bgs = decl_get(decls, "background")
     val bg_image = decl_get(decls, "background-image")
@@ -1446,27 +1482,17 @@ fn apply_decls(st: Style, decls: text) -> Style:
         if cv != 0u32:
             fg_v = cv
     val fs = decl_get(decls, "font-size")
-    if fs.len() > 0:
+    val fs_pos = decl_last_pos(decls, "font-size")
+    if fs.len() > 0 and (font_pos < 0 or fs_pos > font_pos):
         val v = parse_int(fs)
         if v > 0:
             font_size_v = v
     val line_height = decl_get(decls, "line-height")
-    if line_height.len() > 0:
-        if line_height.contains("px"):
-            val lh = parse_int(line_height)
-            if lh > 0:
-                line_height_v = lh
-        else:
-            # Unitless line-height (e.g. 1.6) is a multiplier of font-size, NOT pixels.
-            # parse_int("1.6") drops to 1px and collapses every line — store a negative
-            # sentinel = multiplier*10, resolved per-element in style_line_h.
-            val whole = parse_int(line_height)
-            var mult10 = whole * 10
-            val dot = find_from(line_height, ".", 0)
-            if dot >= 0 and dot + 1 < line_height.len():
-                mult10 = whole * 10 + parse_int(line_height.substring(dot + 1, dot + 2))
-            if mult10 > 0:
-                line_height_v = 0 - mult10
+    val line_height_pos = decl_last_pos(decls, "line-height")
+    if line_height.len() > 0 and (font_pos < 0 or line_height_pos > font_pos):
+        val parsed_line_height = parse_line_height_value(line_height)
+        if parsed_line_height != 0:
+            line_height_v = parsed_line_height
     val width = decl_get(decls, "width")
     if width.len() > 0:
         if width.ends_with("%"):
@@ -1681,7 +1707,8 @@ fn apply_decls(st: Style, decls: text) -> Style:
     if word_spacing_decl.len() > 0:
         word_spacing_px_v = parse_int(word_spacing_decl)
     val font_style_decl = decl_get(decls, "font-style")
-    if font_style_decl.len() > 0:
+    val font_style_pos = decl_last_pos(decls, "font-style")
+    if font_style_decl.len() > 0 and (font_pos < 0 or font_style_pos > font_pos):
         val font_style_norm = font_style_decl.trim().lower()
         font_style_italic_v = font_style_norm == "italic" or font_style_norm == "oblique"
     val direction_decl = decl_get(decls, "direction")
@@ -1863,8 +1890,11 @@ fn apply_decls(st: Style, decls: text) -> Style:
     if align_content_decl.len() > 0:
         align_content_v = normalize_overflow_box_alignment(align_content_decl)
     val fw = decl_get(decls, "font-weight")
-    if fw.len() > 0:
-        if fw == "bold" or fw == "700" or fw == "600" or fw == "800":
+    val fw_pos = decl_last_pos(decls, "font-weight")
+    if fw.len() > 0 and (font_pos < 0 or fw_pos > font_pos):
+        if fw == "normal" or fw == "400":
+            bold_v = false
+        elif fw == "bold" or fw == "700" or fw == "600" or fw == "800":
             bold_v = true
     val pad = decl_get(decls, "padding")
     if pad.len() > 0:
@@ -6295,6 +6325,8 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("direction", if st.direction_rtl: "rtl" else: "ltr"),
         draw_ir_style_prop("font-size", "{st.font_size}"),
         draw_ir_style_prop("font-style", if st.font_style_italic: "italic" else: "normal"),
+        draw_ir_style_prop("font-weight", if st.bold: "bold" else: "normal"),
+        draw_ir_style_prop("line-height", "{style_line_h(st)}"),
         draw_ir_style_prop("letter-spacing", "{st.letter_spacing_px}"),
         draw_ir_style_prop("caret-color", if st.caret_color != 0u32: "{st.caret_color}" else: "auto"),
         draw_ir_style_prop("cursor", st.cursor),

@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 64 | 64 | 0 | 0 |
+| 65 | 65 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -346,6 +346,33 @@ val right_pixels = simple_web_render_html_to_pixels(right_html, 80, 48)
 expect(_draw_ir_style_value(label, "text-align-last")).to_equal("right")
 expect(_count_color(right_pixels, 0xFF111827u32)).to_be_greater_than(0)
 expect(_pixels_equal(left_pixels, right_pixels)).to_equal(false)
+```
+
+</details>
+
+#### renders font shorthand through size style weight and line height
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val normal_html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.label{color:#111827;font-size:8px;font-style:normal;font-weight:400;line-height:8px;width:64px}</style></head><body><div id='label' class='label'>Font</div></body></html>"
+val shorthand_html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.label{color:#111827;font:italic bold 12px/18px sans-serif;width:64px}</style></head><body><div id='label' class='label'>Font</div></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(shorthand_html, 96, 48)
+val batch = composition.batches[0]
+val label = _draw_ir_command_by_id(batch.commands, "label")
+val normal_pixels = simple_web_render_html_to_pixels(normal_html, 96, 48)
+val shorthand_pixels = simple_web_render_html_to_pixels(shorthand_html, 96, 48)
+
+expect(_draw_ir_style_value(label, "font-size")).to_equal("12")
+expect(_draw_ir_style_value(label, "font-style")).to_equal("italic")
+expect(_draw_ir_style_value(label, "font-weight")).to_equal("bold")
+expect(_draw_ir_style_value(label, "line-height")).to_equal("18")
+expect(_count_color(shorthand_pixels, 0xFF111827u32)).to_be_greater_than(0)
+expect(_pixels_equal(normal_pixels, shorthand_pixels)).to_equal(false)
 ```
 
 </details>
@@ -1406,8 +1433,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 64 |
-| Active scenarios | 64 |
+| Total scenarios | 65 |
+| Active scenarios | 65 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
