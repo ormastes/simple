@@ -231,8 +231,12 @@ fn fat32_unlink(core: Fat32Core, path: text) -> Result<(), text>:
             continue
         val entry_rc = core.find_entry_in_dir(dir_cluster, part)
         if entry_rc.is_err():
-            return Err(entry_rc.unwrap_err())
-        val entry = entry_rc.unwrap()
+            return match entry_rc:
+                Ok(_): Err("failed to resolve path entry")
+                Err(err): Err(err)
+        val entry = match entry_rc:
+            Ok(value): value
+            Err(err): return Err(err)
         if not entry.is_dir:
             return Err("not a directory in path")
         dir_cluster = entry.inode.id.to_u32()
@@ -240,14 +244,22 @@ fn fat32_unlink(core: Fat32Core, path: text) -> Result<(), text>:
     val target = _lower_text(parts[parts.len() - 1])
     val chain_rc = core.follow_chain(dir_cluster)
     if chain_rc.is_err():
-        return Err(chain_rc.unwrap_err())
-    val chain = chain_rc.unwrap()
+        return match chain_rc:
+            Ok(_): Err("failed to follow FAT chain")
+            Err(err): Err(err)
+    val chain = match chain_rc:
+        Ok(value): value
+        Err(err): return Err(err)
     var ci = 0
     while ci < chain.len():
         val cdata_rc = core.read_cluster(chain[ci])
         if cdata_rc.is_err():
-            return Err(cdata_rc.unwrap_err())
-        var cdata = cdata_rc.unwrap()
+            return match cdata_rc:
+                Ok(_): Err("failed to read directory cluster")
+                Err(err): Err(err)
+        var cdata = match cdata_rc:
+            Ok(value): value
+            Err(err): return Err(err)
         val epc = (core.bytes_per_sector * core.sectors_per_cluster) / FAT32_DIR_ENTRY_SIZE
         var ei: u32 = 0
         while ei < epc:
@@ -266,16 +278,19 @@ fn fat32_unlink(core: Fat32Core, path: text) -> Result<(), text>:
                 cdata[off] = 0xE5
                 val wrc = core.write_cluster(chain[ci], cdata)
                 if wrc.is_err():
-                    return Err(wrc.unwrap_err())
+                    return match wrc:
+                        Ok(_): Err("failed to write directory cluster")
+                        Err(err): Err(err)
                 core.invalidate_dentry_cache()
                 if file_cluster >= 2:
                     val fchain_rc = core.follow_chain(file_cluster)
-                    if fchain_rc.is_ok():
-                        val fchain = fchain_rc.unwrap()
-                        var fi = 0
-                        while fi < fchain.len():
-                            val free_rc = core.write_fat_entry(fchain[fi], FAT32_FREE)
-                            fi = fi + 1
+                    val fchain = match fchain_rc:
+                        Ok(value): value
+                        Err(_): []
+                    var fi = 0
+                    while fi < fchain.len():
+                        val free_rc = core.write_fat_entry(fchain[fi], FAT32_FREE)
+                        fi = fi + 1
                 return Ok(())
             ei = ei + 1
         ci = ci + 1
