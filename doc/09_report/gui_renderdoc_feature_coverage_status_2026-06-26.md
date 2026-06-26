@@ -28,7 +28,7 @@
 - GUI/web/2D Vulkan setup mode: --run
 - GUI/web/2D Vulkan direct-run source: configured-main (--run; evidence build/gui-web-2d-vulkan-env/evidence.env)
 - GUI/web/2D browser Vulkan backing: fail (gpu-feature-status; electron-vulkan-enabled-without-angle-vulkan-proof;chrome-vulkan-backed)
-- GUI/web/2D Electron browser backing: fail (electron-vulkan-enabled-without-angle-vulkan-proof; vulkan enabled_on; gpu enabled; display ; gl (gl=none,angle=none); skia None; renderer ; source build/gui-web-2d-vulkan-env-browser-backing/electron_argb_proof.json; argb_source build/gui-web-2d-vulkan-env-browser-backing/electron_argb.json)
+- GUI/web/2D Electron browser backing: fail (electron-vulkan-enabled-without-angle-vulkan-proof; vulkan enabled_on; gpu enabled; browser_cdp pass; display ; gl (gl=none,angle=none); skia None; renderer ; source build/gui-web-2d-vulkan-env-browser-backing/electron_argb_proof.json; argb_source build/gui-web-2d-vulkan-env-browser-backing/electron_argb.json)
 - GUI/web/2D Chrome browser backing: pass (chrome-vulkan-backed; display ANGLE_VULKAN; gpu enabled; gl (gl=egl-angle,angle=vulkan); skia GaneshVulkan; renderer ANGLE (NVIDIA, Vulkan 1.4.312 (NVIDIA NVIDIA TITAN RTX (0x00001E02)), NVIDIA-580.126.16.0); source build/gui-web-2d-vulkan-env-browser-backing/chrome_argb_proof.json)
 - GUI/web/2D browser backing blocker: doc/08_tracking/bug/gui_web_2d_vulkan_browser_backing_2026-06-23.md
 - GUI/web/2D Vulkan RenderDoc blockers: blocked (4; renderdoc-command-ready-ready;electron-renderdoc-gate-fail-electron-process-sigtrap-under-renderdoc;chrome-angle-vulkan-not-rejected-by-log-no-angle-vulkan-unavailable-log;chrome-renderdoc-gate-fail-gate-command-failed)
@@ -309,6 +309,8 @@
 - gui_web_2d_vulkan_electron_browser_backing_source_file_status=pass
 - gui_web_2d_vulkan_electron_browser_backing_argb_source=build/gui-web-2d-vulkan-env-browser-backing/electron_argb.json
 - gui_web_2d_vulkan_electron_browser_backing_argb_source_file_status=pass
+- gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_status=pass
+- gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_reason=pass
 - gui_web_2d_vulkan_chrome_browser_backing_status=pass
 - gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed
 - gui_web_2d_vulkan_chrome_browser_backing_display_type=ANGLE_VULKAN

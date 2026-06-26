@@ -14,7 +14,9 @@
 //   xvfb-run --auto-servernum electron --no-sandbox --disable-gpu capture_html_argb.js
 
 const { app, BrowserWindow } = require("electron");
+const crypto = require("crypto");
 const fs = require("fs");
+const net = require("net");
 const path = require("path");
 
 const htmlPath = process.env.ELECTRON_CAPTURE_HTML || "";
@@ -36,6 +38,7 @@ const auditSelectors = (process.env.ELECTRON_CAPTURE_AUDIT_SELECTORS || "")
 const auditOutputPath = process.env.ELECTRON_CAPTURE_AUDIT_OUTPUT || "";
 const geometryOutputPath = process.env.ELECTRON_CAPTURE_GEOMETRY_OUTPUT || "";
 const proofPath = process.env.ELECTRON_CAPTURE_PROOF_PATH || "";
+const remoteDebuggingPort = process.env.ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT || "";
 const contrastMinX100 = Number(process.env.ELECTRON_CAPTURE_CONTRAST_MIN_X100 || 450);
 const touchMinPx = Number(process.env.ELECTRON_CAPTURE_TOUCH_MIN_PX || 44);
 const failOnAudit = /^(1|true|yes)$/i.test(process.env.ELECTRON_CAPTURE_FAIL_ON_AUDIT || "");
@@ -43,6 +46,7 @@ const emulatedMediaFeatures = parseMediaFeatures(process.env.ELECTRON_CAPTURE_ME
 
 app.commandLine.appendSwitch("force-device-scale-factor", "1");
 app.commandLine.appendSwitch("force-color-profile", "srgb");
+if (remoteDebuggingPort) app.commandLine.appendSwitch("remote-debugging-port", remoteDebuggingPort);
 
 function stage(name) {
   if (!stageLogPath) return;
@@ -58,6 +62,167 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) clearTimeout(timer);
   });
+}
+
+function websocketAcceptKey(key) {
+  return crypto
+    .createHash("sha1")
+    .update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+    .digest("base64");
+}
+
+function encodeWebSocketFrame(text) {
+  const payload = Buffer.from(text, "utf8");
+  const len = payload.length;
+  let headerLen = 2;
+  if (len >= 126 && len <= 65535) headerLen = 4;
+  else if (len > 65535) headerLen = 10;
+  const out = Buffer.alloc(headerLen + 4 + len);
+  out[0] = 0x81;
+  if (len < 126) {
+    out[1] = 0x80 | len;
+  } else if (len <= 65535) {
+    out[1] = 0x80 | 126;
+    out.writeUInt16BE(len, 2);
+  } else {
+    out[1] = 0x80 | 127;
+    out.writeUInt32BE(0, 2);
+    out.writeUInt32BE(len, 6);
+  }
+  const maskOffset = headerLen;
+  const payloadOffset = headerLen + 4;
+  const mask = crypto.randomBytes(4);
+  mask.copy(out, maskOffset);
+  for (let i = 0; i < len; i++) out[payloadOffset + i] = payload[i] ^ mask[i % 4];
+  return out;
+}
+
+function readWebSocketFrame(socket, state) {
+  return new Promise((resolve, reject) => {
+    const tryParse = () => {
+      if (state.buffer.length < 2) return false;
+      const b0 = state.buffer[0];
+      const opcode = b0 & 0x0f;
+      let len = state.buffer[1] & 0x7f;
+      let offset = 2;
+      if (len === 126) {
+        if (state.buffer.length < 4) return false;
+        len = state.buffer.readUInt16BE(2);
+        offset = 4;
+      } else if (len === 127) {
+        if (state.buffer.length < 10) return false;
+        const hi = state.buffer.readUInt32BE(2);
+        const lo = state.buffer.readUInt32BE(6);
+        if (hi !== 0) return reject(new Error("websocket-frame-too-large"));
+        len = lo;
+        offset = 10;
+      }
+      const masked = (state.buffer[1] & 0x80) !== 0;
+      const maskOffset = offset;
+      if (masked) offset += 4;
+      if (state.buffer.length < offset + len) return false;
+      let payload = state.buffer.subarray(offset, offset + len);
+      if (masked) {
+        const mask = state.buffer.subarray(maskOffset, maskOffset + 4);
+        const copy = Buffer.alloc(len);
+        for (let i = 0; i < len; i++) copy[i] = payload[i] ^ mask[i % 4];
+        payload = copy;
+      }
+      state.buffer = state.buffer.subarray(offset + len);
+      if (opcode === 0x8) return reject(new Error("websocket-closed"));
+      if (opcode === 0x1) return resolve(payload.toString("utf8"));
+      return false;
+    };
+    const cleanup = () => {
+      socket.off("data", onData);
+      socket.off("error", onError);
+    };
+    const onData = chunk => {
+      state.buffer = Buffer.concat([state.buffer, chunk]);
+      const parsed = tryParse();
+      if (parsed !== false) cleanup();
+    };
+    const onError = err => {
+      cleanup();
+      reject(err);
+    };
+    socket.on("data", onData);
+    socket.on("error", onError);
+    const parsed = tryParse();
+    if (parsed !== false) cleanup();
+  });
+}
+
+function connectWebSocket(wsUrl) {
+  const parsed = new URL(wsUrl);
+  const host = parsed.hostname;
+  const port = Number(parsed.port || 80);
+  const pathAndQuery = parsed.pathname + (parsed.search || "");
+  const key = crypto.randomBytes(16).toString("base64");
+  const expectedAccept = websocketAcceptKey(key);
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host, port });
+    let handshake = Buffer.alloc(0);
+    socket.setTimeout(Number(process.env.ELECTRON_CAPTURE_CDP_TIMEOUT_MS || 5000));
+    socket.on("connect", () => {
+      socket.write([
+        `GET ${pathAndQuery} HTTP/1.1`,
+        `Host: ${host}:${port}`,
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        `Sec-WebSocket-Key: ${key}`,
+        "Sec-WebSocket-Version: 13",
+        "",
+        "",
+      ].join("\r\n"));
+    });
+    socket.on("data", chunk => {
+      handshake = Buffer.concat([handshake, chunk]);
+      const headerEnd = handshake.indexOf("\r\n\r\n");
+      if (headerEnd < 0) return;
+      const header = handshake.subarray(0, headerEnd).toString("utf8");
+      if (!/^HTTP\/1\.1 101/.test(header) || !header.toLowerCase().includes(expectedAccept.toLowerCase())) {
+        socket.destroy();
+        reject(new Error("websocket-handshake-failed"));
+        return;
+      }
+      const state = { buffer: handshake.subarray(headerEnd + 4) };
+      socket.removeAllListeners("data");
+      resolve({ socket, state });
+    });
+    socket.on("timeout", () => {
+      socket.destroy();
+      reject(new Error("websocket-timeout"));
+    });
+    socket.on("error", reject);
+  });
+}
+
+async function cdpSend(conn, id, method, params) {
+  conn.socket.write(encodeWebSocketFrame(JSON.stringify({ id, method, params: params || {} })));
+  while (true) {
+    const msg = JSON.parse(await readWebSocketFrame(conn.socket, conn.state));
+    if (msg.id === id) {
+      if (msg.error) throw new Error(`cdp-${method}:${msg.error.message || msg.error.code}`);
+      return msg.result || {};
+    }
+  }
+}
+
+async function collectBrowserTargetGpuInfo() {
+  if (!remoteDebuggingPort) return null;
+  try {
+    const version = await (await fetch(`http://127.0.0.1:${remoteDebuggingPort}/json/version`)).json();
+    if (!version.webSocketDebuggerUrl) return { error: "electron-browser-devtools-missing" };
+    const conn = await connectWebSocket(version.webSocketDebuggerUrl);
+    try {
+      return await cdpSend(conn, 1, "SystemInfo.getInfo");
+    } finally {
+      conn.socket.destroy();
+    }
+  } catch (err) {
+    return { error: err && err.message ? err.message : "electron-browser-cdp-unavailable" };
+  }
 }
 
 function parseMediaFeatures(value) {
@@ -594,6 +759,7 @@ async function main() {
     stage("gpu-info-failed");
     gpuInfo = { error: err && err.message ? err.message : "gpu-info-unavailable" };
   }
+  const browserTargetGpuInfo = await collectBrowserTargetGpuInfo();
 
   const payload = {
     width,
@@ -605,6 +771,7 @@ async function main() {
     downsampled: result.downsampled,
     gpuFeatureStatus,
     gpuInfo,
+    browserTargetGpuInfo,
     pixels: Array.from(result.pixels, v => v >>> 0),
   };
   if (audit) payload.audit = audit;
@@ -641,6 +808,9 @@ async function main() {
       blur_or_tolerance_used: false,
       gpu_feature_status: gpuFeatureStatus,
       gpu_info: gpuInfo,
+      browser_target_gpu_info: browserTargetGpuInfo,
+      browser_target_gpu_info_status: browserTargetGpuInfo && !browserTargetGpuInfo.error ? "pass" : (remoteDebuggingPort ? "fail" : "not-run"),
+      remote_debugging_port: remoteDebuggingPort,
     }));
   }
   console.log("captured=" + outputPath);

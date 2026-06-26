@@ -377,7 +377,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 879 lines folded for reproduction.
+Runnable source: 883 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -902,6 +902,8 @@ val electron_browser_backing_skia = _value_of(evidence, "gui_web_2d_vulkan_elect
 val electron_browser_backing_renderer = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_gl_renderer")
 val electron_browser_backing_argb_source = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_argb_source")
 val electron_browser_backing_argb_source_status = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_argb_source_file_status")
+val electron_browser_backing_browser_cdp_status = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_status")
+val electron_browser_backing_browser_cdp_reason = _value_of(evidence, "gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_reason")
 val chrome_browser_backing_status = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_status")
 val chrome_browser_backing_reason = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_reason")
 val chrome_browser_backing_display = _value_of(evidence, "gui_web_2d_vulkan_chrome_browser_backing_display_type")
@@ -1155,6 +1157,8 @@ if electron_browser_backing_status.len() > 0:
     expect(electron_browser_backing_renderer.len()).to_be_greater_than(0)
     expect(electron_browser_backing_argb_source.len()).to_be_greater_than(0)
     expect(electron_browser_backing_argb_source_status.len()).to_be_greater_than(0)
+    expect(electron_browser_backing_browser_cdp_status.len()).to_be_greater_than(0)
+    expect(electron_browser_backing_browser_cdp_reason.len()).to_be_greater_than(0)
 if chrome_browser_backing_status.len() > 0:
     expect(chrome_browser_backing_gpu.len()).to_be_greater_than(0)
     expect(chrome_browser_backing_hardware.len()).to_be_greater_than(0)

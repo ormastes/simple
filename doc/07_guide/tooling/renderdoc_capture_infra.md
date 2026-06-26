@@ -253,6 +253,11 @@ Electron browser backing uses the compact `electron_argb_proof.json` as its
 `gui_web_2d_vulkan_electron_browser_backing_source`; the full ARGB capture is
 reported separately as `gui_web_2d_vulkan_electron_browser_backing_argb_source`
 so operators do not need to open the large pixel payload to inspect GPU state.
+When `ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT` is set, the Electron capture tool
+also records browser-target CDP `SystemInfo.getInfo` status in
+`gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_status` and
+`..._reason`; a reachable browser target is diagnostic only and still must
+produce Vulkan renderer fields before Electron can pass browser backing.
 The aggregate also normalizes stale child rows: a child `pass` without those
 matching proof fields is emitted as `fail` with `electron-vulkan-proof-missing`
 or `chrome-vulkan-proof-missing`, so agents must fix the probe evidence rather

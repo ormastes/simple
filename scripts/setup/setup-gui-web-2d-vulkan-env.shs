@@ -431,6 +431,7 @@ if [ "$MODE" = "--browser-backing" ] || [ "$MODE" = "--run" ] || [ "$MODE" = "--
     ELECTRON_LOG="$BUILD_DIR/electron.log"
     ELECTRON_ARGB="$BUILD_DIR/electron_argb.json"
     ELECTRON_ARGB_PROOF="$BUILD_DIR/electron_argb_proof.json"
+    ELECTRON_CDP_PORT="${GUI_WEB_2D_VULKAN_ELECTRON_CDP_PORT:-$((33000 + ($$ % 10000)))}"
     if [ "$MODE" = "--renderdoc-simple" ]; then
         append_kv "gui_web_2d_vulkan_electron_exit_code" ""
         append_kv "gui_web_2d_vulkan_electron_vulkan_status" "not-run"
@@ -442,6 +443,7 @@ if [ "$MODE" = "--browser-backing" ] || [ "$MODE" = "--run" ] || [ "$MODE" = "--
         ELECTRON_CAPTURE_OUTPUT="$ELECTRON_ARGB" \
         ELECTRON_CAPTURE_PROOF_PATH="$ELECTRON_ARGB_PROOF" \
         ELECTRON_CAPTURE_SETTLE_MS="${RDOC_ELECTRON_SETTLE_MS:-1000}" \
+        ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT="$ELECTRON_CDP_PORT" \
         ELECTRON_ENABLE_LOGGING=1 \
             run_electron_bound "$electron_bin" $(rdoc_electron_vulkan_flags) "$ROOT_DIR/tools/electron-live-bitmap/capture_html_argb.js" \
             >"$ELECTRON_OUT" 2>"$ELECTRON_LOG"
@@ -561,15 +563,20 @@ function sourceFileStatus(path) {
   return path ? (fs.existsSync(path) ? "pass" : "missing") : "unavailable";
 }
 const electronFeatureStatus = electronProof && electronProof.gpu_feature_status ? electronProof.gpu_feature_status : (electronArgb && electronArgb.gpuFeatureStatus ? electronArgb.gpuFeatureStatus : {});
-const electronGpuInfo = electronProof && electronProof.gpu_info ? electronProof.gpu_info : (electronArgb && electronArgb.gpuInfo ? electronArgb.gpuInfo : {});
+const electronBrowserGpuInfo = electronProof && electronProof.browser_target_gpu_info ? electronProof.browser_target_gpu_info : (electronArgb && electronArgb.browserTargetGpuInfo ? electronArgb.browserTargetGpuInfo : {});
+const electronAppGpuInfo = electronProof && electronProof.gpu_info ? electronProof.gpu_info : (electronArgb && electronArgb.gpuInfo ? electronArgb.gpuInfo : {});
+const electronGpuInfo = electronBrowserGpuInfo && !electronBrowserGpuInfo.error ? electronBrowserGpuInfo : electronAppGpuInfo;
+const electronBrowserGpuInfoStatus = electronProof && electronProof.browser_target_gpu_info_status ? String(electronProof.browser_target_gpu_info_status) : (electronBrowserGpuInfo && !electronBrowserGpuInfo.error ? "pass" : (electronBrowserGpuInfo && electronBrowserGpuInfo.error ? "fail" : "not-run"));
+const electronBrowserGpuInfoReason = electronBrowserGpuInfo && electronBrowserGpuInfo.error ? String(electronBrowserGpuInfo.error) : electronBrowserGpuInfoStatus;
 const electronVulkan = String(electronFeatureStatus.vulkan || "");
 const electronGpuCompositing = String(electronFeatureStatus.gpu_compositing || "");
 const electronAux = electronGpuInfo && electronGpuInfo.auxAttributes ? electronGpuInfo.auxAttributes : {};
+const electronAppAux = electronAppGpuInfo && electronAppGpuInfo.auxAttributes ? electronAppGpuInfo.auxAttributes : {};
 const electronDisplay = String(electronAux.displayType || "");
-const electronHardware = Boolean(electronAux.hardwareSupportsVulkan);
-const electronGlParts = String(electronAux.glImplementationParts || "");
-const electronSkiaBackend = String(electronAux.skiaBackendType || "");
-const electronGlRenderer = String(electronAux.glRenderer || "");
+const electronHardware = Boolean(electronAux.hardwareSupportsVulkan || electronAppAux.hardwareSupportsVulkan);
+const electronGlParts = String(electronAux.glImplementationParts || electronAppAux.glImplementationParts || "");
+const electronSkiaBackend = String(electronAux.skiaBackendType || electronAppAux.skiaBackendType || "");
+const electronGlRenderer = String(electronAux.glRenderer || electronAppAux.glRenderer || "");
 const electronEnabled = /enabled/i.test(electronVulkan);
 const electronGpuEnabled = /enabled/i.test(electronGpuCompositing);
 const electronMentionsVulkan = /vulkan/i.test(`${electronDisplay} ${electronGlParts} ${electronSkiaBackend} ${electronGlRenderer}`);
@@ -595,6 +602,8 @@ emit("gui_web_2d_vulkan_electron_browser_backing_source", electronProofPath);
 emit("gui_web_2d_vulkan_electron_browser_backing_source_file_status", sourceFileStatus(electronProofPath));
 emit("gui_web_2d_vulkan_electron_browser_backing_argb_source", electronArgbPath);
 emit("gui_web_2d_vulkan_electron_browser_backing_argb_source_file_status", sourceFileStatus(electronArgbPath));
+emit("gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_status", electronBrowserGpuInfoStatus);
+emit("gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_reason", electronBrowserGpuInfoReason);
 emit("gui_web_2d_vulkan_electron_browser_backing_status", electronStatus);
 emit("gui_web_2d_vulkan_electron_browser_backing_reason", electronReason);
 emit("gui_web_2d_vulkan_electron_browser_backing_vulkan", electronVulkan);

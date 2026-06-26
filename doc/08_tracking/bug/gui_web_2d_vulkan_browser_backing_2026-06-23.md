@@ -67,6 +67,14 @@ An in-process Electron page-debugger CDP probe is also not sufficient. Calling
 Electron proof must connect to Electron's browser-level DevTools target, not a
 page target.
 
+The capture tool now supports that browser-target CDP path through
+`ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT`. On the current Linux Xvfb host the
+browser target is reachable and reports
+`gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_status=pass`,
+but it still does not prove Vulkan backing: `hardwareSupportsVulkan=false` and
+renderer fields remain empty or fall back to app-level `(gl=none,angle=none)`
+and `skia=None`.
+
 When the focused browser proof is absent, the gate must report:
 
 ```text
