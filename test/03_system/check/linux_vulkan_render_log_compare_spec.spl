@@ -104,7 +104,9 @@ The spec covers seven cases:
 6. A diagnostic RenderDoc failure fixture with strict RenderDoc disabled. This
    proves partial native logs can still be inspected without claiming platform
    completion.
-7. A source contract check that keeps the default RenderDoc evidence paths on
+7. A fixture with blank and mismatched ARGB rows. This proves pairwise status
+   alone cannot pass without comparable nonblank source pixels.
+8. A source contract check that keeps the default RenderDoc evidence paths on
    the focused current-capture rows instead of stale canonical probe rows.
 
 ## Completion Boundaries
@@ -179,6 +181,15 @@ describe "Linux Vulkan render-log compare gate":
             "gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass\n" +
             "gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass\n" +
             "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass\n" +
+            "gui_web_2d_vulkan_simple_argb_width=3840\n" +
+            "gui_web_2d_vulkan_simple_argb_height=2160\n" +
+            "gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=42\n" +
+            "gui_web_2d_vulkan_chrome_argb_width=3840\n" +
+            "gui_web_2d_vulkan_chrome_argb_height=2160\n" +
+            "gui_web_2d_vulkan_chrome_argb_nonblank_pixel_count=42\n" +
+            "gui_web_2d_vulkan_electron_argb_width=3840\n" +
+            "gui_web_2d_vulkan_electron_argb_height=2160\n" +
+            "gui_web_2d_vulkan_electron_argb_nonblank_pixel_count=42\n" +
             "EOF\n" +
             "BUILD_DIR=build/test-linux-vulkan-render-log-fail/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-fail/gui.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-linux-vulkan-render-log-fail/gui.env LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0 sh scripts/check/check-linux-vulkan-render-log-compare.shs || true"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -253,6 +264,42 @@ describe "Linux Vulkan render-log compare gate":
         expect(evidence.contains("electron-browser-backing-fail")).to_equal(false)
         expect(evidence.contains("browser-backing-fail")).to_equal(false)
 
+    it "rejects Linux Vulkan pairwise rows without comparable nonblank ARGB viewports":
+        step("Create pairwise pass evidence with blank Chrome pixels and a mismatched Electron viewport")
+        val command = "rm -rf build/test-linux-vulkan-render-log-argb-geometry && mkdir -p build/test-linux-vulkan-render-log-argb-geometry && cat > build/test-linux-vulkan-render-log-argb-geometry/gui.env <<'EOF'\n" +
+            "gui_web_2d_vulkan_simple_status=pass\n" +
+            "gui_web_2d_vulkan_simple_backend_name=vulkan\n" +
+            "gui_web_2d_vulkan_simple_argb_backend=vulkan\n" +
+            "gui_web_2d_vulkan_electron_browser_backing_status=pass\n" +
+            "gui_web_2d_vulkan_chrome_browser_backing_status=pass\n" +
+            "gui_web_2d_vulkan_browser_backing_status=pass\n" +
+            "gui_web_2d_vulkan_pixel_comparison_status=pass\n" +
+            "gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff\n" +
+            "gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass\n" +
+            "gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass\n" +
+            "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass\n" +
+            "gui_web_2d_vulkan_simple_argb_width=3840\n" +
+            "gui_web_2d_vulkan_simple_argb_height=2160\n" +
+            "gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=42\n" +
+            "gui_web_2d_vulkan_chrome_argb_width=3840\n" +
+            "gui_web_2d_vulkan_chrome_argb_height=2160\n" +
+            "gui_web_2d_vulkan_chrome_argb_nonblank_pixel_count=0\n" +
+            "gui_web_2d_vulkan_electron_argb_width=1920\n" +
+            "gui_web_2d_vulkan_electron_argb_height=1080\n" +
+            "gui_web_2d_vulkan_electron_argb_nonblank_pixel_count=42\n" +
+            "EOF\n" +
+            "BUILD_DIR=build/test-linux-vulkan-render-log-argb-geometry/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-argb-geometry/gui.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-linux-vulkan-render-log-argb-geometry/gui.env LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0 sh scripts/check/check-linux-vulkan-render-log-compare.shs || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        step("Assert the Linux gate rejects blank and mismatched ARGB evidence")
+        val evidence = file_read("build/test-linux-vulkan-render-log-argb-geometry/out/evidence.env")
+        expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
+        expect(evidence).to_contain("chrome-argb-blank")
+        expect(evidence).to_contain("argb-viewport-mismatch")
+        val chrome_log = file_read("build/test-linux-vulkan-render-log-argb-geometry/out/chrome.srl.env")
+        expect(chrome_log).to_contain("simple_render_log_nonblank_status=fail")
+
     it "preserves RenderDoc failure reasons in Linux source logs":
         step("Create passing pixel evidence with a Chrome RenderDoc crash reason")
         val command = "rm -rf build/test-linux-vulkan-render-log-rdoc-reason && mkdir -p build/test-linux-vulkan-render-log-rdoc-reason/rdoc/simple build/test-linux-vulkan-render-log-rdoc-reason/rdoc/html build/test-linux-vulkan-render-log-rdoc-reason/rdoc/electron && cat > build/test-linux-vulkan-render-log-rdoc-reason/gui.env <<'EOF'\n" +
@@ -267,6 +314,15 @@ describe "Linux Vulkan render-log compare gate":
             "gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass\n" +
             "gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass\n" +
             "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass\n" +
+            "gui_web_2d_vulkan_simple_argb_width=3840\n" +
+            "gui_web_2d_vulkan_simple_argb_height=2160\n" +
+            "gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=42\n" +
+            "gui_web_2d_vulkan_chrome_argb_width=3840\n" +
+            "gui_web_2d_vulkan_chrome_argb_height=2160\n" +
+            "gui_web_2d_vulkan_chrome_argb_nonblank_pixel_count=42\n" +
+            "gui_web_2d_vulkan_electron_argb_width=3840\n" +
+            "gui_web_2d_vulkan_electron_argb_height=2160\n" +
+            "gui_web_2d_vulkan_electron_argb_nonblank_pixel_count=42\n" +
             "EOF\n" +
             "printf 'rdoc_simple_gate_status=pass\\nrdoc_simple_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\n' > build/test-linux-vulkan-render-log-rdoc-reason/rdoc/simple/evidence.env\n" +
             "printf 'rdoc_external_host_capture_gate_status=fail\\nrdoc_external_host_gate_reason=gate-command-failed\\nrdoc_external_host_capture_reason_raw=chromium-gpu-process-crashed-under-renderdoc\\nrdoc_capture_status=fail\\nrdoc_capture_reason=chromium-gpu-process-crashed-under-renderdoc\\n' > build/test-linux-vulkan-render-log-rdoc-reason/rdoc/html/evidence.env\n" +
@@ -300,6 +356,15 @@ describe "Linux Vulkan render-log compare gate":
             "gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass\n" +
             "gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass\n" +
             "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass\n" +
+            "gui_web_2d_vulkan_simple_argb_width=3840\n" +
+            "gui_web_2d_vulkan_simple_argb_height=2160\n" +
+            "gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=42\n" +
+            "gui_web_2d_vulkan_chrome_argb_width=3840\n" +
+            "gui_web_2d_vulkan_chrome_argb_height=2160\n" +
+            "gui_web_2d_vulkan_chrome_argb_nonblank_pixel_count=42\n" +
+            "gui_web_2d_vulkan_electron_argb_width=3840\n" +
+            "gui_web_2d_vulkan_electron_argb_height=2160\n" +
+            "gui_web_2d_vulkan_electron_argb_nonblank_pixel_count=42\n" +
             "EOF\n" +
             "printf 'rdoc_simple_gate_status=pass\\nrdoc_simple_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\n' > build/test-linux-vulkan-render-log-rdoc-diagnostic/rdoc/simple/evidence.env\n" +
             "printf 'rdoc_external_host_capture_gate_status=fail\\nrdoc_external_host_gate_reason=gate-command-failed\\nrdoc_capture_status=fail\\n' > build/test-linux-vulkan-render-log-rdoc-diagnostic/rdoc/html/evidence.env\n" +

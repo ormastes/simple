@@ -370,7 +370,11 @@ wins over a stale separate focused env; otherwise the separate focused env is
 used and older combined fixtures fall back to `GUI_WEB_2D_VULKAN_ENV`. It
 requires Simple Vulkan backend evidence, focused Chrome and Electron Vulkan
 browser backing, `pairwise-argb-diff` mode, and all three pairwise diff lanes to
-pass. Missing RenderDoc `.rdc` evidence is reported through
+pass. It also validates the Simple, Chrome, and Electron ARGB source rows
+directly: each source must report a positive viewport size, positive nonblank
+pixel count, and the three viewport dimensions must match before the Linux row
+can pass. A bare `pairwise-argb-diff` pass without comparable nonblank source
+rows is rejected. Missing RenderDoc `.rdc` evidence is reported through
 `linux_vulkan_render_log_compare_renderdoc_*_status` plus the matching
 `linux_vulkan_render_log_compare_renderdoc_*_reason`; by default Simple,
 Chrome, and Electron RenderDoc rows must pass with real `.rdc` files and `RDOC`
