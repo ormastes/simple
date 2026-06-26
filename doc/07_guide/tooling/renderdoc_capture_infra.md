@@ -411,6 +411,18 @@ capture artifact still has not been produced. Set
 `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0` only for diagnostic
 partial-log inspection, and never use that mode to claim Linux platform-matrix
 completion.
+The Linux row also emits structured blocker fields for parallel platform
+agents:
+`linux_vulkan_render_log_compare_blocked_gate_count`,
+`linux_vulkan_render_log_compare_blocked_gates`,
+`linux_vulkan_render_log_compare_simple_vulkan_gate_status`,
+`linux_vulkan_render_log_compare_browser_backing_gate_status`,
+`linux_vulkan_render_log_compare_pairwise_gate_status`,
+`linux_vulkan_render_log_compare_argb_source_gate_status`, and
+`linux_vulkan_render_log_compare_renderdoc_gate_status`. Use these fields
+instead of parsing `linux_vulkan_render_log_compare_reason` when deciding
+whether the Linux blocker is backend selection, browser Vulkan backing,
+pairwise pixels, ARGB source evidence, or RenderDoc `.rdc` capture.
 
 Current Linux host evidence on 2026-06-25 has
 `linux_vulkan_render_log_compare_pairwise_status=pass`, Simple RenderDoc

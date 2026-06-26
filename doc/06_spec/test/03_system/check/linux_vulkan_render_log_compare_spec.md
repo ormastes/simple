@@ -113,6 +113,11 @@ Chrome, or Electron RenderDoc rows are reported through
 at real capture artifacts whose first four bytes are `RDOC`; metadata-only
 `pass` rows are diagnostics, not completion proof. Set
 `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0` only for diagnostic partial-log runs.
+Structured blockers are emitted through
+`linux_vulkan_render_log_compare_blocked_gate_count` and
+`linux_vulkan_render_log_compare_blocked_gates`, with separate gate statuses
+for Simple Vulkan backend, browser backing, pairwise ARGB diff, ARGB source
+evidence, and RenderDoc.
 
 ## Normalized Outputs
 
@@ -187,7 +192,7 @@ this row with `macos_metal_render_log_compare_*` and
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 65 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -227,6 +232,13 @@ expect(code).to_equal(0)
 step("Read normalized pass evidence and source logs")
 val evidence = file_read("build/test-linux-vulkan-render-log-pass/out/evidence.env")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_blocked_gate_count=0")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_blocked_gates=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_simple_vulkan_gate_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_browser_backing_gate_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_pairwise_gate_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_argb_source_gate_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_gate_status=pass")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_required_api=vulkan")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_gui_web_2d_vulkan_env_file_status=pass")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_browser_backing_env_file_status=pass")
@@ -263,7 +275,7 @@ expect(electron_log).to_contain("simple_render_log_artifact_magic=RDOC")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -297,6 +309,9 @@ expect(code).to_equal(0)
 step("Read fail-closed evidence")
 val evidence = file_read("build/test-linux-vulkan-render-log-fail/out/evidence.env")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_browser_backing_gate_status=fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_gate_status=diagnostic-disabled")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_blocked_gates=browser-vulkan-backing")
 expect(evidence).to_contain("electron-browser-backing-fail")
 expect(evidence).to_contain("browser-backing-fail")
 ```
@@ -315,7 +330,7 @@ expect(evidence).to_contain("browser-backing-fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -344,6 +359,9 @@ val evidence = file_read("build/test-linux-vulkan-render-log-focused-backing/out
 expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_browser_backing_env=build/test-linux-vulkan-render-log-focused-backing/browser.env")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_pairwise_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_browser_backing_gate_status=fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_pairwise_gate_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_blocked_gates=browser-vulkan-backing,argb-source-evidence")
 expect(evidence).to_contain("electron-browser-backing-fail")
 expect(evidence).to_contain("browser-backing-fail")
 expect(evidence.contains("chrome-browser-backing-missing")).to_equal(false)
@@ -412,7 +430,7 @@ expect(evidence.contains("browser-backing-fail")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -446,6 +464,8 @@ expect(code).to_equal(0)
 step("Assert the Linux gate rejects blank and mismatched ARGB evidence")
 val evidence = file_read("build/test-linux-vulkan-render-log-argb-geometry/out/evidence.env")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_argb_source_gate_status=fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_blocked_gates=argb-source-evidence")
 expect(evidence).to_contain("chrome-argb-blank")
 expect(evidence).to_contain("argb-viewport-mismatch")
 val chrome_log = file_read("build/test-linux-vulkan-render-log-argb-geometry/out/chrome.srl.env")
@@ -464,7 +484,7 @@ expect(chrome_log).to_contain("simple_render_log_nonblank_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -505,6 +525,8 @@ val evidence = file_read("build/test-linux-vulkan-render-log-rdoc-reason/out/evi
 expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=renderdoc-chrome-fail")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_require_renderdoc=1")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_gate_status=fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_blocked_gates=renderdoc-chrome-rdc")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_status=fail")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_reason=gate-command-failed")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass")
@@ -527,7 +549,7 @@ expect(chrome_log).to_contain("simple_render_log_reason=gate-command-failed")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -568,6 +590,8 @@ val evidence = file_read("build/test-linux-vulkan-render-log-rdoc-diagnostic/out
 expect(evidence).to_contain("linux_vulkan_render_log_compare_status=pass")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=pass")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_require_renderdoc=0")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_gate_status=diagnostic-disabled")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_blocked_gate_count=0")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_status=fail")
 ```
 
@@ -583,7 +607,7 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_st
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -624,6 +648,7 @@ step("Assert claimed RenderDoc pass rows are checked against actual artifact mag
 val evidence = file_read("build/test-linux-vulkan-render-log-rdoc-spoof/out/evidence.env")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=renderdoc-chrome-fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_blocked_gates=renderdoc-chrome-rdc")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_status=fail")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=")
@@ -645,7 +670,7 @@ expect(chrome_log).to_contain("simple_render_log_original_native_log_format=rend
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -684,6 +709,7 @@ step("Assert missing Electron RenderDoc source is visible without opening side l
 val evidence = file_read("build/test-linux-vulkan-render-log-rdoc-missing-source/out/evidence.env")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=renderdoc-electron-unavailable")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_blocked_gates=renderdoc-electron-rdc")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_status=unavailable")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_reason=missing-source-env")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_env_file_status=missing")

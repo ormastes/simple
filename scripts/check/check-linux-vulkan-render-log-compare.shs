@@ -37,6 +37,10 @@ pixel_mode=""
 ec_diff=""
 es_diff=""
 cs_diff=""
+simple_argb_reason=""
+chrome_argb_reason=""
+electron_argb_reason=""
+argb_viewport_reason=""
 reason_parts=""
 add_reason() {
     reason="$1"
@@ -112,8 +116,10 @@ else
         compare_status="fail"
         add_reason "pairwise-diff-incomplete-or-fail"
     fi
-    for source_name in simple chrome electron; do
-        argb_reason="$(render_log_argb_source_reason gui_web_2d_vulkan "$source_name" "$GUI_WEB_2D_VULKAN_ENV")"
+    simple_argb_reason="$(render_log_argb_source_reason gui_web_2d_vulkan simple "$GUI_WEB_2D_VULKAN_ENV")"
+    chrome_argb_reason="$(render_log_argb_source_reason gui_web_2d_vulkan chrome "$GUI_WEB_2D_VULKAN_ENV")"
+    electron_argb_reason="$(render_log_argb_source_reason gui_web_2d_vulkan electron "$GUI_WEB_2D_VULKAN_ENV")"
+    for argb_reason in "$simple_argb_reason" "$chrome_argb_reason" "$electron_argb_reason"; do
         if [ "$argb_reason" != "pass" ]; then
             compare_status="fail"
             add_reason "$argb_reason"
@@ -162,6 +168,65 @@ electron_artifact="$(render_log_value_of rdoc_capture_file "$RDOC_ELECTRON_HTML_
 electron_magic="$(render_log_rdoc_artifact_magic "$RDOC_ELECTRON_HTML_EVIDENCE_ENV" "$electron_artifact")"
 electron_artifact_path="$(render_log_rdoc_artifact_path "$RDOC_ELECTRON_HTML_EVIDENCE_ENV" "$electron_artifact" || true)"
 
+pixel_gate_status="pass"
+if [ "$pixel_status" != "pass" ] || [ "$pixel_mode" != "pairwise-argb-diff" ] ||
+    [ "$ec_diff" != "pass" ] || [ "$es_diff" != "pass" ] || [ "$cs_diff" != "pass" ]; then
+    pixel_gate_status="fail"
+fi
+
+browser_backing_gate_status="pass"
+if [ "$electron_backing" != "pass" ] || [ "$chrome_backing" != "pass" ] || [ "$browser_backing" != "pass" ]; then
+    browser_backing_gate_status="fail"
+fi
+
+simple_vulkan_gate_status="pass"
+if { [ "$simple_status" != "pass" ] && [ "$simple_backend_status" != "pass" ]; } ||
+    { [ "$simple_backend" != "vulkan" ] && [ "$simple_argb_backend" != "vulkan" ]; }; then
+    simple_vulkan_gate_status="fail"
+fi
+
+argb_source_gate_status="pass"
+if [ "$simple_argb_reason" != "pass" ] || [ "$chrome_argb_reason" != "pass" ] ||
+    [ "$electron_argb_reason" != "pass" ] || [ "$argb_viewport_reason" != "pass" ]; then
+    argb_source_gate_status="fail"
+fi
+
+renderdoc_gate_status="pass"
+if [ "$require_renderdoc" != "1" ]; then
+    renderdoc_gate_status="diagnostic-disabled"
+elif [ "$simple_rdoc_status" != "pass" ] || [ "$chrome_rdoc_status" != "pass" ] ||
+    [ "$electron_rdoc_status" != "pass" ]; then
+    renderdoc_gate_status="fail"
+fi
+
+blocked_gates=""
+blocked_gate_count=0
+add_blocked_gate() {
+    gate="$1"
+    if [ "$compare_status" = "pass" ]; then
+        return
+    fi
+    if [ -z "$blocked_gates" ]; then
+        blocked_gates="$gate"
+    else
+        blocked_gates="$blocked_gates,$gate"
+    fi
+    blocked_gate_count=$((blocked_gate_count + 1))
+}
+
+if [ "$(file_status "$GUI_WEB_2D_VULKAN_ENV")" != "pass" ]; then
+    add_blocked_gate "gui-web-2d-vulkan-env"
+fi
+[ "$simple_vulkan_gate_status" = "pass" ] || add_blocked_gate "simple-vulkan-backend"
+[ "$browser_backing_gate_status" = "pass" ] || add_blocked_gate "browser-vulkan-backing"
+[ "$pixel_gate_status" = "pass" ] || add_blocked_gate "pairwise-argb-diff"
+[ "$argb_source_gate_status" = "pass" ] || add_blocked_gate "argb-source-evidence"
+if [ "$require_renderdoc" = "1" ]; then
+    [ "$simple_rdoc_status" = "pass" ] || add_blocked_gate "renderdoc-simple-rdc"
+    [ "$chrome_rdoc_status" = "pass" ] || add_blocked_gate "renderdoc-chrome-rdc"
+    [ "$electron_rdoc_status" = "pass" ] || add_blocked_gate "renderdoc-electron-rdc"
+fi
+
 render_log_write_source_log "$SIMPLE_LOG" "simple" "simple-renderdoc" "$RDOC_SIMPLE_EVIDENCE_ENV" "$GUI_WEB_2D_VULKAN_ENV" "$simple_rdoc_status" "$simple_artifact" "$simple_magic" "simple-backend=${simple_backend:-};simple-argb-backend=${simple_argb_backend:-}" "$simple_rdoc_reason"
 render_log_write_source_log "$CHROME_LOG" "chrome" "renderdoc" "$RDOC_HTML_EVIDENCE_ENV" "$GUI_WEB_2D_VULKAN_ENV" "$chrome_rdoc_status" "$chrome_artifact" "$chrome_magic" "browser-backing=${chrome_backing:-}" "$chrome_rdoc_reason"
 render_log_write_source_log "$ELECTRON_LOG" "electron" "renderdoc" "$RDOC_ELECTRON_HTML_EVIDENCE_ENV" "$GUI_WEB_2D_VULKAN_ENV" "$electron_rdoc_status" "$electron_artifact" "$electron_magic" "browser-backing=${electron_backing:-}" "$electron_rdoc_reason"
@@ -184,6 +249,13 @@ render_log_write_source_log "$ELECTRON_LOG" "electron" "renderdoc" "$RDOC_ELECTR
 {
     render_log_append_kv "linux_vulkan_render_log_compare_status" "$compare_status"
     render_log_append_kv "linux_vulkan_render_log_compare_reason" "$reason_parts"
+    render_log_append_kv "linux_vulkan_render_log_compare_blocked_gate_count" "$blocked_gate_count"
+    render_log_append_kv "linux_vulkan_render_log_compare_blocked_gates" "$blocked_gates"
+    render_log_append_kv "linux_vulkan_render_log_compare_simple_vulkan_gate_status" "$simple_vulkan_gate_status"
+    render_log_append_kv "linux_vulkan_render_log_compare_browser_backing_gate_status" "$browser_backing_gate_status"
+    render_log_append_kv "linux_vulkan_render_log_compare_pairwise_gate_status" "$pixel_gate_status"
+    render_log_append_kv "linux_vulkan_render_log_compare_argb_source_gate_status" "$argb_source_gate_status"
+    render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_gate_status" "$renderdoc_gate_status"
     render_log_append_kv "linux_vulkan_render_log_compare_platform" "linux"
     render_log_append_kv "linux_vulkan_render_log_compare_required_api" "vulkan"
     render_log_append_kv "linux_vulkan_render_log_compare_gui_web_2d_vulkan_env" "$GUI_WEB_2D_VULKAN_ENV"
