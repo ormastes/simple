@@ -1,0 +1,124 @@
+"""
+# Electron MDI proof validator
+
+## Overview
+
+Validates the standalone Electron MDI proof validator. The live wrapper writes
+an Electron/Chromium MDI JSON proof and screenshot, and this validator fails
+closed unless event routing, screenshot binding, performance timing, and
+animation details are all present.
+
+**Plan:** doc/03_plan/ui/web_browser/mdi_platform_completion_plan_2026-06-14.md
+**Requirements:** N/A
+**Research:** N/A
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+```sh
+SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator_spec.spl --mode=interpreter --clean --fail-fast
+```
+
+## Acceptance
+
+- Complete Electron MDI proof JSON validates and emits normalized
+  `electron_mdi_*` rows.
+- Event routing pass requires DOM events and Electron bridge IPC frames.
+- Capture pass requires the proof screenshot path to match the captured
+  screenshot artifact.
+- Performance and animation pass require `performance.now()`, an explicit
+  non-negative timing delta, at least two animation frames, and a CSS animation
+  probe.
+"""
+
+# @tag: system, gui, electron, mdi, event-routing, performance, animation
+
+use std.io_runtime.{file_read, process_run}
+use std.spec.*
+
+fn _proof_command(path: text, mutation: text) -> text:
+    "node -e 'const fs=require(\"fs\");const p={count:4,hasDesktop:true,imageCount:1,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,appActionControlFound:true,appInputControlFound:true,bodyClickRouted:true,bodyInputRouted:true,bodyKeyRouted:true,trafficMinimizeRouted:true,trafficMaximizeRouted:true,trafficCloseRouted:true,bridgeIpcFrameCount:8,bridgeBodyActionFrameRouted:true,bridgeBodyInputFrameRouted:true,bridgeBodyKeyFrameRouted:true,bridgeMouseDownFrameRouted:true,bridgeMouseUpFrameRouted:true,bridgeMinimizeFrameRouted:true,bridgeMaximizeFrameRouted:true,bridgeCloseFrameRouted:true,taskbarItemCount:4,taskbarIconCount:4,taskbarIconsVisible:true,taskbarLabelsVisible:true,htmlRenderable:true,screenshotPath:\"build/electron-proof/screen.png\",performanceNowAvailable:true,performanceNowDeltaMs:16.7,animationFrameAvailable:true,animationFrameCount:2,cssAnimationProbe:true};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+
+describe "Electron MDI proof validator":
+
+    it "accepts complete event capture performance and animation proof":
+        val root = "build/test-electron-mdi-validator-pass"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " +
+            _proof_command(root + "/proof.json", "") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = file_read(root + "/evidence.env")
+        step("Inspect normalized proof rows")
+        expect(evidence).to_contain("electron_mdi_json_proof=pass")
+        expect(evidence).to_contain("electron_mdi_event_status=pass")
+        expect(evidence).to_contain("electron_mdi_capture_status=pass")
+        expect(evidence).to_contain("electron_mdi_performance_status=pass")
+        expect(evidence).to_contain("electron_mdi_animation_status=pass")
+        expect(evidence).to_contain("electron_mdi_performance_now_delta_ms=16.7")
+        expect(evidence).to_contain("electron_mdi_animation_frame_count=2")
+        expect(evidence).to_contain("electron_mdi_css_animation_probe=true")
+
+    it "rejects stale event proof that lacks bridge routed frames":
+        val root = "build/test-electron-mdi-validator-event"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/proof.json", "p.bridgeMouseUpFrameRouted=false") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/evidence.env")
+        expect(evidence).to_contain("electron_mdi_json_proof=fail")
+        expect(evidence).to_contain("electron_mdi_event_status=fail")
+        expect(evidence).to_contain("event-contract-missing")
+        expect(evidence).to_contain("bridgeMouseUpFrameRouted")
+
+    it "rejects proof bound to a different screenshot artifact":
+        val root = "build/test-electron-mdi-validator-capture"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/proof.json", "p.screenshotPath=\"build/electron-proof/old.png\"") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/evidence.env")
+        expect(evidence).to_contain("electron_mdi_json_proof=fail")
+        expect(evidence).to_contain("electron_mdi_capture_status=fail")
+        expect(evidence).to_contain("electron_mdi_screenshot_path_matches=false")
+
+    it "rejects performance availability without explicit timing delta":
+        val root = "build/test-electron-mdi-validator-performance"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/proof.json", "delete p.performanceNowDeltaMs") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/evidence.env")
+        expect(evidence).to_contain("electron_mdi_json_proof=fail")
+        expect(evidence).to_contain("electron_mdi_performance_status=fail")
+        expect(evidence).to_contain("electron_mdi_performance_now_delta_ms=")
+        expect(evidence.contains("electron_mdi_performance_now_delta_ms=0")).to_equal(false)
+
+    it "rejects missing animation frame proof":
+        val root = "build/test-electron-mdi-validator-animation"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/proof.json", "p.animationFrameCount=1;p.cssAnimationProbe=false") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/evidence.env")
+        expect(evidence).to_contain("electron_mdi_json_proof=fail")
+        expect(evidence).to_contain("electron_mdi_animation_status=fail")
+        expect(evidence).to_contain("electron_mdi_animation_frame_count=1")
+        expect(evidence).to_contain("electron_mdi_css_animation_probe=false")
+
+    it "keeps the live Electron producer and shell wrapper wired to timing proof":
+        val bridge = file_read("src/app/ui.electron/bridge.js")
+        val wrapper = file_read("scripts/check/check-electron-mdi-evidence.shs")
+        expect(bridge).to_contain("performanceNowAvailable")
+        expect(bridge).to_contain("animationFrameCount")
+        expect(bridge).to_contain("cssAnimationProbe")
+        expect(wrapper).to_contain("validate-electron-mdi-proof.js")

@@ -509,8 +509,31 @@ function maybeWriteMdiProof(win) {
     }
     mdiProofInputFrames = [];
     win.webContents.executeJavaScript(`
-            (function() {
+            (async function() {
                 var wm = window.__SIMPLE_ELECTRON_WM__;
+                var performanceNowAvailable = !!(window.performance && typeof window.performance.now === 'function');
+                var performanceStart = performanceNowAvailable ? window.performance.now() : 0;
+                var animationFrameAvailable = typeof window.requestAnimationFrame === 'function';
+                var animationFrameCount = 0;
+                var styleProbe = document.createElement('style');
+                styleProbe.textContent = '@keyframes simple-electron-mdi-proof-pulse { from { opacity: 0.2; } to { opacity: 0.9; } } .simple-electron-mdi-proof-animation { animation: simple-electron-mdi-proof-pulse 120ms linear 2; }';
+                document.head.appendChild(styleProbe);
+                var animationProbe = document.createElement('div');
+                animationProbe.className = 'simple-electron-mdi-proof-animation';
+                animationProbe.style.cssText = 'position:fixed;left:-1000px;top:-1000px;width:8px;height:8px;';
+                document.body.appendChild(animationProbe);
+                if (animationFrameAvailable) {
+                    await new Promise(function(resolve) {
+                        requestAnimationFrame(function() {
+                            animationFrameCount += 1;
+                            requestAnimationFrame(function() {
+                                animationFrameCount += 1;
+                                resolve();
+                            });
+                        });
+                    });
+                }
+                var animationProbeStyle = window.getComputedStyle(animationProbe);
                 var dragMoved = false;
                 var bodyClickRouted = false;
                 var bodyInputRouted = false;
@@ -634,7 +657,12 @@ function maybeWriteMdiProof(win) {
             taskbarLabelsVisible: taskbarLabelsVisible,
             dragBefore: dragBefore,
             dragAfter: dragAfter,
-            htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0
+            htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0,
+            performanceNowAvailable: performanceNowAvailable,
+            performanceNowDeltaMs: performanceNowAvailable ? Math.max(0, window.performance.now() - performanceStart) : null,
+            animationFrameAvailable: animationFrameAvailable,
+            animationFrameCount: animationFrameCount,
+            cssAnimationProbe: animationProbeStyle.animationName === 'simple-electron-mdi-proof-pulse'
             };
         })();
     `).then(proof => {
