@@ -117,7 +117,7 @@ Evidence:
 - `direct-env-runtime-guard` passed.
 - `scripts/check/check-llm-tooling-public-absence-rendering.shs` passed and
   verifies public LLM/runtime manuals and evidence do not expose the internal
-  Option-none marker outside folded executable source.
+  absence marker outside folded executable source.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
 
 ## Lane 2: Torch/svLLM Placeholder Blockers

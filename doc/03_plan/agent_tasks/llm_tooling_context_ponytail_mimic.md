@@ -73,7 +73,7 @@ Tasks:
 4. Add discoverability/callability tests. Status: done for app and lower MCP
    source assertions.
 5. Verify absence-safe output. Status: shared audit specs cover clean, review,
-   and missing-file absence without exposing the internal Option-none marker.
+   and missing-file absence without exposing the internal absence marker.
 6. Address normal-review blockers. Status: done.
 
 Evidence:
@@ -98,7 +98,7 @@ Evidence:
 - `direct-env-runtime-guard` passed for working and staged checks.
 - `scripts/check/check-llm-tooling-public-absence-rendering.shs` passed and
   verifies context/ponytail public manuals and LLM evidence render absence as
-  explicit text instead of exposing the internal Option-none marker.
+  explicit text instead of exposing the internal absence marker.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
 
 Normal-review fixes:

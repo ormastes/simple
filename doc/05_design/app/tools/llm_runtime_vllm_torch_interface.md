@@ -90,7 +90,7 @@ Date: 2026-06-25
 - Public manuals and evidence are covered by
   `scripts/check/check-llm-tooling-public-absence-rendering.shs`, which ignores
   folded executable source blocks but fails prose/evidence that exposes the
-  internal Option-none marker.
+  internal absence marker.
 - Dashboard output for this runtime slice redacts credentials, API-key-like
   labels, and local model/adapter paths by default. Prompt and tool-payload
   redaction belongs to callers that create prompt/tool evidence.

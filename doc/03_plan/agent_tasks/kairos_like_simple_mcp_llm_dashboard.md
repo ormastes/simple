@@ -76,9 +76,9 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
 2. MCP assistant control surface:
    - Start/spawn/pause/resume/brief/list/timeline/signal/task tools are
      exposed through MCP with `in_process` handlers.
-   - `src/app/mcp/main_lazy_assistant.spl` uses explicit
-     `match Some(session)/Option-none` for store readback so handler output never
-     dereferences an unresolved `Option`.
+   - `src/app/mcp/main_lazy_assistant.spl` uses explicit optional-session
+     matching for store readback so handler output never dereferences an
+     unresolved optional value.
    - `src/app/dashboard/assistant_collectors.spl` exports
      `collect_assistant_timeline` for dashboard e2e readback of persisted MCP
      assistant timelines.

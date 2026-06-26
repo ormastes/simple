@@ -306,8 +306,8 @@ Implemented MCP assistant control/readback coverage:
 
 The MCP control surface exposes start/spawn/pause/resume/brief/list/timeline/
 signal/task/notification tools as in-process handlers. Handler readback uses
-explicit `match Some(session)/Option-none` branches for assistant store `Option`
-results, and dashboard replay collectors expose timeline readback directly.
+explicit optional-session matching for assistant store results, and dashboard
+replay collectors expose timeline readback directly.
 Signal push checks timeline persistence before returning success, and task list
 rendering no longer checks impossible absent child-task records.
 The dashboard collector and e2e specs use `std.io_runtime` fixture file helpers

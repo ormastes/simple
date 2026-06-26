@@ -202,4 +202,4 @@ simple; richer symbol slicing can be a later slice.
 - all user-visible outputs render absence as explicit text
 - `scripts/check/check-llm-tooling-public-absence-rendering.shs` guards the
   public manuals/evidence for this lane against exposing the internal
-  Option-none marker
+  absence marker
