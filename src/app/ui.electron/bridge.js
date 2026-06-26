@@ -208,8 +208,11 @@ function electronLiveSmokeProofScript() {
             function finish() {
                 var style = window.getComputedStyle(animationProbe);
                 var text = appEl ? (appEl.textContent || '') : '';
+                var userAgent = (window.navigator && window.navigator.userAgent) || '';
                 var proof = Object.assign({}, envelope, {
                     proof_source: 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript',
+                    browser_engine: /Chrome\/|Chromium\//.test(userAgent) ? 'chromium' : '',
+                    electron_user_agent: userAgent,
                     app_element_present: !!appEl,
                     body_text_length: text.length,
                     body_text_sample: text.slice(0, 120),

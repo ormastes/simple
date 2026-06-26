@@ -37,6 +37,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 - The proof must carry the Electron bridge live-smoke source marker so a
   generic hand-authored JSON object cannot stand in for the renderer bridge
   probe.
+- The proof must include Chromium/Electron runtime evidence from the renderer
+  user agent, not only a hand-authored source marker.
 - The live smoke shell wrapper delegates JSON validation to the proof validator.
 - The live smoke shell wrapper keeps validation, proof-source, viewport,
   performance, and animation diagnostic rows on early unavailable/fail exits.
@@ -48,7 +50,7 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={target:\"electron\",surface_id:\"main\",proof_source:\"src/app/ui.electron/bridge.js:electronLiveSmokeProofScript\",width:1280,height:720,body_html_length:64,css_length:12,app_element_present:true,body_text_length:23,body_text_sample:\"Hello World from Web!\",performance_now_available:true,performance_now_delta_ms:1.25,animation_frame_available:true,animation_frame_count:2,css_animation_probe:true,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const p={target:\"electron\",surface_id:\"main\",proof_source:\"src/app/ui.electron/bridge.js:electronLiveSmokeProofScript\",browser_engine:\"chromium\",electron_user_agent:\"Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36\",width:1280,height:720,body_html_length:64,css_length:12,app_element_present:true,body_text_length:23,body_text_sample:\"Hello World from Web!\",performance_now_available:true,performance_now_delta_ms:1.25,animation_frame_available:true,animation_frame_count:2,css_animation_probe:true,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Electron live smoke proof validator":
 
@@ -66,6 +68,8 @@ describe "Electron live smoke proof validator":
         expect(evidence).to_contain("electron_live_smoke_validation_reason=pass")
         expect(evidence).to_contain("electron_live_smoke_target=electron")
         expect(evidence).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
+        expect(evidence).to_contain("electron_live_smoke_browser_engine=chromium")
+        expect(evidence).to_contain("electron_live_smoke_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36")
         expect(evidence).to_contain("electron_live_smoke_width=1280")
         expect(evidence).to_contain("electron_live_smoke_body_html_length=64")
         expect(evidence).to_contain("electron_live_smoke_css_length=12")
@@ -116,6 +120,27 @@ describe "Electron live smoke proof validator":
         expect(wrong).to_contain("electron_live_smoke_validation_status=fail")
         expect(wrong).to_contain("electron_live_smoke_validation_reason=unexpected-proof-source")
         expect(wrong).to_contain("electron_live_smoke_proof_source=tools/manual/proof.json")
+
+    it "rejects proof without Chromium Electron runtime evidence":
+        val root = "build/test-electron-live-smoke-validator-runtime"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/engine.json", "p.browser_engine=\"webkit\"") +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/engine.json 1280 720 > " + root + "/engine.env; " +
+            _proof_command(root + "/user-agent.json", "p.electron_user_agent=\"Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36\"") +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/user-agent.json 1280 720 > " + root + "/user-agent.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val engine = file_read(root + "/engine.env")
+        val user_agent = file_read(root + "/user-agent.env")
+        step("Confirm live smoke proof needs Chromium and Electron runtime rows")
+        expect(engine).to_contain("electron_live_smoke_validation_status=fail")
+        expect(engine).to_contain("electron_live_smoke_validation_reason=unexpected-browser-engine")
+        expect(engine).to_contain("electron_live_smoke_browser_engine=webkit")
+        expect(user_agent).to_contain("electron_live_smoke_validation_status=fail")
+        expect(user_agent).to_contain("electron_live_smoke_validation_reason=missing-electron-chromium-user-agent")
+        expect(user_agent).to_contain("electron_live_smoke_browser_engine=chromium")
+        expect(user_agent).to_contain("electron_live_smoke_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36")
 
     it "rejects forged rendered text counters without the live smoke text sample":
         val root = "build/test-electron-live-smoke-validator-text-sample"
@@ -254,8 +279,12 @@ describe "Electron live smoke proof validator":
         expect(wrapper).to_contain("electron_live_smoke=pass proof=$PROOF_PATH validation=$VALIDATION_ENV")
         expect(wrapper).to_contain("electron_live_smoke_validation_status")
         expect(wrapper).to_contain("electron_live_smoke_proof_source")
+        expect(wrapper).to_contain("electron_live_smoke_browser_engine")
+        expect(wrapper).to_contain("electron_live_smoke_electron_user_agent")
         expect(bridge).to_contain("electronLiveSmokeProofScript")
         expect(bridge).to_contain("proof_source: 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript'")
+        expect(bridge).to_contain("browser_engine")
+        expect(bridge).to_contain("electron_user_agent")
         expect(bridge).to_contain("performance_now_available")
         expect(bridge).to_contain("animation_frame_count")
         expect(bridge).to_contain("css_animation_probe")
@@ -276,6 +305,8 @@ describe "Electron live smoke proof validator":
         expect(evidence).to_contain("electron_live_smoke_validation_status=unavailable")
         expect(evidence).to_contain("electron_live_smoke_validation_reason=missing_command:node")
         expect(evidence).to_contain("electron_live_smoke_proof_source=")
+        expect(evidence).to_contain("electron_live_smoke_browser_engine=")
+        expect(evidence).to_contain("electron_live_smoke_electron_user_agent=")
         expect(evidence).to_contain("electron_live_smoke_width=")
         expect(evidence).to_contain("electron_live_smoke_height=")
         expect(evidence).to_contain("electron_live_smoke_performance_now_delta_ms=")
