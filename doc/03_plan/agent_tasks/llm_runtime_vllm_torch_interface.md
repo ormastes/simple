@@ -324,10 +324,16 @@ Tasks:
     harnesses. This classifies local host capability only; it does not prove a
     live endpoint is serving models.
 12. Add focused top-level command registration evidence. Status: done for
-    source registration: mirrored SPipe specs now prove `llm-runtime-control`
-    is present in `src/app/cli/dispatch/table.spl`, routed by
-    `src/app/cli/main_part2.spl` to `src/app/llm_runtime/control_cli.spl`, and
-    shown in CLI help. Full native CLI rebuild evidence remains blocked:
+    source and Rust-driver registration: mirrored SPipe specs now prove
+    `llm-runtime-control` is present in `src/app/cli/dispatch/table.spl`, routed
+    by `src/app/cli/main_part2.spl` to `src/app/llm_runtime/control_cli.spl`,
+    shown in CLI help, and registered in the Rust driver app-command table plus
+    Simple-app dispatch allow-list. `cargo check -p simple-driver` passes for
+    the driver table change, `cargo build -p simple-driver` produced a rebuilt
+    debug driver, and `src/compiler_rust/target/debug/simple
+    llm-runtime-control ...` now reaches the Simple control CLI with planned,
+    usage, and missing-local-vLLM JSONL outputs instead of treating the command
+    name as a missing file. Full native CLI rebuild evidence remains blocked:
     `native-build --source src/app --source src/lib --entry-closure --entry
     src/app/cli/main.spl --strip --threads 1 --timeout 240 --output
     build/llm_runtime/simple_cli_full` hit the 300s external cap with no binary.
@@ -368,11 +374,12 @@ Tasks:
   dashboard route remains intent-only until integration evidence proves the
   process/HTTP imports do not reintroduce dashboard test teardown diagnostics.
 - Full rebuilt release-binary evidence for top-level
-  `simple llm-runtime-control`; source dispatch is wired, help/table/branch
-  registration now has mirrored SPipe evidence, and the standalone command
+  `simple llm-runtime-control`; source dispatch and Rust-driver app-command
+  registration now have mirrored SPipe evidence, and the standalone command
   binary has native evidence, but full `src/app/cli/main.spl` native-build hit a
   300s timeout on this host and the checked-in prebuilt release binary still
-  predates the new top-level command.
+  predates the new top-level command until a deploy artifact is refreshed from
+  the rebuilt driver/source tree.
 
 Runtime-adjacent decision record for live HTTP transport:
 

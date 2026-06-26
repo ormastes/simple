@@ -474,6 +474,16 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         needs_rust_flags: &[],
     },
     CommandEntry {
+        name: "llm-runtime-control",
+        app_path: "src/app/llm_runtime/control_cli.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: llm-runtime-control app not found (run from project root or rebuild deployed app sources)");
+            1
+        }),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
         name: "constr",
         app_path: "src/app/constr/main.spl",
         rust_handler: Handler::Args(run_constr),
@@ -1086,6 +1096,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/app/wrapper_gen/mod.spl"
         && app_relative_path != "src/app/llm_process_gen/main.spl"
         && app_relative_path != "src/app/context/main.spl"
+        && app_relative_path != "src/app/llm_runtime/control_cli.spl"
         && app_relative_path != "src/app/spipe_docgen/main.spl"
         && app_relative_path != "src/app/md_diagram_update/main.spl"
         && app_relative_path != "src/app/deps/main.spl"
@@ -1117,6 +1128,12 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
     }
 
     if app_relative_path == "src/app/context/main.spl" {
+        let mut full_args = vec![path.to_string_lossy().to_string()];
+        full_args.extend(args.iter().skip(1).cloned());
+        return Some(run_file_with_args(&path, gc_log, gc_off, full_args));
+    }
+
+    if app_relative_path == "src/app/llm_runtime/control_cli.spl" {
         let mut full_args = vec![path.to_string_lossy().to_string()];
         full_args.extend(args.iter().skip(1).cloned());
         return Some(run_file_with_args(&path, gc_log, gc_off, full_args));

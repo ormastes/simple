@@ -27,7 +27,7 @@ llm_runtime_control_command_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -51,6 +51,25 @@ val table = source("src/app/cli/dispatch/table.spl")
 
 expect(table).to_contain("name: \"llm-runtime-control\"")
 expect(table).to_contain("app_path: \"src/app/llm_runtime/control_cli.spl\"")
+```
+
+</details>
+
+#### registers llm-runtime-control in the Rust driver app table
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val driver = source("src/compiler_rust/driver/src/main.rs")
+
+expect(driver).to_contain("name: \"llm-runtime-control\"")
+expect(driver).to_contain("app_path: \"src/app/llm_runtime/control_cli.spl\"")
+expect(driver).to_contain("app_relative_path != \"src/app/llm_runtime/control_cli.spl\"")
+expect(driver).to_contain("if app_relative_path == \"src/app/llm_runtime/control_cli.spl\"")
 ```
 
 </details>
@@ -108,8 +127,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
