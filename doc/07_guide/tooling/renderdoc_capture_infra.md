@@ -204,8 +204,15 @@ pixels, target FPS met, nonempty checksum,
 `target_fps >= 200`, plus RSS budget status with `max_rss_kb` and
 `max_rss_budget_kb`. A pass row must also retain binary provenance:
 `source_revision`, `simple_bin`, `use_native=1`,
-`native_build_mode=aggressive-native`, and `fallback_state=none`. The default
-wrapper budget is 262144 KiB for 4K and
+`native_build_mode=aggressive-native`, and `fallback_state=none`. The
+aggregate compares each retained row against the current checkout and emits
+`gui_showcase_4k_200fps_current_source_revision`,
+`gui_showcase_4k_200fps_source_revision_status`,
+`gui_showcase_8k_perf_current_source_revision`, and
+`gui_showcase_8k_perf_source_revision_status`; use
+`GUI_SHOWCASE_REQUIRE_CURRENT_SOURCE_REVISION=1` for release or goal evidence
+that must fail stale perf rows instead of reporting them as reusable
+diagnostics. The default wrapper budget is 262144 KiB for 4K and
 750000 KiB for 8K; rows with `rss_status=measured` are diagnostics, not
 completion evidence. The 8K row must likewise prove
 `7680x4320`, `33177600` pixels, nonzero readback pixels, target FPS at least
