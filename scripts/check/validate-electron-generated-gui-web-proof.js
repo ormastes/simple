@@ -10,15 +10,29 @@ function emit(key, value) {
   console.log(`${key}=${clean(value)}`);
 }
 
-function numberValue(value) {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
-  if (typeof value === 'string' && value.trim() !== '') return Number(value);
-  return NaN;
+function decimalIntegerText(value) {
+  if (typeof value === 'number' && Number.isInteger(value)) return String(value);
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'string' && /^-?[0-9]+$/.test(value.trim())) return value.trim();
+  return null;
+}
+
+function sameInteger(left, right) {
+  const l = decimalIntegerText(left);
+  const r = decimalIntegerText(right);
+  if (l === null || r === null) return false;
+  return BigInt(l) === BigInt(r);
 }
 
 function integerAtLeast(value, min) {
-  const n = numberValue(value);
-  return Number.isInteger(n) && n >= min;
+  const text = decimalIntegerText(value);
+  if (text === null) return false;
+  return BigInt(text) >= BigInt(min);
+}
+
+function integerTextOrClean(value) {
+  const text = decimalIntegerText(value);
+  return text === null ? clean(value) : text;
 }
 
 function booleanString(value) {
@@ -43,30 +57,20 @@ try {
   process.exit(1);
 }
 
-const checksum = numberValue(proof.checksum);
-const expectedChecksum = numberValue(proof.expected_checksum);
-const weighted = numberValue(proof.weighted_checksum);
-const expectedWeighted = numberValue(proof.expected_weighted_checksum);
-const mismatchCount = numberValue(proof.mismatch_count);
-const frameUs = numberValue(proof.frame_us);
-const nativeWidth = numberValue(proof.capture_native_width);
-const nativeHeight = numberValue(proof.capture_native_height);
-const textNormalizationPixels = numberValue(proof.generated_gui_text_normalization_pixels);
-
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
   reason = 'blur-or-tolerance-not-allowed';
-} else if (!Number.isFinite(checksum) || !Number.isFinite(expectedChecksum)) {
+} else if (decimalIntegerText(proof.checksum) === null || decimalIntegerText(proof.expected_checksum) === null) {
   reason = 'missing-checksum-proof';
-} else if (checksum !== expectedChecksum) {
+} else if (!sameInteger(proof.checksum, proof.expected_checksum)) {
   reason = 'checksum-mismatch';
-} else if (!Number.isFinite(weighted) || !Number.isFinite(expectedWeighted)) {
+} else if (decimalIntegerText(proof.weighted_checksum) === null || decimalIntegerText(proof.expected_weighted_checksum) === null) {
   reason = 'missing-weighted-checksum-proof';
-} else if (weighted !== expectedWeighted) {
+} else if (!sameInteger(proof.weighted_checksum, proof.expected_weighted_checksum)) {
   reason = 'weighted-checksum-mismatch';
-} else if (!Number.isInteger(mismatchCount)) {
+} else if (decimalIntegerText(proof.mismatch_count) === null) {
   reason = 'malformed-mismatch-count';
-} else if (mismatchCount !== 0) {
+} else if (!sameInteger(proof.mismatch_count, 0)) {
   reason = 'pixel-mismatch';
 } else if (proof.captured_argb_written !== true) {
   reason = 'missing-captured-argb';
@@ -80,18 +84,18 @@ if (proof.blur_or_tolerance_used !== false) {
 
 emit('electron_generated_gui_web_validation_status', reason === 'pass' ? 'pass' : 'fail');
 emit('electron_generated_gui_web_validation_reason', reason);
-emit('electron_generated_gui_web_simple_checksum', Number.isFinite(expectedChecksum) ? expectedChecksum : '');
-emit('electron_generated_gui_web_electron_checksum', Number.isFinite(checksum) ? checksum : '');
-emit('electron_generated_gui_web_simple_weighted_checksum', Number.isFinite(expectedWeighted) ? expectedWeighted : '');
-emit('electron_generated_gui_web_electron_weighted_checksum', Number.isFinite(weighted) ? weighted : '');
-emit('electron_generated_gui_web_mismatch_count', Number.isFinite(mismatchCount) ? mismatchCount : clean(proof.mismatch_count));
+emit('electron_generated_gui_web_simple_checksum', integerTextOrClean(proof.expected_checksum));
+emit('electron_generated_gui_web_electron_checksum', integerTextOrClean(proof.checksum));
+emit('electron_generated_gui_web_simple_weighted_checksum', integerTextOrClean(proof.expected_weighted_checksum));
+emit('electron_generated_gui_web_electron_weighted_checksum', integerTextOrClean(proof.weighted_checksum));
+emit('electron_generated_gui_web_mismatch_count', integerTextOrClean(proof.mismatch_count));
 emit('electron_generated_gui_web_blur_or_tolerance_used', proof.blur_or_tolerance_used === false ? 'false' : clean(proof.blur_or_tolerance_used));
-emit('electron_generated_gui_web_electron_frame_us', Number.isFinite(frameUs) ? frameUs : clean(proof.frame_us));
-emit('electron_generated_gui_web_capture_native_width', Number.isFinite(nativeWidth) ? nativeWidth : clean(proof.capture_native_width));
-emit('electron_generated_gui_web_capture_native_height', Number.isFinite(nativeHeight) ? nativeHeight : clean(proof.capture_native_height));
+emit('electron_generated_gui_web_electron_frame_us', integerTextOrClean(proof.frame_us));
+emit('electron_generated_gui_web_capture_native_width', integerTextOrClean(proof.capture_native_width));
+emit('electron_generated_gui_web_capture_native_height', integerTextOrClean(proof.capture_native_height));
 emit('electron_generated_gui_web_capture_downsampled', booleanString(proof.capture_downsampled));
 emit('electron_generated_gui_web_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
-emit('electron_generated_gui_web_text_normalization_pixels', Number.isFinite(textNormalizationPixels) ? textNormalizationPixels : clean(proof.generated_gui_text_normalization_pixels ?? 0));
+emit('electron_generated_gui_web_text_normalization_pixels', integerTextOrClean(proof.generated_gui_text_normalization_pixels ?? 0));
 
 if (reason !== 'pass') {
   process.exit(1);

@@ -27,7 +27,7 @@ electron_generated_gui_web_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -72,6 +72,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
 
 - Complete Electron generated-GUI proof JSON validates and emits normalized
   `electron_generated_gui_web_*` rows.
+- Large checksum and weighted-checksum values compare as exact decimal integer
+  text, not rounded JavaScript numbers.
 - Malformed `frame_us` fails closed instead of relying on shell integer
   comparison behavior.
 - Blur/tolerance use, missing ARGB capture, missing capture provenance,
@@ -115,6 +117,39 @@ expect(evidence).to_contain("electron_generated_gui_web_capture_native_height=72
 expect(evidence).to_contain("electron_generated_gui_web_capture_downsampled=false")
 expect(evidence).to_contain("electron_generated_gui_web_captured_argb_written=true")
 expect(evidence).to_contain("electron_generated_gui_web_blur_or_tolerance_used=false")
+```
+
+</details>
+
+#### rejects large checksum values that differ past JavaScript number precision
+
+-  proof command
+   - Expected: code equals `1`
+- Assert decimal integer text is preserved for large Electron generated-GUI proof
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-generated-gui-web-validator-large-checksum"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "p.checksum=\"9007199254740993\";p.expected_checksum=\"9007199254740992\";p.weighted_checksum=\"18014398509481985\";p.expected_weighted_checksum=\"18014398509481985\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Assert decimal integer text is preserved for large Electron generated-GUI proof")
+expect(evidence).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(evidence).to_contain("electron_generated_gui_web_validation_reason=checksum-mismatch")
+expect(evidence).to_contain("electron_generated_gui_web_electron_checksum=9007199254740993")
+expect(evidence).to_contain("electron_generated_gui_web_simple_checksum=9007199254740992")
+expect(evidence).to_contain("electron_generated_gui_web_electron_weighted_checksum=18014398509481985")
+expect(evidence).to_contain("electron_generated_gui_web_simple_weighted_checksum=18014398509481985")
 ```
 
 </details>
@@ -265,8 +300,8 @@ expect(script).to_contain("status=divergent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
