@@ -143,12 +143,17 @@ const geometry = geometryJson.value || {};
 const geometryViewport = geometry.viewport || {};
 const geometryItems = Array.isArray(geometry.items) ? geometry.items : [];
 const expectedProofSource = 'tools/chrome-live-bitmap/capture_html_argb.js';
+const chromeUserAgent = typeof proof.chrome_user_agent === 'string' ? proof.chrome_user_agent : '';
 
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
   reason = 'blur-or-tolerance-not-allowed';
 } else if (proof.proof_source !== expectedProofSource) {
   reason = 'unexpected-chrome-proof-source';
+} else if (proof.capture_mode !== 'chrome-devtools-screenshot') {
+  reason = 'unexpected-chrome-capture-mode';
+} else if (!/(Chrome|Chromium)\/[0-9]/.test(chromeUserAgent)) {
+  reason = 'missing-chrome-runtime-user-agent';
 } else if (decimalIntegerText(proof.checksum) === null || decimalIntegerText(proof.expected_checksum) === null) {
   reason = 'missing-checksum-proof';
 } else if (!sameInteger(proof.checksum, proof.expected_checksum)) {
@@ -202,6 +207,10 @@ if (proof.blur_or_tolerance_used !== false) {
 emit('chrome_simple_web_layout_validation_status', reason === 'pass' ? 'pass' : 'fail');
 emit('chrome_simple_web_layout_validation_reason', reason);
 emit('chrome_simple_web_layout_proof_source', proof.proof_source);
+emit('chrome_simple_web_layout_capture_mode', proof.capture_mode);
+emit('chrome_simple_web_layout_chrome_user_agent', proof.chrome_user_agent);
+emit('chrome_simple_web_layout_chrome_product', proof.chrome_product);
+emit('chrome_simple_web_layout_chrome_protocol_version', proof.chrome_protocol_version);
 emit('chrome_simple_web_layout_simple_checksum', integerTextOrClean(proof.expected_checksum));
 emit('chrome_simple_web_layout_chrome_checksum', integerTextOrClean(proof.checksum));
 emit('chrome_simple_web_layout_simple_weighted_checksum', integerTextOrClean(proof.expected_weighted_checksum));

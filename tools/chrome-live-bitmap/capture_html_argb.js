@@ -486,11 +486,14 @@ async function captureViaDevTools(fileUrl) {
   let browserConn;
   try {
     let gpuInfo = null;
+    let browserVersion = null;
     try {
       browserConn = await connectWebSocket(endpoint);
-      gpuInfo = await cdpSend(browserConn, 1, "SystemInfo.getInfo");
+      browserVersion = await cdpSend(browserConn, 1, "Browser.getVersion");
+      gpuInfo = await cdpSend(browserConn, 2, "SystemInfo.getInfo");
     } catch (err) {
       gpuInfo = { error: err && err.message ? err.message : "system-info-unavailable" };
+      if (!browserVersion) browserVersion = { error: err && err.message ? err.message : "browser-version-unavailable" };
     }
     const page = await fetchPageTarget(endpoint, timeoutMs);
     conn = await connectWebSocket(page.webSocketDebuggerUrl);
@@ -513,7 +516,7 @@ async function captureViaDevTools(fileUrl) {
     const geometry = geomEval.result ? geomEval.result.value : null;
     const shot = await cdpSend(conn, id++, "Page.captureScreenshot", { format: "png", fromSurface: true });
     const elapsedUs = Number((process.hrtime.bigint() - start) / 1000n);
-    return { png: Buffer.from(shot.data || "", "base64"), geometry, gpuInfo, elapsedUs };
+    return { png: Buffer.from(shot.data || "", "base64"), geometry, gpuInfo, browserVersion, elapsedUs };
   } finally {
     if (conn) conn.socket.destroy();
     if (browserConn) browserConn.socket.destroy();
@@ -532,12 +535,14 @@ const fileUrl = `file://${path.resolve(htmlPath)}`;
 let pngBuffer = null;
 let geometry = null;
 let gpuInfo = null;
+let browserVersion = null;
 let elapsedUs = 0;
 if (geometryOutputPath) {
   captureViaDevTools(fileUrl).then(capture => {
     pngBuffer = capture.png;
     geometry = capture.geometry;
     gpuInfo = capture.gpuInfo;
+    browserVersion = capture.browserVersion;
     elapsedUs = capture.elapsedUs;
     finish();
   }).catch(err => fail(`chrome-devtools-capture-failed:${err.message || "error"}`));
@@ -615,8 +620,12 @@ const proof = {
   captured_argb_written: Boolean(outputPath),
   geometry_path: geometryOutputPath,
   geometry_written: Boolean(geometryOutputPath && geometry),
+  capture_mode: geometryOutputPath ? "chrome-devtools-screenshot" : "chrome-headless-screenshot",
   blur_or_tolerance_used: false,
   chrome_bin: chromeBin,
+  chrome_user_agent: browserVersion && browserVersion.userAgent ? browserVersion.userAgent : "",
+  chrome_product: browserVersion && browserVersion.product ? browserVersion.product : "",
+  chrome_protocol_version: browserVersion && browserVersion.protocolVersion ? browserVersion.protocolVersion : "",
   gpu_info: gpuInfo,
 };
 if (proofPath) fs.writeFileSync(proofPath, JSON.stringify(proof));
