@@ -77,6 +77,9 @@ SIMPLE_LIB=src bin/simple test/03_system/check/production_gui_web_renderer_parit
 - The wrapper preserves layout-manifest host dependency diagnostics so the gate
   and aggregate can distinguish missing Electron setup from Simple Web renderer
   mismatches.
+- The wrapper promotes the event-routing validator status, exact browser event
+  sequence, and native payload/text rows so the top-level parity proof cannot
+  pass on shallow event counts alone.
 
 ## Operator Notes
 
@@ -170,7 +173,7 @@ the produced `evidence.env` to validate the final release-blocking contract.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -189,6 +192,16 @@ expect(script).to_contain("production_gui_web_renderer_parity_event_routing_stat
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_performance_now_available")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_animation_frame_count")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_css_animation_probe")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_validation_status")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_event_sequence")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_move_payload_source")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_title_command_text")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_text_input_text")
+expect(script).to_contain("[ \"$validation_status\" = \"pass\" ]")
+expect(script).to_contain("host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up")
+expect(script).to_contain("[ \"$move_payload_source\" = \"native_event\" ]")
+expect(script).to_contain("[ \"$title_command_text\" = \"/tmp/project\" ]")
+expect(script).to_contain("[ \"$text_input_text\" = \"Hello Simple\" ]")
 expect(script).to_contain("num_positive \"$performance_now_delta_ms\"")
 expect(script).to_contain("num_at_least \"$animation_frame_count\" 2")
 expect(script).to_contain("PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS:-180")
@@ -442,12 +455,12 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_surface_manifest
 
 </details>
 
-#### fails top-level parity when Electron event routing evidence is missing
+#### fails top-level parity when Electron event routing validator details are missing
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -459,7 +472,7 @@ val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
     "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"production_gui_backend_status=pass\\\\nproduction_gui_backend_reason=pass\\\\nproduction_gui_backend_exact_backend_parity=true\\\\nproduction_gui_backend_cpu_simd_different_pixels=0\\\\nproduction_gui_backend_metal_resolved=metal\\\\nproduction_gui_backend_metal_different_pixels=0\\\\nproduction_gui_backend_metal_gpu_frame_complete=true\\\\nproduction_gui_backend_blur_or_tolerance_used=false\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/backend.sh && " +
     "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"production_gui_font_offload_status=pass\\\\nproduction_gui_font_offload_reason=pass\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/font.sh && " +
     "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"metal_engine2d_framebuffer_readback_status=pass\\\\nmetal_engine2d_framebuffer_readback_reason=raw-metal-framebuffer-download-proven\\\\nmetal_engine2d_framebuffer_readback_spec_status=pass\\\\nmetal_engine2d_framebuffer_gpu_readback_available=true\\\\nmetal_engine2d_framebuffer_blur_or_tolerance_used=false\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/metal.sh && " +
-    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"wm_browser_event_routing_status=fail\\\\nwm_browser_event_routing_reason=probe-reported-fail\\\\nwm_browser_event_routing_ready=true\\\\nwm_browser_event_routing_wm_found=true\\\\nwm_browser_event_routing_focus_count=0\\\\nwm_browser_event_routing_move_count=0\\\\nwm_browser_event_routing_maximize_count=0\\\\nwm_browser_event_routing_title_command_count=0\\\\nwm_browser_event_routing_text_input_count=0\\\\nwm_browser_event_routing_pointer_down_count=0\\\\nwm_browser_event_routing_pointer_up_count=0\\\\nwm_browser_event_routing_blur_or_tolerance_used=false\\\\n\" > \"$BUILD_DIR/evidence.env\"\\nexit 1\\n' > " + root + "/fixture/event.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"wm_browser_event_routing_status=pass\\\\nwm_browser_event_routing_reason=pass\\\\nwm_browser_event_routing_ready=true\\\\nwm_browser_event_routing_wm_found=true\\\\nwm_browser_event_routing_focus_count=1\\\\nwm_browser_event_routing_move_count=1\\\\nwm_browser_event_routing_maximize_count=1\\\\nwm_browser_event_routing_title_command_count=1\\\\nwm_browser_event_routing_text_input_count=1\\\\nwm_browser_event_routing_pointer_down_count=1\\\\nwm_browser_event_routing_pointer_up_count=1\\\\nwm_browser_event_routing_performance_now_available=true\\\\nwm_browser_event_routing_performance_now_delta_ms=16.7\\\\nwm_browser_event_routing_animation_frame_available=true\\\\nwm_browser_event_routing_animation_frame_count=2\\\\nwm_browser_event_routing_css_animation_probe=true\\\\nwm_browser_event_routing_blur_or_tolerance_used=false\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/event.sh && " +
     "PRODUCTION_GUI_WEB_RENDERER_PARITY_MATRIX_SCRIPT=" + root + "/fixture/matrix.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_SCRIPT=" + root + "/fixture/layout.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_SCRIPT=" + root + "/fixture/surface.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_BACKEND_SCRIPT=" + root + "/fixture/backend.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_FONT_OFFLOAD_SCRIPT=" + root + "/fixture/font.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_METAL_READBACK_SCRIPT=" + root + "/fixture/metal.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_EVENT_SCRIPT=" + root + "/fixture/event.sh BUILD_ROOT=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
@@ -467,9 +480,11 @@ expect(code).to_equal(0)
 val evidence = file_read(root + "/out/evidence.env")
 expect(evidence).to_contain("production_gui_web_renderer_parity_status=fail")
 expect(evidence).to_contain("production_gui_web_renderer_parity_reason=event-routing-evidence-failed")
-expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_status=fail")
-expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_focus_count=0")
-expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_pointer_down_count=0")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_validation_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_focus_count=1")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_pointer_down_count=1")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_performance_now_delta_ms=16.7")
 ```
 
 </details>
