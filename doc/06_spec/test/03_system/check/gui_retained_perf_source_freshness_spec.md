@@ -27,7 +27,7 @@ gui_retained_perf_source_freshness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -115,6 +115,11 @@ row says `*_native_bin_file_status=pass`,
 `*_native_bin_executable_status=pass`, or `*_native_bin_format_status=pass`,
 the aggregate must still inspect the referenced file and fail completion if the
 actual bytes are not a recognized native binary.
+
+Retained frame timing and checksum rows are claims too. A passing row must carry
+positive numeric `frame_avg_ns`, `frame_p50_ns`, `frame_p95_ns`, and checksum
+values; zero timing or nonnumeric checksum values are diagnostics, not 4K/8K
+completion evidence.
 
 ## Syntax
 
@@ -246,12 +251,74 @@ expect(report).to_contain("8K retained perf native artifacts: alias_src pass; na
 
 </details>
 
+#### rejects retained 4K perf rows with zero frame timing
+
+- Create a retained 4K performance row with zero timing values
+   - Expected: code equals `0`
+- Assert zero timing invalidates the retained 4K completion row
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create a retained 4K performance row with zero timing values")
+val command = "rm -rf build/test-gui-retained-perf-zero-frame-timing && mkdir -p build/test-gui-retained-perf-zero-frame-timing/source && printf 'showcase retained log\\n' > build/test-gui-retained-perf-zero-frame-timing/source/showcase.log && printf 'elapsed_ms=597\\n' > build/test-gui-retained-perf-zero-frame-timing/source/time.log && printf 'alias4k\\n' > build/test-gui-retained-perf-zero-frame-timing/source/alias4k.spl && printf '\\177ELFbin4k\\n' > build/test-gui-retained-perf-zero-frame-timing/source/native4k.bin && chmod +x build/test-gui-retained-perf-zero-frame-timing/source/native4k.bin && printf 'build4k\\n' > build/test-gui-retained-perf-zero-frame-timing/source/build4k.log && printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_reason=met-target-fps\\ngui_showcase_4k_200fps_resolution=4k\\ngui_showcase_4k_200fps_width=3840\\ngui_showcase_4k_200fps_height=2160\\ngui_showcase_4k_200fps_frames=200\\ngui_showcase_4k_200fps_fps_x1000=201000\\ngui_showcase_4k_200fps_frame_avg_ns=0\\ngui_showcase_4k_200fps_frame_p50_ns=0\\ngui_showcase_4k_200fps_frame_p95_ns=0\\ngui_showcase_4k_200fps_target_fps=200\\ngui_showcase_4k_200fps_max_rss_kb=131072\\ngui_showcase_4k_200fps_max_rss_budget_kb=262144\\ngui_showcase_4k_200fps_rss_status=pass\\ngui_showcase_4k_200fps_pixels=8294400\\ngui_showcase_4k_200fps_nonzero_pixels=1000\\ngui_showcase_4k_200fps_checksum=123456\\ngui_showcase_4k_200fps_render_mode=retained-static-frame\\ngui_showcase_4k_200fps_redraw_frames=1\\ngui_showcase_4k_200fps_source_revision=artifact-test\\ngui_showcase_4k_200fps_simple_bin=src/compiler_rust/target/release/simple\\ngui_showcase_4k_200fps_use_native=1\\ngui_showcase_4k_200fps_native_bin=build/test-gui-retained-perf-zero-frame-timing/source/native4k.bin\\ngui_showcase_4k_200fps_alias_src=build/test-gui-retained-perf-zero-frame-timing/source/alias4k.spl\\ngui_showcase_4k_200fps_native_build_log=build/test-gui-retained-perf-zero-frame-timing/source/build4k.log\\ngui_showcase_4k_200fps_native_build_mode=aggressive-native\\ngui_showcase_4k_200fps_fallback_state=none\\ngui_showcase_4k_200fps_log=build/test-gui-retained-perf-zero-frame-timing/source/showcase.log\\ngui_showcase_4k_200fps_time_log=build/test-gui-retained-perf-zero-frame-timing/source/time.log\\n' > build/test-gui-retained-perf-zero-frame-timing/source/status4k.env && GUI_SHOWCASE_4K_PERF_ENV=build/test-gui-retained-perf-zero-frame-timing/source/status4k.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-retained-perf-zero-frame-timing/out REPORT_PATH=build/test-gui-retained-perf-zero-frame-timing/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert zero timing invalidates the retained 4K completion row")
+val evidence = file_read("build/test-gui-retained-perf-zero-frame-timing/out/evidence.env")
+val report = file_read("build/test-gui-retained-perf-zero-frame-timing/report.md")
+expect(evidence).to_contain("gui_showcase_4k_200fps_status=fail")
+expect(evidence).to_contain("gui_showcase_4k_200fps_frame_avg_ns=0")
+expect(evidence).to_contain("gui_showcase_4k_200fps_frame_p50_ns=0")
+expect(evidence).to_contain("gui_showcase_4k_200fps_frame_p95_ns=0")
+expect(evidence).to_contain("gui_showcase_4k_200fps_reason=invalid-4k-frame-timing:avg=0;p50=0;p95=0")
+expect(report).to_contain("GUI/web/2D 4K retained perf: fail (invalid-4k-frame-timing:avg=0;p50=0;p95=0")
+```
+
+</details>
+
+#### rejects retained 8K perf rows with nonnumeric readback checksum
+
+- Create a retained 8K performance row with nonnumeric checksum evidence
+   - Expected: code equals `0`
+- Assert nonnumeric checksum invalidates the retained 8K completion row
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create a retained 8K performance row with nonnumeric checksum evidence")
+val command = "rm -rf build/test-gui-retained-perf-nonnumeric-checksum && mkdir -p build/test-gui-retained-perf-nonnumeric-checksum/source && printf 'showcase retained log\\n' > build/test-gui-retained-perf-nonnumeric-checksum/source/showcase.log && printf 'elapsed_ms=597\\n' > build/test-gui-retained-perf-nonnumeric-checksum/source/time.log && printf 'alias8k\\n' > build/test-gui-retained-perf-nonnumeric-checksum/source/alias8k.spl && printf '\\177ELFbin8k\\n' > build/test-gui-retained-perf-nonnumeric-checksum/source/native8k.bin && chmod +x build/test-gui-retained-perf-nonnumeric-checksum/source/native8k.bin && printf 'build8k\\n' > build/test-gui-retained-perf-nonnumeric-checksum/source/build8k.log && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_resolution=8k\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_frames=200\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_frame_avg_ns=4975124\\ngui_showcase_8k_perf_frame_p50_ns=4975124\\ngui_showcase_8k_perf_frame_p95_ns=4975124\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_nonzero_pixels=1000\\ngui_showcase_8k_perf_checksum=not-a-number\\ngui_showcase_8k_perf_render_mode=retained-static-frame\\ngui_showcase_8k_perf_redraw_frames=1\\ngui_showcase_8k_perf_source_revision=artifact-test\\ngui_showcase_8k_perf_simple_bin=src/compiler_rust/target/release/simple\\ngui_showcase_8k_perf_use_native=1\\ngui_showcase_8k_perf_native_bin=build/test-gui-retained-perf-nonnumeric-checksum/source/native8k.bin\\ngui_showcase_8k_perf_alias_src=build/test-gui-retained-perf-nonnumeric-checksum/source/alias8k.spl\\ngui_showcase_8k_perf_native_build_log=build/test-gui-retained-perf-nonnumeric-checksum/source/build8k.log\\ngui_showcase_8k_perf_native_build_mode=aggressive-native\\ngui_showcase_8k_perf_fallback_state=none\\ngui_showcase_8k_perf_log=build/test-gui-retained-perf-nonnumeric-checksum/source/showcase.log\\ngui_showcase_8k_perf_time_log=build/test-gui-retained-perf-nonnumeric-checksum/source/time.log\\n' > build/test-gui-retained-perf-nonnumeric-checksum/source/status8k.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-retained-perf-nonnumeric-checksum/source/status8k.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-retained-perf-nonnumeric-checksum/out REPORT_PATH=build/test-gui-retained-perf-nonnumeric-checksum/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert nonnumeric checksum invalidates the retained 8K completion row")
+val evidence = file_read("build/test-gui-retained-perf-nonnumeric-checksum/out/evidence.env")
+val report = file_read("build/test-gui-retained-perf-nonnumeric-checksum/report.md")
+expect(evidence).to_contain("gui_showcase_8k_perf_status=fail")
+expect(evidence).to_contain("gui_showcase_8k_perf_checksum=not-a-number")
+expect(evidence).to_contain("gui_showcase_8k_perf_reason=invalid-8k-readback-checksum:not-a-number")
+expect(report).to_contain("GUI/web/2D 8K retained perf: fail (invalid-8k-readback-checksum:not-a-number")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
