@@ -7,7 +7,7 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 40
+- **Total Lines:** 90
 
 ---
 
@@ -15,5 +15,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Model Loader Streaming Readiness Specification](test/unit/lib/gc_async_mut/svllm/model_loader_streaming_readiness_spec.md) | Minimal | N/A | 4 | 20% | 40 lines |
+| [Std Fs Specification](test/unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.md) | Partial | N/A | 9 | 40% | 90 lines |
 

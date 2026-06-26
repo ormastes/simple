@@ -17,18 +17,46 @@
 # see FS-REQ-001).
 
 use std.nogc_async_mut.svllm.nvfs_client.{ObjHandle, ObjClass, CreateFlags, NvfsError, SyncScope, OpenMode, BufHandle, NvfsCaps}
-use std.nogc_sync_mut.sffi.io.{file_exists, file_move, file_write_bytes}
+use std.nogc_sync_mut.sffi.io.{file_exists, file_move, file_read_bytes, file_write_bytes}
 
 # Monotonic handle-id counter. Handles are integers; the real path is carried
 # in the handle itself (advisory field). Native nvfs adapters ignore it.
 var _std_fs_next_id: i64 = 1
+var _std_fs_registered_buf_ids: [i64] = []
 
 fn _alloc_id() -> i64:
     val id = _std_fs_next_id
     _std_fs_next_id = _std_fs_next_id + 1
     id
 
-# Concrete adapter. Stateless — all per-object state lives in the handle.
+fn _register_buf_id(id: i64):
+    _std_fs_registered_buf_ids.push(id)
+
+fn _buf_registered(id: i64) -> bool:
+    var i = 0
+    while i < _std_fs_registered_buf_ids.len():
+        if _std_fs_registered_buf_ids[i] == id:
+            return true
+        i = i + 1
+    false
+
+fn _unregister_buf_id(id: i64) -> bool:
+    var found = false
+    var next_ids: [i64] = []
+    var i = 0
+    while i < _std_fs_registered_buf_ids.len():
+        val current = _std_fs_registered_buf_ids[i]
+        if current == id:
+            found = true
+        else:
+            next_ids.push(current)
+        i = i + 1
+    _std_fs_registered_buf_ids = next_ids
+    found
+
+# Concrete adapter. Object state lives in ObjHandle paths; local streaming
+# buffer lifecycle uses an in-process handle registry until native pinned
+# buffers land.
 struct StdFsNvfsClient:
     marker: i64
 
@@ -69,7 +97,22 @@ struct StdFsNvfsClient:
         Ok(bytes.len() as i64)
 
     fn read_range(self, obj: ObjHandle, off: i64, len: i64, buf: BufHandle) -> Result<i64, NvfsError>:
-        Err(NvfsError.Unsupported)
+        if obj.path == "" or obj.is_null():
+            return Err(NvfsError.InvalidArgument)
+        if off < 0 or len < 0:
+            return Err(NvfsError.InvalidArgument)
+        if buf.is_null() or not _buf_registered(buf.id):
+            return Err(NvfsError.InvalidArgument)
+        if len > buf.len:
+            return Err(NvfsError.InvalidArgument)
+        if not file_exists(obj.path):
+            return Err(NvfsError.NotFound)
+        val bytes = file_read_bytes(obj.path)
+        if off > bytes.len():
+            return Err(NvfsError.InvalidArgument)
+        if off + len > bytes.len():
+            return Err(NvfsError.InvalidArgument)
+        Ok(len)
 
     fn publish_atomic(self, temp_obj: ObjHandle, final_path: text) -> Result<(), NvfsError>:
         if temp_obj.path == "":
@@ -104,10 +147,18 @@ struct StdFsNvfsClient:
         ))
 
     fn register_buffer(self, ptr: i64, len: i64) -> Result<BufHandle, NvfsError>:
-        Err(NvfsError.Unsupported)
+        if ptr < 0 or len <= 0:
+            return Err(NvfsError.InvalidArgument)
+        val id = _alloc_id()
+        _register_buf_id(id)
+        Ok(BufHandle(id: id, len: len))
 
     fn unregister_buffer(self, buf: BufHandle) -> Result<(), NvfsError>:
-        Err(NvfsError.Unsupported)
+        if buf.is_null() or buf.len <= 0:
+            return Err(NvfsError.InvalidArgument)
+        if not _unregister_buf_id(buf.id):
+            return Err(NvfsError.InvalidArgument)
+        Ok(())
 
 # Two-phase rename helper: open a `<final>.tmp` staging path read-only and
 # publish_atomic it onto `final_path`. Extracted so callers don't repeat the

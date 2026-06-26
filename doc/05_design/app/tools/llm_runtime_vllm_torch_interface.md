@@ -480,8 +480,10 @@ that start in one chunk and continue through following chunks, with explicit
 also exposes a plan-only tensor stream plan that decomposes single-chunk and
 cross-chunk tensor spans into ordered chunk read segments and carries
 pin/device-staging intent as explicit flags while reporting
-`plan_only_not_scheduled`. The `std_fs` NVFS adapter still reports
-`read_range`, `register_buffer`, and `unregister_buffer` as unsupported, so it
-cannot be treated as async NVFS execution. Remaining blockers include full async
-NVFS scheduling, pinned/device staging, live CUDA placement evidence, and
-device-preserving optimizer state for already-CUDA parameters.
+`plan_only_not_scheduled`. The `std_fs` NVFS adapter now validates local byte
+ranges with `file_read_bytes`, returns deterministic read byte counts, and
+registers pure local buffer handles for bring-up streaming tests. This proves
+local pack streaming boundaries without claiming pinned memory, GPU staging, or
+async NVFS scheduling. Remaining blockers include native async scheduling, real
+pinned/device staging, live CUDA placement evidence, and device-preserving
+optimizer execution against a live CUDA/libtorch installation.
