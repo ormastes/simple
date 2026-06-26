@@ -304,6 +304,11 @@ CLI accepts:
 - `context <file> --sql --query=<text> [--db=<path>]` to query SQLite-backed
   context records with `backend: sqlite` in the output.
 
+The MCP tool accepts `file`, optional `target`, `format` (`text`, `markdown`, or
+`json`), `index=true`, `query`, `sql=true`, and `db`. These fields are forwarded
+to the existing `context` CLI subprocess so source-mode MCP does not import the
+large context/compiler graph directly.
+
 The SQL-backed context path uses the existing `app.io.sqlite_sffi` facade. In
 interpreter mode the compiler provides a narrow `rt_sqlite_*` subset for context
 indexing/querying: open/close, create table, delete, prepared insert/bind,

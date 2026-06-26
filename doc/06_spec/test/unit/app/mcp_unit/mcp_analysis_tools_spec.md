@@ -27,7 +27,7 @@ mcp_analysis_tools_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -219,6 +219,30 @@ expect(has_target).to_equal(true)
 
 </details>
 
+#### app MCP context forwards index query sql and db options
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
+expect(source).to_contain("val query = extract_field(body, \"query\")")
+expect(source).to_contain("ctx_args.push(\"--query=\" + query)")
+expect(source).to_contain("ctx_args.push(\"--index\")")
+expect(source).to_contain("ctx_args.push(\"--sql\")")
+expect(source).to_contain("ctx_args.push(\"--db=\" + db_path)")
+
+val table = rt_file_read_text("src/app/mcp/tool_table.spl") ?? ""
+expect(table).to_contain("prop_str(\"index\", \"Emit a local context-pack index (true/false)\")")
+expect(table).to_contain("prop_str(\"query\", \"Query local context-pack index for this source\")")
+expect(table).to_contain("prop_str(\"sql\", \"Use Simple embedded SQLite for index/query (true/false)\")")
+```
+
+</details>
+
 ### simple_ponytail tool
 
 #### app MCP ponytail exposes audit and simplification modes
@@ -268,13 +292,14 @@ expect(schema).to_contain("Mode: audit, simplification")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val table = rt_file_read_text("src/app/mcp/tool_table.spl") ?? ""
 expect(table).to_contain("tool_entry(\"simple_ponytail\"")
 expect(table).to_contain("Ponytail over-engineering audit")
+expect(table).to_contain("prop_str(\"mode\", \"Mode: audit, simplification\")")
 
 val static_tools = rt_file_read_text("src/app/mcp/main_static_tools.spl") ?? ""
 expect(static_tools).to_contain("_mcp_static_tool(\"simple_ponytail\"")
@@ -479,8 +504,8 @@ expect(cmd).to_contain("^type Position")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

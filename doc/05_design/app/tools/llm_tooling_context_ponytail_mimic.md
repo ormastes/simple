@@ -122,6 +122,18 @@ The `context` CLI exposes this through the existing parser:
 - `context app.spl --sql --index -o context.db.txt`
 - `context app.spl --sql --query=handler --json`
 
+## MCP Context Index/Query Options Slice
+
+App MCP `simple_context` exposes the existing CLI-backed context storage
+surface without importing the large context/compiler graph into source-mode MCP.
+The tool schema accepts `file`, optional `target`, `format`, `index`, `query`,
+`sql`, and `db`. `handle_simple_context` validates the same text/markdown/json
+format boundary and forwards index/query/sql/db options to the `context`
+subprocess argument vector.
+
+App MCP `simple_ponytail` also advertises the existing `mode` selector so
+clients can discover `audit` and `simplification` through metadata.
+
 Interpreter mode implements the existing `rt_sqlite_*` facade in
 `sffi_db.rs`. The supported SQL subset is intentionally narrow: create table,
 delete all rows, prepared insert/bind, select explicit columns, count, simple

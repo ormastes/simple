@@ -275,3 +275,26 @@ Remaining:
 
 - Dedicated tab/routing for tooling artifacts, if the diagnostics-tab placement
   becomes too cramped.
+
+## Lane 7: MCP Context Index/Query Options
+
+Owner: Codex
+
+Status: implemented on 2026-06-26 for app MCP metadata and forwarding.
+
+Files:
+
+- `src/app/mcp/main_lazy_query_tools.spl`
+- `src/app/mcp/tool_table.spl`
+- `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl`
+- `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl`
+- `doc/07_guide/app/mcp/mcp.md`
+
+Tasks:
+
+1. Advertise `format`, `index`, `query`, `sql`, and `db` on app MCP
+   `simple_context`. Status: done.
+2. Forward those fields to the existing `context` CLI subprocess instead of
+   importing the context implementation into source-mode MCP. Status: done.
+3. Advertise `mode` on app MCP `simple_ponytail`. Status: done.
+4. Add focused mirrored unit coverage. Status: done.
