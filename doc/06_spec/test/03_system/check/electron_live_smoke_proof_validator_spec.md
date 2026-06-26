@@ -27,7 +27,7 @@ electron_live_smoke_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -87,6 +87,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
   generic hand-authored JSON object cannot stand in for the renderer bridge
   probe.
 - The live smoke shell wrapper delegates JSON validation to the proof validator.
+- The live smoke shell wrapper keeps validation, proof-source, viewport,
+  performance, and animation diagnostic rows on early unavailable/fail exits.
 
 ## Scenarios
 
@@ -435,7 +437,7 @@ expect(fractional).to_contain("electron_live_smoke_height=720")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -444,6 +446,8 @@ val bridge = file_read("src/app/ui.electron/bridge.js")
 val envelopes = file_read("src/app/ui.electron/bridge_envelopes.js")
 expect(wrapper).to_contain("validate-electron-live-smoke-proof.js")
 expect(wrapper).to_contain("electron_live_smoke=pass proof=$PROOF_PATH validation=$VALIDATION_ENV")
+expect(wrapper).to_contain("electron_live_smoke_validation_status")
+expect(wrapper).to_contain("electron_live_smoke_proof_source")
 expect(bridge).to_contain("electronLiveSmokeProofScript")
 expect(bridge).to_contain("proof_source: 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript'")
 expect(bridge).to_contain("performance_now_available")
@@ -455,12 +459,45 @@ expect(envelopes).to_contain("css_length")
 
 </details>
 
+#### keeps Electron live smoke diagnostics on early dependency failures
+
+- Confirm early Electron live smoke unavailable evidence preserves normalized diagnostics
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-live-smoke-wrapper-early-fail"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "PATH=/bin:/usr/bin SIMPLE_ELECTRON_PROOF_PATH=" + root + "/proof.json sh scripts/check/check-electron-live-smoke.shs > " + root + "/stdout.env 2> " + root + "/stderr.log; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm early Electron live smoke unavailable evidence preserves normalized diagnostics")
+expect(evidence).to_contain("electron_live_smoke=unavailable")
+expect(evidence).to_contain("error=missing_command:node")
+expect(evidence).to_contain("electron_live_smoke_validation_status=unavailable")
+expect(evidence).to_contain("electron_live_smoke_validation_reason=missing_command:node")
+expect(evidence).to_contain("electron_live_smoke_proof_source=")
+expect(evidence).to_contain("electron_live_smoke_width=")
+expect(evidence).to_contain("electron_live_smoke_height=")
+expect(evidence).to_contain("electron_live_smoke_performance_now_delta_ms=")
+expect(evidence).to_contain("electron_live_smoke_animation_frame_count=")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
