@@ -158,6 +158,37 @@ fn _bm_parse_blocks(content: text) -> [RenderBlock]:
                     scanning_list = false
             blocks.push(_bm_block(next_id, "list", start, i - 1, lines))
             next_id = next_id + 1
+        elif start == 0 and current_trimmed == "---":
+            # YAML frontmatter — only valid when --- is the very first content (Obsidian rule).
+            var j = 1
+            var close_at = -1
+            while j < lines.len() and close_at < 0:
+                if lines[j].trim() == "---":
+                    close_at = j
+                j = j + 1
+            if close_at >= 0:
+                blocks.push(_bm_block(next_id, "frontmatter", start, close_at, lines))
+                next_id = next_id + 1
+                i = close_at + 1
+            else:
+                # Unterminated => horizontal_rule (Obsidian rule)
+                blocks.push(_bm_block(next_id, "horizontal_rule", start, start, lines))
+                next_id = next_id + 1
+                i = i + 1
+        elif current_left.starts_with("~~~"):
+            # Tilde-fence code block — only ~~~ closes it, not ```
+            i = i + 1
+            var scanning_tilde = true
+            while i < lines.len() and scanning_tilde:
+                val probe = lines[i]
+                if probe.trim_start().starts_with("~~~"):
+                    scanning_tilde = false
+                else:
+                    i = i + 1
+            if i < lines.len():
+                i = i + 1
+            blocks.push(_bm_block(next_id, _bm_tilde_code_kind(lines, start), start, i - 1, lines))
+            next_id = next_id + 1
         elif _bm_is_horizontal_rule(line):
             blocks.push(_bm_block(next_id, "horizontal_rule", start, start, lines))
             next_id = next_id + 1
@@ -237,6 +268,15 @@ fn _bm_heading_level(line: text) -> i64:
         return level
     0
 
+fn _bm_tilde_code_kind(lines: [text], start: i64) -> text:
+    val raw = lines[start].trim_start()
+    val opener = raw.lower()
+    if opener.starts_with("~~~sdn-graph") or opener.starts_with("~~~sdn_graph"):
+        return "sdn_graph"
+    if opener.starts_with("~~~md-css") or opener.starts_with("~~~css"):
+        return "md_css"
+    "code"
+
 fn _bm_code_kind(lines: [text], start: i64) -> text:
     val raw = lines[start].trim_start()
     val opener = raw.lower()
@@ -296,6 +336,7 @@ fn _bm_is_math_fence(line: text) -> bool:
 fn _bm_starts_special_block(line: text) -> bool:
     val trimmed = line.trim_start()
     _bm_heading_level(line) > 0 or trimmed.starts_with("```") or
+        trimmed.starts_with("~~~") or
         trimmed.starts_with(">") or _bm_is_table_row(line) or
         _bm_is_list_line(line) or _bm_is_horizontal_rule(line) or _bm_is_embed(line) or
         _bm_is_math_fence(line)
