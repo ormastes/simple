@@ -82,7 +82,7 @@ SIMPLE_LIB=src bin/simple test/03_system/check/production_gui_web_renderer_parit
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -101,6 +101,7 @@ expect(script).to_contain("production_gui_web_renderer_parity_event_routing_stat
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_performance_now_available")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_animation_frame_count")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_css_animation_probe")
+expect(script).to_contain("num_nonnegative \"$performance_now_delta_ms\"")
 expect(script).to_contain("num_at_least \"$animation_frame_count\" 2")
 ```
 

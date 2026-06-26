@@ -27,7 +27,7 @@ production_gui_web_renderer_parity_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -87,7 +87,8 @@ sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true
   blur/tolerance.
 - The Electron event-routing contract also requires Chromium timing and
   animation evidence: `performance.now()`, at least two animation frames, and a
-  CSS animation probe.
+  CSS animation probe. The `performance.now()` delta must be numeric and
+  non-negative, not merely present.
 
 ## Scenarios
 
@@ -98,7 +99,7 @@ sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 85 lines folded for reproduction.
+Runnable source: 86 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -162,6 +163,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_ev
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_min_pointer_down_count=1")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_min_pointer_up_count=1")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_performance_now_available=true")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_performance_now_delta_ms_min=0")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_min_animation_frame_count=2")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_css_animation_probe=true")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_blur_or_tolerance_used=false")
@@ -325,6 +327,28 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_ev
 
 </details>
 
+#### rejects pass status when event routing performance delta is not numeric
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-production-gui-web-renderer-parity-gate-event-bad-delta && mkdir -p build/test-production-gui-web-renderer-parity-gate-event-bad-delta/source && printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_reason=pass\\nproduction_gui_web_renderer_parity_matrix_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_case_count=50\\nproduction_gui_web_renderer_parity_layout_manifest_pass_count=36\\nproduction_gui_web_renderer_parity_layout_manifest_tracked_count=14\\nproduction_gui_web_renderer_parity_layout_manifest_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_electron_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_backend=x11-xvfb-window-screenshot\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_required_commands=cargo,xvfb-run,dbus-run-session,xdotool,import,convert,node\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_capture_missing_commands=\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_capture_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_capture_backend=chrome-live-bitmap\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_live_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_case_count=50\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_pass_count=36\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_tracked_count=14\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_tauri_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_chrome_mismatch_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\nproduction_gui_web_renderer_parity_surface_manifest_blur_or_tolerance_used=false\\nproduction_gui_web_renderer_parity_backend_status=pass\\nproduction_gui_web_renderer_parity_font_offload_status=pass\\nproduction_gui_web_renderer_parity_metal_readback_status=pass\\nproduction_gui_web_renderer_parity_event_routing_status=pass\\nproduction_gui_web_renderer_parity_event_routing_ready=true\\nproduction_gui_web_renderer_parity_event_routing_wm_found=true\\nproduction_gui_web_renderer_parity_event_routing_focus_count=1\\nproduction_gui_web_renderer_parity_event_routing_move_count=1\\nproduction_gui_web_renderer_parity_event_routing_maximize_count=1\\nproduction_gui_web_renderer_parity_event_routing_title_command_count=1\\nproduction_gui_web_renderer_parity_event_routing_text_input_count=1\\nproduction_gui_web_renderer_parity_event_routing_pointer_down_count=1\\nproduction_gui_web_renderer_parity_event_routing_pointer_up_count=1\\nproduction_gui_web_renderer_parity_event_routing_performance_now_available=true\\nproduction_gui_web_renderer_parity_event_routing_performance_now_delta_ms=not-a-number\\nproduction_gui_web_renderer_parity_event_routing_animation_frame_available=true\\nproduction_gui_web_renderer_parity_event_routing_animation_frame_count=2\\nproduction_gui_web_renderer_parity_event_routing_css_animation_probe=true\\nproduction_gui_web_renderer_parity_event_routing_blur_or_tolerance_used=false\\n' > build/test-production-gui-web-renderer-parity-gate-event-bad-delta/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-production-gui-web-renderer-parity-gate-event-bad-delta/source/evidence.env BUILD_DIR=build/test-production-gui-web-renderer-parity-gate-event-bad-delta/out REPORT_PATH=build/test-production-gui-web-renderer-parity-gate-event-bad-delta/report.md sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-production-gui-web-renderer-parity-gate-event-bad-delta/out/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=event-routing-performance-animation-contract-missing")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_event_routing_performance_now_delta_ms=not-a-number")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_performance_now_delta_ms_min=0")
+```
+
+</details>
+
 #### rejects pass status when surface capture provenance is missing
 
 <details>
@@ -422,8 +446,8 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_me
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
