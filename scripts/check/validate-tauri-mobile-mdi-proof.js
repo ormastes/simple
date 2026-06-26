@@ -13,6 +13,41 @@ function emit(key, value) {
   console.log(`${prefix}_${key}=${clean(value)}`);
 }
 
+function decimalIntegerText(value) {
+  if (typeof value === "number" && Number.isInteger(value)) return String(value);
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "string" && /^-?[0-9]+$/.test(value.trim())) return value.trim();
+  return null;
+}
+
+function decimalNumberText(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string" && /^-?(?:[0-9]+)(?:\.[0-9]+)?$/.test(value.trim())) return value.trim();
+  return null;
+}
+
+function integerAtLeast(value, min) {
+  const text = decimalIntegerText(value);
+  if (text === null) return false;
+  return BigInt(text) >= BigInt(min);
+}
+
+function decimalAtLeast(value, min) {
+  const text = decimalNumberText(value);
+  if (text === null) return false;
+  return Number(text) >= min;
+}
+
+function integerTextOrBlank(value) {
+  const text = decimalIntegerText(value);
+  return text === null ? "" : text;
+}
+
+function decimalTextOrBlank(value) {
+  const text = decimalNumberText(value);
+  return text === null ? "" : text;
+}
+
 function fail(reason) {
   emit("mdi_proof_status", "fail");
   emit("mdi_proof_reason", reason);
@@ -46,16 +81,8 @@ try {
 
 fs.writeFileSync(jsonPath, `${JSON.stringify(proof)}\n`);
 
-const count = Number(proof.count || 0);
-const taskbarItemCount = Number(proof.taskbarItemCount || 0);
-const taskbarIconCount = Number(proof.taskbarIconCount || 0);
-const viewportWidth = Number(proof.viewportWidth);
-const viewportHeight = Number(proof.viewportHeight);
-const performanceNowDeltaMs = Number(proof.performanceNowDeltaMs);
-const animationFrameCount = Number(proof.animationFrameCount);
-
 const eventPass =
-  count >= 4 &&
+  integerAtLeast(proof.count, 4) &&
   proof.hasDesktop === true &&
   proof.hasDragRuntime === true &&
   proof.hasDragEvents === true &&
@@ -66,39 +93,35 @@ const eventPass =
   proof.bodyClickRouted === true &&
   proof.bodyInputRouted === true &&
   proof.bodyKeyRouted === true &&
-  taskbarItemCount >= 4 &&
-  taskbarIconCount >= 4 &&
+  integerAtLeast(proof.taskbarItemCount, 4) &&
+  integerAtLeast(proof.taskbarIconCount, 4) &&
   proof.taskbarIconsVisible === true &&
   proof.taskbarLabelsVisible === true &&
   proof.htmlRenderable === true;
 
 const capturePass =
-  Number.isFinite(viewportWidth) &&
-  Number.isFinite(viewportHeight) &&
-  viewportWidth >= 300 &&
-  viewportHeight >= 300;
+  integerAtLeast(proof.viewportWidth, 300) &&
+  integerAtLeast(proof.viewportHeight, 300);
 const performancePass =
   proof.performanceNowAvailable === true &&
-  Number.isFinite(performanceNowDeltaMs) &&
-  performanceNowDeltaMs >= 0;
+  decimalAtLeast(proof.performanceNowDeltaMs, 0);
 const animationPass =
   proof.animationFrameAvailable === true &&
-  Number.isFinite(animationFrameCount) &&
-  animationFrameCount >= 2 &&
+  integerAtLeast(proof.animationFrameCount, 2) &&
   proof.cssAnimationProbe === true;
 
 emit("mdi_proof_json", jsonPath);
 emit("mdi_proof_status", eventPass && capturePass && performancePass && animationPass ? "pass" : "fail");
 emit("mdi_proof_reason", eventPass && capturePass && performancePass && animationPass ? "pass" : "contract-missing");
-emit("mdi_proof_window_count", count);
+emit("mdi_proof_window_count", integerTextOrBlank(proof.count));
 emit("mdi_event_status", eventPass ? "pass" : "fail");
 emit("mdi_capture_status", capturePass ? "pass" : "fail");
-emit("mdi_capture_viewport_width", Number.isFinite(viewportWidth) ? viewportWidth : "");
-emit("mdi_capture_viewport_height", Number.isFinite(viewportHeight) ? viewportHeight : "");
+emit("mdi_capture_viewport_width", integerTextOrBlank(proof.viewportWidth));
+emit("mdi_capture_viewport_height", integerTextOrBlank(proof.viewportHeight));
 emit("mdi_performance_status", performancePass ? "pass" : "fail");
-emit("mdi_performance_now_delta_ms", Number.isFinite(performanceNowDeltaMs) ? performanceNowDeltaMs : "");
+emit("mdi_performance_now_delta_ms", decimalTextOrBlank(proof.performanceNowDeltaMs));
 emit("mdi_animation_status", animationPass ? "pass" : "fail");
-emit("mdi_animation_frame_count", Number.isFinite(animationFrameCount) ? animationFrameCount : "");
+emit("mdi_animation_frame_count", integerTextOrBlank(proof.animationFrameCount));
 emit("mdi_css_animation_probe", proof.cssAnimationProbe === true ? "true" : "false");
 
 if (!(eventPass && capturePass && performancePass && animationPass)) {

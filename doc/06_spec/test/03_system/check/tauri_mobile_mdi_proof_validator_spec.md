@@ -27,7 +27,7 @@ tauri_mobile_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,6 +76,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
   explicit finite non-negative `performanceNowDeltaMs`.
 - Capture viewport and animation-frame details must also be explicit finite
   numeric proof values, not defaulted placeholder values.
+- Event counts, viewport dimensions, and animation-frame counts must be decimal
+  integers; fractional counts do not prove routed events or full animation
+  frames.
 
 ## Scenarios
 
@@ -208,6 +211,47 @@ expect(evidence.contains("ios_mdi_capture_viewport_width=0")).to_equal(false)
 
 </details>
 
+#### rejects fractional viewport and animation frame proof values
+
+-  proof log command
+-  proof log command
+   - Expected: code equals `1`
+- Confirm fractional capture and animation values are not accepted as proof
+   - Expected: viewport does not contain `ios_mdi_capture_viewport_width=390.5`
+   - Expected: animation does not contain `android_mdi_animation_frame_count=2.5`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-fractional-counts"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_log_command(root + "/viewport.log", "p.viewportWidth=390.5") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/viewport.json " + root + "/viewport.log > " + root + "/viewport.env; " +
+    _proof_log_command(root + "/animation.log", "p.animationFrameCount=2.5") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/animation.json " + root + "/animation.log > " + root + "/animation.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val viewport = file_read(root + "/viewport.env")
+val animation = file_read(root + "/animation.env")
+step("Confirm fractional capture and animation values are not accepted as proof")
+expect(viewport).to_contain("ios_mdi_proof_status=fail")
+expect(viewport).to_contain("ios_mdi_capture_status=fail")
+expect(viewport).to_contain("ios_mdi_capture_viewport_width=")
+expect(viewport.contains("ios_mdi_capture_viewport_width=390.5")).to_equal(false)
+expect(animation).to_contain("android_mdi_proof_status=fail")
+expect(animation).to_contain("android_mdi_animation_status=fail")
+expect(animation).to_contain("android_mdi_animation_frame_count=")
+expect(animation.contains("android_mdi_animation_frame_count=2.5")).to_equal(false)
+```
+
+</details>
+
 #### rejects missing animation frame counts
 
 -  proof log command
@@ -242,8 +286,8 @@ expect(evidence.contains("android_mdi_animation_frame_count=0")).to_equal(false)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
