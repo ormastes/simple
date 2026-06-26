@@ -1477,25 +1477,26 @@ expect(blocked_gates.contains("production GUI/web parity evidence with live Taur
 - Create synthetic retained 4K perf evidence
    - Expected: code equals `0`
 - Assert the aggregate report carries FPS, checksum, and RSS budget rows
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_status") equals `pass`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Create synthetic retained 4K perf evidence")
-val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-4k && mkdir -p build/test-gui-renderdoc-feature-coverage-status-4k/source && printf 'showcase retained log\\n' > build/test-gui-renderdoc-feature-coverage-status-4k/source/showcase.log && printf 'elapsed_ms=597\\n' > build/test-gui-renderdoc-feature-coverage-status-4k/source/time.log && printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_reason=met-target-fps\\ngui_showcase_4k_200fps_resolution=4k\\ngui_showcase_4k_200fps_width=3840\\ngui_showcase_4k_200fps_height=2160\\ngui_showcase_4k_200fps_frames=200\\ngui_showcase_4k_200fps_fps_x1000=201000\\ngui_showcase_4k_200fps_frame_avg_ns=4975124\\ngui_showcase_4k_200fps_frame_p50_ns=4975124\\ngui_showcase_4k_200fps_frame_p95_ns=4975124\\ngui_showcase_4k_200fps_target_fps=200\\ngui_showcase_4k_200fps_max_rss_kb=131072\\ngui_showcase_4k_200fps_max_rss_budget_kb=262144\\ngui_showcase_4k_200fps_rss_status=pass\\ngui_showcase_4k_200fps_pixels=8294400\\ngui_showcase_4k_200fps_nonzero_pixels=1000\\ngui_showcase_4k_200fps_checksum=123456\\ngui_showcase_4k_200fps_render_mode=retained-static-frame\\ngui_showcase_4k_200fps_redraw_frames=1\\ngui_showcase_4k_200fps_source_revision=testrev123\\ngui_showcase_4k_200fps_simple_bin=src/compiler_rust/target/release/simple\\ngui_showcase_4k_200fps_use_native=1\\ngui_showcase_4k_200fps_native_build_mode=aggressive-native\\ngui_showcase_4k_200fps_fallback_state=none\\ngui_showcase_4k_200fps_log=build/test-gui-renderdoc-feature-coverage-status-4k/source/showcase.log\\ngui_showcase_4k_200fps_time_log=build/test-gui-renderdoc-feature-coverage-status-4k/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-4k/source/status.env && GUI_SHOWCASE_4K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-4k/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-4k/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-4k/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-4k && mkdir -p build/test-gui-renderdoc-feature-coverage-status-4k/source && printf '%b' '\\177ELFsynthetic-native\n' > build/test-gui-renderdoc-feature-coverage-status-4k/source/native4k.bin && chmod +x build/test-gui-renderdoc-feature-coverage-status-4k/source/native4k.bin && printf 'native build log\n' > build/test-gui-renderdoc-feature-coverage-status-4k/source/build4k.log && printf 'fn main() -> i64:\n    0\n' > build/test-gui-renderdoc-feature-coverage-status-4k/source/showcase4k.spl && printf 'showcase retained log\\n' > build/test-gui-renderdoc-feature-coverage-status-4k/source/showcase.log && printf 'elapsed_ms=597\\n' > build/test-gui-renderdoc-feature-coverage-status-4k/source/time.log && printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_reason=met-target-fps\\ngui_showcase_4k_200fps_resolution=4k\\ngui_showcase_4k_200fps_width=3840\\ngui_showcase_4k_200fps_height=2160\\ngui_showcase_4k_200fps_frames=200\\ngui_showcase_4k_200fps_fps_x1000=201000\\ngui_showcase_4k_200fps_frame_avg_ns=4975124\\ngui_showcase_4k_200fps_frame_p50_ns=4975124\\ngui_showcase_4k_200fps_frame_p95_ns=4975124\\ngui_showcase_4k_200fps_target_fps=200\\ngui_showcase_4k_200fps_max_rss_kb=131072\\ngui_showcase_4k_200fps_max_rss_budget_kb=262144\\ngui_showcase_4k_200fps_rss_status=pass\\ngui_showcase_4k_200fps_pixels=8294400\\ngui_showcase_4k_200fps_nonzero_pixels=1000\\ngui_showcase_4k_200fps_checksum=123456\\ngui_showcase_4k_200fps_render_mode=retained-static-frame\\ngui_showcase_4k_200fps_redraw_frames=1\\ngui_showcase_4k_200fps_source_revision=testrev123\\ngui_showcase_4k_200fps_source_revision_kind=content-sha256\\ngui_showcase_4k_200fps_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl\\ngui_showcase_4k_200fps_simple_bin=src/compiler_rust/target/release/simple\\ngui_showcase_4k_200fps_use_native=1\\ngui_showcase_4k_200fps_native_build_mode=aggressive-native\\ngui_showcase_4k_200fps_fallback_state=none\\ngui_showcase_4k_200fps_log=build/test-gui-renderdoc-feature-coverage-status-4k/source/showcase.log\\ngui_showcase_4k_200fps_time_log=build/test-gui-renderdoc-feature-coverage-status-4k/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-4k/source/status.env && GUI_SHOWCASE_4K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-4k/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-4k/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-4k/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
 step("Assert the aggregate report carries FPS, checksum, and RSS budget rows")
 val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-4k/out/evidence.env")
 val report = file_read("build/test-gui-renderdoc-feature-coverage-status-4k/report.md")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_status")).to_equal("pass")
 expect(evidence).to_contain("gui_showcase_4k_200fps_env=build/test-gui-renderdoc-feature-coverage-status-4k/source/status.env")
-expect(evidence).to_contain("gui_showcase_4k_200fps_status=pass")
 expect(evidence).to_contain("gui_showcase_4k_200fps_fps_x1000=201000")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frame_p50_ns=4975124")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frame_p95_ns=4975124")
@@ -1508,7 +1509,14 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_checksum_status=pass")
 expect(evidence).to_contain("gui_showcase_4k_200fps_retained_render_mode_status=pass")
 expect(evidence).to_contain("gui_showcase_4k_200fps_retained_redraw_status=pass")
 expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision=testrev123")
+expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_kind=content-sha256")
+expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl")
 expect(evidence).to_contain("gui_showcase_4k_200fps_simple_bin=src/compiler_rust/target/release/simple")
+expect(evidence).to_contain("gui_showcase_4k_200fps_native_bin_file_status=pass")
+expect(evidence).to_contain("gui_showcase_4k_200fps_native_bin_executable_status=pass")
+expect(evidence).to_contain("gui_showcase_4k_200fps_native_bin_format_status=pass")
+expect(evidence).to_contain("gui_showcase_4k_200fps_alias_src_file_status=pass")
+expect(evidence).to_contain("gui_showcase_4k_200fps_native_build_log_file_status=pass")
 expect(evidence).to_contain("gui_showcase_4k_200fps_native_build_mode=aggressive-native")
 expect(evidence).to_contain("gui_showcase_4k_200fps_fallback_state=none")
 expect(evidence).to_contain("gui_showcase_4k_200fps_log_file_status=pass")
@@ -1536,25 +1544,26 @@ expect(report).to_contain("rss 131072/262144 kB")
 - Create synthetic retained 8K perf evidence
    - Expected: code equals `0`
 - Assert the aggregate carries FPS, checksum, and RSS budget rows
+   - Expected: _value_of(evidence, "gui_showcase_8k_perf_status") equals `pass`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Create synthetic retained 8K perf evidence")
-val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k/source && printf 'showcase retained log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k/source/showcase.log && printf 'elapsed_ms=597\\n' > build/test-gui-renderdoc-feature-coverage-status-8k/source/time.log && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_resolution=8k\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_frames=200\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_frame_avg_ns=4975124\\ngui_showcase_8k_perf_frame_p50_ns=4975124\\ngui_showcase_8k_perf_frame_p95_ns=4975124\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_nonzero_pixels=1000\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_render_mode=retained-static-frame\\ngui_showcase_8k_perf_redraw_frames=1\\ngui_showcase_8k_perf_source_revision=testrev123\\ngui_showcase_8k_perf_simple_bin=src/compiler_rust/target/release/simple\\ngui_showcase_8k_perf_use_native=1\\ngui_showcase_8k_perf_native_build_mode=aggressive-native\\ngui_showcase_8k_perf_fallback_state=none\\ngui_showcase_8k_perf_log=build/test-gui-renderdoc-feature-coverage-status-8k/source/showcase.log\\ngui_showcase_8k_perf_time_log=build/test-gui-renderdoc-feature-coverage-status-8k/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k/source && printf '%b' '\\177ELFsynthetic-native\n' > build/test-gui-renderdoc-feature-coverage-status-8k/source/native8k.bin && chmod +x build/test-gui-renderdoc-feature-coverage-status-8k/source/native8k.bin && printf 'native build log\n' > build/test-gui-renderdoc-feature-coverage-status-8k/source/build8k.log && printf 'fn main() -> i64:\n    0\n' > build/test-gui-renderdoc-feature-coverage-status-8k/source/showcase8k.spl && printf 'showcase retained log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k/source/showcase.log && printf 'elapsed_ms=597\\n' > build/test-gui-renderdoc-feature-coverage-status-8k/source/time.log && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_resolution=8k\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_frames=200\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_frame_avg_ns=4975124\\ngui_showcase_8k_perf_frame_p50_ns=4975124\\ngui_showcase_8k_perf_frame_p95_ns=4975124\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_nonzero_pixels=1000\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_render_mode=retained-static-frame\\ngui_showcase_8k_perf_redraw_frames=1\\ngui_showcase_8k_perf_source_revision=testrev123\\ngui_showcase_8k_perf_source_revision_kind=content-sha256\\ngui_showcase_8k_perf_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl\\ngui_showcase_8k_perf_simple_bin=src/compiler_rust/target/release/simple\\ngui_showcase_8k_perf_use_native=1\\ngui_showcase_8k_perf_native_build_mode=aggressive-native\\ngui_showcase_8k_perf_fallback_state=none\\ngui_showcase_8k_perf_log=build/test-gui-renderdoc-feature-coverage-status-8k/source/showcase.log\\ngui_showcase_8k_perf_time_log=build/test-gui-renderdoc-feature-coverage-status-8k/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
 step("Assert the aggregate carries FPS, checksum, and RSS budget rows")
 val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-8k/out/evidence.env")
 val report = file_read("build/test-gui-renderdoc-feature-coverage-status-8k/report.md")
+expect(_value_of(evidence, "gui_showcase_8k_perf_status")).to_equal("pass")
 expect(evidence).to_contain("gui_showcase_8k_perf_env=build/test-gui-renderdoc-feature-coverage-status-8k/source/status.env")
-expect(evidence).to_contain("gui_showcase_8k_perf_status=pass")
 expect(evidence).to_contain("gui_showcase_8k_perf_fps_x1000=201000")
 expect(evidence).to_contain("gui_showcase_8k_perf_frame_p50_ns=4975124")
 expect(evidence).to_contain("gui_showcase_8k_perf_frame_p95_ns=4975124")
@@ -1567,7 +1576,14 @@ expect(evidence).to_contain("gui_showcase_8k_perf_checksum_status=pass")
 expect(evidence).to_contain("gui_showcase_8k_perf_retained_render_mode_status=pass")
 expect(evidence).to_contain("gui_showcase_8k_perf_retained_redraw_status=pass")
 expect(evidence).to_contain("gui_showcase_8k_perf_source_revision=testrev123")
+expect(evidence).to_contain("gui_showcase_8k_perf_source_revision_kind=content-sha256")
+expect(evidence).to_contain("gui_showcase_8k_perf_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl")
 expect(evidence).to_contain("gui_showcase_8k_perf_simple_bin=src/compiler_rust/target/release/simple")
+expect(evidence).to_contain("gui_showcase_8k_perf_native_bin_file_status=pass")
+expect(evidence).to_contain("gui_showcase_8k_perf_native_bin_executable_status=pass")
+expect(evidence).to_contain("gui_showcase_8k_perf_native_bin_format_status=pass")
+expect(evidence).to_contain("gui_showcase_8k_perf_alias_src_file_status=pass")
+expect(evidence).to_contain("gui_showcase_8k_perf_native_build_log_file_status=pass")
 expect(evidence).to_contain("gui_showcase_8k_perf_native_build_mode=aggressive-native")
 expect(evidence).to_contain("gui_showcase_8k_perf_fallback_state=none")
 expect(evidence).to_contain("gui_showcase_8k_perf_log_file_status=pass")
@@ -1934,7 +1950,7 @@ expect(evidence).to_contain("redraw_frames")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1948,6 +1964,8 @@ val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-8k-mi
 expect(evidence).to_contain("gui_showcase_8k_perf_status=fail")
 expect(evidence).to_contain("gui_showcase_8k_perf_reason=missing-8k-perf-provenance:")
 expect(evidence).to_contain("source_revision")
+expect(evidence).to_contain("source_revision_kind")
+expect(evidence).to_contain("source_revision_files")
 expect(evidence).to_contain("simple_bin")
 expect(evidence).to_contain("native_build_mode")
 expect(evidence).to_contain("fallback_state")
@@ -1965,7 +1983,7 @@ expect(evidence).to_contain("fallback_state")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1979,6 +1997,8 @@ val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-4k-mi
 expect(evidence).to_contain("gui_showcase_4k_200fps_status=fail")
 expect(evidence).to_contain("gui_showcase_4k_200fps_reason=missing-4k-perf-provenance:")
 expect(evidence).to_contain("source_revision")
+expect(evidence).to_contain("source_revision_kind")
+expect(evidence).to_contain("source_revision_files")
 expect(evidence).to_contain("simple_bin")
 expect(evidence).to_contain("native_build_mode")
 expect(evidence).to_contain("fallback_state")
@@ -2001,7 +2021,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Create an otherwise complete retained 8K row with interpreter fallback provenance")
-val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source && printf 'showcase retained log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/showcase.log && printf 'elapsed_ms=597\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/time.log && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_resolution=8k\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_frames=200\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_frame_avg_ns=4975124\\ngui_showcase_8k_perf_frame_p50_ns=4975124\\ngui_showcase_8k_perf_frame_p95_ns=4975124\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_nonzero_pixels=1000\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_render_mode=retained-static-frame\\ngui_showcase_8k_perf_redraw_frames=1\\ngui_showcase_8k_perf_source_revision=testrev123\\ngui_showcase_8k_perf_simple_bin=src/compiler_rust/target/release/simple\\ngui_showcase_8k_perf_native_bin=build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/native8k.bin\\ngui_showcase_8k_perf_alias_src=src/app/gui/showcase_retained_8k.spl\\ngui_showcase_8k_perf_native_build_log=build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/build8k.log\\ngui_showcase_8k_perf_use_native=0\\ngui_showcase_8k_perf_native_build_mode=interpreter\\ngui_showcase_8k_perf_fallback_state=interpreter-fallback\\ngui_showcase_8k_perf_log=build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/showcase.log\\ngui_showcase_8k_perf_time_log=build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance && mkdir -p build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source && printf 'showcase retained log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/showcase.log && printf 'elapsed_ms=597\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/time.log && printf 'gui_showcase_8k_perf_status=pass\\ngui_showcase_8k_perf_reason=met-target-fps\\ngui_showcase_8k_perf_resolution=8k\\ngui_showcase_8k_perf_width=7680\\ngui_showcase_8k_perf_height=4320\\ngui_showcase_8k_perf_frames=200\\ngui_showcase_8k_perf_fps_x1000=201000\\ngui_showcase_8k_perf_frame_avg_ns=4975124\\ngui_showcase_8k_perf_frame_p50_ns=4975124\\ngui_showcase_8k_perf_frame_p95_ns=4975124\\ngui_showcase_8k_perf_target_fps=200\\ngui_showcase_8k_perf_max_rss_kb=524288\\ngui_showcase_8k_perf_max_rss_budget_kb=1048576\\ngui_showcase_8k_perf_rss_status=pass\\ngui_showcase_8k_perf_pixels=33177600\\ngui_showcase_8k_perf_nonzero_pixels=1000\\ngui_showcase_8k_perf_checksum=123456\\ngui_showcase_8k_perf_render_mode=retained-static-frame\\ngui_showcase_8k_perf_redraw_frames=1\\ngui_showcase_8k_perf_source_revision=testrev123\\ngui_showcase_8k_perf_source_revision_kind=content-sha256\\ngui_showcase_8k_perf_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl\\ngui_showcase_8k_perf_simple_bin=src/compiler_rust/target/release/simple\\ngui_showcase_8k_perf_native_bin=build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/native8k.bin\\ngui_showcase_8k_perf_alias_src=src/app/gui/showcase_retained_8k.spl\\ngui_showcase_8k_perf_native_build_log=build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/build8k.log\\ngui_showcase_8k_perf_use_native=0\\ngui_showcase_8k_perf_native_build_mode=interpreter\\ngui_showcase_8k_perf_fallback_state=interpreter-fallback\\ngui_showcase_8k_perf_log=build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/showcase.log\\ngui_showcase_8k_perf_time_log=build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/status.env && GUI_SHOWCASE_8K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-8k-fallback-provenance/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -2028,7 +2048,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Create an otherwise complete retained 4K row with interpreter fallback provenance")
-val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance && mkdir -p build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source && printf 'showcase retained log\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/showcase.log && printf 'elapsed_ms=597\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/time.log && printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_reason=met-target-fps\\ngui_showcase_4k_200fps_resolution=4k\\ngui_showcase_4k_200fps_width=3840\\ngui_showcase_4k_200fps_height=2160\\ngui_showcase_4k_200fps_frames=200\\ngui_showcase_4k_200fps_fps_x1000=201000\\ngui_showcase_4k_200fps_frame_avg_ns=4975124\\ngui_showcase_4k_200fps_frame_p50_ns=4975124\\ngui_showcase_4k_200fps_frame_p95_ns=4975124\\ngui_showcase_4k_200fps_target_fps=200\\ngui_showcase_4k_200fps_max_rss_kb=131072\\ngui_showcase_4k_200fps_max_rss_budget_kb=262144\\ngui_showcase_4k_200fps_rss_status=pass\\ngui_showcase_4k_200fps_pixels=8294400\\ngui_showcase_4k_200fps_nonzero_pixels=1000\\ngui_showcase_4k_200fps_checksum=123456\\ngui_showcase_4k_200fps_render_mode=retained-static-frame\\ngui_showcase_4k_200fps_redraw_frames=1\\ngui_showcase_4k_200fps_source_revision=testrev123\\ngui_showcase_4k_200fps_simple_bin=src/compiler_rust/target/release/simple\\ngui_showcase_4k_200fps_native_bin=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/native4k.bin\\ngui_showcase_4k_200fps_alias_src=src/app/gui/showcase_retained_4k.spl\\ngui_showcase_4k_200fps_native_build_log=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/build4k.log\\ngui_showcase_4k_200fps_use_native=0\\ngui_showcase_4k_200fps_native_build_mode=interpreter\\ngui_showcase_4k_200fps_fallback_state=interpreter-fallback\\ngui_showcase_4k_200fps_log=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/showcase.log\\ngui_showcase_4k_200fps_time_log=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/status.env && GUI_SHOWCASE_4K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance && mkdir -p build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source && printf 'showcase retained log\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/showcase.log && printf 'elapsed_ms=597\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/time.log && printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_reason=met-target-fps\\ngui_showcase_4k_200fps_resolution=4k\\ngui_showcase_4k_200fps_width=3840\\ngui_showcase_4k_200fps_height=2160\\ngui_showcase_4k_200fps_frames=200\\ngui_showcase_4k_200fps_fps_x1000=201000\\ngui_showcase_4k_200fps_frame_avg_ns=4975124\\ngui_showcase_4k_200fps_frame_p50_ns=4975124\\ngui_showcase_4k_200fps_frame_p95_ns=4975124\\ngui_showcase_4k_200fps_target_fps=200\\ngui_showcase_4k_200fps_max_rss_kb=131072\\ngui_showcase_4k_200fps_max_rss_budget_kb=262144\\ngui_showcase_4k_200fps_rss_status=pass\\ngui_showcase_4k_200fps_pixels=8294400\\ngui_showcase_4k_200fps_nonzero_pixels=1000\\ngui_showcase_4k_200fps_checksum=123456\\ngui_showcase_4k_200fps_render_mode=retained-static-frame\\ngui_showcase_4k_200fps_redraw_frames=1\\ngui_showcase_4k_200fps_source_revision=testrev123\\ngui_showcase_4k_200fps_source_revision_kind=content-sha256\\ngui_showcase_4k_200fps_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl\\ngui_showcase_4k_200fps_simple_bin=src/compiler_rust/target/release/simple\\ngui_showcase_4k_200fps_native_bin=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/native4k.bin\\ngui_showcase_4k_200fps_alias_src=src/app/gui/showcase_retained_4k.spl\\ngui_showcase_4k_200fps_native_build_log=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/build4k.log\\ngui_showcase_4k_200fps_use_native=0\\ngui_showcase_4k_200fps_native_build_mode=interpreter\\ngui_showcase_4k_200fps_fallback_state=interpreter-fallback\\ngui_showcase_4k_200fps_log=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/showcase.log\\ngui_showcase_4k_200fps_time_log=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/time.log\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/status.env && GUI_SHOWCASE_4K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-4k-fallback-provenance/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
