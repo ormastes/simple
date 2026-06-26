@@ -181,9 +181,13 @@ impl Container:
     #     val binding = self.bindings[name]
     #     if binding.is_none():
     #         return Err("No binding for: {name}")
-    #     val b = binding.unwrap()
+    #     val b = match binding:
+    #         case Some(value): value
+    #         case None: return Err("No binding for: {name}")
     #     if b.singleton and b.instance.is_some():
-    #         return Ok(b.instance.unwrap() as T)
+    #         match b.instance:
+    #             case Some(instance): return Ok(instance as T)
+    #             case None: pass_do_nothing
     #     val instance = b.factory()
     #     if b.singleton:
     #         self.instances[name] = instance
@@ -195,11 +199,15 @@ impl Container:
         if binding.is_none():
             return Err("No binding for: {name}")
 
-        val b = binding.unwrap()
+        val b = match binding:
+            case Some(value): value
+            case None: return Err("No binding for: {name}")
 
         # Return cached instance for singletons
         if b.singleton and b.instance.is_some():
-            return Ok(b.instance.unwrap())
+            match b.instance:
+                case Some(instance): return Ok(instance)
+                case None: pass_do_nothing
 
         # Create new instance
         val instance = b.factory()
@@ -216,11 +224,15 @@ impl Container:
         if binding.is_none():
             return Err("No binding for: {name}")
 
-        val b = binding.unwrap()
+        val b = match binding:
+            case Some(value): value
+            case None: return Err("No binding for: {name}")
 
         # Return cached instance if available
         if b.instance.is_some():
-            return Ok(b.instance.unwrap())
+            match b.instance:
+                case Some(instance): return Ok(instance)
+                case None: pass_do_nothing
 
         # Create new instance (but don't cache - this is fn not me)
         val instance = b.factory()
@@ -359,7 +371,9 @@ impl Backend for InterpreterBackend:
         # Get or create instruction module
         var inst_module: InstructionModule = MockInstructionModule()
         if instruction_module_result.is_ok():
-            inst_module = instruction_module_result.unwrap()
+            match instruction_module_result:
+                case Ok(module): inst_module = module
+                case Err(_): pass_do_nothing
 
         # Walk HIR items and execute via instruction module
         var last_value = Value.none()
@@ -594,10 +608,15 @@ impl InstructionModule for NoOpInstructionModule:
             case LoadConst(value):
                 Ok(value)
             case ArrayNew(elements):
-                val results = elements.map(self.execute(_, ctx))
-                if results.any(&:is_err):
-                    return Err("Failed to construct array")
-                Ok(Value.array(results.map(&:unwrap)))
+                var values: [Value] = []
+                for element in elements:
+                    val result = self.execute(element, ctx)
+                    match result:
+                        case Ok(value):
+                            values = values.push(value)
+                        case Err(_):
+                            return Err("Failed to construct array")
+                Ok(Value.array(values))
             case DictNew(pairs):
                 var dict: Dict<Value, Value> = {}
                 for pair in pairs:
@@ -606,7 +625,15 @@ impl InstructionModule for NoOpInstructionModule:
                     val value = self.execute(value_inst, ctx)
                     if key.is_err() or value.is_err():
                         return Err("Failed to construct dict")
-                    dict[key.unwrap()] = value.unwrap()
+                    match key:
+                        case Ok(key_value):
+                            match value:
+                                case Ok(dict_value):
+                                    dict[key_value] = dict_value
+                                case Err(_):
+                                    return Err("Failed to construct dict")
+                        case Err(_):
+                            return Err("Failed to construct dict")
                 Ok(Value.dict(dict))
             case _:
                 Err("Code execution not allowed in SDN mode: {inst.kind()}")
@@ -732,7 +759,9 @@ pub fn get_container() -> Container:
     """Get the global container (creates dev container if not initialized)."""
     if global_container.is_none():
         global_container = Some(Container.for_dev())
-    global_container.unwrap()
+    match global_container:
+        case Some(container): container
+        case None: Container.for_dev()
 
 # Generic resolve<T> parses correctly but `as T` is a no-op at runtime
 # (interpreter discards generic args). Use resolve_simple() instead.
