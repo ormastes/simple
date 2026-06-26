@@ -387,6 +387,37 @@ Runtime-adjacent decision record:
 - `rejected_shortcuts`: shelling out to dashboard routes, importing dashboard
   process/HTTP paths, or adding raw process/runtime shortcuts.
 
+## Implemented Runtime Control Resource Detection Slice
+
+- `src/app/llm_runtime/control_cli.spl`
+- `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
+- `test/unit/app/llm_runtime/vllm_control_cli_spec.spl`
+- `doc/06_spec/test/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
+- `doc/06_spec/test/unit/app/llm_runtime/vllm_control_cli_spec.md`
+
+The runtime control CLI now accepts `--detect-resources` for local host
+capability classification. When explicit `--vllm-available` or
+`--gpu-available` flags are absent, detection runs bounded probes through the
+`app.io.mod.process_run_timeout` facade: `vllm --version` for the local vLLM
+entrypoint and `nvidia-smi --query-gpu=name --format=csv,noheader` for GPU
+visibility. The resulting booleans feed the existing preflight/start/probe
+resource gates before any serve spawn or HTTP readiness plan can proceed.
+
+Explicit flags still override detection so tests and CI harnesses remain
+deterministic. Detection is deliberately a host capability classifier, not live
+endpoint proof; `/v1/models` readiness remains owned by the runtime HTTP
+transport/readiness path.
+
+Runtime-adjacent decision record:
+
+- `runtime_need`: classify local vLLM/GPU availability for runtime control
+  preflight without forcing operators to pass manual resource flags.
+- `facade_checked`: `app.io.mod.process_run_timeout`.
+- `chosen_path`: `reuse-facade` with bounded process probes inside
+  `app.llm_runtime.control_cli`.
+- `rejected_shortcuts`: raw `rt_process_run` imports, shell pipelines, dashboard
+  owned detection, and treating command availability as endpoint readiness.
+
 ## Implemented Torch Readiness Slice
 
 - `src/lib/common/torch/dyn_sffi_ops.spl`

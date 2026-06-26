@@ -27,7 +27,7 @@ vllm_control_cli_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -55,6 +55,24 @@ expect(opts.endpoint).to_equal("http://127.0.0.1:8000/v1")
 expect(opts.pid).to_equal(42)
 expect(opts.vllm_available).to_equal(true)
 expect(opts.gpu_available).to_equal(true)
+```
+
+</details>
+
+#### parses local resource detection flag
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val opts = llm_runtime_control_cli_options(["llm-runtime-control", "--detect-resources"])
+
+expect(opts.detect_resources).to_equal(true)
+expect(opts.vllm_available).to_equal(false)
+expect(opts.gpu_available).to_equal(false)
 ```
 
 </details>
@@ -151,8 +169,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

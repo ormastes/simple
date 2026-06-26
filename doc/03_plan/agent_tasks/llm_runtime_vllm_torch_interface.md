@@ -308,6 +308,14 @@ Tasks:
     public JSONL for planned preflight, skipped start, and usage/error cases.
     Public pid absence renders as `0` so native negative-sentinel formatting
     cannot leak huge integer values.
+11. Add local resource detection for runtime control command. Status: done for
+    direct app/source execution: `--detect-resources` uses the
+    `app.io.mod.process_run_timeout` facade for bounded `vllm --version` and
+    `nvidia-smi --query-gpu=name --format=csv,noheader` probes before any serve
+    spawn or HTTP readiness plan. Explicit `--vllm-available` and
+    `--gpu-available` flags still override detection for deterministic tests and
+    harnesses. This classifies local host capability only; it does not prove a
+    live endpoint is serving models.
 
 ## Sidecars
 
@@ -370,5 +378,15 @@ Runtime-adjacent decision record for dashboard live control execution:
 - `rejected_shortcuts`: importing process/HTTP modules into dashboard
   collectors, shell lifecycle wrappers, and exposing model ids or response
   bodies in JSONL evidence.
+
+Runtime-adjacent decision record for runtime control resource detection:
+
+- `runtime_need`: classify local vLLM/GPU capability for control preflight
+  without requiring manual resource flags.
+- `facade_checked`: `app.io.mod.process_run_timeout`.
+- `chosen_path`: `reuse-facade` with bounded command probes in the runtime
+  control CLI before side-effecting serve or HTTP checks are planned.
+- `rejected_shortcuts`: raw `rt_process_run` imports, shell pipelines, dashboard
+  owned detection, and treating local tool presence as endpoint readiness.
 
 - Full dashboard controls for vLLM lifecycle.
