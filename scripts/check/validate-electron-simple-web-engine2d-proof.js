@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const fs = require('fs');
+const path = require('path');
 
 function clean(value) {
   if (value === undefined || value === null) return '';
@@ -41,6 +42,27 @@ function booleanString(value) {
   return clean(value);
 }
 
+function artifactStat(value, proofPath) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return null;
+  }
+  const raw = value.trim();
+  const candidates = path.isAbsolute(raw)
+    ? [raw]
+    : [raw, path.join(path.dirname(proofPath), raw)];
+  for (const candidate of candidates) {
+    try {
+      const stat = fs.statSync(candidate);
+      if (stat.isFile()) {
+        return { stat, path: candidate };
+      }
+    } catch (_err) {
+      // Try the next candidate.
+    }
+  }
+  return null;
+}
+
 const proofPath = process.argv[2];
 if (!proofPath) {
   emit('electron_simple_web_engine2d_validation_status', 'fail');
@@ -56,6 +78,8 @@ try {
   emit('electron_simple_web_engine2d_validation_reason', `invalid-json:${err && err.message ? err.message : err}`);
   process.exit(1);
 }
+
+const capturedArgbStat = artifactStat(proof.captured_argb_path, proofPath);
 
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
@@ -76,6 +100,10 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-viewport-proof';
 } else if (proof.captured_argb_written !== true) {
   reason = 'missing-captured-argb';
+} else if (capturedArgbStat === null) {
+  reason = 'missing-captured-argb-file';
+} else if (capturedArgbStat.stat.size <= 0) {
+  reason = 'empty-captured-argb-file';
 } else if (!integerAtLeast(proof.capture_native_width, 1) || !integerAtLeast(proof.capture_native_height, 1) || typeof proof.capture_downsampled !== 'boolean') {
   reason = 'missing-capture-provenance';
 } else if (!sameInteger(proof.capture_native_width, proof.width) || !sameInteger(proof.capture_native_height, proof.height)) {
@@ -98,7 +126,10 @@ emit('electron_simple_web_engine2d_requested_height', integerTextOrClean(proof.h
 emit('electron_simple_web_engine2d_capture_native_width', integerTextOrClean(proof.capture_native_width));
 emit('electron_simple_web_engine2d_capture_native_height', integerTextOrClean(proof.capture_native_height));
 emit('electron_simple_web_engine2d_capture_downsampled', booleanString(proof.capture_downsampled));
+emit('electron_simple_web_engine2d_captured_argb_path', proof.captured_argb_path);
 emit('electron_simple_web_engine2d_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
+emit('electron_simple_web_engine2d_captured_argb_file_status', capturedArgbStat === null ? 'fail' : 'pass');
+emit('electron_simple_web_engine2d_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
 
 if (reason !== 'pass') {
   process.exit(1);
