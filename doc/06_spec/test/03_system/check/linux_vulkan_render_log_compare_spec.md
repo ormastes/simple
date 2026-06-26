@@ -27,7 +27,7 @@ linux_vulkan_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -135,7 +135,7 @@ schema.
 
 ## Test Matrix
 
-The spec covers seven cases:
+The spec covers ten cases:
 
 1. A combined fixture where direct-run, browser-backing, pairwise diff, and
    RenderDoc statuses all pass. This proves the pass contract and source-log
@@ -161,6 +161,9 @@ The spec covers seven cases:
    the focused current-capture rows instead of stale canonical probe rows.
 9. A status-only RenderDoc spoof row fails when the referenced artifact bytes
    are not `RDOC`.
+10. A missing RenderDoc source env is surfaced in the top-level Linux evidence
+    so parallel platform agents do not need to open side logs to classify the
+    blocker.
 
 ## Completion Boundaries
 
@@ -184,7 +187,7 @@ this row with `macos_metal_render_log_compare_*` and
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 47 lines folded for reproduction.
+Runnable source: 58 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -225,6 +228,17 @@ step("Read normalized pass evidence and source logs")
 val evidence = file_read("build/test-linux-vulkan-render-log-pass/out/evidence.env")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_status=pass")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_required_api=vulkan")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_gui_web_2d_vulkan_env_file_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_browser_backing_env_file_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_simple_env_file_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=RDOC")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=RDOC")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_env_file_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=RDOC")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_status=pass")
 val electron_log = file_read("build/test-linux-vulkan-render-log-pass/out/electron.srl.env")
 expect(electron_log).to_contain("simple_render_log_format=simple-render-log-v1")
@@ -450,7 +464,7 @@ expect(chrome_log).to_contain("simple_render_log_nonblank_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -493,6 +507,9 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=renderdoc-ch
 expect(evidence).to_contain("linux_vulkan_render_log_compare_require_renderdoc=1")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_status=fail")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_reason=gate-command-failed")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=missing")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=")
 val chrome_log = file_read("build/test-linux-vulkan-render-log-rdoc-reason/out/chrome.srl.env")
 expect(chrome_log).to_contain("simple_render_log_status=fail")
 expect(chrome_log).to_contain("simple_render_log_reason=gate-command-failed")
@@ -566,7 +583,7 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_st
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -608,10 +625,70 @@ val evidence = file_read("build/test-linux-vulkan-render-log-rdoc-spoof/out/evid
 expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=renderdoc-chrome-fail")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_status=fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=")
 val chrome_log = file_read("build/test-linux-vulkan-render-log-rdoc-spoof/out/chrome.srl.env")
 expect(chrome_log).to_contain("simple_render_log_status=fail")
 expect(chrome_log).to_contain("simple_render_log_artifact_magic=")
 expect(chrome_log).to_contain("simple_render_log_original_native_log_format=renderdoc-diagnostic")
+```
+
+</details>
+
+#### reports missing RenderDoc source envs and artifacts in top-level evidence
+
+- Create passing pixel evidence while omitting the Electron RenderDoc env
+   - Expected: code equals `0`
+- Assert missing Electron RenderDoc source is visible without opening side logs
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 40 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create passing pixel evidence while omitting the Electron RenderDoc env")
+val command = "rm -rf build/test-linux-vulkan-render-log-rdoc-missing-source && mkdir -p build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/simple build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/html build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/electron && cat > build/test-linux-vulkan-render-log-rdoc-missing-source/gui.env <<'EOF'\n" +
+    "gui_web_2d_vulkan_simple_status=pass\n" +
+    "gui_web_2d_vulkan_simple_backend_name=vulkan\n" +
+    "gui_web_2d_vulkan_simple_argb_backend=vulkan\n" +
+    "gui_web_2d_vulkan_electron_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_chrome_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_pixel_comparison_status=pass\n" +
+    "gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff\n" +
+    "gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_simple_argb_width=3840\n" +
+    "gui_web_2d_vulkan_simple_argb_height=2160\n" +
+    "gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=42\n" +
+    "gui_web_2d_vulkan_chrome_argb_width=3840\n" +
+    "gui_web_2d_vulkan_chrome_argb_height=2160\n" +
+    "gui_web_2d_vulkan_chrome_argb_nonblank_pixel_count=42\n" +
+    "gui_web_2d_vulkan_electron_argb_width=3840\n" +
+    "gui_web_2d_vulkan_electron_argb_height=2160\n" +
+    "gui_web_2d_vulkan_electron_argb_nonblank_pixel_count=42\n" +
+    "EOF\n" +
+    "printf 'RDOCsynthetic simple capture\\n' > build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/simple/simple.rdc\n" +
+    "printf 'RDOCsynthetic chrome capture\\n' > build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/html/chrome.rdc\n" +
+    "printf 'rdoc_simple_gate_status=pass\\nrdoc_simple_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\nrdoc_capture_file=build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/simple/simple.rdc\\n' > build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/simple/evidence.env\n" +
+    "printf 'rdoc_external_host_capture_gate_status=pass\\nrdoc_external_host_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\nrdoc_capture_file=build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/html/chrome.rdc\\n' > build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/html/evidence.env\n" +
+    "BUILD_DIR=build/test-linux-vulkan-render-log-rdoc-missing-source/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-rdoc-missing-source/gui.env RDOC_SIMPLE_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/simple/evidence.env RDOC_HTML_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/html/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/electron/missing.env sh scripts/check/check-linux-vulkan-render-log-compare.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert missing Electron RenderDoc source is visible without opening side logs")
+val evidence = file_read("build/test-linux-vulkan-render-log-rdoc-missing-source/out/evidence.env")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=renderdoc-electron-unavailable")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_status=unavailable")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_reason=missing-source-env")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_env_file_status=missing")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=missing")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=")
 ```
 
 </details>
@@ -653,8 +730,8 @@ expect(script.contains("build/renderdoc/canonical-probe/electron-html/evidence.e
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
