@@ -24,6 +24,35 @@ simple dashboard check-alerts
 
 ---
 
+## Web Dashboard
+
+The authenticated web dashboard shell is the operator view for LLM diagnostics,
+tooling artifacts, and vLLM control evidence.
+
+- `view-diagnostics` renders LLM diagnostics JSONL readback with explicit
+  absence text for missing session, event, and tool fields.
+- `view-tooling` renders the `llm-tooling-artifacts-panel` from the same local
+  source configured for context and Ponytail analysis. The panel reports
+  `simple_context` status, `simple_ponytail` audit/simplification status, and
+  source/target summaries without exposing internal absence markers.
+- `/api/vllm/control` exposes dashboard-safe vLLM control planning. The route
+  returns `llm_dashboard_vllm_control_panel` JSONL for authenticated requests,
+  accepts query-style `action`, `base_model`, `endpoint`, `vllm_available`, and
+  `gpu_available` values, and stays on the dashboard collector boundary instead
+  of importing the live process/HTTP executor.
+- The embedded vLLM control form posts to `/api/vllm/control` with `start`,
+  `probe`, and related actions. Missing local vLLM/GPU resources produce
+  explicit skipped evidence rather than live side effects.
+
+Verification:
+
+```bash
+release/x86_64-unknown-linux-gnu/simple test test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl --mode=interpreter --clean
+release/x86_64-unknown-linux-gnu/simple test test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl --mode=interpreter --clean
+```
+
+---
+
 ## Commands
 
 ### Status

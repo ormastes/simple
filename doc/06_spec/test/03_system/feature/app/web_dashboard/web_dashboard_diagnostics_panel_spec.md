@@ -28,7 +28,7 @@ web_dashboard_diagnostics_panel_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -236,6 +236,29 @@ remove_file_if_exists(diagnostics_path)
 
 </details>
 
+#### keeps the operator guide aligned with diagnostics, tooling, and vLLM panels
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val guide = file_read("doc/07_guide/app/dashboard.md")
+
+expect(guide).to_contain("Web Dashboard")
+expect(guide).to_contain("view-diagnostics")
+expect(guide).to_contain("view-tooling")
+expect(guide).to_contain("llm-tooling-artifacts-panel")
+expect(guide).to_contain("/api/vllm/control")
+expect(guide).to_contain("simple_context")
+expect(guide).to_contain("simple_ponytail")
+expect(guide.contains(internal_absence_marker())).to_equal(false)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -255,8 +278,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

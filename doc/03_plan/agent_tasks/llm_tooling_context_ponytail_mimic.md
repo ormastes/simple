@@ -310,7 +310,7 @@ Evidence:
   passed with 6/6 scenarios, including configured/missing tooling panel
   readback and dedicated tooling tab/view evidence.
 
-Remaining:
+Dedicated dashboard view evidence:
 
 - Dedicated tab/routing for tooling artifacts is implemented on 2026-06-26.
   `src/app/web_dashboard/dashboard_html.spl` keeps the existing diagnostics
@@ -318,6 +318,10 @@ Remaining:
   `generate_full_dashboard_html_with_diagnostics_and_tooling(...)`; the web
   dashboard server now mounts context/ponytail tooling artifacts into
   `view-tooling` instead of appending them to `view-diagnostics`.
+- `test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl`
+  verifies the dedicated `view-tooling` rendering, explicit missing-source
+  output, and `doc/07_guide/app/dashboard.md` operator-guide coverage for
+  diagnostics, tooling, and vLLM panels.
 
 ## Lane 7: MCP Context Index/Query Options
 

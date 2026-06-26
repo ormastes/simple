@@ -28,7 +28,7 @@ web_dashboard_diagnostics_panel_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -94,7 +94,7 @@ expect(html).to_contain("LLM Tooling Artifacts")
 - mkdir p
 - remove file if exists
 - write file
-   - Expected: response does not expose the internal absence marker
+   - Expected: response does not contain `internal_absence_marker()`
 - remove file if exists
 
 
@@ -129,7 +129,7 @@ remove_file_if_exists(path)
 - mkdir p
 - remove file if exists
 - write file
-   - Expected: response does not expose the internal absence marker
+   - Expected: response does not contain `internal_absence_marker()`
 - remove file if exists
 
 
@@ -160,8 +160,8 @@ remove_file_if_exists(path)
 - mkdir p
 - remove file if exists
 - write file
-   - Expected: diagnostics view does not contain the tooling artifact panel
-   - Expected: response does not expose the internal absence marker
+   - Expected: diagnostics_view does not contain `llm-tooling-artifacts-panel`
+   - Expected: response does not contain `internal_absence_marker()`
 - remove file if exists
 - remove file if exists
 
@@ -205,7 +205,7 @@ remove_file_if_exists(tooling_path)
 - remove file if exists
 - write file
 - remove file if exists
-   - Expected: response does not expose the internal absence marker
+   - Expected: response does not contain `internal_absence_marker()`
 - remove file if exists
 
 
@@ -236,6 +236,29 @@ remove_file_if_exists(diagnostics_path)
 
 </details>
 
+#### keeps the operator guide aligned with diagnostics, tooling, and vLLM panels
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val guide = file_read("doc/07_guide/app/dashboard.md")
+
+expect(guide).to_contain("Web Dashboard")
+expect(guide).to_contain("view-diagnostics")
+expect(guide).to_contain("view-tooling")
+expect(guide).to_contain("llm-tooling-artifacts-panel")
+expect(guide).to_contain("/api/vllm/control")
+expect(guide).to_contain("simple_context")
+expect(guide).to_contain("simple_ponytail")
+expect(guide.contains(internal_absence_marker())).to_equal(false)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -243,7 +266,7 @@ remove_file_if_exists(diagnostics_path)
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl` |
-| Updated | 2026-06-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -255,8 +278,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
