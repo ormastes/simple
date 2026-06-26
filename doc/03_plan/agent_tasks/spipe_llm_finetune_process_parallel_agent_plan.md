@@ -77,7 +77,7 @@ Evidence:
 - `fine-tune-status llm_backed_app_server_dry_run_retry2` reports every
   registry present and `STATUS: PASS llm-finetune-status`.
 - `fine-tune-doctor llm_backed_app_server_dry_run_retry2` reports
-  `WARN placeholder model_artifact=not-created`,
+  `WARN missing_evidence model_artifact=not-created`,
   `next_action=retry-implementation`, and
   `STATUS: WARN llm-finetune-doctor`.
 - `fine-tune-ready llm_backed_app_server_dry_run_retry2` reports

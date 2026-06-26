@@ -371,11 +371,10 @@ Tasks:
     by `src/app/cli/main_part2.spl` to `src/app/llm_runtime/control_cli.spl`,
     shown in CLI help, and registered in the Rust driver app-command table plus
     Simple-app dispatch allow-list. `cargo check -p simple-driver` passes for
-    the driver table change, `cargo build -p simple-driver` produced a rebuilt
-    debug driver, and `src/compiler_rust/target/debug/simple
-    llm-runtime-control ...` now reaches the Simple control CLI with planned,
-    usage, and missing-local-vLLM JSONL outputs instead of treating the command
-    name as a missing file. Full native CLI rebuild evidence remains blocked:
+    the driver table change, and the rebuilt release/current driver reaches the
+    Simple control CLI with planned, usage, and missing-local-vLLM JSONL outputs
+    instead of treating the command name as a missing file. Full native CLI
+    rebuild evidence remains blocked:
     `native-build --source src/app --source src/lib --entry-closure --entry
     src/app/cli/main.spl --strip --threads 1 --timeout 240 --output
     build/llm_runtime/simple_cli_full` hit the 300s external cap with no binary.
