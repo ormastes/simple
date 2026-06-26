@@ -3,7 +3,11 @@
 # Context/Ponytail Mimic System Specification
 
 **Feature:** LLM tooling context/ponytail mimic
-**Requirements:** REQ-012, REQ-013, REQ-014, REQ-015
+**Requirements:** doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md
+**Requirements:** doc/02_requirements/nfr/llm_tooling_context_ponytail_mimic.md
+**Research:** doc/01_research/local/llm_tooling_context_ponytail_mimic.md
+**Research:** doc/01_research/domain/llm_tooling_context_ponytail_mimic.md
+**Design:** doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md
 **Plan:** doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md
 **System Test Plan:** doc/03_plan/sys_test/llm_tooling_context_ponytail_mimic.md
 
@@ -13,6 +17,103 @@ This system spec verifies the shipped tool surfaces for the local
 context-mode mimic and Ponytail mimic pair. It proves the CLI, app MCP, lower
 MCP, operator guide, and verification guard all describe the same public
 contract.
+
+The feature exists so local LLM tooling can request compact context packs,
+persist them into the Simple embedded SQLite-backed context database, query
+that database without resupplying a source path, and run Ponytail-style
+over-engineering checks through the same MCP tool families. The spec covers the
+CLI path because it is the executable behavior behind both MCP handlers, and it
+checks the app MCP and lower MCP source surfaces so the advertised tool schemas
+stay aligned with the CLI contract.
+
+## Syntax
+
+CLI context indexing:
+
+```text
+simple run src/app/context/main.spl <source...> --sql --index --db=<path> --text --no-progress
+```
+
+CLI source-less SQL querying:
+
+```text
+simple run src/app/context/main.spl --sql --query=<text> --db=<path> --source-filter=<source> --text --no-progress
+```
+
+App MCP `simple_context` accepts these fields:
+
+```json
+{
+  "file": "",
+  "query": "shared_context_marker",
+  "sql": "true",
+  "db": "build/context.db",
+  "source_filter": "src/app/context/main.spl",
+  "format": "text"
+}
+```
+
+`file` is optional when `sql` is enabled and `query` is non-empty. That is the
+source-less context-mode mimic path: the query reads an already persisted
+SQLite context index instead of regenerating a context pack from a live source
+file.
+
+App MCP `simple_ponytail` accepts:
+
+```json
+{
+  "file": "src/app/context/main.spl",
+  "mode": "audit",
+  "format": "text"
+}
+```
+
+The `mode` field supports `audit` and `simplification`; invalid modes must
+return a structured error rather than silently falling back to one mode.
+
+## Examples
+
+Index two context packs, then query all persisted rows:
+
+```text
+simple run src/app/context/main.spl alpha.spl beta.spl --sql --index --db=build/context.db --text --no-progress
+simple run src/app/context/main.spl --sql --query=shared_context_marker --db=build/context.db --text --no-progress
+```
+
+Query the same persisted database while filtering to one stored source:
+
+```text
+simple run src/app/context/main.spl --sql --query=shared_context_marker --db=build/context.db --source-filter=alpha.spl --text --no-progress
+```
+
+Expected behavior:
+
+- The unfiltered query reports both matching packs.
+- The filtered query reports only the stored source whose full path or basename
+  matches `source_filter`.
+- Public output uses explicit text such as `none` or `source unavailable` for
+  absence; it must not leak implementation-level option sentinels.
+- The app MCP and lower MCP schemas expose the same `sql`, `db`,
+  `source_filter`, and Ponytail `mode` controls that the CLI supports.
+
+## Evidence Matrix
+
+| Requirement | Evidence in this spec |
+|-------------|-----------------------|
+| REQ-012 | CLI source-less SQL query path exists and executes through the release runtime. |
+| REQ-013 | App MCP `simple_context` accepts SQL query fields without requiring `file`. |
+| REQ-014 | Persisted SQLite query results honor `source_filter` and exclude other matches. |
+| REQ-015 | App MCP and lower MCP expose Ponytail audit and simplification modes. |
+
+The executable CLI scenario creates two source packs with the same search
+marker, stores both in one SQLite context database, confirms an unfiltered
+source-less query sees both packs, and confirms a filtered source-less query
+returns only the requested source. That prevents a false positive where SQL
+querying works but `source_filter` is ignored.
+
+The source-inspection scenarios intentionally cover both app MCP and lower MCP.
+The goal is not only that one handler works today, but that both registered MCP
+surfaces keep the same public contract as the context CLI.
 """
 
 use std.spec
@@ -22,7 +123,7 @@ fn read(path: text) -> text:
     file_read(path)
 
 fn _run_context_cli(args: [text]) -> (text, i64):
-    val (stdout, stderr, exit_code) = process_run("src/compiler_rust/target/debug/simple", ["run", "src/app/context/main.spl"] + args)
+    val (stdout, stderr, exit_code) = process_run("src/compiler_rust/target/release/simple", ["run", "src/app/context/main.spl"] + args)
     (stdout + stderr, exit_code)
 
 describe "context/ponytail mimic system surface":
@@ -35,13 +136,21 @@ describe "context/ponytail mimic system surface":
     it "REQ-012 and REQ-014 execute persisted source-less SQL CLI queries":
         dir_create_all("build/test/context_ponytail_system")
         val source_path = "build/test/context_ponytail_system/alpha.spl"
+        val other_source_path = "build/test/context_ponytail_system/beta.spl"
         val db_path = "build/test/context_ponytail_system/context_cli.db"
         file_write(source_path, "fn alpha_context() -> text:\n    \"shared_context_marker alpha_only\"\n")
+        file_write(other_source_path, "fn beta_context() -> text:\n    \"shared_context_marker beta_only\"\n")
 
-        val (index_output, index_code) = _run_context_cli([source_path, "--sql", "--index", "--db=" + db_path, "--text", "--no-progress"])
+        val (index_output, index_code) = _run_context_cli([source_path, other_source_path, "--sql", "--index", "--db=" + db_path, "--text", "--no-progress"])
         expect(index_code).to_equal(0)
         expect(index_output).to_contain("status: ready")
-        expect(index_output).to_contain("pack_count: 1")
+        expect(index_output).to_contain("pack_count: 2")
+
+        val (unfiltered_output, unfiltered_code) = _run_context_cli(["--sql", "--query=shared_context_marker", "--db=" + db_path, "--text", "--no-progress"])
+        expect(unfiltered_code).to_equal(0)
+        expect(unfiltered_output).to_contain("matches: 2")
+        expect(unfiltered_output).to_contain("alpha_only")
+        expect(unfiltered_output).to_contain("beta_only")
 
         val (query_output, query_code) = _run_context_cli(["--sql", "--query=shared_context_marker", "--db=" + db_path, "--source-filter=" + source_path, "--text", "--no-progress"])
         expect(query_code).to_equal(0)
@@ -49,6 +158,7 @@ describe "context/ponytail mimic system surface":
         expect(query_output).to_contain("source_filter: " + source_path)
         expect(query_output).to_contain("matches: 1")
         expect(query_output).to_contain("alpha_only")
+        expect(query_output.split("beta_only").len()).to_equal(1)
 
     it "REQ-013 and REQ-015 expose SQL query and source filter through app MCP":
         val handler = read("src/app/mcp/main_lazy_query_tools.spl")
