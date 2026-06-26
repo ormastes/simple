@@ -3,7 +3,10 @@
 # Context/Ponytail Mimic System Specification
 
 **Feature:** LLM tooling context/ponytail mimic
-**Requirements:** REQ-012, REQ-013, REQ-014, REQ-015
+**Requirements:** doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md
+**Research:** doc/01_research/local/llm_tooling_context_ponytail_mimic.md
+**Design:** doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md
+**Architecture:** doc/04_architecture/app/tools/llm_tooling_context_ponytail_mimic.md
 **Plan:** doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md
 **System Test Plan:** doc/03_plan/sys_test/llm_tooling_context_ponytail_mimic.md
 
@@ -13,6 +16,109 @@ This system spec verifies the shipped tool surfaces for the local
 context-mode mimic and Ponytail mimic pair. It proves the CLI, app MCP, lower
 MCP, operator guide, and verification guard all describe the same public
 contract.
+
+The executable scenarios focus on REQ-012 through REQ-015 because those
+requirements are the user-facing replacement edge for context-mode style SQL
+queries: operators must be able to query a persisted embedded-SQL context
+database without passing a dummy source file, and both MCP layers must expose
+the same shape. The Ponytail checks prove the paired `simple_ponytail` surface
+keeps audit and simplification modes discoverable through the same app and
+lower MCP registries.
+
+## Syntax
+
+The CLI path under test is:
+
+```text
+src/compiler_rust/target/release/simple run src/app/context/main.spl \
+  <source.spl> --sql --index --db=<context.db> --text --no-progress
+
+src/compiler_rust/target/release/simple run src/app/context/main.spl \
+  --sql --query=<text> --db=<context.db> \
+  --source-filter=<source.spl> --text --no-progress
+```
+
+The first command builds an embedded-SQL context database from a readable
+source file. The second command deliberately omits a source file and proves
+that persisted query mode no longer requires a dummy path. The system spec uses
+the in-tree release compiler because this contract depends on the current
+interpreter-mode `rt_sqlite_*` facade.
+
+The app MCP `simple_context` schema accepts:
+
+```text
+file, target, format, index, query, sql, db, source_filter
+```
+
+`file` is optional only for the source-less SQL query shape:
+
+```text
+sql=true, query=<non-empty>, db=<path>
+```
+
+For ordinary context generation, local index creation, and source-backed SQL
+indexing, callers still need a readable source file. `source_filter` narrows
+persisted SQL query results by stored source path or path suffix.
+
+The Ponytail MCP surface accepts:
+
+```text
+file, format, mode
+```
+
+`mode=audit` keeps the over-engineering audit behavior. `mode=simplification`
+returns concrete cut/replace suggestions and a total suggestion count. Invalid
+modes fail closed instead of silently falling back.
+
+## Examples
+
+Create a persisted context DB:
+
+```text
+src/compiler_rust/target/release/simple run src/app/context/main.spl \
+  src/app/context/main.spl --sql --index --db=build/context.db --text
+```
+
+Query the persisted DB without a source file:
+
+```text
+src/compiler_rust/target/release/simple run src/app/context/main.spl \
+  --sql --query=context_sql_query --db=build/context.db \
+  --source-filter=src/app/context/main.spl --text
+```
+
+Expected successful query output includes:
+
+```text
+status: ready
+backend: sqlite
+source_filter: src/app/context/main.spl
+matches: 1
+```
+
+Expected no-match output is explicit:
+
+```text
+status: no_matches
+matches: 0
+content: none
+```
+
+No public output may expose the internal absence marker. Missing, empty,
+unavailable, and no-match states must be rendered as explicit domain text.
+
+## Operator Notes
+
+This spec intentionally combines live CLI execution with static MCP contract
+checks. The live CLI scenario proves persisted embedded-SQL behavior across
+processes. The static MCP checks ensure app MCP and lower MCP keep forwarding
+`--sql`, `--db`, `--query`, and `--source-filter` to the shared context CLI
+instead of adding another context implementation.
+
+The final guard assertion keeps the operator guide and public generated manuals
+under the absence-rendering check. If the guard stops mentioning this lane or
+the generated context/ponytail manuals, the system spec fails because public
+docs could drift away from the nil/absence policy.
 """
 
 use std.spec
@@ -22,7 +128,7 @@ fn read(path: text) -> text:
     file_read(path)
 
 fn _run_context_cli(args: [text]) -> (text, i64):
-    val (stdout, stderr, exit_code) = process_run("src/compiler_rust/target/debug/simple", ["run", "src/app/context/main.spl"] + args)
+    val (stdout, stderr, exit_code) = process_run("src/compiler_rust/target/release/simple", ["run", "src/app/context/main.spl"] + args)
     (stdout + stderr, exit_code)
 
 describe "context/ponytail mimic system surface":
