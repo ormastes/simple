@@ -27,7 +27,7 @@ tauri_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,6 +78,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   comparison behavior.
 - Blur/tolerance use, missing ARGB capture, malformed mismatch counts, and
   malformed WebKit expected-profile metadata are rejected.
+- ARGB capture proof paths must resolve to nonempty files instead of relying
+  on `captured_argb_written=true` alone.
 - The live Tauri wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 
@@ -95,7 +97,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -112,7 +114,10 @@ expect(evidence).to_contain("tauri_simple_web_layout_validation_status=pass")
 expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=pass")
 expect(evidence).to_contain("tauri_simple_web_layout_mismatch_count=0")
 expect(evidence).to_contain("tauri_simple_web_layout_tauri_frame_us=1250")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_path=captured.json")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_written=true")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_file_status=pass")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=2")
 expect(evidence).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=false")
 expect(evidence).to_contain("tauri_simple_web_layout_expected_profile=webkitgtk")
 expect(evidence).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=12")
@@ -218,6 +223,45 @@ expect(overlay).to_contain("tauri_simple_web_layout_validation_reason=malformed-
 
 </details>
 
+#### rejects missing and empty captured ARGB files
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm boolean Tauri capture flags are not enough without file evidence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-layout-validator-captured-files"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/missing.json", "p.captured_argb_path=\"missing.json\"") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+    _proof_command(root + "/empty.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"\")") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/empty.json > " + root + "/empty.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing = file_read(root + "/missing.env")
+val empty = file_read(root + "/empty.env")
+step("Confirm boolean Tauri capture flags are not enough without file evidence")
+expect(missing).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(missing).to_contain("tauri_simple_web_layout_validation_reason=missing-captured-argb-file")
+expect(missing).to_contain("tauri_simple_web_layout_captured_argb_file_status=fail")
+expect(missing).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
+expect(empty).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(empty).to_contain("tauri_simple_web_layout_validation_reason=empty-captured-argb-file")
+expect(empty).to_contain("tauri_simple_web_layout_captured_argb_file_status=pass")
+expect(empty).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=0")
+```
+
+</details>
+
 #### rejects blur tolerance and malformed mismatch counts
 
 -  proof command
@@ -292,15 +336,19 @@ expect(pixel).to_contain("tauri_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-tauri-simple-web-layout-bitmap-evidence.shs")
 expect(script).to_contain("validate-tauri-simple-web-layout-proof.js")
 expect(script).to_contain("tauri_simple_web_layout_validation_status")
+expect(script).to_contain("tauri_simple_web_layout_captured_argb_file_status")
+expect(script).to_contain("tauri_simple_web_layout_captured_argb_size_bytes")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
+val converter = file_read("tools/tauri-live-bitmap/raw_rgba_to_argb.js")
+expect(converter).to_contain("captured_argb_path: outputPath")
 ```
 
 </details>
@@ -309,8 +357,8 @@ expect(script).to_contain("status=divergent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

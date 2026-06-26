@@ -37,6 +37,7 @@ function fail(reason) {
     weighted_checksum: 0,
     mismatch_count: 0,
     frame_us: frameUs,
+    captured_argb_path: outputPath,
     captured_argb_written: false,
     blur_or_tolerance_used: false,
     expected_profile: "none",
@@ -113,6 +114,7 @@ const proof = {
   expected_weighted_checksum: expectedWeighted,
   mismatch_count: mismatchCount,
   frame_us: frameUs,
+  captured_argb_path: outputPath,
   captured_argb_written: Boolean(outputPath),
   blur_or_tolerance_used: false,
   expected_profile: appliedExpectedProfile,
@@ -127,6 +129,7 @@ console.log(`weighted_checksum=${actualWeighted}`);
 console.log(`expected_weighted_checksum=${expectedWeighted}`);
 console.log(`mismatch_count=${mismatchCount}`);
 console.log(`frame_us=${frameUs}`);
+console.log(`captured_argb_path=${outputPath}`);
 console.log(`captured_argb_written=${Boolean(outputPath)}`);
 console.log("blur_or_tolerance_used=false");
 console.log(`expected_profile=${appliedExpectedProfile}`);

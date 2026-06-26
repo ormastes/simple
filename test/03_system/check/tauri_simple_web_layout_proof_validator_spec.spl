@@ -29,6 +29,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   comparison behavior.
 - Blur/tolerance use, missing ARGB capture, malformed mismatch counts, and
   malformed WebKit expected-profile metadata are rejected.
+- ARGB capture proof paths must resolve to nonempty files instead of relying
+  on `captured_argb_written=true` alone.
 - The live Tauri wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 """
@@ -39,7 +41,7 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={status:\"pass\",reason:\"pass\",width:96,height:64,checksum:100,expected_checksum:100,weighted_checksum:500,expected_weighted_checksum:500,mismatch_count:0,frame_us:1250,captured_argb_written:true,blur_or_tolerance_used:false,expected_profile:\"webkitgtk\",expected_overlay_pixel_count:12};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);fs.writeFileSync(path.join(dir,\"captured.json\"),\"{}\");const p={status:\"pass\",reason:\"pass\",width:96,height:64,checksum:100,expected_checksum:100,weighted_checksum:500,expected_weighted_checksum:500,mismatch_count:0,frame_us:1250,captured_argb_path:\"captured.json\",captured_argb_written:true,blur_or_tolerance_used:false,expected_profile:\"webkitgtk\",expected_overlay_pixel_count:12};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Tauri Simple Web layout proof validator":
 
@@ -57,7 +59,10 @@ describe "Tauri Simple Web layout proof validator":
         expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=pass")
         expect(evidence).to_contain("tauri_simple_web_layout_mismatch_count=0")
         expect(evidence).to_contain("tauri_simple_web_layout_tauri_frame_us=1250")
+        expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_path=captured.json")
         expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_written=true")
+        expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_file_status=pass")
+        expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=2")
         expect(evidence).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=false")
         expect(evidence).to_contain("tauri_simple_web_layout_expected_profile=webkitgtk")
         expect(evidence).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=12")
@@ -112,6 +117,28 @@ describe "Tauri Simple Web layout proof validator":
         expect(profile).to_contain("tauri_simple_web_layout_validation_reason=missing-expected-profile")
         expect(overlay).to_contain("tauri_simple_web_layout_validation_reason=malformed-expected-overlay-pixel-count")
 
+    it "rejects missing and empty captured ARGB files":
+        val root = "build/test-tauri-layout-validator-captured-files"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/missing.json", "p.captured_argb_path=\"missing.json\"") +
+            " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+            _proof_command(root + "/empty.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"\")") +
+            " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/empty.json > " + root + "/empty.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val missing = file_read(root + "/missing.env")
+        val empty = file_read(root + "/empty.env")
+        step("Confirm boolean Tauri capture flags are not enough without file evidence")
+        expect(missing).to_contain("tauri_simple_web_layout_validation_status=fail")
+        expect(missing).to_contain("tauri_simple_web_layout_validation_reason=missing-captured-argb-file")
+        expect(missing).to_contain("tauri_simple_web_layout_captured_argb_file_status=fail")
+        expect(missing).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
+        expect(empty).to_contain("tauri_simple_web_layout_validation_status=fail")
+        expect(empty).to_contain("tauri_simple_web_layout_validation_reason=empty-captured-argb-file")
+        expect(empty).to_contain("tauri_simple_web_layout_captured_argb_file_status=pass")
+        expect(empty).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=0")
+
     it "rejects blur tolerance and malformed mismatch counts":
         val root = "build/test-tauri-layout-validator-blur-mismatch"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
@@ -152,5 +179,9 @@ describe "Tauri Simple Web layout proof validator":
         val script = file_read("scripts/check/check-tauri-simple-web-layout-bitmap-evidence.shs")
         expect(script).to_contain("validate-tauri-simple-web-layout-proof.js")
         expect(script).to_contain("tauri_simple_web_layout_validation_status")
+        expect(script).to_contain("tauri_simple_web_layout_captured_argb_file_status")
+        expect(script).to_contain("tauri_simple_web_layout_captured_argb_size_bytes")
         expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
         expect(script).to_contain("status=divergent")
+        val converter = file_read("tools/tauri-live-bitmap/raw_rgba_to_argb.js")
+        expect(converter).to_contain("captured_argb_path: outputPath")
