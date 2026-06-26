@@ -232,15 +232,22 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
     me build_trait_impls(impls: [HirImpl]):
         """Build a map of type -> implemented traits."""
         for impl_ in impls:
-            if impl_.trait_.?:
-                val type_sym = self.type_checker.get_type_symbol(impl_.type_)
-                if type_sym.?:
-                    val type_id = type_sym.unwrap().id
-                    val trait_sym = self.type_checker.get_type_symbol(impl_.trait_.unwrap())
-                    if trait_sym.?:
-                        if not self.trait_impls[type_id].?:
-                            self.trait_impls[type_id] = []
-                        self.trait_impls[type_id] = self.trait_impls[type_id].push(trait_sym.unwrap())
+            match impl_.trait_:
+                case Some(trait_type):
+                    match self.type_checker.get_type_symbol(impl_.type_):
+                        case Some(type_symbol):
+                            val type_id = type_symbol.id
+                            match self.type_checker.get_type_symbol(trait_type):
+                                case Some(trait_symbol):
+                                    if not self.trait_impls[type_id].?:
+                                        self.trait_impls[type_id] = []
+                                    self.trait_impls[type_id] = self.trait_impls[type_id].push(trait_symbol)
+                                case nil:
+                                    pass
+                        case nil:
+                            pass
+                case nil:
+                    pass
 
     # ========================================================================
     # Function Resolution
@@ -284,10 +291,11 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
         for stmt in block.stmts:
             resolved_stmts = resolved_stmts.push(self.resolve_stmt(stmt))
 
-        val resolved_value = if block.value.?:
-            Some(self.resolve_expr(block.value.unwrap()))
-        else:
-            nil
+        val resolved_value = match block.value:
+            case Some(value):
+                Some(self.resolve_expr(value))
+            case nil:
+                nil
 
         HirBlock(
             stmts: resolved_stmts,
@@ -356,17 +364,18 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
             case IntLit(_, _): expr.kind
             case FloatLit(_, _): expr.kind
             case StringLit(value, interps):
-                if interps.?:
-                    var resolved_interps: [HirInterpolation] = []
-                    for interp in interps.unwrap():
-                        resolved_interps = resolved_interps.push(HirInterpolation(
-                            expr: self.resolve_expr(interp.expr),
-                            format: interp.format,
-                            span: interp.span
-                        ))
-                    HirExprKind.StringLit(value, Some(resolved_interps))
-                else:
-                    expr.kind
+                match interps:
+                    case Some(values):
+                        var resolved_interps: [HirInterpolation] = []
+                        for interp in values:
+                            resolved_interps = resolved_interps.push(HirInterpolation(
+                                expr: self.resolve_expr(interp.expr),
+                                format: interp.format,
+                                span: interp.span
+                            ))
+                        HirExprKind.StringLit(value, Some(resolved_interps))
+                    case nil:
+                        expr.kind
             case BoolLit(_): expr.kind
             case CharLit(_): expr.kind
             case UnitLit: expr.kind
@@ -427,19 +436,21 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
 
             # Control flow
             case If(cond, then_, else_):
-                val resolved_else = if else_.?:
-                    Some(self.resolve_block(else_.unwrap()))
-                else:
-                    nil
+                val resolved_else = match else_:
+                    case Some(block):
+                        Some(self.resolve_block(block))
+                    case nil:
+                        nil
                 HirExprKind.If(self.resolve_expr(cond), self.resolve_block(then_), resolved_else)
 
             case MatchCase(scrutinee, arms):
                 var resolved_arms: [HirMatchArm] = []
                 for arm in arms:
-                    val resolved_guard = if arm.guard.?:
-                        Some(self.resolve_expr(arm.guard.unwrap()))
-                    else:
-                        nil
+                    val resolved_guard = match arm.guard:
+                        case Some(guard):
+                            Some(self.resolve_expr(guard))
+                        case nil:
+                            nil
                     resolved_arms = resolved_arms.push(HirMatchArm(
                         pattern: arm.pattern,
                         guard: resolved_guard,
@@ -474,11 +485,19 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
 
             # Control transfer
             case Return(value):
-                val resolved_value = if value.?: Some(self.resolve_expr(value.unwrap())) else: nil
+                val resolved_value = match value:
+                    case Some(expr_):
+                        Some(self.resolve_expr(expr_))
+                    case nil:
+                        nil
                 HirExprKind.Return(resolved_value)
 
             case Break(label, value):
-                val resolved_value = if value.?: Some(self.resolve_expr(value.unwrap())) else: nil
+                val resolved_value = match value:
+                    case Some(expr_):
+                        Some(self.resolve_expr(expr_))
+                    case nil:
+                        nil
                 HirExprKind.Break(label, resolved_value)
 
             case Continue(label):
@@ -495,7 +514,11 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
                 HirExprKind.Await(self.resolve_expr(e))
 
             case Yield(value):
-                val resolved_value = if value.?: Some(self.resolve_expr(value.unwrap())) else: nil
+                val resolved_value = match value:
+                    case Some(expr_):
+                        Some(self.resolve_expr(expr_))
+                    case nil:
+                        nil
                 HirExprKind.Yield(resolved_value)
 
             # Construction
@@ -506,20 +529,21 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
                 HirExprKind.StructLit(type_, resolved_fields)
 
             case EnumLit(type_, variant, payload):
-                val resolved_payload = if payload.?:
-                    match payload.unwrap():
-                        case Tuple(values):
-                            var resolved: [HirExpr] = []
-                            for v in values:
-                                resolved = resolved.push(self.resolve_expr(v))
-                            Some(HirEnumPayload.Tuple(resolved))
-                        case Struct(fields):
-                            var resolved: [(text, HirExpr)] = []
-                            for (name, value) in fields:
-                                resolved = resolved.push((name, self.resolve_expr(value)))
-                            Some(HirEnumPayload.Struct(resolved))
-                else:
-                    nil
+                val resolved_payload = match payload:
+                    case Some(value):
+                        match value:
+                            case Tuple(values):
+                                var resolved: [HirExpr] = []
+                                for v in values:
+                                    resolved = resolved.push(self.resolve_expr(v))
+                                Some(HirEnumPayload.Tuple(resolved))
+                            case Struct(fields):
+                                var resolved: [(text, HirExpr)] = []
+                                for (name, value) in fields:
+                                    resolved = resolved.push((name, self.resolve_expr(value)))
+                                Some(HirEnumPayload.Struct(resolved))
+                    case nil:
+                        nil
                 HirExprKind.EnumLit(type_, variant, resolved_payload)
 
             # Casts
@@ -531,9 +555,21 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
 
             # Range
             case Range(start, end, inclusive, step):
-                val resolved_start = if start.?: Some(self.resolve_expr(start.unwrap())) else: nil
-                val resolved_end = if end.?: Some(self.resolve_expr(end.unwrap())) else: nil
-                val resolved_step = if step.?: Some(self.resolve_expr(step.unwrap())) else: nil
+                val resolved_start = match start:
+                    case Some(expr_):
+                        Some(self.resolve_expr(expr_))
+                    case nil:
+                        nil
+                val resolved_end = match end:
+                    case Some(expr_):
+                        Some(self.resolve_expr(expr_))
+                    case nil:
+                        nil
+                val resolved_step = match step:
+                    case Some(expr_):
+                        Some(self.resolve_expr(expr_))
+                    case nil:
+                        nil
                 HirExprKind.Range(resolved_start, resolved_end, inclusive, resolved_step)
 
             # Comprehension
