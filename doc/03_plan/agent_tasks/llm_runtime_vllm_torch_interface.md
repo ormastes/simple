@@ -559,6 +559,24 @@ Evidence:
   assertions in `test/01_unit/app/llm_runtime` or
   `test/unit/app/llm_runtime`.
 
+## 2026-06-26 vLLM Control CLI JSON Escaping Hardening
+
+The runtime control CLI now builds
+`llm_runtime_vllm_dashboard_control_execution` JSONL with the shared escaped
+JSON helper path instead of manual string concatenation. This keeps rejected
+user-supplied action text from breaking public JSONL while preserving explicit
+missing-resource and absence-marker behavior.
+
+Evidence:
+
+- Focused `simple check` passed for `src/app/llm_runtime/control_cli.spl` and
+  both mirrored `vllm_control_cli_spec.spl` files.
+- Both mirrored control CLI specs now include 9 scenarios, including quoted
+  rejected-action JSON escaping and absence-marker split-count checks.
+- Focused interpreter test runs reported 9 passed and 0 failed for both mirrored
+  specs; the runner still prints its known per-file subprocess diagnostic line.
+- `simple spipe-docgen` regenerated the matching manuals and `doc/06_spec/INDEX.md`.
+
 ## 2026-06-26 vLLM Runtime Manual Sync
 
 The stale canonical `doc/06_spec/01_unit/app/llm_runtime/` and
