@@ -42,7 +42,11 @@ tooling artifacts, and vLLM control evidence.
   of importing the live process/HTTP executor.
 - The embedded vLLM control form posts to `/api/vllm/control` with `start`,
   `probe`, and related actions. Missing local vLLM/GPU resources produce
-  explicit skipped evidence rather than live side effects.
+  explicit skipped evidence rather than live side effects. Runtime-control
+  JSONL uses `live_evidence_status=not_live_evidence` for planned, skipped, and
+  invalid-pid results; only a runtime-owner probe observation with running
+  process, ready models status, and 2xx HTTP response may report
+  `live_endpoint_observed`.
 
 Verification:
 

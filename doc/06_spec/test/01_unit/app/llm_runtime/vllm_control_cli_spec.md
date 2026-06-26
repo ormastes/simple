@@ -103,7 +103,7 @@ expect(opts.gpu_available).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -112,6 +112,7 @@ val response = llm_runtime_control_cli_response(["llm-runtime-control", "--actio
 expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
+expect(response).to_contain("\"live_evidence_status\":\"not_live_evidence\"")
 expect(response.split(absence_marker()).len()).to_equal(1)
 ```
 
@@ -122,7 +123,7 @@ expect(response.split(absence_marker()).len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -130,6 +131,7 @@ val response = llm_runtime_control_cli_response(["simple", "run", "src/app/llm_r
 
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"endpoint\":\"configured\"")
+expect(response).to_contain("\"live_evidence_status\":\"not_live_evidence\"")
 expect(response.split(absence_marker()).len()).to_equal(1)
 ```
 
@@ -140,7 +142,7 @@ expect(response.split(absence_marker()).len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -148,6 +150,7 @@ val response = llm_runtime_control_cli_response(["simple", "run", "src/app/llm_r
 
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
+expect(response).to_contain("\"live_evidence_status\":\"not_live_evidence\"")
 expect(response.split(absence_marker()).len()).to_equal(1)
 ```
 
@@ -158,7 +161,7 @@ expect(response.split(absence_marker()).len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -167,6 +170,7 @@ val response = llm_runtime_control_cli_response(["llm-runtime-control", "--actio
 expect(response).to_contain("\"status\":\"skipped\"")
 expect(response).to_contain("\"reason\":\"missing_local_vllm_and_gpu\"")
 expect(response).to_contain("\"started_pid\":0")
+expect(response).to_contain("\"live_evidence_status\":\"not_live_evidence\"")
 ```
 
 </details>
