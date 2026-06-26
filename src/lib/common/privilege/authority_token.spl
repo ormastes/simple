@@ -12,11 +12,14 @@ enum AuthorityLevel:
     Sensitive
     Admin
     Internal
+    Secret
 
 enum TrustSource:
     Untrusted
     SystemTrusted
     UserTrusted
+    RegistryTrusted
+    Revoked
 
 class Scope:
     one_shot_flag: bool
@@ -47,6 +50,36 @@ impl AuthorityToken:
             scope: Scope.persistent(),
             issuer_sig: [])
 
+    # Root token for a principal — used as mint parent.
+    static fn root_for(principal: Principal) -> AuthorityToken:
+        AuthorityToken(
+            id_path: id_path_intern("id." + principal.id),
+            level: AuthorityLevel.Admin,
+            principal: principal,
+            trust_source: TrustSource.SystemTrusted,
+            scope: Scope.persistent(),
+            issuer_sig: ("root:" + principal.id).bytes())
+
+    # Mock token for testing — system-trusted by default.
+    static fn mock(id_path: IdPath, level: AuthorityLevel, principal: Principal) -> AuthorityToken:
+        AuthorityToken(
+            id_path: id_path,
+            level: level,
+            principal: principal,
+            trust_source: TrustSource.SystemTrusted,
+            scope: Scope.persistent(),
+            issuer_sig: ("mock:" + principal.id + ":" + id_path.path).bytes())
+
+    # Mock token with explicit trust source — used to test revocation.
+    static fn mock_with_trust(id_path: IdPath, level: AuthorityLevel, principal: Principal, trust: TrustSource) -> AuthorityToken:
+        AuthorityToken(
+            id_path: id_path,
+            level: level,
+            principal: principal,
+            trust_source: trust,
+            scope: Scope.persistent(),
+            issuer_sig: ("mock:" + principal.id + ":" + id_path.path).bytes())
+
 fn authority_level_name(level: AuthorityLevel) -> text:
     match level:
         AuthorityLevel.Public:     "public"
@@ -55,6 +88,14 @@ fn authority_level_name(level: AuthorityLevel) -> text:
         AuthorityLevel.Sensitive:  "sensitive"
         AuthorityLevel.Admin:      "admin"
         AuthorityLevel.Internal:   "internal"
+
+fn authority_level_from_name(name: text) -> AuthorityLevel:
+    if name == "read":      return AuthorityLevel.Read
+    if name == "write":     return AuthorityLevel.Write
+    if name == "sensitive": return AuthorityLevel.Sensitive
+    if name == "admin":     return AuthorityLevel.Admin
+    if name == "internal":  return AuthorityLevel.Internal
+    AuthorityLevel.Public
 
 fn authority_level_rank(level: AuthorityLevel) -> i64:
     match level:
@@ -73,6 +114,8 @@ fn trust_source_name(source: TrustSource) -> text:
         TrustSource.Untrusted:     "untrusted"
         TrustSource.SystemTrusted: "system"
         TrustSource.UserTrusted:   "user"
+        TrustSource.Revoked:       "revoked"
 
 export AuthorityToken, AuthorityLevel, TrustSource, Scope
-export authority_level_name, authority_level_rank, is_revoked, trust_source_name
+export authority_level_name, authority_level_from_name, authority_level_rank
+export is_revoked, trust_source_name
