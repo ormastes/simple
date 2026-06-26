@@ -83,7 +83,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   on `captured_argb_written=true` alone.
 - Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
   match the proof viewport, include the expected pixel count, and contain
-  nonzero pixels.
+  nonzero pixels with numeric uint32 JSON pixel values.
 - Proof renderer and scene identity must match the live generated-GUI Electron
   capture path.
 - The live Electron wrapper consumes the validator and still maps real pixel
@@ -315,6 +315,9 @@ expect(empty).to_contain("electron_generated_gui_web_captured_argb_size_bytes=0"
 -  proof command
 -  proof command
 -  proof command
+-  proof command
+-  proof command
+-  proof command
    - Expected: code equals `1`
 - Confirm captured ARGB evidence is parsed, dimensioned, and nonblank
 
@@ -322,7 +325,7 @@ expect(empty).to_contain("electron_generated_gui_web_captured_argb_size_bytes=0"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -334,6 +337,12 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/viewport.json > " + root + "/viewport.env; " +
     _proof_command(root + "/pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:72,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:[0,0,0,0]}))") +
     " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/pixels.json > " + root + "/pixels.env; " +
+    _proof_command(root + "/string-pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:72,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*72).fill(\"4294967295\")}))") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/string-pixels.json > " + root + "/string-pixels.env; " +
+    _proof_command(root + "/fractional-pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:72,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*72).fill(1.5)}))") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/fractional-pixels.json > " + root + "/fractional-pixels.env; " +
+    _proof_command(root + "/range-pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:72,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*72).fill(4294967296)}))") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/range-pixels.json > " + root + "/range-pixels.env; " +
     _proof_command(root + "/blank.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:72,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*72).fill(0)}))") +
     " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/blank.json > " + root + "/blank.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -342,6 +351,9 @@ expect(code).to_equal(1)
 val malformed = file_read(root + "/malformed.env")
 val viewport = file_read(root + "/viewport.env")
 val pixels = file_read(root + "/pixels.env")
+val string_pixels = file_read(root + "/string-pixels.env")
+val fractional_pixels = file_read(root + "/fractional-pixels.env")
+val range_pixels = file_read(root + "/range-pixels.env")
 val blank = file_read(root + "/blank.env")
 step("Confirm captured ARGB evidence is parsed, dimensioned, and nonblank")
 expect(malformed).to_contain("electron_generated_gui_web_validation_reason=malformed-captured-argb")
@@ -350,6 +362,9 @@ expect(viewport).to_contain("electron_generated_gui_web_validation_reason=captur
 expect(viewport).to_contain("electron_generated_gui_web_captured_argb_width=95")
 expect(pixels).to_contain("electron_generated_gui_web_validation_reason=captured-argb-pixel-count-mismatch")
 expect(pixels).to_contain("electron_generated_gui_web_captured_argb_pixel_count=4")
+expect(string_pixels).to_contain("electron_generated_gui_web_validation_reason=captured-argb-pixel-type-mismatch")
+expect(fractional_pixels).to_contain("electron_generated_gui_web_validation_reason=captured-argb-pixel-type-mismatch")
+expect(range_pixels).to_contain("electron_generated_gui_web_validation_reason=captured-argb-pixel-type-mismatch")
 expect(blank).to_contain("electron_generated_gui_web_validation_reason=blank-captured-argb")
 expect(blank).to_contain("electron_generated_gui_web_captured_argb_nonzero_pixel_count=0")
 ```

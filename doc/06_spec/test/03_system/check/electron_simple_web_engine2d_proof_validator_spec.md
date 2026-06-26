@@ -79,7 +79,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
   missing viewport proof, and capture viewport mismatches are rejected.
 - Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
   match the proof viewport, include the expected pixel count, and contain
-  nonzero pixels.
+  nonzero pixels with numeric uint32 JSON pixel values.
 - Proof renderer must be the live Electron capture page and scenes must stay
   within the Simple Web Engine2D scene family.
 - The live Electron wrapper consumes the validator instead of raw shell JSON
@@ -274,6 +274,9 @@ expect(empty).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=
 -  proof command
 -  proof command
 -  proof command
+-  proof command
+-  proof command
+-  proof command
    - Expected: code equals `1`
 - Confirm Engine2D captured ARGB evidence is parsed, dimensioned, and nonblank
 
@@ -281,7 +284,7 @@ expect(empty).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -293,6 +296,12 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/viewport.json > " + root + "/viewport.env; " +
     _proof_command(root + "/pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:[0,0,0,0]}))") +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/pixels.json > " + root + "/pixels.env; " +
+    _proof_command(root + "/string-pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(\"4294967295\")}))") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/string-pixels.json > " + root + "/string-pixels.env; " +
+    _proof_command(root + "/fractional-pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(1.5)}))") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/fractional-pixels.json > " + root + "/fractional-pixels.env; " +
+    _proof_command(root + "/range-pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(4294967296)}))") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/range-pixels.json > " + root + "/range-pixels.env; " +
     _proof_command(root + "/blank.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(0)}))") +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/blank.json > " + root + "/blank.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -301,6 +310,9 @@ expect(code).to_equal(1)
 val malformed = file_read(root + "/malformed.env")
 val viewport = file_read(root + "/viewport.env")
 val pixels = file_read(root + "/pixels.env")
+val string_pixels = file_read(root + "/string-pixels.env")
+val fractional_pixels = file_read(root + "/fractional-pixels.env")
+val range_pixels = file_read(root + "/range-pixels.env")
 val blank = file_read(root + "/blank.env")
 step("Confirm Engine2D captured ARGB evidence is parsed, dimensioned, and nonblank")
 expect(malformed).to_contain("electron_simple_web_engine2d_validation_reason=malformed-captured-argb")
@@ -308,6 +320,9 @@ expect(viewport).to_contain("electron_simple_web_engine2d_validation_reason=capt
 expect(viewport).to_contain("electron_simple_web_engine2d_captured_argb_height=63")
 expect(pixels).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-pixel-count-mismatch")
 expect(pixels).to_contain("electron_simple_web_engine2d_captured_argb_pixel_count=4")
+expect(string_pixels).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-pixel-type-mismatch")
+expect(fractional_pixels).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-pixel-type-mismatch")
+expect(range_pixels).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-pixel-type-mismatch")
 expect(blank).to_contain("electron_simple_web_engine2d_validation_reason=blank-captured-argb")
 expect(blank).to_contain("electron_simple_web_engine2d_captured_argb_nonzero_pixel_count=0")
 ```
