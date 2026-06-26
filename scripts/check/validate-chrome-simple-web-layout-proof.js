@@ -66,6 +66,23 @@ function readJsonArtifact(artifact, fallback) {
   }
 }
 
+function pixelCountMatches(pixels, width, height) {
+  if (!Array.isArray(pixels)) return false;
+  const w = decimalIntegerText(width);
+  const h = decimalIntegerText(height);
+  if (w === null || h === null) return false;
+  return BigInt(pixels.length) === BigInt(w) * BigInt(h);
+}
+
+function nonzeroPixelCount(pixels) {
+  if (!Array.isArray(pixels)) return '';
+  let count = 0;
+  for (const pixel of pixels) {
+    if ((Number(pixel) >>> 0) !== 0) count += 1;
+  }
+  return String(count);
+}
+
 const proofPath = process.argv[2];
 if (!proofPath) {
   emit('chrome_simple_web_layout_validation_status', 'fail');
@@ -83,6 +100,10 @@ try {
 }
 
 const capturedArgbStat = artifactStat(proof.captured_argb_path, proofPath);
+const capturedArgbJson = readJsonArtifact(capturedArgbStat, {});
+const capturedArgb = capturedArgbJson.value || {};
+const capturedArgbPixels = Array.isArray(capturedArgb.pixels) ? capturedArgb.pixels : null;
+const capturedArgbNonzeroPixelCount = nonzeroPixelCount(capturedArgbPixels);
 const geometryStat = artifactStat(proof.geometry_path, proofPath);
 const geometryJson = readJsonArtifact(geometryStat, {});
 const geometry = geometryJson.value || {};
@@ -104,12 +125,26 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'malformed-mismatch-count';
 } else if (!sameInteger(proof.mismatch_count, 0)) {
   reason = 'pixel-mismatch';
+} else if (!integerAtLeast(proof.width, 1) || !integerAtLeast(proof.height, 1)) {
+  reason = 'missing-capture-viewport';
 } else if (proof.captured_argb_written !== true) {
   reason = 'missing-captured-argb';
 } else if (capturedArgbStat === null) {
   reason = 'missing-captured-argb-file';
 } else if (capturedArgbStat.stat.size <= 0) {
   reason = 'empty-captured-argb-file';
+} else if (!capturedArgbJson.ok || !Array.isArray(capturedArgb.pixels)) {
+  reason = 'malformed-captured-argb';
+} else if (capturedArgb.format !== 'argb-u32') {
+  reason = 'captured-argb-format-mismatch';
+} else if (capturedArgb.producer !== 'chrome-headless-screenshot') {
+  reason = 'captured-argb-producer-mismatch';
+} else if (!sameInteger(capturedArgb.width, proof.width) || !sameInteger(capturedArgb.height, proof.height)) {
+  reason = 'captured-argb-viewport-mismatch';
+} else if (!pixelCountMatches(capturedArgb.pixels, proof.width, proof.height)) {
+  reason = 'captured-argb-pixel-count-mismatch';
+} else if (!integerAtLeast(capturedArgbNonzeroPixelCount, 1)) {
+  reason = 'blank-captured-argb';
 } else if (proof.geometry_written !== true) {
   reason = 'missing-chrome-geometry';
 } else if (geometryStat === null) {
@@ -118,8 +153,6 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'empty-chrome-geometry-file';
 } else if (!geometryJson.ok || geometry.producer !== 'chrome-headless-geometry') {
   reason = 'malformed-chrome-geometry';
-} else if (!integerAtLeast(proof.width, 1) || !integerAtLeast(proof.height, 1)) {
-  reason = 'missing-capture-viewport';
 } else if (!sameInteger(geometryViewport.width, proof.width) || !sameInteger(geometryViewport.height, proof.height)) {
   reason = 'chrome-geometry-viewport-mismatch';
 } else if (geometryItems.length < 1) {
@@ -143,6 +176,12 @@ emit('chrome_simple_web_layout_captured_argb_path', proof.captured_argb_path);
 emit('chrome_simple_web_layout_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
 emit('chrome_simple_web_layout_captured_argb_file_status', capturedArgbStat === null ? 'fail' : 'pass');
 emit('chrome_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
+emit('chrome_simple_web_layout_captured_argb_format', capturedArgb.format);
+emit('chrome_simple_web_layout_captured_argb_producer', capturedArgb.producer);
+emit('chrome_simple_web_layout_captured_argb_width', integerTextOrClean(capturedArgb.width));
+emit('chrome_simple_web_layout_captured_argb_height', integerTextOrClean(capturedArgb.height));
+emit('chrome_simple_web_layout_captured_argb_pixel_count', capturedArgbPixels === null ? '' : String(capturedArgbPixels.length));
+emit('chrome_simple_web_layout_captured_argb_nonzero_pixel_count', capturedArgbNonzeroPixelCount);
 emit('chrome_simple_web_layout_geometry_path', proof.geometry_path);
 emit('chrome_simple_web_layout_geometry_written', proof.geometry_written === true ? 'true' : 'false');
 emit('chrome_simple_web_layout_geometry_file_status', geometryStat === null ? 'fail' : 'pass');
