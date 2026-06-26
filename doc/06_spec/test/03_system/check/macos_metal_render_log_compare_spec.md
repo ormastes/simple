@@ -27,7 +27,7 @@ macos_metal_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -91,7 +91,7 @@ The gate requires native Metal generated/readback evidence:
 - `metal_generated_2d_readback_module_verified=true`
 - `metal_generated_2d_readback_submit_attempted=true`
 - `metal_generated_2d_readback_readback_available=true`
-- Matching expected and actual checksums when both are present.
+- Unsigned decimal expected and actual checksums that match.
 
 It also requires Engine2D framebuffer readback evidence:
 
@@ -154,16 +154,17 @@ macos_metal_render_log_compare_pairwise_status=pass
 
 1. Accept complete Metal generated/readback, framebuffer, browser backing,
    pairwise ARGB, and Xcode GPU capture evidence.
-2. Reject missing Engine2D framebuffer GPU readback.
-3. Reject browser fallback and non-pairwise comparisons even when native Metal
+2. Reject missing or malformed generated Metal readback checksums.
+3. Reject missing Engine2D framebuffer GPU readback.
+4. Reject browser fallback and non-pairwise comparisons even when native Metal
    readback exists.
-4. Reject pairwise rows whose Simple, Chrome, or Electron ARGB evidence is
+5. Reject pairwise rows whose Simple, Chrome, or Electron ARGB evidence is
    blank or uses mismatched viewport geometry.
-5. Reject pairwise rows whose ARGB checksums are missing or mismatched.
-6. Reject missing Xcode GPU capture when strict capture mode is enabled.
-7. Reject Xcode GPU capture rows whose artifact bytes do not match the native
+6. Reject pairwise rows whose ARGB checksums are missing or mismatched.
+7. Reject missing Xcode GPU capture when strict capture mode is enabled.
+8. Reject Xcode GPU capture rows whose artifact bytes do not match the native
    marker, even if the env row claims `XCODE-GPUTRACE`.
-8. Reject status-only Xcode GPU capture rows that omit the capture artifact or
+9. Reject status-only Xcode GPU capture rows that omit the capture artifact or
    native artifact marker.
 
 ## Scenarios
@@ -175,7 +176,7 @@ macos_metal_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -200,6 +201,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact
 expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gate_count=0")
 expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=")
 expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_gate_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_generated_checksum_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_gate_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_pairwise_gate_status=pass")
@@ -214,6 +216,39 @@ expect(simple_log).to_contain("simple_render_log_original_capture_tool=xcode-gpu
 expect(simple_log).to_contain("simple_render_log_original_native_log_format=xcode-gputrace")
 expect(simple_log).to_contain("simple_render_log_original_native_log_source=build/test-macos-metal-render-log-pass/generated.env")
 expect(simple_log).to_contain("simple_render_log_artifact_magic=XCODE-GPUTRACE")
+```
+
+</details>
+
+#### rejects missing or malformed generated Metal readback checksum rows
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-macos-metal-render-log-generated-checksum && mkdir -p build/test-macos-metal-render-log-generated-checksum && " +
+    "printf 'metal_engine2d_framebuffer_readback_status=pass\\nmetal_engine2d_framebuffer_gpu_readback_available=true\\nmetal_engine2d_framebuffer_blur_or_tolerance_used=false\\n' > build/test-macos-metal-render-log-generated-checksum/framebuffer.env && " +
+    "printf 'macos_metal_electron_browser_backing_status=pass\\nmacos_metal_chrome_browser_backing_status=pass\\nmacos_metal_browser_backing_status=pass\\nmacos_metal_pixel_comparison_status=pass\\nmacos_metal_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_electron_simple_pairwise_diff_status=pass\\nmacos_metal_chrome_simple_pairwise_diff_status=pass\\nmacos_metal_simple_argb_width=3840\\nmacos_metal_simple_argb_height=2160\\nmacos_metal_simple_argb_nonblank_pixel_count=42\\nmacos_metal_simple_argb_checksum=700\\nmacos_metal_chrome_argb_width=3840\\nmacos_metal_chrome_argb_height=2160\\nmacos_metal_chrome_argb_nonblank_pixel_count=42\\nmacos_metal_chrome_argb_checksum=700\\nmacos_metal_electron_argb_width=3840\\nmacos_metal_electron_argb_height=2160\\nmacos_metal_electron_argb_nonblank_pixel_count=42\\nmacos_metal_electron_argb_checksum=700\\n' > build/test-macos-metal-render-log-generated-checksum/browser.env && " +
+    "printf 'metal_generated_2d_readback_status=pass\\nmetal_generated_2d_readback_module_verified=true\\nmetal_generated_2d_readback_submit_attempted=true\\nmetal_generated_2d_readback_readback_available=true\\nmetal_generated_2d_readback_actual_checksum=7\\n' > build/test-macos-metal-render-log-generated-checksum/missing.env && " +
+    "printf 'metal_generated_2d_readback_status=pass\\nmetal_generated_2d_readback_module_verified=true\\nmetal_generated_2d_readback_submit_attempted=true\\nmetal_generated_2d_readback_readback_available=true\\nmetal_generated_2d_readback_expected_checksum=7\\nmetal_generated_2d_readback_actual_checksum=not-a-number\\n' > build/test-macos-metal-render-log-generated-checksum/malformed.env && " +
+    "BUILD_DIR=build/test-macos-metal-render-log-generated-checksum/missing-out METAL_GENERATED_2D_READBACK_ENV=build/test-macos-metal-render-log-generated-checksum/missing.env METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=build/test-macos-metal-render-log-generated-checksum/framebuffer.env MACOS_METAL_BROWSER_ENV=build/test-macos-metal-render-log-generated-checksum/browser.env sh scripts/check/check-macos-metal-render-log-compare.shs || true; " +
+    "BUILD_DIR=build/test-macos-metal-render-log-generated-checksum/malformed-out METAL_GENERATED_2D_READBACK_ENV=build/test-macos-metal-render-log-generated-checksum/malformed.env METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=build/test-macos-metal-render-log-generated-checksum/framebuffer.env MACOS_METAL_BROWSER_ENV=build/test-macos-metal-render-log-generated-checksum/browser.env sh scripts/check/check-macos-metal-render-log-compare.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val missing = file_read("build/test-macos-metal-render-log-generated-checksum/missing-out/evidence.env")
+val malformed = file_read("build/test-macos-metal-render-log-generated-checksum/malformed-out/evidence.env")
+expect(missing).to_contain("macos_metal_render_log_compare_status=fail")
+expect(missing).to_contain("macos_metal_render_log_compare_generated_readback_gate_status=fail")
+expect(missing).to_contain("macos_metal_render_log_compare_generated_checksum_reason=metal-generated-expected-checksum-missing")
+expect(missing).to_contain("macos_metal_render_log_compare_blocked_gates=metal-generated-readback")
+expect(malformed).to_contain("macos_metal_render_log_compare_status=fail")
+expect(malformed).to_contain("macos_metal_render_log_compare_generated_readback_gate_status=fail")
+expect(malformed).to_contain("macos_metal_render_log_compare_generated_checksum_reason=metal-generated-actual-checksum-missing")
+expect(malformed).to_contain("macos_metal_render_log_compare_blocked_gates=metal-generated-readback")
 ```
 
 </details>
@@ -419,8 +454,8 @@ expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_sta
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
