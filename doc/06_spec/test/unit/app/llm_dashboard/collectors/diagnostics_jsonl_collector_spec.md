@@ -235,7 +235,7 @@ expect_no_internal_absence_marker(text)
 - mkdir p
 - remove file if exists
 - write file
-   - Expected: html does not contain `<tag>`
+   - Expected: html.split("<tag>").len() equals `1`
 - expect no internal absence marker
 - remove file if exists
 
@@ -254,7 +254,7 @@ write_file(path, "{\"event\":\"PreToolUse<tag>\",\"sid\":\"sid&\"}\n")
 val html = render_llm_diagnostics_panel_html(collect_llm_diagnostics_jsonl(path))
 expect(html).to_contain("PreToolUse&lt;tag&gt;")
 expect(html).to_contain("sid&amp;")
-expect(html.contains("<tag>")).to_equal(false)
+expect(html.split("<tag>").len()).to_equal(1)
 expect_no_internal_absence_marker(html)
 remove_file_if_exists(path)
 ```
@@ -266,7 +266,7 @@ remove_file_if_exists(path)
 - mkdir p
 - remove file if exists
 - write file
-   - Expected: html does not contain `ready<tag>`
+   - Expected: html.split("ready<tag>").len() equals `1`
 - expect no internal absence marker
 - remove file if exists
 
@@ -286,7 +286,7 @@ val html = render_llm_diagnostics_panel_html(collect_llm_diagnostics_jsonl(path)
 expect(html).to_contain("vllm_events=1")
 expect(html).to_contain("ready&lt;tag&gt;")
 expect(html).to_contain("models&amp;endpoint")
-expect(html.contains("ready<tag>")).to_equal(false)
+expect(html.split("ready<tag>").len()).to_equal(1)
 expect_no_internal_absence_marker(html)
 remove_file_if_exists(path)
 ```

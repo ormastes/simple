@@ -56,7 +56,7 @@ expect(panel.reason).to_equal("serve_and_models_probe_planned")
 expect(panel.pid).to_equal(-1)
 expect(text).to_contain("vLLM Controls")
 expect(text).to_contain("controls=preflight,start,poll,probe,stop")
-expect(text.split("nil").len()).to_equal(1)
+expect(text.split(internal_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -77,7 +77,7 @@ expect(panel.status).to_equal("rejected")
 expect(panel.reason).to_equal("unknown_action")
 expect(panel.pid).to_equal(55)
 expect(text).to_contain("action=restart")
-expect(text.split("nil").len()).to_equal(1)
+expect(text.split(internal_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -97,7 +97,7 @@ expect(panel.action).to_equal("start")
 expect(panel.status).to_equal("planned")
 expect(panel.reason).to_equal("live_executor_required")
 expect(panel.models_reason).to_equal("probe_not_run")
-expect(panel.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(panel.evidence_jsonl.split(internal_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -117,7 +117,7 @@ expect(panel.action).to_equal("start")
 expect(panel.status).to_equal("skipped")
 expect(panel.reason).to_equal("missing_local_vllm")
 expect(panel.running_status).to_equal("not_started")
-expect(panel.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(panel.evidence_jsonl.split(internal_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -137,7 +137,7 @@ expect(panel.action).to_equal("preflight")
 expect(panel.status).to_equal("planned")
 expect(panel.reason).to_equal("serve_and_models_probe_planned")
 expect(panel.endpoint_status).to_equal("configured")
-expect(panel.evidence_jsonl.contains("base-model")).to_equal(false)
+expect(panel.evidence_jsonl.split("base-model").len()).to_equal(1)
 ```
 
 </details>
@@ -158,7 +158,7 @@ expect(panel.status).to_equal("not_stopped")
 expect(panel.reason).to_equal("invalid_pid")
 expect(panel.running_status).to_equal("not_running")
 expect(panel.evidence_jsonl).to_contain("\"event\":\"llm_dashboard_vllm_control_panel\"")
-expect(panel.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(panel.evidence_jsonl.split(internal_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -179,7 +179,7 @@ expect(html).to_contain("id=\"llm-vllm-control-panel\"")
 expect(html).to_contain("value=\"start\"")
 expect(html).to_contain("value=\"probe\"")
 expect(html).to_contain("serve_and_models_probe_planned")
-expect(html.split("nil").len()).to_equal(1)
+expect(html.split(internal_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -199,7 +199,7 @@ val response = server.route_http("GET", "/api/vllm/control?action=preflight", ""
 expect(response).to_contain("HTTP/1.1 200 OK")
 expect(response).to_contain("\"event\":\"llm_dashboard_vllm_control_panel\"")
 expect(response).to_contain("\"status\":\"planned\"")
-expect(response.split("nil").len()).to_equal(1)
+expect(response.split(internal_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -219,7 +219,7 @@ val response = server.route_http("GET", "/api/vllm/control?action=start&vllm_ava
 expect(response).to_contain("HTTP/1.1 200 OK")
 expect(response).to_contain("\"status\":\"skipped\"")
 expect(response).to_contain("\"reason\":\"missing_local_vllm\"")
-expect(response.split("nil").len()).to_equal(1)
+expect(response.split(internal_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -239,7 +239,7 @@ val response = server.route_http("GET", "/api/vllm/control?action=preflight&base
 expect(response).to_contain("HTTP/1.1 200 OK")
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
-expect(response.contains("base-model")).to_equal(false)
+expect(response.split("base-model").len()).to_equal(1)
 ```
 
 </details>

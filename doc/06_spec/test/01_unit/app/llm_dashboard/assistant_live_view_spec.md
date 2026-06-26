@@ -38,12 +38,12 @@ assistant_live_view_spec -> app
 
 ### assistant dashboard live view
 
-#### renders replay snapshots as read-only with explicit absence text
+#### renders replay snapshots as read-only without internal absence marker text
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -51,12 +51,13 @@ val policy = assistant_bridge_default_policy()
 val snapshot = make_snapshot(make_session("session-replay", 1000))
 val view = assistant_dashboard_live_view_from_snapshot(snapshot, policy, 2_000_000, 1_000_000, false)
 val lines = assistant_dashboard_render_live_view(view)
+val rendered = lines.join("\n")
 
 expect(view.read_only).to_equal(true)
 expect(view.live_controls_enabled).to_equal(false)
 expect(view.primary_action.route_target).to_equal("blocked")
-expect(lines.join("\n").contains("nil")).to_equal(false)
-expect(lines.join("\n").contains("replay snapshot is read-only")).to_equal(true)
+expect(rendered.split(internal_absence_marker()).len()).to_equal(1)
+expect(rendered.contains("replay snapshot is read-only")).to_equal(true)
 ```
 
 </details>
@@ -113,7 +114,7 @@ expect(lines.join("\n").contains("refresh required before operator actions")).to
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -121,22 +122,23 @@ val policy = assistant_bridge_default_policy()
 val snapshot = make_snapshot(make_failed_session("session-crash", 4000))
 val view = assistant_dashboard_live_view_from_snapshot(snapshot, policy, 4_000_100, 4_000_000, true)
 val lines = assistant_dashboard_render_live_view(view)
+val rendered = lines.join("\n")
 
 expect(view.failure_state).to_equal("error")
 expect(view.failure_count).to_equal(1)
 expect(view.failure_detail).to_equal("model process crashed")
-expect(lines.join("\n").contains("failure error model process crashed")).to_equal(true)
-expect(lines.join("\n").contains("nil")).to_equal(false)
+expect(rendered.contains("failure error model process crashed")).to_equal(true)
+expect(rendered.split(internal_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
 
-#### renders missing selected-session evidence with explicit absence text
+#### renders missing selected-session evidence without internal absence marker text
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -152,10 +154,11 @@ val snapshot = AssistantDashboardSnapshot(
 )
 val view = assistant_dashboard_live_view_from_snapshot(snapshot, policy, 1_000_000, 1_000_000, false)
 val lines = assistant_dashboard_render_live_view(view)
+val rendered = lines.join("\n")
 
 expect(view.failure_state).to_equal("missing")
 expect(view.failure_detail).to_equal("selected session unavailable")
-expect(lines.join("\n").contains("nil")).to_equal(false)
+expect(rendered.split(internal_absence_marker()).len()).to_equal(1)
 ```
 
 </details>

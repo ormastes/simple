@@ -38,17 +38,18 @@ assistant_digest_spec -> app
 
 ### assistant dashboard digest
 
-#### renders digest checkpoint, summary, task summaries, and warnings with explicit absence rendering
+#### renders digest checkpoint, summary, task summaries, and warnings without internal absence marker
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val view = assistant_dashboard_digest_from_snapshot(make_snapshot(make_session("session-digest")))
 val lines = assistant_dashboard_render_digest(view)
+val rendered = lines.join("\n")
 
 expect(view.status).to_equal("ready")
 expect(view.checkpoint_id).to_equal("digest-1")
@@ -57,7 +58,7 @@ expect(view.recent_detail).to_equal("recent detail")
 expect(view.task_summary_count).to_equal(1)
 expect(view.warning_count).to_equal(1)
 expect(view.notification_count).to_equal(1)
-expect(lines.join("\n").contains("nil")).to_equal(false)
+expect(rendered.split(internal_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -67,7 +68,7 @@ expect(lines.join("\n").contains("nil")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -82,11 +83,12 @@ val snapshot = AssistantDashboardSnapshot(
 )
 val view = assistant_dashboard_digest_from_snapshot(snapshot)
 val lines = assistant_dashboard_render_digest(view)
+val rendered = lines.join("\n")
 
 expect(view.status).to_equal("missing")
 expect(view.checkpoint_id).to_equal("none")
 expect(view.summary).to_equal("none")
-expect(lines.join("\n").contains("nil")).to_equal(false)
+expect(rendered.split(internal_absence_marker()).len()).to_equal(1)
 ```
 
 </details>

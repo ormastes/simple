@@ -38,7 +38,7 @@ assistant_retention_spec -> app
 
 ### assistant dashboard retention
 
-#### keeps bounded tails and reports backpressure with explicit absence text
+#### keeps bounded tails and reports backpressure without internal absence marker text
 
 - timeline push
 - notifications push
@@ -50,7 +50,7 @@ assistant_retention_spec -> app
    - Expected: projection.dropped_timeline_count equals `3`
    - Expected: projection.dropped_notification_count equals `1`
    - Expected: projection.backpressure_state equals `backpressure`
-   - Expected: projection.notice does not expose the internal absence marker
+   - Expected: projection.notice.split(internal_absence_marker()).len() equals `1`
    - Expected: projection.visible_timeline[0].event_id equals `event-3`
 
 
@@ -79,7 +79,7 @@ expect(projection.retained_notification_count).to_equal(3)
 expect(projection.dropped_timeline_count).to_equal(3)
 expect(projection.dropped_notification_count).to_equal(1)
 expect(projection.backpressure_state).to_equal("backpressure")
-expect(projection.notice.contains("nil")).to_equal(false)
+expect(projection.notice.split(internal_absence_marker()).len()).to_equal(1)
 expect(projection.visible_timeline[0].event_id).to_equal("event-3")
 ```
 
