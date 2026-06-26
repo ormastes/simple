@@ -117,6 +117,9 @@ const performanceChecks = {
   performanceNowAvailable: proof.performanceNowAvailable === true,
   performanceNowDeltaMs: jsonDecimalGreaterThan(proof.performanceNowDeltaMs, 0),
 };
+const interactionLatencyChecks = {
+  inputToPaintMs: jsonDecimalGreaterThan(proof.inputToPaintMs, 0),
+};
 const animationChecks = {
   animationFrameAvailable: proof.animationFrameAvailable === true,
   animationFrameCount: jsonIntegerAtLeast(proof.animationFrameCount, 2),
@@ -130,6 +133,7 @@ function failedNames(checks) {
 const eventFailed = failedNames(eventChecks);
 const captureFailed = failedNames(captureChecks);
 const performanceFailed = failedNames(performanceChecks);
+const interactionLatencyFailed = failedNames(interactionLatencyChecks);
 const animationFailed = failedNames(animationChecks);
 
 let reason = 'pass';
@@ -139,6 +143,8 @@ if (eventFailed.length) {
   reason = `capture-contract-missing:${captureFailed.join(',')}`;
 } else if (performanceFailed.length) {
   reason = `performance-contract-missing:${performanceFailed.join(',')}`;
+} else if (interactionLatencyFailed.length) {
+  reason = `interaction-latency-contract-missing:${interactionLatencyFailed.join(',')}`;
 } else if (animationFailed.length) {
   reason = `animation-contract-missing:${animationFailed.join(',')}`;
 }
@@ -148,11 +154,13 @@ emit('electron_mdi_json_proof_reason', reason);
 emit('electron_mdi_event_status', eventFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_capture_status', captureFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_performance_status', performanceFailed.length ? 'fail' : 'pass');
+emit('electron_mdi_interaction_latency_status', interactionLatencyFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_animation_status', animationFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_window_count', jsonIntegerTextOrBlank(proof.count));
 emit('electron_mdi_bridge_ipc_frame_count', jsonIntegerTextOrBlank(proof.bridgeIpcFrameCount));
 emit('electron_mdi_performance_now_available', proof.performanceNowAvailable === true ? 'true' : 'false');
 emit('electron_mdi_performance_now_delta_ms', jsonDecimalTextOrBlank(proof.performanceNowDeltaMs));
+emit('electron_mdi_input_to_paint_ms', jsonDecimalTextOrBlank(proof.inputToPaintMs));
 emit('electron_mdi_animation_frame_available', proof.animationFrameAvailable === true ? 'true' : 'false');
 emit('electron_mdi_animation_frame_count', jsonIntegerTextOrBlank(proof.animationFrameCount));
 emit('electron_mdi_css_animation_probe', proof.cssAnimationProbe === true ? 'true' : 'false');

@@ -6,7 +6,7 @@
 Validates the standalone Electron MDI proof validator. The live wrapper writes
 an Electron/Chromium MDI JSON proof and screenshot, and this validator fails
 closed unless event routing, screenshot binding, performance timing, and
-animation details are all present.
+input-to-paint latency, and animation details are all present.
 
 **Plan:** doc/03_plan/ui/web_browser/mdi_platform_completion_plan_2026-06-14.md
 **Requirements:** N/A
@@ -28,13 +28,15 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
   screenshot artifact and the artifact file to exist with nonzero bytes.
 - Capture artifacts must carry the PNG signature bytes; an arbitrary nonempty
   file is not accepted as Electron screenshot proof.
-- Performance and animation pass require `performance.now()`, an explicit
-  positive timing delta, at least two animation frames, and a CSS animation
-  probe. A zero delta does not prove distinct timing samples.
+- Performance, interaction latency, and animation pass require
+  `performance.now()`, an explicit positive timing delta, a positive
+  `inputToPaintMs` sample after routed MDI input, at least two animation
+  frames, and a CSS animation probe. A zero delta does not prove distinct
+  timing samples.
 - Event counts, bridge frame counts, taskbar counts, image counts, animation
-  frame counts, and performance timing deltas must be real JSON numbers;
-  stringified or fractional values are not valid routed-event or full-frame
-  proof.
+  frame counts, performance timing deltas, and input-to-paint latency must be
+  real JSON numbers; stringified or fractional values are not valid
+  routed-event or full-frame proof.
 """
 
 # @tag: system, gui, electron, mdi, event-routing, performance, animation
@@ -43,7 +45,7 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={count:4,hasDesktop:true,imageCount:1,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,appActionControlFound:true,appInputControlFound:true,bodyClickRouted:true,bodyInputRouted:true,bodyKeyRouted:true,trafficMinimizeRouted:true,trafficMaximizeRouted:true,trafficCloseRouted:true,bridgeIpcFrameCount:8,bridgeBodyActionFrameRouted:true,bridgeBodyInputFrameRouted:true,bridgeBodyKeyFrameRouted:true,bridgeMouseDownFrameRouted:true,bridgeMouseUpFrameRouted:true,bridgeMinimizeFrameRouted:true,bridgeMaximizeFrameRouted:true,bridgeCloseFrameRouted:true,taskbarItemCount:4,taskbarIconCount:4,taskbarIconsVisible:true,taskbarLabelsVisible:true,htmlRenderable:true,screenshotPath:\"build/electron-proof/screen.png\",performanceNowAvailable:true,performanceNowDeltaMs:16.7,animationFrameAvailable:true,animationFrameCount:2,cssAnimationProbe:true};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const p={count:4,hasDesktop:true,imageCount:1,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,appActionControlFound:true,appInputControlFound:true,bodyClickRouted:true,bodyInputRouted:true,bodyKeyRouted:true,trafficMinimizeRouted:true,trafficMaximizeRouted:true,trafficCloseRouted:true,bridgeIpcFrameCount:8,bridgeBodyActionFrameRouted:true,bridgeBodyInputFrameRouted:true,bridgeBodyKeyFrameRouted:true,bridgeMouseDownFrameRouted:true,bridgeMouseUpFrameRouted:true,bridgeMinimizeFrameRouted:true,bridgeMaximizeFrameRouted:true,bridgeCloseFrameRouted:true,taskbarItemCount:4,taskbarIconCount:4,taskbarIconsVisible:true,taskbarLabelsVisible:true,htmlRenderable:true,screenshotPath:\"build/electron-proof/screen.png\",performanceNowAvailable:true,performanceNowDeltaMs:16.7,inputToPaintMs:18.4,animationFrameAvailable:true,animationFrameCount:2,cssAnimationProbe:true};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 fn _png_capture_command() -> text:
     "printf '\\211PNG\\r\\n\\032\\nproof' > build/electron-proof/screen.png"
@@ -68,8 +70,10 @@ describe "Electron MDI proof validator":
         expect(evidence).to_contain("electron_mdi_screenshot_size_bytes=13")
         expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=pass")
         expect(evidence).to_contain("electron_mdi_performance_status=pass")
+        expect(evidence).to_contain("electron_mdi_interaction_latency_status=pass")
         expect(evidence).to_contain("electron_mdi_animation_status=pass")
         expect(evidence).to_contain("electron_mdi_performance_now_delta_ms=16.7")
+        expect(evidence).to_contain("electron_mdi_input_to_paint_ms=18.4")
         expect(evidence).to_contain("electron_mdi_animation_frame_count=2")
         expect(evidence).to_contain("electron_mdi_css_animation_probe=true")
 
@@ -176,6 +180,33 @@ describe "Electron MDI proof validator":
         expect(evidence).to_contain("electron_mdi_performance_now_available=true")
         expect(evidence).to_contain("electron_mdi_performance_now_delta_ms=0")
 
+    it "rejects missing zero or stringified input-to-paint latency":
+        val root = "build/test-electron-mdi-validator-input-latency"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
+            _proof_command(root + "/missing.json", "delete p.inputToPaintMs") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/missing.json build/electron-proof/screen.png > " + root + "/missing.env; " +
+            _proof_command(root + "/zero.json", "p.inputToPaintMs=0") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/zero.json build/electron-proof/screen.png > " + root + "/zero.env; " +
+            _proof_command(root + "/string.json", "p.inputToPaintMs=\"18.4\"") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/string.json build/electron-proof/screen.png > " + root + "/string.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val missing = file_read(root + "/missing.env")
+        val zero = file_read(root + "/zero.env")
+        val string_latency = file_read(root + "/string.env")
+        expect(missing).to_contain("electron_mdi_json_proof=fail")
+        expect(missing).to_contain("electron_mdi_json_proof_reason=interaction-latency-contract-missing:inputToPaintMs")
+        expect(missing).to_contain("electron_mdi_interaction_latency_status=fail")
+        expect(missing).to_contain("electron_mdi_input_to_paint_ms=")
+        expect(zero).to_contain("electron_mdi_json_proof=fail")
+        expect(zero).to_contain("electron_mdi_interaction_latency_status=fail")
+        expect(zero).to_contain("electron_mdi_input_to_paint_ms=0")
+        expect(string_latency).to_contain("electron_mdi_json_proof=fail")
+        expect(string_latency).to_contain("electron_mdi_interaction_latency_status=fail")
+        expect(string_latency).to_contain("electron_mdi_input_to_paint_ms=")
+        expect(string_latency.contains("electron_mdi_input_to_paint_ms=18.4")).to_equal(false)
+
     it "rejects missing animation frame proof":
         val root = "build/test-electron-mdi-validator-animation"
         val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
@@ -214,7 +245,7 @@ describe "Electron MDI proof validator":
         expect(animation).to_contain("electron_mdi_animation_frame_count=")
         expect(animation.contains("electron_mdi_animation_frame_count=2.5")).to_equal(false)
 
-    it "rejects stringified numeric event performance and animation proof values":
+    it "rejects stringified numeric event performance latency and animation proof values":
         val root = "build/test-electron-mdi-validator-string-numbers"
         val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
             _proof_command(root + "/window.json", "p.count=\"4\"") +
@@ -225,6 +256,8 @@ describe "Electron MDI proof validator":
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/taskbar.json build/electron-proof/screen.png > " + root + "/taskbar.env; " +
             _proof_command(root + "/performance.json", "p.performanceNowDeltaMs=\"16.7\"") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/performance.json build/electron-proof/screen.png > " + root + "/performance.env; " +
+            _proof_command(root + "/latency.json", "p.inputToPaintMs=\"18.4\"") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/latency.json build/electron-proof/screen.png > " + root + "/latency.env; " +
             _proof_command(root + "/animation.json", "p.animationFrameCount=\"2\"") +
             " && node scripts/check/validate-electron-mdi-proof.js " + root + "/animation.json build/electron-proof/screen.png > " + root + "/animation.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -234,6 +267,7 @@ describe "Electron MDI proof validator":
         val bridge = file_read(root + "/bridge.env")
         val taskbar = file_read(root + "/taskbar.env")
         val performance = file_read(root + "/performance.env")
+        val latency = file_read(root + "/latency.env")
         val animation = file_read(root + "/animation.env")
         step("Confirm stringified numeric evidence is not accepted as live Electron MDI proof")
         expect(window).to_contain("electron_mdi_json_proof=fail")
@@ -250,6 +284,10 @@ describe "Electron MDI proof validator":
         expect(performance).to_contain("electron_mdi_json_proof_reason=performance-contract-missing:performanceNowDeltaMs")
         expect(performance).to_contain("electron_mdi_performance_now_delta_ms=")
         expect(performance.contains("electron_mdi_performance_now_delta_ms=16.7")).to_equal(false)
+        expect(latency).to_contain("electron_mdi_json_proof=fail")
+        expect(latency).to_contain("electron_mdi_json_proof_reason=interaction-latency-contract-missing:inputToPaintMs")
+        expect(latency).to_contain("electron_mdi_input_to_paint_ms=")
+        expect(latency.contains("electron_mdi_input_to_paint_ms=18.4")).to_equal(false)
         expect(animation).to_contain("electron_mdi_json_proof=fail")
         expect(animation).to_contain("electron_mdi_json_proof_reason=animation-contract-missing:animationFrameCount")
         expect(animation).to_contain("electron_mdi_animation_frame_count=")
@@ -259,6 +297,7 @@ describe "Electron MDI proof validator":
         val bridge = file_read("src/app/ui.electron/bridge.js")
         val wrapper = file_read("scripts/check/check-electron-mdi-evidence.shs")
         expect(bridge).to_contain("performanceNowAvailable")
+        expect(bridge).to_contain("inputToPaintMs")
         expect(bridge).to_contain("animationFrameCount")
         expect(bridge).to_contain("cssAnimationProbe")
         expect(wrapper).to_contain("validate-electron-mdi-proof.js")

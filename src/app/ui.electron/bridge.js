@@ -566,6 +566,8 @@ function maybeWriteMdiProof(win) {
                 var wm = window.__SIMPLE_ELECTRON_WM__;
                 var performanceNowAvailable = !!(window.performance && typeof window.performance.now === 'function');
                 var performanceStart = performanceNowAvailable ? window.performance.now() : 0;
+                var inputToPaintStart = 0;
+                var inputToPaintMs = 0;
                 var animationFrameAvailable = typeof window.requestAnimationFrame === 'function';
                 var animationFrameCount = 0;
                 var styleProbe = document.createElement('style');
@@ -613,6 +615,7 @@ function maybeWriteMdiProof(win) {
                     return rect.width >= 20 && rect.height >= 10 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
                 });
                 if (wm && wm.windows && wm.windows.terminal) {
+                    inputToPaintStart = performanceNowAvailable ? window.performance.now() : 0;
                     var terminal = wm.windows.terminal.win;
                     var body = wm.windows.terminal.body;
                     var titlebar = terminal.querySelector('.wm-titlebar');
@@ -687,6 +690,14 @@ function maybeWriteMdiProof(win) {
                         trafficCloseRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'bridge-proof-close' && wm.lastEvent.action === 'close' && !wm.windows['bridge-proof-close']);
                     }
                 }
+                if (inputToPaintStart > 0 && animationFrameAvailable) {
+                    await new Promise(function(resolve) {
+                        requestAnimationFrame(function() {
+                            requestAnimationFrame(resolve);
+                        });
+                    });
+                }
+                inputToPaintMs = performanceNowAvailable && inputToPaintStart > 0 ? Math.max(0, window.performance.now() - inputToPaintStart) : 0;
                 return {
             count: window.__SIMPLE_ELECTRON_WM__ ? Object.keys(window.__SIMPLE_ELECTRON_WM__.windows || {}).length : 0,
             text: document.body.innerText,
@@ -713,6 +724,7 @@ function maybeWriteMdiProof(win) {
             htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0,
             performanceNowAvailable: performanceNowAvailable,
             performanceNowDeltaMs: performanceNowAvailable ? Math.max(0, window.performance.now() - performanceStart) : null,
+            inputToPaintMs: inputToPaintMs,
             animationFrameAvailable: animationFrameAvailable,
             animationFrameCount: animationFrameCount,
             cssAnimationProbe: animationProbeStyle.animationName === 'simple-electron-mdi-proof-pulse'

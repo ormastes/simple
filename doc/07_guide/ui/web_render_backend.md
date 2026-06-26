@@ -165,6 +165,11 @@ This keeps a visually correct capture from passing when visible controls no
 longer receive DOM events or the browser timing, input-to-paint, and animation
 loop are not proven.
 
+The focused Electron MDI wrapper follows the same rule for the live
+Electron/Chromium shell: `electron_mdi_interaction_latency_status=pass` and
+`electron_mdi_input_to_paint_ms>0` are required alongside event routing,
+screenshot binding, `performance.now()`, and animation-frame proof.
+
 The focused production web endpoint gate is:
 
 ```bash
