@@ -278,17 +278,19 @@ expect(cmd).to_contain(file)
 
 ### simple_context tool
 
-#### requires file parameter
+#### requires file parameter except source-less sql query
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("Missing required parameter: file")
+expect(source).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
+expect(source).to_contain("if file == \"\" and not sourceless_sql_query")
 ```
 
 </details>
@@ -356,7 +358,7 @@ expect(source).to_contain("Invalid format: ")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -365,6 +367,7 @@ expect(source).to_contain("val query = extract_field(body, \"query\")")
 expect(source).to_contain("val index = extract_field(body, \"index\")")
 expect(source).to_contain("val sql = extract_field(body, \"sql\")")
 expect(source).to_contain("val db_path = extract_field(body, \"db\")")
+expect(source).to_contain("var ctx_args = [\"context\"]")
 expect(source).to_contain("ctx_args.push(\"--index\")")
 expect(source).to_contain("ctx_args.push(\"--query=\" + query)")
 expect(source).to_contain("ctx_args.push(\"--sql\")")
@@ -373,8 +376,10 @@ expect(source).to_contain("ctx_args.push(\"--db=\" + db_path)")
 val table = rt_file_read_text("src/app/mcp/tool_table.spl") ?? ""
 expect(table).to_contain("prop_str(\"format\", \"Output format: text, markdown, json\")")
 expect(table).to_contain("prop_str(\"index\", \"Emit a local context-pack index (true/false)\")")
-expect(table).to_contain("prop_str(\"query\", \"Query local context-pack index for this source\")")
+expect(table).to_contain("prop_str(\"file\", \"Source file path; optional for --sql query with db\")")
+expect(table).to_contain("prop_str(\"query\", \"Query local or SQL context-pack index\")")
 expect(table).to_contain("prop_str(\"sql\", \"Use Simple embedded SQLite for index/query (true/false)\")")
+expect(table).to_contain("e.required_json = build_required([])")
 expect(table).to_contain("prop_str(\"db\", \"SQLite index database path\")")
 ```
 
@@ -401,7 +406,7 @@ expect(source.contains("timeout 10 \" + _mcp_find_simple_binary() + \" check \" 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -419,8 +424,12 @@ expect(schema).to_contain("elif name == \"simple_context\"")
 expect(schema).to_contain("jp(\"file\", jo2")
 expect(schema).to_contain("jp(\"target\", jo2")
 expect(schema).to_contain("jp(\"format\", jo2")
+expect(schema).to_contain("jp(\"index\", jo2")
+expect(schema).to_contain("jp(\"query\", jo2")
+expect(schema).to_contain("jp(\"sql\", jo2")
+expect(schema).to_contain("jp(\"db\", jo2")
 expect(schema).to_contain("Output format: text, markdown, json")
-expect(schema).to_contain("req = \"[\" + js(\"file\") + \"]\"")
+expect(schema).to_contain("req = \"[]\"")
 ```
 
 </details>
@@ -450,13 +459,17 @@ expect(dispatcher).to_contain("handle_simple_context(id, body)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("target_report")
 expect(source).to_contain("_mcp_render_context_pack")
+expect(source).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
+expect(source).to_contain("ctx_args.push(\"--query=\" + query)")
+expect(source).to_contain("ctx_args.push(\"--sql\")")
+expect(source).to_contain("ctx_args.push(\"--db=\" + db_path)")
 ```
 
 </details>

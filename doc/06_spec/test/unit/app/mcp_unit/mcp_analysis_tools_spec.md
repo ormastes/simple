@@ -172,18 +172,19 @@ expect(cmd).to_contain(file)
 
 ### simple_context tool
 
-#### requires file parameter
+#### requires file parameter except source-less sql query
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val file = ""
-val has_error = file == ""
-expect(has_error).to_equal(true)
+val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
+expect(source).to_contain("Missing required parameter: file")
+expect(source).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
+expect(source).to_contain("if file == \"\" and not sourceless_sql_query")
 ```
 
 </details>
@@ -224,12 +225,13 @@ expect(has_target).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("val query = extract_field(body, \"query\")")
+expect(source).to_contain("var ctx_args = [\"context\"]")
 expect(source).to_contain("ctx_args.push(\"--query=\" + query)")
 expect(source).to_contain("ctx_args.push(\"--index\")")
 expect(source).to_contain("ctx_args.push(\"--sql\")")
@@ -237,8 +239,10 @@ expect(source).to_contain("ctx_args.push(\"--db=\" + db_path)")
 
 val table = rt_file_read_text("src/app/mcp/tool_table.spl") ?? ""
 expect(table).to_contain("prop_str(\"index\", \"Emit a local context-pack index (true/false)\")")
-expect(table).to_contain("prop_str(\"query\", \"Query local context-pack index for this source\")")
+expect(table).to_contain("prop_str(\"file\", \"Source file path; optional for --sql query with db\")")
+expect(table).to_contain("prop_str(\"query\", \"Query local or SQL context-pack index\")")
 expect(table).to_contain("prop_str(\"sql\", \"Use Simple embedded SQLite for index/query (true/false)\")")
+expect(table).to_contain("e.required_json = build_required([])")
 ```
 
 </details>

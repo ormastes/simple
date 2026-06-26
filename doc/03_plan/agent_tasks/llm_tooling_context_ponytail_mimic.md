@@ -226,6 +226,14 @@ Tasks:
 4. Add interpreter extern support for the existing SQLite facade operations used
    by the context backend. Status: done.
 5. Add mirrored absence-marker-free unit coverage. Status: done.
+6. Allow persisted SQL DB query without a source file. Status: done on
+   2026-06-26; `context --sql --query=<text> --db=<path>` now reaches
+   `context_sql_query_packs([], "", query, db_path, format)` instead of failing
+   source-file validation.
+7. Expose source-less SQL context DB query through MCP. Status: done on
+   2026-06-26 for app MCP and lower MCP; `simple_context` no longer marks
+   `file` as universally required and still rejects missing file unless
+   `sql=true` plus a non-empty `query` are present.
 
 Evidence:
 
@@ -240,6 +248,19 @@ Evidence:
 - `release/x86_64-unknown-linux-gnu/simple test
   test/unit/app/tooling/context_generate_spec.spl --mode=interpreter` passed
   with 13/13 after adding exact character-budget token estimate coverage.
+- `release/x86_64-unknown-linux-gnu/simple test
+  test/01_unit/app/tooling/context_generate_spec.spl --mode=interpreter` passed
+  with 14/14 after adding source-less embedded SQL DB query coverage.
+- `release/x86_64-unknown-linux-gnu/simple test
+  test/unit/app/tooling/context_generate_spec.spl --mode=interpreter` passed
+  with 14/14 after adding source-less embedded SQL DB query coverage.
+- `release/x86_64-unknown-linux-gnu/simple test
+  test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl --mode=interpreter`
+  passed with 33/33 after adding app/lower MCP source-less SQL context
+  contracts.
+- `release/x86_64-unknown-linux-gnu/simple test
+  test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl --mode=interpreter` passed
+  with 23/23 after adding app MCP source-less SQL context contracts.
 
 ## Lane 3: Dashboard Tooling Artifact Panel
 

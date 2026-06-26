@@ -30,6 +30,12 @@ Selected option: Option A, Context Pack First.
   unavailable, ready, and no-match statuses.
 - REQ-011: Interpreter mode shall provide the `rt_sqlite_*` externs needed by
   the existing Simple SQLite facade for context indexing and querying.
+- REQ-012: The `context` CLI shall allow `--sql --query=<text> --db=<path>`
+  without a source file so operators can query a persisted embedded-SQL context
+  database without providing a dummy readable file.
+- REQ-013: App MCP and lower MCP `simple_context` shall expose the same
+  source-less SQL query shape by treating `file` as optional only when SQL mode
+  and a non-empty query are provided.
 
 ## Deferred
 

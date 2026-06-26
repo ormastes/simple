@@ -11,7 +11,7 @@
 #   - Multiple export formats (JSON, Markdown, Text)
 
 # I/O imports
-use app.io.context_ops (context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_get_args, context_file_exists, context_file_write)
+use app.io.context_ops (context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_args_allow_sourceless_sql_query, context_get_args, context_file_exists, context_file_write)
 use std.cli.cli_util (has_flag)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 
@@ -46,6 +46,7 @@ fn print_help():
     print "  context app.spl --index -o context.index"
     print "  context app.spl --query=handler --text"
     print "  context app.spl --sql --query=handler --db=.cache/context.db"
+    print "  context --sql --query=handler --db=.cache/context.db"
     print ""
     print "Features:"
     print "  - 90% reduction in LLM context tokens"
@@ -122,6 +123,57 @@ fn main() -> i64:
             source_idx = scan_arg_idx
             break
         scan_arg_idx = scan_arg_idx + 1
+
+    var sourceless_query = ""
+    var sourceless_db_path = ""
+    var sourceless_format = "markdown"
+    var sourceless_output_file = ""
+    if source_path == "" and context_args_allow_sourceless_sql_query(args):
+        var source_less_idx = 0
+        while source_less_idx < args.len():
+            val arg = args[source_less_idx]
+            if arg == "--json":
+                sourceless_format = "json"
+            elif arg == "--text":
+                sourceless_format = "text"
+            elif arg.starts_with("--format="):
+                sourceless_format = arg[9:]
+            elif arg.starts_with("--query="):
+                sourceless_query = arg[8:]
+            elif arg.starts_with("--db="):
+                sourceless_db_path = arg[5:]
+            elif arg == "-o":
+                if source_less_idx + 1 < args.len():
+                    sourceless_output_file = args[source_less_idx + 1]
+                    source_less_idx = source_less_idx + 1
+            elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                source_less_idx = source_less_idx + 1
+            source_less_idx = source_less_idx + 1
+
+        val output = context_sql_query_packs([], "", sourceless_query, sourceless_db_path, sourceless_format)
+        if output == "":
+            if log_opts.log_mode == "json":
+                print "{\"command\":\"context\",\"status\":\"error\",\"source\":\"\"}"
+            else:
+                print "context: failed to query SQL context database"
+            return 1
+        if sourceless_output_file != "":
+            if not context_file_write(sourceless_output_file, output):
+                print "context: cannot write {sourceless_output_file}"
+                return 1
+            if log_opts.progress != "summary":
+                val progress_line = render_progress(log_opts.progress, 1, 1, "context")
+                if progress_line != "":
+                    print progress_line
+            print "Context written to {sourceless_output_file}"
+            return 0
+        if log_opts.progress != "summary" and log_opts.log_mode != "json":
+            val progress_line = render_progress(log_opts.progress, 1, 1, "context")
+            if progress_line != "":
+                print progress_line
+        print output
+        return 0
+
     if source_path == "":
         print_help()
         return 1

@@ -291,7 +291,7 @@ bin/simple_mcp_server
 | `simple_api` | Module API (optional: module, query, visibility) |
 | `simple_dependencies` | Dependency graph |
 | `simple_api_diff` | API surface diff (required: file) |
-| `simple_context` | Context pack (required: file) |
+| `simple_context` | Context pack or SQL context query |
 | `simple_ponytail` | Over-engineering audit or simplification report |
 | `simple_search` | Code search (required: query) |
 
@@ -304,11 +304,15 @@ CLI accepts:
   embedded SQLite facade.
 - `context <file> --sql --query=<text> [--db=<path>]` to query SQLite-backed
   context records with `backend: sqlite` in the output.
+- `context --sql --query=<text> --db=<path>` to query a persisted SQLite-backed
+  context database without requiring a source file.
 
 The MCP tool accepts `file`, optional `target`, `format` (`text`, `markdown`, or
-`json`), `index=true`, `query`, `sql=true`, and `db`. These fields are forwarded
-to the existing `context` CLI subprocess so source-mode MCP does not import the
-large context/compiler graph directly.
+`json`), `index=true`, `query`, `sql=true`, and `db`. `file` is optional only for
+the `sql=true` plus non-empty `query` shape; ordinary context generation still
+requires a source file. These fields are forwarded to the existing `context` CLI
+subprocess so source-mode MCP does not import the large context/compiler graph
+directly.
 
 The SQL-backed context path uses the existing `app.io.sqlite_sffi` facade. In
 interpreter mode the compiler provides a narrow `rt_sqlite_*` subset for context

@@ -121,6 +121,12 @@ The `context` CLI exposes this through the existing parser:
 
 - `context app.spl --sql --index -o context.db.txt`
 - `context app.spl --sql --query=handler --json`
+- `context --sql --query=handler --db=.cache/context.db`
+
+The source-less SQL query form skips source-file validation and calls
+`context_sql_query_packs([], "", query, db_path, format)`. This preserves the
+same output/write/progress behavior while allowing persisted context databases
+to be queried without a dummy file path.
 
 ## MCP Context Index/Query Options Slice
 
@@ -130,6 +136,12 @@ The tool schema accepts `file`, optional `target`, `format`, `index`, `query`,
 `sql`, and `db`. `handle_simple_context` validates the same text/markdown/json
 format boundary and forwards index/query/sql/db options to the `context`
 subprocess argument vector.
+
+`file` is no longer universally required in the MCP schema. The handler still
+requires it for ordinary context generation, local index, and source-backed SQL
+index/query. The only source-less accepted shape is `sql=true` with a non-empty
+`query`, which forwards to the CLI as `context --sql --query=<text>
+--db=<path>`.
 
 App MCP `simple_ponytail` also advertises the existing `mode` selector so
 clients can discover `audit` and `simplification` through metadata.
@@ -183,6 +195,9 @@ simple; richer symbol slicing can be a later slice.
 - embedded SQL index output contains sqlite backend, pack count, and source
   records
 - embedded SQL query output contains sqlite backend, matches, and content
+- source-less embedded SQL DB query is accepted only when both `--sql` and a
+  non-empty `--query` are present, and empty DB results use explicit no-match
+  output
 - missing file returns empty helper output and CLI error path remains unchanged
 - all user-visible outputs render absence as explicit text
 - `scripts/check/check-llm-tooling-public-absence-rendering.shs` guards the

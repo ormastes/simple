@@ -28,7 +28,7 @@ context_generate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -106,6 +106,24 @@ val stats = context_stats(path, "hello")
 expect(stats).to_contain("status: ready")
 expect(stats).to_contain("lines:")
 expect(stats).to_contain("token_estimate:")
+```
+
+</details>
+
+#### estimates tokens by context character budget
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val path = _write_context_fixture()
+val stats = context_stats(path, "hello")
+expect(stats).to_contain("token_estimate: 10")
+val output = context_index_packs([path], "hello", "text")
+expect(output).to_contain("token_estimate: 10")
 ```
 
 </details>
@@ -278,6 +296,31 @@ expect(output.contains(absence_marker)).to_equal(false)
 
 </details>
 
+#### allows source-less embedded sql db queries
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val absence_marker = "n" + "il"
+expect(context_args_allow_sourceless_sql_query(["--sql", "--query=hello", "--db=build/test/context.db"])).to_equal(true)
+expect(context_args_allow_sourceless_sql_query(["--query=hello"])).to_equal(false)
+expect(context_args_allow_sourceless_sql_query(["--sql", "--query="])).to_equal(false)
+
+val output = context_sql_query_packs([], "", "hello", "", "text")
+expect(output).to_contain("Simple context SQL query")
+expect(output).to_contain("backend: sqlite")
+if not output.contains("status: unavailable"):
+    expect(output).to_contain("status: no_matches")
+    expect(output).to_contain("matches: 0")
+expect(output.contains(absence_marker)).to_equal(false)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -297,8 +340,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
