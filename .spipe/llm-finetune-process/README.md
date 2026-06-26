@@ -61,6 +61,10 @@ The linked retry attempt `llm_backed_app_server_dry_run_retry4` records the
 license/data-access gate before real QLoRA. It must continue to fail
 `fine-tune-ready` because no licensed data cache, model artifact, target eval,
 or accepted decision exists yet.
+The linked retry attempt `llm_backed_app_server_dry_run_retry5` records the
+current licensed data acquisition and cache/checksum gate. It must continue to
+fail `fine-tune-ready` because no licensed cache path, checksum, model artifact,
+target eval, or accepted decision exists yet.
 
 Record data-download evidence:
 

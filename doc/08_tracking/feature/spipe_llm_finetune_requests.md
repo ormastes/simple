@@ -59,3 +59,39 @@ Lifecycle: `Open` -> `Accepted` -> `Implemented` or `Rejected`.
         checks.
   - [ ] Deployment evidence records runtime, memory target, latency target, and
         rollback/fallback model.
+
+### FR-SPIPE-LLM-0004 - Obtain licensed fixed-format data cache
+
+- **Filed-on:** 2026-06-26
+- **Filed-by:** Codex
+- **Target:** SPipe LLM fine-tune retry5 / MedGemma Korean
+- **Priority:** P1
+- **Status:** Open
+- **Requested-semantics:** Complete the current retry5 handoff by obtaining
+  licensed fixed-format medical QA data access, writing a repo-visible cache
+  path/checksum evidence record, and keeping training blocked until license
+  approval exists.
+- **Acceptance-criteria:**
+  - [ ] `llm_backed_app_server_dry_run_retry5` records a real licensed data
+        source, approved license state, cache path, and checksum.
+  - [ ] `fine-tune-data-plan llm_backed_app_server_dry_run_retry5` reports the
+        licensed data cache/checksum as present.
+  - [ ] `fine-tune-ready llm_backed_app_server_dry_run_retry5` still fails until
+        target-reaching model eval and accepted decision are also recorded.
+
+### FR-SPIPE-LLM-0005 - Run real QLoRA retry after data gate
+
+- **Filed-on:** 2026-06-26
+- **Filed-by:** Codex
+- **Target:** SPipe LLM fine-tune retry6 / MedGemma Korean
+- **Priority:** P1
+- **Status:** Open
+- **Requested-semantics:** After FR-SPIPE-LLM-0004 is satisfied, run the real
+  QLoRA rerun and target evaluation instead of accepting dry-run artifact
+  evidence.
+- **Acceptance-criteria:**
+  - [ ] A retry6 or successor attempt records real training command, artifact,
+        evaluation command, metrics, and target result.
+  - [ ] The eval reaches `target_accuracy>=90.0` before any accepted decision.
+  - [ ] If eval remains below target, the decision routes to a new retry or a
+        retrieval/tool strategy instead of overwriting prior evidence.

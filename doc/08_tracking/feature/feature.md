@@ -128,7 +128,7 @@ Last ID: `STATIC_FILE_COMPRESSION_CACHE_INTEGRATION_2026_05_01`
 | [simpleos_pci/device_grants,_dma_syscalls,_and_net_backend_layer](group/simpleos_pci_device_grants__dma_syscalls__and_net_backend_layer.md) | 1 | 0 | 1 | 0 | 0 | 0 |
 | [simpleos_pci/device_manager_and_network_backend_capability_layer](group/simpleos_pci_device_manager_and_network_backend_capability_layer.md) | 1 | 0 | 1 | 0 | 0 | 0 |
 | [spipe_fine-tune_readiness_gate](group/spipe_fine_tune_readiness_gate.md) | 1 | 1 | 0 | 0 | 0 | 0 |
-| [spipe_llm_fine-tune_retry_loop_/_medgemma_korean](group/spipe_llm_fine_tune_retry_loop___medgemma_korean.md) | 1 | 1 | 0 | 0 | 0 | 0 |
+| [spipe_llm_fine-tune_retry_loop_/_medgemma_korean](group/spipe_llm_fine_tune_retry_loop___medgemma_korean.md) | 3 | 3 | 0 | 0 | 0 | 0 |
 | [sspec-manual](group/sspec_manual.md) | 4 | 0 | 4 | 0 | 0 | 0 |
 | [static](group/static.md) | 1 | 1 | 0 | 0 | 0 | 0 |
 | [storage__(src/lib/nogc_sync_mut/fs_driver/fat32_stub](group/storage___src_lib_nogc_sync_mut_fs_driver_fat32_stub.md) | 3 | 0 | 3 | 0 | 0 | 0 |

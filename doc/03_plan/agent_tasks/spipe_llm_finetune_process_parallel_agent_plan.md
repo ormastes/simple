@@ -135,3 +135,23 @@ Next normal-LLM work: obtain licensed fixed-format data access and
 cache/checksum evidence, then run real QLoRA/eval or route to another strategy.
 Record an accepted decision only if eval reaches the target and license/handoff
 checks pass.
+
+## 2026-06-26 Retry5 Handoff
+
+Retry attempt `llm_backed_app_server_dry_run_retry5` now exists as the current
+licensed data acquisition/cache-checksum gate. It is intentionally not accepted:
+no licensed cache path, checksum, trained artifact, target eval, or accepted
+decision exists yet.
+
+Evidence:
+
+- `.spipe/llm-finetune-process/scripts/check_retry5_data_access_gate.shs
+  llm_backed_app_server_dry_run_retry5` reports `license_review=missing`,
+  `data_access=missing`, `cache_checksum=missing`,
+  `training_allowed=false`, and `STATUS: WARN retry5-data-access-gate`.
+- `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry5.sdn`
+  records the retry target as licensed data acquisition, cache/checksum
+  verification, QLoRA rerun, and target eval.
+
+Next normal-LLM work: obtain licensed data approval and write cache/checksum
+evidence for retry5 before any real training or acceptance claim.

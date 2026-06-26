@@ -132,6 +132,19 @@ check covers SPipe command routing. The `doc/06_spec` guard covers scenario 5.
   `model_artifact_created` and `decision_accepted`; retry4 is a license/data
   gate, not a trained or accepted model.
 
+2026-06-26 retry5 licensed data cache/checksum gate evidence:
+
+- `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry5.sdn`
+  records the current licensed data acquisition/cache gate.
+- `.spipe/llm-finetune-process/scripts/check_retry5_data_access_gate.shs
+  llm_backed_app_server_dry_run_retry5` reports
+  `license_review=missing`, `data_access=missing`,
+  `cache_checksum=missing`, `training_allowed=false`, and
+  `STATUS: WARN retry5-data-access-gate`.
+- Retry5 must continue to fail `fine-tune-ready` until licensed data access,
+  cache path, checksum evidence, real QLoRA training, target-reaching eval, and
+  an accepted decision are all recorded.
+
 ## Manual Gate
 
 Final SPipe fine-tune process requirements are selected in
@@ -141,4 +154,5 @@ Final SPipe fine-tune process requirements are selected in
 The remaining manual gate is model acceptance and licensed data access: do not
 mark a fine-tune attempt ready until the decision registry records `accepted`
 after target-reaching eval evidence, license review, cache/checksum evidence,
-and app/server handoff verification.
+and app/server handoff verification. The current concrete next attempt is
+`llm_backed_app_server_dry_run_retry5`.
