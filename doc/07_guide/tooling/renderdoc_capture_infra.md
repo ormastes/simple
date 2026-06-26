@@ -220,9 +220,16 @@ scripts/check/check-widget-showcase-4k-200fps.shs` to verify wrapper routing
 without launching the expensive native perf run. Plan-only evidence is not
 completion evidence; it proves only that the wrapper selects the expected
 `*_probe_fn`, `*_probe_prefix`, and `*_perf_env_flag`, and that native alias
-generation points at the selected probe. The wrapper emits producer-side
-`*_log_file_status` and `*_time_log_file_status` fields; plan-only rows should
-mark them `fail`, while completion rows must mark them `pass`.
+generation points at the selected probe. The wrapper emits the full measured
+field key shape in plan-only rows with empty FPS, frame timing, observed RSS,
+checksum, nonzero readback, render mode, and redraw fields. It also emits
+producer-side `*_log_file_status` and `*_time_log_file_status` fields; plan-only
+rows should mark them `fail`, while completion rows must mark them `pass`.
+When `GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR` is set, the aggregate keys the
+HTML/CSS and widget fixture nested caches by the scripts, specs, manifests, and
+fixture files that define their evidence. Do not rely on old unkeyed cache
+directories; they are intentionally ignored so stale `105/105` or blocked
+animation rows cannot survive after the implemented CSS subset changes.
 The browser Vulkan-backed proof is a separate rollup:
 `gui_web_2d_vulkan_browser_backing_status`,
 `gui_web_2d_vulkan_browser_backing_reason`, and

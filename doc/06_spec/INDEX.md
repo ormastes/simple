@@ -15,5 +15,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [GUI RenderDoc feature coverage status gate](test/03_system/check/gui_renderdoc_feature_coverage_status_spec.md) | Partial | N/A | 27 | 60% | 174 lines |
+| [GUI RenderDoc feature coverage status gate](test/03_system/check/gui_renderdoc_feature_coverage_status_spec.md) | Partial | N/A | 28 | 60% | 174 lines |
 

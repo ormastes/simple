@@ -27,7 +27,7 @@ gui_renderdoc_feature_coverage_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 27 | 27 | 0 | 0 |
+| 28 | 28 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1581,6 +1581,35 @@ expect(evidence).to_contain("gui_showcase_8k_perf_reason=missing-8k-retained-log
 
 </details>
 
+#### ignores stale unkeyed static cache entries for HTML CSS counts
+
+- Create stale unkeyed aggregate cache entries
+   - Expected: code equals `0`
+- Assert keyed cache misses stale unkeyed rows and reports current CSS state
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create stale unkeyed aggregate cache entries")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-stale-cache && mkdir -p build/test-gui-renderdoc-feature-coverage-status-stale-cache/cache/sspec-traceability build/test-gui-renderdoc-feature-coverage-status-stale-cache/cache/rendering-manifest-traceability build/test-gui-renderdoc-feature-coverage-status-stale-cache/cache/full-rendering-goal-status && printf 'html_css_sspec_traceability_status=pass\\nhtml_css_sspec_traceability_reason=stale\\nhtml_css_sspec_traceability_implemented_css_property_count=105\\n' > build/test-gui-renderdoc-feature-coverage-status-stale-cache/cache/sspec-traceability/evidence.env && printf 'html_css_rendering_manifest_traceability_status=pass\\nhtml_css_rendering_manifest_traceability_reason=stale\\nhtml_css_rendering_manifest_traceability_css_property_count=105\\nhtml_css_rendering_manifest_traceability_css_property_covered_count=105\\n' > build/test-gui-renderdoc-feature-coverage-status-stale-cache/cache/rendering-manifest-traceability/evidence.env && printf 'html_css_full_rendering_goal_status=incomplete\\nhtml_css_full_rendering_goal_implemented_css_total_count=105\\nhtml_css_full_rendering_goal_animation_css_status=incomplete\\n' > build/test-gui-renderdoc-feature-coverage-status-stale-cache/cache/full-rendering-goal-status/evidence.env && GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-status-stale-cache/cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-stale-cache/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-stale-cache/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert keyed cache misses stale unkeyed rows and reports current CSS state")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-stale-cache/out/evidence.env")
+expect(evidence).to_contain("html_css_traceability_implemented_css_property_count=117")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_count=117")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=117")
+expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_status=pass")
+```
+
+</details>
+
 #### rejects retained 4K pass rows with a target below 200 FPS
 
 - Create an otherwise valid retained 4K row with a 60 FPS target
@@ -2330,8 +2359,8 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=simple-runtim
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 27 |
-| Active scenarios | 27 |
+| Total scenarios | 28 |
+| Active scenarios | 28 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

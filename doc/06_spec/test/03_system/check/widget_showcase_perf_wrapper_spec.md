@@ -80,7 +80,8 @@ PLAN_ONLY=1 RESOLUTION=8k sh scripts/check/check-widget-showcase-4k-200fps.shs
 4. Feed those env files into the GUI RenderDoc aggregate with
    `GUI_SHOWCASE_4K_PERF_ENV` and `GUI_SHOWCASE_8K_PERF_ENV`.
 5. Treat plan-only output as routing evidence only. It is not completion
-   evidence because it does not produce timing, RSS, checksum, or readback rows.
+   evidence because timing, RSS, checksum, and readback measurement rows remain
+   empty until a real run executes.
 
 ## Acceptance
 
@@ -90,6 +91,9 @@ PLAN_ONLY=1 RESOLUTION=8k sh scripts/check/check-widget-showcase-4k-200fps.shs
   `SHOWCASE_8K_PERF`, 7680x4320, 200 frames, and target FPS 200.
 - Plan-only evidence includes native provenance and marks runtime log artifact
   status as `fail` because no expensive benchmark has executed yet.
+- Plan-only evidence emits the same measured field keys as a real row with empty
+  values for FPS, frame timing, observed RSS, checksum, nonzero readback pixels,
+  render mode, and redraw count.
 - Native plan-only mode writes the generated alias source that calls the
   selected probe function directly.
 
@@ -165,8 +169,8 @@ showcase source imports and helper definitions.
 
 The spec covers plan-only 4K and 8K routing. It verifies the selected probe
 function, evidence prefix, environment flag, resolution, frame count, target
-FPS, pixel count, native provenance fields, plan-only log artifact status, and
-generated native alias source.
+FPS, pixel count, native provenance fields, empty measured field placeholders,
+plan-only log artifact status, and generated native alias source.
 
 ## Scenarios
 
@@ -182,7 +186,7 @@ generated native alias source.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -204,6 +208,16 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_height=2160")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frames=200")
 expect(evidence).to_contain("gui_showcase_4k_200fps_target_fps=200")
 expect(evidence).to_contain("gui_showcase_4k_200fps_pixels=8294400")
+expect(evidence).to_contain("gui_showcase_4k_200fps_fps_x1000=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_frame_avg_ns=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_frame_p50_ns=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_frame_p95_ns=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_max_rss_kb=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_rss_status=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_nonzero_pixels=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_checksum=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_render_mode=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_redraw_frames=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_simple_bin=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_use_native=1")
@@ -229,7 +243,7 @@ expect(alias_src).to_contain("run_4k_perf_probe()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -251,6 +265,16 @@ expect(evidence).to_contain("gui_showcase_8k_perf_height=4320")
 expect(evidence).to_contain("gui_showcase_8k_perf_frames=200")
 expect(evidence).to_contain("gui_showcase_8k_perf_target_fps=200")
 expect(evidence).to_contain("gui_showcase_8k_perf_pixels=33177600")
+expect(evidence).to_contain("gui_showcase_8k_perf_fps_x1000=")
+expect(evidence).to_contain("gui_showcase_8k_perf_frame_avg_ns=")
+expect(evidence).to_contain("gui_showcase_8k_perf_frame_p50_ns=")
+expect(evidence).to_contain("gui_showcase_8k_perf_frame_p95_ns=")
+expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_kb=")
+expect(evidence).to_contain("gui_showcase_8k_perf_rss_status=")
+expect(evidence).to_contain("gui_showcase_8k_perf_nonzero_pixels=")
+expect(evidence).to_contain("gui_showcase_8k_perf_checksum=")
+expect(evidence).to_contain("gui_showcase_8k_perf_render_mode=")
+expect(evidence).to_contain("gui_showcase_8k_perf_redraw_frames=")
 expect(evidence).to_contain("gui_showcase_8k_perf_source_revision=")
 expect(evidence).to_contain("gui_showcase_8k_perf_simple_bin=")
 expect(evidence).to_contain("gui_showcase_8k_perf_use_native=1")
