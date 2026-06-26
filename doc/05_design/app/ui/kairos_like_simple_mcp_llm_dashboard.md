@@ -280,9 +280,12 @@ absence-safe and are covered by the assistant live-view specs.
 The dashboard retention projection applies bounded visible timeline and
 notification windows over a snapshot, coalesces repeated low-value signal and
 notification bursts, and reports retained/dropped/coalesced counts with a
-absence-safe operator notice. It is a dashboard projection only: durable store
-pruning and digest-checkpoint retention are left to the store/digest policy
-lane.
+absence-safe operator notice. The MCP assistant store also exposes
+`assistant_store_prune_session_retention(...)`, which applies the durable side
+of the same policy by rewriting persisted timeline and notification JSONL files
+to bounded tails. The result reports retained/dropped counts and preserves the
+current digest checkpoint id. Background digest generation and multi-checkpoint
+digest pruning remain in the store/digest policy follow-on.
 The dashboard digest projection renders persisted summary/checkpoint readback
 from replay snapshots: session summary, digest checkpoint ID, latest event
 detail, task result-summary counts, warning counts, and notifications. It is

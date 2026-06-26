@@ -156,8 +156,19 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
    - Evidence:
      - `test/01_unit/app/llm_dashboard/assistant_retention_spec.spl` passes.
      - `test/unit/app/llm_dashboard/assistant_retention_spec.spl` passes.
-   - Durable store pruning and digest-checkpoint retention policy remain a
-     separate broad follow-on; this slice does not delete persisted records.
+   - `src/app/mcp/assistant/session_store_part2.spl` now adds
+     `assistant_store_prune_session_retention(...)`, a durable store-level
+     retention pass that rewrites timeline and notification JSONL files to
+     bounded tails, reports retained/dropped counts, and preserves the current
+     digest checkpoint id.
+   - Evidence:
+     - `test/01_unit/app/mcp/assistant/session_store_spec.spl` proves persisted
+       JSONL tails are actually pruned on disk and the digest checkpoint id is
+       preserved.
+     - `test/unit/app/mcp/assistant/session_store_spec.spl` mirrors the same
+       durable retention coverage.
+   - Full background digest generation and multi-checkpoint digest pruning
+     remain a separate store/digest follow-on.
 7. Digest/brief replay readback:
    - `src/app/dashboard/assistant_digest.spl` projects digest-style dashboard
      readback from persisted snapshot fields: session summary, digest checkpoint

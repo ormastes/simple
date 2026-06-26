@@ -5,7 +5,8 @@ use std.common.json.types.{json_get_type, json_to_string}
 use app.mcp.assistant.{
     AssistantSessionRecord, AssistantTimelineRecord, AssistantChildTaskRecord,
     assistant_store_create_session, assistant_store_load_session, assistant_store_list_sessions,
-    assistant_store_append_event, assistant_store_update_state, assistant_store_create_child_task
+    assistant_store_append_event, assistant_store_update_state, assistant_store_create_child_task,
+    assistant_store_prune_session_retention
 }
 
 extern fn rt_time_now_unix_micros() -> i64
@@ -177,3 +178,44 @@ describe "assistant session store":
                 fail("timeline JSONL first line should parse")
             case _:
                 expect(json_to_string(json_object_get(first_line, "kind"))).to_equal("note")
+
+    it "durably prunes timeline and notification jsonl tails while preserving digest checkpoint":
+        val root = test_root("retention")
+        assistant_store_create_session(
+            root,
+            json_parse(r"""{"session_id":"assistant-retention-core","name":"Retention Core","summary":"retention","objective":"retention","prompt":"retention","mode":"proactive","state":"running","digest_checkpoint_id":"digest-keep"}""")
+        )
+        var i: i64 = 0
+        while i < 7:
+            assistant_store_append_event(
+                root,
+                json_parse("{\"session_id\":\"assistant-retention-core\",\"kind\":\"note\",\"message\":\"event-{i}\",\"signal\":\"\",\"timestamp_ms\":{i},\"event_id\":\"event-{i}\"}")
+            )
+            i = i + 1
+
+        val result = assistant_store_prune_session_retention(root, "assistant-retention-core", 3, 2)
+
+        expect(result.status).to_equal("pruned")
+        expect(result.reason).to_equal("retention_applied")
+        expect(result.retained_timeline_count).to_equal(3)
+        expect(result.retained_notification_count).to_equal(2)
+        expect(result.dropped_timeline_count).to_equal(4)
+        expect(result.dropped_notification_count).to_equal(5)
+        expect(result.digest_checkpoint_id).to_equal("digest-keep")
+        expect(result.evidence.contains("nil")).to_equal(false)
+
+        val timeline_jsonl = rt_file_read_text("{root}/timelines/assistant-retention-core.jsonl")
+        val notifications_jsonl = rt_file_read_text("{root}/notifications/assistant-retention-core.jsonl")
+        expect(non_empty_lines_count(timeline_jsonl)).to_equal(3)
+        expect(non_empty_lines_count(notifications_jsonl)).to_equal(2)
+        expect(timeline_jsonl).to_contain("event-4")
+        expect(timeline_jsonl).to_contain("event-6")
+        expect(timeline_jsonl.contains("event-0")).to_equal(false)
+
+        val loaded = assistant_store_load_session(root, "assistant-retention-core")
+        match loaded:
+            case Some(session):
+                expect(session.event_count).to_equal(3)
+                expect(session.digest_checkpoint_id).to_equal("digest-keep")
+            case nil:
+                fail("retained assistant session should load after pruning")

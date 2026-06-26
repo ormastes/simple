@@ -28,7 +28,7 @@ session_store_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -308,6 +308,76 @@ match first_line:
 
 </details>
 
+#### durably prunes timeline and notification jsonl tails while preserving digest checkpoint
+
+- json parse
+- json parse
+   - Expected: result.status equals `pruned`
+   - Expected: result.reason equals `retention_applied`
+   - Expected: result.retained_timeline_count equals `3`
+   - Expected: result.retained_notification_count equals `2`
+   - Expected: result.dropped_timeline_count equals `4`
+   - Expected: result.dropped_notification_count equals `5`
+   - Expected: result.digest_checkpoint_id equals `digest-keep`
+   - Expected: result.evidence does not contain `nil`
+   - Expected: non_empty_lines_count(timeline_jsonl) equals `3`
+   - Expected: non_empty_lines_count(notifications_jsonl) equals `2`
+   - Expected: timeline_jsonl does not contain `event-0`
+   - Expected: session.event_count equals `3`
+   - Expected: session.digest_checkpoint_id equals `digest-keep`
+- fail
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 39 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = test_root("retention")
+assistant_store_create_session(
+    root,
+    json_parse(r"""{"session_id":"assistant-retention-core","name":"Retention Core","summary":"retention","objective":"retention","prompt":"retention","mode":"proactive","state":"running","digest_checkpoint_id":"digest-keep"}""")
+)
+var i: i64 = 0
+while i < 7:
+    assistant_store_append_event(
+        root,
+        json_parse("{\"session_id\":\"assistant-retention-core\",\"kind\":\"note\",\"message\":\"event-{i}\",\"signal\":\"\",\"timestamp_ms\":{i},\"event_id\":\"event-{i}\"}")
+    )
+    i = i + 1
+
+val result = assistant_store_prune_session_retention(root, "assistant-retention-core", 3, 2)
+
+expect(result.status).to_equal("pruned")
+expect(result.reason).to_equal("retention_applied")
+expect(result.retained_timeline_count).to_equal(3)
+expect(result.retained_notification_count).to_equal(2)
+expect(result.dropped_timeline_count).to_equal(4)
+expect(result.dropped_notification_count).to_equal(5)
+expect(result.digest_checkpoint_id).to_equal("digest-keep")
+expect(result.evidence.contains("nil")).to_equal(false)
+
+val timeline_jsonl = rt_file_read_text("{root}/timelines/assistant-retention-core.jsonl")
+val notifications_jsonl = rt_file_read_text("{root}/notifications/assistant-retention-core.jsonl")
+expect(non_empty_lines_count(timeline_jsonl)).to_equal(3)
+expect(non_empty_lines_count(notifications_jsonl)).to_equal(2)
+expect(timeline_jsonl).to_contain("event-4")
+expect(timeline_jsonl).to_contain("event-6")
+expect(timeline_jsonl.contains("event-0")).to_equal(false)
+
+val loaded = assistant_store_load_session(root, "assistant-retention-core")
+match loaded:
+    case Some(session):
+        expect(session.event_count).to_equal(3)
+        expect(session.digest_checkpoint_id).to_equal("digest-keep")
+    case nil:
+        fail("retained assistant session should load after pruning")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -327,8 +397,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

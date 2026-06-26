@@ -30,7 +30,7 @@ use .types.{
     assistant_timeline_title, assistant_timeline_detail, assistant_session_summary
 }
 
-use std.io_runtime.{file_exists, file_read, list_dir}
+use std.io_runtime.{file_exists, file_read, file_write, list_dir}
 use std.common.json.object_ops.{json_object_get}
 use std.common.json.types.{json_to_number, json_to_string}
 
@@ -268,6 +268,82 @@ fn assistant_store_create_child_task_record(root: text, task: AssistantChildTask
         case nil:
             pass
     nil
+
+class AssistantStoreRetentionResult:
+    session_id: text
+    status: text
+    reason: text
+    retained_timeline_count: i64
+    retained_notification_count: i64
+    dropped_timeline_count: i64
+    dropped_notification_count: i64
+    digest_checkpoint_id: text
+    evidence: text
+
+fn assistant_store_prune_session_retention(root: text, session_id: text, max_timeline_events: i64, max_notifications: i64) -> AssistantStoreRetentionResult:
+    val resolved_session_id = session_id.trim()
+    if resolved_session_id == "":
+        return _assistant_retention_result("", "rejected", "missing_session_id", 0, 0, 0, 0, "")
+    val loaded = assistant_store_load_session(root: root, session_id: resolved_session_id)
+    match loaded:
+        case Some(session):
+            val timeline_path = assistant_store_timeline_path(root: root, session_id: resolved_session_id)
+            val notifications_path = assistant_store_notifications_path(root: root, session_id: resolved_session_id)
+            val timeline_lines = _assistant_jsonl_tail_lines(timeline_path, _assistant_positive_limit(max_timeline_events))
+            val notification_lines = _assistant_jsonl_tail_lines(notifications_path, _assistant_positive_limit(max_notifications))
+            _assistant_write_jsonl_lines(timeline_path, timeline_lines.retained)
+            _assistant_write_jsonl_lines(notifications_path, notification_lines.retained)
+            session.event_count = timeline_lines.retained.len()
+            assistant_store_write_json(path: assistant_store_session_path(root: root, session_id: session.session_id), value: assistant_store_session_record_to_json_text(session))
+            return _assistant_retention_result(session.session_id, "pruned", "retention_applied", timeline_lines.retained.len(), notification_lines.retained.len(), timeline_lines.dropped, notification_lines.dropped, session.digest_checkpoint_id)
+        case nil:
+            _assistant_retention_result(resolved_session_id, "missing", "session_not_found", 0, 0, 0, 0, "")
+
+class _AssistantStoreJsonlTail:
+    retained: [text]
+    dropped: i64
+
+fn _assistant_positive_limit(value: i64) -> i64:
+    if value < 1:
+        return 1
+    value
+
+fn _assistant_jsonl_tail_lines(path: text, limit: i64) -> _AssistantStoreJsonlTail:
+    if not file_exists(path):
+        return _AssistantStoreJsonlTail(retained: [], dropped: 0)
+    val content = file_read(path)
+    var lines: [text] = []
+    for raw in content.split("\n"):
+        val line = raw.trim()
+        if line != "":
+            lines.push(line)
+    if lines.len() <= limit:
+        return _AssistantStoreJsonlTail(retained: lines, dropped: 0)
+    var retained: [text] = []
+    var i = lines.len() - limit
+    while i < lines.len():
+        retained.push(lines[i])
+        i = i + 1
+    _AssistantStoreJsonlTail(retained: retained, dropped: lines.len() - retained.len())
+
+fn _assistant_write_jsonl_lines(path: text, lines: [text]) -> bool:
+    if lines.len() == 0:
+        return file_write(path, "")
+    file_write(path, lines.join("\n") + "\n")
+
+fn _assistant_retention_result(session_id: text, status: text, reason: text, retained_timeline: i64, retained_notifications: i64, dropped_timeline: i64, dropped_notifications: i64, digest_checkpoint_id: text) -> AssistantStoreRetentionResult:
+    val digest_label = if digest_checkpoint_id.trim() == "": "none" else: digest_checkpoint_id
+    AssistantStoreRetentionResult(
+        session_id: session_id,
+        status: status,
+        reason: reason,
+        retained_timeline_count: retained_timeline,
+        retained_notification_count: retained_notifications,
+        dropped_timeline_count: dropped_timeline,
+        dropped_notification_count: dropped_notifications,
+        digest_checkpoint_id: digest_label,
+        evidence: "assistant_store_retention status={status} reason={reason} session={session_id} timeline_retained={retained_timeline} notifications_retained={retained_notifications} timeline_dropped={dropped_timeline} notifications_dropped={dropped_notifications} digest_checkpoint={digest_label}"
+    )
 
 fn _assistant_json_text(value: any, keys: [text]) -> text:
     for key in keys:
