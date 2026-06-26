@@ -27,7 +27,7 @@ electron_simple_web_engine2d_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,6 +80,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
 - Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
   match the proof viewport, include the expected pixel count, and contain
   nonzero pixels with numeric uint32 JSON pixel values.
+- Requested viewport, native capture provenance, ARGB readback dimensions, and
+  frame timing values must be real JSON numbers, not stringified rows.
 - Proof renderer must be the live Electron capture page and scenes must stay
   within the Simple Web Engine2D scene family.
 - The live Electron wrapper consumes the validator instead of raw shell JSON
@@ -363,6 +365,57 @@ expect(mismatch).to_contain("electron_simple_web_engine2d_capture_native_height=
 
 </details>
 
+#### rejects stringified live Engine2D viewport provenance and timing proof rows
+
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm live Electron Engine2D numeric proof cannot be stringified
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-engine2d-validator-string-numeric-proof"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/requested.json", "p.height=\"64\"") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/requested.json > " + root + "/requested.env; " +
+    _proof_command(root + "/argb.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:\"64\",format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(4294967295)}))") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/argb.json > " + root + "/argb.env; " +
+    _proof_command(root + "/native.json", "p.capture_native_height=\"64\"") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/native.json > " + root + "/native.env; " +
+    _proof_command(root + "/timing.json", "p.frame_us=\"1250\"") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/timing.json > " + root + "/timing.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val requested = file_read(root + "/requested.env")
+val argb = file_read(root + "/argb.env")
+val native = file_read(root + "/native.env")
+val timing = file_read(root + "/timing.env")
+step("Confirm live Electron Engine2D numeric proof cannot be stringified")
+expect(requested).to_contain("electron_simple_web_engine2d_validation_status=fail")
+expect(requested).to_contain("electron_simple_web_engine2d_validation_reason=missing-viewport-proof")
+expect(requested).to_contain("electron_simple_web_engine2d_requested_height=64")
+expect(argb).to_contain("electron_simple_web_engine2d_validation_status=fail")
+expect(argb).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-viewport-mismatch")
+expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_height=64")
+expect(native).to_contain("electron_simple_web_engine2d_validation_status=fail")
+expect(native).to_contain("electron_simple_web_engine2d_validation_reason=missing-capture-provenance")
+expect(native).to_contain("electron_simple_web_engine2d_capture_native_height=64")
+expect(timing).to_contain("electron_simple_web_engine2d_validation_status=fail")
+expect(timing).to_contain("electron_simple_web_engine2d_validation_reason=missing-electron-timing")
+expect(timing).to_contain("electron_simple_web_engine2d_electron_frame_us=1250")
+```
+
+</details>
+
 #### rejects blur tolerance and malformed mismatch counts
 
 -  proof command
@@ -458,8 +511,8 @@ expect(script).to_contain("electron-proof.validation.env")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
