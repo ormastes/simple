@@ -10,7 +10,7 @@ surfaces.
 Unix:
 
 ```sh
-sh .spipe/spipe/scripts/setup-spipe-links.sh
+sh .spipe/spipe/scripts/setup-spipe-links.shs
 ```
 
 Windows PowerShell:

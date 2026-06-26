@@ -73,7 +73,7 @@ sh scripts/check/check-spipe-submodule-gitlinks.shs --check
 From a host repository with this project mounted at `.spipe/spipe`:
 
 ```sh
-sh .spipe/spipe/scripts/setup-spipe-links.sh
+sh .spipe/spipe/scripts/setup-spipe-links.shs
 ```
 
 By default this links reusable SPipe surfaces into `doc/llm_process`. Host
