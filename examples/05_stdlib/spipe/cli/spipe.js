@@ -1620,6 +1620,25 @@ function commandFineTuneReport(args) {
     const block = registryBlockForAttempt(root, fileName, attemptId);
     console.log(block || "missing");
   }
+
+  const gate = fineTuneDataGateStatus(root, attemptId);
+  if (gate) {
+    console.log("");
+    console.log("## Data Check Execution");
+    console.log(`checker: "${quoteSdn(gate.checker)}"`);
+    console.log(`data_check_execution: "${gate.status === "PASS" ? "pass" : gate.status === "WARN" ? "warn" : "fail"}"`);
+    console.log(`data_check_status: "${quoteSdn(gate.statusLine)}"`);
+    printFineTuneGateFields(gate, [
+      "result",
+      "training_allowed",
+      "model_manifest_exists",
+      "eval_result_exists",
+      "target_accuracy",
+      "required_accuracy",
+      "target_eval_reached",
+      "acceptance_allowed"
+    ]);
+  }
 }
 
 function commandFineTuneVerify(recordPath) {
