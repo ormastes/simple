@@ -74,7 +74,10 @@ impl FsDriver for FsFat32Driver:
             return Err(FsError.Corrupt)
         val cluster_bytes = (self.inner.sectors_per_cluster * self.inner.bytes_per_sector).to_u64()
         val total_bytes = self.inner.total_clusters.to_u64() * cluster_bytes
-        val free_bytes = free_result.unwrap().to_u64() * cluster_bytes
+        val free_clusters = match free_result:
+            Ok(value): value
+            Err(_): return Err(FsError.Corrupt)
+        val free_bytes = free_clusters.to_u64() * cluster_bytes
         Ok(FsStatfs(
             total_bytes: total_bytes,
             free_bytes: free_bytes,
@@ -99,12 +102,18 @@ impl FsDriver for FsFat32Driver:
             val rc = self.inner.open(path_str)
             if rc.is_err():
                 return Err(FsError.NotFound)
-            return Ok(rc.unwrap())
+            val handle = match rc:
+                Ok(value): value
+                Err(_): return Err(FsError.NotFound)
+            return Ok(handle)
         if create_flag:
             val rc = self.inner.create_file(path_str)
             if rc.is_err():
                 return Err(FsError.NotFound)
-            return Ok(rc.unwrap())
+            val handle = match rc:
+                Ok(value): value
+                Err(_): return Err(FsError.NotFound)
+            return Ok(handle)
         Err(FsError.NotFound)
 
     me fn close(handle: FileHandle) -> Result<(), FsError>:
@@ -121,7 +130,9 @@ impl FsDriver for FsFat32Driver:
         val rc = self.inner.read(handle, buf, buf.len().to_i64())
         if rc.is_err():
             return Err(FsError.Corrupt)
-        Ok(rc.unwrap())
+        match rc:
+            Ok(value): Ok(value)
+            Err(_): Err(FsError.Corrupt)
 
     me fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
         if not self.mounted:
@@ -129,7 +140,9 @@ impl FsDriver for FsFat32Driver:
         val rc = self.inner.write(handle, buf, buf.len().to_i64())
         if rc.is_err():
             return Err(FsError.Corrupt)
-        Ok(rc.unwrap())
+        match rc:
+            Ok(value): Ok(value)
+            Err(_): Err(FsError.Corrupt)
 
     me fn pread(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
         if not self.mounted:
@@ -137,7 +150,9 @@ impl FsDriver for FsFat32Driver:
         val rc = self.inner.read(handle, buf, buf.len().to_i64())
         if rc.is_err():
             return Err(FsError.Corrupt)
-        Ok(rc.unwrap())
+        match rc:
+            Ok(value): Ok(value)
+            Err(_): Err(FsError.Corrupt)
 
     me fn pwrite(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
         if not self.mounted:
@@ -145,7 +160,9 @@ impl FsDriver for FsFat32Driver:
         val rc = self.inner.write(handle, buf, buf.len().to_i64())
         if rc.is_err():
             return Err(FsError.Corrupt)
-        Ok(rc.unwrap())
+        match rc:
+            Ok(value): Ok(value)
+            Err(_): Err(FsError.Corrupt)
 
     fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
         if not self.mounted:
@@ -153,7 +170,9 @@ impl FsDriver for FsFat32Driver:
         val of_rc = self.inner.get_open_file(handle)
         if of_rc.is_err():
             return Err(FsError.InvalidArg)
-        val of = of_rc.unwrap()
+        val of = match of_rc:
+            Ok(value): value
+            Err(_): return Err(FsError.InvalidArg)
         Ok(FileStat(
             inode: of.start_cluster.to_u64(),
             size: of.size.to_u64(),
@@ -175,7 +194,9 @@ impl FsDriver for FsFat32Driver:
         val entry_rc = self.inner.resolve_path(path.raw)
         if entry_rc.is_err():
             return Err(FsError.NotFound)
-        val entry = entry_rc.unwrap()
+        val entry = match entry_rc:
+            Ok(value): value
+            Err(_): return Err(FsError.NotFound)
         Ok(FileStat(
             inode: entry.inode.id,
             size: 0,
@@ -197,7 +218,9 @@ impl FsDriver for FsFat32Driver:
         val entry_rc = self.inner.resolve_path(path.raw)
         if entry_rc.is_err():
             return Err(FsError.NotFound)
-        val entry = entry_rc.unwrap()
+        val entry = match entry_rc:
+            Ok(value): value
+            Err(_): return Err(FsError.NotFound)
         if not entry.is_dir:
             return Err(FsError.InvalidArg)
         Ok(DirHandle(id: entry.inode.id))
@@ -226,7 +249,9 @@ impl FsDriver for FsFat32Driver:
         val rc = self.inner.read_dir_entries(dir_cluster)
         if rc.is_err():
             return Err(FsError.Corrupt)
-        Ok(rc.unwrap())
+        match rc:
+            Ok(value): Ok(value)
+            Err(_): Err(FsError.Corrupt)
 
     me fn mkdir(path: Path, mode: u32) -> Result<(), FsError>:
         if not self.mounted:
@@ -280,8 +305,11 @@ impl FsDriver for FsFat32Driver:
 
     fn probe(cap: Capability) -> Option<Extension>:
         if cap == Capability.DirectIo:
-            if self.direct_io.is_some():
-                return Some(Extension.DirectIo(ext: self.direct_io.unwrap()))
+            match self.direct_io:
+                Some(ext):
+                    return Some(Extension.DirectIo(ext: ext))
+                None:
+                    pass_do_nothing("direct I/O is not configured")
         None
 
     fn direct_io_extent_for_handle(handle: FileHandle, file_offset: i64, byte_len: u64) -> Result<DirectIoExtent, FsError>:
@@ -290,7 +318,9 @@ impl FsDriver for FsFat32Driver:
         val extent = self.inner.direct_io_extent_for_handle(handle, file_offset, byte_len)
         if extent.is_err():
             return Err(FsError.InvalidArg)
-        Ok(extent.unwrap())
+        match extent:
+            Ok(value): Ok(value)
+            Err(_): Err(FsError.InvalidArg)
 
     fn stat_path(path: Path) -> Result<StatInfo, FsError>:
         if not self.mounted:
@@ -298,13 +328,19 @@ impl FsDriver for FsFat32Driver:
         val entry_rc = self.inner.resolve_path(path.raw)
         if entry_rc.is_err():
             return Err(FsError.NotFound)
-        val entry = entry_rc.unwrap()
+        val entry = match entry_rc:
+            Ok(value): value
+            Err(_): return Err(FsError.NotFound)
         if entry.is_dir:
             return Ok(StatInfo(is_dir: true, is_file: false, size: 0))
         val size_rc = self.inner._get_file_size(path.raw)
         var sz: i64 = 0
         if size_rc.is_ok():
-            sz = size_rc.unwrap()
+            match size_rc:
+                Ok(value):
+                    sz = value
+                Err(_):
+                    pass_do_nothing("missing FAT32 size falls back to zero")
         Ok(StatInfo(is_dir: false, is_file: true, size: sz))
 
     me fn open_path(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
@@ -322,7 +358,9 @@ impl FsDriver for FsFat32Driver:
         val rc = self.inner.read_bytes(handle, length)
         if rc.is_err():
             return Err(FsError.Corrupt)
-        val bytes = rc.unwrap()
+        val bytes = match rc:
+            Ok(value): value
+            Err(_): return Err(FsError.Corrupt)
         var result = ""
         var i = 0
         while i < bytes.len():
