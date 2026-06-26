@@ -1,3 +1,108 @@
+"""
+# vLLM Live Environment Evidence Specification
+
+**Feature:** LLM runtime vLLM/Torch interface
+**Requirements:** doc/02_requirements/feature/llm_runtime_vllm_torch_interface.md
+**Plan:** doc/03_plan/agent_tasks/llm_runtime_vllm_torch_interface.md
+**Design:** doc/05_design/app/tools/llm_runtime_vllm_torch_interface.md
+**Research:** doc/01_research/local/llm_runtime_vllm_torch_interface.md
+
+## Overview
+
+This spec covers the deterministic live-environment evidence helper used before
+vLLM dashboard control or live serve/probe paths are allowed to claim runtime
+readiness. It does not start vLLM or touch a GPU; it proves the public JSONL
+shape used by higher-level gates.
+
+## Syntax
+
+Call `llm_runtime_vllm_live_environment_evidence(vllm_available,
+gpu_available, gpu_name)` with explicit boolean probe results from the runtime
+owner. The helper returns status, reason, public vLLM/GPU status fields, a
+sanitized GPU label, and one JSONL event.
+
+## Examples
+
+- missing vLLM and missing GPU -> `skipped` / `missing_local_vllm_and_gpu`
+- available vLLM and missing GPU -> `skipped` / `missing_local_gpu`
+- missing vLLM and available GPU -> `skipped` / `missing_local_vllm`
+- available vLLM and available GPU -> `ready` / `local_vllm_gpu_ready`
+
+## Public Evidence Rules
+
+Every branch must emit one public JSONL event and must avoid the internal
+absence marker. GPU names that look like paths, secrets, tokens, credentials, or
+home-relative paths are redacted before they reach the JSONL event.
+
+## Coverage Matrix
+
+| Probe state | Status | Reason | Public GPU label |
+|-------------|--------|--------|------------------|
+| vLLM missing, GPU missing | `skipped` | `missing_local_vllm_and_gpu` | `none` |
+| vLLM available, GPU missing | `skipped` | `missing_local_gpu` | `none` |
+| vLLM missing, GPU available | `skipped` | `missing_local_vllm` | sanitized GPU name |
+| vLLM available, GPU available | `ready` | `local_vllm_gpu_ready` | sanitized GPU name |
+
+## Failure Modes
+
+This helper must fail closed. A missing runtime dependency is a skipped evidence
+event, not a ready state. Empty GPU names become `available` only after the GPU
+probe says a GPU exists; otherwise they become `none`. Sensitive labels are
+always redacted, including path-like strings and values containing token,
+password, secret, API key, at-sign, home-relative, or backslash markers.
+
+## Verification Notes
+
+The spec intentionally uses deterministic booleans instead of probing the host.
+Live host probing belongs to the runtime-owner executor and dashboard route
+tests. This unit-level contract proves the evidence object and JSONL renderer
+used by those higher layers have stable redaction, status, and reason fields.
+
+## Operator Checklist
+
+Before citing live vLLM readiness, an operator must have evidence for all of
+these items:
+
+- local vLLM package or server binary is available
+- local GPU probe is available and names a non-sensitive public device label
+- dashboard or CLI caller receives `status=ready`
+- dashboard or CLI caller receives `reason=local_vllm_gpu_ready`
+- public JSONL contains no internal absence marker
+- public JSONL contains no private path, credential, token, or secret label
+
+If any item is missing, the live runtime path remains a skipped or blocked
+state. A skipped environment event is useful diagnostic evidence, but it is not
+serve, probe, or inference evidence.
+
+## Integration Boundaries
+
+The live environment helper feeds these higher-level surfaces:
+
+- vLLM dashboard control preflight and side-effect routes
+- vLLM serve lifecycle planning
+- live models and chat probe readiness
+- dashboard diagnostics JSONL collection
+- public absence-rendering verification
+
+Those surfaces may combine this event with HTTP probes, process launch attempts,
+and Torch readiness. They must not rewrite a skipped environment event into a
+ready state without new runtime-owner evidence.
+
+## Evidence Ownership
+
+The LLM runtime owner owns the host probes and executor handoff. Dashboard code
+may render or route the evidence, but it does not own vLLM process launch, GPU
+probing, HTTP probing, or Torch availability. This split keeps dashboard tests
+from masquerading as live runtime proof.
+
+## Out of Scope
+
+- Starting or stopping a vLLM process.
+- Probing `/v1/models` or `/v1/chat/completions`.
+- Claiming CUDA, ROCm, Metal, or Torch availability from fixture data.
+- Treating skipped environment evidence as live inference readiness.
+"""
+
 use app.llm_runtime.live_environment.{llm_runtime_vllm_live_environment_evidence}
 
 fn absence_marker() -> text:
@@ -21,6 +126,9 @@ describe "vLLM live environment skipped evidence":
         expect(result.reason).to_equal("missing_local_gpu")
         expect(result.vllm_status).to_equal("available")
         expect(result.gpu_status).to_equal("missing")
+        expect(result.gpu_name).to_equal("none")
+        expect(result.evidence_jsonl).to_contain("\"reason\":\"missing_local_gpu\"")
+        expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 
     it "reports skipped when GPU is available but local vLLM is missing":
         val result = llm_runtime_vllm_live_environment_evidence(false, true, "NVIDIA Test GPU")
@@ -30,6 +138,8 @@ describe "vLLM live environment skipped evidence":
         expect(result.vllm_status).to_equal("missing")
         expect(result.gpu_status).to_equal("available")
         expect(result.gpu_name).to_equal("NVIDIA Test GPU")
+        expect(result.evidence_jsonl).to_contain("\"reason\":\"missing_local_vllm\"")
+        expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 
     it "reports ready when both vLLM and GPU are available":
         val result = llm_runtime_vllm_live_environment_evidence(true, true, "NVIDIA Test GPU")
@@ -38,6 +148,10 @@ describe "vLLM live environment skipped evidence":
         expect(result.reason).to_equal("local_vllm_gpu_ready")
         expect(result.vllm_status).to_equal("available")
         expect(result.gpu_status).to_equal("available")
+        expect(result.gpu_name).to_equal("NVIDIA Test GPU")
+        expect(result.evidence_jsonl).to_contain("\"status\":\"ready\"")
+        expect(result.evidence_jsonl).to_contain("\"reason\":\"local_vllm_gpu_ready\"")
+        expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 
     it "redacts sensitive GPU labels from public evidence":
         val result = llm_runtime_vllm_live_environment_evidence(true, true, "/home/alice/private-gpu-token")
