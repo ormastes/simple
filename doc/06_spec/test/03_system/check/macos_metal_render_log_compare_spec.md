@@ -161,7 +161,7 @@ macos_metal_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -182,6 +182,10 @@ val simple_log = file_read("build/test-macos-metal-render-log-pass/out/simple.sr
 expect(simple_log).to_contain("simple_render_log_platform=macos")
 expect(simple_log).to_contain("simple_render_log_native_api=metal")
 expect(simple_log).to_contain("simple_render_log_source=simple")
+expect(simple_log).to_contain("simple_render_log_original_capture_tool=xcode-gpu-frame-capture")
+expect(simple_log).to_contain("simple_render_log_original_native_log_format=xcode-gputrace")
+expect(simple_log).to_contain("simple_render_log_original_native_log_source=build/test-macos-metal-render-log-pass/generated.env")
+expect(simple_log).to_contain("simple_render_log_artifact_magic=XCODE-GPUTRACE")
 ```
 
 </details>

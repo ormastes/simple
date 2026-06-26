@@ -180,7 +180,7 @@ this row with `macos_metal_render_log_compare_*` and
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -224,6 +224,10 @@ expect(electron_log).to_contain("simple_render_log_format=simple-render-log-v1")
 expect(electron_log).to_contain("simple_render_log_platform=linux")
 expect(electron_log).to_contain("simple_render_log_native_api=vulkan")
 expect(electron_log).to_contain("simple_render_log_source=electron")
+expect(electron_log).to_contain("simple_render_log_original_capture_tool=renderdoc")
+expect(electron_log).to_contain("simple_render_log_original_native_log_format=renderdoc-rdc")
+expect(electron_log).to_contain("simple_render_log_original_native_log_source=build/test-linux-vulkan-render-log-pass/rdoc/electron/evidence.env")
+expect(electron_log).to_contain("simple_render_log_artifact_magic=RDOC")
 ```
 
 </details>

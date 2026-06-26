@@ -162,7 +162,7 @@ windows_d3d12_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -182,6 +182,10 @@ val simple_log = file_read("build/test-windows-d3d12-render-log-pass/out/simple.
 expect(simple_log).to_contain("simple_render_log_platform=windows")
 expect(simple_log).to_contain("simple_render_log_native_api=d3d12")
 expect(simple_log).to_contain("simple_render_log_source=simple")
+expect(simple_log).to_contain("simple_render_log_original_capture_tool=pix-or-gpu-debugger")
+expect(simple_log).to_contain("simple_render_log_original_native_log_format=pix-capture")
+expect(simple_log).to_contain("simple_render_log_original_native_log_source=build/test-windows-d3d12-render-log-pass/native.env")
+expect(simple_log).to_contain("simple_render_log_artifact_magic=PIX")
 ```
 
 </details>
