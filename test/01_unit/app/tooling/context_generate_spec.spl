@@ -1,4 +1,4 @@
-use app.io.context_ops.{context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_args_allow_sourceless_sql_query}
+use app.io.context_ops.{context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_sql_query_packs_by_source, context_args_allow_sourceless_sql_query}
 use std.io_runtime.{file_write, dir_create_all}
 
 fn _context_fixture_path() -> text:
@@ -133,3 +133,25 @@ describe "simple context generator":
             expect(output).to_contain("status: no_matches")
             expect(output).to_contain("matches: 0")
         expect(output.contains(absence_marker)).to_equal(false)
+
+    it "filters embedded sql query rows by source provenance":
+        val absence_marker = "n" + "il"
+        dir_create_all("build/test")
+        val alpha_path = "build/test/context_alpha_source.spl"
+        val beta_path = "build/test/context_beta_source.spl"
+        val db_path = "build/test/context_source_filter.db"
+        file_write(alpha_path, "fn alpha_context() -> text:\n    \"shared_context_marker alpha_only\"\n")
+        file_write(beta_path, "fn beta_context() -> text:\n    \"shared_context_marker beta_only\"\n")
+
+        val indexed = context_sql_index_packs([alpha_path, beta_path], "ctx", db_path, "text")
+        expect(indexed).to_contain("backend: sqlite")
+        if not indexed.contains("status: unavailable"):
+            val output = context_sql_query_packs_by_source([], "", "shared_context_marker", alpha_path, db_path, "text")
+            expect(output).to_contain("Simple context SQL query")
+            expect(output).to_contain("source_filter: " + alpha_path)
+            expect(output).to_contain("matches: 1")
+            expect(output).to_contain(alpha_path)
+            expect(output).to_contain("alpha_only")
+            expect(output.contains(beta_path)).to_equal(false)
+            expect(output.contains("beta_only")).to_equal(false)
+        expect(indexed.contains(absence_marker)).to_equal(false)

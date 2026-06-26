@@ -234,6 +234,13 @@ Tasks:
    2026-06-26 for app MCP and lower MCP; `simple_context` no longer marks
    `file` as universally required and still rejects missing file unless
    `sql=true` plus a non-empty `query` are present.
+8. Add source/provenance filtering for SQL context queries. Status: done on
+   2026-06-26; `context_sql_query_packs_by_source(...)` and
+   `context --source-filter=<text>` narrow persisted SQL query results by
+   stored source path without exposing absence markers.
+9. Forward SQL source/provenance filtering through MCP. Status: done on
+   2026-06-26 for app MCP and lower MCP; `simple_context` now accepts
+   `source_filter` and forwards it to the shared `context` CLI subprocess.
 
 Evidence:
 

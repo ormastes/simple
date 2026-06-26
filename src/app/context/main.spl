@@ -11,7 +11,7 @@
 #   - Multiple export formats (JSON, Markdown, Text)
 
 # I/O imports
-use app.io.context_ops (context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_args_allow_sourceless_sql_query, context_get_args, context_file_exists, context_file_write)
+use app.io.context_ops (context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_sql_query_packs_by_source, context_args_allow_sourceless_sql_query, context_get_args, context_file_exists, context_file_write)
 use std.cli.cli_util (has_flag)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 
@@ -35,6 +35,7 @@ fn print_help():
     print "  --query=<text>  Query the local context-pack index for this source"
     print "  --sql           Use Simple embedded SQLite for index/query"
     print "  --db=<path>     SQLite index database path (default: in-memory)"
+    print "  --source-filter=<text>  Filter SQL query rows by stored source path"
     for line in log_options_help():
         print "  {line}"
     print "  -h, --help      Show this help"
@@ -46,7 +47,7 @@ fn print_help():
     print "  context app.spl --index -o context.index"
     print "  context app.spl --query=handler --text"
     print "  context app.spl --sql --query=handler --db=.cache/context.db"
-    print "  context --sql --query=handler --db=.cache/context.db"
+    print "  context --sql --query=handler --db=.cache/context.db --source-filter=app.spl"
     print ""
     print "Features:"
     print "  - 90% reduction in LLM context tokens"
@@ -128,6 +129,7 @@ fn main() -> i64:
     var sourceless_db_path = ""
     var sourceless_format = "markdown"
     var sourceless_output_file = ""
+    var sourceless_source_filter = ""
     if source_path == "" and context_args_allow_sourceless_sql_query(args):
         var source_less_idx = 0
         while source_less_idx < args.len():
@@ -142,6 +144,8 @@ fn main() -> i64:
                 sourceless_query = arg[8:]
             elif arg.starts_with("--db="):
                 sourceless_db_path = arg[5:]
+            elif arg.starts_with("--source-filter="):
+                sourceless_source_filter = arg[16:]
             elif arg == "-o":
                 if source_less_idx + 1 < args.len():
                     sourceless_output_file = args[source_less_idx + 1]
@@ -150,7 +154,7 @@ fn main() -> i64:
                 source_less_idx = source_less_idx + 1
             source_less_idx = source_less_idx + 1
 
-        val output = context_sql_query_packs([], "", sourceless_query, sourceless_db_path, sourceless_format)
+        val output = context_sql_query_packs_by_source([], "", sourceless_query, sourceless_source_filter, sourceless_db_path, sourceless_format)
         if output == "":
             if log_opts.log_mode == "json":
                 print "{\"command\":\"context\",\"status\":\"error\",\"source\":\"\"}"
@@ -199,6 +203,7 @@ fn main() -> i64:
     var query = ""
     var use_sql = false
     var db_path = ""
+    var source_filter = ""
 
     # Parse remaining arguments
     var j = source_idx + 1
@@ -218,6 +223,8 @@ fn main() -> i64:
             use_sql = true
         elif arg.starts_with("--db="):
             db_path = arg[5:]
+        elif arg.starts_with("--source-filter="):
+            source_filter = arg[16:]
         elif arg == "-o":
             if j + 1 < args.len():
                 output_file = args[j + 1]
@@ -244,7 +251,7 @@ fn main() -> i64:
     var output = ""
     if query != "":
         if use_sql:
-            output = context_sql_query_packs([source_path], target, query, db_path, format)
+            output = context_sql_query_packs_by_source([source_path], target, query, source_filter, db_path, format)
         else:
             val index = context_index_packs([source_path], target, "text")
             output = context_query_index(index, query, format)

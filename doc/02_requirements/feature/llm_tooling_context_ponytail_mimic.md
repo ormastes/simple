@@ -36,6 +36,13 @@ Selected option: Option A, Context Pack First.
 - REQ-013: App MCP and lower MCP `simple_context` shall expose the same
   source-less SQL query shape by treating `file` as optional only when SQL mode
   and a non-empty query are provided.
+- REQ-014: SQL context queries shall support a source/provenance filter so
+  persisted context databases can return only rows whose stored source path
+  matches the requested filter while preserving explicit empty, unavailable,
+  ready, and no-match statuses.
+- REQ-015: App MCP and lower MCP `simple_context` shall expose the SQL
+  source/provenance filter and forward it to the shared `context` CLI
+  subprocess.
 
 ## Deferred
 

@@ -28,7 +28,7 @@ context_generate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -321,6 +321,47 @@ expect(output.contains(absence_marker)).to_equal(false)
 
 </details>
 
+#### filters embedded sql query rows by source provenance
+
+- dir create all
+- file write
+- file write
+   - Expected: output does not contain `beta_path`
+   - Expected: output does not contain `beta_only`
+   - Expected: indexed does not contain `absence_marker`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val absence_marker = "n" + "il"
+dir_create_all("build/test")
+val alpha_path = "build/test/context_alpha_source.spl"
+val beta_path = "build/test/context_beta_source.spl"
+val db_path = "build/test/context_source_filter.db"
+file_write(alpha_path, "fn alpha_context() -> text:\n    \"shared_context_marker alpha_only\"\n")
+file_write(beta_path, "fn beta_context() -> text:\n    \"shared_context_marker beta_only\"\n")
+
+val indexed = context_sql_index_packs([alpha_path, beta_path], "ctx", db_path, "text")
+expect(indexed).to_contain("backend: sqlite")
+if not indexed.contains("status: unavailable"):
+    val output = context_sql_query_packs_by_source([], "", "shared_context_marker", alpha_path, db_path, "text")
+    expect(output).to_contain("Simple context SQL query")
+    expect(output).to_contain("source_filter: " + alpha_path)
+    expect(output).to_contain("matches: 1")
+    expect(output).to_contain(alpha_path)
+    expect(output).to_contain("alpha_only")
+    expect(output.contains(beta_path)).to_equal(false)
+    expect(output.contains("beta_only")).to_equal(false)
+expect(indexed.contains(absence_marker)).to_equal(false)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -340,8 +381,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

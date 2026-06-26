@@ -117,25 +117,32 @@ target, or content match the escaped SQL `LIKE` pattern. Empty queries return
 `status: empty_query`; unavailable database handles return `status:
 unavailable`; no rows return `status: no_matches`.
 
+`context_sql_query_packs_by_source(paths, target, query, source_filter, db_path,
+format)` keeps the same SQL query contract and applies the optional source
+filter to the returned rows by matching each row's stored `source` path exactly
+or by basename-style path suffix. This preserves context-mode provenance
+narrowing without expanding the embedded SQL grammar surface.
+
 The `context` CLI exposes this through the existing parser:
 
 - `context app.spl --sql --index -o context.db.txt`
 - `context app.spl --sql --query=handler --json`
 - `context --sql --query=handler --db=.cache/context.db`
+- `context --sql --query=handler --db=.cache/context.db --source-filter=app.spl`
 
 The source-less SQL query form skips source-file validation and calls
-`context_sql_query_packs([], "", query, db_path, format)`. This preserves the
-same output/write/progress behavior while allowing persisted context databases
-to be queried without a dummy file path.
+`context_sql_query_packs_by_source([], "", query, source_filter, db_path,
+format)`. This preserves the same output/write/progress behavior while allowing
+persisted context databases to be queried without a dummy file path.
 
 ## MCP Context Index/Query Options Slice
 
 App MCP `simple_context` exposes the existing CLI-backed context storage
 surface without importing the large context/compiler graph into source-mode MCP.
 The tool schema accepts `file`, optional `target`, `format`, `index`, `query`,
-`sql`, and `db`. `handle_simple_context` validates the same text/markdown/json
-format boundary and forwards index/query/sql/db options to the `context`
-subprocess argument vector.
+`sql`, `db`, and `source_filter`. `handle_simple_context` validates the same
+text/markdown/json format boundary and forwards index/query/sql/db/source
+filter options to the `context` subprocess argument vector.
 
 `file` is no longer universally required in the MCP schema. The handler still
 requires it for ordinary context generation, local index, and source-backed SQL

@@ -188,16 +188,17 @@ fn _context_sql_open(db_path: text):
 fn _context_sql_schema() -> text:
     "CREATE TABLE IF NOT EXISTS context_packs (id INTEGER PRIMARY KEY, source TEXT, target TEXT, status TEXT, lines INTEGER, token_estimate INTEGER, content TEXT)"
 
-fn _context_sql_render_rows(rows, query: text, format: text) -> text:
-    val match_count = rows.len()
+fn _context_sql_render_rows_filtered(rows, query: text, source_filter: text, format: text) -> text:
+    val trimmed_filter = source_filter.trim()
+    var match_count: i64 = 0
     var status = "ready"
     var body_parts: [text] = []
-    if match_count == 0:
-        status = "no_matches"
-        body_parts.push("content: none")
-    else:
-        for row in rows:
-            body_parts.push("source: " + sqlite_row_get(row, "source"))
+
+    for row in rows:
+        val source = sqlite_row_get(row, "source")
+        if trimmed_filter == "" or source == trimmed_filter or source.ends_with("/" + trimmed_filter):
+            match_count = match_count + 1
+            body_parts.push("source: " + source)
             body_parts.push("target: " + sqlite_row_get(row, "target"))
             body_parts.push("status: " + sqlite_row_get(row, "status"))
             body_parts.push("lines: " + sqlite_row_get(row, "lines"))
@@ -205,12 +206,26 @@ fn _context_sql_render_rows(rows, query: text, format: text) -> text:
             body_parts.push("content:")
             body_parts.push(sqlite_row_get(row, "content"))
             body_parts.push("---")
+
+    if match_count == 0:
+        status = "no_matches"
+        body_parts.push("content: none")
+
     val body = body_parts.join("\n")
     if format == "json":
+        if trimmed_filter != "":
+            return "{\"status\":\"" + status + "\",\"backend\":\"sqlite\",\"query\":\"" + _context_json_escape(query) + "\",\"source_filter\":\"" + _context_json_escape(trimmed_filter) + "\",\"matches\":" + str(match_count) + ",\"content\":\"" + _context_json_escape(body) + "\"}"
         return "{\"status\":\"" + status + "\",\"backend\":\"sqlite\",\"query\":\"" + _context_json_escape(query) + "\",\"matches\":" + str(match_count) + ",\"content\":\"" + _context_json_escape(body) + "\"}"
     if format == "markdown":
+        if trimmed_filter != "":
+            return "# Simple Context SQL Query\n\n- status: " + status + "\n- backend: sqlite\n- query: `" + query + "`\n- source_filter: `" + trimmed_filter + "`\n- matches: " + str(match_count) + "\n\n```text\n" + body + "\n```"
         return "# Simple Context SQL Query\n\n- status: " + status + "\n- backend: sqlite\n- query: `" + query + "`\n- matches: " + str(match_count) + "\n\n```text\n" + body + "\n```"
+    if trimmed_filter != "":
+        return "Simple context SQL query\nstatus: " + status + "\nbackend: sqlite\nquery: " + query + "\nsource_filter: " + trimmed_filter + "\nmatches: " + str(match_count) + "\n\n" + body
     "Simple context SQL query\nstatus: " + status + "\nbackend: sqlite\nquery: " + query + "\nmatches: " + str(match_count) + "\n\n" + body
+
+fn _context_sql_render_rows(rows, query: text, format: text) -> text:
+    _context_sql_render_rows_filtered(rows, query, "", format)
 
 fn context_sql_index_packs(paths: [text], target: text, db_path: text, format: text) -> text:
     val db = _context_sql_open(db_path)
@@ -253,17 +268,25 @@ fn context_sql_index_packs(paths: [text], target: text, db_path: text, format: t
         return "# Simple Context SQL Index\n\n- status: ready\n- backend: sqlite\n- pack_count: " + str(pack_count) + "\n\n```text\n" + rendered + "\n```"
     "Simple context SQL index\nstatus: ready\nbackend: sqlite\npack_count: " + str(pack_count) + "\n\n" + rendered
 
-fn context_sql_query_packs(paths: [text], target: text, query: text, db_path: text, format: text) -> text:
+fn context_sql_query_packs_by_source(paths: [text], target: text, query: text, source_filter: text, db_path: text, format: text) -> text:
     val trimmed_query = query.trim()
     if trimmed_query == "":
         if format == "json":
+            if source_filter.trim() != "":
+                return "{\"status\":\"empty_query\",\"backend\":\"sqlite\",\"query\":\"\",\"source_filter\":\"" + _context_json_escape(source_filter.trim()) + "\",\"matches\":0,\"content\":\"\"}"
             return "{\"status\":\"empty_query\",\"backend\":\"sqlite\",\"query\":\"\",\"matches\":0,\"content\":\"\"}"
+        if source_filter.trim() != "":
+            return "Simple context SQL query\nstatus: empty_query\nbackend: sqlite\nquery: \nsource_filter: " + source_filter.trim() + "\nmatches: 0\ncontent: none"
         return "Simple context SQL query\nstatus: empty_query\nbackend: sqlite\nquery: \nmatches: 0\ncontent: none"
 
     val db = _context_sql_open(db_path)
     if not db.is_valid:
         if format == "json":
+            if source_filter.trim() != "":
+                return "{\"status\":\"unavailable\",\"backend\":\"sqlite\",\"query\":\"" + _context_json_escape(trimmed_query) + "\",\"source_filter\":\"" + _context_json_escape(source_filter.trim()) + "\",\"matches\":0,\"content\":\"\"}"
             return "{\"status\":\"unavailable\",\"backend\":\"sqlite\",\"query\":\"" + _context_json_escape(trimmed_query) + "\",\"matches\":0,\"content\":\"\"}"
+        if source_filter.trim() != "":
+            return "Simple context SQL query\nstatus: unavailable\nbackend: sqlite\nquery: " + trimmed_query + "\nsource_filter: " + source_filter.trim() + "\nmatches: 0\ncontent: none"
         return "Simple context SQL query\nstatus: unavailable\nbackend: sqlite\nquery: " + trimmed_query + "\nmatches: 0\ncontent: none"
 
     sqlite_execute(db, _context_sql_schema())
@@ -283,6 +306,9 @@ fn context_sql_query_packs(paths: [text], target: text, query: text, db_path: te
     val pattern = _context_sql_like_literal(trimmed_query)
     val sql = "SELECT source, target, status, lines, token_estimate, content FROM context_packs WHERE source LIKE " + pattern + " OR target LIKE " + pattern + " OR content LIKE " + pattern + " ORDER BY id"
     val rows = sqlite_query_all(db, sql)
-    val rendered = _context_sql_render_rows(rows, trimmed_query, format)
+    val rendered = _context_sql_render_rows_filtered(rows, trimmed_query, source_filter, format)
     sqlite_close(db)
     rendered
+
+fn context_sql_query_packs(paths: [text], target: text, query: text, db_path: text, format: text) -> text:
+    context_sql_query_packs_by_source(paths, target, query, "", db_path, format)
