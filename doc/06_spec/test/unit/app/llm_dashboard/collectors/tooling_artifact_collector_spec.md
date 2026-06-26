@@ -62,7 +62,7 @@ expect(panel.ponytail_status).to_equal("ok")
 
 #### renders text without internal absence markers
 
-- expect no internal absence marker
+- expect absence marker hidden
 
 
 <details>
@@ -78,7 +78,7 @@ val text = render_llm_tooling_artifacts_panel_text(collect_llm_tooling_artifacts
 expect(text).to_contain("LLM Tooling Artifacts")
 expect(text).to_contain("context_status=ready")
 expect(text).to_contain("ponytail_status=review")
-expect_no_internal_absence_marker(text)
+expect_absence_marker_hidden(text)
 ```
 
 </details>
@@ -86,7 +86,7 @@ expect_no_internal_absence_marker(text)
 #### renders missing files as explicit absence
 
 - remove file if exists
-- expect no internal absence marker
+- expect absence marker hidden
 
 
 <details>
@@ -103,14 +103,14 @@ val text = render_llm_tooling_artifacts_panel_text(collect_llm_tooling_artifacts
 expect(text).to_contain("context_status=missing")
 expect(text).to_contain("ponytail_status=missing")
 expect(text).to_contain("ponytail_reason=source unavailable")
-expect_no_internal_absence_marker(text)
+expect_absence_marker_hidden(text)
 ```
 
 </details>
 
 #### escapes html panel fields and preview
 
-- expect no internal absence marker
+- expect absence marker hidden
 
 
 <details>
@@ -126,7 +126,7 @@ val html = render_llm_tooling_artifacts_panel_html(collect_llm_tooling_artifacts
 expect(html).to_contain("llm-tooling-artifacts-panel")
 expect(html).to_contain("&lt;tag&gt;&amp;")
 expect(html.split("<tag>").len()).to_equal(1)
-expect_no_internal_absence_marker(html)
+expect_absence_marker_hidden(html)
 ```
 
 </details>

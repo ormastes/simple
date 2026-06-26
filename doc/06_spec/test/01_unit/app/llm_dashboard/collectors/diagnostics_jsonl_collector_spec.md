@@ -81,7 +81,7 @@ remove_file_if_exists(path)
    - Expected: panel.vllm_event_count equals `2`
    - Expected: panel.last_vllm_status equals `ready`
    - Expected: panel.last_vllm_reason equals `models_endpoint_ready`
-- expect no internal absence marker
+- expect absence marker hidden
 - remove file if exists
 
 
@@ -105,7 +105,7 @@ val text = render_llm_diagnostics_panel_text(panel)
 expect(text).to_contain("vllm_events=2")
 expect(text).to_contain("vllm_status=ready")
 expect(text).to_contain("vllm_reason=models_endpoint_ready")
-expect_no_internal_absence_marker(text)
+expect_absence_marker_hidden(text)
 remove_file_if_exists(path)
 ```
 
@@ -116,7 +116,7 @@ remove_file_if_exists(path)
 - mkdir p
 - remove file if exists
 - write file
-- expect no internal absence marker
+- expect absence marker hidden
 - remove file if exists
 
 
@@ -134,7 +134,7 @@ write_file(path, fixture_diag_jsonl())
 val text = render_llm_diagnostics_panel_text(collect_llm_diagnostics_jsonl(path))
 expect(text).to_contain("LLM Diagnostics")
 expect(text).to_contain("events=4")
-expect_no_internal_absence_marker(text)
+expect_absence_marker_hidden(text)
 remove_file_if_exists(path)
 ```
 
@@ -180,7 +180,7 @@ remove_file_if_exists(path)
 - mkdir p
 - remove file if exists
 - write file
-- expect no internal absence marker
+- expect absence marker hidden
 - remove file if exists
 
 
@@ -199,7 +199,7 @@ val text = render_llm_diagnostics_panel_text(collect_llm_diagnostics_jsonl(path)
 expect(text).to_contain("events=2")
 expect(text).to_contain("last_event=PostToolUse")
 expect(text).to_contain("last_session=none")
-expect_no_internal_absence_marker(text)
+expect_absence_marker_hidden(text)
 remove_file_if_exists(path)
 ```
 
@@ -208,7 +208,7 @@ remove_file_if_exists(path)
 #### keeps missing files absence-marker-free
 
 - remove file if exists
-- expect no internal absence marker
+- expect absence marker hidden
 
 
 <details>
@@ -225,7 +225,7 @@ expect(text).to_contain("events=0")
 expect(text).to_contain("last_event=none")
 expect(text).to_contain("last_session=none")
 expect(text).to_contain("vllm_status=none")
-expect_no_internal_absence_marker(text)
+expect_absence_marker_hidden(text)
 ```
 
 </details>
@@ -236,7 +236,7 @@ expect_no_internal_absence_marker(text)
 - remove file if exists
 - write file
    - Expected: html.split("<tag>").len() equals `1`
-- expect no internal absence marker
+- expect absence marker hidden
 - remove file if exists
 
 
@@ -255,7 +255,7 @@ val html = render_llm_diagnostics_panel_html(collect_llm_diagnostics_jsonl(path)
 expect(html).to_contain("PreToolUse&lt;tag&gt;")
 expect(html).to_contain("sid&amp;")
 expect(html.split("<tag>").len()).to_equal(1)
-expect_no_internal_absence_marker(html)
+expect_absence_marker_hidden(html)
 remove_file_if_exists(path)
 ```
 
@@ -267,7 +267,7 @@ remove_file_if_exists(path)
 - remove file if exists
 - write file
    - Expected: html.split("ready<tag>").len() equals `1`
-- expect no internal absence marker
+- expect absence marker hidden
 - remove file if exists
 
 
@@ -287,7 +287,7 @@ expect(html).to_contain("vllm_events=1")
 expect(html).to_contain("ready&lt;tag&gt;")
 expect(html).to_contain("models&amp;endpoint")
 expect(html.split("ready<tag>").len()).to_equal(1)
-expect_no_internal_absence_marker(html)
+expect_absence_marker_hidden(html)
 remove_file_if_exists(path)
 ```
 
