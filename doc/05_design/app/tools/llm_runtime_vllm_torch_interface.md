@@ -387,6 +387,33 @@ Runtime-adjacent decision record:
 - `rejected_shortcuts`: shelling out to dashboard routes, importing dashboard
   process/HTTP paths, or adding raw process/runtime shortcuts.
 
+## Implemented Runtime Control CLI Registration Evidence Slice
+
+- `test/01_unit/app/cli/llm_runtime_control_command_spec.spl`
+- `test/unit/app/cli/llm_runtime_control_command_spec.spl`
+- `doc/06_spec/test/01_unit/app/cli/llm_runtime_control_command_spec.md`
+- `doc/06_spec/test/unit/app/cli/llm_runtime_control_command_spec.md`
+
+Mirrored SPipe coverage now proves the top-level command is registered in the
+canonical CLI command table, routed by the direct dispatcher branch, and shown
+in operator help:
+
+- `src/app/cli/dispatch/table.spl` maps `llm-runtime-control` to
+  `src/app/llm_runtime/control_cli.spl`.
+- `src/app/cli/main_part2.spl` routes the direct branch through
+  `cli_run_file("src/app/llm_runtime/control_cli.spl", filtered_args, ...)`.
+- `src/app/cli/cli_helpers.spl` documents
+  `simple llm-runtime-control --action preflight --base-model <model>
+  --endpoint <url>`.
+
+Full native CLI rebuild evidence is still not complete. A focused attempt to
+build the full CLI with `native-build --source src/app --source src/lib
+--entry-closure --entry src/app/cli/main.spl --strip --threads 1 --timeout 240
+--output build/llm_runtime/simple_cli_full` reached compiler/backend module
+progress but hit the 300s external cap with exit `124` and emitted no binary.
+This is tracked with the full-program native build bug rather than treated as
+vLLM command logic.
+
 ## Implemented Runtime Control Resource Detection Slice
 
 - `src/app/llm_runtime/control_cli.spl`

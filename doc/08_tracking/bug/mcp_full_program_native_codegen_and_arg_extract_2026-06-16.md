@@ -70,6 +70,22 @@ nested objects (same family as prior interpreter string bugs). NOT an obvious so
 
 Broken binary preserved: `bin/release/x86_64-unknown-linux-gnu/simple.broken_stage4_248`.
 
+Additional evidence from the LLM runtime-control lane on 2026-06-26:
+
+- Command:
+  `timeout 300s release/x86_64-unknown-linux-gnu/simple native-build --source
+  src/app --source src/lib --entry-closure --entry src/app/cli/main.spl --strip
+  --threads 1 --timeout 240 --output build/llm_runtime/simple_cli_full`
+- Result: exit `124`, no `build/llm_runtime/simple_cli_full` binary emitted.
+- Observed progress reached compiler/backend modules before the external cap.
+  Diagnostics included existing full-program warnings such as ambiguous
+  `ConstEvaluator.*.to_text` candidates and private helper collisions, but no
+  focused vLLM control source failure.
+- Impact for `llm-runtime-control`: standalone native app evidence exists, and
+  the top-level source registration is covered by SPipe specs, but full rebuilt
+  top-level `simple llm-runtime-control` binary evidence remains blocked by the
+  full-program native build lane.
+
 ### D. (minor, orthogonal) macOS-only LLVM-18 detection
 `bootstrap-from-scratch.sh:227` only checks `/opt/homebrew/opt/llvm@18`. This Linux host
 has LLVM 18.1.8 at `/usr/lib/llvm-18` (`lib/libLLVM-18.so`), so it always falls back to
