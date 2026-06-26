@@ -7,7 +7,7 @@
 - **Total Features:** 2
 - **Complete Documentation:** 2 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 207
+- **Total Lines:** 232
 
 ---
 
@@ -15,6 +15,6 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [RenderDoc Capture File Status Diagnostics](test/03_system/check/renderdoc_capture_file_status_diagnostics_spec.md) | Partial | N/A | 3 | 60% | 105 lines |
-| [RenderDoc Electron HTML gate](test/03_system/check/renderdoc_electron_html_gate_spec.md) | Partial | N/A | 9 | 60% | 102 lines |
+| [macOS Metal render-log compare gate](test/03_system/check/macos_metal_render_log_compare_spec.md) | Partial | N/A | 7 | 60% | 115 lines |
+| [Windows D3D12 render-log compare gate](test/03_system/check/windows_d3d12_render_log_compare_spec.md) | Partial | N/A | 7 | 60% | 117 lines |
 

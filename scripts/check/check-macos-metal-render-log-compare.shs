@@ -35,6 +35,15 @@ add_reason() {
     if [ -z "$reason_parts" ]; then reason_parts="$reason"; else reason_parts="$reason_parts;$reason"; fi
 }
 
+file_status() {
+    path="$1"
+    if [ -n "$path" ] && [ -s "$path" ]; then
+        printf '%s\n' "pass"
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
 if [ ! -s "$METAL_GENERATED_2D_READBACK_ENV" ]; then
     compare_status="unavailable"
     add_reason "missing-metal-generated-2d-readback-env"
@@ -69,6 +78,7 @@ capture_status="$(render_log_value_of macos_metal_gpu_capture_status "$MACOS_MET
 capture_tool="$(render_log_value_of macos_metal_gpu_capture_tool "$MACOS_METAL_CAPTURE_ENV")"
 capture_artifact="$(render_log_value_of macos_metal_gpu_capture_artifact "$MACOS_METAL_CAPTURE_ENV")"
 capture_artifact_magic="$(render_log_value_of macos_metal_gpu_capture_artifact_magic "$MACOS_METAL_CAPTURE_ENV")"
+capture_artifact_file_status="$(file_status "$capture_artifact")"
 
 if [ "$metal_status" != "pass" ] || [ "$metal_module" != "true" ] || [ "$metal_submit" != "true" ] || [ "$metal_readback" != "true" ]; then
     [ "$compare_status" = "unavailable" ] || compare_status="fail"
@@ -115,6 +125,10 @@ if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}" = "1" ] && [ "$capture_s
         [ "$compare_status" = "unavailable" ] || compare_status="fail"
         add_reason "macos-metal-gpu-capture-artifact-missing"
     fi
+    if [ "$capture_artifact_file_status" != "pass" ]; then
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "macos-metal-gpu-capture-artifact-file-${capture_artifact_file_status:-missing}"
+    fi
     if [ "$capture_artifact_magic" != "XCODE-GPUTRACE" ]; then
         [ "$compare_status" = "unavailable" ] || compare_status="fail"
         add_reason "macos-metal-gpu-capture-magic-${capture_artifact_magic:-missing}"
@@ -160,6 +174,7 @@ gpu_capture_gate_status="not-required"
 if [ "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}" = "1" ]; then
     gpu_capture_gate_status="pass"
     if [ "$capture_status" != "pass" ] || [ -z "$capture_artifact" ] ||
+        [ "$capture_artifact_file_status" != "pass" ] ||
         [ "$capture_artifact_magic" != "XCODE-GPUTRACE" ]; then
         gpu_capture_gate_status="fail"
     fi
@@ -220,6 +235,14 @@ render_log_write_native_log "$ELECTRON_LOG" "macos" "metal" "electron" "browser-
 {
     render_log_append_kv "macos_metal_render_log_compare_status" "$compare_status"
     render_log_append_kv "macos_metal_render_log_compare_reason" "$reason_parts"
+    render_log_append_kv "macos_metal_render_log_compare_generated_readback_env" "$METAL_GENERATED_2D_READBACK_ENV"
+    render_log_append_kv "macos_metal_render_log_compare_generated_readback_env_file_status" "$(file_status "$METAL_GENERATED_2D_READBACK_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_framebuffer_readback_env" "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV"
+    render_log_append_kv "macos_metal_render_log_compare_framebuffer_readback_env_file_status" "$(file_status "$METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_browser_env" "$MACOS_METAL_BROWSER_ENV"
+    render_log_append_kv "macos_metal_render_log_compare_browser_env_file_status" "$(file_status "$MACOS_METAL_BROWSER_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_env" "$MACOS_METAL_CAPTURE_ENV"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_env_file_status" "$(file_status "$MACOS_METAL_CAPTURE_ENV")"
     render_log_append_kv "macos_metal_render_log_compare_blocked_gate_count" "$blocked_gate_count"
     render_log_append_kv "macos_metal_render_log_compare_blocked_gates" "$blocked_gates"
     render_log_append_kv "macos_metal_render_log_compare_generated_readback_gate_status" "$metal_generated_gate_status"
@@ -237,6 +260,7 @@ render_log_write_native_log "$ELECTRON_LOG" "macos" "metal" "electron" "browser-
     render_log_append_kv "macos_metal_render_log_compare_pairwise_status" "$pixel_status"
     render_log_append_kv "macos_metal_render_log_compare_gpu_capture_status" "${capture_status:-unavailable}"
     render_log_append_kv "macos_metal_render_log_compare_gpu_capture_artifact" "$capture_artifact"
+    render_log_append_kv "macos_metal_render_log_compare_gpu_capture_artifact_file_status" "$capture_artifact_file_status"
     render_log_append_kv "macos_metal_render_log_compare_gpu_capture_artifact_magic" "$capture_artifact_magic"
     render_log_append_kv "macos_metal_render_log_compare_require_gpu_capture" "${MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE:-0}"
 } >"$OUT_ENV"

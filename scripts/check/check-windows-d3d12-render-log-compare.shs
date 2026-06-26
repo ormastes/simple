@@ -31,6 +31,15 @@ add_reason() {
     if [ -z "$reason_parts" ]; then reason_parts="$reason"; else reason_parts="$reason_parts;$reason"; fi
 }
 
+file_status() {
+    path="$1"
+    if [ -n "$path" ] && [ -s "$path" ]; then
+        printf '%s\n' "pass"
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
 if [ ! -s "$WINDOWS_D3D12_NATIVE_READBACK_ENV" ]; then
     compare_status="unavailable"
     add_reason "missing-windows-d3d12-native-readback-env"
@@ -61,7 +70,9 @@ pix_status="$(render_log_value_of windows_d3d12_pix_capture_status "$WINDOWS_D3D
 gpu_debugger_status="$(render_log_value_of windows_d3d12_gpu_debugger_capture_status "$WINDOWS_D3D12_PIX_ENV")"
 pix_artifact="$(render_log_value_of windows_d3d12_pix_capture_artifact "$WINDOWS_D3D12_PIX_ENV")"
 pix_artifact_magic="$(render_log_value_of windows_d3d12_pix_capture_artifact_magic "$WINDOWS_D3D12_PIX_ENV")"
+pix_artifact_file_status="$(file_status "$pix_artifact")"
 gpu_debugger_artifact="$(render_log_value_of windows_d3d12_gpu_debugger_capture_artifact "$WINDOWS_D3D12_PIX_ENV")"
+gpu_debugger_artifact_file_status="$(file_status "$gpu_debugger_artifact")"
 
 case "$d3d12_handle" in ""|*[!0-9]*) d3d12_handle_positive=false ;; *) [ "$d3d12_handle" -gt 0 ] && d3d12_handle_positive=true || d3d12_handle_positive=false ;; esac
 
@@ -108,14 +119,23 @@ if [ "${WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX:-0}" = "1" ] && [ "$pix_status" = "
         [ "$compare_status" = "unavailable" ] || compare_status="fail"
         add_reason "windows-d3d12-pix-artifact-missing"
     fi
+    if [ "$pix_artifact_file_status" != "pass" ]; then
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "windows-d3d12-pix-artifact-file-${pix_artifact_file_status:-missing}"
+    fi
     if [ "$pix_artifact_magic" != "PIX" ]; then
         [ "$compare_status" = "unavailable" ] || compare_status="fail"
         add_reason "windows-d3d12-pix-magic-${pix_artifact_magic:-missing}"
     fi
 fi
-if [ "${WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX:-0}" = "1" ] && [ "$gpu_debugger_status" = "pass" ] && [ -z "$gpu_debugger_artifact" ]; then
-    [ "$compare_status" = "unavailable" ] || compare_status="fail"
-    add_reason "windows-d3d12-gpu-debugger-artifact-missing"
+if [ "${WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX:-0}" = "1" ] && [ "$gpu_debugger_status" = "pass" ]; then
+    if [ -z "$gpu_debugger_artifact" ]; then
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "windows-d3d12-gpu-debugger-artifact-missing"
+    elif [ "$gpu_debugger_artifact_file_status" != "pass" ]; then
+        [ "$compare_status" = "unavailable" ] || compare_status="fail"
+        add_reason "windows-d3d12-gpu-debugger-artifact-file-${gpu_debugger_artifact_file_status:-missing}"
+    fi
 fi
 [ -n "$reason_parts" ] || reason_parts="pass"
 
@@ -142,6 +162,14 @@ render_log_write_native_log "$ELECTRON_LOG" "windows" "d3d12" "electron" "browse
     render_log_append_kv "windows_d3d12_render_log_compare_status" "$compare_status"
     render_log_append_kv "windows_d3d12_render_log_compare_reason" "$reason_parts"
     render_log_append_kv "windows_d3d12_render_log_compare_required_api" "d3d12"
+    render_log_append_kv "windows_d3d12_render_log_compare_native_readback_env" "$WINDOWS_D3D12_NATIVE_READBACK_ENV"
+    render_log_append_kv "windows_d3d12_render_log_compare_native_readback_env_file_status" "$(file_status "$WINDOWS_D3D12_NATIVE_READBACK_ENV")"
+    render_log_append_kv "windows_d3d12_render_log_compare_directx_readback_env" "$DIRECTX_NATIVE_READBACK_ENV"
+    render_log_append_kv "windows_d3d12_render_log_compare_directx_readback_env_file_status" "$(file_status "$DIRECTX_NATIVE_READBACK_ENV")"
+    render_log_append_kv "windows_d3d12_render_log_compare_browser_env" "$WINDOWS_D3D12_BROWSER_ENV"
+    render_log_append_kv "windows_d3d12_render_log_compare_browser_env_file_status" "$(file_status "$WINDOWS_D3D12_BROWSER_ENV")"
+    render_log_append_kv "windows_d3d12_render_log_compare_pix_env" "$WINDOWS_D3D12_PIX_ENV"
+    render_log_append_kv "windows_d3d12_render_log_compare_pix_env_file_status" "$(file_status "$WINDOWS_D3D12_PIX_ENV")"
     render_log_append_kv "windows_d3d12_render_log_compare_simple_log" "$SIMPLE_LOG"
     render_log_append_kv "windows_d3d12_render_log_compare_chrome_log" "$CHROME_LOG"
     render_log_append_kv "windows_d3d12_render_log_compare_electron_log" "$ELECTRON_LOG"
@@ -150,9 +178,11 @@ render_log_write_native_log "$ELECTRON_LOG" "windows" "d3d12" "electron" "browse
     render_log_append_kv "windows_d3d12_render_log_compare_argb_checksum_reason" "$argb_checksum_reason"
     render_log_append_kv "windows_d3d12_render_log_compare_pix_status" "${pix_status:-unavailable}"
     render_log_append_kv "windows_d3d12_render_log_compare_pix_artifact" "$pix_artifact"
+    render_log_append_kv "windows_d3d12_render_log_compare_pix_artifact_file_status" "$pix_artifact_file_status"
     render_log_append_kv "windows_d3d12_render_log_compare_pix_artifact_magic" "$pix_artifact_magic"
     render_log_append_kv "windows_d3d12_render_log_compare_gpu_debugger_status" "${gpu_debugger_status:-unavailable}"
     render_log_append_kv "windows_d3d12_render_log_compare_gpu_debugger_artifact" "$gpu_debugger_artifact"
+    render_log_append_kv "windows_d3d12_render_log_compare_gpu_debugger_artifact_file_status" "$gpu_debugger_artifact_file_status"
     render_log_append_kv "windows_d3d12_render_log_compare_require_pix" "${WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX:-0}"
 } >"$OUT_ENV"
 
