@@ -27,7 +27,7 @@ web_dashboard_server_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,39 +43,19 @@ web_dashboard_server_spec -> std
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = _read_source(SERVER_PATH)
-expect(source).to_contain("if session == nil:")
+
+expect(source).to_contain("if not _session_authenticated(session):")
 expect(source).to_contain("return http_redirect(\"/login\")")
 ```
 
 </details>
 
-#### serves the login page on GET /login
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val server_source = _read_source(SERVER_PATH)
-val login_source = _read_source(LOGIN_PATH)
-expect(server_source).to_contain("if clean_path == \"/login\":")
-expect(server_source).to_contain("return self.handle_login(method, body, session)")
-expect(login_source).to_contain("LLM Dashboard Login")
-expect(login_source).to_contain("<form method=\"POST\" action=\"/login\">")
-expect(login_source.contains("/api/tmux/sessions")).to_equal(false)
-expect(login_source.contains("/ws/terminal?session=")).to_equal(false)
-```
-
-</details>
-
-#### rejects empty login submissions without minting an authenticated session
+#### treats blank session tokens as unauthenticated
 
 <details>
 <summary>Executable SSpec</summary>
@@ -85,26 +65,9 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = _read_source(SERVER_PATH)
-expect(source).to_contain("if method != \"POST\":")
-expect(source).to_contain("val auth_result = auth_authenticate_form(body)")
-expect(source).to_contain("return http_response(status: 401, content_type: \"text/html\", body: auth_login_page(")
-```
 
-</details>
-
-#### logout clears any active session and returns to /login
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val source = _read_source(SERVER_PATH)
-expect(source).to_contain("if clean_path == \"/logout\":")
-expect(source).to_contain("return self.handle_logout(session)")
-expect(source).to_contain("auth_clear_cookie_header(")
+expect(source).to_contain("fn _session_authenticated(session: text?) -> bool:")
+expect(source).to_contain("value.trim() != \"\"")
 ```
 
 </details>
@@ -114,18 +77,19 @@ expect(source).to_contain("auth_clear_cookie_header(")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = _read_source(SERVER_PATH)
-expect(source).to_contain("if clean_path.starts_with(\"/api/\"):")
+
+expect(source).to_contain("if path.starts_with(\"/api/\"):")
 expect(source).to_contain("return http_error(401, \"Authentication required\")")
 ```
 
 </details>
 
-#### rejects unauthenticated terminal and tmux capture access on deeper routes
+#### serves authenticated tmux API placeholder
 
 <details>
 <summary>Executable SSpec</summary>
@@ -135,25 +99,26 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = _read_source(SERVER_PATH)
-expect(source).to_contain("if is_ws and path.starts_with(\"/ws/terminal\"):")
+
 expect(source).to_contain("if path.starts_with(\"/api/tmux\"):")
-expect(source).to_contain("return http_error(503, \"Tmux API is unavailable in this runtime mode\")")
+expect(source).to_contain("return http_response(200, \"application/json\", \"[]\")")
 ```
 
 </details>
 
-#### routes unknown paths to the login redirect when unauthenticated
+#### rejects unsupported authenticated methods
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = _read_source(SERVER_PATH)
-expect(source).to_contain("if val active_session = session:")
-expect(source).to_contain("http_redirect(\"/login\")")
+
+expect(source).to_contain("if method != \"GET\":")
+expect(source).to_contain("return http_error(401, \"Method not supported\")")
 ```
 
 </details>
@@ -177,8 +142,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

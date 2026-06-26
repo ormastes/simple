@@ -1,27 +1,38 @@
-# Web Dashboard Server Router Contracts
+# Web Dashboard Server Specification
 
-| Field | Value |
-|---|---|
-| Source | `test/03_system/feature/app/web_dashboard/web_dashboard_server_spec.spl` |
-| Feature IDs | `#WEB-DASHBOARD-SERVER` |
-| Category | Application |
-| Status | Implemented |
-| Requirements | N/A |
-| Plan | N/A |
-| Design | N/A |
-| Research | N/A |
+> <details>
 
-## Overview
+<!-- sdn-diagram:id=web_dashboard_server_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
 
-This SPipe spec verifies the web dashboard router and authentication contracts
-from source while the live browser-facing runtime path remains isolated.
+```sdn id=web_dashboard_server_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
 
-## Scenario Summary
+web_dashboard_server_spec -> std
+```
 
-| Metric | Count |
-|---|---:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=web_dashboard_server_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 5 | 5 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Web Dashboard Server Specification
 
 ## Scenarios
 
@@ -29,62 +40,113 @@ from source while the live browser-facing runtime path remains isolated.
 
 #### redirects unauthenticated requests for / to /login
 
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
 val source = _read_source(SERVER_PATH)
-expect(source).to_contain("if session == nil:")
+
+expect(source).to_contain("if not _session_authenticated(session):")
 expect(source).to_contain("return http_redirect(\"/login\")")
 ```
 
-#### serves the login page on GET /login
+</details>
 
-```simple
-val server_source = _read_source(SERVER_PATH)
-val login_source = _read_source(LOGIN_PATH)
-expect(server_source).to_contain("if clean_path == \"/login\":")
-expect(server_source).to_contain("return self.handle_login(method, body, session)")
-expect(login_source).to_contain("LLM Dashboard Login")
-expect(login_source).to_contain("<form method=\"POST\" action=\"/login\">")
-```
+#### treats blank session tokens as unauthenticated
 
-#### rejects empty login submissions without minting an authenticated session
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = _read_source(SERVER_PATH)
-expect(source).to_contain("if method != \"POST\":")
-expect(source).to_contain("val auth_result = auth_authenticate_form(body)")
-expect(source).to_contain("return http_response(401, \"text/html\", auth_login_page(")
+
+expect(source).to_contain("fn _session_authenticated(session: text?) -> bool:")
+expect(source).to_contain("value.trim() != \"\"")
 ```
 
-#### logout clears any active session and returns to /login
-
-```simple
-val source = _read_source(SERVER_PATH)
-expect(source).to_contain("if clean_path == \"/logout\":")
-expect(source).to_contain("return self.handle_logout(session)")
-expect(source).to_contain("auth_clear_cookie_header(")
-```
+</details>
 
 #### rejects unauthenticated API access
 
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
 val source = _read_source(SERVER_PATH)
-expect(source).to_contain("if clean_path.starts_with(\"/api/\"):")
+
+expect(source).to_contain("if path.starts_with(\"/api/\"):")
 expect(source).to_contain("return http_error(401, \"Authentication required\")")
 ```
 
-#### rejects unauthenticated terminal and tmux capture access on deeper routes
+</details>
+
+#### serves authenticated tmux API placeholder
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = _read_source(SERVER_PATH)
-expect(source).to_contain("if is_ws and path.starts_with(\"/ws/terminal\"):")
+
 expect(source).to_contain("if path.starts_with(\"/api/tmux\"):")
-expect(source).to_contain("return http_error(503, \"Tmux API is unavailable in this runtime mode\")")
+expect(source).to_contain("return http_response(200, \"application/json\", \"[]\")")
 ```
 
-#### routes unknown paths to the login redirect when unauthenticated
+</details>
+
+#### rejects unsupported authenticated methods
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = _read_source(SERVER_PATH)
-expect(source).to_contain("if val active_session = session:")
-expect(source).to_contain("http_redirect(\"/login\")")
+
+expect(source).to_contain("if method != \"GET\":")
+expect(source).to_contain("return http_error(401, \"Method not supported\")")
 ```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/feature/app/web_dashboard/web_dashboard_server_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- Web dashboard server router contracts
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 5 |
+| Active scenarios | 5 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
