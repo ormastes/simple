@@ -403,7 +403,9 @@ Tasks:
     missing-resource cases as `blocked` with `process_access=not_used`,
     `http_access=not_used`, and `acceptance_status=not_live_evidence`. This is
     not live endpoint proof; it is a dashboard-safe gate that keeps process/HTTP
-    execution owned by `dashboard_live_control_executor`.
+    execution owned by `dashboard_live_control_executor`. Follow-up hardening
+    aligned the JSONL helper with the object path so planned `preflight` evidence
+    remains `requires_runtime_executor=false`.
 15. Accept dashboard/query-style runtime control arguments. Status: done for
     `--key=value` and `key=value` forms on action, base model, endpoint, pid,
     and resource flags. This keeps direct app execution and future dashboard
@@ -425,7 +427,9 @@ Tasks:
     proves the route returns `llm_runtime_vllm_dashboard_control_execution`
     JSONL for missing-resource or invalid-pid inputs, so no process is spawned
     or stopped during the system spec. The host-dependent live executor remains
-    in `app.llm_runtime.dashboard_live_control_executor`.
+    in `app.llm_runtime.dashboard_live_control_executor`. The route spec also
+    proves authenticated preflight and query-style override preflight keep
+    `requires_runtime_executor=false`, preserving the dashboard-intent boundary.
 
 ## Sidecars
 

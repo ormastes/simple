@@ -47,7 +47,7 @@ vllm_control_route_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -60,6 +60,7 @@ expect(response).to_contain("\"event\":\"llm_dashboard_vllm_control_panel\"")
 expect(response).to_contain("\"action\":\"preflight\"")
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
+expect(response).to_contain("\"requires_runtime_executor\":false")
 expect(response.split("base-model").len()).to_equal(1)
 expect_absence_marker_hidden(response)
 ```
@@ -92,7 +93,7 @@ expect(response).to_contain("Authentication required")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -102,6 +103,7 @@ val response = server.route_http("GET", "/api/vllm/control?action=preflight&base
 expect(response).to_contain("HTTP/1.1 200 OK")
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
+expect(response).to_contain("\"requires_runtime_executor\":false")
 expect(response.split("base-model").len()).to_equal(1)
 expect_absence_marker_hidden(response)
 ```

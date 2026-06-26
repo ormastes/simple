@@ -62,6 +62,28 @@ expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 
 </details>
 
+#### preflight JSONL helper stays pure dashboard intent evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+val result = llm_runtime_execute_dashboard_control_jsonl(manifest, "preflight", -1, true, true)
+
+expect(result).to_contain("\"action\":\"preflight\"")
+expect(result).to_contain("\"status\":\"planned\"")
+expect(result).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
+expect(result).to_contain("\"requires_runtime_executor\":false")
+expect(result.split("base-model").len()).to_equal(1)
+expect(result.split(absence_marker()).len()).to_equal(1)
+```
+
+</details>
+
 #### skips start before process spawn when local resources are missing
 
 <details>

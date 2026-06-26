@@ -27,7 +27,7 @@ vllm_dashboard_live_control_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -58,6 +58,28 @@ expect(result.requires_runtime_executor).to_equal(false)
 expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":false")
 expect(result.evidence_jsonl.split("base-model").len()).to_equal(1)
 expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+```
+
+</details>
+
+#### preflight JSONL helper stays pure dashboard intent evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+val result = llm_runtime_execute_dashboard_control_jsonl(manifest, "preflight", -1, true, true)
+
+expect(result).to_contain("\"action\":\"preflight\"")
+expect(result).to_contain("\"status\":\"planned\"")
+expect(result).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
+expect(result).to_contain("\"requires_runtime_executor\":false")
+expect(result.split("base-model").len()).to_equal(1)
+expect(result.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -377,8 +399,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
