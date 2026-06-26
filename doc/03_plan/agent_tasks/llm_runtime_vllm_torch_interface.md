@@ -158,6 +158,14 @@ Tasks:
    API remains compatible. The C++ Torch runtime boundary now returns `0` for
    missing linalg-solve tensor handles instead of panicking before the Simple
    status wrapper can classify the failure.
+   Follow-up status wrappers now cover the dynamic tensor construction/value
+   copy surface in `std.common.torch.dyn_sffi_tensor_ops`:
+   `dyn_torch_tensor_from_values_1d_result`,
+   `dyn_torch_tensor_from_values_2d_result`, and
+   `dyn_torch_tensor_copy_values_result` report `libtorch_unavailable`,
+   `invalid_shape`, `invalid_handle`, `empty_or_invalid_tensor`,
+   `buffer_allocation_failed`, or `runtime_copy_failed` while legacy
+   handle/array-returning APIs remain compatible.
 3. Stop hardcoded CUDA device behavior from being user-visible as correct.
    Status: done for public GC/NoGC backend CUDA placement, `Tensor.cuda`,
    stream creation, and optimizer state initialization. Explicit `device_id`
@@ -281,6 +289,11 @@ Evidence:
 - `test/unit/lib/common/torch/torch_device_placement_status_spec.spl` passed
   with 5/5 scenarios, including same-parameter-device optimizer state
   initialization.
+- `test/01_unit/lib/common/torch/dyn_sffi_tensor_ops_status_spec.spl` passed
+  with 3/3 scenarios, proving explicit dynamic tensor construction and value
+  copy statuses without requiring live libtorch.
+- `test/unit/lib/common/torch/dyn_sffi_tensor_ops_status_spec.spl` passed with
+  3/3 mirrored scenarios.
 
 Still open:
 
