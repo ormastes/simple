@@ -86,11 +86,49 @@ render_log_status_from_rdoc_env() {
     fi
     gate_status="$(render_log_value_of "$gate_key" "$source_env")"
     capture_status="$(render_log_value_of "$capture_key" "$source_env")"
-    magic="$(render_log_value_of "$magic_key" "$source_env")"
-    if [ "$gate_status" = "pass" ] || { [ "$capture_status" = "pass" ] && [ "$magic" = "RDOC" ]; }; then
+    artifact="$(render_log_value_of rdoc_capture_file "$source_env")"
+    [ -n "$artifact" ] || artifact="$(render_log_value_of rdoc_external_host_capture_file "$source_env")"
+    artifact_magic="$(render_log_rdoc_artifact_magic "$source_env" "$artifact")"
+    if { [ "$gate_status" = "pass" ] || [ "$capture_status" = "pass" ]; } && [ "$artifact_magic" = "RDOC" ]; then
         printf '%s\n' "pass"
     else
         printf '%s\n' "fail"
+    fi
+}
+
+render_log_rdoc_artifact_path() {
+    source_env="$1"
+    artifact="$2"
+    if [ -z "$artifact" ]; then
+        return 1
+    fi
+    case "$artifact" in
+        /*)
+            [ -f "$artifact" ] && printf '%s\n' "$artifact"
+            ;;
+        *)
+            if [ -f "$artifact" ]; then
+                printf '%s\n' "$artifact"
+            elif [ -f "$(dirname -- "$source_env")/$artifact" ]; then
+                printf '%s\n' "$(dirname -- "$source_env")/$artifact"
+            fi
+            ;;
+    esac
+}
+
+render_log_rdoc_artifact_magic() {
+    source_env="$1"
+    artifact="$2"
+    artifact_path="$(render_log_rdoc_artifact_path "$source_env" "$artifact" || true)"
+    if [ -z "$artifact_path" ]; then
+        printf '%s\n' ""
+        return
+    fi
+    magic="$(dd if="$artifact_path" bs=4 count=1 2>/dev/null || true)"
+    if [ "$magic" = "RDOC" ]; then
+        printf '%s\n' "RDOC"
+    else
+        printf '%s\n' ""
     fi
 }
 

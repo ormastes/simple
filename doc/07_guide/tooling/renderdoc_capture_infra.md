@@ -397,7 +397,9 @@ rows is rejected. Missing RenderDoc `.rdc` evidence is reported through
 `linux_vulkan_render_log_compare_renderdoc_*_status` plus the matching
 `linux_vulkan_render_log_compare_renderdoc_*_reason`; by default Simple,
 Chrome, and Electron RenderDoc rows must pass with real `.rdc` files and `RDOC`
-magic. Set `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0` only for diagnostic
+magic in the first four artifact bytes; env metadata that merely claims
+`rdoc_capture_magic=RDOC` is not completion proof. Set
+`LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0` only for diagnostic
 partial-log inspection, and never use that mode to claim Linux platform-matrix
 completion.
 
