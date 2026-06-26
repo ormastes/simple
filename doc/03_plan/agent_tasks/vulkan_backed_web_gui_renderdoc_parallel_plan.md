@@ -308,6 +308,7 @@ macOS Metal render-log compare:
 macos_metal_render_log_compare_status=pass
 macos_metal_render_log_compare_required_api=metal
 macos_metal_render_log_compare_pairwise_status=pass
+macos_metal_render_log_compare_gpu_capture_status=pass
 ```
 
 Windows D3D12/PIX render-log compare:
@@ -316,6 +317,8 @@ Windows D3D12/PIX render-log compare:
 windows_d3d12_render_log_compare_status=pass
 windows_d3d12_render_log_compare_required_api=d3d12
 windows_d3d12_render_log_compare_pairwise_status=pass
+windows_d3d12_render_log_compare_pix_status=pass
+windows_d3d12_render_log_compare_gpu_debugger_status=pass
 ```
 
 Each source log must use `simple_render_log_format=simple-render-log-v1`,
