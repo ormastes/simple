@@ -1,33 +1,40 @@
-# Bug: fault_detection_enhanced_spec — module-level var mutation inside fn not visible in test runner
+# Bug: Module-level var mutations via function calls do not propagate in interpreter
 
 **Date:** 2026-06-26
-**Spec:** test/01_unit/lib/common/fault_detection_enhanced_spec.spl
-**Status:** Open
+**Spec:** `test/01_unit/lib/common/fault_detection_enhanced_spec.spl`
 
-## Symptom
+## Symptoms (6 failures)
 
-6 tests fail with "expected false to equal true" / "expected 0 to equal N":
-- `set marks active` (signal/memory/interrupt contexts)
-- `stores signal number` — expects 6, gets 0
-- `stores signal name` — expects "SIGABRT", gets ""
-- `stores used and limit` — expects 512/256, gets 0
+Tests that call a helper function to mutate a module-level `var` see the initial value
+instead of the mutated value:
 
-## Root Cause
-
-The spec defines module-level `var` state and functions that mutate it:
 ```
-var _signal_detected = false
 fn set_signal(num: i64, name: text):
-    _signal_detected = true   # mutation NOT visible after fn returns
+    _signal_detected = true   # assigns module-level var
     _signal_number = num
+    _signal_name = name
+
+it "detects SIGABRT":
+    set_signal(6, "SIGABRT")
+    expect(_signal_detected).to_equal(true)  # fails — still false
 ```
 
-The interpreter does not propagate writes to module-level `var` made inside a function body back to the module scope (same-file). The spec comment says it was "designed to test in interpreter mode" — the assumption was that same-file module-level var mutation would work, but it does not.
+Tests that mutate module-level vars DIRECTLY (without a helper function) work correctly.
+Tests that only READ the initial value of vars pass.
 
-## Impact
+## Root cause
 
-6 of 19 assertions fail. The spec intent is valid; the interpreter has a bug.
+The interpreter does not propagate module-level `var` mutations made inside called
+functions back to the caller's module scope. Mutations made directly at the call site
+(no function indirection) are visible.
 
-## Fix Required
+## Affected tests
 
-In `src/compiler_rust/compiler/src/interpreter_eval.rs` (or equivalent): when a function body assigns to a name that exists in the enclosing module scope, the write must propagate back to module scope, not only to the function's local frame.
+All tests invoking `set_signal()`, `set_memory()`, `set_interrupt()`, or similar
+helper functions and then checking the mutated module-level vars. Approximately 6
+of 19 tests fail.
+
+## Fix needed
+
+Interpreter: function calls that mutate module-level (global) variables must write
+those mutations back to the module scope after the call returns.
