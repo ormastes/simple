@@ -28,7 +28,7 @@ vllm_readiness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -193,6 +193,27 @@ val result = llm_runtime_probe_manifest_with_torch_status(manifest, "ready")
 expect(result.status).to_equal("ready")
 expect(result.reason).to_equal("static_manifest_ready")
 expect(result.torch_ready).to_equal("ready")
+```
+
+</details>
+
+#### normalizes unknown Torch readiness as an explicit runtime blocker
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = llm_runtime_manifest("base", "http://127.0.0.1:8000/v1", "", [], "disabled")
+val result = llm_runtime_probe_manifest_with_torch_status(manifest, "fixture-only")
+
+expect(result.status).to_equal("blocked")
+expect(result.reason).to_equal("torch_or_runtime_blocked")
+expect(result.torch_ready).to_equal("blocked")
+expect(result.evidence_jsonl.split(legacy_blocker_marker()).len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -362,7 +383,7 @@ expect(invalid_endpoint.evidence_jsonl.split(absence_marker()).len()).to_equal(1
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Source | `test/unit/app/llm_runtime/vllm_readiness_spec.spl` |
+| Source | `test/01_unit/app/llm_runtime/vllm_readiness_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
@@ -375,8 +396,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
