@@ -149,9 +149,18 @@ Evidence:
   llm_backed_app_server_dry_run_retry5` reports `license_review=missing`,
   `data_access=missing`, `cache_checksum=missing`,
   `training_allowed=false`, and `STATUS: WARN retry5-data-access-gate`.
+- `.spipe/llm-finetune-process/scripts/check_retry5_cache_manifest.shs
+  llm_backed_app_server_dry_run_retry5
+  .spipe/llm-finetune-process/data/llm_backed_app_server_dry_run_retry5_cache_manifest.sdn`
+  is the deterministic cache/checksum gate for retry5. It reports
+  `STATUS: WARN retry5-cache-manifest` while the manifest is missing, and only
+  reports PASS when `license_review=approved`, `data_access=granted`, the cache
+  path exists, and `checksum` matches the cached file's `sha256:<hex>`.
 - `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry5.sdn`
   records the retry target as licensed data acquisition, cache/checksum
   verification, QLoRA rerun, and target eval.
 
 Next normal-LLM work: obtain licensed data approval and write cache/checksum
-evidence for retry5 before any real training or acceptance claim.
+evidence for retry5 by copying the retry5 cache manifest template to the
+manifest path and filling approved access plus a real sha256 checksum before
+any real training or acceptance claim.
