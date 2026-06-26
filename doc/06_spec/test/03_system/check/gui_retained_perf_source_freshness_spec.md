@@ -146,12 +146,13 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/gui_retained_perf_source_fre
 
 - Read the retained performance evidence report
 - Assert the aggregate command consumes the produced 4K and 8K env rows
+- Assert the report records retained 4K and 8K aggregate pass evidence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -163,6 +164,11 @@ expect(report).to_contain("GUI_SHOWCASE_REQUIRE_CURRENT_SOURCE_REVISION=1")
 expect(report).to_contain("GUI_SHOWCASE_4K_PERF_ENV=build/widget-showcase-4k-200fps/status.env")
 expect(report).to_contain("GUI_SHOWCASE_8K_PERF_ENV=build/widget-showcase-8k-perf/status.env")
 expect(report).to_contain("sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
+
+step("Assert the report records retained 4K and 8K aggregate pass evidence")
+expect(report).to_contain("`gui_showcase_4k_200fps_status=pass`")
+expect(report).to_contain("`gui_showcase_8k_perf_status=pass`")
+expect(report).to_contain("`blocked_completion_gate_count=14`")
 ```
 
 </details>

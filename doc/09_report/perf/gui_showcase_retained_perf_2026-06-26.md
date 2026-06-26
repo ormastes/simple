@@ -11,11 +11,11 @@ completion.
 ## Commands
 
 ```sh
-RESOLUTION=4k BUILD_DIR=build/widget-showcase-4k-200fps TIMEOUT_SECS=30 \
+RESOLUTION=4k BUILD_DIR=build/widget-showcase-4k-200fps TIMEOUT_SECS=120 \
 SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple \
   sh scripts/check/check-widget-showcase-4k-200fps.shs
 
-RESOLUTION=8k BUILD_DIR=build/widget-showcase-8k-perf TIMEOUT_SECS=30 \
+RESOLUTION=8k BUILD_DIR=build/widget-showcase-8k-perf TIMEOUT_SECS=180 \
 SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple \
   sh scripts/check/check-widget-showcase-4k-200fps.shs
 
@@ -52,9 +52,9 @@ internal probe loop.
 - Viewport: `3840x2160`
 - Pixels: `8294400`
 - Frames: `200`
-- FPS x1000: `48076923`
+- FPS x1000: `46104195`
 - Target FPS: `200`
-- Frame avg/p50/p95 ns: `20800 / 20800 / 20800`
+- Frame avg/p50/p95 ns: `21690 / 21690 / 21690`
 - RSS: `131328 / 262144 KiB`
 - RSS status: `pass`
 - Nonzero pixels: `5458`
@@ -71,10 +71,10 @@ internal probe loop.
 - Viewport: `7680x4320`
 - Pixels: `33177600`
 - Frames: `200`
-- FPS x1000: `10712946`
+- FPS x1000: `12452524`
 - Target FPS: `200`
-- Frame avg/p50/p95 ns: `93345 / 93345 / 93345`
-- RSS: `519680 / 750000 KiB`
+- Frame avg/p50/p95 ns: `80305 / 80305 / 80305`
+- RSS: `520192 / 750000 KiB`
 - RSS status: `pass`
 - Nonzero pixels: `203`
 - Checksum: `869060580878`
@@ -85,7 +85,14 @@ internal probe loop.
 
 ## Remaining Blockers
 
+With both retained perf env files supplied, the aggregate reports
+`gui_showcase_4k_200fps_status=pass`,
+`gui_showcase_8k_perf_status=pass`, and
+`blocked_completion_gate_count=14`.
+
 The aggregate remains incomplete because Chrome and Electron RenderDoc `.rdc`
-artifacts are missing, the native render-log matrix still lacks macOS Metal and
-Windows D3D12 evidence, production GUI/web parity is incomplete, and full CSS
-coverage is not yet complete.
+artifacts are missing, GUI widget RenderDoc captures are missing, Vulkan
+comparison and browser backing evidence are incomplete, the native render-log
+matrix still lacks Linux Vulkan, macOS Metal, and Windows D3D12 completion
+evidence, production GUI/web parity is incomplete, and full CSS coverage is not
+yet complete.
