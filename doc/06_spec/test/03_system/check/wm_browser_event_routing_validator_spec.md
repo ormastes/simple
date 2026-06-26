@@ -89,7 +89,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 - The live shell evidence wrapper consumes the standalone validator instead of
   trusting only the probe's top-level `pass` flag.
 - The live shell evidence wrapper keeps validation, proof-source, event,
-  timing, and animation diagnostic rows on early dependency failures.
+  timing, animation, payload, and UI diagnostic rows on early dependency
+  failures.
 
 ## Scenarios
 
@@ -488,7 +489,7 @@ expect(payload.contains("wm_browser_event_routing_move_payload_x=86.5")).to_equa
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -499,6 +500,10 @@ expect(script).to_contain("wm_browser_event_routing_validation_status")
 expect(script).to_contain("wm_browser_event_routing_validation_reason")
 expect(script).to_contain("wm_browser_event_routing_proof_source")
 expect(script).to_contain("wm_browser_event_routing_event_sequence")
+expect(script).to_contain("wm_browser_event_routing_focus_count")
+expect(script).to_contain("wm_browser_event_routing_move_payload_source")
+expect(script).to_contain("wm_browser_event_routing_title_input_width_px")
+expect(script).to_contain("wm_browser_event_routing_close_button_background")
 ```
 
 </details>
@@ -511,7 +516,7 @@ expect(script).to_contain("wm_browser_event_routing_event_sequence")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -528,9 +533,24 @@ expect(evidence).to_contain("wm_browser_event_routing_reason=missing-command:nod
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=missing-command:node")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source=")
+expect(evidence).to_contain("wm_browser_event_routing_focus_count=")
+expect(evidence).to_contain("wm_browser_event_routing_move_count=")
+expect(evidence).to_contain("wm_browser_event_routing_title_command_count=")
+expect(evidence).to_contain("wm_browser_event_routing_text_input_count=")
+expect(evidence).to_contain("wm_browser_event_routing_pointer_down_count=")
+expect(evidence).to_contain("wm_browser_event_routing_pointer_up_count=")
 expect(evidence).to_contain("wm_browser_event_routing_event_sequence=")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=")
 expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=")
+expect(evidence).to_contain("wm_browser_event_routing_title_text=")
+expect(evidence).to_contain("wm_browser_event_routing_traffic_button_count=")
+expect(evidence).to_contain("wm_browser_event_routing_title_input_width_px=")
+expect(evidence).to_contain("wm_browser_event_routing_close_button_background=")
+expect(evidence).to_contain("wm_browser_event_routing_expected_move_x=")
+expect(evidence).to_contain("wm_browser_event_routing_move_payload_x=")
+expect(evidence).to_contain("wm_browser_event_routing_move_payload_source=")
+expect(evidence).to_contain("wm_browser_event_routing_title_command_text=")
+expect(evidence).to_contain("wm_browser_event_routing_text_input_text=")
 ```
 
 </details>
