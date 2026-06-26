@@ -27,7 +27,7 @@ windows_d3d12_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -102,6 +102,7 @@ Browser evidence must prove D3D12 backing and exact pairwise ARGB comparison:
 - `windows_d3d12_pixel_comparison_status=pass`
 - `windows_d3d12_pixel_comparison_mode=pairwise-argb-diff`
 - All Electron/Chrome/Simple pairwise diff statuses are `pass`.
+- Simple, Chrome, and Electron ARGB checksums are present and match.
 
 Strict PIX/GPU-debugger evidence accepts either:
 
@@ -160,8 +161,9 @@ windows_d3d12_render_log_compare_pairwise_status=pass
    readback exists.
 4. Reject pairwise rows whose Simple, Chrome, or Electron ARGB evidence is
    blank or uses mismatched viewport geometry.
-5. Reject missing PIX/GPU debugger evidence when strict capture mode is enabled.
-6. Reject status-only PIX/GPU debugger rows that omit the native artifact
+5. Reject pairwise rows whose ARGB checksums are missing or mismatched.
+6. Reject missing PIX/GPU debugger evidence when strict capture mode is enabled.
+7. Reject status-only PIX/GPU debugger rows that omit the native artifact
    marker.
 
 ## Scenarios
@@ -173,13 +175,13 @@ windows_d3d12_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val command = "rm -rf build/test-windows-d3d12-render-log-pass && mkdir -p build/test-windows-d3d12-render-log-pass && " +
     "printf 'windows_d3d12_native_readback_status=pass\\nwindows_d3d12_native_readback_api=d3d12\\nwindows_d3d12_native_readback_source=device_readback\\nwindows_d3d12_native_readback_backend_handle=44\\nwindows_d3d12_native_readback_expected_checksum=9\\nwindows_d3d12_native_readback_actual_checksum=9\\n' > build/test-windows-d3d12-render-log-pass/native.env && " +
-    "printf 'windows_d3d12_electron_browser_backing_status=pass\\nwindows_d3d12_chrome_browser_backing_status=pass\\nwindows_d3d12_browser_backing_status=pass\\nwindows_d3d12_pixel_comparison_status=pass\\nwindows_d3d12_pixel_comparison_mode=pairwise-argb-diff\\nwindows_d3d12_electron_chrome_pairwise_diff_status=pass\\nwindows_d3d12_electron_simple_pairwise_diff_status=pass\\nwindows_d3d12_chrome_simple_pairwise_diff_status=pass\\nwindows_d3d12_simple_argb_width=3840\\nwindows_d3d12_simple_argb_height=2160\\nwindows_d3d12_simple_argb_nonblank_pixel_count=42\\nwindows_d3d12_chrome_argb_width=3840\\nwindows_d3d12_chrome_argb_height=2160\\nwindows_d3d12_chrome_argb_nonblank_pixel_count=42\\nwindows_d3d12_electron_argb_width=3840\\nwindows_d3d12_electron_argb_height=2160\\nwindows_d3d12_electron_argb_nonblank_pixel_count=42\\n' > build/test-windows-d3d12-render-log-pass/browser.env && " +
+    "printf 'windows_d3d12_electron_browser_backing_status=pass\\nwindows_d3d12_chrome_browser_backing_status=pass\\nwindows_d3d12_browser_backing_status=pass\\nwindows_d3d12_pixel_comparison_status=pass\\nwindows_d3d12_pixel_comparison_mode=pairwise-argb-diff\\nwindows_d3d12_electron_chrome_pairwise_diff_status=pass\\nwindows_d3d12_electron_simple_pairwise_diff_status=pass\\nwindows_d3d12_chrome_simple_pairwise_diff_status=pass\\nwindows_d3d12_simple_argb_width=3840\\nwindows_d3d12_simple_argb_height=2160\\nwindows_d3d12_simple_argb_nonblank_pixel_count=42\\nwindows_d3d12_simple_argb_checksum=900\\nwindows_d3d12_chrome_argb_width=3840\\nwindows_d3d12_chrome_argb_height=2160\\nwindows_d3d12_chrome_argb_nonblank_pixel_count=42\\nwindows_d3d12_chrome_argb_checksum=900\\nwindows_d3d12_electron_argb_width=3840\\nwindows_d3d12_electron_argb_height=2160\\nwindows_d3d12_electron_argb_nonblank_pixel_count=42\\nwindows_d3d12_electron_argb_checksum=900\\n' > build/test-windows-d3d12-render-log-pass/browser.env && " +
     "printf 'windows_d3d12_pix_capture_status=pass\\nwindows_d3d12_gpu_debugger_capture_status=pass\\nwindows_d3d12_pix_capture_artifact=frame.wpix\\nwindows_d3d12_pix_capture_artifact_magic=PIX\\nwindows_d3d12_gpu_debugger_capture_artifact=gpu-debugger.log\\n' > build/test-windows-d3d12-render-log-pass/pix.env && " +
     "BUILD_DIR=build/test-windows-d3d12-render-log-pass/out WINDOWS_D3D12_NATIVE_READBACK_ENV=build/test-windows-d3d12-render-log-pass/native.env WINDOWS_D3D12_BROWSER_ENV=build/test-windows-d3d12-render-log-pass/browser.env WINDOWS_D3D12_PIX_ENV=build/test-windows-d3d12-render-log-pass/pix.env WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1 sh scripts/check/check-windows-d3d12-render-log-compare.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -193,6 +195,7 @@ expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact=frame
 expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_magic=PIX")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_gpu_debugger_status=pass")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_gpu_debugger_artifact=gpu-debugger.log")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_argb_checksum_reason=pass")
 val simple_log = file_read("build/test-windows-d3d12-render-log-pass/out/simple.srl.env")
 expect(simple_log).to_contain("simple_render_log_platform=windows")
 expect(simple_log).to_contain("simple_render_log_native_api=d3d12")
@@ -201,6 +204,29 @@ expect(simple_log).to_contain("simple_render_log_original_capture_tool=pix-or-gp
 expect(simple_log).to_contain("simple_render_log_original_native_log_format=pix-capture")
 expect(simple_log).to_contain("simple_render_log_original_native_log_source=build/test-windows-d3d12-render-log-pass/native.env")
 expect(simple_log).to_contain("simple_render_log_artifact_magic=PIX")
+```
+
+</details>
+
+#### rejects D3D12 pairwise rows with mismatched ARGB checksums
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-windows-d3d12-render-log-argb-checksum && mkdir -p build/test-windows-d3d12-render-log-argb-checksum && " +
+    "printf 'windows_d3d12_native_readback_status=pass\\nwindows_d3d12_native_readback_api=d3d12\\nwindows_d3d12_native_readback_source=device_readback\\nwindows_d3d12_native_readback_backend_handle=44\\nwindows_d3d12_native_readback_expected_checksum=9\\nwindows_d3d12_native_readback_actual_checksum=9\\n' > build/test-windows-d3d12-render-log-argb-checksum/native.env && " +
+    "printf 'windows_d3d12_electron_browser_backing_status=pass\\nwindows_d3d12_chrome_browser_backing_status=pass\\nwindows_d3d12_browser_backing_status=pass\\nwindows_d3d12_pixel_comparison_status=pass\\nwindows_d3d12_pixel_comparison_mode=pairwise-argb-diff\\nwindows_d3d12_electron_chrome_pairwise_diff_status=pass\\nwindows_d3d12_electron_simple_pairwise_diff_status=pass\\nwindows_d3d12_chrome_simple_pairwise_diff_status=pass\\nwindows_d3d12_simple_argb_width=3840\\nwindows_d3d12_simple_argb_height=2160\\nwindows_d3d12_simple_argb_nonblank_pixel_count=42\\nwindows_d3d12_simple_argb_checksum=900\\nwindows_d3d12_chrome_argb_width=3840\\nwindows_d3d12_chrome_argb_height=2160\\nwindows_d3d12_chrome_argb_nonblank_pixel_count=42\\nwindows_d3d12_chrome_argb_checksum=901\\nwindows_d3d12_electron_argb_width=3840\\nwindows_d3d12_electron_argb_height=2160\\nwindows_d3d12_electron_argb_nonblank_pixel_count=42\\nwindows_d3d12_electron_argb_checksum=900\\n' > build/test-windows-d3d12-render-log-argb-checksum/browser.env && " +
+    "BUILD_DIR=build/test-windows-d3d12-render-log-argb-checksum/out WINDOWS_D3D12_NATIVE_READBACK_ENV=build/test-windows-d3d12-render-log-argb-checksum/native.env WINDOWS_D3D12_BROWSER_ENV=build/test-windows-d3d12-render-log-argb-checksum/browser.env sh scripts/check/check-windows-d3d12-render-log-compare.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-windows-d3d12-render-log-argb-checksum/out/evidence.env")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_status=fail")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_argb_checksum_reason=argb-checksum-mismatch")
 ```
 
 </details>
@@ -317,7 +343,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val command = "rm -rf build/test-windows-d3d12-render-log-status-only-pix && mkdir -p build/test-windows-d3d12-render-log-status-only-pix && " +
     "printf 'windows_d3d12_native_readback_status=pass\\nwindows_d3d12_native_readback_api=d3d12\\nwindows_d3d12_native_readback_source=device_readback\\nwindows_d3d12_native_readback_backend_handle=44\\nwindows_d3d12_native_readback_expected_checksum=9\\nwindows_d3d12_native_readback_actual_checksum=9\\n' > build/test-windows-d3d12-render-log-status-only-pix/native.env && " +
-    "printf 'windows_d3d12_electron_browser_backing_status=pass\\nwindows_d3d12_chrome_browser_backing_status=pass\\nwindows_d3d12_browser_backing_status=pass\\nwindows_d3d12_pixel_comparison_status=pass\\nwindows_d3d12_pixel_comparison_mode=pairwise-argb-diff\\nwindows_d3d12_electron_chrome_pairwise_diff_status=pass\\nwindows_d3d12_electron_simple_pairwise_diff_status=pass\\nwindows_d3d12_chrome_simple_pairwise_diff_status=pass\\nwindows_d3d12_simple_argb_width=3840\\nwindows_d3d12_simple_argb_height=2160\\nwindows_d3d12_simple_argb_nonblank_pixel_count=42\\nwindows_d3d12_chrome_argb_width=3840\\nwindows_d3d12_chrome_argb_height=2160\\nwindows_d3d12_chrome_argb_nonblank_pixel_count=42\\nwindows_d3d12_electron_argb_width=3840\\nwindows_d3d12_electron_argb_height=2160\\nwindows_d3d12_electron_argb_nonblank_pixel_count=42\\n' > build/test-windows-d3d12-render-log-status-only-pix/browser.env && " +
+    "printf 'windows_d3d12_electron_browser_backing_status=pass\\nwindows_d3d12_chrome_browser_backing_status=pass\\nwindows_d3d12_browser_backing_status=pass\\nwindows_d3d12_pixel_comparison_status=pass\\nwindows_d3d12_pixel_comparison_mode=pairwise-argb-diff\\nwindows_d3d12_electron_chrome_pairwise_diff_status=pass\\nwindows_d3d12_electron_simple_pairwise_diff_status=pass\\nwindows_d3d12_chrome_simple_pairwise_diff_status=pass\\nwindows_d3d12_simple_argb_width=3840\\nwindows_d3d12_simple_argb_height=2160\\nwindows_d3d12_simple_argb_nonblank_pixel_count=42\\nwindows_d3d12_simple_argb_checksum=900\\nwindows_d3d12_chrome_argb_width=3840\\nwindows_d3d12_chrome_argb_height=2160\\nwindows_d3d12_chrome_argb_nonblank_pixel_count=42\\nwindows_d3d12_chrome_argb_checksum=900\\nwindows_d3d12_electron_argb_width=3840\\nwindows_d3d12_electron_argb_height=2160\\nwindows_d3d12_electron_argb_nonblank_pixel_count=42\\nwindows_d3d12_electron_argb_checksum=900\\n' > build/test-windows-d3d12-render-log-status-only-pix/browser.env && " +
     "printf 'windows_d3d12_pix_capture_status=pass\\n' > build/test-windows-d3d12-render-log-status-only-pix/pix.env && " +
     "BUILD_DIR=build/test-windows-d3d12-render-log-status-only-pix/out WINDOWS_D3D12_NATIVE_READBACK_ENV=build/test-windows-d3d12-render-log-status-only-pix/native.env WINDOWS_D3D12_BROWSER_ENV=build/test-windows-d3d12-render-log-status-only-pix/browser.env WINDOWS_D3D12_PIX_ENV=build/test-windows-d3d12-render-log-status-only-pix/pix.env WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1 sh scripts/check/check-windows-d3d12-render-log-compare.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -335,8 +361,8 @@ expect(evidence).to_contain("windows-d3d12-pix-magic-missing")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

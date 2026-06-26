@@ -4,17 +4,17 @@
 
 ## Quick Stats
 
-- **Total Features:** 1
-- **Complete Documentation:** 1 (100%)
+- **Total Features:** 2
+- **Complete Documentation:** 2 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 19
-- **Warnings:** 2
+- **Total Lines:** 232
 
 ---
 
-## Other (1 features)
+## Other (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [GUI Vulkan ARGB Checksum Contract](test/03_system/check/gui_vulkan_argb_checksum_contract_spec.md) | Minimal | N/A | 1 | 20% | 19 lines |
+| [macOS Metal render-log compare gate](test/03_system/check/macos_metal_render_log_compare_spec.md) | Partial | N/A | 7 | 60% | 115 lines |
+| [Windows D3D12 render-log compare gate](test/03_system/check/windows_d3d12_render_log_compare_spec.md) | Partial | N/A | 7 | 60% | 117 lines |
 
