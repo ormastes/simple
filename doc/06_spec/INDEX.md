@@ -4,21 +4,17 @@
 
 ## Quick Stats
 
-- **Total Features:** 6
-- **Complete Documentation:** 6 (100%)
+- **Total Features:** 2
+- **Complete Documentation:** 2 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 636
+- **Total Lines:** 207
 
 ---
 
-## Other (6 features)
+## Other (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [GUI Showcase Perf Checksum Contract](test/03_system/check/gui_showcase_perf_checksum_contract_spec.md) | Partial | N/A | 1 | 60% | 102 lines |
-| [GUI Showcase Perf Resolution Contract](test/03_system/check/gui_showcase_perf_resolution_contract_spec.md) | Partial | N/A | 1 | 60% | 101 lines |
-| [GUI Showcase Perf RSS Contract](test/03_system/check/gui_showcase_perf_rss_contract_spec.md) | Partial | N/A | 2 | 60% | 103 lines |
-| [GUI Showcase Perf Source Revision Contract](test/03_system/check/gui_showcase_perf_source_revision_contract_spec.md) | Partial | N/A | 2 | 60% | 100 lines |
-| [GUI Showcase Perf Retained Mode Contract](test/03_system/check/gui_showcase_perf_retained_mode_contract_spec.md) | Partial | N/A | 2 | 60% | 109 lines |
-| [GUI Showcase Perf Nonzero Contract](test/03_system/check/gui_showcase_perf_nonzero_contract_spec.md) | Partial | N/A | 2 | 60% | 121 lines |
+| [RenderDoc Capture File Status Diagnostics](test/03_system/check/renderdoc_capture_file_status_diagnostics_spec.md) | Partial | N/A | 3 | 60% | 105 lines |
+| [RenderDoc Electron HTML gate](test/03_system/check/renderdoc_electron_html_gate_spec.md) | Partial | N/A | 9 | 60% | 102 lines |
 

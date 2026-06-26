@@ -8,9 +8,9 @@ evidence. The local host may not have RenderDoc installed, but the gate must
 record a deterministic non-pass state and accept only Electron `.rdc` evidence
 that also proves the requested Chromium Vulkan/ANGLE launch contract.
 
-**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+**Plan:** doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md
 **Requirements:** N/A
-**Research:** doc/09_report/electron_vulkan_renderdoc_debug_2026-06-17.md
+**Research:** doc/09_report/renderdoc_electron_html_gate_2026-06-25.md
 **Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
 
 ## Syntax
@@ -34,6 +34,73 @@ sh scripts/check/check-renderdoc-electron-html-gate.shs || true
   to have the expected dimensions, `argb-u32` format, the
   `electron-chromium-capture` producer, complete pixel data, and nonblank
   rendered pixels.
+
+## Evidence Contract
+
+The gate emits both declarative metadata and verified filesystem facts. The
+producer may claim `rdoc_capture_magic=RDOC`, but the gate independently reads
+the first four bytes of the referenced capture file and emits
+`rdoc_electron_html_gate_capture_file_magic`. It also emits
+`rdoc_electron_html_gate_capture_file_status` so reports can distinguish a
+missing `.rdc` from a file that exists with the wrong magic.
+
+The ARGB proof is separate from RenderDoc proof. A nonblank Electron bitmap can
+prove Chromium rendered the fixture, but it does not prove RenderDoc captured
+the browser GPU process. For that reason, pass requires both a valid `.rdc` and
+valid ARGB proof.
+
+## Failure Classes
+
+Missing source evidence reports `missing-source-evidence`. A missing `.rdc`
+reports `missing-rdc-file` or the capture reason from the source evidence. Bad
+file magic reports `missing-rdoc-file-magic`. Vulkan/ANGLE launch mistakes
+report the missing requested API, angle, feature, or launch flag.
+
+The gate also reads the Chromium/Electron log when available. If the log shows
+ANGLE Vulkan initialization failure, the gate reports the Vulkan log reason
+instead of accepting a fallback bitmap render.
+
+## Debugging
+
+Inspect `build/test-renderdoc-electron-html-gate/evidence.env` for the active
+host result. The most important keys are `rdoc_electron_html_gate_status`,
+`rdoc_electron_html_gate_reason`,
+`rdoc_electron_html_gate_capture_file_status`,
+`rdoc_electron_html_gate_capture_file_magic`,
+`rdoc_electron_html_gate_argb_status`, and
+`rdoc_electron_html_gate_vulkan_log_status`.
+
+When the top-level GUI RenderDoc aggregate is incomplete but ARGB parity passes,
+this gate usually names the remaining native RenderDoc blocker. A prepared host
+must turn the capture file status to `pass` and the file magic to `RDOC`.
+
+## Evidence Checklist
+
+- `rdoc_electron_html_gate_status=pass` is required for completion.
+- `rdoc_electron_html_gate_capture_file_status=pass` proves the `.rdc` path
+  exists and is nonempty.
+- `rdoc_electron_html_gate_capture_file_magic=RDOC` proves the file bytes are a
+  RenderDoc capture, not only a claimed path.
+- `rdoc_electron_html_gate_argb_status=pass` proves the Electron-rendered bitmap
+  was nonblank and structurally valid.
+- `rdoc_electron_html_gate_requested_api=vulkan` and
+  `rdoc_electron_html_gate_requested_angle=vulkan` prove the requested browser
+  backing.
+- `rdoc_electron_html_gate_vulkan_log_status=pass` or `not-recorded` keeps log
+  diagnostics explicit; a Vulkan-unavailable log must fail the gate.
+
+## Platform Notes
+
+Linux verification usually exercises this gate with Electron Chromium launched
+under RenderDoc and ANGLE Vulkan flags. macOS may use the same Electron evidence
+shape when MoltenVK and RenderDoc are available, but platform setup can remain
+blocked by RenderDoc packaging or upstream capture support. Windows may later
+pair this gate with PIX or GPU debugger logs; those native logs can add fields,
+but they must not remove the common capture-file status and magic evidence.
+
+The gate is deliberately conservative across all platforms: a fallback bitmap,
+software rendering path, or browser log that rejects Vulkan is not enough to
+close the Electron RenderDoc requirement.
 """
 
 # @tag: system, gpu, renderdoc, html, electron, vulkan, evidence
@@ -85,6 +152,7 @@ describe "RenderDoc Electron HTML gate":
         expect(evidence).to_contain("rdoc_electron_html_gate_required_launch_flag_enable_features=--enable-features=Vulkan")
         expect(evidence).to_contain("rdoc_electron_html_gate_required_launch_flag_use_angle=--use-angle=vulkan")
         expect(evidence).to_contain("rdoc_electron_html_gate_required_vulkan_log_no_angle_failure=1")
+        expect(evidence).to_contain("rdoc_electron_html_gate_capture_file_status=")
         expect(evidence).to_contain("rdoc_electron_html_gate_capture_file_magic=")
         expect(evidence).to_contain("rdoc_electron_html_gate_log=")
         expect(evidence).to_contain("rdoc_electron_html_gate_vulkan_log_status=")
@@ -135,6 +203,7 @@ describe "RenderDoc Electron HTML gate":
         expect(evidence).to_contain("rdoc_electron_html_gate_required_electron_suffix=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron|tools/electron-shell/node_modules/.bin/electron")
         expect(evidence).to_contain("rdoc_electron_html_gate_capture_script=tools/electron-live-bitmap/capture_html_argb.js")
         expect(evidence).to_contain("rdoc_electron_html_gate_capture_magic=RDOC")
+        expect(evidence).to_contain("rdoc_electron_html_gate_capture_file_status=pass")
         expect(evidence).to_contain("rdoc_electron_html_gate_capture_file_magic=RDOC")
         expect(evidence).to_contain("rdoc_electron_html_gate_requested_api=vulkan")
         expect(evidence).to_contain("rdoc_electron_html_gate_requested_angle=vulkan")
