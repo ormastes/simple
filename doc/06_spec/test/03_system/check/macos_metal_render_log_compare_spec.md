@@ -27,7 +27,7 @@ macos_metal_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -77,9 +77,11 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/macos_metal_render_log_compa
 4. If Xcode GPU Frame Capture is required for the host, write
    `build/macos-metal-gpu-capture/evidence.env` and set
    `MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1`.
-   Strict capture mode requires both `macos_metal_gpu_capture_artifact` and
-   a capture artifact whose first bytes are `XCODE-GPUTRACE`; a status-only row
-   or env-only claimed magic is diagnostic, not native GPU-capture proof.
+   Strict capture mode requires `macos_metal_gpu_capture_tool` to be
+   `xcode-gpu-frame-capture`, `macos_metal_gpu_capture_artifact`, and a capture
+   artifact whose first bytes are `XCODE-GPUTRACE`; a status-only row,
+   browser-metadata row, or env-only claimed magic is diagnostic, not native
+   GPU-capture proof.
 5. Run `scripts/check/check-macos-metal-render-log-compare.shs` and consume the
    normalized `macos_metal_render_log_compare_*` keys from the output env.
 
@@ -174,7 +176,9 @@ macos_metal_render_log_compare_pairwise_status=pass
 10. Reject Xcode GPU capture rows whose artifact bytes do not match the native
    marker, even if the env row claims `XCODE-GPUTRACE`.
 11. Reject status-only Xcode GPU capture rows that omit the capture artifact or
-   native artifact marker.
+    native artifact marker.
+12. Reject strict Metal capture rows that use browser metadata as the capture
+    tool even when the `.gputrace` artifact bytes are valid.
 
 ## Scenarios
 
@@ -185,7 +189,7 @@ macos_metal_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 56 lines folded for reproduction.
+Runnable source: 58 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -203,6 +207,8 @@ val evidence = file_read("build/test-macos-metal-render-log-pass/out/evidence.en
 expect(evidence).to_contain("macos_metal_render_log_compare_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_required_api=metal")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_tool=xcode-gpu-frame-capture")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_tool_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact=build/test-macos-metal-render-log-pass/frame.gputrace")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE")
@@ -508,12 +514,44 @@ expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_sta
 
 </details>
 
+#### rejects strict Metal capture rows that use browser metadata as the capture tool
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-macos-metal-render-log-browser-capture-tool && mkdir -p build/test-macos-metal-render-log-browser-capture-tool && " +
+    "printf 'metal_generated_2d_readback_status=pass\\nmetal_generated_2d_readback_module_verified=true\\nmetal_generated_2d_readback_submit_attempted=true\\nmetal_generated_2d_readback_readback_available=true\\nmetal_generated_2d_readback_expected_checksum=7\\nmetal_generated_2d_readback_actual_checksum=7\\n' > build/test-macos-metal-render-log-browser-capture-tool/generated.env && " +
+    "printf 'metal_engine2d_framebuffer_readback_status=pass\\nmetal_engine2d_framebuffer_gpu_readback_available=true\\nmetal_engine2d_framebuffer_blur_or_tolerance_used=false\\n' > build/test-macos-metal-render-log-browser-capture-tool/framebuffer.env && " +
+    "printf 'macos_metal_electron_browser_backing_status=pass\\nmacos_metal_chrome_browser_backing_status=pass\\nmacos_metal_browser_backing_status=pass\\nmacos_metal_electron_browser_backing_reason=electron-metal-backed\\nmacos_metal_electron_browser_backing_gpu_compositing=enabled\\nmacos_metal_electron_browser_backing_display_type=Metal\\nmacos_metal_electron_browser_backing_gl_implementation_parts=metal\\nmacos_metal_electron_browser_backing_skia_backend_type=Metal\\nmacos_metal_electron_browser_backing_gl_renderer=Apple GPU\\nmacos_metal_electron_browser_backing_source=test/03_system/check/macos_metal_render_log_compare_spec.spl\\nmacos_metal_chrome_browser_backing_reason=chrome-metal-backed\\nmacos_metal_chrome_browser_backing_gpu_compositing=enabled\\nmacos_metal_chrome_browser_backing_display_type=Metal\\nmacos_metal_chrome_browser_backing_gl_implementation_parts=metal\\nmacos_metal_chrome_browser_backing_skia_backend_type=Metal\\nmacos_metal_chrome_browser_backing_gl_renderer=Apple GPU\\nmacos_metal_chrome_browser_backing_source=test/03_system/check/macos_metal_render_log_compare_spec.spl\\nmacos_metal_pixel_comparison_status=pass\\nmacos_metal_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_electron_simple_pairwise_diff_status=pass\\nmacos_metal_chrome_simple_pairwise_diff_status=pass\\nmacos_metal_simple_argb_width=3840\\nmacos_metal_simple_argb_height=2160\\nmacos_metal_simple_argb_nonblank_pixel_count=42\\nmacos_metal_simple_argb_checksum=700\\nmacos_metal_chrome_argb_width=3840\\nmacos_metal_chrome_argb_height=2160\\nmacos_metal_chrome_argb_nonblank_pixel_count=42\\nmacos_metal_chrome_argb_checksum=700\\nmacos_metal_electron_argb_width=3840\\nmacos_metal_electron_argb_height=2160\\nmacos_metal_electron_argb_nonblank_pixel_count=42\\nmacos_metal_electron_argb_checksum=700\\n' > build/test-macos-metal-render-log-browser-capture-tool/browser.env && " +
+    "printf 'XCODE-GPUTRACE synthetic capture\\n' > build/test-macos-metal-render-log-browser-capture-tool/frame.gputrace && " +
+    "printf 'macos_metal_gpu_capture_status=pass\\nmacos_metal_gpu_capture_tool=browser-gpu-metadata\\nmacos_metal_gpu_capture_artifact=build/test-macos-metal-render-log-browser-capture-tool/frame.gputrace\\nmacos_metal_gpu_capture_artifact_magic=XCODE-GPUTRACE\\n' > build/test-macos-metal-render-log-browser-capture-tool/capture.env && " +
+    "BUILD_DIR=build/test-macos-metal-render-log-browser-capture-tool/out METAL_GENERATED_2D_READBACK_ENV=build/test-macos-metal-render-log-browser-capture-tool/generated.env METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=build/test-macos-metal-render-log-browser-capture-tool/framebuffer.env MACOS_METAL_BROWSER_ENV=build/test-macos-metal-render-log-browser-capture-tool/browser.env MACOS_METAL_CAPTURE_ENV=build/test-macos-metal-render-log-browser-capture-tool/capture.env MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1 sh scripts/check/check-macos-metal-render-log-compare.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-macos-metal-render-log-browser-capture-tool/out/evidence.env")
+expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
+expect(evidence).to_contain("macos-metal-gpu-capture-tool-browser-gpu-metadata")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_tool=browser-gpu-metadata")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_tool_reason=macos-metal-gpu-capture-tool-browser-gpu-metadata")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_file_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=xcode-gpu-capture")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
