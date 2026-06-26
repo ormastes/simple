@@ -49,7 +49,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val server = DashboardServer.new_with_agent_dir(3099, ".build/llm_dashboard/agent-system-empty")
-val response = server.route_http("GET", "/agents", "", nil)
+val response = route_agents_without_session(server)
 
 expect(response).to_contain("HTTP/1.1 302 Found")
 expect(response).to_contain("Location: /login")
