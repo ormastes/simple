@@ -273,13 +273,15 @@ For failed or partial hosts, inspect
 matching `*_browser_backing_source` files before changing Chromium flags.
 RenderDoc capture and gate readiness remains a separate blocker reported by
 `gui_web_2d_vulkan_renderdoc_blocker_*`.
-As of 2026-06-22, Linux Xvfb evidence has Chrome Vulkan-backed and Simple
-Vulkan passing with pairwise pixel parity, but Electron reports
-`electron-vulkan-disabled_off`. Treat Electron backing as postponed to a real
-desktop GPU host or macOS MoltenVK lane; do not keep adding Chromium flags on
-the Xvfb host without new evidence. The current status and rejected shortcuts
-are tracked in
-`doc/08_tracking/bug/gui_web_2d_vulkan_pairwise_aggregate_2026-06-22.md`.
+As of 2026-06-26, Linux evidence has Chrome Vulkan-backed and Simple Vulkan
+passing with pairwise pixel parity. Electron direct Vulkan status can report
+`enabled_on`, but focused browser backing still fails unless Electron also
+proves a Vulkan renderer path through `hardwareSupportsVulkan=true` and Vulkan
+in display type, GL implementation parts, Skia backend, or GL renderer. Current
+Linux evidence reports `electron-vulkan-enabled-without-angle-vulkan-proof`
+with `(gl=none,angle=none)` and `skia=None`; do not treat that as a browser
+Vulkan pass. The current status and rejected shortcuts are tracked in
+`doc/08_tracking/bug/gui_web_2d_vulkan_browser_backing_2026-06-23.md`.
 The current blockers are machine-readable in
 `gui_web_2d_vulkan_renderdoc_blocker_status`,
 `gui_web_2d_vulkan_renderdoc_blocker_reason`,
@@ -299,8 +301,9 @@ Chrome `139.0.7258.138`, repo-local Electron `30.5.1`, RenderDoc
 stable toolchain (`rustc`/`cargo` 1.96). `--check` reports RenderDoc ready from
 `PATH:renderdoccmd`; `--run` reports Simple Vulkan readback pass and
 Electron/Chrome/Simple pairwise ARGB pixel parity. `--browser-backing` still
-fails because Electron reports `electron-vulkan-disabled_off`, while Chrome
-reports ANGLE Vulkan hardware support. `--renderdoc-simple` now builds the
+fails because Electron reports `electron-vulkan-enabled-without-angle-vulkan-proof`
+with no ANGLE/Skia Vulkan renderer proof, while Chrome reports ANGLE Vulkan
+hardware support. `--renderdoc-simple` now builds the
 Rust interpreter and resolves `rt_renderdoc_*`; the remaining blocker is that
 RenderDoc returns `renderdoc_end=0`, `renderdoc_num_captures=0`, and no `.rdc`
 for the headless Simple Engine2D frame.

@@ -21,21 +21,29 @@ failed browser-backing gate, not a successful fallback bitmap comparison.
 ## Current Evidence
 
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --browser-backing` is now a
-valid focused probe mode. The 2026-06-26 Linux host run passes after upgrading
-the repo-local Electron shell to Electron 42, adding `--ozone-platform=x11` to
-the Electron Vulkan launch, and sampling Electron GPU status after the page is
-captured:
+valid focused probe mode. The 2026-06-26 Linux host run proves Chrome is
+Vulkan-backed, but still fails the browser-backing rollup because Electron does
+not prove ANGLE/Vulkan renderer backing. Electron reports `vulkan=enabled_on`
+and GPU compositing enabled, but the compact proof has
+`hardwareSupportsVulkan=false`, `glImplementationParts=(gl=none,angle=none)`,
+`skiaBackendType=None`, and an empty GL renderer:
 
 ```text
 gui_web_2d_vulkan_mode=--browser-backing
 gui_web_2d_vulkan_browser_backing_mode=gpu-feature-status
-gui_web_2d_vulkan_electron_browser_backing_status=pass
-gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed
+gui_web_2d_vulkan_electron_browser_backing_status=fail
+gui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-enabled-without-angle-vulkan-proof
 gui_web_2d_vulkan_electron_browser_backing_vulkan=enabled_on
+gui_web_2d_vulkan_electron_browser_backing_gpu_compositing=enabled
+gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=false
+gui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=(gl=none,angle=none)
+gui_web_2d_vulkan_electron_browser_backing_skia_backend_type=None
 gui_web_2d_vulkan_chrome_browser_backing_status=pass
 gui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed
-gui_web_2d_vulkan_browser_backing_status=pass
-gui_web_2d_vulkan_browser_backing_reason=pass
+gui_web_2d_vulkan_chrome_browser_backing_display_type=ANGLE_VULKAN
+gui_web_2d_vulkan_chrome_browser_backing_skia_backend_type=GaneshVulkan
+gui_web_2d_vulkan_browser_backing_status=fail
+gui_web_2d_vulkan_browser_backing_reason=electron-vulkan-enabled-without-angle-vulkan-proof;chrome-vulkan-backed
 ```
 
 When the focused browser proof is absent, the gate must report:
@@ -53,7 +61,9 @@ Completion requires `scripts/setup/setup-gui-web-2d-vulkan-env.shs
 - `gui_web_2d_vulkan_browser_backing_status=pass`
 - `gui_web_2d_vulkan_browser_backing_mode=gpu-feature-status` or stronger
   RenderDoc-backed browser evidence, not `focused-browser-backing-required`
-- Electron and Chrome both report Vulkan-backed GPU feature status
+- Electron and Chrome both report Vulkan-backed GPU feature status and renderer
+  proof: enabled GPU compositing, `hardwareSupportsVulkan=true`, and Vulkan in
+  display type, GL implementation parts, Skia backend, or GL renderer
 - logs do not contain Chromium `angle=vulkan` unavailable failures
 
 Keep `scripts/check/check-gui-renderdoc-feature-coverage-status.shs` incomplete
