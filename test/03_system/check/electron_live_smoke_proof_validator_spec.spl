@@ -24,6 +24,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
   `electron_live_smoke_*` rows.
 - Missing DOM render text, missing `performance.now`, missing two animation
   frames, missing CSS animation support, and blur/tolerance use fail closed.
+- Requested capture viewport dimensions must be explicit decimal integers; the
+  proof validator must not accept exponent or fractional notation as a capture
+  size contract.
 - The live smoke shell wrapper delegates JSON validation to the proof validator.
 """
 
@@ -107,6 +110,26 @@ describe "Electron live smoke proof validator":
         val width = file_read(root + "/width.env")
         expect(blur).to_contain("electron_live_smoke_validation_reason=blur-or-tolerance-not-allowed")
         expect(width).to_contain("electron_live_smoke_validation_reason=unexpected-width")
+
+    it "rejects non decimal requested viewport dimensions":
+        val root = "build/test-electron-live-smoke-validator-decimal-viewport"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/exponent.json", "") +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/exponent.json 1e3 720 > " + root + "/exponent.env; " +
+            _proof_command(root + "/fractional.json", "") +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/fractional.json 1280 720.0 > " + root + "/fractional.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val exponent = file_read(root + "/exponent.env")
+        val fractional = file_read(root + "/fractional.env")
+        step("Confirm viewport arguments are not coerced through JavaScript Number parsing")
+        expect(exponent).to_contain("electron_live_smoke_validation_status=fail")
+        expect(exponent).to_contain("electron_live_smoke_validation_reason=unexpected-width")
+        expect(exponent).to_contain("electron_live_smoke_width=1280")
+        expect(fractional).to_contain("electron_live_smoke_validation_status=fail")
+        expect(fractional).to_contain("electron_live_smoke_validation_reason=unexpected-height")
+        expect(fractional).to_contain("electron_live_smoke_height=720")
 
     it "keeps the Electron live smoke wrapper wired to the validator and bridge proof":
         val wrapper = file_read("scripts/check/check-electron-live-smoke.shs")

@@ -54,8 +54,10 @@ try {
   process.exit(1);
 }
 
-const expectedWidth = Number(widthText);
-const expectedHeight = Number(heightText);
+const expectedWidthText = decimalIntegerText(widthText);
+const expectedHeightText = decimalIntegerText(heightText);
+const expectedWidth = expectedWidthText === null ? NaN : Number(expectedWidthText);
+const expectedHeight = expectedHeightText === null ? NaN : Number(expectedHeightText);
 
 let reason = 'pass';
 if (proof.target !== 'electron') {

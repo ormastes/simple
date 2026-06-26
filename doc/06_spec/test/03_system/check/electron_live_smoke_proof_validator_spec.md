@@ -27,7 +27,7 @@ electron_live_smoke_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -73,6 +73,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
   `electron_live_smoke_*` rows.
 - Missing DOM render text, missing `performance.now`, missing two animation
   frames, missing CSS animation support, and blur/tolerance use fail closed.
+- Requested capture viewport dimensions must be explicit decimal integers; the
+  proof validator must not accept exponent or fractional notation as a capture
+  size contract.
 - The live smoke shell wrapper delegates JSON validation to the proof validator.
 
 ## Scenarios
@@ -215,6 +218,43 @@ expect(width).to_contain("electron_live_smoke_validation_reason=unexpected-width
 
 </details>
 
+#### rejects non decimal requested viewport dimensions
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm viewport arguments are not coerced through JavaScript Number parsing
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-live-smoke-validator-decimal-viewport"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/exponent.json", "") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/exponent.json 1e3 720 > " + root + "/exponent.env; " +
+    _proof_command(root + "/fractional.json", "") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/fractional.json 1280 720.0 > " + root + "/fractional.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val exponent = file_read(root + "/exponent.env")
+val fractional = file_read(root + "/fractional.env")
+step("Confirm viewport arguments are not coerced through JavaScript Number parsing")
+expect(exponent).to_contain("electron_live_smoke_validation_status=fail")
+expect(exponent).to_contain("electron_live_smoke_validation_reason=unexpected-width")
+expect(exponent).to_contain("electron_live_smoke_width=1280")
+expect(fractional).to_contain("electron_live_smoke_validation_status=fail")
+expect(fractional).to_contain("electron_live_smoke_validation_reason=unexpected-height")
+expect(fractional).to_contain("electron_live_smoke_height=720")
+```
+
+</details>
+
 #### keeps the Electron live smoke wrapper wired to the validator and bridge proof
 
 <details>
@@ -243,8 +283,8 @@ expect(envelopes).to_contain("css_length")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
