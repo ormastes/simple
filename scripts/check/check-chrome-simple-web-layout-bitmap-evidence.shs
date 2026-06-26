@@ -14,11 +14,13 @@ CAPTURED_ARGB="$BUILD_DIR/chrome-argb.json"
 CHROME_GEOMETRY="$BUILD_DIR/chrome-geometry.json"
 CHROME_OUT="$BUILD_DIR/chrome.out"
 CHROME_PROOF="$BUILD_DIR/chrome-proof.json"
+VALIDATED_ENV="$BUILD_DIR/chrome-proof.validation.env"
+VALIDATOR="scripts/check/validate-chrome-simple-web-layout-proof.js"
 TIMEOUT_SECS="${CHROME_LAYOUT_TIMEOUT_SECS:-${ELECTRON_BITMAP_TIMEOUT_SECS:-20}}"
 KILL_SECS="${CHROME_LAYOUT_KILL_SECS:-5}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$CAPTURED_ARGB" "$CHROME_GEOMETRY" "$CHROME_OUT" "$CHROME_PROOF" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+rm -f "$CAPTURED_ARGB" "$CHROME_GEOMETRY" "$CHROME_OUT" "$CHROME_PROOF" "$VALIDATED_ENV" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
 
 field_of_json() {
     key="$1"
@@ -97,6 +99,10 @@ if [ "$EXPECTED_ARGB" = "" ] || [ ! -s "$EXPECTED_ARGB" ]; then
     emit_unavailable "missing-expected-argb"
     exit 1
 fi
+if [ ! -f "$VALIDATOR" ]; then
+    emit_fail "missing-validator:$VALIDATOR"
+    exit 1
+fi
 
 set +e
 if command -v timeout >/dev/null 2>&1; then
@@ -146,20 +152,43 @@ if [ "$chrome_code" -ne 0 ]; then
     exit 1
 fi
 
-checksum="$(field_of_json checksum "$CHROME_PROOF")"
-expected_checksum="$(field_of_json expected_checksum "$CHROME_PROOF")"
-weighted="$(field_of_json weighted_checksum "$CHROME_PROOF")"
-expected_weighted="$(field_of_json expected_weighted_checksum "$CHROME_PROOF")"
-mismatch_count="$(field_of_json mismatch_count "$CHROME_PROOF")"
-frame_us="$(field_of_json frame_us "$CHROME_PROOF")"
-captured_argb_written="$(field_of_json captured_argb_written "$CHROME_PROOF")"
-geometry_written="$(field_of_json geometry_written "$CHROME_PROOF")"
-blur_used="$(field_of_json blur_or_tolerance_used "$CHROME_PROOF")"
-chrome_bin="$(field_of_json chrome_bin "$CHROME_PROOF")"
+set +e
+node "$VALIDATOR" "$CHROME_PROOF" >"$VALIDATED_ENV"
+validator_code=$?
+set -e
+
+field_of_env() {
+    key="$1"
+    file="$2"
+    sed -n "s/^$key=//p" "$file" | tail -n 1
+}
+
+expected_checksum="$(field_of_env chrome_simple_web_layout_simple_checksum "$VALIDATED_ENV")"
+checksum="$(field_of_env chrome_simple_web_layout_chrome_checksum "$VALIDATED_ENV")"
+expected_weighted="$(field_of_env chrome_simple_web_layout_simple_weighted_checksum "$VALIDATED_ENV")"
+weighted="$(field_of_env chrome_simple_web_layout_chrome_weighted_checksum "$VALIDATED_ENV")"
+mismatch_count="$(field_of_env chrome_simple_web_layout_mismatch_count "$VALIDATED_ENV")"
+frame_us="$(field_of_env chrome_simple_web_layout_chrome_frame_us "$VALIDATED_ENV")"
+captured_argb_written="$(field_of_env chrome_simple_web_layout_captured_argb_written "$VALIDATED_ENV")"
+geometry_written="$(field_of_env chrome_simple_web_layout_geometry_written "$VALIDATED_ENV")"
+blur_used="$(field_of_env chrome_simple_web_layout_blur_or_tolerance_used "$VALIDATED_ENV")"
+chrome_bin="$(field_of_env chrome_simple_web_layout_chrome_bin "$VALIDATED_ENV")"
+validation_status="$(field_of_env chrome_simple_web_layout_validation_status "$VALIDATED_ENV")"
+validation_reason="$(field_of_env chrome_simple_web_layout_validation_reason "$VALIDATED_ENV")"
 
 status=pass
 reason=pass
-if [ "$blur_used" != "false" ]; then
+if [ "$validator_code" -ne 0 ] || [ "$validation_status" != "pass" ]; then
+    reason="${validation_reason:-chrome-proof-invalid}"
+    case "$reason" in
+        checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch)
+            status=divergent
+            ;;
+        *)
+            status=fail
+            ;;
+    esac
+elif [ "$blur_used" != "false" ]; then
     status=fail
     reason=blur-or-tolerance-not-allowed
 elif [ "$checksum" != "$expected_checksum" ]; then
@@ -177,14 +206,13 @@ elif [ "$captured_argb_written" != "true" ] || [ ! -s "$CAPTURED_ARGB" ]; then
 elif [ "$geometry_written" != "true" ] || [ ! -s "$CHROME_GEOMETRY" ]; then
     status=fail
     reason=missing-chrome-geometry
-elif [ "$frame_us" = "" ] || [ "$frame_us" -le 0 ]; then
-    status=fail
-    reason=missing-chrome-timing
 fi
 
 {
     echo "chrome_simple_web_layout_status=$status"
     echo "chrome_simple_web_layout_reason=$reason"
+    echo "chrome_simple_web_layout_validation_status=$validation_status"
+    echo "chrome_simple_web_layout_validation_reason=$validation_reason"
     echo "chrome_simple_web_layout_width=$WIDTH"
     echo "chrome_simple_web_layout_height=$HEIGHT"
     echo "chrome_simple_web_layout_html_path=$HTML_PATH"
