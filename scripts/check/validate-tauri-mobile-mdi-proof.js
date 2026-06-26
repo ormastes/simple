@@ -4,8 +4,13 @@ const fs = require("fs");
 
 const [prefix, jsonPath, ...files] = process.argv.slice(2);
 
+function clean(value) {
+  if (value === undefined || value === null) return "";
+  return String(value).replace(/[\r\n]/g, " ");
+}
+
 function emit(key, value) {
-  console.log(`${prefix}_${key}=${value}`);
+  console.log(`${prefix}_${key}=${clean(value)}`);
 }
 
 function fail(reason) {
@@ -44,10 +49,10 @@ fs.writeFileSync(jsonPath, `${JSON.stringify(proof)}\n`);
 const count = Number(proof.count || 0);
 const taskbarItemCount = Number(proof.taskbarItemCount || 0);
 const taskbarIconCount = Number(proof.taskbarIconCount || 0);
-const viewportWidth = Number(proof.viewportWidth || 0);
-const viewportHeight = Number(proof.viewportHeight || 0);
-const performanceNowDeltaMs = Number(proof.performanceNowDeltaMs || 0);
-const animationFrameCount = Number(proof.animationFrameCount || 0);
+const viewportWidth = Number(proof.viewportWidth);
+const viewportHeight = Number(proof.viewportHeight);
+const performanceNowDeltaMs = Number(proof.performanceNowDeltaMs);
+const animationFrameCount = Number(proof.animationFrameCount);
 
 const eventPass =
   count >= 4 &&
@@ -67,13 +72,18 @@ const eventPass =
   proof.taskbarLabelsVisible === true &&
   proof.htmlRenderable === true;
 
-const capturePass = viewportWidth >= 300 && viewportHeight >= 300;
+const capturePass =
+  Number.isFinite(viewportWidth) &&
+  Number.isFinite(viewportHeight) &&
+  viewportWidth >= 300 &&
+  viewportHeight >= 300;
 const performancePass =
   proof.performanceNowAvailable === true &&
   Number.isFinite(performanceNowDeltaMs) &&
   performanceNowDeltaMs >= 0;
 const animationPass =
   proof.animationFrameAvailable === true &&
+  Number.isFinite(animationFrameCount) &&
   animationFrameCount >= 2 &&
   proof.cssAnimationProbe === true;
 
@@ -83,12 +93,12 @@ emit("mdi_proof_reason", eventPass && capturePass && performancePass && animatio
 emit("mdi_proof_window_count", count);
 emit("mdi_event_status", eventPass ? "pass" : "fail");
 emit("mdi_capture_status", capturePass ? "pass" : "fail");
-emit("mdi_capture_viewport_width", viewportWidth);
-emit("mdi_capture_viewport_height", viewportHeight);
+emit("mdi_capture_viewport_width", Number.isFinite(viewportWidth) ? viewportWidth : "");
+emit("mdi_capture_viewport_height", Number.isFinite(viewportHeight) ? viewportHeight : "");
 emit("mdi_performance_status", performancePass ? "pass" : "fail");
-emit("mdi_performance_now_delta_ms", performanceNowDeltaMs);
+emit("mdi_performance_now_delta_ms", Number.isFinite(performanceNowDeltaMs) ? performanceNowDeltaMs : "");
 emit("mdi_animation_status", animationPass ? "pass" : "fail");
-emit("mdi_animation_frame_count", animationFrameCount);
+emit("mdi_animation_frame_count", Number.isFinite(animationFrameCount) ? animationFrameCount : "");
 emit("mdi_css_animation_probe", proof.cssAnimationProbe === true ? "true" : "false");
 
 if (!(eventPass && capturePass && performancePass && animationPass)) {
