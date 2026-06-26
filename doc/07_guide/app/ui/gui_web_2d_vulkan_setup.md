@@ -169,6 +169,33 @@ If Chrome or Electron logs `angle=vulkan` unavailable or falls back to a
 non-Vulkan path, record `vulkan-angle-unavailable` and leave the browser Vulkan
 gate failed.
 
+## Current Linux Browser-Backing Evidence - 2026-06-26
+
+The current Linux host produced a focused browser-backing pass with:
+
+```sh
+GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-browser-backing-current \
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --browser-backing
+```
+
+Retained report:
+`doc/09_report/gui_web_2d_vulkan_browser_backing_2026-06-26_current.md`.
+
+Key rows:
+
+- `gui_web_2d_vulkan_browser_backing_status=pass`
+- `gui_web_2d_vulkan_browser_backing_mode=gpu-feature-status`
+- `gui_web_2d_vulkan_electron_browser_backing_status=pass`
+- `gui_web_2d_vulkan_chrome_browser_backing_status=pass`
+- Electron and Chrome both reported `ANGLE_VULKAN` and `GaneshVulkan`
+- Renderer: NVIDIA Vulkan `1.4.312` on NVIDIA TITAN RTX, driver `580.126.16.0`
+
+This satisfies the focused browser Vulkan backing gate when the aggregate is run
+with
+`GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/gui-web-2d-vulkan-env-browser-backing-current/evidence.env`.
+It does not satisfy RenderDoc `.rdc`, PIX, GPU debugger, or native render-log
+capture gates.
+
 ## Full Evidence
 
 After SDK tools and browser backing are ready, use:
