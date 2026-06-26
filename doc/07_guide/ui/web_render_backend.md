@@ -157,11 +157,13 @@ before a top-level pass. Saved evidence must include
 WM discovery flags, focus/move/maximize/title-command/text-input/pointer
 counts, `production_gui_web_renderer_parity_event_routing_performance_now_available=true`,
 `production_gui_web_renderer_parity_event_routing_performance_now_delta_ms>0`,
+`production_gui_web_renderer_parity_event_routing_input_to_paint_ms>0`,
 `production_gui_web_renderer_parity_event_routing_animation_frame_count>=2`,
 `production_gui_web_renderer_parity_event_routing_css_animation_probe=true`, and
 `production_gui_web_renderer_parity_event_routing_blur_or_tolerance_used=false`.
 This keeps a visually correct capture from passing when visible controls no
-longer receive DOM events or the browser timing/animation loop is not proven.
+longer receive DOM events or the browser timing, input-to-paint, and animation
+loop are not proven.
 
 The focused production web endpoint gate is:
 

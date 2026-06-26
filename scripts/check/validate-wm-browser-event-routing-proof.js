@@ -147,6 +147,7 @@ const rows = {
   event_sequence: eventSequenceText(proof.event_sequence),
   performance_now_available: proof.performance_now_available,
   performance_now_delta_ms: jsonDecimalTextOrClean(proof.performance_now_delta_ms),
+  input_to_paint_ms: jsonDecimalTextOrClean(proof.input_to_paint_ms),
   animation_frame_available: proof.animation_frame_available,
   animation_frame_count: jsonIntegerTextOrBlank(proof.animation_frame_count),
   css_animation_probe: proof.css_animation_probe,
@@ -206,6 +207,8 @@ if (!boolTrue(proof.pass)) {
   !boolTrue(proof.css_animation_probe)
 ) {
   reason = 'event-routing-performance-animation-contract-missing';
+} else if (!jsonDecimalGreaterThan(proof.input_to_paint_ms, 0)) {
+  reason = 'event-routing-interaction-latency-contract-missing';
 } else if (
   move.window_id_hint !== 'win1' ||
   move.source !== 'native_event' ||

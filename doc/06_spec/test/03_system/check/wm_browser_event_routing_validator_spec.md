@@ -27,7 +27,7 @@ wm_browser_event_routing_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -79,6 +79,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
   counts alone are not enough event-routing proof.
 - Chromium timing must include an explicit positive `performance.now()` delta;
   `0` does not prove distinct timing samples.
+- Input handling must include an explicit positive input-to-paint measurement
+  sampled after a dispatched DOM interaction and a following animation frame.
 - Boolean readiness, timing, animation, and CSS probe fields must be real JSON
   booleans; string values like `"true"` are not structured event proof.
 - Event counts, animation frame counts, traffic button counts, timing deltas,
@@ -105,7 +107,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -121,6 +123,7 @@ expect(evidence).to_contain("wm_browser_event_routing_validation_reason=pass")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source=tools/web-render-backend/wm_event_check.js")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_available=true")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=16.7")
+expect(evidence).to_contain("wm_browser_event_routing_input_to_paint_ms=18.4")
 expect(evidence).to_contain("wm_browser_event_routing_animation_frame_available=true")
 expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=2")
 expect(evidence).to_contain("wm_browser_event_routing_css_animation_probe=true")
@@ -283,6 +286,49 @@ expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_available=true")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=0")
+```
+
+</details>
+
+#### rejects pass true proof when input-to-paint latency is missing or malformed
+
+-  fixture command
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm event routing proof requires structured input-to-paint timing
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-input-latency && mkdir -p build/test-wm-browser-event-validator-input-latency && " +
+    _fixture_command("build/test-wm-browser-event-validator-input-latency/missing.json", "delete p.input_to_paint_ms") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-input-latency/missing.json > build/test-wm-browser-event-validator-input-latency/missing.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-input-latency/zero.json", "p.input_to_paint_ms=0") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-input-latency/zero.json > build/test-wm-browser-event-validator-input-latency/zero.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-input-latency/string.json", "p.input_to_paint_ms=\"18.4\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-input-latency/string.json > build/test-wm-browser-event-validator-input-latency/string.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing = file_read("build/test-wm-browser-event-validator-input-latency/missing.env")
+val zero = file_read("build/test-wm-browser-event-validator-input-latency/zero.env")
+val string_latency = file_read("build/test-wm-browser-event-validator-input-latency/string.env")
+step("Confirm event routing proof requires structured input-to-paint timing")
+expect(missing).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(missing).to_contain("wm_browser_event_routing_validation_reason=event-routing-interaction-latency-contract-missing")
+expect(missing).to_contain("wm_browser_event_routing_input_to_paint_ms=")
+expect(zero).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(zero).to_contain("wm_browser_event_routing_validation_reason=event-routing-interaction-latency-contract-missing")
+expect(zero).to_contain("wm_browser_event_routing_input_to_paint_ms=0")
+expect(string_latency).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(string_latency).to_contain("wm_browser_event_routing_validation_reason=event-routing-interaction-latency-contract-missing")
+expect(string_latency).to_contain("wm_browser_event_routing_input_to_paint_ms=18.4")
 ```
 
 </details>
@@ -489,7 +535,7 @@ expect(payload.contains("wm_browser_event_routing_move_payload_x=86.5")).to_equa
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -501,6 +547,7 @@ expect(script).to_contain("wm_browser_event_routing_validation_reason")
 expect(script).to_contain("wm_browser_event_routing_proof_source")
 expect(script).to_contain("wm_browser_event_routing_event_sequence")
 expect(script).to_contain("wm_browser_event_routing_focus_count")
+expect(script).to_contain("wm_browser_event_routing_input_to_paint_ms")
 expect(script).to_contain("wm_browser_event_routing_move_payload_source")
 expect(script).to_contain("wm_browser_event_routing_title_input_width_px")
 expect(script).to_contain("wm_browser_event_routing_close_button_background")
@@ -516,7 +563,7 @@ expect(script).to_contain("wm_browser_event_routing_close_button_background")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -541,6 +588,7 @@ expect(evidence).to_contain("wm_browser_event_routing_pointer_down_count=")
 expect(evidence).to_contain("wm_browser_event_routing_pointer_up_count=")
 expect(evidence).to_contain("wm_browser_event_routing_event_sequence=")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=")
+expect(evidence).to_contain("wm_browser_event_routing_input_to_paint_ms=")
 expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=")
 expect(evidence).to_contain("wm_browser_event_routing_title_text=")
 expect(evidence).to_contain("wm_browser_event_routing_traffic_button_count=")
@@ -559,8 +607,8 @@ expect(evidence).to_contain("wm_browser_event_routing_text_input_text=")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

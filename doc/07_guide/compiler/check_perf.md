@@ -330,7 +330,9 @@ Measures: binary size only (Qt minimal widget vs Simple web artifact).
 - **Sustained FPS coverage** — Electron Engine2D proof emits a conservative
   FPS floor from measured frame latency, but broader sustained-FPS coverage
   across GUI backends is still incomplete
-- **User interaction latency** — scripts test static scenes only, not event-driven UI response time
+- **User interaction latency** — WM browser event-routing proof now records a
+  positive input-to-paint sample after dispatched Chromium DOM events; broader
+  latency coverage across every GUI backend is still incomplete
 
 ### Benchmark template (pure Simple)
 

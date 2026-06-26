@@ -209,6 +209,8 @@ async function main() {
     out.close_button_background = closeStyle.backgroundColor;
     out.minimize_button_background = minimizeStyle.backgroundColor;
     out.maximize_button_background = maximizeStyle.backgroundColor;
+    let inputToPaintMs = 0;
+    const interactionStart = performanceNowAvailable ? window.performance.now() : 0;
     const beforeRect = eventTarget('.wm-window').getBoundingClientRect();
     dispatch(titlebar, 'mousedown', { clientX: 90, clientY: 72 });
     dispatch(document, 'mousemove', { clientX: 126, clientY: 98 });
@@ -228,6 +230,10 @@ async function main() {
     const bodyButton = eventTarget('#ok');
     dispatch(bodyButton, 'pointerdown', { clientX: 80, clientY: 122 });
     dispatch(bodyButton, 'pointerup', { clientX: 80, clientY: 122 });
+    if (performanceNowAvailable && animationFrameAvailable) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      inputToPaintMs = Math.max(0, window.performance.now() - interactionStart);
+    }
 
     out.window_cmd_count = frames('window_cmd').length;
     out.input_event_count = frames('input_event').length;
@@ -238,6 +244,7 @@ async function main() {
     out.text_input_count = frames('input_event', 'text_input').length;
     out.pointer_down_count = frames('input_event', 'pointer_down').length;
     out.pointer_up_count = frames('input_event', 'pointer_up').length;
+    out.input_to_paint_ms = inputToPaintMs;
     out.event_sequence = window.__wmFrames.map(frameName);
     out.move_payload = frames('window_cmd', 'move')[0]?.payload || null;
     out.title_payload = frames('window_cmd', 'title_command')[0]?.payload || null;
@@ -254,6 +261,7 @@ async function main() {
       out.pointer_up_count >= 1 &&
       out.performance_now_available === true &&
       out.performance_now_delta_ms >= 0 &&
+      out.input_to_paint_ms > 0 &&
       out.animation_frame_available === true &&
       out.animation_frame_count >= 2 &&
       out.css_animation_probe === true &&
