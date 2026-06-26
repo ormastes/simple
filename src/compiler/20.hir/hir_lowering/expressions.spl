@@ -103,8 +103,10 @@ impl HirLowering:
                     eprint("[hir-lower] lower_expr:string")
                 val hir_interps = if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     nil
+                elif interps.?:
+                    self.lower_interpolation_list(interps)
                 else:
-                    interps.map(self.lower_interpolation_list(_))
+                    nil
                 HirExprKind.StringLit(value, hir_interps)
 
             case BoolLit(value):
@@ -200,18 +202,20 @@ impl HirLowering:
                     HirExprKind.MethodCall(self.lower_hir_expr(receiver), method, hir_args, MethodResolution.Unresolved)
 
             case If(cond, then_, else_):
+                val else_block = if else_.?: self.lower_hir_block(else_) else: nil
                 HirExprKind.If(
                     self.lower_hir_expr(cond),
                     self.lower_hir_block(then_),
-                    else_.map(self.lower_hir_block(_))
+                    else_block
                 )
 
             case MatchCase(scrutinee, arms):
                 var hir_arms: [HirMatchArm] = []
                 for arm in arms:
+                    val guard_ = if arm.guard.?: self.lower_hir_expr(arm.guard) else: nil
                     hir_arms = hir_arms.push(HirMatchArm(
                         pattern: self.lower_pattern(arm.pattern),
-                        guard: arm.guard.map(self.lower_hir_expr(_)),
+                        guard: guard_,
                         body: self.lower_hir_block(arm.body),
                         span: arm.span
                     ))
@@ -221,7 +225,7 @@ impl HirLowering:
                 self.symbols.push_scope(ScopeKind.Function)
                 var hir_params: [HirParam] = []
                 for p in params:
-                    val type_ = p.type_.map(self.lower_type(_)) ?? HirType(kind: HirTypeKind.Infer(0, 0), span: p.span)
+                    val type_ = if p.type_.?: self.lower_type(p.type_) else: HirType(kind: HirTypeKind.Infer(0, 0), span: p.span)
                     val symbol = self.symbols.define(p.name, SymbolKind.Parameter, Some(type_), p.span, false, false, nil)
                     hir_params = hir_params.push(HirParam(
                         symbol: symbol,
@@ -238,7 +242,8 @@ impl HirLowering:
                 HirExprKind.Block(self.lower_hir_block(block))
 
             case Return(value):
-                HirExprKind.Return(value.map(self.lower_hir_expr(_)))
+                val rv = if value.?: self.lower_hir_expr(value) else: nil
+                HirExprKind.Return(rv)
 
             case Break(label):
                 HirExprKind.Break(label, nil)
@@ -247,7 +252,8 @@ impl HirLowering:
                 HirExprKind.Continue(label)
 
             case Yield(value):
-                HirExprKind.Yield(value.map(self.lower_hir_expr(_)))
+                val yv = if value.?: self.lower_hir_expr(value) else: nil
+                HirExprKind.Yield(yv)
 
             case Throw(value):
                 HirExprKind.Throw(self.lower_hir_expr(value))
@@ -259,12 +265,10 @@ impl HirLowering:
                 HirExprKind.Try(self.lower_hir_expr(expr))
 
             case Range(start, end, inclusive, step):
-                HirExprKind.Range(
-                    start.map(self.lower_hir_expr(_)),
-                    end.map(self.lower_hir_expr(_)),
-                    inclusive,
-                    step.map(self.lower_hir_expr(_))
-                )
+                val rstart = if start.?: self.lower_hir_expr(start) else: nil
+                val rend = if end.?: self.lower_hir_expr(end) else: nil
+                val rstep = if step.?: self.lower_hir_expr(step) else: nil
+                HirExprKind.Range(rstart, rend, inclusive, rstep)
 
             case ListComprehension(expr, clauses):
                 var hir_clauses: [HirCompClause] = []
@@ -489,11 +493,9 @@ impl HirLowering:
                 HirPatternKind.Or(hir_patterns)
 
             case Range(start, end, inclusive):
-                HirPatternKind.Range(
-                    start.map(self.lower_hir_expr(_)),
-                    end.map(self.lower_hir_expr(_)),
-                    inclusive
-                )
+                val pstart = if start.?: self.lower_hir_expr(start) else: nil
+                val pend = if end.?: self.lower_hir_expr(end) else: nil
+                HirPatternKind.Range(pstart, pend, inclusive)
 
             case Error:
                 HirPatternKind.Error

@@ -147,9 +147,10 @@ impl HirLowering:
         var return_type = HirType(kind: HirTypeKind.Unit, span: fn_.span)
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             if fn_.return_type.?:
-                val mapped = fn_.return_type.map(self.lower_type(_))
-                if mapped.?:
-                    return_type = mapped.unwrap()
+                # Already known-present: pass the bare value straight to lower_type.
+                # Option.map/.unwrap fail on a bare struct optional in the seed
+                # interpreter (a present optional is stored as the bare payload).
+                return_type = self.lower_type(fn_.return_type)
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_function:return_type {fn_.name}")
 
@@ -217,14 +218,17 @@ impl HirLowering:
         hir_func
 
     me lower_param(p: Param) -> HirParam:
-        val type_ = p.type_.map(self.lower_type(_)) ?? HirType(kind: HirTypeKind.Infer(0, 0), span: p.span)
+        # Option.map fails on a bare struct optional in the seed interpreter; use
+        # an explicit present-check and pass the bare value directly.
+        val type_ = if p.type_.?: self.lower_type(p.type_) else: HirType(kind: HirTypeKind.Infer(0, 0), span: p.span)
         val symbol = self.symbols.define(p.name, SymbolKind.Parameter, Some(type_), p.span, Visibility.Private, false, nil)
+        val default_ = if p.default.?: self.lower_hir_expr(p.default) else: nil
 
         HirParam(
             symbol: symbol,
             name: p.name,
             type_: type_,
-            default: p.default.map(self.lower_hir_expr(_)),
+            default: default_,
             span: p.span
         )
 
