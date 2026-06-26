@@ -27,7 +27,7 @@ gui_widget_renderdoc_goal_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,6 +80,9 @@ sh scripts/check/check-gui-widget-renderdoc-goal-status.shs
 - With valid synthetic child gate evidence, the wrapper reports `pass`, zero
   blocked gates, Simple Vulkan runtime proof, and Electron Chromium/Vulkan ARGB
   nonblank proof for the widget fixture.
+- Simple child gate evidence must include the generated widget fixture path and
+  a positive `rdoc_simple_widget_html_bytes` value; a generic Simple Vulkan
+  `.rdc` row is not enough to satisfy the widget-specific gate.
 
 ## Scenarios
 
@@ -161,7 +164,7 @@ expect(report).to_contain("- widgets with RenderDoc fixture features: 43 / 43")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -182,6 +185,8 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_source_env_fi
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_magic=RDOC")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_runtime_backend=vulkan")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_widget_html_bytes=4096")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_widget_html_bytes_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_failure_class=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_source_env_file_status=pass")
@@ -237,6 +242,40 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gate_count=1")
 
 </details>
 
+#### rejects Simple widget RDOC evidence without widget HTML byte proof
+
+- Create Simple widget RDOC evidence with a fixture path but no byte count
+   - Expected: code equals `0`
+- Assert missing widget HTML bytes keeps the Simple widget gate incomplete
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create Simple widget RDOC evidence with a fixture path but no byte count")
+val command = "rm -rf build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes && mkdir -p build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/simple build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/electron && printf 'RDOCsynthetic simple capture\\n' > build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/simple/simple.rdc && printf 'RDOCsynthetic electron capture\\n' > build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/electron/electron.rdc && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/electron/electron_argb.json && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_widget_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_widget_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\n' > build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/simple/evidence.env && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/electron/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/electron/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan\\n' > build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/electron/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/simple/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/electron/evidence.env BUILD_DIR=build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/out REPORT_PATH=build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/report.md sh scripts/check/check-gui-widget-renderdoc-goal-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert missing widget HTML bytes keeps the Simple widget gate incomplete")
+val evidence = file_read("build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/out/evidence.env")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_status=incomplete")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_reason=missing-simple-widget-renderdoc")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_fixture_path_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_widget_html_bytes=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_widget_html_bytes_status=fail")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gate_count=1")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gates=Simple GUI widget RenderDoc .rdc on Vulkan Engine2D")
+```
+
+</details>
+
 #### forwards missing Electron RDOC while preserving ARGB proof status
 
 - Create controlled Electron evidence with ARGB proof but no RDOC capture
@@ -278,8 +317,8 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gates=Electron Ch
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

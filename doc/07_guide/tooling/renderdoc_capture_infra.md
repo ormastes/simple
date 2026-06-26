@@ -900,6 +900,7 @@ require `gui_widget_renderdoc_goal_widget_feature_covered_count=43`,
 `gui_widget_renderdoc_goal_simple_gate_status=pass`,
 `gui_widget_renderdoc_goal_simple_gate_source_env_file_status=pass`,
 `gui_widget_renderdoc_goal_simple_gate_capture_file_status=pass`,
+`gui_widget_renderdoc_goal_simple_gate_widget_html_bytes_status=pass`,
 `gui_widget_renderdoc_goal_electron_gate_status=pass`, and
 `gui_widget_renderdoc_goal_electron_gate_reason=pass`,
 `gui_widget_renderdoc_goal_electron_gate_failure_class=pass`,
@@ -915,6 +916,7 @@ The top-level GUI audit now runs that focused wrapper, re-emits
 `gui_widget_renderdoc_goal_simple_gate_status`,
 `gui_widget_renderdoc_goal_simple_gate_source_env_file_status`,
 `gui_widget_renderdoc_goal_simple_gate_capture_file_status`,
+`gui_widget_renderdoc_goal_simple_gate_widget_html_bytes_status`,
 `gui_widget_renderdoc_goal_electron_gate_status`, and
 `gui_widget_renderdoc_goal_electron_gate_reason`,
 `gui_widget_renderdoc_goal_electron_gate_failure_class`,
@@ -1260,7 +1262,8 @@ sh scripts/check/check-gui-widget-renderdoc-goal-status.shs
 
 Passing Simple widget evidence records
 `rdoc_simple_gate_required_program=src/app/test/renderdoc_vulkan_widget_capture.spl`,
-the generated fixture path, Vulkan runtime metadata, and `.rdc` `RDOC` magic.
+the generated fixture path, positive `rdoc_simple_widget_html_bytes`, Vulkan
+runtime metadata, and `.rdc` `RDOC` magic.
 The widget goal still remains incomplete until Electron Chromium/Vulkan also
 produces widget `.rdc` evidence with nonblank ARGB proof.
 
