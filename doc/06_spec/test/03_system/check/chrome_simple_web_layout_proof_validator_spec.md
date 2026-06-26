@@ -27,7 +27,7 @@ chrome_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -95,6 +95,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   numeric evidence.
 - The top-level proof must carry the live Chrome capture source marker; a
   hand-authored proof object with valid-looking artifacts is not sufficient.
+- The live Chrome wrapper emits validation and proof-source diagnostic rows
+  even on early missing-artifact exits before the validator can run.
 - The live Chrome wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 
@@ -679,13 +681,14 @@ expect(pixel).to_contain("chrome_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs")
 expect(script).to_contain("validate-chrome-simple-web-layout-proof.js")
 expect(script).to_contain("chrome_simple_web_layout_validation_status")
+expect(script).to_contain("chrome_simple_web_layout_validation_reason")
 expect(script).to_contain("chrome_simple_web_layout_proof_source")
 expect(script).to_contain("capture-viewport-mismatch")
 expect(script).to_contain("chrome_simple_web_layout_capture_width")
@@ -703,12 +706,44 @@ expect(capture).to_contain("geometry_path: geometryOutputPath")
 
 </details>
 
+#### keeps Chrome wrapper diagnostics on early missing artifact exits
+
+- Confirm unavailable Chrome wrapper evidence preserves validator-shape diagnostics
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-wrapper-early-exit"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md CHROME_LAYOUT_HTML_PATH=" + root + "/missing.html CHROME_LAYOUT_EXPECTED_ARGB_PATH=" + root + "/missing.argb.json sh scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs > " + root + "/stdout.env 2> " + root + "/stderr.log; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm unavailable Chrome wrapper evidence preserves validator-shape diagnostics")
+expect(evidence).to_contain("chrome_simple_web_layout_status=unavailable")
+expect(evidence).to_contain("chrome_simple_web_layout_reason=missing-layout-html")
+expect(evidence).to_contain("chrome_simple_web_layout_validation_status=unavailable")
+expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=missing-layout-html")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_source=")
+expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=")
+expect(evidence).to_contain("chrome_simple_web_layout_capture_width=")
+expect(evidence).to_contain("chrome_simple_web_layout_capture_height=")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
