@@ -404,48 +404,29 @@ expect(_pixel_at(pixels, 96, 1, 1)).to_equal(0xffffffffu32)
 
 </details>
 
-#### samples named translate keyframes at explicit animation times
-
-- "@keyframes slide{from{transform:translate
-   - Expected: _pixel_at(mid, 48, 11, 1) equals `0xff22c55eu32`
-   - Expected: _pixel_at(mid, 48, 1, 1) equals `0xffffffffu32`
-   - Expected: _pixel_at(end, 48, 21, 1) equals `0xff22c55eu32`
-
+#### keeps static transition metadata in computed style
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = "<html><head><style>" +
     "html,body{margin:0;padding:0;background-color:#ffffff}" +
-    "@keyframes slide{from{transform:translate(0px,0px)}to{transform:translate(20px,0px)}}" +
-    "#box{width:10px;height:10px;background-color:#22c55e;animation-name:slide;animation-duration:1000ms;animation-delay:0ms;animation-fill-mode:forwards}" +
-    "</style></head><body><div id=\"box\"></div></body></html>"
-val mid = simple_web_layout_render_html_software_pixels_at_animation_time(html, 48, 24, 500)
-val end = simple_web_layout_render_html_software_pixels_at_animation_time(html, 48, 24, 1000)
-expect(_pixel_at(mid, 48, 11, 1)).to_equal(0xff22c55eu32)
-expect(_pixel_at(mid, 48, 1, 1)).to_equal(0xffffffffu32)
-expect(_pixel_at(end, 48, 21, 1)).to_equal(0xff22c55eu32)
+    "#box{width:10px;height:10px;background-color:#22c55e;transition:opacity 150ms ease-in 25ms}" +
+    "#override{width:10px;height:10px;background-color:#3b82f6;transition:all 1s linear;transition-property:transform;transition-duration:75ms;transition-delay:10ms;transition-timing-function:ease-out}" +
+    "</style></head><body><div id=\"box\"></div><div id=\"override\"></div></body></html>"
+expect(simple_web_layout_debug_style_by_id(html, "box", "transition_property")).to_equal("opacity")
+expect(simple_web_layout_debug_style_by_id(html, "box", "transition_duration_ms")).to_equal("150")
+expect(simple_web_layout_debug_style_by_id(html, "box", "transition_delay_ms")).to_equal("25")
+expect(simple_web_layout_debug_style_by_id(html, "box", "transition_timing_function")).to_equal("ease-in")
+expect(simple_web_layout_debug_style_by_id(html, "override", "transition_property")).to_equal("transform")
+expect(simple_web_layout_debug_style_by_id(html, "override", "transition_duration_ms")).to_equal("75")
+expect(simple_web_layout_debug_style_by_id(html, "override", "transition_delay_ms")).to_equal("10")
+expect(simple_web_layout_debug_style_by_id(html, "override", "transition_timing_function")).to_equal("ease-out")
 ```
-
-<details>
-<summary>Rendered scenario source</summary>
-
-> val html = "<html><head><style>" +<br>
->     "html,body{margin:0;padding:0;background-color:#ffffff}" +<br>
->     "@keyframes slide{fro$transform$to{transform:translate(20px,0px)}}" +<br>
->     "#box{width:10px;height:10px;background-color:#22c55e;animation-name:slide;animation-duration:1000ms;animation-delay:0ms;animation-fill-mode:forwards}" +<br>
->     "</style></head><body><div id=\"box\"></div></body></html>"<br>
-> val mid = simple_web_layout_render_html_software_pixels_at_animation_time(html, 48, 24, 500)<br>
-> val end = simple_web_layout_render_html_software_pixels_at_animation_time(html, 48, 24, 1000)<br>
-> expect(_pixel_at(mid, 48, 11, 1)).to_equal(0xff22c55eu32)<br>
-> expect(_pixel_at(mid, 48, 1, 1)).to_equal(0xffffffffu32)<br>
-> expect(_pixel_at(end, 48, 21, 1)).to_equal(0xff22c55eu32)
-
-</details>
 
 </details>
 
