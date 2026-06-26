@@ -413,7 +413,7 @@ val lines = render_agent_tree(tree, 100)
 expect(lines.len()).to_be_greater_than(0)
 # Content references waiting state
 val joined = lines.join("")
-expect(joined.contains("No agents") or joined.contains("Waiting")).to_equal(true)
+expect(joined).to_contain("No agents connected")
 ```
 
 </details>
@@ -898,7 +898,6 @@ expect(pool.pending_count()).to_equal(1)
 #### render_agent_tree after clearing all agents shows placeholder
 
 - tree ensure agent
-   - Expected: joined contains `"No agents") or joined`
 
 
 <details>
@@ -914,7 +913,7 @@ tree.ensure_agent("gone", LLMProvider.Claude, "")
 val fresh = AgentTree.new()
 val lines = render_agent_tree(fresh, 100)
 val joined = lines.join("")
-expect(joined.contains("No agents") or joined.contains("Waiting")).to_equal(true)
+expect(joined).to_contain("No agents connected")
 ```
 
 </details>

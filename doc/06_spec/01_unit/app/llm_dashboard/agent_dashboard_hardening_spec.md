@@ -37,7 +37,7 @@ agent_dashboard_hardening_spec -> app
 
 ## Scenarios
 
-### AgentTree — empty and nil safety
+### AgentTree — empty and absence safety
 
 #### starts with zero agents
 
@@ -69,7 +69,10 @@ expect(tree.root_agents().len()).to_equal(0)
 
 </details>
 
-#### get_agent returns nil for unknown id
+#### get_agent returns no result for unknown id
+
+- expect agent absent
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -80,7 +83,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val tree = AgentTree.new()
 val result = tree.get_agent("no-such-agent")
-expect(result == nil).to_equal(true)
+expect_agent_absent(result)
 ```
 
 </details>
@@ -132,7 +135,7 @@ expect(tree.depth_of("nobody")).to_equal(0)
 
 #### ensure_agent creates a root entry
 
-1. tree ensure agent
+- tree ensure agent
    - Expected: tree.agent_count() equals `1`
    - Expected: tree.root_agents().len() equals `1`
 
@@ -154,8 +157,8 @@ expect(tree.root_agents().len()).to_equal(1)
 
 #### ensure_agent is idempotent — calling twice keeps count at 1
 
-1. tree ensure agent
-2. tree ensure agent
+- tree ensure agent
+- tree ensure agent
    - Expected: tree.agent_count() equals `1`
 
 
@@ -176,8 +179,8 @@ expect(tree.agent_count()).to_equal(1)
 
 #### get_agent finds an agent after ensure
 
-1. tree ensure agent
-   - Expected: found == nil is false
+- tree ensure agent
+- expect agent id
 
 
 <details>
@@ -190,14 +193,14 @@ Reproduction: this block contains the complete executable scenario source.
 val tree = AgentTree.new()
 tree.ensure_agent("a2", LLMProvider.Gemini, "pro")
 val found = tree.get_agent("a2")
-expect(found == nil).to_equal(false)
+expect_agent_id(found, "a2")
 ```
 
 </details>
 
 #### depth_of root agent is 0
 
-1. tree ensure agent
+- tree ensure agent
    - Expected: tree.depth_of("root-1") equals `0`
 
 
@@ -217,7 +220,7 @@ expect(tree.depth_of("root-1")).to_equal(0)
 
 #### depth_of returns 0 for root agent
 
-1. tree ensure agent
+- tree ensure agent
    - Expected: tree.depth_of("root-check") equals `0`
 
 
@@ -239,7 +242,7 @@ expect(tree.depth_of("root-check")).to_equal(0)
 
 #### pos_get on unknown id returns a valid pos (no crash)
 
-1. pos clear
+- pos clear
 
 
 <details>
@@ -262,7 +265,7 @@ expect(pos.slot).to_be_greater_than(-1)
 
 #### pos_agents_in_room returns empty list when no agents present
 
-1. pos clear
+- pos clear
    - Expected: result.len() equals `0`
 
 
@@ -288,7 +291,7 @@ expect(result.len()).to_equal(0)
 
 #### pos_agent_count_in_room is 0 on empty state
 
-1. pos clear
+- pos clear
    - Expected: pos_agent_count_in_room(RoomKind.Code) equals `0`
 
 
@@ -310,8 +313,8 @@ expect(pos_agent_count_in_room(RoomKind.Code)).to_equal(0)
 
 #### pos_update_from_nodes with empty list does not crash
 
-1. pos clear
-2. pos update from nodes
+- pos clear
+- pos update from nodes
    - Expected: pos_agent_count_in_room(RoomKind.Chat) equals `0`
 
 
@@ -334,9 +337,9 @@ expect(pos_agent_count_in_room(RoomKind.Chat)).to_equal(0)
 
 #### pos_update_from_nodes assigns slots within MAX_SLOTS_PER_ROOM (6)
 
-1. pos clear
-2. agents push
-3. pos update from nodes
+- pos clear
+- agents push
+- pos update from nodes
 
 
 <details>
@@ -369,9 +372,9 @@ for ap in in_chat:
 
 #### pos_clear resets state so subsequent queries start fresh
 
-1. pos clear
-2. pos update from nodes
-3. pos clear
+- pos clear
+- pos update from nodes
+- pos clear
    - Expected: pos_agent_count_in_room(RoomKind.Chat) equals `0`
    - Expected: pos_get("temp").slot equals `0)  # default from new_agent_pos`
 
@@ -410,7 +413,7 @@ val lines = render_agent_tree(tree, 100)
 expect(lines.len()).to_be_greater_than(0)
 # Content references waiting state
 val joined = lines.join("")
-expect(joined.contains("No agents") or joined.contains("Waiting")).to_equal(true)
+expect(joined).to_contain("No agents connected")
 ```
 
 </details>
@@ -433,7 +436,7 @@ expect(lines.len()).to_equal(2)
 
 #### renders 1 agent tree without crash
 
-1. tree ensure agent
+- tree ensure agent
    - Expected: tree.agent_count() equals `1`
 
 
@@ -454,7 +457,7 @@ expect(tree.agent_count()).to_equal(1)
 
 #### respects max_lines limit of 0 returns empty
 
-1. tree ensure agent
+- tree ensure agent
    - Expected: lines.len() equals `0`
 
 
@@ -475,8 +478,8 @@ expect(lines.len()).to_equal(0)
 
 #### respects max_lines=1 never exceeds 1 line
 
-1. tree ensure agent
-2. tree ensure agent
+- tree ensure agent
+- tree ensure agent
 
 
 <details>
@@ -497,7 +500,7 @@ expect(lines.len()).to_be_less_than(2)
 
 #### renders multiple agents without crash
 
-1. tree ensure agent
+- tree ensure agent
    - Expected: tree.agent_count() equals `20`
 
 
@@ -523,11 +526,11 @@ expect(tree.agent_count()).to_equal(20)
 
 #### agent_sprite always returns exactly 3 lines (SPRITE_HEIGHT)
 
-1. LLMProvider Unknown
-2. AgentActivity Finished, AgentActivity Error
-3. AgentActivity Reading
-4. AgentActivity Searching
-5. AgentActivity ToolUse
+- LLMProvider Unknown
+- AgentActivity Finished, AgentActivity Error
+- AgentActivity Reading
+- AgentActivity Searching
+- AgentActivity ToolUse
    - Expected: sprite.len() equals `3`
 
 
@@ -656,8 +659,8 @@ expect(sprite.len()).to_equal(3)
 
 #### agent_indicator returns non-empty text for all known activities
 
-1. AgentActivity Reading
-2. AgentActivity Error
+- AgentActivity Reading
+- AgentActivity Error
 
 
 <details>
@@ -681,8 +684,8 @@ for act in acts:
 
 #### register same agent id twice keeps count at 1
 
-1. pool register agent
-2. pool register agent
+- pool register agent
+- pool register agent
    - Expected: pool.active_agent_count() equals `1`
 
 
@@ -733,7 +736,7 @@ expect(pool.heartbeat("nobody")).to_equal(false)
 
 #### report_result for unregistered agent returns false
 
-1. pool load pending tests
+- pool load pending tests
    - Expected: pool.report_result("nobody", "test/x.spl", 1, 0, 0, 5, "ok") is false
 
 
@@ -753,7 +756,7 @@ expect(pool.report_result("nobody", "test/x.spl", 1, 0, 0, 5, "ok")).to_equal(fa
 
 #### claim_batch on pool with no pending tests returns empty
 
-1. pool register agent
+- pool register agent
    - Expected: pool.claim_batch("idle").len() equals `0`
 
 
@@ -773,10 +776,10 @@ expect(pool.claim_batch("idle").len()).to_equal(0)
 
 #### register then deregister then register again works correctly
 
-1. pool register agent
-2. pool deregister agent
+- pool register agent
+- pool deregister agent
    - Expected: pool.active_agent_count() equals `0`
-3. pool register agent
+- pool register agent
    - Expected: pool.active_agent_count() equals `1`
 
 
@@ -799,10 +802,10 @@ expect(pool.active_agent_count()).to_equal(1)
 
 #### deregister returns in-progress tests to pending (existing coverage extended)
 
-1. pool register agent
-2. pool load pending tests
+- pool register agent
+- pool load pending tests
    - Expected: batch.len() equals `3`
-3. pool deregister agent
+- pool deregister agent
    - Expected: pool.active_agent_count() equals `0`
    - Expected: pool.pending_count() equals `3`
 
@@ -828,14 +831,14 @@ expect(pool.pending_count()).to_equal(3)
 
 #### completed_count stays accurate after sequential complete cycles
 
-1. pool register agent
-2. pool load pending tests
-3. pool claim batch
-4. pool report result
-5. pool claim batch
-6. pool report result
-7. pool claim batch
-8. pool report result
+- pool register agent
+- pool load pending tests
+- pool claim batch
+- pool report result
+- pool claim batch
+- pool report result
+- pool claim batch
+- pool report result
    - Expected: pool.completed_count() equals `3`
    - Expected: pool.pending_count() equals `0`
 
@@ -864,11 +867,11 @@ expect(pool.pending_count()).to_equal(0)
 
 #### load_pending_tests after all completed adds only net-new tests
 
-1. pool register agent
-2. pool load pending tests
-3. pool claim batch
-4. pool report result
-5. pool load pending tests
+- pool register agent
+- pool load pending tests
+- pool claim batch
+- pool report result
+- pool load pending tests
    - Expected: pool.pending_count() equals `1`
 
 
@@ -894,8 +897,7 @@ expect(pool.pending_count()).to_equal(1)
 
 #### render_agent_tree after clearing all agents shows placeholder
 
-1. tree ensure agent
-   - Expected: joined contains `"No agents") or joined`
+- tree ensure agent
 
 
 <details>
@@ -911,7 +913,7 @@ tree.ensure_agent("gone", LLMProvider.Claude, "")
 val fresh = AgentTree.new()
 val lines = render_agent_tree(fresh, 100)
 val joined = lines.join("")
-expect(joined.contains("No agents") or joined.contains("Waiting")).to_equal(true)
+expect(joined).to_contain("No agents connected")
 ```
 
 </details>
@@ -921,9 +923,9 @@ expect(joined.contains("No agents") or joined.contains("Waiting")).to_equal(true
 
 #### pos_update_from_nodes with empty list after data clears room counts
 
-1. pos clear
-2. pos update from nodes
-3. pos update from nodes
+- pos clear
+- pos update from nodes
+- pos update from nodes
 
 
 <details>
@@ -955,8 +957,8 @@ expect(count).to_be_greater_than(-1)
 
 #### pos_clear then update from single Thinking agent assigns Code room
 
-1. pos clear
-2. pos update from nodes
+- pos clear
+- pos update from nodes
 
 
 <details>
@@ -992,7 +994,7 @@ expect(pos.slot).to_be_greater_than(-1)
 ## Overview
 
 Tests covering:
-- AgentTree — empty and nil safety
+- AgentTree — empty and absence safety
 - AgentPosition — slot and room boundary safety
 - AgentPanel — render_agent_tree boundary cases
 - AgentSprites — provider and activity coverage
