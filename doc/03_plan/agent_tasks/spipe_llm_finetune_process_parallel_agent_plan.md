@@ -278,6 +278,10 @@ Evidence:
   repo-local checkers, prints `data_check_gate_ready`, and fails until the data
   checker reports PASS. Retry6 and retry7 system specs cover the release gate
   so registry rows alone cannot bypass WARN cache/training/acceptance checks.
+- 2026-06-26 next-action gate hardening: `fine-tune-next` now prints the same
+  safe checker status and gate fields when routing an unfinished retry via a
+  recorded decision. The retry6 system spec covers this so the next-action
+  command does not hide the concrete cache/training blocker.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS

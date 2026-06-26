@@ -1554,6 +1554,21 @@ function commandFineTuneNext(args) {
     console.log(`next_action=${decisionStatus}`);
     console.log(`retry_target=${retryTarget}`);
     if (nextAttempt) console.log(`next_attempt=${nextAttempt}`);
+    const gate = fineTuneDataGateStatus(root, attemptId);
+    if (gate) {
+      console.log(`data_check_execution=${gate.status === "PASS" ? "pass" : gate.status === "WARN" ? "warn" : "fail"}`);
+      console.log(`data_check_status="${quoteSdn(gate.statusLine)}"`);
+      printFineTuneGateFields(gate, [
+        "result",
+        "training_allowed",
+        "model_manifest_exists",
+        "eval_result_exists",
+        "target_accuracy",
+        "required_accuracy",
+        "target_eval_reached",
+        "acceptance_allowed"
+      ]);
+    }
     process.exitCode = 1;
     return;
   }
