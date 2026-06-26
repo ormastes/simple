@@ -924,10 +924,13 @@ For the HTML-backed GUI modernization claim, the top-level audit consumes
 `web_wm_modern_shell_evidence_bitmap_nonblank_status=pass`,
 `web_wm_modern_shell_evidence_audit_pass=pass`, and
 `web_wm_modern_shell_evidence_interaction_pass=pass` with focus, keyboard,
-input, pointer, and click evidence. `environment-unavailable` remains a useful
-host diagnosis but is still reported as `modern Web WM Electron visual and
-interaction evidence` in `blocked_completion_gates` until a real Electron host
-produces the pass row.
+input, pointer, and click evidence. The aggregate also emits explicit
+`*_file_status` rows for the HTML, ARGB, PNG, audit, interaction JSON,
+interaction PNG, and interaction log artifacts so missing host output is visible
+without inferring it from blank paths. `environment-unavailable` remains a
+useful host diagnosis but is still reported as `modern Web WM Electron visual
+and interaction evidence` in `blocked_completion_gates` until a real Electron
+host produces the pass row.
 
 For the all-GUI-item claim, use the focused wrapper
 `scripts/check/check-gui-widget-renderdoc-goal-status.shs`. It composes the

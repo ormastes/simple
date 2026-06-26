@@ -385,7 +385,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 932 lines folded for reproduction.
+Runnable source: 939 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -438,6 +438,13 @@ expect(evidence).to_contain("web_wm_modern_shell_evidence_status=environment-una
 expect(evidence).to_contain("web_wm_modern_shell_evidence_reason=electron-missing")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_width=1360")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_height=840")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_html_file_status=unavailable")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_argb_file_status=unavailable")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_png_file_status=unavailable")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_audit_file_status=unavailable")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_interaction_file_status=unavailable")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_interaction_png_file_status=unavailable")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_interaction_log_file_status=unavailable")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_bitmap_nonblank_status=missing")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_audit_pass=missing")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_interaction_pass=missing")
@@ -2362,7 +2369,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 253 lines folded for reproduction.
+Runnable source: 260 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2599,6 +2606,13 @@ expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_hardware_s
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_source_file_status=pass")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_status=pass")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_reason=pass")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_html_file_status=pass")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_argb_file_status=pass")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_png_file_status=pass")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_audit_file_status=pass")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_interaction_file_status=pass")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_interaction_png_file_status=pass")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_interaction_log_file_status=pass")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_bitmap_nonblank_status=pass")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_audit_pass=pass")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_interaction_pass=pass")
