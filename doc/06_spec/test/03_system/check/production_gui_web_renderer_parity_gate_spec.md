@@ -88,7 +88,7 @@ sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true
 - The Electron event-routing contract also requires Chromium timing and
   animation evidence: `performance.now()`, at least two animation frames, and a
   CSS animation probe. The `performance.now()` delta must be numeric and
-  non-negative, not merely present.
+  positive, not merely present or zero.
 
 ## Operator Notes
 
@@ -243,7 +243,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_ev
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_min_pointer_down_count=1")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_min_pointer_up_count=1")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_performance_now_available=true")
-expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_performance_now_delta_ms_min=0")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_performance_now_delta_ms_gt=0")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_min_animation_frame_count=2")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_css_animation_probe=true")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_blur_or_tolerance_used=false")
@@ -432,12 +432,12 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_ev
 
 </details>
 
-#### rejects pass status when event routing performance delta is not numeric
+#### rejects pass status when event routing performance delta is not numeric or zero
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -449,7 +449,17 @@ val evidence = file_read("build/test-production-gui-web-renderer-parity-gate-eve
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=event-routing-performance-animation-contract-missing")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_event_routing_performance_now_delta_ms=not-a-number")
-expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_performance_now_delta_ms_min=0")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_performance_now_delta_ms_gt=0")
+
+val zero_command = command.replace("not-a-number", "0")
+val (_zero_stdout, _zero_stderr, zero_code) = process_run("/bin/sh", ["-c", zero_command])
+expect(zero_code).to_equal(0)
+
+val zero_evidence = file_read("build/test-production-gui-web-renderer-parity-gate-event-bad-delta/out/evidence.env")
+expect(zero_evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
+expect(zero_evidence).to_contain("production_gui_web_renderer_parity_gate_reason=event-routing-performance-animation-contract-missing")
+expect(zero_evidence).to_contain("production_gui_web_renderer_parity_gate_event_routing_performance_now_delta_ms=0")
+expect(zero_evidence).to_contain("production_gui_web_renderer_parity_gate_required_event_routing_performance_now_delta_ms_gt=0")
 ```
 
 </details>

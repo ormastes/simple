@@ -189,7 +189,7 @@ expect(script).to_contain("production_gui_web_renderer_parity_event_routing_stat
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_performance_now_available")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_animation_frame_count")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_css_animation_probe")
-expect(script).to_contain("num_nonnegative \"$performance_now_delta_ms\"")
+expect(script).to_contain("num_positive \"$performance_now_delta_ms\"")
 expect(script).to_contain("num_at_least \"$animation_frame_count\" 2")
 expect(script).to_contain("PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS:-180")
 expect(script).to_contain("timeout \"$SUBCHECK_TIMEOUT_SECS\" \"$@\"")

@@ -187,8 +187,9 @@ renderer parity wrapper now consumes
 `scripts/check/check-wm-browser-event-routing-evidence.shs`; a green production
 claim must expose `production_gui_web_renderer_parity_event_routing_*` with
 focus, move, maximize, title-command, text-input, pointer-down, pointer-up, and
-browser timing/animation proof: `performance_now_available=true`, at least two
-animation frames, `css_animation_probe=true`, and `blur_or_tolerance=false`.
+browser timing/animation proof: `performance_now_available=true` with a positive
+`performance_now_delta_ms`, at least two animation frames,
+`css_animation_probe=true`, and `blur_or_tolerance=false`.
 
 For GUI/web/2D Vulkan comparison, use
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check` for readiness,

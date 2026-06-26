@@ -156,6 +156,7 @@ before a top-level pass. Saved evidence must include
 `production_gui_web_renderer_parity_event_routing_status=pass`, readiness and
 WM discovery flags, focus/move/maximize/title-command/text-input/pointer
 counts, `production_gui_web_renderer_parity_event_routing_performance_now_available=true`,
+`production_gui_web_renderer_parity_event_routing_performance_now_delta_ms>0`,
 `production_gui_web_renderer_parity_event_routing_animation_frame_count>=2`,
 `production_gui_web_renderer_parity_event_routing_css_animation_probe=true`, and
 `production_gui_web_renderer_parity_event_routing_blur_or_tolerance_used=false`.

@@ -27,7 +27,7 @@ wm_browser_event_routing_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,6 +74,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
   `wm_browser_event_routing_*` rows.
 - `pass=true` JSON still fails when event counts, Chromium timing, animation,
   payload details, or UI proof rows are missing or malformed.
+- Chromium timing must include an explicit positive `performance.now()` delta;
+  `0` does not prove distinct timing samples.
 - Event counts, animation frame counts, traffic button counts, and dispatched
   move coordinates must be decimal integers; fractional values are not valid
   DOM event-routing proof.
@@ -93,7 +95,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -106,7 +108,9 @@ expect(code).to_equal(0)
 val evidence = file_read("build/test-wm-browser-event-validator-pass/evidence.env")
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=pass")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=pass")
+expect(evidence).to_contain("wm_browser_event_routing_performance_now_available=true")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=16.7")
+expect(evidence).to_contain("wm_browser_event_routing_animation_frame_available=true")
 expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=2")
 expect(evidence).to_contain("wm_browser_event_routing_css_animation_probe=true")
 expect(evidence).to_contain("wm_browser_event_routing_move_payload_source=native_event")
@@ -167,6 +171,34 @@ expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
 expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=not-a-number")
 expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=1")
+```
+
+</details>
+
+#### rejects pass true proof when Chromium timing does not advance
+
+-  fixture command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-zero-timing && mkdir -p build/test-wm-browser-event-validator-zero-timing && " +
+    _fixture_command("build/test-wm-browser-event-validator-zero-timing/proof.json", "p.performance_now_delta_ms=0") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-zero-timing/proof.json > build/test-wm-browser-event-validator-zero-timing/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-wm-browser-event-validator-zero-timing/evidence.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+expect(evidence).to_contain("wm_browser_event_routing_performance_now_available=true")
+expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=0")
 ```
 
 </details>
@@ -287,8 +319,8 @@ expect(script).to_contain("wm_browser_event_routing_validation_reason")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

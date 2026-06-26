@@ -35,6 +35,12 @@ function decimalAtLeast(value, required) {
   return Number(text) >= required;
 }
 
+function decimalGreaterThan(value, required) {
+  const text = decimalNumberText(value);
+  if (text === null) return false;
+  return Number(text) > required;
+}
+
 function sameInteger(actual, expected) {
   const a = decimalIntegerText(actual);
   const e = decimalIntegerText(expected);
@@ -140,7 +146,7 @@ if (!boolValue(proof.pass)) {
   reason = 'event-routing-contract-missing';
 } else if (
   !boolValue(proof.performance_now_available) ||
-  !decimalAtLeast(proof.performance_now_delta_ms, 0) ||
+  !decimalGreaterThan(proof.performance_now_delta_ms, 0) ||
   !boolValue(proof.animation_frame_available) ||
   !integerAtLeast(proof.animation_frame_count, 2) ||
   !boolValue(proof.css_animation_probe)
