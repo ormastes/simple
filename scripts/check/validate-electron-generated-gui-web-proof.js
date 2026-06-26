@@ -63,6 +63,32 @@ function artifactStat(value, proofPath) {
   return null;
 }
 
+function readJsonArtifact(artifact) {
+  if (!artifact) return { ok: false, value: null };
+  try {
+    return { ok: true, value: JSON.parse(fs.readFileSync(artifact.path, 'utf8')) };
+  } catch (_err) {
+    return { ok: false, value: null };
+  }
+}
+
+function pixelCountMatches(pixels, width, height) {
+  const w = decimalIntegerText(width);
+  const h = decimalIntegerText(height);
+  if (!Array.isArray(pixels) || w === null || h === null) return false;
+  return BigInt(pixels.length) === BigInt(w) * BigInt(h);
+}
+
+function nonzeroPixelCount(pixels) {
+  if (!Array.isArray(pixels)) return 0;
+  let count = 0;
+  for (const pixel of pixels) {
+    const text = decimalIntegerText(pixel);
+    if (text !== null && BigInt(text) !== 0n) count += 1;
+  }
+  return count;
+}
+
 const proofPath = process.argv[2];
 if (!proofPath) {
   emit('electron_generated_gui_web_validation_status', 'fail');
@@ -80,10 +106,18 @@ try {
 }
 
 const capturedArgbStat = artifactStat(proof.captured_argb_path, proofPath);
+const capturedArgbJson = readJsonArtifact(capturedArgbStat);
+const capturedArgb = capturedArgbJson.value || {};
+const capturedArgbPixels = Array.isArray(capturedArgb.pixels) ? capturedArgb.pixels : [];
+const capturedArgbNonzeroPixels = nonzeroPixelCount(capturedArgbPixels);
 
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
   reason = 'blur-or-tolerance-not-allowed';
+} else if (proof.renderer !== 'electron-live-capture-page') {
+  reason = 'unexpected-electron-renderer';
+} else if (proof.scene !== 'generated-gui-widget-html') {
+  reason = 'unexpected-electron-scene';
 } else if (decimalIntegerText(proof.checksum) === null || decimalIntegerText(proof.expected_checksum) === null) {
   reason = 'missing-checksum-proof';
 } else if (!sameInteger(proof.checksum, proof.expected_checksum)) {
@@ -104,6 +138,14 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-captured-argb-file';
 } else if (capturedArgbStat.stat.size <= 0) {
   reason = 'empty-captured-argb-file';
+} else if (!capturedArgbJson.ok || capturedArgb.format !== 'argb-u32' || capturedArgb.producer !== 'electron-live-capture-page') {
+  reason = 'malformed-captured-argb';
+} else if (!sameInteger(capturedArgb.width, proof.width) || !sameInteger(capturedArgb.height, proof.height)) {
+  reason = 'captured-argb-viewport-mismatch';
+} else if (!pixelCountMatches(capturedArgbPixels, proof.width, proof.height)) {
+  reason = 'captured-argb-pixel-count-mismatch';
+} else if (capturedArgbNonzeroPixels < 1) {
+  reason = 'blank-captured-argb';
 } else if (!integerAtLeast(proof.capture_native_width, 1) || !integerAtLeast(proof.capture_native_height, 1) || typeof proof.capture_downsampled !== 'boolean') {
   reason = 'missing-capture-provenance';
 } else if (!sameInteger(proof.capture_native_width, proof.width) || !sameInteger(proof.capture_native_height, proof.height)) {
@@ -116,6 +158,8 @@ if (proof.blur_or_tolerance_used !== false) {
 
 emit('electron_generated_gui_web_validation_status', reason === 'pass' ? 'pass' : 'fail');
 emit('electron_generated_gui_web_validation_reason', reason);
+emit('electron_generated_gui_web_renderer', proof.renderer);
+emit('electron_generated_gui_web_scene', proof.scene);
 emit('electron_generated_gui_web_simple_checksum', integerTextOrClean(proof.expected_checksum));
 emit('electron_generated_gui_web_electron_checksum', integerTextOrClean(proof.checksum));
 emit('electron_generated_gui_web_simple_weighted_checksum', integerTextOrClean(proof.expected_weighted_checksum));
@@ -132,6 +176,12 @@ emit('electron_generated_gui_web_captured_argb_path', proof.captured_argb_path);
 emit('electron_generated_gui_web_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
 emit('electron_generated_gui_web_captured_argb_file_status', capturedArgbStat === null ? 'fail' : 'pass');
 emit('electron_generated_gui_web_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
+emit('electron_generated_gui_web_captured_argb_format', capturedArgb.format);
+emit('electron_generated_gui_web_captured_argb_producer', capturedArgb.producer);
+emit('electron_generated_gui_web_captured_argb_width', integerTextOrClean(capturedArgb.width));
+emit('electron_generated_gui_web_captured_argb_height', integerTextOrClean(capturedArgb.height));
+emit('electron_generated_gui_web_captured_argb_pixel_count', String(capturedArgbPixels.length));
+emit('electron_generated_gui_web_captured_argb_nonzero_pixel_count', String(capturedArgbNonzeroPixels));
 emit('electron_generated_gui_web_text_normalization_pixels', integerTextOrClean(proof.generated_gui_text_normalization_pixels ?? 0));
 
 if (reason !== 'pass') {
