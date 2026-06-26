@@ -30,6 +30,7 @@ training primitives only when a later lane explicitly enters training.
    - dashboard diagnostics consumption
 5. UI/tool layer:
    - existing web dashboard diagnostics panel
+   - dashboard vLLM control-intent panel for preflight/start/poll/probe/stop
    - future MCP/tool exposure
 
 ## Boundaries
@@ -52,7 +53,9 @@ training primitives only when a later lane explicitly enters training.
 ## MDSOC Ownership
 
 - `src/app/llm_runtime` should own manifests and probes if implemented.
-- Dashboard modules should only render collected evidence.
+- Dashboard modules should render collected evidence and control intent. They
+  must not import live HTTP/process backends for ordinary page rendering; live
+  execution remains behind `src/app/llm_runtime` owner facades.
 - SPipe specs should assert behavior through public probe/evidence outputs.
 - Torch/SFFI owner modules must provide ABI/loader readiness; app probes should
   consume that evidence instead of reaching around owner boundaries.
@@ -60,7 +63,7 @@ training primitives only when a later lane explicitly enters training.
 ## Deferred
 
 - PEFT/TRL training orchestration.
-- vLLM process supervisor.
+- Live dashboard execution of vLLM process supervisor actions.
 - Dynamic adapter resolver plugins.
 - GPU memory accounting beyond optional readback.
 - Custom serving engine work in this lane; keep svLLM product work separate

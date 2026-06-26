@@ -178,6 +178,25 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
        passes with vLLM evidence count/status/reason coverage.
      - `test/unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.spl`
        mirrors the same coverage.
+10. vLLM dashboard control panel:
+   - `src/app/llm_dashboard/collectors/vllm_control_panel.spl` adds a
+     dashboard-facing operator control panel for vLLM `preflight`, `start`,
+     `poll`, `probe`, and `stop` intents.
+   - The panel validates manifest/action/pid inputs, emits
+     `llm_dashboard_vllm_control_panel` JSONL, renders text/HTML controls, and
+     is embedded in `src/app/web_dashboard/server.spl`.
+   - The web route `/api/vllm/control` returns authenticated JSONL action
+     evidence. This slice is intentionally action-intent only: live process
+     execution remains owned by `app.llm_runtime` lifecycle/readiness facades so
+     importing the dashboard does not load HTTP/process backends.
+   - Evidence:
+     - `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
+       passes.
+     - `test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
+       mirrors the same coverage.
+     - `test/01_unit/app/llm_dashboard/ios_mode_spec.spl` and mirrored
+       `test/unit/app/llm_dashboard/ios_mode_spec.spl` pass after preserving the
+       existing dashboard server constructor surface.
 
 ## Open Bugs Found During This Lane
 

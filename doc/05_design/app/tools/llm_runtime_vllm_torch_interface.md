@@ -276,6 +276,39 @@ Runtime-adjacent decision record:
   directly in `app.llm_runtime`, or treating missing host capability as a model
   failure.
 
+## Implemented Dashboard Control-Intent Slice
+
+- `src/app/llm_dashboard/collectors/vllm_control_panel.spl`
+- `src/app/web_dashboard/server.spl`
+- `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
+- `test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
+- `doc/06_spec/test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
+- `doc/06_spec/test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
+
+The dashboard now renders a vLLM control panel with `preflight`, `start`,
+`poll`, `probe`, and `stop` intents and exposes `/api/vllm/control` for
+authenticated JSONL action evidence. This panel validates manifest, action, and
+pid inputs and keeps missing state rendered as `none`.
+
+This is intentionally not the live execution owner. The dashboard module uses
+pure serve/request planning and does not import live HTTP/process backends during
+ordinary page rendering. Actual process spawn, polling, stop, and endpoint fetch
+remain in `src/app/llm_runtime/serve_lifecycle.spl`,
+`src/app/llm_runtime/live_transport.spl`, and
+`src/app/llm_runtime/serve_readiness.spl`.
+
+Runtime-adjacent decision record:
+
+- `runtime_need`: expose operator controls without forcing dashboard import of
+  process or HTTP runtime backends.
+- `facade_checked`: `serve_plan`, `live_request_plan`, and existing
+  `serve_lifecycle`/`serve_readiness` execution facades.
+- `chosen_path`: `reuse-facade` for pure planning in the dashboard; defer live
+  execution to the runtime owner boundary.
+- `rejected_shortcuts`: raw `rt_process_*`/HTTP imports in the dashboard,
+  shelling out from dashboard routes, and treating rendered buttons as proof of
+  live vLLM availability.
+
 ## Implemented Torch Readiness Slice
 
 - `src/lib/common/torch/dyn_sffi_ops.spl`

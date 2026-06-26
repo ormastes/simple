@@ -36,6 +36,7 @@ Proposed module family:
 - `src/app/dashboard.views/assistant_timeline.spl`
 - `src/app/dashboard.views/assistant_tasks.spl`
 - `src/app/llm_dashboard/collectors/diagnostics_jsonl_collector.spl`
+- `src/app/llm_dashboard/collectors/vllm_control_panel.spl`
 - `src/app/web_dashboard/dashboard_html.spl`
 - `src/app/web_dashboard/server.spl`
 
@@ -47,6 +48,9 @@ Responsibilities:
 - support replay/import mode
 - host the web login entrypoint and persist operator auth session state under `.build/llm_dashboard/auth`
 - summarize diagnostics hook JSONL into an operator-visible Diagnostics panel
+- render vLLM `preflight`, `start`, `poll`, `probe`, and `stop` control
+  intents without importing live HTTP/process backends into normal dashboard
+  rendering
 - keep missing diagnostics fields rendered as explicit `none` text in
   rendered text/HTML
 

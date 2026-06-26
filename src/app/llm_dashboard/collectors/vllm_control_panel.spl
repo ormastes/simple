@@ -1,0 +1,139 @@
+use app.llm_runtime.manifest.{LlmRuntimeManifest, llm_runtime_manifest_from_text}
+use app.llm_runtime.serve_plan.{llm_runtime_static_serve_plan}
+use app.llm_runtime.live_request_plan.{llm_runtime_vllm_models_request_plan}
+use app.mcp.main_lazy_json.{LB, RB, jp, js}
+
+pub class LlmDashboardVllmControlPanel:
+    action: text
+    status: text
+    reason: text
+    pid: i64
+    running_status: text
+    endpoint_status: text
+    models_status: text
+    models_reason: text
+    http_status: i64
+    controls: [text]
+    evidence_jsonl: text
+
+pub fn collect_llm_dashboard_vllm_control_preflight(manifest_text: text) -> LlmDashboardVllmControlPanel:
+    val manifest = llm_runtime_manifest_from_text(manifest_text)
+    val serve_plan = llm_runtime_static_serve_plan(manifest)
+    if serve_plan.status != "planned":
+        return _panel("preflight", "not_started", serve_plan.reason, -1, "not_started", "not_checked", "not_fetched", "serve_not_planned", 0)
+    val models_plan = llm_runtime_vllm_models_request_plan(manifest)
+    if models_plan.status != "planned":
+        return _panel("preflight", "not_ready", models_plan.reason, -1, "not_started", models_plan.endpoint_status, "not_fetched", "models_probe_not_planned", 0)
+    _panel("preflight", "planned", "serve_and_models_probe_planned", -1, "not_started", models_plan.endpoint_status, "not_fetched", "probe_not_run", 0)
+
+pub fn collect_llm_dashboard_vllm_control_action(manifest_text: text, action: text, pid: i64) -> LlmDashboardVllmControlPanel:
+    val manifest = llm_runtime_manifest_from_text(manifest_text)
+    val selected = action.trim()
+    if selected == "" or selected == "preflight":
+        return collect_llm_dashboard_vllm_control_preflight(manifest_text)
+    if selected == "start":
+        val serve_plan = llm_runtime_static_serve_plan(manifest)
+        if serve_plan.status != "planned":
+            return _panel("start", "not_started", serve_plan.reason, -1, "not_started", "not_checked", "not_fetched", "serve_not_planned", 0)
+        return _panel("start", "planned", "start_request_ready", -1, "not_started", "not_checked", "not_fetched", "start_not_executed_by_panel", 0)
+    if selected == "poll":
+        if pid <= 0:
+            return _panel("poll", "rejected", "invalid_pid", pid, "not_running", "not_checked", "not_fetched", "poll_not_executed", 0)
+        return _panel("poll", "planned", "poll_request_ready", pid, "unknown_until_polled", "not_checked", "not_fetched", "poll_not_executed_by_panel", 0)
+    if selected == "probe":
+        val models_plan = llm_runtime_vllm_models_request_plan(manifest)
+        if models_plan.status != "planned":
+            return _panel("probe", "not_ready", models_plan.reason, pid, "unknown_until_polled", models_plan.endpoint_status, "not_fetched", "models_probe_not_planned", 0)
+        if pid <= 0:
+            return _panel("probe", "rejected", "invalid_pid", pid, "not_running", models_plan.endpoint_status, "not_fetched", "probe_not_executed", 0)
+        return _panel("probe", "planned", "models_probe_request_ready", pid, "unknown_until_polled", models_plan.endpoint_status, "not_fetched", "probe_not_executed_by_panel", 0)
+    if selected == "stop":
+        if pid <= 0:
+            return _panel("stop", "not_stopped", "invalid_pid", pid, "not_running", "not_checked", "not_fetched", "stop_not_executed", 0)
+        return _panel("stop", "planned", "stop_request_ready", pid, "unknown_until_polled", "not_checked", "not_fetched", "stop_not_executed_by_panel", 0)
+    _panel(selected, "rejected", "unsupported_action", pid, "not_checked", "not_checked", "not_fetched", "unsupported_action", 0)
+
+pub fn render_llm_dashboard_vllm_control_panel_text(panel: LlmDashboardVllmControlPanel) -> text:
+    "vLLM Controls action=" + _public_absence(panel.action) +
+        " status=" + _public_absence(panel.status) +
+        " reason=" + _public_absence(panel.reason) +
+        " pid=" + panel.pid.to_text() +
+        " running=" + _public_absence(panel.running_status) +
+        " endpoint=" + _public_absence(panel.endpoint_status) +
+        " models=" + _public_absence(panel.models_status) +
+        " controls=" + panel.controls.join(",")
+
+pub fn render_llm_dashboard_vllm_control_panel_html(panel: LlmDashboardVllmControlPanel) -> text:
+    "<section id=\"llm-vllm-control-panel\"><h2>vLLM Controls</h2><p>action=" +
+        _html_escape(_public_absence(panel.action)) + "</p><p>status=" +
+        _html_escape(_public_absence(panel.status)) + "</p><p>reason=" +
+        _html_escape(_public_absence(panel.reason)) + "</p><p>pid=" +
+        panel.pid.to_text() + "</p><p>running=" +
+        _html_escape(_public_absence(panel.running_status)) + "</p><p>endpoint=" +
+        _html_escape(_public_absence(panel.endpoint_status)) + "</p><p>models=" +
+        _html_escape(_public_absence(panel.models_status)) + "</p>" +
+        _render_controls(panel.controls) + "</section>"
+
+pub fn llm_dashboard_vllm_control_panel_jsonl_event(panel: LlmDashboardVllmControlPanel) -> text:
+    LB() +
+    jp("event", js("llm_dashboard_vllm_control_panel")) +
+    "," + jp("action", js(panel.action)) +
+    "," + jp("status", js(panel.status)) +
+    "," + jp("reason", js(panel.reason)) +
+    "," + jp("pid", str(panel.pid)) +
+    "," + jp("running", js(panel.running_status)) +
+    "," + jp("endpoint", js(panel.endpoint_status)) +
+    "," + jp("models_status", js(panel.models_status)) +
+    "," + jp("models_reason", js(panel.models_reason)) +
+    "," + jp("http_status", str(panel.http_status)) +
+    RB() + "\n"
+
+fn _panel(action: text, status: text, reason: text, pid: i64, running_status: text, endpoint_status: text, models_status: text, models_reason: text, http_status: i64) -> LlmDashboardVllmControlPanel:
+    val panel = LlmDashboardVllmControlPanel(
+        action: action,
+        status: status,
+        reason: reason,
+        pid: pid,
+        running_status: running_status,
+        endpoint_status: endpoint_status,
+        models_status: models_status,
+        models_reason: models_reason,
+        http_status: http_status,
+        controls: _controls_for(status, pid),
+        evidence_jsonl: ""
+    )
+    panel.evidence_jsonl = llm_dashboard_vllm_control_panel_jsonl_event(panel)
+    panel
+
+fn _controls_for(status: text, pid: i64) -> [text]:
+    var controls = ["preflight", "start"]
+    if pid > 0:
+        controls.push("poll")
+        controls.push("probe")
+        controls.push("stop")
+    else if status == "planned" or status == "not_ready" or status == "skipped":
+        controls.push("poll")
+        controls.push("probe")
+        controls.push("stop")
+    controls
+
+fn _render_controls(controls: [text]) -> text:
+    var html = "<form id=\"llm-vllm-controls\" method=\"get\" action=\"/api/vllm/control\">"
+    for control in controls:
+        html = html + "<button name=\"action\" value=\"" + _html_escape(control) + "\">" + _html_escape(control) + "</button>"
+    html + "</form>"
+
+fn _public_absence(value: text) -> text:
+    if value == "":
+        return "none"
+    value
+
+fn _html_escape(value: text) -> text:
+    var escaped = value.split("&").join("&amp;")
+    escaped = escaped.split("<").join("&lt;")
+    escaped = escaped.split(">").join("&gt;")
+    escaped.split("\"").join("&quot;")
+
+export LlmDashboardVllmControlPanel
+export collect_llm_dashboard_vllm_control_preflight, collect_llm_dashboard_vllm_control_action
+export render_llm_dashboard_vllm_control_panel_text, render_llm_dashboard_vllm_control_panel_html, llm_dashboard_vllm_control_panel_jsonl_event

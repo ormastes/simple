@@ -277,6 +277,12 @@ Tasks:
    `llm_runtime_vllm_*` events and renders latest status/reason without
    exposing internal absence markers. This is evidence readback only, not a
    live start/stop control surface.
+6. Add dashboard operator controls for vLLM lifecycle intent. Status: done for
+   dashboard action-intent readback. The web dashboard now renders
+   `preflight`, `start`, `poll`, `probe`, and `stop` controls and exposes
+   `/api/vllm/control` JSONL evidence for those intents. Live process execution
+   still remains in the existing `app.llm_runtime` lifecycle/readiness facades
+   rather than being imported directly by dashboard rendering.
 
 ## Sidecars
 
@@ -289,8 +295,9 @@ Tasks:
 - Dynamic LoRA resolver.
 - Torch model execution beyond readiness probes.
 - Live endpoint availability evidence against an installed local `vllm`.
-- Dashboard controls for starting, polling, probing, and stopping vLLM; the
-  current dashboard slice only reads already-recorded vLLM evidence.
+- Live dashboard execution of start, poll, probe, and stop against an installed
+  local `vllm`; the current dashboard slice validates and renders operator
+  intents while keeping live execution at the runtime owner boundary.
 
 Runtime-adjacent decision record for live HTTP transport:
 

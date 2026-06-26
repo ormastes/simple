@@ -1,6 +1,7 @@
 use app.web_dashboard.dashboard_html.{generate_full_dashboard_html_with_diagnostics}
 use app.llm_dashboard.collectors.diagnostics_jsonl_collector.{collect_llm_diagnostics_jsonl, render_llm_diagnostics_panel_html}
 use app.llm_dashboard.collectors.tooling_artifact_collector.{collect_llm_tooling_artifacts, render_llm_tooling_artifacts_panel_html}
+use app.llm_dashboard.collectors.vllm_control_panel.{collect_llm_dashboard_vllm_control_preflight, collect_llm_dashboard_vllm_control_action, render_llm_dashboard_vllm_control_panel_html}
 
 val DEFAULT_DIAGNOSTICS_JSONL = ".build/llm_dashboard/diagnostics/session.jsonl"
 
@@ -32,27 +33,40 @@ pub struct DashboardServer:
     diagnostics_path: text
     tooling_source_path: text
     tooling_target: text
+    vllm_manifest_text: text
+    is_ios: bool
+    agent_dir: text
 
     static fn new(port: i64) -> DashboardServer:
-        DashboardServer(port: port, diagnostics_path: DEFAULT_DIAGNOSTICS_JSONL, tooling_source_path: "", tooling_target: "")
+        DashboardServer(port: port, diagnostics_path: DEFAULT_DIAGNOSTICS_JSONL, tooling_source_path: "", tooling_target: "", vllm_manifest_text: "", is_ios: false, agent_dir: "")
 
     static fn new_with_diagnostics(port: i64, diagnostics_path: text) -> DashboardServer:
-        DashboardServer(port: port, diagnostics_path: diagnostics_path, tooling_source_path: "", tooling_target: "")
+        DashboardServer(port: port, diagnostics_path: diagnostics_path, tooling_source_path: "", tooling_target: "", vllm_manifest_text: "", is_ios: false, agent_dir: "")
 
     static fn new_with_diagnostics_and_tooling(port: i64, diagnostics_path: text, tooling_source_path: text, tooling_target: text) -> DashboardServer:
-        DashboardServer(port: port, diagnostics_path: diagnostics_path, tooling_source_path: tooling_source_path, tooling_target: tooling_target)
+        DashboardServer(port: port, diagnostics_path: diagnostics_path, tooling_source_path: tooling_source_path, tooling_target: tooling_target, vllm_manifest_text: "", is_ios: false, agent_dir: "")
+
+    static fn new_with_vllm_manifest(port: i64, diagnostics_path: text, tooling_source_path: text, tooling_target: text, vllm_manifest_text: text) -> DashboardServer:
+        DashboardServer(port: port, diagnostics_path: diagnostics_path, tooling_source_path: tooling_source_path, tooling_target: tooling_target, vllm_manifest_text: vllm_manifest_text, is_ios: false, agent_dir: "")
+
+    static fn new_ios(port: i64, agent_dir: text) -> DashboardServer:
+        DashboardServer(port: port, diagnostics_path: DEFAULT_DIAGNOSTICS_JSONL, tooling_source_path: "", tooling_target: "", vllm_manifest_text: "", is_ios: true, agent_dir: agent_dir)
+
+    static fn new_with_agent_dir(port: i64, agent_dir: text) -> DashboardServer:
+        DashboardServer(port: port, diagnostics_path: DEFAULT_DIAGNOSTICS_JSONL, tooling_source_path: "", tooling_target: "", vllm_manifest_text: "", is_ios: false, agent_dir: agent_dir)
 
     fn render_dashboard_html() -> text:
         val panel = collect_llm_diagnostics_jsonl(self.diagnostics_path)
         val diagnostics_html = render_llm_diagnostics_panel_html(panel)
         val tooling_html = _render_tooling_panel_if_configured(self.tooling_source_path, self.tooling_target)
+        val vllm_html = render_llm_dashboard_vllm_control_panel_html(collect_llm_dashboard_vllm_control_preflight(self.vllm_manifest_text))
         generate_full_dashboard_html_with_diagnostics(
             self.port,
             "<section id=\"status-card\">status</section>",
             "diagnostics@fixture",
             "<div id=\"tmux-card\">tmux</div>",
             "<span>admin</span><a href=\"/logout\">Log out</a>",
-            diagnostics_html + tooling_html
+            diagnostics_html + tooling_html + vllm_html
         )
 
     fn route_http(method: text, path: text, body: text, session: text?) -> text:
@@ -60,13 +74,38 @@ pub struct DashboardServer:
             if path.starts_with("/api/"):
                 return http_error(401, "Authentication required")
             return http_redirect("/login")
+        if path.starts_with("/api/vllm/control"):
+            if method != "GET":
+                return http_error(401, "Method not supported")
+            return http_response(200, "application/json", self._route_vllm_control(path))
         if path.starts_with("/api/tmux"):
             return http_response(200, "application/json", "[]")
         if method != "GET":
             return http_error(401, "Method not supported")
         http_response(200, "text/html", self.render_dashboard_html())
 
+    fn _route_vllm_control(path: text) -> text:
+        val action = _query_value(path, "action")
+        val pid = _query_i64(path, "pid", -1)
+        collect_llm_dashboard_vllm_control_action(self.vllm_manifest_text, action, pid).evidence_jsonl
+
 fn _render_tooling_panel_if_configured(path: text, target: text) -> text:
     if path.trim() == "":
         return ""
     render_llm_tooling_artifacts_panel_html(collect_llm_tooling_artifacts(path, target))
+
+fn _query_value(path: text, key: text) -> text:
+    val marker = key + "="
+    val parts = path.split("?")
+    if parts.len() < 2:
+        return ""
+    for raw in parts[1].split("&"):
+        if raw.starts_with(marker):
+            return raw.slice(marker.len(), raw.len())
+    ""
+
+fn _query_i64(path: text, key: text, fallback: i64) -> i64:
+    val value = _query_value(path, key)
+    if value.trim() == "":
+        return fallback
+    value.to_i64() ?? fallback
