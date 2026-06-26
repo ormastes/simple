@@ -100,7 +100,7 @@ sh scripts/check/check-gui-widget-renderdoc-goal-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -117,9 +117,11 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_widget_count=43")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_widget_feature_covered_count=43")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_missing_widget_features=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/widget-probe-small RDOC_SIMPLE_PROG=\"$PWD/src/app/test/renderdoc_vulkan_widget_capture.spl\" RDOC_HTML_PATH=\"$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\" scripts/tool/renderdoc-evidence.shs capture-simple")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_source_env_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_status=")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/electron-display-helper RDOC_HTML_PATH=\"$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\" scripts/tool/renderdoc-evidence.shs capture-electron-html")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_source_env_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_file_status=")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_file_status=")
@@ -164,7 +166,7 @@ expect(report).to_contain("- widgets with RenderDoc fixture features: 43 / 43")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -181,6 +183,7 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_widget_fixture_status=pas
 expect(evidence).to_contain("gui_widget_renderdoc_goal_widget_count=43")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_widget_feature_covered_count=43")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/widget-probe-small RDOC_SIMPLE_PROG=\"$PWD/src/app/test/renderdoc_vulkan_widget_capture.spl\" RDOC_HTML_PATH=\"$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\" scripts/tool/renderdoc-evidence.shs capture-simple")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_source_env_file_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_magic=RDOC")
@@ -188,6 +191,7 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_runtime_backe
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_widget_html_bytes=4096")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_widget_html_bytes_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_status=pass")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/electron-display-helper RDOC_HTML_PATH=\"$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\" scripts/tool/renderdoc-evidence.shs capture-electron-html")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_failure_class=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_source_env_file_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_fixture_path_status=pass")

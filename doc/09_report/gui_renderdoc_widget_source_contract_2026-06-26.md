@@ -25,6 +25,7 @@ Simple widget gate:
 
 - source env: `build/renderdoc/widget-probe-small/simple/evidence.env`
 - source env status: `missing`
+- generation command: `RDOC_OUTPUT_DIR=build/renderdoc/widget-probe-small RDOC_SIMPLE_PROG="$PWD/src/app/test/renderdoc_vulkan_widget_capture.spl" RDOC_HTML_PATH="$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html" scripts/tool/renderdoc-evidence.shs capture-simple`
 - required backend: `simple`
 - required scene: `vulkan-engine2d`
 - required program: `src/app/test/renderdoc_vulkan_widget_capture.spl`
@@ -35,6 +36,7 @@ Electron widget gate:
 
 - source env: `build/renderdoc/electron-display-helper/electron-html/evidence.env`
 - source env status: `missing`
+- generation command: `RDOC_OUTPUT_DIR=build/renderdoc/electron-display-helper RDOC_HTML_PATH="$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html" scripts/tool/renderdoc-evidence.shs capture-electron-html`
 - required backend: `electron`
 - required scene: `html-css-electron`
 - required HTML suffix: `test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html`
