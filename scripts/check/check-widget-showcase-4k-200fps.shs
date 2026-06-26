@@ -215,6 +215,21 @@ positive_int_range_status() {
     esac
 }
 
+frame_distribution_status() {
+    avg="$1"
+    p50="$2"
+    p95="$3"
+    if [ "$(positive_int_status "${avg:-}")" != "pass" ] || [ "$(positive_int_status "${p50:-}")" != "pass" ] || [ "$(positive_int_status "${p95:-}")" != "pass" ]; then
+        echo fail
+        return
+    fi
+    if [ "$p95" -lt "$p50" ]; then
+        echo fail
+        return
+    fi
+    echo pass
+}
+
 checksum_status() {
     case "${1:-}" in
         ""|*[!0-9]*)
@@ -249,6 +264,7 @@ emit_unmeasured_perf_fields() {
     echo "${STATUS_PREFIX}_frame_avg_ns="
     echo "${STATUS_PREFIX}_frame_p50_ns="
     echo "${STATUS_PREFIX}_frame_p95_ns="
+    echo "${STATUS_PREFIX}_frame_distribution_status="
     echo "${STATUS_PREFIX}_fps_x1000="
     echo "${STATUS_PREFIX}_max_rss_kb="
     echo "${STATUS_PREFIX}_rss_status="
@@ -396,6 +412,7 @@ if [ "$FRAMES" -gt 0 ] 2>/dev/null && [ "$fps_elapsed_ns" -gt 0 ] 2>/dev/null; t
     frame_p50_ns=$frame_avg_ns
     frame_p95_ns=$frame_avg_ns
 fi
+frame_distribution_status="$(frame_distribution_status "$frame_avg_ns" "$frame_p50_ns" "$frame_p95_ns")"
 pixels="$(sed -n "s/^${PROBE_PREFIX}_pixels=//p" "$LOG")"
 nonzero="$(sed -n "s/^${PROBE_PREFIX}_nonzero_pixels=//p" "$LOG")"
 checksum="$(sed -n "s/^${PROBE_PREFIX}_checksum=//p" "$LOG")"
@@ -430,6 +447,7 @@ if [ "$width" != "$WIDTH" ] || [ "$height" != "$HEIGHT" ] || [ "$pixels" != "$EX
         echo "${STATUS_PREFIX}_frame_avg_ns=$frame_avg_ns"
         echo "${STATUS_PREFIX}_frame_p50_ns=$frame_p50_ns"
         echo "${STATUS_PREFIX}_frame_p95_ns=$frame_p95_ns"
+        echo "${STATUS_PREFIX}_frame_distribution_status=$frame_distribution_status"
         echo "${STATUS_PREFIX}_fps_x1000=$fps_x1000"
         echo "${STATUS_PREFIX}_target_fps=$TARGET_FPS"
         echo "${STATUS_PREFIX}_max_rss_kb=${max_rss_kb:-}"
@@ -451,7 +469,10 @@ if [ "$width" != "$WIDTH" ] || [ "$height" != "$HEIGHT" ] || [ "$pixels" != "$EX
     exit 1
 fi
 
-if [ "$fps_x1000" -lt "$target_x1000" ]; then
+if [ "$frame_distribution_status" != "pass" ]; then
+    status=fail
+    reason=frame-distribution-untrusted
+elif [ "$fps_x1000" -lt "$target_x1000" ]; then
     status=fail
     reason=$BELOW_REASON
 elif [ "$rss_status" = "fail" ]; then
@@ -477,6 +498,7 @@ fi
     echo "${STATUS_PREFIX}_frame_avg_ns=$frame_avg_ns"
     echo "${STATUS_PREFIX}_frame_p50_ns=$frame_p50_ns"
     echo "${STATUS_PREFIX}_frame_p95_ns=$frame_p95_ns"
+    echo "${STATUS_PREFIX}_frame_distribution_status=$frame_distribution_status"
     echo "${STATUS_PREFIX}_fps_x1000=$fps_x1000"
     echo "${STATUS_PREFIX}_target_fps=$TARGET_FPS"
     echo "${STATUS_PREFIX}_max_rss_kb=${max_rss_kb:-}"

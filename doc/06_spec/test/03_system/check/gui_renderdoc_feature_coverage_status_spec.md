@@ -27,7 +27,7 @@ gui_renderdoc_feature_coverage_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 32 | 32 | 0 | 0 |
+| 33 | 33 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1522,7 +1522,7 @@ expect(blocked_gates.contains("production GUI/web parity evidence with live Taur
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 49 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1539,6 +1539,7 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_env=build/test-gui-renderdoc
 expect(evidence).to_contain("gui_showcase_4k_200fps_fps_x1000=201000")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frame_p50_ns=4975124")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frame_p95_ns=4975124")
+expect(evidence).to_contain("gui_showcase_4k_200fps_frame_distribution_status=pass")
 expect(evidence).to_contain("gui_showcase_4k_200fps_max_rss_kb=131072")
 expect(evidence).to_contain("gui_showcase_4k_200fps_max_rss_budget_kb=262144")
 expect(evidence).to_contain("gui_showcase_4k_200fps_rss_status=pass")
@@ -1579,6 +1580,36 @@ expect(report).to_contain("rss 131072/262144 kB")
 
 </details>
 
+#### rejects retained 4K pass rows with inverted frame distribution timing
+
+- Create a retained 4K row whose p95 is lower than p50
+   - Expected: code equals `0`
+- Assert the aggregate rejects inverted percentile evidence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create a retained 4K row whose p95 is lower than p50")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-4k-frame-distribution && mkdir -p build/test-gui-renderdoc-feature-coverage-status-4k-frame-distribution/source && " +
+    "printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_reason=met-target-fps\\ngui_showcase_4k_200fps_resolution=4k\\ngui_showcase_4k_200fps_width=3840\\ngui_showcase_4k_200fps_height=2160\\ngui_showcase_4k_200fps_frames=200\\ngui_showcase_4k_200fps_fps_x1000=201000\\ngui_showcase_4k_200fps_frame_avg_ns=4975124\\ngui_showcase_4k_200fps_frame_elapsed_ns_status=pass\\ngui_showcase_4k_200fps_frame_p50_ns=6000000\\ngui_showcase_4k_200fps_frame_p95_ns=5000000\\ngui_showcase_4k_200fps_target_fps=200\\ngui_showcase_4k_200fps_max_rss_kb=131072\\ngui_showcase_4k_200fps_max_rss_budget_kb=262144\\ngui_showcase_4k_200fps_rss_status=pass\\ngui_showcase_4k_200fps_pixels=8294400\\ngui_showcase_4k_200fps_nonzero_pixels=1000\\ngui_showcase_4k_200fps_checksum=123456\\ngui_showcase_4k_200fps_render_mode=retained-static-frame\\ngui_showcase_4k_200fps_redraw_frames=1\\n' > build/test-gui-renderdoc-feature-coverage-status-4k-frame-distribution/source/status.env && " +
+    "GUI_SHOWCASE_4K_PERF_ENV=build/test-gui-renderdoc-feature-coverage-status-4k-frame-distribution/source/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-4k-frame-distribution/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-4k-frame-distribution/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate rejects inverted percentile evidence")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-4k-frame-distribution/out/evidence.env")
+expect(evidence).to_contain("gui_showcase_4k_200fps_status=fail")
+expect(evidence).to_contain("gui_showcase_4k_200fps_frame_distribution_status=fail")
+expect(evidence).to_contain("gui_showcase_4k_200fps_reason=untrusted-4k-frame-distribution:fail;p50=6000000;p95=5000000")
+```
+
+</details>
+
 #### forwards retained 8K perf RSS evidence into the aggregate audit
 
 - Create synthetic retained 8K perf evidence
@@ -1590,7 +1621,7 @@ expect(report).to_contain("rss 131072/262144 kB")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1607,6 +1638,7 @@ expect(evidence).to_contain("gui_showcase_8k_perf_env=build/test-gui-renderdoc-f
 expect(evidence).to_contain("gui_showcase_8k_perf_fps_x1000=201000")
 expect(evidence).to_contain("gui_showcase_8k_perf_frame_p50_ns=4975124")
 expect(evidence).to_contain("gui_showcase_8k_perf_frame_p95_ns=4975124")
+expect(evidence).to_contain("gui_showcase_8k_perf_frame_distribution_status=pass")
 expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_kb=524288")
 expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_budget_kb=1048576")
 expect(evidence).to_contain("gui_showcase_8k_perf_rss_status=pass")
@@ -2641,8 +2673,8 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-produ
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 32 |
-| Active scenarios | 32 |
+| Total scenarios | 33 |
+| Active scenarios | 33 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

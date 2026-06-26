@@ -122,6 +122,7 @@ The full 4K row must prove:
 - `gui_showcase_4k_200fps_frame_p50_ns` and
   `gui_showcase_4k_200fps_frame_p95_ns` are present for timing distribution
   evidence.
+- `gui_showcase_4k_200fps_frame_distribution_status=pass`
 - `gui_showcase_4k_200fps_nonzero_pixels` is positive.
 - `gui_showcase_4k_200fps_nonzero_pixels_status=pass`
 - `gui_showcase_4k_200fps_checksum` is nonempty.
@@ -148,6 +149,7 @@ The full 8K row has the same contract with:
 - `gui_showcase_8k_perf_frame_p50_ns` and
   `gui_showcase_8k_perf_frame_p95_ns` are present for timing distribution
   evidence.
+- `gui_showcase_8k_perf_frame_distribution_status=pass`
 - `gui_showcase_8k_perf_nonzero_pixels_status=pass`
 - `gui_showcase_8k_perf_checksum_status=pass`
 - `gui_showcase_8k_perf_retained_render_mode_status=pass`
@@ -211,7 +213,7 @@ environment dispatch.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -238,6 +240,7 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_frame_avg_ns=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frame_elapsed_ns_status=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frame_p50_ns=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frame_p95_ns=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_frame_distribution_status=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_max_rss_kb=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_rss_status=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_nonzero_pixels=")
@@ -282,7 +285,7 @@ expect(alias_src).to_contain("run_4k_perf_probe()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -309,6 +312,7 @@ expect(evidence).to_contain("gui_showcase_8k_perf_frame_avg_ns=")
 expect(evidence).to_contain("gui_showcase_8k_perf_frame_elapsed_ns_status=")
 expect(evidence).to_contain("gui_showcase_8k_perf_frame_p50_ns=")
 expect(evidence).to_contain("gui_showcase_8k_perf_frame_p95_ns=")
+expect(evidence).to_contain("gui_showcase_8k_perf_frame_distribution_status=")
 expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_kb=")
 expect(evidence).to_contain("gui_showcase_8k_perf_rss_status=")
 expect(evidence).to_contain("gui_showcase_8k_perf_nonzero_pixels=")
@@ -352,7 +356,7 @@ expect(alias_src).to_contain("run_8k_perf_probe()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -365,9 +369,11 @@ expect(script).to_contain("\"$FRAMES\" \"$elapsed_ns\"")
 expect(script).to_contain("frame_avg_ns=$((fps_elapsed_ns / FRAMES))")
 expect(script).to_contain("frame_p50_ns=$frame_avg_ns")
 expect(script).to_contain("frame_p95_ns=$frame_avg_ns")
+expect(script).to_contain("frame_distribution_status=\"$(frame_distribution_status")
 expect(script).to_contain("_frame_elapsed_ns_status=$frame_elapsed_ns_status")
 expect(script).to_contain("_frame_p50_ns=$frame_p50_ns")
 expect(script).to_contain("_frame_p95_ns=$frame_p95_ns")
+expect(script).to_contain("_frame_distribution_status=$frame_distribution_status")
 ```
 
 </details>
