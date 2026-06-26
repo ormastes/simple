@@ -342,6 +342,15 @@ Tasks:
     because it reintroduced process/HTTP teardown diagnostics in dashboard
     specs; live executor import remains runtime-owner-only until that boundary
     has a dashboard-safe facade.
+14. Add pure dashboard/live-executor boundary evidence. Status: done for
+    `llm_runtime_dashboard_live_boundary(...)` and
+    `llm_runtime_dashboard_live_boundary_jsonl(...)`. The evidence classifies
+    `preflight` as `intent-only`, side-effecting actions as
+    `executor-required` only when local vLLM/GPU resources are available, and
+    missing-resource cases as `blocked` with `process_access=not_used`,
+    `http_access=not_used`, and `acceptance_status=not_live_evidence`. This is
+    not live endpoint proof; it is a dashboard-safe gate that keeps process/HTTP
+    execution owned by `dashboard_live_control_executor`.
 
 ## Sidecars
 

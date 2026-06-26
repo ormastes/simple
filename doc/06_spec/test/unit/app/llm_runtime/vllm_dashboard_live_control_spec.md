@@ -27,7 +27,7 @@ vllm_dashboard_live_control_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,7 +43,7 @@ vllm_dashboard_live_control_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -54,6 +54,8 @@ expect(result.action).to_equal("preflight")
 expect(result.status).to_equal("planned")
 expect(result.reason).to_equal("serve_and_models_probe_planned")
 expect(result.models_status).to_equal("not_fetched")
+expect(result.requires_runtime_executor).to_equal(false)
+expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":false")
 expect(result.evidence_jsonl.contains("base-model")).to_equal(false)
 expect(result.evidence_jsonl.contains("nil")).to_equal(false)
 ```
@@ -65,7 +67,7 @@ expect(result.evidence_jsonl.contains("nil")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -76,6 +78,7 @@ expect(result.status).to_equal("skipped")
 expect(result.reason).to_equal("missing_local_vllm_and_gpu")
 expect(result.started_pid).to_equal(-1)
 expect(result.models_status).to_equal("not_fetched")
+expect(result.requires_runtime_executor).to_equal(false)
 ```
 
 </details>
@@ -85,7 +88,7 @@ expect(result.models_status).to_equal("not_fetched")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -95,6 +98,7 @@ val result = llm_runtime_execute_dashboard_control(manifest, "start", -1, true, 
 expect(result.status).to_equal("not_started")
 expect(result.reason).to_equal("missing_base_model")
 expect(result.started_pid).to_equal(-1)
+expect(result.requires_runtime_executor).to_equal(false)
 ```
 
 </details>
@@ -104,7 +108,7 @@ expect(result.started_pid).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -114,6 +118,7 @@ val result = llm_runtime_execute_dashboard_control(manifest, "poll", 0, true, tr
 expect(result.status).to_equal("not_ready")
 expect(result.reason).to_equal("invalid_pid")
 expect(result.running_status).to_equal("not_running")
+expect(result.requires_runtime_executor).to_equal(false)
 ```
 
 </details>
@@ -123,7 +128,7 @@ expect(result.running_status).to_equal("not_running")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -133,6 +138,7 @@ val result = llm_runtime_execute_dashboard_control(manifest, "probe", 12345, fal
 expect(result.status).to_equal("skipped")
 expect(result.reason).to_equal("missing_local_vllm")
 expect(result.models_status).to_equal("not_fetched")
+expect(result.requires_runtime_executor).to_equal(false)
 ```
 
 </details>
@@ -142,7 +148,7 @@ expect(result.models_status).to_equal("not_fetched")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -152,6 +158,7 @@ val result = llm_runtime_execute_dashboard_control(manifest, "stop", -1, true, t
 expect(result.status).to_equal("not_stopped")
 expect(result.reason).to_equal("invalid_pid")
 expect(result.stopped_pid).to_equal(-1)
+expect(result.requires_runtime_executor).to_equal(false)
 ```
 
 </details>
@@ -161,7 +168,7 @@ expect(result.stopped_pid).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -170,7 +177,90 @@ val result = llm_runtime_execute_dashboard_control(manifest, "restart", 12345, t
 
 expect(result.status).to_equal("rejected")
 expect(result.reason).to_equal("unknown_action")
+expect(result.requires_runtime_executor).to_equal(false)
 expect(result.evidence_jsonl.contains("nil")).to_equal(false)
+```
+
+</details>
+
+#### marks valid side-effecting control plans as requiring the runtime executor
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+val result = llm_runtime_execute_dashboard_control(manifest, "start", -1, true, true)
+
+expect(result.status).to_equal("planned")
+expect(result.reason).to_equal("live_executor_required")
+expect(result.requires_runtime_executor).to_equal(true)
+expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":true")
+```
+
+</details>
+
+#### keeps preflight as pure dashboard intent evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val boundary = llm_runtime_dashboard_live_boundary("preflight", true, true)
+
+expect(boundary.boundary_status).to_equal("intent-only")
+expect(boundary.dashboard_route_status).to_equal("pure_dashboard_route")
+expect(boundary.live_executor_status).to_equal("not_required")
+expect(boundary.process_access).to_equal("not_used")
+expect(boundary.http_access).to_equal("not_used")
+expect(boundary.acceptance_status).to_equal("not_live_evidence")
+expect(boundary.evidence_jsonl).to_contain("llm_runtime_vllm_dashboard_live_boundary")
+```
+
+</details>
+
+#### requires runtime owner live executor for side-effecting actions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val boundary = llm_runtime_dashboard_live_boundary("start", true, true)
+
+expect(boundary.boundary_status).to_equal("executor-required")
+expect(boundary.reason).to_equal("live_executor_required")
+expect(boundary.live_executor_status).to_equal("runtime_owner_required")
+expect(boundary.process_access).to_equal("runtime_owner_only")
+expect(boundary.http_access).to_equal("runtime_owner_only")
+expect(boundary.evidence_jsonl.contains("nil")).to_equal(false)
+```
+
+</details>
+
+#### blocks live boundary evidence when local resources are unavailable
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val jsonl = llm_runtime_dashboard_live_boundary_jsonl("probe", false, true)
+
+expect(jsonl).to_contain("\"boundary_status\":\"blocked\"")
+expect(jsonl).to_contain("\"reason\":\"missing_local_vllm\"")
+expect(jsonl).to_contain("\"process_access\":\"not_used\"")
+expect(jsonl).to_contain("\"acceptance_status\":\"not_live_evidence\"")
 ```
 
 </details>
@@ -182,7 +272,7 @@ expect(result.evidence_jsonl.contains("nil")).to_equal(false)
 | Category | Application |
 | Status | Active |
 | Source | `test/unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -194,8 +284,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
