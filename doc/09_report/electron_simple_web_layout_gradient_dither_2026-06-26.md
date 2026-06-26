@@ -12,8 +12,8 @@ large repeated gradient fills.
 Command:
 
 ```sh
-BUILD_DIR=build/test-css-box-gradient-dither \
-REPORT_PATH=build/test-css-box-gradient-dither/report.md \
+BUILD_DIR=build/test-css-box-gradient-dither-exact \
+REPORT_PATH=build/test-css-box-gradient-dither-exact/report.md \
 ELECTRON_BITMAP_SCENE=simple-web-layout-css-box-matrix \
 ELECTRON_BITMAP_WIDTH=96 \
 ELECTRON_BITMAP_HEIGHT=64 \
@@ -23,10 +23,10 @@ sh scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs
 
 Result after the renderer change:
 
-- `electron_simple_web_layout_status=divergent`
-- `electron_simple_web_layout_reason=checksum-mismatch`
-- `electron_simple_web_layout_mismatch_count=18`
-- `electron_simple_web_layout_text_color_delta_pixels=18`
+- `electron_simple_web_layout_status=pass`
+- `electron_simple_web_layout_reason=pass`
+- `electron_simple_web_layout_mismatch_count=0`
+- `electron_simple_web_layout_text_color_delta_pixels=0`
 - `electron_simple_web_layout_surface_geometry_pixels=0`
 - `electron_simple_web_layout_blur_or_tolerance_used=false`
 
@@ -37,14 +37,15 @@ Previous production evidence for the same case:
 - `electron_simple_web_layout_surface_geometry_pixels=0`
 
 The change reduces the smallest exact layout mismatch from 50 to 18 pixels. It
-does not make the manifest pass yet.
+The refined threshold phase then reduces the same case from 18 mismatches to an
+exact pass without blur/tolerance.
 
 ## Broader Probe
 
-Additional probes remained divergent but improved slightly:
+Additional probes remained divergent but improved:
 
-- `border_nested_matrix`: 1105 -> 1065 mismatches.
-- `position_z_index_matrix`: 1833 -> 1788 mismatches.
+- `border_nested_matrix`: 1105 -> 779 mismatches.
+- `position_z_index_matrix`: 1833 -> 1708 mismatches.
 
 Both still report `surface_geometry_pixels=0`, so the remaining blocker is
 gradient/color quantization, not layout geometry.
@@ -58,8 +59,7 @@ gradient/color quantization, not layout geometry.
 
 ## Remaining Work
 
-The residual 18-pixel `css_box_matrix` mismatch shows the ordered quantization
-phase/threshold still does not exactly match Chromium. Full production
-GUI/web parity remains incomplete until the exact layout cases reach
-`mismatch_count=0` or the manifest explicitly records a narrower tracked
-Chromium-dither policy with a release gate that still forbids blur/tolerance.
+`css_box_matrix` now reaches exact parity. Full production GUI/web parity
+remains incomplete until the other exact layout cases also reach
+`mismatch_count=0` or the manifest explicitly records narrower tracked
+Chromium-dither policies with release gates that still forbid blur/tolerance.

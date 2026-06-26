@@ -168,7 +168,7 @@ expect(_count_color(result.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -177,9 +177,11 @@ val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
 
 expect(result.pixel_data[0]).to_equal(0xFFE5E7EBu32)
 expect(result.pixel_data[19 * TEST_WIDTH]).to_equal(0xFFCBD5E1u32)
-expect(result.pixel_data[8 * TEST_WIDTH]).to_equal(0xFFDBE0E7u32)
+expect(result.pixel_data[8 * TEST_WIDTH]).to_equal(0xFFDADFE7u32)
 expect(result.pixel_data[1 + 8 * TEST_WIDTH]).to_equal(0xFFDADFE7u32)
 expect(result.pixel_data[2 + 8 * TEST_WIDTH]).to_equal(0xFFDAE0E7u32)
+expect(result.pixel_data[3 + 9 * TEST_WIDTH]).to_equal(0xFFD9DFE7u32)
+expect(result.pixel_data[4 + 10 * TEST_WIDTH]).to_equal(0xFFD8DEE6u32)
 ```
 
 </details>
