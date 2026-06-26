@@ -3739,7 +3739,38 @@ fn fb_rounded_rect_corners_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y
 fn fb_style_rounded_rect_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, st: Style, color: u32, opacity_pct: i32, clip: ClipRect) -> [u32]:
     fb_rounded_rect_corners_opacity_clip(fb, fbw, fbh, x, y, w, h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, opacity_pct, clip)
 
-fn mix_color_vertical(a: u32, b: u32, pos: i32, denom: i32) -> u32:
+fn gradient_dither_threshold(px: i32, py: i32) -> i32:
+    val mx = px % 4
+    val my = py % 4
+    if my == 0:
+        if mx == 0: return 0
+        if mx == 1: return 8
+        if mx == 2: return 2
+        return 10
+    if my == 1:
+        if mx == 0: return 12
+        if mx == 1: return 4
+        if mx == 2: return 14
+        return 6
+    if my == 2:
+        if mx == 0: return 3
+        if mx == 1: return 11
+        if mx == 2: return 1
+        return 9
+    if mx == 0: return 15
+    if mx == 1: return 7
+    if mx == 2: return 13
+    5
+
+fn mix_channel_gradient(a: i32, b: i32, pos: i32, denom: i32, px: i32, py: i32) -> i32:
+    val weighted = a * (denom - pos) + b * pos
+    var base = weighted / denom
+    val rem = weighted - base * denom
+    if rem > 0 and rem * 16 > gradient_dither_threshold(px, py) * denom:
+        base = base + 1
+    base
+
+fn mix_color_vertical(a: u32, b: u32, pos: i32, denom: i32, px: i32, py: i32) -> u32:
     if denom <= 0:
         return a
     val ar = (((a >> 16) & 255u32) as i32)
@@ -3748,8 +3779,7 @@ fn mix_color_vertical(a: u32, b: u32, pos: i32, denom: i32) -> u32:
     val br = (((b >> 16) & 255u32) as i32)
     val bg = (((b >> 8) & 255u32) as i32)
     val bb = ((b & 255u32) as i32)
-    val inv = denom - pos
-    argb((ar * inv + br * pos) / denom, (ag * inv + bg * pos) / denom, (ab * inv + bb * pos) / denom)
+    argb(mix_channel_gradient(ar, br, pos, denom, px, py), mix_channel_gradient(ag, bg, pos, denom, px, py), mix_channel_gradient(ab, bb, pos, denom, px, py))
 
 fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, st: Style, clip: ClipRect) -> [u32]:
     var bg_x = x
@@ -3802,10 +3832,18 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
     val max_y = if st.background_repeat == "no-repeat": (if tile_h < remaining_h: tile_h else: remaining_h) else: image_origin_h
     var py = 0
     val denom = if tile_h > 1: tile_h - 1 else: 1
+    val small_no_repeat_gradient_tile = st.background_repeat == "no-repeat" and tile_w <= 64 and tile_h <= 64
     while py < max_y:
         val tile_py = py % tile_h
-        val color = mix_color_vertical(st.background_gradient_from, st.background_gradient_to, tile_py, denom)
-        out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, image_origin_x + image_x, image_origin_y + image_y + py, max_x, 1, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, st.opacity_pct, clip)
+        if small_no_repeat_gradient_tile:
+            var px = 0
+            while px < max_x:
+                val color = mix_color_vertical(st.background_gradient_from, st.background_gradient_to, tile_py, denom, px, tile_py)
+                out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, image_origin_x + image_x + px, image_origin_y + image_y + py, 1, 1, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, st.opacity_pct, clip)
+                px = px + 1
+        else:
+            val color = mix_color_vertical(st.background_gradient_from, st.background_gradient_to, tile_py, denom, 0, tile_py)
+            out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, image_origin_x + image_x, image_origin_y + image_y + py, max_x, 1, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, st.opacity_pct, clip)
         py = py + 1
     out
 
