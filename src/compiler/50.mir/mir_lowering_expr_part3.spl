@@ -73,13 +73,16 @@ impl MirLowering:
         var wb_index: LocalId = 0
         var wb_field_idx: i64 = 0
         var wb_receiver: LocalId = 0
-        val receiver_type = if receiver.type_.?:
-            self.lower_type(receiver.type_.unwrap())
+        val receiver_type = if val found_receiver_type = receiver.type_:
+            self.lower_type(found_receiver_type)
         else:
             MirType.i64()
 
-        if (method == "len" or method == "length") and args.len() == 0 and receiver.type_.?:
-            val len_symbol = self.len_runtime_symbol_for_hir_type(receiver.type_.unwrap())
+        if (method == "len" or method == "length") and args.len() == 0:
+            val len_symbol = if val found_receiver_type = receiver.type_:
+                self.len_runtime_symbol_for_hir_type(found_receiver_type)
+            else:
+                ""
             if len_symbol != "":
                 val receiver_local = self.lower_expr(receiver)
                 val func_operand = MirOperand(kind: MirOperandKind.Const(
@@ -89,41 +92,46 @@ impl MirLowering:
                 var b_len = self.builder
                 val result = b_len.emit_call(func_operand, [mir_operand_copy(receiver_local)], MirType.i64())
                 self.builder = b_len
-                if result.?:
-                    return result.unwrap()
+                if val result_local = result:
+                    return result_local
                 return receiver_local
 
-        if (method == "substring" or method == "slice") and receiver.type_.?:
-            match receiver.type_.unwrap().kind:
-                case Str:
-                    if args.len() == 1 or args.len() == 2:
-                        val receiver_local = self.lower_expr(receiver)
-                        var arg_operands: [MirOperand] = [mir_operand_copy(receiver_local)]
-                        for arg in args:
-                            val arg_local = self.lower_expr(arg.value)
-                            arg_operands = arg_operands.push(mir_operand_copy(arg_local))
-                        if args.len() == 1:
-                            val len_operand = MirOperand(kind: MirOperandKind.Const(
-                                MirConstValue.Str("spl_str_len"),
-                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                            ))
-                            var b_len = self.builder
-                            val len_result = b_len.emit_call(len_operand, [mir_operand_copy(receiver_local)], MirType.i64())
-                            self.builder = b_len
-                            if len_result.?:
-                                arg_operands = arg_operands.push(mir_operand_copy(len_result.unwrap()))
-                        val slice_operand = MirOperand(kind: MirOperandKind.Const(
-                            MirConstValue.Str("spl_str_slice"),
-                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
-                        ))
-                        var b_slice = self.builder
-                        val slice_result = b_slice.emit_call(slice_operand, arg_operands, MirType(kind: MirTypeKind.Opaque("str")))
-                        self.builder = b_slice
-                        if slice_result.?:
-                            return slice_result.unwrap()
-                        return receiver_local
-                case _:
+        if (method == "substring" or method == "slice"):
+            val maybe_receiver_type = receiver.type_
+            match maybe_receiver_type:
+                case nil:
                     ()
+                case Some(found_receiver_type):
+                    match found_receiver_type.kind:
+                        case Str:
+                            if args.len() == 1 or args.len() == 2:
+                                val receiver_local = self.lower_expr(receiver)
+                                var arg_operands: [MirOperand] = [mir_operand_copy(receiver_local)]
+                                for arg in args:
+                                    val arg_local = self.lower_expr(arg.value)
+                                    arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+                                if args.len() == 1:
+                                    val len_operand = MirOperand(kind: MirOperandKind.Const(
+                                        MirConstValue.Str("spl_str_len"),
+                                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                                    ))
+                                    var b_len = self.builder
+                                    val len_result = b_len.emit_call(len_operand, [mir_operand_copy(receiver_local)], MirType.i64())
+                                    self.builder = b_len
+                                    if val len_local = len_result:
+                                        arg_operands = arg_operands.push(mir_operand_copy(len_local))
+                                val slice_operand = MirOperand(kind: MirOperandKind.Const(
+                                    MirConstValue.Str("spl_str_slice"),
+                                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                                ))
+                                var b_slice = self.builder
+                                val slice_result = b_slice.emit_call(slice_operand, arg_operands, MirType(kind: MirTypeKind.Opaque("str")))
+                                self.builder = b_slice
+                                if val slice_local = slice_result:
+                                    return slice_local
+                                return receiver_local
+                        case _:
+                            ()
 
         if self.is_mutating_method(method):
             match receiver.kind:
@@ -160,10 +168,10 @@ impl MirLowering:
                 var b = self.builder
                 val result = b.emit_call(method_operand, arg_operands, return_type)
                 self.builder = b
-                val wb_value = if result.?: result.unwrap() else: wb_receiver
+                val wb_value = if val result_local = result: result_local else: wb_receiver
                 self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_value)
-                if result.?:
-                    result.unwrap()
+                if val result_local = result:
+                    result_local
                 else:
                     var b2 = self.builder
                     val temp = b2.new_temp(MirType.unit())
@@ -180,10 +188,10 @@ impl MirLowering:
                 var b = self.builder
                 val result = b.emit_call(method_operand, arg_operands, return_type)
                 self.builder = b
-                val wb_value = if result.?: result.unwrap() else: wb_receiver
+                val wb_value = if val result_local = result: result_local else: wb_receiver
                 self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_value)
-                if result.?:
-                    result.unwrap()
+                if val result_local = result:
+                    result_local
                 else:
                     var b2 = self.builder
                     val temp = b2.new_temp(MirType.unit())
@@ -200,10 +208,10 @@ impl MirLowering:
                 var b = self.builder
                 val result = b.emit_call(func_operand, arg_operands, return_type)
                 self.builder = b
-                val wb_value = if result.?: result.unwrap() else: wb_receiver
+                val wb_value = if val result_local = result: result_local else: wb_receiver
                 self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_value)
-                if result.?:
-                    result.unwrap()
+                if val result_local = result:
+                    result_local
                 else:
                     var b2 = self.builder
                     val temp = b2.new_temp(MirType.unit())
@@ -220,9 +228,9 @@ impl MirLowering:
                 val return_type = self.resolved_call_return_type(method_id)
                 var b = self.builder
                 val result = b.emit_call(method_operand, arg_operands, return_type)
-                if result.?:
+                if val result_local = result:
                     self.builder = b
-                    result.unwrap()
+                    result_local
                 else:
                     val temp = b.new_temp(MirType.unit())
                     self.builder = b
@@ -353,8 +361,8 @@ impl MirLowering:
                 var b2 = self.builder
                 val call_result = b2.emit_call(func_op, arg_operands, MirType.i64())
                 self.builder = b2
-                if call_result.?:
-                    return call_result.unwrap()
+                if val call_local = call_result:
+                    return call_local
                 else:
                     return dest
 
@@ -378,8 +386,11 @@ impl MirLowering:
             val local = self.lower_expr(elem)
             operands = operands.push(mir_operand_copy(local))
 
-        val elem_type = if elements.len() > 0 and elements[0].type_.?:
-            self.lower_type(elements[0].type_.unwrap())
+        val elem_type = if elements.len() > 0:
+            if val first_type = elements[0].type_:
+                self.lower_type(first_type)
+            else:
+                MirType.i64()
         else:
             MirType.i64()
         val array_type = MirType(kind: MirTypeKind.Array(elem_type, elements.len()))
@@ -397,8 +408,8 @@ impl MirLowering:
         for elem in elements:
             val local = self.lower_expr(elem)
             operands = operands.push(mir_operand_copy(local))
-            val elem_ty = if elem.type_.?:
-                self.lower_type(elem.type_.unwrap())
+            val elem_ty = if val elem_type = elem.type_:
+                self.lower_type(elem_type)
             else:
                 MirType.i64()
             types = types.push(elem_ty)
@@ -416,8 +427,11 @@ impl MirLowering:
         Future optimization: emit direct Set.new() + insert() calls.
         """
         # Infer element type from first element, or default to i64
-        val elem_type = if elements.len() > 0 and elements[0].type_.?:
-            self.lower_type(elements[0].type_.unwrap())
+        val elem_type = if elements.len() > 0:
+            if val first_type = elements[0].type_:
+                self.lower_type(first_type)
+            else:
+                MirType.i64()
         else:
             MirType.i64()
 
