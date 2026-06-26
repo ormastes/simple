@@ -256,6 +256,12 @@ Evidence:
   `target_accuracy` or `final_accuracy` meeting the 90.0 threshold. Retry7 now
   propagates `target_accuracy` and `target_eval_reached` so normal acceptance
   cannot advance on empty or below-target eval files.
+- 2026-06-26 retry6 direct gate evidence: the retry6 checker now accepts
+  optional upstream attempt-record and cache-manifest paths for deterministic
+  verifier fixtures. `llm_finetune_retry6_training_eval_gate_spec.spl` proves a
+  checksum-matched retry5 cache still blocks below-target retry6 evals and only
+  reaches `TARGET_EVAL_REVIEW_REQUIRED` after deployable model plus
+  `target_accuracy>=90.0`; acceptance remains false pending normal review.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS
