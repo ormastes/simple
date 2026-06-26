@@ -30,13 +30,16 @@ fn _greek_latex(name: text) -> text:
     if name == "mu": return "\\mu"
     if name == "nu": return "\\nu"
     if name == "xi": return "\\xi"
+    if name == "Xi": return "\\Xi"
     if name == "pi": return "\\pi"
     if name == "Pi": return "\\Pi"
     if name == "rho": return "\\rho"
+    if name == "varrho": return "\\varrho"
     if name == "sigma": return "\\sigma"
     if name == "Sigma": return "\\Sigma"
     if name == "tau": return "\\tau"
     if name == "upsilon": return "\\upsilon"
+    if name == "Upsilon": return "\\Upsilon"
     if name == "phi": return "\\phi"
     if name == "Phi": return "\\Phi"
     if name == "chi": return "\\chi"
@@ -67,13 +70,16 @@ fn _greek_unicode(name: text) -> text:
     if name == "mu": return "μ"
     if name == "nu": return "ν"
     if name == "xi": return "ξ"
+    if name == "Xi": return "Ξ"
     if name == "pi": return "π"
     if name == "Pi": return "Π"
     if name == "rho": return "ρ"
+    if name == "varrho": return "ϱ"
     if name == "sigma": return "σ"
     if name == "Sigma": return "Σ"
     if name == "tau": return "τ"
     if name == "upsilon": return "υ"
+    if name == "Upsilon": return "Υ"
     if name == "phi": return "φ"
     if name == "Phi": return "Φ"
     if name == "chi": return "χ"
@@ -94,6 +100,7 @@ fn _known_fn_latex(name: text) -> text:
     if name == "exp": return "\\exp"
     if name == "log": return "\\log"
     if name == "ln": return "\\ln"
+    if name == "lim": return "\\lim"
     if name == "det": return "\\det"
     if name == "max": return "\\max"
     if name == "min": return "\\min"
@@ -173,7 +180,11 @@ fn _tokenise(src: text) -> [text]:
             var scanning_num = true
             while i < n and scanning_num:
                 val c2 = src[i]
-                if _is_digit(c2) or c2 == ".":
+                val c2_next = if i + 1 < n: src[i + 1] else: ""
+                if _is_digit(c2):
+                    num = num + c2
+                    i = i + 1
+                elif c2 == "." and c2_next != ".":
                     num = num + c2
                     i = i + 1
                 else:
@@ -205,10 +216,9 @@ fn _tokenise(src: text) -> [text]:
 # ============================================================================
 
 fn _peek(tokens: [text], pos: i64) -> text:
-    if pos < tokens.len():
-        tokens[pos]
-    else:
-        ""
+    if pos < 0 or pos >= tokens.len():
+        return ""
+    tokens[pos]
 
 fn _to_int(s: text) -> i64:
     var result = 0
@@ -325,6 +335,27 @@ fn _join_args(args: [text], from_idx: i64, to_idx: i64) -> text:
         i = i + 1
     s
 
+# Split a range string like "1..n" on ".." returning [from, to].
+# If no ".." found, returns [range, ""].
+fn _split_range(range: text) -> [text]:
+    val n = range.len()
+    var i = 0
+    while i < n - 1:
+        if range[i] == "." and range[i + 1] == ".":
+            var from_str = ""
+            var j = 0
+            while j < i:
+                from_str = from_str + range[j]
+                j = j + 1
+            var to_str = ""
+            j = i + 2
+            while j < n:
+                to_str = to_str + range[j]
+                j = j + 1
+            return [from_str, to_str]
+        i = i + 1
+    [range, ""]
+
 # ============================================================================
 # AST node encoding
 # AST nodes are encoded as tagged text strings.
@@ -350,14 +381,12 @@ fn _sub_latex(expr: text) -> text:
 fn _primary_latex(tokens: [text], pos: i64) -> [text]:
     val t = _peek(tokens, pos)
     if t == "":
-        return ["", "" + pos]
-
-    if t == "-":
-        val inner = _primary_latex(tokens, pos + 1)
-        return ["-" + inner[0], inner[1]]
+        return ["?", "" + pos]
 
     if t == "(":
         val pr = _collect_paren(tokens, pos + 1)
+        if pr[0] == "":
+            return ["?", pr[1]]
         val inner = _sub_latex(pr[0])
         return ["(" + inner + ")", pr[1]]
 
@@ -369,6 +398,8 @@ fn _primary_latex(tokens: [text], pos: i64) -> [text]:
             val num = _sub_latex(ar[0])
             val den = _sub_latex(ar[1])
             return ["\\frac{" + num + "}{" + den + "}", np]
+        elif al >= 2:
+            return ["\\frac{" + _sub_latex(ar[0]) + "}{?}", np]
         return ["\\frac{?}{?}", np]
 
     if t == "sqrt":
@@ -390,7 +421,7 @@ fn _primary_latex(tokens: [text], pos: i64) -> [text]:
         elif al >= 2:
             sub = "_{" + ar[0] + "}"
         val body_r = _primary_latex(tokens, npi)
-        if body_r[0] != "":
+        if body_r[0] != "" and body_r[0] != "?":
             return ["\\sum" + sub + " " + body_r[0], body_r[1]]
         return ["\\sum" + sub, np]
 
@@ -403,7 +434,7 @@ fn _primary_latex(tokens: [text], pos: i64) -> [text]:
         if al >= 3:
             sub = "_{" + _sub_latex(ar[1]) + "}"
         val body_r = _primary_latex(tokens, npi)
-        if body_r[0] != "":
+        if body_r[0] != "" and body_r[0] != "?":
             return ["\\int" + sub + " " + body_r[0], body_r[1]]
         return ["\\int" + sub, np]
 
@@ -413,11 +444,20 @@ fn _primary_latex(tokens: [text], pos: i64) -> [text]:
             val ar = _parse_args(tokens, pos + 1)
             val al = ar.len()
             val np = ar[al - 1]
-            val arg = if al >= 2: _sub_latex(ar[0]) else: ""
-            return [kfn + "(" + arg + ")", np]
+            var all_args_latex = ""
+            var ai = 0
+            while ai < al - 1:
+                if ar[ai] != "":
+                    if all_args_latex != "":
+                        all_args_latex = all_args_latex + ", "
+                    all_args_latex = all_args_latex + _sub_latex(ar[ai])
+                ai = ai + 1
+            return [kfn + "(" + all_args_latex + ")", np]
         return [kfn, "" + (pos + 1)]
 
     if _is_alpha(t[0]):
+        if t == "_":
+            return ["?", "" + (pos + 1)]
         val greek = _greek_latex(t)
         var base = if greek != "": greek else: t
         var p = pos + 1
@@ -429,13 +469,13 @@ fn _primary_latex(tokens: [text], pos: i64) -> [text]:
             val ar = _parse_args(tokens, p)
             val al = ar.len()
             val np = ar[al - 1]
-            # Render all args for LaTeX operatorname
             var all_args_latex = ""
             var ai = 0
             while ai < al - 1:
-                if all_args_latex != "":
-                    all_args_latex = all_args_latex + ", "
-                all_args_latex = all_args_latex + _sub_latex(ar[ai])
+                if ar[ai] != "":
+                    if all_args_latex != "":
+                        all_args_latex = all_args_latex + ", "
+                    all_args_latex = all_args_latex + _sub_latex(ar[ai])
                 ai = ai + 1
             return ["\\operatorname{" + t + "}(" + all_args_latex + ")", np]
         if _peek(tokens, p) == "'":
@@ -443,9 +483,15 @@ fn _primary_latex(tokens: [text], pos: i64) -> [text]:
             return [base + transpose_sup, "" + (p + 1)]
         return [base, "" + p]
 
-    return [t, "" + (pos + 1)]
+    if _is_digit(t[0]):
+        return [t, "" + (pos + 1)]
+    return ["?", "" + (pos + 1)]
 
 fn _power_latex(tokens: [text], pos: i64) -> [text]:
+    val t = _peek(tokens, pos)
+    if t == "-":
+        val inner = _power_latex(tokens, pos + 1)
+        return ["-" + inner[0], inner[1]]
     val left = _primary_latex(tokens, pos)
     val lp = _to_int(left[1])
     if _peek(tokens, lp) == "^":
@@ -467,6 +513,10 @@ fn _mul_latex(tokens: [text], pos: i64) -> [text]:
         elif op == "/":
             val right = _power_latex(tokens, p + 1)
             ls = ls + " / " + right[0]
+            p = _to_int(right[1])
+        elif op != "" and op != "+" and op != "-" and op != ")" and op != "," and op != "]" and (_is_alpha(op[0]) or op == "("):
+            val right = _power_latex(tokens, p)
+            ls = ls + " " + right[0]
             p = _to_int(right[1])
         else:
             cont = false
@@ -503,14 +553,12 @@ fn _sub_pretty(expr: text) -> text:
 fn _primary_pretty(tokens: [text], pos: i64) -> [text]:
     val t = _peek(tokens, pos)
     if t == "":
-        return ["", "" + pos]
-
-    if t == "-":
-        val inner = _primary_pretty(tokens, pos + 1)
-        return ["-" + inner[0], inner[1]]
+        return ["?", "" + pos]
 
     if t == "(":
         val pr = _collect_paren(tokens, pos + 1)
+        if pr[0] == "":
+            return ["?", pr[1]]
         return ["(" + _sub_pretty(pr[0]) + ")", pr[1]]
 
     if t == "frac":
@@ -519,6 +567,8 @@ fn _primary_pretty(tokens: [text], pos: i64) -> [text]:
         val np = ar[al - 1]
         if al >= 3:
             return ["(" + _sub_pretty(ar[0]) + ")/(" + _sub_pretty(ar[1]) + ")", np]
+        elif al >= 2:
+            return ["(" + _sub_pretty(ar[0]) + ")/?", np]
         return ["(?/?)", np]
 
     if t == "sqrt":
@@ -540,7 +590,7 @@ fn _primary_pretty(tokens: [text], pos: i64) -> [text]:
         elif al >= 2:
             sub = "(" + ar[0] + ")"
         val body_r = _primary_pretty(tokens, npi)
-        if body_r[0] != "":
+        if body_r[0] != "" and body_r[0] != "?":
             return ["∑" + sub + " " + body_r[0], body_r[1]]
         return ["∑" + sub, np]
 
@@ -553,7 +603,7 @@ fn _primary_pretty(tokens: [text], pos: i64) -> [text]:
         if al >= 3:
             sub = "(" + ar[0] + "=" + ar[1] + ")"
         val body_r = _primary_pretty(tokens, npi)
-        if body_r[0] != "":
+        if body_r[0] != "" and body_r[0] != "?":
             return ["∫" + sub + " " + body_r[0], body_r[1]]
         return ["∫" + sub, np]
 
@@ -563,11 +613,20 @@ fn _primary_pretty(tokens: [text], pos: i64) -> [text]:
             val ar = _parse_args(tokens, pos + 1)
             val al = ar.len()
             val np = ar[al - 1]
-            val arg = if al >= 2: _sub_pretty(ar[0]) else: ""
-            return [t + "(" + arg + ")", np]
+            var all_args_pretty = ""
+            var ai = 0
+            while ai < al - 1:
+                if ar[ai] != "":
+                    if all_args_pretty != "":
+                        all_args_pretty = all_args_pretty + ", "
+                    all_args_pretty = all_args_pretty + _sub_pretty(ar[ai])
+                ai = ai + 1
+            return [t + "(" + all_args_pretty + ")", np]
         return [t, "" + (pos + 1)]
 
     if _is_alpha(t[0]):
+        if t == "_":
+            return ["?", "" + (pos + 1)]
         val gu = _greek_unicode(t)
         var base = if gu != "": gu else: t
         var p = pos + 1
@@ -582,18 +641,25 @@ fn _primary_pretty(tokens: [text], pos: i64) -> [text]:
             var all_args_pretty = ""
             var ai = 0
             while ai < al - 1:
-                if all_args_pretty != "":
-                    all_args_pretty = all_args_pretty + ", "
-                all_args_pretty = all_args_pretty + _sub_pretty(ar[ai])
+                if ar[ai] != "":
+                    if all_args_pretty != "":
+                        all_args_pretty = all_args_pretty + ", "
+                    all_args_pretty = all_args_pretty + _sub_pretty(ar[ai])
                 ai = ai + 1
             return [t + "(" + all_args_pretty + ")", np]
         if _peek(tokens, p) == "'":
             return [base + "ᵀ", "" + (p + 1)]
         return [base, "" + p]
 
-    return [t, "" + (pos + 1)]
+    if _is_digit(t[0]):
+        return [t, "" + (pos + 1)]
+    return ["?", "" + (pos + 1)]
 
 fn _power_pretty(tokens: [text], pos: i64) -> [text]:
+    val t = _peek(tokens, pos)
+    if t == "-":
+        val inner = _power_pretty(tokens, pos + 1)
+        return ["-" + inner[0], inner[1]]
     val left = _primary_pretty(tokens, pos)
     val lp = _to_int(left[1])
     if _peek(tokens, lp) == "^":
@@ -618,6 +684,10 @@ fn _mul_pretty(tokens: [text], pos: i64) -> [text]:
         elif op == "/":
             val right = _power_pretty(tokens, p + 1)
             ls = ls + "/" + right[0]
+            p = _to_int(right[1])
+        elif op != "" and op != "+" and op != "-" and op != ")" and op != "," and op != "]" and (_is_alpha(op[0]) or op == "("):
+            val right = _power_pretty(tokens, p)
+            ls = ls + right[0]
             p = _to_int(right[1])
         else:
             cont = false
@@ -654,14 +724,12 @@ fn _sub_text(expr: text) -> text:
 fn _primary_text(tokens: [text], pos: i64) -> [text]:
     val t = _peek(tokens, pos)
     if t == "":
-        return ["", "" + pos]
-
-    if t == "-":
-        val inner = _primary_text(tokens, pos + 1)
-        return ["-" + inner[0], inner[1]]
+        return ["?", "" + pos]
 
     if t == "(":
         val pr = _collect_paren(tokens, pos + 1)
+        if pr[0] == "":
+            return ["?", pr[1]]
         return ["(" + _sub_text(pr[0]) + ")", pr[1]]
 
     if t == "frac":
@@ -670,6 +738,8 @@ fn _primary_text(tokens: [text], pos: i64) -> [text]:
         val np = ar[al - 1]
         if al >= 3:
             return [_sub_text(ar[0]) + " / " + _sub_text(ar[1]), np]
+        elif al >= 2:
+            return [_sub_text(ar[0]) + " / ?", np]
         return ["? / ?", np]
 
     if t == "sqrt":
@@ -687,12 +757,14 @@ fn _primary_text(tokens: [text], pos: i64) -> [text]:
         val npi = _to_int(np)
         var range_str = ""
         if al >= 3:
-            range_str = ar[1]
+            range_str = ar[0] + ", " + ar[1]
+        elif al >= 2:
+            range_str = ar[0]
         val body_r = _primary_text(tokens, npi)
         var out = "sum"
         if range_str != "":
             out = out + "(" + range_str + ")"
-        if body_r[0] != "":
+        if body_r[0] != "" and body_r[0] != "?":
             out = out + " " + body_r[0]
             return [out, body_r[1]]
         return [out, np]
@@ -704,12 +776,14 @@ fn _primary_text(tokens: [text], pos: i64) -> [text]:
         val npi = _to_int(np)
         var range_str = ""
         if al >= 3:
-            range_str = ar[1]
+            range_str = ar[0] + ", " + ar[1]
+        elif al >= 2:
+            range_str = ar[0]
         val body_r = _primary_text(tokens, npi)
         var out = "int"
         if range_str != "":
             out = out + "(" + range_str + ")"
-        if body_r[0] != "":
+        if body_r[0] != "" and body_r[0] != "?":
             out = out + " " + body_r[0]
             return [out, body_r[1]]
         return [out, np]
@@ -720,11 +794,20 @@ fn _primary_text(tokens: [text], pos: i64) -> [text]:
             val ar = _parse_args(tokens, pos + 1)
             val al = ar.len()
             val np = ar[al - 1]
-            val arg = if al >= 2: _sub_text(ar[0]) else: ""
-            return [t + "(" + arg + ")", np]
+            var all_args_text = ""
+            var ai = 0
+            while ai < al - 1:
+                if ar[ai] != "":
+                    if all_args_text != "":
+                        all_args_text = all_args_text + ", "
+                    all_args_text = all_args_text + _sub_text(ar[ai])
+                ai = ai + 1
+            return [t + "(" + all_args_text + ")", np]
         return [t, "" + (pos + 1)]
 
     if _is_alpha(t[0]):
+        if t == "_":
+            return ["?", "" + (pos + 1)]
         var base = t
         var p = pos + 1
         while _peek(tokens, p) == "[":
@@ -735,11 +818,11 @@ fn _primary_text(tokens: [text], pos: i64) -> [text]:
             val ar = _parse_args(tokens, p)
             val al = ar.len()
             val np = ar[al - 1]
-            # Render all args for to_text
             var args_rendered: [text] = []
             var ai = 0
             while ai < al - 1:
-                args_rendered.push(_sub_text(ar[ai]))
+                if ar[ai] != "":
+                    args_rendered.push(_sub_text(ar[ai]))
                 ai = ai + 1
             var args_str = ""
             var aj = 0
@@ -753,9 +836,15 @@ fn _primary_text(tokens: [text], pos: i64) -> [text]:
             return [base + "'", "" + (p + 1)]
         return [base, "" + p]
 
-    return [t, "" + (pos + 1)]
+    if _is_digit(t[0]):
+        return [t, "" + (pos + 1)]
+    return ["?", "" + (pos + 1)]
 
 fn _power_text(tokens: [text], pos: i64) -> [text]:
+    val t = _peek(tokens, pos)
+    if t == "-":
+        val inner = _power_text(tokens, pos + 1)
+        return ["-" + inner[0], inner[1]]
     val left = _primary_text(tokens, pos)
     val lp = _to_int(left[1])
     if _peek(tokens, lp) == "^":
@@ -819,14 +908,12 @@ fn _sub_debug(expr: text) -> text:
 fn _primary_debug(tokens: [text], pos: i64) -> [text]:
     val t = _peek(tokens, pos)
     if t == "":
-        return ["", "" + pos]
-
-    if t == "-":
-        val inner = _primary_debug(tokens, pos + 1)
-        return ["Neg(" + inner[0] + ")", inner[1]]
+        return ["?", "" + pos]
 
     if t == "(":
         val pr = _collect_paren(tokens, pos + 1)
+        if pr[0] == "":
+            return ["?", pr[1]]
         val inner = _sub_debug(pr[0])
         return ["Group(" + inner + ")", pr[1]]
 
@@ -838,6 +925,8 @@ fn _primary_debug(tokens: [text], pos: i64) -> [text]:
             val num = _sub_debug(ar[0])
             val den = _sub_debug(ar[1])
             return ["Frac(" + num + ", " + den + ")", np]
+        elif al >= 2:
+            return ["Frac(" + _sub_debug(ar[0]) + ", ?)", np]
         return ["Frac(?)", np]
 
     if t == "sqrt":
@@ -854,7 +943,14 @@ fn _primary_debug(tokens: [text], pos: i64) -> [text]:
         val np = ar[al - 1]
         val npi = _to_int(np)
         val body_r = _primary_debug(tokens, npi)
-        if body_r[0] != "":
+        if al >= 3:
+            val rp = _split_range(ar[1])
+            val from_d = _sub_debug(rp[0])
+            val to_d = _sub_debug(rp[1])
+            if body_r[0] != "" and body_r[0] != "?":
+                return ["Sum(" + ar[0] + ", " + from_d + ", " + to_d + ", " + body_r[0] + ")", body_r[1]]
+            return ["Sum(" + ar[0] + ", " + from_d + ", " + to_d + ")", np]
+        if body_r[0] != "" and body_r[0] != "?":
             return ["Sum(" + body_r[0] + ")", body_r[1]]
         return ["Sum()", np]
 
@@ -864,7 +960,14 @@ fn _primary_debug(tokens: [text], pos: i64) -> [text]:
         val np = ar[al - 1]
         val npi = _to_int(np)
         val body_r = _primary_debug(tokens, npi)
-        if body_r[0] != "":
+        if al >= 3:
+            val rp = _split_range(ar[1])
+            val from_d = _sub_debug(rp[0])
+            val to_d = _sub_debug(rp[1])
+            if body_r[0] != "" and body_r[0] != "?":
+                return ["Int(" + ar[0] + ", " + from_d + ", " + to_d + ", " + body_r[0] + ")", body_r[1]]
+            return ["Int(" + ar[0] + ", " + from_d + ", " + to_d + ")", np]
+        if body_r[0] != "" and body_r[0] != "?":
             return ["Int(" + body_r[0] + ")", body_r[1]]
         return ["Int()", np]
 
@@ -879,6 +982,8 @@ fn _primary_debug(tokens: [text], pos: i64) -> [text]:
         return ["Id(" + t + ")", "" + (pos + 1)]
 
     if _is_alpha(t[0]):
+        if t == "_":
+            return ["Id(?)", "" + (pos + 1)]
         var base = "Id(" + t + ")"
         var p = pos + 1
         while _peek(tokens, p) == "[":
@@ -894,18 +999,24 @@ fn _primary_debug(tokens: [text], pos: i64) -> [text]:
             var args_d = t
             var ai = 0
             while ai < al - 1:
-                val ad = _sub_debug(ar[ai])
-                args_d = args_d + ", " + ad
+                if ar[ai] != "":
+                    val ad = _sub_debug(ar[ai])
+                    args_d = args_d + ", " + ad
                 ai = ai + 1
             return ["Call(" + args_d + ")", np]
         if _peek(tokens, p) == "'":
-            return ["Transpose(Id(" + t + "))", "" + (p + 1)]
+            return ["Transpose(" + base + ")", "" + (p + 1)]
         return [base, "" + p]
 
-    # Number
-    return ["Num(" + t + ")", "" + (pos + 1)]
+    if _is_digit(t[0]):
+        return ["Num(" + t + ")", "" + (pos + 1)]
+    return ["Id(?)", "" + (pos + 1)]
 
 fn _power_debug(tokens: [text], pos: i64) -> [text]:
+    val t = _peek(tokens, pos)
+    if t == "-":
+        val inner = _power_debug(tokens, pos + 1)
+        return ["Neg(" + inner[0] + ")", inner[1]]
     val left = _primary_debug(tokens, pos)
     val lp = _to_int(left[1])
     if _peek(tokens, lp) == "^":
@@ -927,6 +1038,10 @@ fn _mul_debug(tokens: [text], pos: i64) -> [text]:
         elif op == "/":
             val right = _power_debug(tokens, p + 1)
             ls = "Div(" + ls + ", " + right[0] + ")"
+            p = _to_int(right[1])
+        elif op != "" and op != "+" and op != "-" and op != ")" and op != "," and op != "]" and (_is_alpha(op[0]) or op == "("):
+            val right = _power_debug(tokens, p)
+            ls = "Mul(" + ls + ", " + right[0] + ")"
             p = _to_int(right[1])
         else:
             cont = false
@@ -957,24 +1072,28 @@ fn _expr_debug(tokens: [text], pos: i64) -> [text]:
 
 # Render a math expression string to raw LaTeX.
 fn render_latex_raw(expr: text) -> text:
+    if expr == "": return "?"
     val tokens = _tokenise(expr)
     val r = _expr_latex(tokens, 0)
     r[0]
 
 # Render a math expression string to Unicode pretty print.
 fn to_pretty(expr: text) -> text:
+    if expr == "": return "?"
     val tokens = _tokenise(expr)
     val r = _expr_pretty(tokens, 0)
     r[0]
 
 # Render a math expression string to normalised plain text.
 fn to_text(expr: text) -> text:
+    if expr == "": return "?"
     val tokens = _tokenise(expr)
     val r = _expr_text(tokens, 0)
     r[0]
 
 # Render a math expression string to an AST debug description.
 fn to_debug(expr: text) -> text:
+    if expr == "": return "?"
     val tokens = _tokenise(expr)
     val r = _expr_debug(tokens, 0)
     r[0]
