@@ -354,13 +354,13 @@ Runtime-adjacent decision record:
 - `doc/06_spec/test/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
 - `doc/06_spec/test/unit/app/llm_runtime/vllm_control_cli_spec.md`
 
-The runtime exposes an in-process control response helper,
-`llm_runtime_control_cli_response(argv)`, that accepts explicit action,
-base-model, endpoint, pid, and local resource flags and emits public JSONL
-through the same runtime control decision boundary as the dashboard. It is
-intentionally not registered as a top-level `simple llm-runtime-control`
-command yet: direct app `main()`/argv execution returned blank non-usage output
-under the current runner, while the in-process response surface is covered.
+The runtime exposes `control_cli.spl`, which accepts explicit action,
+base-model, endpoint, pid, and local resource flags and emits public JSONL. The
+in-process helper `llm_runtime_control_cli_response(argv)` is covered for
+operator/agent callers, and direct app execution through
+`simple run src/app/llm_runtime/control_cli.spl -- ...` emits JSONL. The source
+CLI dispatcher also registers `llm-runtime-control`; the prebuilt release
+binary will expose `simple llm-runtime-control` after rebuild.
 
 This slice also removed post-construction evidence mutation from
 `serve_plan`, `live_request_plan`, `live_environment`, and
@@ -373,10 +373,10 @@ Runtime-adjacent decision record:
   through the web dashboard.
 - `facade_checked`: runtime pure control decision API and existing serve/request
   planning evidence APIs.
-- `chosen_path`: expose an in-process response helper first; defer top-level
-  CLI registration until direct runner argv/main behavior is proven.
-- `rejected_shortcuts`: shipping a top-level command that emits blank output,
-  shelling out to dashboard routes, or adding raw process/runtime shortcuts.
+- `chosen_path`: expose direct app execution plus source CLI dispatch through
+  the runtime owner; release-binary proof waits for rebuild.
+- `rejected_shortcuts`: shelling out to dashboard routes, importing dashboard
+  process/HTTP paths, or adding raw process/runtime shortcuts.
 
 ## Implemented Torch Readiness Slice
 

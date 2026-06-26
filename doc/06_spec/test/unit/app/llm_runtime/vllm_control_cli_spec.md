@@ -27,7 +27,7 @@ vllm_control_cli_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -73,6 +73,24 @@ val response = llm_runtime_control_cli_response(["llm-runtime-control", "--actio
 expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
+expect(response.split("nil").len()).to_equal(1)
+```
+
+</details>
+
+#### accepts direct app separator arguments
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val response = llm_runtime_control_cli_response(["simple", "run", "src/app/llm_runtime/control_cli.spl", "--", "--action", "preflight", "--base-model", "base-model", "--endpoint", "http://127.0.0.1:8000/v1", "--vllm-available", "--gpu-available"])
+
+expect(response).to_contain("\"status\":\"planned\"")
+expect(response).to_contain("\"endpoint\":\"configured\"")
 expect(response.split("nil").len()).to_equal(1)
 ```
 
@@ -133,8 +151,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

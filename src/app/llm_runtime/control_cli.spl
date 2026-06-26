@@ -1,5 +1,4 @@
-use app.llm_runtime.manifest.{llm_runtime_manifest}
-use app.llm_runtime.dashboard_live_control.{llm_runtime_execute_dashboard_control, llm_runtime_dashboard_control_execution_jsonl_event}
+extern fn rt_cli_get_args() -> [text]
 
 pub class LlmRuntimeControlCliOptions:
     action: text
@@ -68,9 +67,7 @@ pub fn llm_runtime_control_cli_response(argv: [text]) -> text:
     val opts = llm_runtime_control_cli_options(argv)
     if opts.status == "usage":
         return "{\"event\":\"llm_runtime_vllm_control_cli\",\"status\":\"usage\",\"reason\":\"" + opts.reason + "\"}\n"
-    val manifest = llm_runtime_manifest(opts.base_model, opts.endpoint, "", [], "disabled")
-    val result = llm_runtime_execute_dashboard_control(manifest, opts.action, opts.pid, opts.vllm_available, opts.gpu_available)
-    llm_runtime_dashboard_control_execution_jsonl_event(result)
+    _control_cli_execution_jsonl(opts)
 
 pub fn llm_runtime_control_cli_run(argv: [text]) -> i64:
     val response = llm_runtime_control_cli_response(argv)
@@ -78,6 +75,104 @@ pub fn llm_runtime_control_cli_run(argv: [text]) -> i64:
     if response.contains("\"status\":\"usage\""):
         return 2
     0
+
+fn main() -> i64:
+    llm_runtime_control_cli_run(rt_cli_get_args())
+
+fn _control_cli_execution_jsonl(opts: LlmRuntimeControlCliOptions) -> text:
+    val action = opts.action.trim().to_lower()
+    if action == "preflight":
+        return _control_cli_preflight_jsonl(action, opts)
+    if action == "start":
+        val environment_reason = _control_cli_environment_reason(opts.vllm_available, opts.gpu_available)
+        if environment_reason != "local_vllm_gpu_ready":
+            return _jsonl(action, "skipped", environment_reason, -1, "not_started", "not_checked", "not_fetched", "environment_skipped", 0, -1, -1)
+        val serve_reason = _control_cli_serve_reason(opts)
+        if serve_reason != "static_serve_plan_only":
+            return _jsonl(action, "not_started", serve_reason, -1, "not_started", "not_checked", "not_fetched", "serve_not_planned", 0, -1, -1)
+        return _jsonl(action, "planned", "live_executor_required", -1, "not_started", "not_checked", "not_fetched", "probe_not_run", 0, -1, -1)
+    if action == "poll":
+        if opts.pid <= 0:
+            return _jsonl(action, "not_ready", "invalid_pid", opts.pid, "not_running", "not_checked", "not_fetched", "poll_not_run", 0, -1, -1)
+        return _jsonl(action, "planned", "live_executor_required", opts.pid, "unknown_until_polled", "not_checked", "not_fetched", "probe_not_run", 0, -1, -1)
+    if action == "probe":
+        val environment_reason = _control_cli_environment_reason(opts.vllm_available, opts.gpu_available)
+        if environment_reason != "local_vllm_gpu_ready":
+            return _jsonl(action, "skipped", environment_reason, opts.pid, "not_started", "not_checked", "not_fetched", "environment_skipped", 0, -1, -1)
+        if opts.pid <= 0:
+            return _jsonl(action, "not_ready", "invalid_pid", opts.pid, "not_running", "not_checked", "not_fetched", "probe_not_run", 0, -1, -1)
+        val endpoint_status = _control_cli_endpoint_status(opts.endpoint)
+        val models_reason = _control_cli_models_plan_reason(endpoint_status)
+        if models_reason != "live_request_plan_only":
+            return _jsonl(action, "not_ready", models_reason, opts.pid, "unknown_until_polled", endpoint_status, "not_fetched", "models_probe_not_planned", 0, -1, -1)
+        return _jsonl(action, "planned", "live_executor_required", opts.pid, "unknown_until_polled", endpoint_status, "not_fetched", "probe_not_run", 0, -1, -1)
+    if action == "stop":
+        if opts.pid <= 0:
+            return _jsonl(action, "not_stopped", "invalid_pid", opts.pid, "not_running", "not_checked", "not_fetched", "stop_only", 0, -1, opts.pid)
+        return _jsonl(action, "planned", "live_executor_required", opts.pid, "unknown_until_polled", "not_checked", "not_fetched", "stop_only", 0, -1, -1)
+    _jsonl(action, "rejected", "unknown_action", opts.pid, "not_checked", "not_checked", "not_fetched", "action_not_supported", 0, -1, -1)
+
+fn _control_cli_preflight_jsonl(action: text, opts: LlmRuntimeControlCliOptions) -> text:
+    val environment_reason = _control_cli_environment_reason(opts.vllm_available, opts.gpu_available)
+    if environment_reason != "local_vllm_gpu_ready":
+        return _jsonl(action, "skipped", environment_reason, -1, "not_started", "not_checked", "not_fetched", "environment_skipped", 0, -1, -1)
+    val serve_reason = _control_cli_serve_reason(opts)
+    if serve_reason != "static_serve_plan_only":
+        return _jsonl(action, "not_started", serve_reason, -1, "not_started", "not_checked", "not_fetched", "serve_not_planned", 0, -1, -1)
+    val endpoint_status = _control_cli_endpoint_status(opts.endpoint)
+    val models_reason = _control_cli_models_plan_reason(endpoint_status)
+    if models_reason != "live_request_plan_only":
+        return _jsonl(action, "not_ready", models_reason, -1, "not_started", endpoint_status, "not_fetched", "models_probe_not_planned", 0, -1, -1)
+    _jsonl(action, "planned", "serve_and_models_probe_planned", -1, "not_started", endpoint_status, "not_fetched", "probe_not_run", 0, -1, -1)
+
+fn _control_cli_environment_reason(vllm_available: bool, gpu_available: bool) -> text:
+    if vllm_available and gpu_available:
+        return "local_vllm_gpu_ready"
+    if not vllm_available and not gpu_available:
+        return "missing_local_vllm_and_gpu"
+    if not vllm_available:
+        return "missing_local_vllm"
+    "missing_local_gpu"
+
+fn _control_cli_serve_reason(opts: LlmRuntimeControlCliOptions) -> text:
+    if opts.base_model.trim() == "":
+        return "missing_base_model"
+    val endpoint_status = _control_cli_endpoint_status(opts.endpoint)
+    if endpoint_status == "missing":
+        return "missing_endpoint"
+    if endpoint_status == "invalid":
+        return "invalid_endpoint"
+    "static_serve_plan_only"
+
+fn _control_cli_endpoint_status(endpoint: text) -> text:
+    val value = endpoint.trim()
+    if value == "":
+        return "missing"
+    if value.starts_with("http://") or value.starts_with("https://"):
+        if value.contains(" "):
+            return "invalid"
+        return "configured"
+    "invalid"
+
+fn _control_cli_models_plan_reason(endpoint_status: text) -> text:
+    if endpoint_status == "missing":
+        return "missing_endpoint"
+    if endpoint_status == "invalid":
+        return "invalid_endpoint"
+    "live_request_plan_only"
+
+fn _jsonl(action: text, status: text, reason: text, pid: i64, running_status: text, endpoint_status: text, models_status: text, models_reason: text, http_status: i64, started_pid: i64, stopped_pid: i64) -> text:
+    "{\"event\":\"llm_runtime_vllm_dashboard_control_execution\",\"action\":\"" + action +
+        "\",\"status\":\"" + status +
+        "\",\"reason\":\"" + reason +
+        "\",\"pid\":" + pid.to_text() +
+        ",\"running\":\"" + running_status +
+        "\",\"endpoint\":\"" + endpoint_status +
+        "\",\"models_status\":\"" + models_status +
+        "\",\"models_reason\":\"" + models_reason +
+        "\",\"http_status\":" + http_status.to_text() +
+        ",\"started_pid\":" + started_pid.to_text() +
+        ",\"stopped_pid\":" + stopped_pid.to_text() + "}\n"
 
 export LlmRuntimeControlCliOptions
 export llm_runtime_control_cli_options, llm_runtime_control_cli_response, llm_runtime_control_cli_run
