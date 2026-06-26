@@ -43,20 +43,34 @@ impl RunFilter:
 
     fn matches(summary: RunSummary) -> bool:
         """Check if a run summary matches this filter."""
-        if self.status.? and summary.status != self.status.unwrap():
-            return false
-        if self.tag.?:
-            val target_tag = self.tag.unwrap()
-            var found = false
-            for t in summary.tags:
-                if t == target_tag:
-                    found = true
-            if not found:
-                return false
-        if self.after.? and summary.start_time < self.after.unwrap():
-            return false
-        if self.before.? and summary.start_time > self.before.unwrap():
-            return false
+        match self.status:
+            case Some(target_status):
+                if summary.status != target_status:
+                    return false
+            case None:
+                pass_do_nothing
+        match self.tag:
+            case Some(target_tag):
+                var found = false
+                for t in summary.tags:
+                    if t == target_tag:
+                        found = true
+                if not found:
+                    return false
+            case None:
+                pass_do_nothing
+        match self.after:
+            case Some(after_time):
+                if summary.start_time < after_time:
+                    return false
+            case None:
+                pass_do_nothing
+        match self.before:
+            case Some(before_time):
+                if summary.start_time > before_time:
+                    return false
+            case None:
+                pass_do_nothing
         true
 
 # ============================================================================
@@ -142,14 +156,14 @@ struct MetricDiff:
 pub fn diff_runs(run_id_a: text, run_id_b: text) -> Result<DiffResult, text>:
     """Compare two runs: config diff + metric diff."""
     val detail_a = show_run(run_id_a)
-    if detail_a.is_err():
-        return Err(detail_a.unwrap_err())
     val detail_b = show_run(run_id_b)
-    if detail_b.is_err():
-        return Err(detail_b.unwrap_err())
 
-    val a = detail_a.unwrap()
-    val b = detail_b.unwrap()
+    val a = match detail_a:
+        case Ok(detail): detail
+        case Err(err): return Err(err)
+    val b = match detail_b:
+        case Ok(detail): detail
+        case Err(err): return Err(err)
 
     # Config diff
     var config_diffs: [ConfigDiff] = []
@@ -185,19 +199,22 @@ pub fn best_run(metric_name: text, direction: text) -> RunSummary?:
         val detail = show_run(summary.run_id)
         if detail.is_err():
             continue
-        val d = detail.unwrap()
+        val d = match detail:
+            case Ok(value): value
+            case Err(_): continue
         val last = last_metric_value(d.metrics, metric_name)
-        if not last.?:
-            continue
-        val v = last.unwrap()
-        if not best_value.?:
-            best = Some(summary)
-            best_value = Some(v)
-        else:
-            val is_better = match direction:
-                case "minimize": v < best_value.unwrap()
-                case _: v > best_value.unwrap()
-            if is_better:
+        val v = match last:
+            case Some(value): value
+            case None: continue
+        match best_value:
+            case Some(current_best):
+                val is_better = match direction:
+                    case "minimize": v < current_best
+                    case _: v > current_best
+                if is_better:
+                    best = Some(summary)
+                    best_value = Some(v)
+            case None:
                 best = Some(summary)
                 best_value = Some(v)
     best
