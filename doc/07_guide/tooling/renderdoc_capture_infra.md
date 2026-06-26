@@ -422,6 +422,10 @@ magic in the first four artifact bytes. Env metadata that merely claims
 `rdoc_capture_magic=RDOC` is not completion proof; `env_file_status=pass` plus
 `artifact_file_status=missing` means the diagnostic env exists but the native
 capture artifact still has not been produced. If the Linux compare env is
+missing, `linux_vulkan_render_log_compare_pairwise_status=missing` names the
+missing direct-run pixel-comparison row. `artifact_magic=missing` means no
+native capture artifact was available to inspect, and `artifact_magic=invalid`
+means an artifact exists but its first four bytes are not `RDOC`. If the Linux compare env is
 absent, the aggregate reports each Simple/Chrome/Electron RenderDoc source as
 `status=unavailable`, `env_file_status=missing`, and
 `artifact_file_status=missing` instead of leaving those detail rows blank. Set

@@ -532,7 +532,7 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_st
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_reason=gate-command-failed")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=missing")
-expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=missing")
 val chrome_log = file_read("build/test-linux-vulkan-render-log-rdoc-reason/out/chrome.srl.env")
 expect(chrome_log).to_contain("simple_render_log_status=fail")
 expect(chrome_log).to_contain("simple_render_log_reason=gate-command-failed")
@@ -652,7 +652,7 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=renderdoc-ch
 expect(evidence).to_contain("linux_vulkan_render_log_compare_blocked_gates=renderdoc-chrome-rdc")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_status=fail")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass")
-expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=invalid")
 val chrome_log = file_read("build/test-linux-vulkan-render-log-rdoc-spoof/out/chrome.srl.env")
 expect(chrome_log).to_contain("simple_render_log_status=fail")
 expect(chrome_log).to_contain("simple_render_log_artifact_magic=")
@@ -715,7 +715,7 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_reason=missing-source-env")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_env_file_status=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=missing")
-expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=missing")
 ```
 
 </details>

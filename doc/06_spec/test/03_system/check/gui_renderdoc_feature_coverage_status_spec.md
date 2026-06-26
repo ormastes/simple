@@ -385,7 +385,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 931 lines folded for reproduction.
+Runnable source: 932 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -468,15 +468,16 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_required_api=vulkan
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_simple_status=unavailable")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_simple_env_file_status=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status=missing")
-expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_pairwise_status=missing")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_status=unavailable")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=missing")
-expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_status=unavailable")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_env_file_status=missing")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=missing")
-expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_status=")
 expect(evidence).to_contain("macos_metal_render_log_compare_required_api=metal")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_status=")
