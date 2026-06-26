@@ -27,7 +27,7 @@ tauri_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -72,6 +72,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
 
 - Complete Tauri layout proof JSON validates and emits normalized
   `tauri_simple_web_layout_*` rows.
+- Large checksum and weighted-checksum values compare as exact decimal integer
+  text, not rounded JavaScript numbers.
 - Malformed `frame_us` fails closed instead of relying on shell integer
   comparison behavior.
 - Blur/tolerance use, missing ARGB capture, malformed mismatch counts, and
@@ -114,6 +116,39 @@ expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_written=true"
 expect(evidence).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=false")
 expect(evidence).to_contain("tauri_simple_web_layout_expected_profile=webkitgtk")
 expect(evidence).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=12")
+```
+
+</details>
+
+#### rejects large checksum values that differ past JavaScript number precision
+
+-  proof command
+   - Expected: code equals `1`
+- Assert decimal integer text is preserved for large checksum proof
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-layout-validator-large-checksum"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "p.checksum=\"9007199254740993\";p.expected_checksum=\"9007199254740992\";p.weighted_checksum=\"18014398509481985\";p.expected_weighted_checksum=\"18014398509481985\"") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Assert decimal integer text is preserved for large checksum proof")
+expect(evidence).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=checksum-mismatch")
+expect(evidence).to_contain("tauri_simple_web_layout_tauri_checksum=9007199254740993")
+expect(evidence).to_contain("tauri_simple_web_layout_simple_checksum=9007199254740992")
+expect(evidence).to_contain("tauri_simple_web_layout_tauri_weighted_checksum=18014398509481985")
+expect(evidence).to_contain("tauri_simple_web_layout_simple_weighted_checksum=18014398509481985")
 ```
 
 </details>
@@ -274,8 +309,8 @@ expect(script).to_contain("status=divergent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

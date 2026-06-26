@@ -10,15 +10,29 @@ function emit(key, value) {
   console.log(`${key}=${clean(value)}`);
 }
 
-function numberValue(value) {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
-  if (typeof value === 'string' && value.trim() !== '') return Number(value);
-  return NaN;
+function decimalIntegerText(value) {
+  if (typeof value === 'number' && Number.isInteger(value)) return String(value);
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'string' && /^-?[0-9]+$/.test(value.trim())) return value.trim();
+  return null;
+}
+
+function sameInteger(left, right) {
+  const l = decimalIntegerText(left);
+  const r = decimalIntegerText(right);
+  if (l === null || r === null) return false;
+  return BigInt(l) === BigInt(r);
 }
 
 function integerAtLeast(value, min) {
-  const n = numberValue(value);
-  return Number.isInteger(n) && n >= min;
+  const text = decimalIntegerText(value);
+  if (text === null) return false;
+  return BigInt(text) >= BigInt(min);
+}
+
+function integerTextOrClean(value) {
+  const text = decimalIntegerText(value);
+  return text === null ? clean(value) : text;
 }
 
 const proofPath = process.argv[2];
@@ -37,28 +51,20 @@ try {
   process.exit(1);
 }
 
-const checksum = numberValue(proof.checksum);
-const expectedChecksum = numberValue(proof.expected_checksum);
-const weighted = numberValue(proof.weighted_checksum);
-const expectedWeighted = numberValue(proof.expected_weighted_checksum);
-const mismatchCount = numberValue(proof.mismatch_count);
-const frameUs = numberValue(proof.frame_us);
-const overlayPixelCount = numberValue(proof.expected_overlay_pixel_count);
-
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
   reason = 'blur-or-tolerance-not-allowed';
-} else if (!Number.isFinite(checksum) || !Number.isFinite(expectedChecksum)) {
+} else if (decimalIntegerText(proof.checksum) === null || decimalIntegerText(proof.expected_checksum) === null) {
   reason = 'missing-checksum-proof';
-} else if (checksum !== expectedChecksum) {
+} else if (!sameInteger(proof.checksum, proof.expected_checksum)) {
   reason = 'checksum-mismatch';
-} else if (!Number.isFinite(weighted) || !Number.isFinite(expectedWeighted)) {
+} else if (decimalIntegerText(proof.weighted_checksum) === null || decimalIntegerText(proof.expected_weighted_checksum) === null) {
   reason = 'missing-weighted-checksum-proof';
-} else if (weighted !== expectedWeighted) {
+} else if (!sameInteger(proof.weighted_checksum, proof.expected_weighted_checksum)) {
   reason = 'weighted-checksum-mismatch';
-} else if (!Number.isInteger(mismatchCount)) {
+} else if (decimalIntegerText(proof.mismatch_count) === null) {
   reason = 'malformed-mismatch-count';
-} else if (mismatchCount !== 0) {
+} else if (!sameInteger(proof.mismatch_count, 0)) {
   reason = 'pixel-mismatch';
 } else if (proof.captured_argb_written !== true) {
   reason = 'missing-captured-argb';
@@ -66,21 +72,21 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-tauri-timing';
 } else if (typeof proof.expected_profile !== 'string' || proof.expected_profile === '') {
   reason = 'missing-expected-profile';
-} else if (!Number.isInteger(overlayPixelCount) || overlayPixelCount < 0) {
+} else if (!integerAtLeast(proof.expected_overlay_pixel_count, 0)) {
   reason = 'malformed-expected-overlay-pixel-count';
 }
 
 emit('tauri_simple_web_layout_validation_status', reason === 'pass' ? 'pass' : 'fail');
 emit('tauri_simple_web_layout_validation_reason', reason);
-emit('tauri_simple_web_layout_simple_checksum', Number.isFinite(expectedChecksum) ? expectedChecksum : '');
-emit('tauri_simple_web_layout_tauri_checksum', Number.isFinite(checksum) ? checksum : '');
-emit('tauri_simple_web_layout_simple_weighted_checksum', Number.isFinite(expectedWeighted) ? expectedWeighted : '');
-emit('tauri_simple_web_layout_tauri_weighted_checksum', Number.isFinite(weighted) ? weighted : '');
-emit('tauri_simple_web_layout_mismatch_count', Number.isFinite(mismatchCount) ? mismatchCount : clean(proof.mismatch_count));
+emit('tauri_simple_web_layout_simple_checksum', integerTextOrClean(proof.expected_checksum));
+emit('tauri_simple_web_layout_tauri_checksum', integerTextOrClean(proof.checksum));
+emit('tauri_simple_web_layout_simple_weighted_checksum', integerTextOrClean(proof.expected_weighted_checksum));
+emit('tauri_simple_web_layout_tauri_weighted_checksum', integerTextOrClean(proof.weighted_checksum));
+emit('tauri_simple_web_layout_mismatch_count', integerTextOrClean(proof.mismatch_count));
 emit('tauri_simple_web_layout_blur_or_tolerance_used', proof.blur_or_tolerance_used === false ? 'false' : clean(proof.blur_or_tolerance_used));
 emit('tauri_simple_web_layout_expected_profile', clean(proof.expected_profile));
-emit('tauri_simple_web_layout_expected_overlay_pixel_count', Number.isFinite(overlayPixelCount) ? overlayPixelCount : clean(proof.expected_overlay_pixel_count));
-emit('tauri_simple_web_layout_tauri_frame_us', Number.isFinite(frameUs) ? frameUs : clean(proof.frame_us));
+emit('tauri_simple_web_layout_expected_overlay_pixel_count', integerTextOrClean(proof.expected_overlay_pixel_count));
+emit('tauri_simple_web_layout_tauri_frame_us', integerTextOrClean(proof.frame_us));
 emit('tauri_simple_web_layout_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
 
 if (reason !== 'pass') {
