@@ -1336,6 +1336,20 @@ pub fn rt_getpid(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(std::process::id() as i64))
 }
 
+/// Host target architecture code for backend selection:
+/// 0 = x86_64, 1 = aarch64, 2 = riscv64. Unknown architectures fall back to 0
+/// (the compiler's default host target), keeping the result in the 0..=2 range
+/// the backend selector expects.
+pub fn rt_get_host_target_code(_args: &[Value]) -> Result<Value, CompileError> {
+    let code = match std::env::consts::ARCH {
+        "x86_64" => 0,
+        "aarch64" | "arm64" => 1,
+        "riscv64" => 2,
+        _ => 0,
+    };
+    Ok(Value::Int(code))
+}
+
 /// Check if a process with given PID exists
 pub fn rt_process_exists(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
