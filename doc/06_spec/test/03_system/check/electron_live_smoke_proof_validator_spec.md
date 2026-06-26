@@ -27,7 +27,7 @@ electron_live_smoke_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -83,6 +83,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 - Requested capture viewport dimensions must be explicit decimal integers; the
   proof validator must not accept exponent or fractional notation as a capture
   size contract.
+- The proof must carry the Electron bridge live-smoke source marker so a
+  generic hand-authored JSON object cannot stand in for the renderer bridge
+  probe.
 - The live smoke shell wrapper delegates JSON validation to the proof validator.
 
 ## Scenarios
@@ -99,7 +102,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -115,6 +118,7 @@ step("Inspect normalized Electron live smoke proof rows")
 expect(evidence).to_contain("electron_live_smoke_validation_status=pass")
 expect(evidence).to_contain("electron_live_smoke_validation_reason=pass")
 expect(evidence).to_contain("electron_live_smoke_target=electron")
+expect(evidence).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
 expect(evidence).to_contain("electron_live_smoke_width=1280")
 expect(evidence).to_contain("electron_live_smoke_body_html_length=64")
 expect(evidence).to_contain("electron_live_smoke_css_length=12")
@@ -162,6 +166,43 @@ expect(html).to_contain("electron_live_smoke_validation_reason=missing-render-ht
 expect(css).to_contain("electron_live_smoke_validation_reason=missing-render-css")
 expect(css).to_contain("electron_live_smoke_css_length=0")
 expect(text).to_contain("electron_live_smoke_validation_reason=missing-rendered-text")
+```
+
+</details>
+
+#### rejects proof without the Electron bridge live-smoke source marker
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm live smoke proof must identify the Electron bridge probe
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-live-smoke-validator-source"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/missing.json", "delete p.proof_source") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/missing.json 1280 720 > " + root + "/missing.env; " +
+    _proof_command(root + "/wrong.json", "p.proof_source=\"tools/manual/proof.json\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/wrong.json 1280 720 > " + root + "/wrong.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing = file_read(root + "/missing.env")
+val wrong = file_read(root + "/wrong.env")
+step("Confirm live smoke proof must identify the Electron bridge probe")
+expect(missing).to_contain("electron_live_smoke_validation_status=fail")
+expect(missing).to_contain("electron_live_smoke_validation_reason=unexpected-proof-source")
+expect(missing).to_contain("electron_live_smoke_proof_source=")
+expect(wrong).to_contain("electron_live_smoke_validation_status=fail")
+expect(wrong).to_contain("electron_live_smoke_validation_reason=unexpected-proof-source")
+expect(wrong).to_contain("electron_live_smoke_proof_source=tools/manual/proof.json")
 ```
 
 </details>
@@ -394,7 +435,7 @@ expect(fractional).to_contain("electron_live_smoke_height=720")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -404,6 +445,7 @@ val envelopes = file_read("src/app/ui.electron/bridge_envelopes.js")
 expect(wrapper).to_contain("validate-electron-live-smoke-proof.js")
 expect(wrapper).to_contain("electron_live_smoke=pass proof=$PROOF_PATH validation=$VALIDATION_ENV")
 expect(bridge).to_contain("electronLiveSmokeProofScript")
+expect(bridge).to_contain("proof_source: 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript'")
 expect(bridge).to_contain("performance_now_available")
 expect(bridge).to_contain("animation_frame_count")
 expect(bridge).to_contain("css_animation_probe")
@@ -417,8 +459,8 @@ expect(envelopes).to_contain("css_length")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

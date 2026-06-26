@@ -62,12 +62,15 @@ const expectedWidthText = decimalIntegerText(widthText);
 const expectedHeightText = decimalIntegerText(heightText);
 const expectedWidth = expectedWidthText === null ? NaN : Number(expectedWidthText);
 const expectedHeight = expectedHeightText === null ? NaN : Number(expectedHeightText);
+const expectedProofSource = 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript';
 
 let reason = 'pass';
 if (proof.target !== 'electron') {
   reason = 'unexpected-target';
 } else if (proof.surface_id !== 'main') {
   reason = 'unexpected-surface';
+} else if (proof.proof_source !== expectedProofSource) {
+  reason = 'unexpected-proof-source';
 } else if (!Number.isInteger(expectedWidth) || expectedWidth < 1 || proof.width !== expectedWidth) {
   reason = 'unexpected-width';
 } else if (!Number.isInteger(expectedHeight) || expectedHeight < 1 || proof.height !== expectedHeight) {
@@ -100,6 +103,7 @@ emit('electron_live_smoke_validation_status', reason === 'pass' ? 'pass' : 'fail
 emit('electron_live_smoke_validation_reason', reason);
 emit('electron_live_smoke_target', proof.target);
 emit('electron_live_smoke_surface_id', proof.surface_id);
+emit('electron_live_smoke_proof_source', proof.proof_source);
 emit('electron_live_smoke_width', jsonIntegerTextOrBlank(proof.width));
 emit('electron_live_smoke_height', jsonIntegerTextOrBlank(proof.height));
 emit('electron_live_smoke_body_html_length', jsonIntegerTextOrBlank(proof.body_html_length));

@@ -209,6 +209,7 @@ function electronLiveSmokeProofScript() {
                 var style = window.getComputedStyle(animationProbe);
                 var text = appEl ? (appEl.textContent || '') : '';
                 var proof = Object.assign({}, envelope, {
+                    proof_source: 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript',
                     app_element_present: !!appEl,
                     body_text_length: text.length,
                     body_text_sample: text.slice(0, 120),

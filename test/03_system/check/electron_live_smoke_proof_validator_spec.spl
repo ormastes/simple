@@ -34,6 +34,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 - Requested capture viewport dimensions must be explicit decimal integers; the
   proof validator must not accept exponent or fractional notation as a capture
   size contract.
+- The proof must carry the Electron bridge live-smoke source marker so a
+  generic hand-authored JSON object cannot stand in for the renderer bridge
+  probe.
 - The live smoke shell wrapper delegates JSON validation to the proof validator.
 """
 
@@ -43,7 +46,7 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={target:\"electron\",surface_id:\"main\",width:1280,height:720,body_html_length:64,css_length:12,app_element_present:true,body_text_length:23,body_text_sample:\"Hello World from Web!\",performance_now_available:true,performance_now_delta_ms:1.25,animation_frame_available:true,animation_frame_count:2,css_animation_probe:true,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const p={target:\"electron\",surface_id:\"main\",proof_source:\"src/app/ui.electron/bridge.js:electronLiveSmokeProofScript\",width:1280,height:720,body_html_length:64,css_length:12,app_element_present:true,body_text_length:23,body_text_sample:\"Hello World from Web!\",performance_now_available:true,performance_now_delta_ms:1.25,animation_frame_available:true,animation_frame_count:2,css_animation_probe:true,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Electron live smoke proof validator":
 
@@ -60,6 +63,7 @@ describe "Electron live smoke proof validator":
         expect(evidence).to_contain("electron_live_smoke_validation_status=pass")
         expect(evidence).to_contain("electron_live_smoke_validation_reason=pass")
         expect(evidence).to_contain("electron_live_smoke_target=electron")
+        expect(evidence).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
         expect(evidence).to_contain("electron_live_smoke_width=1280")
         expect(evidence).to_contain("electron_live_smoke_body_html_length=64")
         expect(evidence).to_contain("electron_live_smoke_css_length=12")
@@ -90,6 +94,26 @@ describe "Electron live smoke proof validator":
         expect(css).to_contain("electron_live_smoke_validation_reason=missing-render-css")
         expect(css).to_contain("electron_live_smoke_css_length=0")
         expect(text).to_contain("electron_live_smoke_validation_reason=missing-rendered-text")
+
+    it "rejects proof without the Electron bridge live-smoke source marker":
+        val root = "build/test-electron-live-smoke-validator-source"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/missing.json", "delete p.proof_source") +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/missing.json 1280 720 > " + root + "/missing.env; " +
+            _proof_command(root + "/wrong.json", "p.proof_source=\"tools/manual/proof.json\"") +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/wrong.json 1280 720 > " + root + "/wrong.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val missing = file_read(root + "/missing.env")
+        val wrong = file_read(root + "/wrong.env")
+        step("Confirm live smoke proof must identify the Electron bridge probe")
+        expect(missing).to_contain("electron_live_smoke_validation_status=fail")
+        expect(missing).to_contain("electron_live_smoke_validation_reason=unexpected-proof-source")
+        expect(missing).to_contain("electron_live_smoke_proof_source=")
+        expect(wrong).to_contain("electron_live_smoke_validation_status=fail")
+        expect(wrong).to_contain("electron_live_smoke_validation_reason=unexpected-proof-source")
+        expect(wrong).to_contain("electron_live_smoke_proof_source=tools/manual/proof.json")
 
     it "rejects forged rendered text counters without the live smoke text sample":
         val root = "build/test-electron-live-smoke-validator-text-sample"
@@ -227,6 +251,7 @@ describe "Electron live smoke proof validator":
         expect(wrapper).to_contain("validate-electron-live-smoke-proof.js")
         expect(wrapper).to_contain("electron_live_smoke=pass proof=$PROOF_PATH validation=$VALIDATION_ENV")
         expect(bridge).to_contain("electronLiveSmokeProofScript")
+        expect(bridge).to_contain("proof_source: 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript'")
         expect(bridge).to_contain("performance_now_available")
         expect(bridge).to_contain("animation_frame_count")
         expect(bridge).to_contain("css_animation_probe")
