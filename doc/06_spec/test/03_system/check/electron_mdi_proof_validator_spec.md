@@ -27,7 +27,7 @@ electron_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,9 +80,10 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
 - Performance and animation pass require `performance.now()`, an explicit
   positive timing delta, at least two animation frames, and a CSS animation
   probe. A zero delta does not prove distinct timing samples.
-- Event counts, bridge frame counts, taskbar counts, image counts, and animation
-  frame counts must be decimal integers; fractional counts are not valid
-  routed-event or full-frame proof.
+- Event counts, bridge frame counts, taskbar counts, image counts, animation
+  frame counts, and performance timing deltas must be real JSON numbers;
+  stringified or fractional values are not valid routed-event or full-frame
+  proof.
 
 ## Scenarios
 
@@ -396,6 +397,71 @@ expect(animation.contains("electron_mdi_animation_frame_count=2.5")).to_equal(fa
 
 </details>
 
+#### rejects stringified numeric event performance and animation proof values
+
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm stringified numeric evidence is not accepted as live Electron MDI proof
+   - Expected: window does not contain `electron_mdi_window_count=4`
+   - Expected: bridge does not contain `electron_mdi_bridge_ipc_frame_count=8`
+   - Expected: performance does not contain `electron_mdi_performance_now_delta_ms=16.7`
+   - Expected: animation does not contain `electron_mdi_animation_frame_count=2`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 39 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-mdi-validator-string-numbers"
+val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
+    _proof_command(root + "/window.json", "p.count=\"4\"") +
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/window.json build/electron-proof/screen.png > " + root + "/window.env; " +
+    _proof_command(root + "/bridge.json", "p.bridgeIpcFrameCount=\"8\"") +
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/bridge.json build/electron-proof/screen.png > " + root + "/bridge.env; " +
+    _proof_command(root + "/taskbar.json", "p.taskbarItemCount=\"4\"") +
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/taskbar.json build/electron-proof/screen.png > " + root + "/taskbar.env; " +
+    _proof_command(root + "/performance.json", "p.performanceNowDeltaMs=\"16.7\"") +
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/performance.json build/electron-proof/screen.png > " + root + "/performance.env; " +
+    _proof_command(root + "/animation.json", "p.animationFrameCount=\"2\"") +
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/animation.json build/electron-proof/screen.png > " + root + "/animation.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val window = file_read(root + "/window.env")
+val bridge = file_read(root + "/bridge.env")
+val taskbar = file_read(root + "/taskbar.env")
+val performance = file_read(root + "/performance.env")
+val animation = file_read(root + "/animation.env")
+step("Confirm stringified numeric evidence is not accepted as live Electron MDI proof")
+expect(window).to_contain("electron_mdi_json_proof=fail")
+expect(window).to_contain("electron_mdi_json_proof_reason=event-contract-missing:count")
+expect(window).to_contain("electron_mdi_window_count=")
+expect(window.contains("electron_mdi_window_count=4")).to_equal(false)
+expect(bridge).to_contain("electron_mdi_json_proof=fail")
+expect(bridge).to_contain("bridgeIpcFrameCount")
+expect(bridge).to_contain("electron_mdi_bridge_ipc_frame_count=")
+expect(bridge.contains("electron_mdi_bridge_ipc_frame_count=8")).to_equal(false)
+expect(taskbar).to_contain("electron_mdi_json_proof=fail")
+expect(taskbar).to_contain("taskbarItemCount")
+expect(performance).to_contain("electron_mdi_json_proof=fail")
+expect(performance).to_contain("electron_mdi_json_proof_reason=performance-contract-missing:performanceNowDeltaMs")
+expect(performance).to_contain("electron_mdi_performance_now_delta_ms=")
+expect(performance.contains("electron_mdi_performance_now_delta_ms=16.7")).to_equal(false)
+expect(animation).to_contain("electron_mdi_json_proof=fail")
+expect(animation).to_contain("electron_mdi_json_proof_reason=animation-contract-missing:animationFrameCount")
+expect(animation).to_contain("electron_mdi_animation_frame_count=")
+expect(animation.contains("electron_mdi_animation_frame_count=2")).to_equal(false)
+```
+
+</details>
+
 #### keeps the live Electron producer and shell wrapper wired to timing proof
 
 <details>
@@ -419,8 +485,8 @@ expect(wrapper).to_contain("validate-electron-mdi-proof.js")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

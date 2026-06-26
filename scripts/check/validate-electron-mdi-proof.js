@@ -10,38 +10,35 @@ function emit(key, value) {
   console.log(`${key}=${clean(value)}`);
 }
 
-function decimalIntegerText(value) {
+function jsonIntegerText(value) {
   if (typeof value === 'number' && Number.isInteger(value)) return String(value);
-  if (typeof value === 'bigint') return value.toString();
-  if (typeof value === 'string' && /^-?[0-9]+$/.test(value.trim())) return value.trim();
   return null;
 }
 
-function decimalNumberText(value) {
+function jsonNumberText(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  if (typeof value === 'string' && /^-?(?:[0-9]+)(?:\.[0-9]+)?$/.test(value.trim())) return value.trim();
   return null;
 }
 
-function integerAtLeast(value, required) {
-  const text = decimalIntegerText(value);
+function jsonIntegerAtLeast(value, required) {
+  const text = jsonIntegerText(value);
   if (text === null) return false;
   return BigInt(text) >= BigInt(required);
 }
 
-function decimalGreaterThan(value, required) {
-  const text = decimalNumberText(value);
+function jsonDecimalGreaterThan(value, required) {
+  const text = jsonNumberText(value);
   if (text === null) return false;
   return Number(text) > required;
 }
 
-function integerTextOrBlank(value) {
-  const text = decimalIntegerText(value);
+function jsonIntegerTextOrBlank(value) {
+  const text = jsonIntegerText(value);
   return text === null ? '' : text;
 }
 
-function decimalTextOrBlank(value) {
-  const text = decimalNumberText(value);
+function jsonDecimalTextOrBlank(value) {
+  const text = jsonNumberText(value);
   return text === null ? '' : text;
 }
 
@@ -62,9 +59,9 @@ try {
 }
 
 const eventChecks = {
-  count: integerAtLeast(proof.count, 4),
+  count: jsonIntegerAtLeast(proof.count, 4),
   hasDesktop: proof.hasDesktop === true,
-  imageCount: integerAtLeast(proof.imageCount, 1),
+  imageCount: jsonIntegerAtLeast(proof.imageCount, 1),
   hasDragRuntime: proof.hasDragRuntime === true,
   hasDragEvents: proof.hasDragEvents === true,
   dragMoved: proof.dragMoved === true,
@@ -77,7 +74,7 @@ const eventChecks = {
   trafficMinimizeRouted: proof.trafficMinimizeRouted === true,
   trafficMaximizeRouted: proof.trafficMaximizeRouted === true,
   trafficCloseRouted: proof.trafficCloseRouted === true,
-  bridgeIpcFrameCount: integerAtLeast(proof.bridgeIpcFrameCount, 8),
+  bridgeIpcFrameCount: jsonIntegerAtLeast(proof.bridgeIpcFrameCount, 8),
   bridgeBodyActionFrameRouted: proof.bridgeBodyActionFrameRouted === true,
   bridgeBodyInputFrameRouted: proof.bridgeBodyInputFrameRouted === true,
   bridgeBodyKeyFrameRouted: proof.bridgeBodyKeyFrameRouted === true,
@@ -86,8 +83,8 @@ const eventChecks = {
   bridgeMinimizeFrameRouted: proof.bridgeMinimizeFrameRouted === true,
   bridgeMaximizeFrameRouted: proof.bridgeMaximizeFrameRouted === true,
   bridgeCloseFrameRouted: proof.bridgeCloseFrameRouted === true,
-  taskbarItemCount: integerAtLeast(proof.taskbarItemCount, 4),
-  taskbarIconCount: integerAtLeast(proof.taskbarIconCount, 4),
+  taskbarItemCount: jsonIntegerAtLeast(proof.taskbarItemCount, 4),
+  taskbarIconCount: jsonIntegerAtLeast(proof.taskbarIconCount, 4),
   taskbarIconsVisible: proof.taskbarIconsVisible === true,
   taskbarLabelsVisible: proof.taskbarLabelsVisible === true,
   htmlRenderable: proof.htmlRenderable === true,
@@ -118,11 +115,11 @@ const captureChecks = {
 };
 const performanceChecks = {
   performanceNowAvailable: proof.performanceNowAvailable === true,
-  performanceNowDeltaMs: decimalGreaterThan(proof.performanceNowDeltaMs, 0),
+  performanceNowDeltaMs: jsonDecimalGreaterThan(proof.performanceNowDeltaMs, 0),
 };
 const animationChecks = {
   animationFrameAvailable: proof.animationFrameAvailable === true,
-  animationFrameCount: integerAtLeast(proof.animationFrameCount, 2),
+  animationFrameCount: jsonIntegerAtLeast(proof.animationFrameCount, 2),
   cssAnimationProbe: proof.cssAnimationProbe === true,
 };
 
@@ -152,12 +149,12 @@ emit('electron_mdi_event_status', eventFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_capture_status', captureFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_performance_status', performanceFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_animation_status', animationFailed.length ? 'fail' : 'pass');
-emit('electron_mdi_window_count', integerTextOrBlank(proof.count));
-emit('electron_mdi_bridge_ipc_frame_count', integerTextOrBlank(proof.bridgeIpcFrameCount));
+emit('electron_mdi_window_count', jsonIntegerTextOrBlank(proof.count));
+emit('electron_mdi_bridge_ipc_frame_count', jsonIntegerTextOrBlank(proof.bridgeIpcFrameCount));
 emit('electron_mdi_performance_now_available', proof.performanceNowAvailable === true ? 'true' : 'false');
-emit('electron_mdi_performance_now_delta_ms', decimalTextOrBlank(proof.performanceNowDeltaMs));
+emit('electron_mdi_performance_now_delta_ms', jsonDecimalTextOrBlank(proof.performanceNowDeltaMs));
 emit('electron_mdi_animation_frame_available', proof.animationFrameAvailable === true ? 'true' : 'false');
-emit('electron_mdi_animation_frame_count', integerTextOrBlank(proof.animationFrameCount));
+emit('electron_mdi_animation_frame_count', jsonIntegerTextOrBlank(proof.animationFrameCount));
 emit('electron_mdi_css_animation_probe', proof.cssAnimationProbe === true ? 'true' : 'false');
 emit('electron_mdi_screenshot_path_matches', proof.screenshotPath === screenshotPath ? 'true' : 'false');
 emit('electron_mdi_screenshot_file_status', screenshotStat !== null && screenshotStat.isFile() ? 'pass' : 'fail');
