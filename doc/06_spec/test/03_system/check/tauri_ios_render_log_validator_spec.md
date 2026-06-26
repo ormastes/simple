@@ -27,7 +27,7 @@ tauri_ios_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -84,6 +84,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
   cannot hide a missing render-log source artifact.
 - Failure markers such as eval failures fail closed even when render and Metal
   markers are present.
+- The iOS renderer wrapper keeps render-log, Metal, MDI event/capture,
+  performance, and animation diagnostic rows on early unavailable/fail exits.
 - The iOS renderer wrapper, mobile aggregate, and Tauri shell source are wired
   to the validator contract.
 
@@ -399,12 +401,63 @@ expect(evidence).to_contain("ios_render_log_failure_marker_status=fail")
 
 </details>
 
+#### keeps iOS render-log and MDI diagnostics on early wrapper exits
+
+- Confirm early iOS wrapper exits preserve normalized render-log and MDI diagnostics
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-ios-render-wrapper-early-exit"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "SIMPLE_BIN=" + root + "/missing-simple sh scripts/check/check-tauri-ios-mobile-renderer-evidence.shs > " + root + "/stdout.env 2> " + root + "/stderr.log; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm early iOS wrapper exits preserve normalized render-log and MDI diagnostics")
+expect(evidence).to_contain("ios_render_log_status=")
+expect(evidence).to_contain("ios_layout_status=")
+expect(evidence).to_contain("ios_metal_log_status=")
+expect(evidence).to_contain("ios_render_log_validation_status=")
+expect(evidence).to_contain("ios_render_log_validation_reason=")
+expect(evidence).to_contain("ios_render_log_requested_source_count=0")
+expect(evidence).to_contain("ios_render_log_source_count=0")
+expect(evidence).to_contain("ios_render_log_missing_source_count=0")
+expect(evidence).to_contain("ios_render_log_source_coherence_status=")
+expect(evidence).to_contain("ios_render_log_marker_status=")
+expect(evidence).to_contain("ios_render_log_html_len=")
+expect(evidence).to_contain("ios_render_log_metal_marker_status=")
+expect(evidence).to_contain("ios_render_log_tauri_context_status=")
+expect(evidence).to_contain("ios_render_log_metal_context_status=")
+expect(evidence).to_contain("ios_render_log_failure_marker_status=")
+expect(evidence).to_contain("ios_mdi_proof_status=")
+expect(evidence).to_contain("ios_mdi_proof_requested_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
+expect(evidence).to_contain("ios_mdi_render_status=")
+expect(evidence).to_contain("ios_mdi_event_status=")
+expect(evidence).to_contain("ios_mdi_capture_status=")
+expect(evidence).to_contain("ios_mdi_performance_status=")
+expect(evidence).to_contain("ios_mdi_performance_now_delta_ms=")
+expect(evidence).to_contain("ios_mdi_animation_status=")
+expect(evidence).to_contain("ios_mdi_animation_frame_count=")
+expect(evidence).to_contain("ios_mdi_css_animation_probe=")
+```
+
+</details>
+
 #### keeps the iOS renderer wrappers and Tauri shell wired to the validator
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -413,6 +466,8 @@ val aggregate = file_read("scripts/check/check-tauri-mobile-renderer-parity-evid
 val tauri = file_read("tools/tauri-shell/src-tauri/src/lib.rs")
 expect(direct).to_contain("validate-tauri-ios-render-log-proof.js")
 expect(direct).to_contain("ios_render_log.validation.env")
+expect(direct).to_contain("emit_unavailable_ios_diagnostics")
+expect(direct).to_contain("ios_mdi_animation_frame_count")
 expect(aggregate).to_contain("TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_requested_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_count")
@@ -435,8 +490,8 @@ expect(tauri).to_contain("metal_layer=CAMetalLayer")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
