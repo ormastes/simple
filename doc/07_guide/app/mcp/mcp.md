@@ -1,6 +1,6 @@
 # MCP Server Setup and Usage
 
-The Simple MCP (Model Context Protocol) server currently provides 108 tools, 3
+The Simple MCP (Model Context Protocol) server currently provides 151 tools, 3
 resources, and 2 prompts for code intelligence, debugging, build, VCS,
 analysis, and UI access -- accessible from Claude Code and Claude Desktop.
 
@@ -284,7 +284,7 @@ bin/simple_mcp_server
 | `simple_completions` | Completions | file, line |
 | `simple_type_at` | Type at position | file, line |
 
-### Analysis (5 tools)
+### Analysis (6 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -292,6 +292,7 @@ bin/simple_mcp_server
 | `simple_dependencies` | Dependency graph |
 | `simple_api_diff` | API surface diff (required: file) |
 | `simple_context` | Context pack (required: file) |
+| `simple_ponytail` | Over-engineering audit or simplification report |
 | `simple_search` | Code search (required: query) |
 
 `simple_context` shares the `src/app/context` implementation with the CLI. The
@@ -316,6 +317,13 @@ select explicit columns, count, ordered rows, and simple `LIKE`. It is not a
 general SQL planner. Public context output must render explicit statuses such
 as `ready`, `empty_query`, `no_matches`, or `unavailable`; it must not expose the
 internal absence marker.
+
+`simple_ponytail` reuses the shared Ponytail audit rules used by the CLI-facing
+helpers. It accepts `file`, optional `format` (`text`, `markdown`, or `json`),
+and optional `mode`: `audit` returns the default over-engineering audit, while
+`simplification` returns concrete cut/replace suggestions. JSON responses expose
+both `audit` and `report` fields so older audit clients and newer generic report
+clients can read the same result.
 
 ### UI Access (11 tools)
 

@@ -32,8 +32,9 @@ Tasks:
 1. Implement local context generation/stats. Status: done.
 2. Add focused absence-rendering tests. Status: done.
 3. Route `simple context` dispatch to the Simple app instead of the Rust
-   fallback. Status: done in source and debug-driver smoke; release artifact
-   needs rebuild before the checked-in release binary shows it.
+   fallback. Status: done; the checked-in Linux release binary help now shows
+   the Simple context CLI flags including `--index`, `--query`, `--sql`, and
+   `--db`.
 4. Generate manuals and normalize canonical paths. Status: manual docs added.
 5. Run direct-env/runtime guard. Status: passed.
 6. Remove shell-backed file I/O. Status: done; context helpers now use
@@ -84,8 +85,10 @@ Evidence:
 - `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 32/32.
 - `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 22/22.
 - `test/01_unit/app/tooling/context_generate_spec.spl` and
-  `test/unit/app/tooling/context_generate_spec.spl` both pass 7/7 cleanly
-  after narrowing fixture imports away from broad `app.io.mod`.
+  `test/unit/app/tooling/context_generate_spec.spl` both pass 13/13 cleanly
+  after narrowing fixture imports away from broad `app.io.mod`, adding local
+  index/query coverage, SQL index/query coverage, and exact character-budget
+  token estimate coverage.
 - `test/01_unit/app/tooling/ponytail_audit_spec.spl` and
   `test/unit/app/tooling/ponytail_audit_spec.spl` both pass 6/6 cleanly
   after narrowing fixture imports away from broad `app.io.mod`.
@@ -109,6 +112,8 @@ Normal-review fixes:
   `std.common.ponytail.audit`.
 - Updated stale MCP inventory and CLI/MCP completeness counts for
   `simple_ponytail`.
+- Updated the MCP operator guide so the Analysis table lists `simple_ponytail`
+  and documents `audit` / `simplification` mode behavior.
 - Removed the contradictory runner diagnostic from context/ponytail unit specs
   by importing `app.io.context_ops` and `std.io_runtime` directly instead of
   the broad `app.io.mod` compatibility shim.
@@ -188,8 +193,8 @@ Evidence:
 
 - `simple check` passed for context helper, CLI/export files, and mirrored
   context specs.
-- `test/01_unit/app/tooling/context_generate_spec.spl` passed with 10/10.
-- `test/unit/app/tooling/context_generate_spec.spl` passed with 10/10.
+- `test/01_unit/app/tooling/context_generate_spec.spl` passed with 13/13.
+- `test/unit/app/tooling/context_generate_spec.spl` passed with 13/13.
 
 ## Lane 6: Embedded SQL Context Backend
 
@@ -260,6 +265,9 @@ Tasks:
 3. Render text and HTML panel summaries with explicit absence text. Status:
    done.
 4. Add focused mirrored unit coverage. Status: done.
+5. Update the MCP operator guide for `simple_context` and `simple_ponytail`.
+   Status: done; `doc/07_guide/app/mcp/mcp.md` documents context index/query,
+   SQL/`--db`, absence statuses, and Ponytail `audit`/`simplification` modes.
 5. Wire the tooling panel into the authenticated web dashboard diagnostics view
    when a source path is configured. Status: done.
 
