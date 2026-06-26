@@ -116,6 +116,10 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
      - `test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl`
        passes with authenticated `/agents` readback, blank-session redirect,
        absence-safe output, and shell link coverage.
+     - 2026-06-26 public manual hardening: the `/agents` system spec now uses
+       helper/count-based absence assertions, and both generated manuals were
+       refreshed so public expected-code snippets do not expose the internal
+       absence marker.
      - `test/03_system/feature/app/web_dashboard/web_dashboard_server_spec.spl`
        passes after updating stale login-module source contracts to the current
        minimal router/auth behavior.
