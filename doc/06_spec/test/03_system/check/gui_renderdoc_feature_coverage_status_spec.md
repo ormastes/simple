@@ -2041,7 +2041,7 @@ expect(evidence).to_contain("production GUI/web raw Metal readback evidence")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2090,7 +2090,9 @@ expect(evidence).to_contain("external_renderdoc_required_html_path_suffix=test/f
 expect(evidence).to_contain("electron_renderdoc_gate_status=unavailable")
 expect(evidence).to_contain("electron_renderdoc_gate_reason=missing-source-evidence")
 expect(evidence).to_contain("blocked_completion_gate=Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof")
-expect(evidence).to_contain("blocked_completion_gates=Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof")
+val electron_required_blocked_gates = _value_of(evidence, "blocked_completion_gates")
+expect(electron_required_blocked_gates).to_contain("Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof")
+expect(electron_required_blocked_gates).to_contain("Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof")
 expect(evidence).to_contain("gui_renderdoc_feature_coverage_status=incomplete")
 expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-electron-widget-renderdoc")
 ```
@@ -2114,7 +2116,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 201 lines folded for reproduction.
+Runnable source: 203 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2143,11 +2145,13 @@ expect(setup_script).to_contain("browser_target_gpu_info_status")
 expect(setup_script).to_contain("gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_status")
 val aggregate_script = file_read("scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
 expect(aggregate_script).to_contain("default_simple_renderdoc_env = \"build/gui-web-2d-vulkan-env-renderdoc-simple/renderdoc/simple/evidence.env\"")
+expect(aggregate_script).to_contain("default_widget_simple_renderdoc_env = \"build/renderdoc/widget-probe-small/simple/evidence.env\"")
 expect(aggregate_script.contains("default_simple_renderdoc_env = \"build/gui-web-2d-vulkan-env-renderdoc-simple-explicit-layer-owner-env/renderdoc/simple/evidence.env\"")).to_be(false)
 expect(aggregate_script).to_contain("default_chrome_renderdoc_env = \"build/renderdoc/chrome-display-helper/evidence.env\"")
 expect(aggregate_script.contains("default_chrome_renderdoc_env = \"build/renderdoc/chrome-display-helper/html/evidence.env\"")).to_be(false)
 expect(aggregate_script).to_contain("def path_fingerprint(value: str) -> str:")
 expect(aggregate_script).to_contain("hashlib.sha256(data).hexdigest()")
+expect(aggregate_script).to_contain("RDOC_WIDGET_SIMPLE_EVIDENCE_ENV")
 expect(aggregate_script).to_contain("path_fingerprint(os.environ.get(\"RDOC_ELECTRON_HTML_EVIDENCE_ENV\", default_electron_renderdoc_env))")
 expect(aggregate_script).to_contain("\"RDOC_ELECTRON_HTML_EVIDENCE_ENV\": os.environ.get(\"RDOC_ELECTRON_HTML_EVIDENCE_ENV\", default_electron_renderdoc_env)")
 val renderdoc_common = file_read("scripts/lib/renderdoc-evidence-common.shs")
