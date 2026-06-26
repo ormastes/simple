@@ -208,3 +208,31 @@ Evidence:
 Next normal-LLM work: complete retry5 licensed cache/checksum evidence before
 running retry6 training. Do not synthesize model/eval artifacts or accept the
 attempt without real evidence.
+
+## 2026-06-26 Retry7 Normal Acceptance Gate
+
+Retry attempt `llm_backed_app_server_dry_run_retry7` now exists as the normal
+acceptance-review gate after retry6. It is intentionally not accepted: retry6
+has not produced a real model manifest, target eval, accepted decision, safety
+review, deployment evidence, or app handoff evidence.
+
+Evidence:
+
+- `.spipe/llm-finetune-process/scripts/check_retry7_acceptance_gate.shs
+  llm_backed_app_server_dry_run_retry7` reports
+  `upstream_retry6_result=BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY`,
+  `training_allowed=false`, `model_manifest_exists=false`,
+  `eval_result_exists=false`, `acceptance_allowed=false`, and
+  `STATUS: WARN retry7-acceptance-gate`.
+- `test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl`
+  verifies the retry7 script, attempt record, `fine-tune-status`, and
+  `fine-tune-ready` behavior while keeping public output internal-marker-free.
+- Generated manuals exist at
+  `doc/06_spec/test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.md`
+  and
+  `doc/06_spec/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.md`.
+
+Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
+real training/eval before retry7 can become an acceptance gate with a PASS
+result. Do not synthesize model/eval artifacts or record an accepted decision
+without real evidence.

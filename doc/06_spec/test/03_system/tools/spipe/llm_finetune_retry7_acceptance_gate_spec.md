@@ -43,10 +43,11 @@ Retry7 is a normal-review acceptance gate for the SPipe LLM fine-tune process. I
 | Feature IDs | #SP-FINETUNE-RETRY7-001 |
 | Category | Tooling |
 | Difficulty | 2/5 |
-| Status | Draft |
+| Status | Implemented |
 | Requirements | doc/02_requirements/language/tools/spipe_llm_finetune_process.md |
 | Plan | doc/03_plan/ml/spipe_llm_finetune_process.md |
 | Design | doc/05_design/app/spipe/spipe_llm_finetune_process.md |
+| Research | doc/01_research/app/editor/spipe_llm_finetune_process.md |
 | Source | `test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -56,6 +57,87 @@ Retry7 is a normal-review acceptance gate for the SPipe LLM fine-tune process. I
 Retry7 is a normal-review acceptance gate for the SPipe LLM fine-tune process.
 It must remain blocked until retry6 has real training, target evaluation,
 license, safety, deployment, app handoff, and accepted-decision evidence.
+
+## Syntax
+
+The direct retry7 gate command is:
+
+```bash
+.spipe/llm-finetune-process/scripts/check_retry7_acceptance_gate.shs \
+  llm_backed_app_server_dry_run_retry7
+```
+
+The public SPipe status surfaces are:
+
+```bash
+node examples/05_stdlib/spipe/cli/spipe.js fine-tune-status \
+  llm_backed_app_server_dry_run_retry7
+node examples/05_stdlib/spipe/cli/spipe.js fine-tune-ready \
+  llm_backed_app_server_dry_run_retry7
+```
+
+## Examples
+
+Current expected gate state is blocked, not accepted. A healthy blocked retry7
+run reports:
+
+- `training_allowed=false`
+- `model_manifest_exists=false`
+- `eval_result_exists=false`
+- `acceptance_allowed=false`
+- `STATUS: WARN retry7-acceptance-gate`
+
+The fine-tune status command must surface the same gate as a warning so the
+operator sees that retry7 exists but still needs retry6 model/eval evidence.
+The ready command must fail until target eval, accepted decision, license,
+safety, deployment, and app handoff evidence all exist.
+
+## Public Absence Policy
+
+Retry7 output must not expose the internal absence marker. Missing model,
+evaluation, safety, deployment, or decision evidence is reported as explicit
+status text such as `false`, `pending`, `not-run`, or `not-deployable`.
+
+## Workflow
+
+1. Run retry5 review handoff and confirm licensed cache/checksum evidence is
+   PASS before retry6 can train.
+2. Run retry6 training/eval gate and confirm it reports target eval and model
+   manifest evidence before asking retry7 for acceptance.
+3. Run retry7 acceptance gate only as a review surface. It reads retry6 state
+   and the retry7 attempt record; it does not train, download data, or create
+   model artifacts.
+4. If retry7 reports `BLOCKED_RETRY6_NOT_READY`, continue retry5 or retry6.
+   Do not edit retry7 to bypass the missing evidence.
+5. If retry7 reports `BLOCKED_NORMAL_ACCEPTANCE_REVIEW`, normal LLM review must
+   inspect target eval, license, safety, deployment, and app handoff evidence
+   before any accepted decision is recorded.
+6. Only a retry7 PASS may be cited by release handoff, and only when the
+   accepted decision and all upstream evidence are concrete.
+
+## Non-Acceptance Checklist
+
+Retry7 must remain WARN when any of these are true:
+
+- retry6 training is not allowed
+- retry6 model manifest is absent
+- retry6 target eval result is absent
+- retry7 decision is not `accepted`
+- safety evaluation remains `not-run`
+- deployment evidence remains `not-deployable`
+- license constraints remain `pending`
+
+These conditions are deliberately explicit so the pipeline fails closed. A
+missing artifact never becomes an implicit success, and a syntactic attempt
+record never substitutes for model quality or deployment evidence.
+
+## Operator Notes
+
+The retry7 spec exercises three surfaces because each catches a different
+failure mode. The shell gate proves the low-level review decision. The
+`fine-tune-status` command proves SPipe registry integration. The
+`fine-tune-ready` command proves release readiness remains failed while model
+and decision evidence are missing.
 
 ## Scenarios
 
@@ -84,7 +166,7 @@ expect(executable_code).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -98,8 +180,7 @@ expect(output).to_contain("eval_result_exists=false")
 expect(output).to_contain("acceptance_allowed=false")
 expect(output).to_contain("result=BLOCKED_RETRY6_NOT_READY")
 expect(output).to_contain("STATUS: WARN retry7-acceptance-gate")
-val contains_nil = output.contains("nil")
-expect(contains_nil).to_equal(false)
+expect(output.split("nil").len()).to_equal(1)
 ```
 
 </details>
@@ -109,7 +190,7 @@ expect(contains_nil).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -122,8 +203,7 @@ expect(output).to_contain("training_scripts=present")
 expect(output).to_contain("data_check_execution=warn")
 expect(output).to_contain("data_check_status=\"STATUS: WARN retry7-acceptance-gate\"")
 expect(output).to_contain("STATUS: WARN llm-finetune-status")
-val contains_nil = output.contains("nil")
-expect(contains_nil).to_equal(false)
+expect(output.split("nil").len()).to_equal(1)
 ```
 
 </details>
@@ -133,7 +213,7 @@ expect(contains_nil).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -144,8 +224,7 @@ expect(output).to_contain("model_artifact_created=pending")
 expect(output).to_contain("target_eval_reached=pending")
 expect(output).to_contain("decision_accepted=pending")
 expect(output).to_contain("STATUS: FAIL llm-finetune-ready")
-val contains_nil = output.contains("nil")
-expect(contains_nil).to_equal(false)
+expect(output.split("nil").len()).to_equal(1)
 ```
 
 </details>
@@ -166,6 +245,7 @@ expect(contains_nil).to_equal(false)
 - **Requirements:** [doc/02_requirements/language/tools/spipe_llm_finetune_process.md](doc/02_requirements/language/tools/spipe_llm_finetune_process.md)
 - **Plan:** [doc/03_plan/ml/spipe_llm_finetune_process.md](doc/03_plan/ml/spipe_llm_finetune_process.md)
 - **Design:** [doc/05_design/app/spipe/spipe_llm_finetune_process.md](doc/05_design/app/spipe/spipe_llm_finetune_process.md)
+- **Research:** [doc/01_research/app/editor/spipe_llm_finetune_process.md](doc/01_research/app/editor/spipe_llm_finetune_process.md)
 
 
 </details>
