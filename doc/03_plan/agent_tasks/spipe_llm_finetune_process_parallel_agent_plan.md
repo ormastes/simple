@@ -274,6 +274,10 @@ Evidence:
   `required_accuracy`, `target_eval_reached`, and `acceptance_allowed`. The
   retry6 system spec covers the consolidated report so normal review handoff
   does not need to rerun the shell checker to see why retry6 is blocked.
+- 2026-06-26 readiness gate hardening: `fine-tune-ready` now runs safe
+  repo-local checkers, prints `data_check_gate_ready`, and fails until the data
+  checker reports PASS. Retry6 and retry7 system specs cover the release gate
+  so registry rows alone cannot bypass WARN cache/training/acceptance checks.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS
