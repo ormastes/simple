@@ -284,13 +284,16 @@ absence-safe operator notice. The MCP assistant store also exposes
 `assistant_store_prune_session_retention(...)`, which applies the durable side
 of the same policy by rewriting persisted timeline and notification JSONL files
 to bounded tails. The result reports retained/dropped counts and preserves the
-current digest checkpoint id. Background digest generation and multi-checkpoint
-digest pruning remain in the store/digest policy follow-on.
+current digest checkpoint id. The MCP assistant store also exposes
+`assistant_store_generate_session_digest(...)`, which writes compact digest
+checkpoints to a per-session digest JSONL stream, updates the session's current
+digest checkpoint id, and prunes older digest checkpoints to a bounded tail.
 The dashboard digest projection renders persisted summary/checkpoint readback
 from replay snapshots: session summary, digest checkpoint ID, latest event
 detail, task result-summary counts, warning counts, and notifications. It is
-absence-safe and uses `none`/`missing` for absent data. It does not implement the
-background digest generator; that remains in the MCP store/digest policy lane.
+absence-safe and uses `none`/`missing` for absent data. Durable digest
+generation remains owned by the MCP store path so dashboard replay can read the
+same current checkpoint without becoming the source of truth.
 The transcript JSONL watcher scans project directories under a dashboard root,
 starts newly discovered transcript files at EOF, tails appended JSONL lines,
 holds incomplete trailing records until they are newline-terminated, resets

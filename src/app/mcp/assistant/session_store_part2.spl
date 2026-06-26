@@ -12,7 +12,8 @@ use .session_store_helpers.{
     _assistant_sort_sessions_by_updated_at,
     assistant_store_write_json, assistant_store_append_jsonl,
     assistant_store_session_path, assistant_store_timeline_path,
-    assistant_store_notifications_path, assistant_store_sessions_dir,
+    assistant_store_notifications_path, assistant_store_digest_path,
+    assistant_store_sessions_dir,
     assistant_store_ensure_dirs,
     assistant_store_session_record_from_json_text,
     assistant_store_session_record_to_json_text,
@@ -29,6 +30,7 @@ use .types.{
     assistant_generate_event_id, assistant_generate_task_id, assistant_timeline_severity,
     assistant_timeline_title, assistant_timeline_detail, assistant_session_summary
 }
+use ..main_lazy_json.{js, jp}
 
 use std.io_runtime.{file_exists, file_read, file_write, list_dir}
 use std.common.json.object_ops.{json_object_get}
@@ -280,6 +282,16 @@ class AssistantStoreRetentionResult:
     digest_checkpoint_id: text
     evidence: text
 
+class AssistantStoreDigestResult:
+    session_id: text
+    status: text
+    reason: text
+    checkpoint_id: text
+    digest_text: text
+    retained_checkpoint_count: i64
+    dropped_checkpoint_count: i64
+    evidence: text
+
 fn assistant_store_prune_session_retention(root: text, session_id: text, max_timeline_events: i64, max_notifications: i64) -> AssistantStoreRetentionResult:
     val resolved_session_id = session_id.trim()
     if resolved_session_id == "":
@@ -298,6 +310,28 @@ fn assistant_store_prune_session_retention(root: text, session_id: text, max_tim
             return _assistant_retention_result(session.session_id, "pruned", "retention_applied", timeline_lines.retained.len(), notification_lines.retained.len(), timeline_lines.dropped, notification_lines.dropped, session.digest_checkpoint_id)
         case nil:
             _assistant_retention_result(resolved_session_id, "missing", "session_not_found", 0, 0, 0, 0, "")
+
+fn assistant_store_generate_session_digest(root: text, session_id: text, max_digest_checkpoints: i64) -> AssistantStoreDigestResult:
+    val resolved_session_id = session_id.trim()
+    if resolved_session_id == "":
+        return _assistant_digest_result("", "rejected", "missing_session_id", "", "", 0, 0)
+    val loaded = assistant_store_load_session(root: root, session_id: resolved_session_id)
+    match loaded:
+        case Some(session):
+            val checkpoint_id = _assistant_digest_checkpoint_id(session)
+            val digest_text = _assistant_digest_text(session)
+            val line = _assistant_digest_json_line(session.session_id, checkpoint_id, digest_text, session)
+            val digest_path = assistant_store_digest_path(root: root, session_id: session.session_id)
+            assistant_store_ensure_dirs(root)
+            if not assistant_store_append_jsonl(path: digest_path, line: line):
+                return _assistant_digest_result(session.session_id, "failed", "digest_write_failed", checkpoint_id, digest_text, 0, 0)
+            val pruned = _assistant_jsonl_tail_lines(digest_path, _assistant_positive_limit(max_digest_checkpoints))
+            _assistant_write_jsonl_lines(digest_path, pruned.retained)
+            session.digest_checkpoint_id = checkpoint_id
+            assistant_store_write_json(path: assistant_store_session_path(root: root, session_id: session.session_id), value: assistant_store_session_record_to_json_text(session))
+            return _assistant_digest_result(session.session_id, "generated", "digest_generated", checkpoint_id, digest_text, pruned.retained.len(), pruned.dropped)
+        case nil:
+            _assistant_digest_result(resolved_session_id, "missing", "session_not_found", "", "", 0, 0)
 
 class _AssistantStoreJsonlTail:
     retained: [text]
@@ -343,6 +377,35 @@ fn _assistant_retention_result(session_id: text, status: text, reason: text, ret
         dropped_notification_count: dropped_notifications,
         digest_checkpoint_id: digest_label,
         evidence: "assistant_store_retention status={status} reason={reason} session={session_id} timeline_retained={retained_timeline} notifications_retained={retained_notifications} timeline_dropped={dropped_timeline} notifications_dropped={dropped_notifications} digest_checkpoint={digest_label}"
+    )
+
+fn _assistant_digest_checkpoint_id(session: AssistantSessionRecord) -> text:
+    "digest-{session.session_id}-{session.updated_at_ms}-{session.event_count}"
+
+fn _assistant_digest_summary(session: AssistantSessionRecord) -> text:
+    assistant_first_non_empty([session.summary, session.objective, session.prompt, session.name, session.session_id, "none"])
+
+fn _assistant_digest_recent(session: AssistantSessionRecord) -> text:
+    assistant_first_non_empty([session.last_event_detail, session.last_signal, session.last_event_kind, "none"])
+
+fn _assistant_digest_text(session: AssistantSessionRecord) -> text:
+    _assistant_digest_summary(session) + " | recent=" + _assistant_digest_recent(session) + " | events=" + str(session.event_count) + " | tasks=" + str(session.child_tasks.len()) + " | warnings=" + str(session.warnings.len())
+
+fn _assistant_digest_json_line(session_id: text, checkpoint_id: text, digest_text: text, session: AssistantSessionRecord) -> text:
+    "{" + jp("session_id", js(session_id)) + "," + jp("checkpoint_id", js(checkpoint_id)) + "," + jp("summary", js(digest_text)) + "," + jp("event_count", str(session.event_count)) + "," + jp("task_count", str(session.child_tasks.len())) + "," + jp("warning_count", str(session.warnings.len())) + "," + jp("updated_at_ms", str(session.updated_at_ms)) + "}"
+
+fn _assistant_digest_result(session_id: text, status: text, reason: text, checkpoint_id: text, digest_text: text, retained: i64, dropped: i64) -> AssistantStoreDigestResult:
+    val checkpoint_label = if checkpoint_id.trim() == "": "none" else: checkpoint_id
+    val digest_label = if digest_text.trim() == "": "none" else: digest_text
+    AssistantStoreDigestResult(
+        session_id: session_id,
+        status: status,
+        reason: reason,
+        checkpoint_id: checkpoint_label,
+        digest_text: digest_label,
+        retained_checkpoint_count: retained,
+        dropped_checkpoint_count: dropped,
+        evidence: "assistant_store_digest status={status} reason={reason} session={session_id} checkpoint={checkpoint_label} retained={retained} dropped={dropped}"
     )
 
 fn _assistant_json_text(value: any, keys: [text]) -> text:

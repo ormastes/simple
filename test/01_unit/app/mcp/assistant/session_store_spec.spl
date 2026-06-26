@@ -6,7 +6,7 @@ use app.mcp.assistant.{
     AssistantSessionRecord, AssistantTimelineRecord, AssistantChildTaskRecord,
     assistant_store_create_session, assistant_store_load_session, assistant_store_list_sessions,
     assistant_store_append_event, assistant_store_update_state, assistant_store_create_child_task,
-    assistant_store_prune_session_retention
+    assistant_store_prune_session_retention, assistant_store_generate_session_digest
 }
 
 extern fn rt_time_now_unix_micros() -> i64
@@ -202,7 +202,7 @@ describe "assistant session store":
         expect(result.dropped_timeline_count).to_equal(4)
         expect(result.dropped_notification_count).to_equal(5)
         expect(result.digest_checkpoint_id).to_equal("digest-keep")
-        expect(result.evidence.contains("nil")).to_equal(false)
+        expect(result.evidence.split("nil").len()).to_equal(1)
 
         val timeline_jsonl = rt_file_read_text("{root}/timelines/assistant-retention-core.jsonl")
         val notifications_jsonl = rt_file_read_text("{root}/notifications/assistant-retention-core.jsonl")
@@ -210,7 +210,7 @@ describe "assistant session store":
         expect(non_empty_lines_count(notifications_jsonl)).to_equal(2)
         expect(timeline_jsonl).to_contain("event-4")
         expect(timeline_jsonl).to_contain("event-6")
-        expect(timeline_jsonl.contains("event-0")).to_equal(false)
+        expect(timeline_jsonl.split("event-0").len()).to_equal(1)
 
         val loaded = assistant_store_load_session(root, "assistant-retention-core")
         match loaded:
@@ -219,3 +219,40 @@ describe "assistant session store":
                 expect(session.digest_checkpoint_id).to_equal("digest-keep")
             case nil:
                 fail("retained assistant session should load after pruning")
+
+    it "generates durable digest checkpoints and prunes old checkpoint entries":
+        val root = test_root("digest")
+        assistant_store_create_session(
+            root,
+            json_parse(r"""{"session_id":"assistant-digest-core","name":"Digest Core","summary":"digest","objective":"digest","prompt":"digest","mode":"proactive","state":"running"}""")
+        )
+        assistant_store_append_event(
+            root,
+            json_parse(r"""{"session_id":"assistant-digest-core","kind":"note","message":"first digest event","signal":"","timestamp_ms":1000,"event_id":"digest-event-1"}""")
+        )
+        val first = assistant_store_generate_session_digest(root, "assistant-digest-core", 5)
+        assistant_store_update_state(root, "assistant-digest-core", "running", "resume")
+        val second = assistant_store_generate_session_digest(root, "assistant-digest-core", 1)
+
+        expect(first.status).to_equal("generated")
+        expect(first.reason).to_equal("digest_generated")
+        expect(first.retained_checkpoint_count).to_equal(1)
+        expect(first.dropped_checkpoint_count).to_equal(0)
+        expect(first.digest_text).to_contain("events=1")
+        expect(second.status).to_equal("generated")
+        expect(second.retained_checkpoint_count).to_equal(1)
+        expect(second.dropped_checkpoint_count).to_equal(1)
+        expect(second.digest_text).to_contain("recent=resume")
+        expect(second.evidence.split("nil").len()).to_equal(1)
+
+        val digest_jsonl = rt_file_read_text("{root}/digests/assistant-digest-core.jsonl")
+        expect(non_empty_lines_count(digest_jsonl)).to_equal(1)
+        expect(digest_jsonl).to_contain(second.checkpoint_id)
+        expect(digest_jsonl.split(first.checkpoint_id).len()).to_equal(1)
+
+        val loaded = assistant_store_load_session(root, "assistant-digest-core")
+        match loaded:
+            case Some(session):
+                expect(session.digest_checkpoint_id).to_equal(second.checkpoint_id)
+            case nil:
+                fail("assistant session should retain generated digest checkpoint id")

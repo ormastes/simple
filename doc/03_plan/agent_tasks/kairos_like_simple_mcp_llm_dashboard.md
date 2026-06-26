@@ -167,8 +167,14 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
        preserved.
      - `test/unit/app/mcp/assistant/session_store_spec.spl` mirrors the same
        durable retention coverage.
-   - Full background digest generation and multi-checkpoint digest pruning
-     remain a separate store/digest follow-on.
+   - Store digest policy now writes digest checkpoints to per-session JSONL,
+     updates the selected session checkpoint id, and prunes old digest
+     checkpoints to a bounded tail.
+   - Evidence:
+     - `test/01_unit/app/mcp/assistant/session_store_spec.spl` proves durable
+       digest generation, current-checkpoint update, and old-checkpoint pruning.
+     - `test/unit/app/mcp/assistant/session_store_spec.spl` mirrors the same
+       digest checkpoint coverage.
 7. Digest/brief replay readback:
    - `src/app/dashboard/assistant_digest.spl` projects digest-style dashboard
      readback from persisted snapshot fields: session summary, digest checkpoint
@@ -179,8 +185,8 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
    - Evidence:
      - `test/01_unit/app/llm_dashboard/assistant_digest_spec.spl` passes.
      - `test/unit/app/llm_dashboard/assistant_digest_spec.spl` passes.
-   - Full background digest generation and durable digest pruning remain in the
-     MCP store/digest policy follow-on.
+   - MCP store digest generation and durable multi-checkpoint pruning are
+     covered by the session-store digest checkpoint scenario.
 8. Transcript JSONL watcher:
    - `src/app/llm_dashboard/data/jsonl_watcher.spl` tails project transcript
      `.jsonl` files for dashboard ingestion.

@@ -28,7 +28,7 @@ session_store_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -319,10 +319,10 @@ match first_line:
    - Expected: result.dropped_timeline_count equals `4`
    - Expected: result.dropped_notification_count equals `5`
    - Expected: result.digest_checkpoint_id equals `digest-keep`
-   - Expected: result.evidence does not contain `nil`
+   - Expected: result.evidence.split("nil").len() equals `1`
    - Expected: non_empty_lines_count(timeline_jsonl) equals `3`
    - Expected: non_empty_lines_count(notifications_jsonl) equals `2`
-   - Expected: timeline_jsonl does not contain `event-0`
+   - Expected: timeline_jsonl.split("event-0").len() equals `1`
    - Expected: session.event_count equals `3`
    - Expected: session.digest_checkpoint_id equals `digest-keep`
 - fail
@@ -357,7 +357,7 @@ expect(result.retained_notification_count).to_equal(2)
 expect(result.dropped_timeline_count).to_equal(4)
 expect(result.dropped_notification_count).to_equal(5)
 expect(result.digest_checkpoint_id).to_equal("digest-keep")
-expect(result.evidence.contains("nil")).to_equal(false)
+expect(result.evidence.split("nil").len()).to_equal(1)
 
 val timeline_jsonl = rt_file_read_text("{root}/timelines/assistant-retention-core.jsonl")
 val notifications_jsonl = rt_file_read_text("{root}/notifications/assistant-retention-core.jsonl")
@@ -365,7 +365,7 @@ expect(non_empty_lines_count(timeline_jsonl)).to_equal(3)
 expect(non_empty_lines_count(notifications_jsonl)).to_equal(2)
 expect(timeline_jsonl).to_contain("event-4")
 expect(timeline_jsonl).to_contain("event-6")
-expect(timeline_jsonl.contains("event-0")).to_equal(false)
+expect(timeline_jsonl.split("event-0").len()).to_equal(1)
 
 val loaded = assistant_store_load_session(root, "assistant-retention-core")
 match loaded:
@@ -374,6 +374,71 @@ match loaded:
         expect(session.digest_checkpoint_id).to_equal("digest-keep")
     case nil:
         fail("retained assistant session should load after pruning")
+```
+
+</details>
+
+#### generates durable digest checkpoints and prunes old checkpoint entries
+
+- json parse
+- json parse
+- assistant store update state
+   - Expected: first.status equals `generated`
+   - Expected: first.reason equals `digest_generated`
+   - Expected: first.retained_checkpoint_count equals `1`
+   - Expected: first.dropped_checkpoint_count equals `0`
+   - Expected: second.status equals `generated`
+   - Expected: second.retained_checkpoint_count equals `1`
+   - Expected: second.dropped_checkpoint_count equals `1`
+   - Expected: second.evidence.split("nil").len() equals `1`
+   - Expected: non_empty_lines_count(digest_jsonl) equals `1`
+   - Expected: digest_jsonl.split(first.checkpoint_id).len() equals `1`
+   - Expected: session.digest_checkpoint_id equals `second.checkpoint_id`
+- fail
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = test_root("digest")
+assistant_store_create_session(
+    root,
+    json_parse(r"""{"session_id":"assistant-digest-core","name":"Digest Core","summary":"digest","objective":"digest","prompt":"digest","mode":"proactive","state":"running"}""")
+)
+assistant_store_append_event(
+    root,
+    json_parse(r"""{"session_id":"assistant-digest-core","kind":"note","message":"first digest event","signal":"","timestamp_ms":1000,"event_id":"digest-event-1"}""")
+)
+val first = assistant_store_generate_session_digest(root, "assistant-digest-core", 5)
+assistant_store_update_state(root, "assistant-digest-core", "running", "resume")
+val second = assistant_store_generate_session_digest(root, "assistant-digest-core", 1)
+
+expect(first.status).to_equal("generated")
+expect(first.reason).to_equal("digest_generated")
+expect(first.retained_checkpoint_count).to_equal(1)
+expect(first.dropped_checkpoint_count).to_equal(0)
+expect(first.digest_text).to_contain("events=1")
+expect(second.status).to_equal("generated")
+expect(second.retained_checkpoint_count).to_equal(1)
+expect(second.dropped_checkpoint_count).to_equal(1)
+expect(second.digest_text).to_contain("recent=resume")
+expect(second.evidence.split("nil").len()).to_equal(1)
+
+val digest_jsonl = rt_file_read_text("{root}/digests/assistant-digest-core.jsonl")
+expect(non_empty_lines_count(digest_jsonl)).to_equal(1)
+expect(digest_jsonl).to_contain(second.checkpoint_id)
+expect(digest_jsonl.split(first.checkpoint_id).len()).to_equal(1)
+
+val loaded = assistant_store_load_session(root, "assistant-digest-core")
+match loaded:
+    case Some(session):
+        expect(session.digest_checkpoint_id).to_equal(second.checkpoint_id)
+    case nil:
+        fail("assistant session should retain generated digest checkpoint id")
 ```
 
 </details>
@@ -397,8 +462,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
