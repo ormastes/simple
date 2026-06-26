@@ -96,7 +96,7 @@ PLAN_ONLY=1 RESOLUTION=8k sh scripts/check/check-widget-showcase-4k-200fps.shs
   log remain absent until a real native run.
 - Plan-only evidence emits the same measured field keys as a real row with empty
   values for FPS, frame timing, observed RSS, checksum, nonzero readback pixels,
-  render mode, and redraw count.
+  render mode, redraw count, and the readback proof status fields.
 - Native plan-only mode writes the generated alias source that calls the
   selected probe function directly.
 - The GUI showcase app routes `SHOWCASE_8K_PERF=1` through the env facade to
@@ -118,9 +118,13 @@ The full 4K row must prove:
   `gui_showcase_4k_200fps_frame_p95_ns` are present for timing distribution
   evidence.
 - `gui_showcase_4k_200fps_nonzero_pixels` is positive.
+- `gui_showcase_4k_200fps_nonzero_pixels_status=pass`
 - `gui_showcase_4k_200fps_checksum` is nonempty.
+- `gui_showcase_4k_200fps_checksum_status=pass`
 - `gui_showcase_4k_200fps_render_mode=retained-static-frame`
+- `gui_showcase_4k_200fps_retained_render_mode_status=pass`
 - `gui_showcase_4k_200fps_redraw_frames=1`
+- `gui_showcase_4k_200fps_retained_redraw_status=pass`
 - `gui_showcase_4k_200fps_rss_status=pass`
 - The showcase log and `/usr/bin/time` log exist.
 - Producer-side `*_log_file_status` and `*_time_log_file_status` are `pass`.
@@ -139,6 +143,10 @@ The full 8K row has the same contract with:
 - `gui_showcase_8k_perf_frame_p50_ns` and
   `gui_showcase_8k_perf_frame_p95_ns` are present for timing distribution
   evidence.
+- `gui_showcase_8k_perf_nonzero_pixels_status=pass`
+- `gui_showcase_8k_perf_checksum_status=pass`
+- `gui_showcase_8k_perf_retained_render_mode_status=pass`
+- `gui_showcase_8k_perf_retained_redraw_status=pass`
 - Producer-side `*_log_file_status` and `*_time_log_file_status` are `pass`.
 
 ## Completion Boundary
@@ -198,7 +206,7 @@ environment dispatch.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 47 lines folded for reproduction.
+Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -227,9 +235,13 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_frame_p95_ns=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_max_rss_kb=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_rss_status=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_nonzero_pixels=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_nonzero_pixels_status=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_checksum=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_checksum_status=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_render_mode=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_retained_render_mode_status=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_redraw_frames=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_retained_redraw_status=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_kind=content-sha256")
 expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl")
@@ -263,7 +275,7 @@ expect(alias_src).to_contain("run_4k_perf_probe()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 47 lines folded for reproduction.
+Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -292,9 +304,13 @@ expect(evidence).to_contain("gui_showcase_8k_perf_frame_p95_ns=")
 expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_kb=")
 expect(evidence).to_contain("gui_showcase_8k_perf_rss_status=")
 expect(evidence).to_contain("gui_showcase_8k_perf_nonzero_pixels=")
+expect(evidence).to_contain("gui_showcase_8k_perf_nonzero_pixels_status=")
 expect(evidence).to_contain("gui_showcase_8k_perf_checksum=")
+expect(evidence).to_contain("gui_showcase_8k_perf_checksum_status=")
 expect(evidence).to_contain("gui_showcase_8k_perf_render_mode=")
+expect(evidence).to_contain("gui_showcase_8k_perf_retained_render_mode_status=")
 expect(evidence).to_contain("gui_showcase_8k_perf_redraw_frames=")
+expect(evidence).to_contain("gui_showcase_8k_perf_retained_redraw_status=")
 expect(evidence).to_contain("gui_showcase_8k_perf_source_revision=")
 expect(evidence).to_contain("gui_showcase_8k_perf_source_revision_kind=content-sha256")
 expect(evidence).to_contain("gui_showcase_8k_perf_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl")

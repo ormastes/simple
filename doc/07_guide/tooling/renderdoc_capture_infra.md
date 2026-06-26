@@ -199,11 +199,14 @@ Retained showcase performance is also machine-gated. The aggregate consumes
 `GUI_SHOWCASE_4K_PERF_ENV` and `GUI_SHOWCASE_8K_PERF_ENV`, forwarding
 `gui_showcase_4k_200fps_*` and `gui_showcase_8k_perf_*` rows. Completion
 requires the 4K row to prove `3840x2160`, `8294400` pixels, nonzero readback
-pixels, target FPS met, nonempty checksum,
+pixels, `gui_showcase_4k_200fps_nonzero_pixels_status=pass`, target FPS met,
+nonempty checksum, `gui_showcase_4k_200fps_checksum_status=pass`,
 `frame_avg_ns`, `frame_p50_ns`, `frame_p95_ns`,
 `gui_showcase_4k_200fps_log_file_status=pass`,
 `gui_showcase_4k_200fps_time_log_file_status=pass`,
-`retained-static-frame`, one redraw frame, at least 200 measured frames, and
+`retained-static-frame`,
+`gui_showcase_4k_200fps_retained_render_mode_status=pass`, one redraw frame,
+`gui_showcase_4k_200fps_retained_redraw_status=pass`, at least 200 measured frames, and
 `target_fps >= 200`, plus RSS budget status with `max_rss_kb` and
 `max_rss_budget_kb`. A pass row must also retain binary provenance:
 `source_revision`, `source_revision_kind=content-sha256`,
@@ -222,11 +225,15 @@ the measured wrapper/source content changes. The default wrapper budget is
 262144 KiB for 4K and
 750000 KiB for 8K; rows with `rss_status=measured` are diagnostics, not
 completion evidence. The 8K row must likewise prove
-`7680x4320`, `33177600` pixels, nonzero readback pixels, target FPS at least
+`7680x4320`, `33177600` pixels, nonzero readback pixels,
+`gui_showcase_8k_perf_nonzero_pixels_status=pass`, target FPS at least
 200, positive measured frame count, checksum,
+`gui_showcase_8k_perf_checksum_status=pass`,
 `frame_avg_ns`, `frame_p50_ns`, `frame_p95_ns`,
 `gui_showcase_8k_perf_log_file_status=pass`,
-`gui_showcase_8k_perf_time_log_file_status=pass`, RSS budget status, and the
+`gui_showcase_8k_perf_time_log_file_status=pass`,
+`gui_showcase_8k_perf_retained_render_mode_status=pass`,
+`gui_showcase_8k_perf_retained_redraw_status=pass`, RSS budget status, and the
 same native binary provenance fields. Interpreter or fallback rows remain useful
 diagnostics, but they are not 4K/8K completion evidence.
 The aggregate validates producer-side native artifact proof for completion rows:
