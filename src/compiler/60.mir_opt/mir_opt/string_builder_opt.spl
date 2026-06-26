@@ -68,27 +68,25 @@ impl StringBuilderOpt:
 
         # Find string concat patterns inside loop
         var candidate = self.find_str_concat_candidate(blocks, loop_set, func)
-        if not candidate.?:
-            return blocks
+        if val info = candidate:
+            # Verify the candidate: str_var must be initialized to "" before loop,
+            # and only written by the concat pattern inside the loop
+            if not self.verify_candidate(blocks, loop_set, info, func):
+                return blocks
 
-        val info = candidate.unwrap()
+            self.transforms_applied = self.transforms_applied + 1
 
-        # Verify the candidate: str_var must be initialized to "" before loop,
-        # and only written by the concat pattern inside the loop
-        if not self.verify_candidate(blocks, loop_set, info, func):
-            return blocks
+            # Allocate a new local for the parts array
+            val parts_local = LocalId(id: self.next_local_id)
+            self.next_local_id = self.next_local_id + 1
 
-        self.transforms_applied = self.transforms_applied + 1
-
-        # Allocate a new local for the parts array
-        val parts_local = LocalId(id: self.next_local_id)
-        self.next_local_id = self.next_local_id + 1
-
-        # Transform:
-        # Before loop: initialize parts = []
-        # Inside loop: replace concat+copy with parts.push(suffix)
-        # After loop: result = parts.join("")
-        self.apply_transform(blocks, loop_set, info, parts_local)
+            # Transform:
+            # Before loop: initialize parts = []
+            # Inside loop: replace concat+copy with parts.push(suffix)
+            # After loop: result = parts.join("")
+            self.apply_transform(blocks, loop_set, info, parts_local)
+        else:
+            blocks
 
     fn find_str_concat_candidate(blocks: [MirBlock], loop_set: Dict<i64, bool>, func: MirFunction) -> StrConcatCandidate?:
         """Find a string variable being concatenated in a loop."""
@@ -105,12 +103,15 @@ impl StringBuilderOpt:
                         match op:
                             case Add:
                                 val str_local = self.operand_local_id(left)
-                                if str_local.? and self.local_is_text(str_local.unwrap(), func):
+                                if val str_var = str_local:
+                                    if not self.local_is_text(str_var, func):
+                                        i = i + 1
+                                        continue
                                     match insts[i + 1].kind:
                                         case Copy(copy_dest, copy_src):
-                                            if copy_src.id == tmp_dest.id and copy_dest.id == str_local.unwrap().id:
+                                            if copy_src.id == tmp_dest.id and copy_dest.id == str_var.id:
                                                 return StrConcatCandidate(
-                                                    str_var: str_local.unwrap(),
+                                                    str_var: str_var,
                                                     suffix_operand: right,
                                                     block_id: block.id,
                                                     inst_index: i
@@ -156,8 +157,9 @@ impl StringBuilderOpt:
                 continue
             for inst in block.instructions:
                 val dest = self.inst_dest(inst)
-                if dest.? and dest.unwrap().id == target_id:
-                    write_count = write_count + 1
+                if val write_dest = dest:
+                    if write_dest.id == target_id:
+                        write_count = write_count + 1
 
         # The concat pattern writes str_var twice: once in BinOp (tmp), once in Copy
         # Actually the Copy is the only write to str_var (BinOp writes to tmp)
