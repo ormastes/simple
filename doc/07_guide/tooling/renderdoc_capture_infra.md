@@ -406,10 +406,15 @@ linux_vulkan_render_log_compare_renderdoc_electron_reason=pass
 The source logs use `simple-render-log-v1` and include
 `simple_render_log_reason` for normalized failure detail and
 `simple_render_log_native_info` for native-only metadata that does not yet fit
-the normalized schema. Metal, D3D12/PIX, GPU debugger, and Tauri mobile lanes
-must keep this schema and add native sidecar fields instead of inventing
-unrelated key names. If any required render-log or native capture field is
-missing, completion remains `incomplete`.
+the normalized schema. They also expose original native provenance:
+`simple_render_log_original_capture_tool`,
+`simple_render_log_original_native_log_format`, and
+`simple_render_log_original_native_log_source`. Current formats include
+`renderdoc-rdc`, `renderdoc-diagnostic`, `xcode-gputrace`, `pix-capture`,
+`gpu-debugger-log`, and `browser-gpu-metadata`. Metal, D3D12/PIX, GPU
+debugger, and Tauri mobile lanes must keep this schema and add native sidecar
+fields instead of inventing unrelated key names. If any required render-log or
+native capture field is missing, completion remains `incomplete`.
 
 ### macOS Metal Render-Log Compare
 
