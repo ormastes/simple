@@ -165,6 +165,17 @@ check covers SPipe command routing. The `doc/06_spec` guard covers scenario 5.
   selected threshold, safety/deployment/app handoff evidence is recorded, and a
   normal LLM records an accepted decision.
 
+2026-06-26 retry7 normal acceptance-review gate evidence:
+
+- `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry7.sdn`
+  records the normal acceptance-review gate requested by retry6.
+- `.spipe/llm-finetune-process/scripts/check_retry7_acceptance_gate.shs
+  llm_backed_app_server_dry_run_retry7` wraps the retry6 training/eval gate and
+  blocks acceptance while retry6 lacks real model and eval artifacts.
+- Retry7 must continue to fail `fine-tune-ready` until retry6 has target eval,
+  license constraints, safety evaluation, deployment evidence, and an accepted
+  normal-review decision.
+
 ## Manual Gate
 
 Final SPipe fine-tune process requirements are selected in
@@ -175,7 +186,8 @@ The remaining manual gate is model acceptance and licensed data access: do not
 mark a fine-tune attempt ready until the decision registry records `accepted`
 after target-reaching eval evidence, license review, cache/checksum evidence,
 and app/server handoff verification. The current concrete next attempt is
-`llm_backed_app_server_dry_run_retry6`.
+`llm_backed_app_server_dry_run_retry7`; it is blocked by retry6 training/eval
+evidence and is not itself a training attempt.
 
 2026-06-26 app/server handoff evidence gate:
 

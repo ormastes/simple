@@ -133,3 +133,6 @@ Host-local scripts live under `.spipe/llm-finetune-process/scripts/`:
   eval, and retry fields.
 - `dry_run_training.sh` is a no-training placeholder used only until
   requirements select a real tuning path.
+- `check_retry7_acceptance_gate.shs` is a no-training normal-review gate that
+  wraps retry6 training/eval evidence and blocks acceptance until real model,
+  eval, license, safety, deployment, and accepted-decision evidence exist.
