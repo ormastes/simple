@@ -29,6 +29,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   comparison behavior.
 - Blur/tolerance use, missing ARGB capture, missing geometry, malformed
   mismatch counts, and checksum mismatches are rejected.
+- Capture viewport dimensions must be explicit positive decimal integers and
+  are emitted as normalized rows for the live wrapper to compare against the
+  requested Chrome viewport.
 - The live Chrome wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 """
@@ -39,10 +42,10 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={checksum:100,expected_checksum:100,weighted_checksum:500,expected_weighted_checksum:500,mismatch_count:0,frame_us:1250,captured_argb_written:true,geometry_written:true,blur_or_tolerance_used:false,chrome_bin:\"/usr/bin/google-chrome\"};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const p={checksum:100,expected_checksum:100,weighted_checksum:500,expected_weighted_checksum:500,mismatch_count:0,width:96,height:64,frame_us:1250,captured_argb_written:true,geometry_written:true,blur_or_tolerance_used:false,chrome_bin:\"/usr/bin/google-chrome\"};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 fn _large_proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={checksum:\"18446744073709551610\",expected_checksum:\"18446744073709551610\",weighted_checksum:\"18446744073709551611\",expected_weighted_checksum:\"18446744073709551611\",mismatch_count:0,frame_us:1250,captured_argb_written:true,geometry_written:true,blur_or_tolerance_used:false,chrome_bin:\"/usr/bin/google-chrome\"};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const p={checksum:\"18446744073709551610\",expected_checksum:\"18446744073709551610\",weighted_checksum:\"18446744073709551611\",expected_weighted_checksum:\"18446744073709551611\",mismatch_count:0,width:96,height:64,frame_us:1250,captured_argb_written:true,geometry_written:true,blur_or_tolerance_used:false,chrome_bin:\"/usr/bin/google-chrome\"};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Chrome Simple Web layout proof validator":
 
@@ -60,6 +63,8 @@ describe "Chrome Simple Web layout proof validator":
         expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=pass")
         expect(evidence).to_contain("chrome_simple_web_layout_mismatch_count=0")
         expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=1250")
+        expect(evidence).to_contain("chrome_simple_web_layout_capture_width=96")
+        expect(evidence).to_contain("chrome_simple_web_layout_capture_height=64")
         expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_written=true")
         expect(evidence).to_contain("chrome_simple_web_layout_geometry_written=true")
         expect(evidence).to_contain("chrome_simple_web_layout_blur_or_tolerance_used=false")
@@ -111,6 +116,26 @@ describe "Chrome Simple Web layout proof validator":
         expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_written=false")
         expect(evidence).to_contain("chrome_simple_web_layout_geometry_written=false")
 
+    it "rejects missing or fractional capture viewport proof rows":
+        val root = "build/test-chrome-layout-validator-viewport-proof"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/missing.json", "delete p.width") +
+            " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+            _proof_command(root + "/fractional.json", "p.height=64.5") +
+            " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/fractional.json > " + root + "/fractional.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val missing = file_read(root + "/missing.env")
+        val fractional = file_read(root + "/fractional.env")
+        step("Confirm capture dimensions are explicit integer proof rows")
+        expect(missing).to_contain("chrome_simple_web_layout_validation_status=fail")
+        expect(missing).to_contain("chrome_simple_web_layout_validation_reason=missing-capture-viewport")
+        expect(missing).to_contain("chrome_simple_web_layout_capture_width=")
+        expect(fractional).to_contain("chrome_simple_web_layout_validation_status=fail")
+        expect(fractional).to_contain("chrome_simple_web_layout_validation_reason=missing-capture-viewport")
+        expect(fractional).to_contain("chrome_simple_web_layout_capture_height=64.5")
+
     it "rejects blur tolerance and malformed mismatch counts":
         val root = "build/test-chrome-layout-validator-blur-mismatch"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
@@ -147,6 +172,8 @@ describe "Chrome Simple Web layout proof validator":
         val script = file_read("scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs")
         expect(script).to_contain("validate-chrome-simple-web-layout-proof.js")
         expect(script).to_contain("chrome_simple_web_layout_validation_status")
+        expect(script).to_contain("capture-viewport-mismatch")
+        expect(script).to_contain("chrome_simple_web_layout_capture_width")
         expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
         expect(script).to_contain("status=divergent")
         val capture = file_read("tools/chrome-live-bitmap/capture_html_argb.js")

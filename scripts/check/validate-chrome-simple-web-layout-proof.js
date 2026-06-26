@@ -70,6 +70,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-captured-argb';
 } else if (proof.geometry_written !== true) {
   reason = 'missing-chrome-geometry';
+} else if (!integerAtLeast(proof.width, 1) || !integerAtLeast(proof.height, 1)) {
+  reason = 'missing-capture-viewport';
 } else if (!integerAtLeast(proof.frame_us, 1)) {
   reason = 'missing-chrome-timing';
 }
@@ -83,6 +85,8 @@ emit('chrome_simple_web_layout_chrome_weighted_checksum', integerTextOrClean(pro
 emit('chrome_simple_web_layout_mismatch_count', integerTextOrClean(proof.mismatch_count));
 emit('chrome_simple_web_layout_blur_or_tolerance_used', proof.blur_or_tolerance_used === false ? 'false' : clean(proof.blur_or_tolerance_used));
 emit('chrome_simple_web_layout_chrome_frame_us', integerTextOrClean(proof.frame_us));
+emit('chrome_simple_web_layout_capture_width', integerTextOrClean(proof.width));
+emit('chrome_simple_web_layout_capture_height', integerTextOrClean(proof.height));
 emit('chrome_simple_web_layout_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
 emit('chrome_simple_web_layout_geometry_written', proof.geometry_written === true ? 'true' : 'false');
 emit('chrome_simple_web_layout_chrome_bin', proof.chrome_bin);

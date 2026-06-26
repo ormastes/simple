@@ -27,7 +27,7 @@ chrome_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,6 +78,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   comparison behavior.
 - Blur/tolerance use, missing ARGB capture, missing geometry, malformed
   mismatch counts, and checksum mismatches are rejected.
+- Capture viewport dimensions must be explicit positive decimal integers and
+  are emitted as normalized rows for the live wrapper to compare against the
+  requested Chrome viewport.
 - The live Chrome wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 
@@ -95,7 +98,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -112,6 +115,8 @@ expect(evidence).to_contain("chrome_simple_web_layout_validation_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_mismatch_count=0")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=1250")
+expect(evidence).to_contain("chrome_simple_web_layout_capture_width=96")
+expect(evidence).to_contain("chrome_simple_web_layout_capture_height=64")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_written=true")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_written=true")
 expect(evidence).to_contain("chrome_simple_web_layout_blur_or_tolerance_used=false")
@@ -213,6 +218,43 @@ expect(evidence).to_contain("chrome_simple_web_layout_geometry_written=false")
 
 </details>
 
+#### rejects missing or fractional capture viewport proof rows
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm capture dimensions are explicit integer proof rows
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-validator-viewport-proof"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/missing.json", "delete p.width") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+    _proof_command(root + "/fractional.json", "p.height=64.5") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/fractional.json > " + root + "/fractional.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing = file_read(root + "/missing.env")
+val fractional = file_read(root + "/fractional.env")
+step("Confirm capture dimensions are explicit integer proof rows")
+expect(missing).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(missing).to_contain("chrome_simple_web_layout_validation_reason=missing-capture-viewport")
+expect(missing).to_contain("chrome_simple_web_layout_capture_width=")
+expect(fractional).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(fractional).to_contain("chrome_simple_web_layout_validation_reason=missing-capture-viewport")
+expect(fractional).to_contain("chrome_simple_web_layout_capture_height=64.5")
+```
+
+</details>
+
 #### rejects blur tolerance and malformed mismatch counts
 
 -  proof command
@@ -282,13 +324,15 @@ expect(pixel).to_contain("chrome_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs")
 expect(script).to_contain("validate-chrome-simple-web-layout-proof.js")
 expect(script).to_contain("chrome_simple_web_layout_validation_status")
+expect(script).to_contain("capture-viewport-mismatch")
+expect(script).to_contain("chrome_simple_web_layout_capture_width")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
 val capture = file_read("tools/chrome-live-bitmap/capture_html_argb.js")
@@ -301,8 +345,8 @@ expect(capture).to_contain("return sum.toString()")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
