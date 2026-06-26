@@ -61,10 +61,61 @@ with `vulkaninfo --summary`; then require Simple Vulkan/Engine2D evidence,
 original Chrome evidence, Electron Chromium evidence, and production GUI/web
 parity evidence. A Chrome/Electron bitmap with a log containing Chromium's
 `angle=vulkan` unavailable failure is a fallback render, not Vulkan proof;
-record `vulkan-angle-unavailable` and leave the gate failed. Windows setup
-starts with `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 -Check`; Linux setup
-uses the same POSIX wrapper after installing a real GPU Vulkan ICD, Vulkan
-tools, shader tools, Chrome/Chromium, Electron dependencies, and RenderDoc.
+record `vulkan-angle-unavailable` and leave the gate failed. The aggregate
+audit must expose `gui_web_2d_vulkan_comparison_fixture_status`,
+`gui_web_2d_vulkan_comparison_artifact_status`,
+`gui_web_2d_vulkan_comparison_artifact_reason`,
+`gui_web_2d_vulkan_electron_argb_viewport_match_status`,
+`gui_web_2d_vulkan_electron_argb_file_status`,
+`gui_web_2d_vulkan_electron_argb_nonblank_status`,
+`gui_web_2d_vulkan_chrome_screenshot_file_status`,
+`gui_web_2d_vulkan_chrome_screenshot_png_status`,
+`gui_web_2d_vulkan_simple_evidence_file_status`, and
+`gui_web_2d_vulkan_simple_backend_status` before treating Electron,
+Chrome, and Simple artifacts as comparable.
+Artifact presence is not a pixel-equivalence claim. Require
+`gui_web_2d_vulkan_pixel_comparison_status=pass`,
+`gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff`, ARGB metadata for
+Electron/Chrome/Simple, and the zero-mismatch pairwise diff statuses
+`gui_web_2d_vulkan_electron_chrome_pairwise_diff_status`,
+`gui_web_2d_vulkan_electron_simple_pairwise_diff_status`, and
+`gui_web_2d_vulkan_chrome_simple_pairwise_diff_status` before claiming the
+Electron baseline, Chrome Vulkan-backed render, and Simple GUI/web/2D Vulkan
+render match pixels. If the aggregate reports
+`gui_web_2d_vulkan_pixel_comparison_status=fail` with
+`gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff-mismatch`, treat it
+as a real pixel mismatch to fix, not as missing evidence.
+Browser Vulkan proof must be read
+from `gui_web_2d_vulkan_browser_backing_status`,
+`gui_web_2d_vulkan_browser_backing_reason`, and
+`gui_web_2d_vulkan_browser_backing_mode`; fallback bitmap comparison is not
+Vulkan-backed browser proof, and the aggregate GUI audit must remain incomplete
+until browser backing is `pass`. Read current macOS blocker lanes from
+`gui_web_2d_vulkan_renderdoc_blocker_status`,
+`gui_web_2d_vulkan_renderdoc_blocker_reason`,
+`gui_web_2d_vulkan_renderdoc_blocker_gate_count`, and
+`gui_web_2d_vulkan_renderdoc_blocker_gates` before claiming RenderDoc, Simple,
+Electron, or Chrome Vulkan-backed capture is ready; blocker status `blocked` is
+a completion blocker, not a warning. GUI widget fixture evidence must
+also prove per-widget feature witnesses via
+`gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features`, not
+only widget/class presence. Defer Windows and Linux claims
+until platform-specific runbooks validate the same evidence keys and RDOC gate
+contract.
+
+For Tauri2 mobile renderer parity, use
+`scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`. It must pass
+the desktop production GUI/Web parity source first, then require live iOS
+Tauri2/WKWebView screenshot evidence plus Metal markers and live Android
+Tauri2/WebView screenshot evidence plus Vulkan/skiavk or host-emulator Vulkan
+markers. A packaged APK or a nonblank Android screenshot is not Vulkan proof if
+logcat contains `F/DEBUG`, `Fatal signal`, `VulkanManager`,
+`Headless UI completed`, or subprocess parse failures; leave the aggregate
+unavailable/failed until the Android renderer log and screenshot both pass.
+Host/emulator GPU logs such as ANGLE/Vulkan or Apple/SwiftShader Vulkan are
+supporting evidence only when `com.simple.ui` remains foreground, a
+`[tauri-shell] render, html_len=` marker is present, and the screenshot is
+captured from the live app.
 
 For runtime concurrency work, keep the public API map current in
 `doc/07_guide/lib/misc/stdlib.md`, `doc/07_guide/compiler/check_perf.md`, and
@@ -277,7 +328,7 @@ Also run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
 new app/gc env reads and process calls use env/process facades instead of local
 `rt_env_get`, `rt_process_run`, `rt_process_run_timeout`,
 `rt_process_spawn_async`, `rt_process_wait`, `rt_process_is_running`, or
-`rt_process_is_alive`, or `rt_process_kill`.
+`rt_process_kill`.
 
 ## LLM Fine-Tune Handoff
 

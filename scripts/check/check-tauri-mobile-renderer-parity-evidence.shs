@@ -1,0 +1,264 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/tauri_mobile_renderer_parity_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/tauri_mobile_renderer_parity_evidence_$(date -u +%F).md}"
+PRODUCTION_ENV="${PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV:-build/production_gui_web_renderer_parity_evidence/evidence.env}"
+IOS_SCRIPT="${TAURI_MOBILE_RENDERER_IOS_SCRIPT:-scripts/check/check-tauri-ios-mobile-renderer-evidence.shs}"
+ANDROID_SCRIPT="${TAURI_MOBILE_RENDERER_ANDROID_SCRIPT:-scripts/check/check-tauri-android-mobile-renderer-evidence.shs}"
+IOS_LOG_EXTRA="${TAURI_MOBILE_RENDERER_IOS_LOG:-}"
+ANDROID_LOG_EXTRA="${TAURI_MOBILE_RENDERER_ANDROID_LOG:-}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+grep_any_file() {
+    pattern="$1"
+    shift
+    for file in "$@"; do
+        if [ -n "$file" ] && [ -s "$file" ] && grep -Eiq "$pattern" "$file"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+run_lane() {
+    name="$1"
+    script="$2"
+    out="$BUILD_DIR/${name}.out"
+    err="$BUILD_DIR/${name}.err"
+    code_file="$BUILD_DIR/${name}.code"
+    code=0
+    sh "$script" >"$out" 2>"$err" || code=$?
+    printf '%s\n' "$code" >"$code_file"
+}
+
+write_report() {
+    {
+        echo "# Tauri Mobile Renderer Parity Evidence"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- production parity source: $PRODUCTION_ENV"
+        echo "- iOS: $ios_status ($ios_reason)"
+        echo "- Android: $android_status ($android_reason)"
+        echo "- iOS expected GPU/log contract: $ios_expected_gpu_backend / $ios_metal_log_status"
+        echo "- Android expected GPU/log contract: $android_expected_gpu_backend / $android_vulkan_log_status"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$OUT_ENV"
+    } >"$REPORT_PATH"
+}
+
+production_status="$(value_of production_gui_web_renderer_parity_status "$PRODUCTION_ENV")"
+production_layout_status="$(value_of production_gui_web_renderer_parity_layout_manifest_status "$PRODUCTION_ENV")"
+production_surface_status="$(value_of production_gui_web_renderer_parity_surface_manifest_status "$PRODUCTION_ENV")"
+production_no_fake="$(value_of production_gui_web_renderer_parity_surface_manifest_no_fake_capture "$PRODUCTION_ENV")"
+
+tauri_v2_status=fail
+tauri_v2_reason=missing-tauri-v2-contract
+if grep -Eq 'tauri[[:space:]]*=[[:space:]]*\{[^\n]*version[[:space:]]*=[[:space:]]*"2' tools/tauri-shell/src-tauri/Cargo.toml 2>/dev/null &&
+    grep -Eq '"@tauri-apps/cli"[[:space:]]*:[[:space:]]*"\^2' tools/tauri-shell/package.json 2>/dev/null; then
+    tauri_v2_status=pass
+    tauri_v2_reason=tauri-v2-configured
+fi
+
+ios_project_status=fail
+ios_project_reason=missing-generated-ios-project
+if [ -d tools/tauri-shell/src-tauri/gen/apple ] &&
+    [ -f tools/tauri-shell/src-tauri/gen/apple/simple-tauri-shell.xcodeproj/project.pbxproj ] &&
+    [ -f tools/tauri-shell/src-tauri/gen/apple/simple-tauri-shell_iOS/Info.plist ]; then
+    ios_project_status=pass
+    ios_project_reason=generated-ios-project-present
+fi
+
+android_project_status=fail
+android_project_reason=missing-generated-android-project
+if [ -d tools/tauri-shell/src-tauri/gen/android ] &&
+    [ -f tools/tauri-shell/src-tauri/gen/android/app/src/main/AndroidManifest.xml ] &&
+    [ -f tools/tauri-shell/src-tauri/gen/android/app/src/main/java/com/simple/ui/MainActivity.kt ]; then
+    android_project_status=pass
+    android_project_reason=generated-android-project-present
+fi
+
+ios_exit_code=""
+ios_status=unavailable
+ios_reason=not-run
+ios_tooling=""
+ios_screenshot=""
+ios_log_stream=""
+ios_dev_log=""
+ios_render_log_status=unavailable
+ios_layout_status=unavailable
+ios_metal_log_status=unavailable
+ios_expected_gpu_backend=metal
+if [ -x "$IOS_SCRIPT" ] || [ -f "$IOS_SCRIPT" ]; then
+    run_lane ios "$IOS_SCRIPT"
+    ios_exit_code="$(cat "$BUILD_DIR/ios.code")"
+    ios_status="$(value_of status "$BUILD_DIR/ios.out")"
+    ios_reason="$(value_of reason "$BUILD_DIR/ios.out")"
+    ios_tooling="$(value_of ios_tooling "$BUILD_DIR/ios.out")"
+    ios_screenshot="$(value_of ios_screenshot "$BUILD_DIR/ios.out")"
+    ios_log_stream="$(value_of ios_log_stream "$BUILD_DIR/ios.out")"
+    ios_dev_log="$(value_of ios_dev_log "$BUILD_DIR/ios.out")"
+    ios_render_log_status="$(value_of ios_render_log_status "$BUILD_DIR/ios.out")"
+    if [ "$ios_render_log_status" != "pass" ] && grep_any_file '\[tauri-shell\] render, html_len=' "$ios_log_stream" "$ios_dev_log" "$IOS_LOG_EXTRA"; then
+        ios_render_log_status=pass
+    elif [ "$ios_status" = "pass" ] && [ "$ios_render_log_status" != "pass" ]; then
+        ios_render_log_status=fail
+        ios_reason=ios-render-log-marker-missing
+    fi
+    if [ "$ios_status" = "pass" ] && [ -n "$ios_screenshot" ] && [ -s "$ios_screenshot" ]; then
+        ios_layout_status=pass
+    elif [ "$ios_status" = "pass" ]; then
+        ios_layout_status=fail
+        ios_reason=ios-screenshot-missing
+    fi
+    if grep_any_file 'Metal|CAMetalLayer|MTL|AGX|IOGPU' "$ios_log_stream" "$ios_dev_log" "$IOS_LOG_EXTRA"; then
+        ios_metal_log_status=pass
+    elif [ "$ios_status" = "pass" ]; then
+        ios_metal_log_status=fail
+        ios_reason=ios-metal-log-marker-missing
+    fi
+else
+    ios_reason=missing-ios-evidence-script
+fi
+
+android_exit_code=""
+android_status=unavailable
+android_reason=not-run
+android_screenshot=""
+android_logcat=""
+android_gpu_log=""
+android_render_log_status=unavailable
+android_layout_status=unavailable
+android_vulkan_log_status=unavailable
+android_expected_gpu_backend=vulkan
+if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
+    run_lane android "$ANDROID_SCRIPT"
+    android_exit_code="$(cat "$BUILD_DIR/android.code")"
+    android_status="$(value_of status "$BUILD_DIR/android.out")"
+    android_reason="$(value_of reason "$BUILD_DIR/android.out")"
+    android_screenshot="$(value_of android_screenshot "$BUILD_DIR/android.out")"
+    android_logcat="$(value_of android_logcat "$BUILD_DIR/android.out")"
+    android_gpu_log="$(value_of android_gpu_log "$BUILD_DIR/android.out")"
+    android_render_log_status="$(value_of android_render_log_status "$BUILD_DIR/android.out")"
+    if [ "$android_render_log_status" != "pass" ] && grep_any_file '\[tauri-shell\] render, html_len=' "$android_logcat" "$ANDROID_LOG_EXTRA"; then
+        android_render_log_status=pass
+    elif [ "$android_status" = "pass" ] && [ "$android_render_log_status" != "pass" ]; then
+        android_render_log_status=fail
+        android_reason=android-render-log-marker-missing
+    fi
+    if [ "$android_status" = "pass" ] && [ -n "$android_screenshot" ] && [ -s "$android_screenshot" ]; then
+        android_layout_status=pass
+    elif [ "$android_status" = "pass" ]; then
+        android_layout_status=fail
+        android_reason=android-screenshot-missing
+    fi
+    if grep_any_file 'Vulkan|vulkan|VK_|ANGLE.*Vulkan|Renderer.*Vulkan|HWUI.*Vulkan|skiavk' "$android_logcat" "$android_gpu_log" "$ANDROID_LOG_EXTRA"; then
+        android_vulkan_log_status=pass
+    elif [ "$android_status" = "pass" ]; then
+        android_vulkan_log_status=fail
+        android_reason=android-vulkan-log-marker-missing
+    fi
+else
+    android_reason=missing-android-evidence-script
+fi
+
+status=pass
+reason=pass
+if [ "$production_status" != "pass" ] || [ "$production_layout_status" != "pass" ] || [ "$production_surface_status" != "pass" ] || [ "$production_no_fake" != "true" ]; then
+    status=fail
+    reason=desktop-production-parity-source-not-pass
+elif [ "$tauri_v2_status" != "pass" ]; then
+    status=fail
+    reason="$tauri_v2_reason"
+elif [ "$ios_project_status" != "pass" ]; then
+    status=fail
+    reason="$ios_project_reason"
+elif [ "$android_project_status" != "pass" ]; then
+    status=fail
+    reason="$android_project_reason"
+elif [ "$ios_status" != "pass" ]; then
+    status=unavailable
+    reason="ios-mobile-renderer-evidence-unavailable"
+elif [ "$ios_render_log_status" != "pass" ]; then
+    status=fail
+    reason="$ios_reason"
+elif [ "$ios_layout_status" != "pass" ]; then
+    status=fail
+    reason="$ios_reason"
+elif [ "$ios_metal_log_status" != "pass" ]; then
+    status=fail
+    reason="$ios_reason"
+elif [ "$android_status" != "pass" ]; then
+    status=unavailable
+    reason="android-mobile-renderer-evidence-unavailable"
+elif [ "$android_render_log_status" != "pass" ]; then
+    status=fail
+    reason="$android_reason"
+elif [ "$android_layout_status" != "pass" ]; then
+    status=fail
+    reason="$android_reason"
+elif [ "$android_vulkan_log_status" != "pass" ]; then
+    status=fail
+    reason="$android_reason"
+fi
+
+{
+    echo "tauri_mobile_renderer_parity_status=$status"
+    echo "tauri_mobile_renderer_parity_reason=$reason"
+    echo "tauri_mobile_renderer_parity_production_env=$PRODUCTION_ENV"
+    echo "tauri_mobile_renderer_parity_production_status=$production_status"
+    echo "tauri_mobile_renderer_parity_production_layout_manifest_status=$production_layout_status"
+    echo "tauri_mobile_renderer_parity_production_surface_manifest_status=$production_surface_status"
+    echo "tauri_mobile_renderer_parity_production_no_fake_capture=$production_no_fake"
+    echo "tauri_mobile_renderer_parity_tauri_v2_status=$tauri_v2_status"
+    echo "tauri_mobile_renderer_parity_tauri_v2_reason=$tauri_v2_reason"
+    echo "tauri_mobile_renderer_parity_ios_project_status=$ios_project_status"
+    echo "tauri_mobile_renderer_parity_ios_project_reason=$ios_project_reason"
+    echo "tauri_mobile_renderer_parity_android_project_status=$android_project_status"
+    echo "tauri_mobile_renderer_parity_android_project_reason=$android_project_reason"
+    echo "tauri_mobile_renderer_parity_ios_exit_code=$ios_exit_code"
+    echo "tauri_mobile_renderer_parity_ios_status=$ios_status"
+    echo "tauri_mobile_renderer_parity_ios_reason=$ios_reason"
+    echo "tauri_mobile_renderer_parity_ios_tooling=$ios_tooling"
+    echo "tauri_mobile_renderer_parity_ios_expected_gpu_backend=$ios_expected_gpu_backend"
+    echo "tauri_mobile_renderer_parity_ios_tauri_backend=tauri2-wkwebview"
+    echo "tauri_mobile_renderer_parity_ios_render_log_status=$ios_render_log_status"
+    echo "tauri_mobile_renderer_parity_ios_layout_status=$ios_layout_status"
+    echo "tauri_mobile_renderer_parity_ios_metal_log_status=$ios_metal_log_status"
+    echo "tauri_mobile_renderer_parity_ios_screenshot=$ios_screenshot"
+    echo "tauri_mobile_renderer_parity_ios_log_stream=$ios_log_stream"
+    echo "tauri_mobile_renderer_parity_ios_dev_log=$ios_dev_log"
+    echo "tauri_mobile_renderer_parity_android_exit_code=$android_exit_code"
+    echo "tauri_mobile_renderer_parity_android_status=$android_status"
+    echo "tauri_mobile_renderer_parity_android_reason=$android_reason"
+    echo "tauri_mobile_renderer_parity_android_expected_gpu_backend=$android_expected_gpu_backend"
+    echo "tauri_mobile_renderer_parity_android_tauri_backend=tauri2-android-webview"
+    echo "tauri_mobile_renderer_parity_android_render_log_status=$android_render_log_status"
+    echo "tauri_mobile_renderer_parity_android_layout_status=$android_layout_status"
+    echo "tauri_mobile_renderer_parity_android_vulkan_log_status=$android_vulkan_log_status"
+    echo "tauri_mobile_renderer_parity_android_screenshot=$android_screenshot"
+    echo "tauri_mobile_renderer_parity_android_logcat=$android_logcat"
+    echo "tauri_mobile_renderer_parity_android_gpu_log=$android_gpu_log"
+} >"$OUT_ENV"
+
+write_report
+cat "$OUT_ENV"
+
+if [ "$status" = "pass" ]; then
+    exit 0
+fi
+exit 1

@@ -48,3 +48,32 @@ Source/platform evidence:
   Xcode project, Info.plist, LaunchScreen, assets, and native source.
 - iOS simulator/device execution still requires an Apple host with `xcodebuild`
   and `simctl`; this Linux pass proves only source/contracts/generated output.
+
+## 2026-06-26 renderer parity continuation
+
+New aggregate wrapper:
+`scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`.
+
+Current evidence:
+
+- Desktop production GUI/Web renderer parity source: pass via
+  `build/production_gui_web_renderer_parity_evidence/evidence.env`.
+- Tauri2 project contract: pass for `tools/tauri-shell` iOS and Android
+  generated projects.
+- iOS: pass on iPhone 17 Pro simulator via
+  `scripts/check/check-tauri-ios-mobile-renderer-evidence.shs`; screenshot
+  validation passed and logs include Metal/Xcode render markers.
+- Android: pass. The arm64 `simple` runtime builds, is packaged into
+  `lib/arm64-v8a/libsimple_mobile_runtime_exec.so`, and the rebuilt APK renders
+  the mobile widget showcase through Tauri2 Android WebView.
+- Android Vulkan: pass for the local host/emulator Vulkan translation lane. The
+  evidence script leaves guest HWUI unchanged, starts the emulator with
+  `-gpu host`, observes Apple M4 Vulkan markers in
+  `build/tauri_android_mobile_renderer/emulator.out`, sees
+  `[tauri-shell] render, html_len=` in logcat, validates the foreground
+  `com.simple.ui` screenshot, and reports
+  `tauri_mobile_renderer_parity_android_vulkan_log_status=pass`. Guest HWUI
+  `skiavk`, `swiftshader`, and `lavapipe` remain crashing lanes on the local
+  Pixel7 AVD and should not be recorded as the passing path.
+
+The aggregate report now returns `tauri_mobile_renderer_parity_status=pass`.

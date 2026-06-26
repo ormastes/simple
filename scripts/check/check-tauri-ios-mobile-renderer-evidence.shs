@@ -1,0 +1,202 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+TAURI_DIR="$ROOT_DIR/tools/tauri-shell"
+BUILD_DIR="$ROOT_DIR/build/tauri_ios_mobile_renderer"
+PROBE_HELPER="$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/src/compiler_rust/target/release/simple}"
+SCREENSHOT="${IOS_RENDERER_SCREENSHOT:-$BUILD_DIR/ios_renderer.png}"
+LOG_STREAM="$BUILD_DIR/ios_renderer_log_stream.txt"
+IOS_DEV_LOG="$BUILD_DIR/ios_renderer_tauri_dev.log"
+TIMEOUT_SECS="${IOS_RENDERER_TIMEOUT_SECS:-120}"
+
+fail() {
+    echo "status=fail"
+    echo "reason=$1"
+    exit 1
+}
+
+validate_screenshot_png() {
+    path="$1"
+    label="$2"
+    validation_log="$BUILD_DIR/ios_screenshot_validation.log"
+
+    if "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate-screenshot "$path" "$label" > "$validation_log" 2>&1; then
+        cat "$validation_log"
+        return 0
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        SCREENSHOT_PATH="$path" SCREENSHOT_LABEL="$label" python3 - <<'PY' > "$validation_log" 2>&1
+import os
+import sys
+
+path = os.environ["SCREENSHOT_PATH"]
+label = os.environ["SCREENSHOT_LABEL"]
+try:
+    from PIL import Image
+except Exception as exc:
+    print(f"pillow unavailable: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+try:
+    image = Image.open(path).convert("RGBA")
+except Exception as exc:
+    print(f"failed to open screenshot: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+width, height = image.size
+if width < 300 or height < 300:
+    print(f"screenshot dimensions invalid: {width}x{height}", file=sys.stderr)
+    sys.exit(1)
+
+colors = image.getcolors(maxcolors=1000000)
+unique = 1000001 if colors is None else len(colors)
+if unique < 16:
+    print(f"screenshot appears blank: unique_colors={unique}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"{label}=pass width={width} height={height} unique_colors={unique}")
+PY
+        code=$?
+        cat "$validation_log"
+        return "$code"
+    fi
+
+    cat "$validation_log" 2>/dev/null || true
+    return 1
+}
+
+mkdir -p "$BUILD_DIR"
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "ios_tooling=unavailable"
+    echo "reason=iOS simulator evidence requires macOS with Xcode; current host $(uname -s)"
+    echo "status=unavailable"
+    exit 0
+fi
+
+command -v xcrun >/dev/null 2>&1 || fail "xcrun not found; install Xcode"
+command -v xcodebuild >/dev/null 2>&1 || fail "xcodebuild not found; install Xcode"
+command -v cargo >/dev/null 2>&1 || fail "cargo not found"
+command -v npm >/dev/null 2>&1 || fail "npm not found"
+cargo tauri --version >/dev/null 2>&1 || fail "cargo-tauri not found"
+test -x "$SIMPLE_BIN" || fail "host Simple runtime missing: $SIMPLE_BIN"
+test -f "$PROBE_HELPER" || fail "screenshot validation helper missing: $PROBE_HELPER"
+test -f "$ROOT_DIR/tools/tauri-shell/scripts/build-ui-bundle.shs" \
+    || fail "UI bundle builder missing: $ROOT_DIR/tools/tauri-shell/scripts/build-ui-bundle.shs"
+
+SIM_UDID="${IOS_SIM_UDID:-}"
+if [ -z "$SIM_UDID" ]; then
+    SIM_UDID="$(
+        xcrun simctl list devices available -j |
+        node -e '
+const fs = require("fs");
+const data = JSON.parse(fs.readFileSync(0, "utf8"));
+const devices = data.devices || {};
+const iphones = Object.values(devices).flat().filter((device) =>
+  String(device.name || "").includes("iPhone") && device.isAvailable
+);
+const booted = iphones.find((device) => String(device.state || "") === "Booted");
+const selected = booted || iphones[0];
+process.stdout.write(selected ? String(selected.udid || "") : "");
+'
+    )"
+fi
+test -n "$SIM_UDID" || fail "no available iPhone simulator found"
+
+SIM_DEVICE_NAME="$(
+    xcrun simctl list devices available -j |
+    node -e '
+const fs = require("fs");
+const target = process.argv[1];
+const data = JSON.parse(fs.readFileSync(0, "utf8"));
+const devices = data.devices || {};
+for (const [runtime, runtimeDevices] of Object.entries(devices)) {
+  for (const device of runtimeDevices) {
+    if (device.udid === target) {
+      process.stdout.write(String(device.name || ""));
+      process.exit(0);
+    }
+  }
+}
+' "$SIM_UDID"
+)"
+test -n "$SIM_DEVICE_NAME" || fail "selected iPhone simulator name not found for $SIM_UDID"
+
+SIM_NAME="$(
+    xcrun simctl list devices available -j |
+    node -e '
+const fs = require("fs");
+const target = process.argv[1];
+const data = JSON.parse(fs.readFileSync(0, "utf8"));
+const devices = data.devices || {};
+for (const [runtime, runtimeDevices] of Object.entries(devices)) {
+  for (const device of runtimeDevices) {
+    if (device.udid === target) {
+      process.stdout.write(String(device.name || "") + " (" + runtime + ")");
+      process.exit(0);
+    }
+  }
+}
+' "$SIM_UDID"
+)"
+
+cd "$TAURI_DIR"
+sh "$ROOT_DIR/tools/tauri-shell/scripts/build-ui-bundle.shs" > "$BUILD_DIR/ios_build_ui_bundle.log" 2>&1 \
+    || fail "UI bundle generation failed; see $BUILD_DIR/ios_build_ui_bundle.log"
+npm run prepare:dist > "$BUILD_DIR/ios_prepare_dist.log" 2>&1 \
+    || fail "npm prepare:dist failed; see $BUILD_DIR/ios_prepare_dist.log"
+
+xcrun simctl boot "$SIM_UDID" >/dev/null 2>&1 || true
+xcrun simctl bootstatus "$SIM_UDID" -b > "$BUILD_DIR/ios_bootstatus.log" 2>&1
+
+: > "$LOG_STREAM"
+xcrun simctl spawn "$SIM_UDID" log stream --style compact \
+    --predicate 'process CONTAINS "simple" OR eventMessage CONTAINS "tauri-shell" OR eventMessage CONTAINS "Metal"' \
+    > "$LOG_STREAM" 2>&1 &
+LOG_PID=$!
+
+cleanup() {
+    kill "$LOG_PID" 2>/dev/null || true
+    if [ -n "${IOS_DEV_PID:-}" ]; then
+        kill "$IOS_DEV_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+cargo tauri ios dev --no-watch --no-dev-server --no-dev-server-wait "$SIM_DEVICE_NAME" > "$IOS_DEV_LOG" 2>&1 &
+IOS_DEV_PID=$!
+
+end=$(( $(date +%s) + TIMEOUT_SECS ))
+while [ "$(date +%s)" -lt "$end" ]; do
+    if grep -q '\[tauri-shell\] render, html_len=' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null; then
+        break
+    fi
+    sleep 2
+done
+
+grep -q '\[tauri-shell\] render, html_len=' "$IOS_DEV_LOG" "$LOG_STREAM" 2>/dev/null \
+    || fail "Tauri iOS render log not observed within ${TIMEOUT_SECS}s"
+
+xcrun simctl io "$SIM_UDID" screenshot "$SCREENSHOT" > "$BUILD_DIR/ios_screenshot.log" 2>&1 \
+    || fail "failed to capture iOS simulator screenshot"
+test -s "$SCREENSHOT" || fail "iOS simulator screenshot is empty: $SCREENSHOT"
+
+validate_screenshot_png "$SCREENSHOT" ios_mobile_renderer_screenshot \
+    || fail "iOS mobile renderer screenshot PNG validation failed"
+
+grep -Eiq 'Metal|CAMetalLayer|MTL|AGX|IOGPU|-framework Metal' "$IOS_DEV_LOG" "$LOG_STREAM" \
+    || fail "iOS renderer log missing Metal marker"
+
+echo "ios_tooling=available"
+echo "ios_simulator=$SIM_UDID"
+echo "ios_simulator_name=$SIM_NAME"
+echo "ios_screenshot=$SCREENSHOT"
+echo "ios_log_stream=$LOG_STREAM"
+echo "ios_dev_log=$IOS_DEV_LOG"
+echo "ios_render_log_status=pass"
+echo "ios_layout_status=pass"
+echo "ios_metal_log_status=pass"
+echo "status=pass"

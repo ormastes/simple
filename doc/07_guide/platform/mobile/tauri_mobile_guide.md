@@ -167,6 +167,7 @@ export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
 Build, boot, install, launch:
 
 ```sh
+sh tools/tauri-shell/scripts/build-ui-bundle.shs
 cd tools/tauri-shell
 cargo tauri android build --debug --target aarch64   # → app-universal-debug.apk
 
@@ -175,6 +176,32 @@ adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-u
 adb shell am start -n com.simple.ui/.MainActivity
 adb exec-out screencap -p > /tmp/android.png
 ```
+
+## 4b. Renderer parity evidence
+
+Use the aggregate wrapper when checking mobile Tauri2 against the production
+GUI/Web renderer parity source:
+
+```sh
+PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH" \
+ANDROID_HOME="$ANDROID_HOME" \
+sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs
+```
+
+The wrapper requires the desktop production parity evidence to pass first, then
+checks generated Tauri2 iOS/Android projects, live iOS simulator rendering with
+Metal log markers, and live Android emulator rendering with Vulkan/skiavk log
+markers plus screenshot proof. Evidence is written to
+`doc/09_report/tauri_mobile_renderer_parity_evidence_<date>.md`.
+
+2026-06-26 status: pass. iOS simulator Metal-backed Tauri2/WKWebView rendering
+passes with a nonblank mobile UI screenshot and Metal markers. Android arm64
+runtime and APK packaging pass, and the Android emulator host-Vulkan lane passes
+with `com.simple.ui` foreground, a real `[tauri-shell] render, html_len=` marker,
+layout screenshot proof, and emulator Vulkan markers (`-gpu host`, Apple M4).
+Guest HWUI `skiavk`, `swiftshader`, and `lavapipe` still crash
+`libhwui`/`VulkanManager` on the local Pixel7 AVD, so record the green lane as
+host/emulator Vulkan translation evidence, not guest `skiavk` evidence.
 
 ## 5. Widgets & 2D
 

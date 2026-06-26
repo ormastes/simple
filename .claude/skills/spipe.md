@@ -150,6 +150,55 @@ Chrome+RenderDoc proof, Electron+RenderDoc proof, and production GUI/web parity
 proof. If Chrome or Electron renders pixels but its log says `angle=vulkan` was
 not in the allowed implementations, classify the browser lane as
 `vulkan-angle-unavailable`; do not treat the bitmap as Vulkan-backed proof.
+The aggregate audit must also expose comparison artifact status keys:
+`gui_web_2d_vulkan_comparison_fixture_status`,
+`gui_web_2d_vulkan_comparison_artifact_status`,
+`gui_web_2d_vulkan_comparison_artifact_reason`,
+`gui_web_2d_vulkan_electron_argb_viewport_match_status`,
+`gui_web_2d_vulkan_electron_argb_file_status`,
+`gui_web_2d_vulkan_electron_argb_nonblank_status`,
+`gui_web_2d_vulkan_chrome_screenshot_file_status`,
+`gui_web_2d_vulkan_chrome_screenshot_png_status`,
+`gui_web_2d_vulkan_simple_evidence_file_status`, and
+`gui_web_2d_vulkan_simple_backend_status`.
+Artifact presence is not a pixel-equivalence claim. Require
+`gui_web_2d_vulkan_pixel_comparison_status=pass`,
+`gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff`, ARGB metadata for
+Electron/Chrome/Simple, and the zero-mismatch pairwise diff statuses
+`gui_web_2d_vulkan_electron_chrome_pairwise_diff_status`,
+`gui_web_2d_vulkan_electron_simple_pairwise_diff_status`, and
+`gui_web_2d_vulkan_chrome_simple_pairwise_diff_status` before claiming the
+Electron baseline, Chrome Vulkan-backed render, and Simple GUI/web/2D Vulkan
+render match pixels. If the aggregate reports
+`gui_web_2d_vulkan_pixel_comparison_status=fail` with
+`gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff-mismatch`, treat it
+as a real pixel mismatch to fix, not as missing evidence.
+Browser Vulkan proof must be read from
+`gui_web_2d_vulkan_browser_backing_status`,
+`gui_web_2d_vulkan_browser_backing_reason`, and
+`gui_web_2d_vulkan_browser_backing_mode`; fallback bitmap comparison is not
+Vulkan-backed browser proof, and the aggregate GUI audit must remain incomplete
+until browser backing is `pass`.
+For Tauri2 mobile renderer parity, use
+`scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`; it requires
+desktop production GUI/Web parity first, iOS WKWebView screenshot evidence with
+Metal markers, and Android WebView screenshot evidence with Vulkan/skiavk or
+host-emulator Vulkan markers. Treat `F/DEBUG`, `Fatal signal`, `VulkanManager`,
+`Headless UI completed`, or subprocess parse failures in Android logcat as hard
+blockers, not as Vulkan proof. Host/emulator ANGLE/Vulkan startup logs are
+supporting evidence only when `com.simple.ui` remains foreground, a
+`[tauri-shell] render, html_len=` marker is present, and the screenshot is
+captured from the live app.
+Read current macOS blocker lanes from
+`gui_web_2d_vulkan_renderdoc_blocker_status`,
+`gui_web_2d_vulkan_renderdoc_blocker_reason`,
+`gui_web_2d_vulkan_renderdoc_blocker_gate_count`, and
+`gui_web_2d_vulkan_renderdoc_blocker_gates` before claiming that RenderDoc,
+Simple, Electron, or Chrome Vulkan-backed capture is ready; blocker status
+`blocked` is a completion blocker, not a warning.
+GUI widget fixture evidence must also prove per-widget feature witnesses via
+`gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features`,
+not only widget/class presence.
 Defer Windows and Linux claims until platform-specific runbooks validate the
 same evidence keys and RDOC gate contract.
 
@@ -174,8 +223,7 @@ Before final verify, run `sh scripts/audit/direct-env-runtime-guard.shs --workin
 and `sh scripts/audit/direct-env-runtime-guard.shs --staged` so new app/gc env
 reads and process calls use env/process facades instead of local `rt_env_get`,
 `rt_process_run`, `rt_process_run_timeout`, `rt_process_spawn_async`,
-`rt_process_wait`, `rt_process_is_running`, `rt_process_is_alive`, or
-`rt_process_kill`.
+`rt_process_wait`, `rt_process_is_running`, or `rt_process_kill`.
 
 For IDE Office Markdown/PPT rendering hardening, keep the canonical guide at
 `doc/07_guide/app/ide_office_plugin_suite.md` current. Specs should prove the
