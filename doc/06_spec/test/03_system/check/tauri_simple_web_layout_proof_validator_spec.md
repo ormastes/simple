@@ -27,7 +27,7 @@ tauri_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -83,6 +83,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
 - ARGB capture files must parse as `argb-u32` artifacts from the Tauri window
   screenshot converter, match the requested viewport, contain the exact pixel
   count, and include nonzero pixels.
+- Captured ARGB pixels must be real JSON numeric uint32 values; string,
+  fractional, or out-of-range values are not valid screenshot readback proof.
 - The live Tauri wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 
@@ -317,6 +319,48 @@ expect(blank).to_contain("tauri_simple_web_layout_captured_argb_nonzero_pixel_co
 
 </details>
 
+#### rejects captured ARGB pixels that are not JSON uint32 numbers
+
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Tauri captured ARGB pixels must be real uint32 JSON numbers
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-layout-validator-argb-pixel-types"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/string.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(96*64).fill(\"4294967295\")}))") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/string.json > " + root + "/string.env; " +
+    _proof_command(root + "/fraction.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(96*64).fill(1.5)}))") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/fraction.json > " + root + "/fraction.env; " +
+    _proof_command(root + "/range.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(96*64).fill(4294967296)}))") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/range.json > " + root + "/range.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val string_pixels = file_read(root + "/string.env")
+val fractional_pixels = file_read(root + "/fraction.env")
+val range_pixels = file_read(root + "/range.env")
+step("Confirm Tauri captured ARGB pixels must be real uint32 JSON numbers")
+expect(string_pixels).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(string_pixels).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-pixel-type-mismatch")
+expect(string_pixels).to_contain("tauri_simple_web_layout_captured_argb_pixel_count=6144")
+expect(fractional_pixels).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(fractional_pixels).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-pixel-type-mismatch")
+expect(range_pixels).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(range_pixels).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-pixel-type-mismatch")
+```
+
+</details>
+
 #### rejects missing or malformed requested viewport proof
 
 -  proof command
@@ -443,8 +487,8 @@ expect(converter).to_contain("captured_argb_path: outputPath")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

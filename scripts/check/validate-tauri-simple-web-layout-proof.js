@@ -53,11 +53,21 @@ function pixelCountMatches(pixels, width, height) {
   return BigInt(pixels.length) === BigInt(w) * BigInt(h);
 }
 
+function argbPixelsAreUint32Numbers(pixels) {
+  if (!Array.isArray(pixels)) return false;
+  return pixels.every((pixel) =>
+    typeof pixel === 'number' &&
+    Number.isInteger(pixel) &&
+    pixel >= 0 &&
+    pixel <= 0xffffffff
+  );
+}
+
 function nonzeroPixelCount(pixels) {
   if (!Array.isArray(pixels)) return '';
   let count = 0;
   for (const pixel of pixels) {
-    if ((Number(pixel) >>> 0) !== 0) count += 1;
+    if (pixel !== 0) count += 1;
   }
   return String(count);
 }
@@ -135,6 +145,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'captured-argb-producer-mismatch';
 } else if (!sameInteger(capturedArgb.width, proof.width) || !sameInteger(capturedArgb.height, proof.height)) {
   reason = 'captured-argb-viewport-mismatch';
+} else if (!argbPixelsAreUint32Numbers(capturedArgb.pixels)) {
+  reason = 'captured-argb-pixel-type-mismatch';
 } else if (!pixelCountMatches(capturedArgb.pixels, proof.width, proof.height)) {
   reason = 'captured-argb-pixel-count-mismatch';
 } else if (!integerAtLeast(capturedArgbNonzeroPixelCount, 1)) {
