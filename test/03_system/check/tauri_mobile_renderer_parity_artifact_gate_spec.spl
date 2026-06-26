@@ -1,0 +1,122 @@
+"""
+# Tauri mobile renderer parity artifact gates
+
+## Overview
+
+Validates the Tauri mobile renderer parity aggregate artifact gates. The
+aggregate combines desktop production renderer parity, iOS WKWebView/Metal
+evidence, and Android WebView/Vulkan evidence. A pass claim must include real
+mobile screenshot artifacts and real MDI event/capture/performance/animation
+proof JSON artifacts, not only status strings.
+
+**Plan:** doc/03_plan/platform/mobile_tauri_gui_parallel_2026-05-29.md
+**Requirements:** N/A
+**Research:** N/A
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+```sh
+SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity_artifact_gate_spec.spl --mode=interpreter --clean --fail-fast
+```
+
+## Acceptance
+
+- Complete fixture iOS and Android mobile evidence passes the aggregate gate.
+- Missing iOS MDI proof JSON fails even when iOS status rows claim pass.
+- Missing Android MDI proof JSON fails even when Android status rows claim pass.
+- The aggregate emits explicit mobile screenshot and MDI proof file status rows.
+"""
+
+# @tag: system, gui, tauri, mobile, ios, android, evidence
+
+use std.io_runtime.{file_read, process_run}
+use std.spec.*
+
+fn _production_env_command(path: text) -> text:
+    "printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\n' > " + path
+
+fn _mobile_script_command(path: text, root: text, platform: text, proof_mode: text) -> text:
+    val proof_path = root + "/artifacts/" + platform + "_mdi.json"
+    val screenshot_path = root + "/artifacts/" + platform + ".png"
+    val log_path = root + "/artifacts/" + platform + ".log"
+    val prefix = if platform == "ios": "ios" else: "android"
+    val gpu_marker = if platform == "ios": "Metal CAMetalLayer" else: "Vulkan VK_"
+    val log_key = if platform == "ios": "ios_log_stream" else: "android_logcat"
+    val dev_log_key = if platform == "ios": "ios_dev_log" else: "android_gpu_log"
+    val tooling_row = if platform == "ios": "ios_tooling=fixture\\n" else: ""
+    val write_proof = if proof_mode == "present": "printf '{\"ok\":true}\\n' > " + proof_path + "\\n" else: ""
+    "printf '#!/bin/sh\\nmkdir -p " + root + "/artifacts\\nprintf x > " + screenshot_path + "\\nprintf \"[tauri-shell] render, html_len=1 " + gpu_marker + "\\\\n\" > " + log_path + "\\n" + write_proof +
+        "printf \"" + tooling_row +
+        "status=pass\\\\nreason=pass\\\\n" +
+        prefix + "_screenshot=" + screenshot_path + "\\\\n" +
+        log_key + "=" + log_path + "\\\\n" +
+        dev_log_key + "=" + log_path + "\\\\n" +
+        prefix + "_render_log_status=pass\\\\n" +
+        prefix + "_mdi_proof_json=" + proof_path + "\\\\n" +
+        prefix + "_mdi_proof_status=pass\\\\n" +
+        prefix + "_mdi_event_status=pass\\\\n" +
+        prefix + "_mdi_capture_status=pass\\\\n" +
+        prefix + "_mdi_capture_viewport_width=390\\\\n" +
+        prefix + "_mdi_capture_viewport_height=844\\\\n" +
+        prefix + "_mdi_performance_status=pass\\\\n" +
+        prefix + "_mdi_performance_now_delta_ms=1.25\\\\n" +
+        prefix + "_mdi_animation_status=pass\\\\n" +
+        prefix + "_mdi_animation_frame_count=2\\\\n" +
+        prefix + "_mdi_css_animation_probe=true\\\\n\"\\n' > " + path + " && chmod +x " + path
+
+fn _run_aggregate_command(root: text, ios_proof_mode: text, android_proof_mode: text) -> text:
+    "rm -rf " + root + " && mkdir -p " + root + " && " +
+        _production_env_command(root + "/production.env") + " && " +
+        _mobile_script_command(root + "/ios.sh", root, "ios", ios_proof_mode) + " && " +
+        _mobile_script_command(root + "/android.sh", root, "android", android_proof_mode) + " && " +
+        "PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=" + root + "/production.env " +
+        "TAURI_MOBILE_RENDERER_IOS_SCRIPT=" + root + "/ios.sh " +
+        "TAURI_MOBILE_RENDERER_ANDROID_SCRIPT=" + root + "/android.sh " +
+        "BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md " +
+        "sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs > " + root + "/stdout.env 2> " + root + "/stderr.log"
+
+describe "Tauri mobile renderer parity artifact gates":
+
+    it "accepts complete mobile screenshot and MDI proof artifacts":
+        val root = "build/test-tauri-mobile-artifact-gate-pass"
+        val command = _run_aggregate_command(root, "present", "present")
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = file_read(root + "/stdout.env")
+        step("Inspect normalized mobile artifact gate rows")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=pass")
+
+    it "rejects an iOS pass claim with missing MDI proof JSON":
+        val root = "build/test-tauri-mobile-artifact-gate-missing-ios-proof"
+        val command = _run_aggregate_command(root, "missing", "present")
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/stdout.env")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-proof-json-missing")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=fail")
+
+    it "rejects an Android pass claim with missing MDI proof JSON":
+        val root = "build/test-tauri-mobile-artifact-gate-missing-android-proof"
+        val command = _run_aggregate_command(root, "present", "missing")
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/stdout.env")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-proof-json-missing")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=fail")
+
+    it "keeps aggregate source wired to mobile proof and screenshot artifact rows":
+        val script = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
+        expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status")
+        expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status")
+        expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status")
+        expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status")
