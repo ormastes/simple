@@ -33,35 +33,34 @@ impl VhdlBackend:
                 false
 
     fn process_local_name(local: LocalId) -> Result<text, CompileError>:
-        val name_result = self.local_to_vhdl(local)
-        if name_result.is_err():
-            return Err(name_result.unwrap_err())
-        val ty_result = self.local_type(local)
-        if ty_result.is_err():
-            return Err(ty_result.unwrap_err())
-        match ty_result.unwrap().kind:
+        val name = match self.local_to_vhdl(local):
+            case Ok(result): result
+            case Err(err): return Err(err)
+        val ty = match self.local_type(local):
+            case Ok(result): result
+            case Err(err): return Err(err)
+        match ty.kind:
             case _:
-                Ok("v_{name_result.unwrap()}")
+                Ok("v_{name}")
 
     fn process_operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
         match operand.kind:
             case Copy(local) | Move(local):
-                val ty_result = self.local_type(local)
-                if ty_result.is_err():
-                    return Err(ty_result.unwrap_err())
-                match ty_result.unwrap().kind:
+                val ty = match self.local_type(local):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                match ty.kind:
                     case I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | Bool | Array(_, _) | Struct(_) | Enum(_):
-                        val local_name = self.local_to_vhdl(local)
-                        if local_name.is_err():
-                            return Err(local_name.unwrap_err())
-                        val name = local_name.unwrap()
+                        val name = match self.local_to_vhdl(local):
+                            case Ok(result): result
+                            case Err(err): return Err(err)
                         if name == "result_out":
                             Ok(name)
                         else:
-                            val kind_result = self.local_kind(local)
-                            if kind_result.is_err():
-                                return Err(kind_result.unwrap_err())
-                            match kind_result.unwrap():
+                            val kind = match self.local_kind(local):
+                                case Ok(result): result
+                                case Err(err): return Err(err)
+                            match kind:
                                 case Arg(_):
                                     Ok(name)
                                 case _:
@@ -78,17 +77,17 @@ impl VhdlBackend:
             Err(self.backend_error("No active MIR local kind for local {local.id}"))
 
     fn emit_process_dest_assign(builder: VhdlBuilder, dest: LocalId, expr: text) -> Result<(), CompileError>:
-        val kind_result = self.local_kind(dest)
-        if kind_result.is_err():
-            return Err(kind_result.unwrap_err())
-        match kind_result.unwrap():
+        val kind = match self.local_kind(dest):
+            case Ok(result): result
+            case Err(err): return Err(err)
+        match kind:
             case Ret:
                 builder.emit_signal_assign("result_out", expr)
             case Var | Temp:
-                val dest_name_result = self.process_local_name(dest)
-                if dest_name_result.is_err():
-                    return Err(dest_name_result.unwrap_err())
-                builder.emit_var_assign(dest_name_result.unwrap(), expr)
+                val dest_name = match self.process_local_name(dest):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                builder.emit_var_assign(dest_name, expr)
             case Arg(_):
                 return Err(self.backend_error("Synthesizable VHDL process cannot assign function argument local {dest.id}"))
         Ok(())
@@ -98,17 +97,17 @@ impl VhdlBackend:
         for local in func.locals:
             match local.kind:
                 case Var | Temp:
-                    val vhdl_type_result = self.local_object_type_to_vhdl(local, Some(func.span))
-                    if vhdl_type_result.is_err():
-                        return Err(vhdl_type_result.unwrap_err())
+                    val vhdl_type = match self.local_object_type_to_vhdl(local, Some(func.span)):
+                        case Ok(result): result
+                        case Err(err): return Err(err)
                     val name = self.default_local_name(local)
-                    builder.emit_process_var("v_{name}", vhdl_type_result.unwrap(), nil)
+                    builder.emit_process_var("v_{name}", vhdl_type, nil)
                 case _:
                     ()
         builder.emit_process_body_begin()
-        val block_result = self.compile_control_block(builder, func.entry_block, [])
-        if block_result.is_err():
-            return Err(block_result.unwrap_err())
+        match self.compile_control_block(builder, func.entry_block, []):
+            case Ok(_): pass
+            case Err(err): return Err(err)
         builder.emit_process_end(Some("comb"))
         Ok(())
 
@@ -116,77 +115,76 @@ impl VhdlBackend:
         for prior in seen:
             if prior == block_id.id:
                 return Err(self.backend_error("Synthesizable VHDL process cannot lower cyclic control flow at BB{block_id.id}"))
-        val block_result = self.block_by_id(block_id)
-        if block_result.is_err():
-            return Err(block_result.unwrap_err())
-        val block = block_result.unwrap()
+        val block = match self.block_by_id(block_id):
+            case Ok(result): result
+            case Err(err): return Err(err)
         var next_seen = seen
         next_seen = next_seen.push(block_id.id)
         for inst in block.instructions:
-            val inst_result = self.compile_process_instruction(builder, inst)
-            if inst_result.is_err():
-                return Err(inst_result.unwrap_err())
+            match self.compile_process_instruction(builder, inst):
+                case Ok(_): pass
+                case Err(err): return Err(err)
         if block.terminator != nil:
             match block.terminator:
                 case Ret(value):
-                    if value.?:
-                        val value_result = self.process_operand_to_vhdl(value.unwrap())
-                        if value_result.is_err():
-                            return Err(value_result.unwrap_err())
-                        val assign_result = self.emit_return_expr(builder, value_result.unwrap())
-                        if assign_result.is_err():
-                            return Err(assign_result.unwrap_err())
+                    match value:
+                        case Some(operand):
+                            val value_expr = match self.process_operand_to_vhdl(operand):
+                                case Ok(result): result
+                                case Err(err): return Err(err)
+                            match self.emit_return_expr(builder, value_expr):
+                                case Ok(_): pass
+                                case Err(err): return Err(err)
+                        case None: ()
                     Ok(())
                 case Goto(target):
                     self.compile_control_block(builder, target, next_seen)
                 case If(cond, then_, else_):
-                    val cond_result = self.process_operand_to_vhdl(cond)
-                    if cond_result.is_err():
-                        return Err(cond_result.unwrap_err())
-                    builder.emit_if_begin("{cond_result.unwrap()} = '1'")
-                    val then_result = self.compile_control_block(builder, then_, next_seen)
-                    if then_result.is_err():
-                        return Err(then_result.unwrap_err())
+                    val cond_expr = match self.process_operand_to_vhdl(cond):
+                        case Ok(result): result
+                        case Err(err): return Err(err)
+                    builder.emit_if_begin("{cond_expr} = '1'")
+                    match self.compile_control_block(builder, then_, next_seen):
+                        case Ok(_): pass
+                        case Err(err): return Err(err)
                     builder.emit_else()
-                    val else_result = self.compile_control_block(builder, else_, next_seen)
-                    if else_result.is_err():
-                        return Err(else_result.unwrap_err())
+                    match self.compile_control_block(builder, else_, next_seen):
+                        case Ok(_): pass
+                        case Err(err): return Err(err)
                     builder.emit_if_end()
                     Ok(())
                 case Switch(value, targets, default):
-                    val value_expr_result = self.switch_value_expr_to_vhdl(value, true)
-                    if value_expr_result.is_err():
-                        return Err(value_expr_result.unwrap_err())
-                    val value_type_result = self.operand_type(value)
-                    if value_type_result.is_err():
-                        return Err(value_type_result.unwrap_err())
-                    val value_expr = value_expr_result.unwrap()
-                    val value_type = value_type_result.unwrap()
+                    val value_expr = match self.switch_value_expr_to_vhdl(value, true):
+                        case Ok(result): result
+                        case Err(err): return Err(err)
+                    val value_type = match self.operand_type(value):
+                        case Ok(result): result
+                        case Err(err): return Err(err)
                     var emitted_case = false
                     for target_raw in targets:
                         val target: SwitchCase = target_raw
-                        val literal_result = self.switch_case_value_to_vhdl(target.value, value_type)
-                        if literal_result.is_err():
-                            return Err(literal_result.unwrap_err())
-                        val condition = "{value_expr} = {literal_result.unwrap()}"
+                        val literal = match self.switch_case_value_to_vhdl(target.value, value_type):
+                            case Ok(result): result
+                            case Err(err): return Err(err)
+                        val condition = "{value_expr} = {literal}"
                         if emitted_case:
                             builder.emit_elsif(condition)
                         else:
                             builder.emit_if_begin(condition)
                             emitted_case = true
-                        val target_result = self.compile_control_block(builder, target.target, next_seen)
-                        if target_result.is_err():
-                            return Err(target_result.unwrap_err())
+                        match self.compile_control_block(builder, target.target, next_seen):
+                            case Ok(_): pass
+                            case Err(err): return Err(err)
                     if emitted_case:
                         builder.emit_else()
-                        val default_result = self.compile_control_block(builder, default, next_seen)
-                        if default_result.is_err():
-                            return Err(default_result.unwrap_err())
+                        match self.compile_control_block(builder, default, next_seen):
+                            case Ok(_): pass
+                            case Err(err): return Err(err)
                         builder.emit_if_end()
                     else:
-                        val default_only_result = self.compile_control_block(builder, default, next_seen)
-                        if default_only_result.is_err():
-                            return Err(default_only_result.unwrap_err())
+                        match self.compile_control_block(builder, default, next_seen):
+                            case Ok(_): pass
+                            case Err(err): return Err(err)
                     Ok(())
                 case Unreachable:
                     Ok(())
@@ -198,16 +196,16 @@ impl VhdlBackend:
     fn compile_process_instruction(builder: VhdlBuilder, inst: MirInst) -> Result<(), CompileError>:
         match inst.kind:
             case Const(dest, value, ty):
-                val value_result = self.const_value_to_vhdl_at(value, ty, Some(inst.span))
-                if value_result.is_err():
-                    return Err(value_result.unwrap_err())
-                self.emit_process_dest_assign(builder, dest, value_result.unwrap())
+                val value_expr = match self.const_value_to_vhdl_at(value, ty, Some(inst.span)):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                self.emit_process_dest_assign(builder, dest, value_expr)
 
             case Copy(dest, src) | Move(dest, src):
-                val value_result = self.process_operand_to_vhdl(MirOperand(kind: MirOperandKind.Copy(src)))
-                if value_result.is_err():
-                    return Err(value_result.unwrap_err())
-                self.emit_process_dest_assign(builder, dest, value_result.unwrap())
+                val value_expr = match self.process_operand_to_vhdl(MirOperand(kind: MirOperandKind.Copy(src))):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                self.emit_process_dest_assign(builder, dest, value_expr)
 
             case Load(dest, ptr):
                 return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Load lowering", Some(inst.span)))
@@ -216,139 +214,139 @@ impl VhdlBackend:
                 return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Store lowering", Some(inst.span)))
 
             case BinOp(dest, op, left, right) | CheckedBinOp(dest, op, left, right):
-                val left_name_result = self.process_operand_to_vhdl(left)
-                if left_name_result.is_err():
-                    return Err(left_name_result.unwrap_err())
-                val right_name_result = self.process_operand_to_vhdl(right)
-                if right_name_result.is_err():
-                    return Err(right_name_result.unwrap_err())
-                val left_type_result = self.operand_type(left)
-                if left_type_result.is_err():
-                    return Err(left_type_result.unwrap_err())
-                val right_type_result = self.operand_type(right)
-                if right_type_result.is_err():
-                    return Err(right_type_result.unwrap_err())
-                val expr_result = self.binop_to_vhdl(op, left_name_result.unwrap(), left_type_result.unwrap(), right_name_result.unwrap(), right_type_result.unwrap(), right)
-                if expr_result.is_err():
-                    return Err(expr_result.unwrap_err())
-                self.emit_process_dest_assign(builder, dest, expr_result.unwrap())
+                val left_name = match self.process_operand_to_vhdl(left):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val right_name = match self.process_operand_to_vhdl(right):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val left_type = match self.operand_type(left):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val right_type = match self.operand_type(right):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val expr = match self.binop_to_vhdl(op, left_name, left_type, right_name, right_type, right):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                self.emit_process_dest_assign(builder, dest, expr)
 
             case Cast(dest, operand, target) | Bitcast(dest, operand, target):
-                val src_name_result = self.process_operand_to_vhdl(operand)
-                if src_name_result.is_err():
-                    return Err(src_name_result.unwrap_err())
-                val src_type_result = self.operand_type(operand)
-                if src_type_result.is_err():
-                    return Err(src_type_result.unwrap_err())
-                val expr_result = self.cast_to_vhdl(src_name_result.unwrap(), src_type_result.unwrap(), target)
-                if expr_result.is_err():
-                    return Err(expr_result.unwrap_err())
-                self.emit_process_dest_assign(builder, dest, expr_result.unwrap())
+                val src_name = match self.process_operand_to_vhdl(operand):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val src_type = match self.operand_type(operand):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val expr = match self.cast_to_vhdl(src_name, src_type, target):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                self.emit_process_dest_assign(builder, dest, expr)
 
             case Aggregate(dest, kind, operands):
-                val dest_type_result = self.local_type(dest)
-                if dest_type_result.is_err():
-                    return Err(dest_type_result.unwrap_err())
-                val aggregate_result = self.aggregate_to_vhdl_process(kind, operands, dest_type_result.unwrap(), Some(inst.span))
-                if aggregate_result.is_err():
-                    return Err(aggregate_result.unwrap_err())
-                self.emit_process_dest_assign(builder, dest, aggregate_result.unwrap())
+                val dest_type = match self.local_type(dest):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val aggregate = match self.aggregate_to_vhdl_process(kind, operands, dest_type, Some(inst.span)):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                self.emit_process_dest_assign(builder, dest, aggregate)
 
             case GetField(dest, base, field):
-                val base_name_result = self.process_operand_to_vhdl(base)
-                if base_name_result.is_err():
-                    return Err(base_name_result.unwrap_err())
-                val field_name_result = self.field_name_for_operand(base, field)
-                if field_name_result.is_err():
-                    return Err(field_name_result.unwrap_err())
-                self.emit_process_dest_assign(builder, dest, "{base_name_result.unwrap()}.{field_name_result.unwrap()}")
+                val base_name = match self.process_operand_to_vhdl(base):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val field_name = match self.field_name_for_operand(base, field):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                self.emit_process_dest_assign(builder, dest, "{base_name}.{field_name}")
 
             case SetField(base, field, value):
-                val field_name_result = self.field_name_for_operand(base, field)
-                if field_name_result.is_err():
-                    return Err(field_name_result.unwrap_err())
-                val value_name_result = self.process_operand_to_vhdl(value)
-                if value_name_result.is_err():
-                    return Err(value_name_result.unwrap_err())
+                val field_name = match self.field_name_for_operand(base, field):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val value_name = match self.process_operand_to_vhdl(value):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
                 match base.kind:
                     case Copy(local) | Move(local):
-                        val kind_result = self.local_kind(local)
-                        if kind_result.is_err():
-                            return Err(kind_result.unwrap_err())
-                        val base_name_result = self.process_operand_to_vhdl(base)
-                        if base_name_result.is_err():
-                            return Err(base_name_result.unwrap_err())
-                        val target = "{base_name_result.unwrap()}.{field_name_result.unwrap()}"
-                        match kind_result.unwrap():
+                        val kind = match self.local_kind(local):
+                            case Ok(result): result
+                            case Err(err): return Err(err)
+                        val base_name = match self.process_operand_to_vhdl(base):
+                            case Ok(result): result
+                            case Err(err): return Err(err)
+                        val target = "{base_name}.{field_name}"
+                        match kind:
                             case Var | Temp:
-                                builder.emit_var_assign(target, value_name_result.unwrap())
+                                builder.emit_var_assign(target, value_name)
                             case Ret:
-                                builder.emit_signal_assign(target, value_name_result.unwrap())
+                                builder.emit_signal_assign(target, value_name)
                             case Arg(_):
                                 return Err(self.backend_error("Synthesizable VHDL process cannot set field on argument local {local.id}"))
                     case _:
                         return Err(self.backend_error("Synthesizable VHDL process field set requires local base"))
 
             case VhdlResize(dest, operand, new_width, signed):
-                val src_name_result = self.process_operand_to_vhdl(operand)
-                if src_name_result.is_err():
-                    return Err(src_name_result.unwrap_err())
-                val expr_result = self.resize_expr_to_vhdl(src_name_result.unwrap(), signed, new_width)
-                if expr_result.is_err():
-                    return Err(expr_result.unwrap_err())
-                self.emit_process_dest_assign(builder, dest, expr_result.unwrap())
+                val src_name = match self.process_operand_to_vhdl(operand):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val expr = match self.resize_expr_to_vhdl(src_name, signed, new_width):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                self.emit_process_dest_assign(builder, dest, expr)
 
             case VhdlSlice(dest, signal, hi, lo):
-                val src_name_result = self.process_operand_to_vhdl(signal)
-                if src_name_result.is_err():
-                    return Err(src_name_result.unwrap_err())
-                val expr = "{src_name_result.unwrap()}({hi} downto {lo})"
-                val dest_type_result = self.local_type(dest)
-                if dest_type_result.is_err():
-                    return Err(dest_type_result.unwrap_err())
+                val src_name = match self.process_operand_to_vhdl(signal):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val expr = "{src_name}({hi} downto {lo})"
+                val dest_type = match self.local_type(dest):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
                 val slice_width = hi - lo + 1
-                val cast_result = self.cast_to_vhdl(expr, MirType.bits(slice_width), dest_type_result.unwrap())
-                if cast_result.is_err():
-                    return Err(cast_result.unwrap_err())
-                self.emit_process_dest_assign(builder, dest, cast_result.unwrap())
+                val cast = match self.cast_to_vhdl(expr, MirType.bits(slice_width), dest_type):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                self.emit_process_dest_assign(builder, dest, cast)
 
             case VhdlConcat(dest, parts):
                 var part_names: [text] = []
                 for part in parts:
-                    val part_name_result = self.process_operand_to_vhdl(part)
-                    if part_name_result.is_err():
-                        return Err(part_name_result.unwrap_err())
-                    part_names = part_names.push(part_name_result.unwrap())
+                    val part_name = match self.process_operand_to_vhdl(part):
+                        case Ok(result): result
+                        case Err(err): return Err(err)
+                    part_names = part_names.push(part_name)
                 self.emit_process_dest_assign(builder, dest, part_names.join(" & "))
 
             case VhdlSignalAssign(target, value, delay_ns):
                 if delay_ns.?:
                     return Err(self.backend_error("Synthesizable VHDL process signal assignment does not support delayed assignment"))
-                val target_name_result = self.process_operand_to_vhdl(target)
-                if target_name_result.is_err():
-                    return Err(target_name_result.unwrap_err())
-                val value_name_result = self.process_operand_to_vhdl(value)
-                if value_name_result.is_err():
-                    return Err(value_name_result.unwrap_err())
-                builder.emit_signal_assign(target_name_result.unwrap(), value_name_result.unwrap())
+                val target_name = match self.process_operand_to_vhdl(target):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val value_name = match self.process_operand_to_vhdl(value):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                builder.emit_signal_assign(target_name, value_name)
 
             case VhdlVarAssign(target, value):
-                val target_name_result = self.process_operand_to_vhdl(target)
-                if target_name_result.is_err():
-                    return Err(target_name_result.unwrap_err())
-                val value_name_result = self.process_operand_to_vhdl(value)
-                if value_name_result.is_err():
-                    return Err(value_name_result.unwrap_err())
-                builder.emit_var_assign(target_name_result.unwrap(), value_name_result.unwrap())
+                val target_name = match self.process_operand_to_vhdl(target):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val value_name = match self.process_operand_to_vhdl(value):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                builder.emit_var_assign(target_name, value_name)
 
             case UnaryOp(dest, op, operand):
-                val src_name_result = self.process_operand_to_vhdl(operand)
-                if src_name_result.is_err():
-                    return Err(src_name_result.unwrap_err())
-                val expr_result = self.unaryop_to_vhdl(op, src_name_result.unwrap())
-                if expr_result.is_err():
-                    return Err(expr_result.unwrap_err())
-                self.emit_process_dest_assign(builder, dest, expr_result.unwrap())
+                val src_name = match self.process_operand_to_vhdl(operand):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                val expr = match self.unaryop_to_vhdl(op, src_name):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                self.emit_process_dest_assign(builder, dest, expr)
 
             case Nop:
                 ()
@@ -370,9 +368,9 @@ impl VhdlBackend:
 
     fn compile_block_instructions(builder: VhdlBuilder, block: MirBlock) -> Result<(), CompileError>:
         for inst in block.instructions:
-            val result = self.compile_instruction(builder, inst)
-            if result.is_err():
-                return Err(result.unwrap_err())
+            match self.compile_instruction(builder, inst):
+                case Ok(_): pass
+                case Err(err): return Err(err)
         Ok(())
 
     fn reset_asserted_literal(domain: VhdlClockDomain) -> text:
@@ -388,9 +386,9 @@ impl VhdlBackend:
             case Combinational(sensitivity):
                 builder.emit_process_begin(Some(label), sensitivity)
                 builder.emit_process_body_begin()
-                val block_result = self.compile_block_instructions(builder, block)
-                if block_result.is_err():
-                    return Err(block_result.unwrap_err())
+                match self.compile_block_instructions(builder, block):
+                    case Ok(_): pass
+                    case Err(err): return Err(err)
                 builder.emit_process_end(Some(label))
             case Clocked(domain):
                 val sensitivity_reset: text? = if domain.reset_synchrony == VhdlResetSynchrony.Async: domain.reset_signal else: nil
@@ -401,14 +399,16 @@ impl VhdlBackend:
                         builder.emit_rising_edge_check(domain.clock_signal)
                     case Falling:
                         builder.emit_falling_edge_check(domain.clock_signal)
-                if domain.reset_signal.? and domain.reset_synchrony == VhdlResetSynchrony.Sync:
-                    val reset_signal = domain.reset_signal.unwrap()
-                    builder.emit_if_begin("{reset_signal} = {self.reset_asserted_literal(domain)}")
-                    builder.emit_comment("sync reset branch")
-                    builder.emit_else()
-                val block_result = self.compile_block_instructions(builder, block)
-                if block_result.is_err():
-                    return Err(block_result.unwrap_err())
+                match domain.reset_signal:
+                    case Some(reset_signal):
+                        if domain.reset_synchrony == VhdlResetSynchrony.Sync:
+                            builder.emit_if_begin("{reset_signal} = {self.reset_asserted_literal(domain)}")
+                            builder.emit_comment("sync reset branch")
+                            builder.emit_else()
+                    case None: ()
+                match self.compile_block_instructions(builder, block):
+                    case Ok(_): pass
+                    case Err(err): return Err(err)
                 if domain.reset_signal.? and domain.reset_synchrony == VhdlResetSynchrony.Sync:
                     builder.emit_if_end()
                 builder.emit_if_end()
@@ -416,19 +416,20 @@ impl VhdlBackend:
             case AsyncReset(domain):
                 builder.emit_clocked_process_begin(Some(label), domain.clock_signal, domain.reset_signal)
                 builder.emit_process_body_begin()
-                if domain.reset_signal.?:
-                    val reset_signal = domain.reset_signal.unwrap()
-                    builder.emit_if_begin("{reset_signal} = {self.reset_asserted_literal(domain)}")
-                    builder.emit_comment("async reset branch")
-                    builder.emit_else()
+                match domain.reset_signal:
+                    case Some(reset_signal):
+                        builder.emit_if_begin("{reset_signal} = {self.reset_asserted_literal(domain)}")
+                        builder.emit_comment("async reset branch")
+                        builder.emit_else()
+                    case None: ()
                 match domain.edge:
                     case Rising:
                         builder.emit_rising_edge_check(domain.clock_signal)
                     case Falling:
                         builder.emit_falling_edge_check(domain.clock_signal)
-                val block_result = self.compile_block_instructions(builder, block)
-                if block_result.is_err():
-                    return Err(block_result.unwrap_err())
+                match self.compile_block_instructions(builder, block):
+                    case Ok(_): pass
+                    case Err(err): return Err(err)
                 builder.emit_if_end()
                 if domain.reset_signal.?:
                     builder.emit_if_end()
