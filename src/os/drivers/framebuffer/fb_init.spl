@@ -1,0 +1,111 @@
+# Framebuffer Initialization — Unified Init for All Architectures
+#
+# MDSOC: feature dimension, drivers layer
+#
+# Provides a single entry point to initialize a framebuffer, regardless
+# of how it was provided (bootloader, ramfb, or other sources).
+#
+# Priority:
+#   1. Boot-provided framebuffer (Limine, UEFI GOP, etc.)
+#   2. QEMU ramfb (if running under QEMU with -device ramfb)
+#   3. nil (no framebuffer available)
+
+use os.kernel.boot.ports.{BootOutputPort, FramebufferInfo}
+use os.kernel.types.memory_types.{PhysAddr}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.drivers.framebuffer.ramfb.{init_ramfb}
+
+# ============================================================================
+# Default ramfb Framebuffer Addresses per Architecture
+# ============================================================================
+#
+# These addresses are chosen to avoid conflicts with kernel memory and
+# MMIO regions on each QEMU virt platform. The framebuffer is placed in
+# usable RAM that the kernel does not use for its own heap.
+
+val RAMFB_DEFAULT_WIDTH: u32 = 1024
+val RAMFB_DEFAULT_HEIGHT: u32 = 768
+
+# Framebuffer addresses per architecture (in usable RAM, after kernel heap)
+# x86_64: kernel at 0x100000, heap ends ~0x1100000 -> fb at 0x2000000 (32MB)
+val RAMFB_ADDR_X86_64: u64 = 0x02000000
+
+# arm64: kernel at 0x40000000, heap ends ~0x41100000 -> fb at 0x42000000
+val RAMFB_ADDR_ARM64: u64 = 0x42000000
+
+# riscv64: kernel at 0x80200000, heap ends ~0x81300000 -> fb at 0x82000000
+val RAMFB_ADDR_RISCV64: u64 = 0x82000000
+
+# riscv32: kernel at 0x80200000, heap ends ~0x81300000 -> fb at 0x82000000
+val RAMFB_ADDR_RISCV32: u64 = 0x82000000
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn init_framebuffer(boot_info: BootOutputPort) -> FramebufferDriver?:
+    """Initialize framebuffer from boot info or ramfb fallback.
+
+    If the bootloader provided a framebuffer (addr != 0), use it directly.
+    Otherwise, try to initialize QEMU ramfb as a fallback.
+
+    Returns nil if no framebuffer is available.
+    """
+    # Check if bootloader already provided a framebuffer
+    if boot_info.framebuffer.addr.addr != 0:
+        val fb = FramebufferDriver.from_boot_info(boot_info.framebuffer)
+        return fb
+
+    # Try ramfb fallback
+    val ramfb_addr = get_ramfb_address(boot_info)
+    val fb_info = init_ramfb(
+        boot_info.arch,
+        ramfb_addr,
+        RAMFB_DEFAULT_WIDTH,
+        RAMFB_DEFAULT_HEIGHT
+    )
+
+    if fb_info.?:
+        val info = fb_info!
+        val fb = FramebufferDriver.from_boot_info(info)
+        return fb
+
+    nil
+
+fn init_framebuffer_with_size(boot_info: BootOutputPort, width: u32, height: u32) -> FramebufferDriver?:
+    """Initialize framebuffer with specific dimensions.
+
+    If boot-provided framebuffer exists, uses it (ignoring width/height).
+    For ramfb, uses the specified dimensions.
+    """
+    # Check if bootloader already provided a framebuffer
+    if boot_info.framebuffer.addr.addr != 0:
+        val fb = FramebufferDriver.from_boot_info(boot_info.framebuffer)
+        return fb
+
+    # Try ramfb fallback with custom size
+    val ramfb_addr = get_ramfb_address(boot_info)
+    val fb_info = init_ramfb(boot_info.arch, ramfb_addr, width, height)
+
+    if fb_info.?:
+        val info = fb_info!
+        val fb = FramebufferDriver.from_boot_info(info)
+        return fb
+
+    nil
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn get_ramfb_address(boot_info: BootOutputPort) -> u64:
+    """Get the default ramfb address for the given architecture."""
+    use os.kernel.arch.arch_context.{Architecture}
+
+    match boot_info.arch:
+        Architecture.X86_64: RAMFB_ADDR_X86_64
+        Architecture.X86: RAMFB_ADDR_X86_64
+        Architecture.Arm64: RAMFB_ADDR_ARM64
+        Architecture.Riscv64: RAMFB_ADDR_RISCV64
+        Architecture.Riscv32: RAMFB_ADDR_RISCV32
+        Architecture.Arm32: RAMFB_ADDR_ARM64   # Shares ARM64 memory layout

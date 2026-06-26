@@ -1,0 +1,124 @@
+# Wait Any — Multiplexed wait on multiple notification objects
+#
+# Provides user-space polling over multiple notification IDs until a
+# kernel-level WaitAny syscall (29) is added.
+#
+# Two variants:
+#   - wait_any_poll: non-blocking, returns first notification with bits set
+#   - wait_any_blocking: loops polling + sleeping until one fires
+#
+# When syscall 29 is implemented in the kernel, wait_any_blocking can be
+# replaced with a single syscall for better latency.
+
+use os.userlib.syscall_raw.{syscall}
+
+# ============================================================================
+# Result Type
+# ============================================================================
+
+struct WaitAnyResult:
+    """Result of a wait_any operation.
+
+    If found is true, notification_id and bits contain the first notification
+    that had bits set. If found is false, no notification was ready.
+    """
+    notification_id: u64
+    bits: u64
+    found: bool
+
+# ============================================================================
+# Non-blocking Poll
+# ============================================================================
+
+fn wait_any_poll(ids: [u64]) -> WaitAnyResult:
+    """Non-blocking poll of multiple notifications.
+
+    Iterates through the list of notification IDs and polls each one
+    via syscall 27 (NotificationPoll). Returns the first ID that has
+    any bits set, clearing those bits atomically.
+
+    Returns WaitAnyResult with found=false if no notification is ready.
+    """
+    var i = 0
+    while i < ids.len():
+        val bits_raw = syscall(27, ids[i], 0, 0, 0, 0)
+        val bits = bits_raw as u64
+        if bits != 0:
+            return WaitAnyResult(
+                notification_id: ids[i],
+                bits: bits,
+                found: true
+            )
+        i = i + 1
+    WaitAnyResult(notification_id: 0, bits: 0, found: false)
+
+# ============================================================================
+# Blocking Wait
+# ============================================================================
+
+fn wait_any_blocking(ids: [u64]) -> WaitAnyResult:
+    """Blocking wait on multiple notifications.
+
+    Polls all notification IDs in a loop. If none are ready, sleeps
+    briefly by calling NotificationWait (syscall 26) on the first ID
+    in the list, then retries. This ensures the thread yields to the
+    scheduler instead of busy-spinning.
+
+    Note: This is a user-space approximation. When the kernel implements
+    syscall 29 (WaitAny), this function should be replaced with a single
+    syscall that atomically waits on all IDs.
+
+    Requires at least one ID in the list.
+    """
+    if ids.len() == 0:
+        return WaitAnyResult(notification_id: 0, bits: 0, found: false)
+
+    while true:
+        # Try non-blocking poll of all IDs
+        val result = wait_any_poll(ids)
+        if result.found:
+            return result
+
+        # No notification ready — sleep on the first ID to yield CPU.
+        # syscall 26 (NotificationWait) will block until bits arrive
+        # on ids[0], then we retry all IDs.
+        val wake_bits_raw = syscall(26, ids[0], 0, 0, 0, 0)
+        val wake_bits = wake_bits_raw as u64
+
+        # If the wait itself returned bits, check if it's the one we want
+        if wake_bits != 0:
+            return WaitAnyResult(
+                notification_id: ids[0],
+                bits: wake_bits,
+                found: true
+            )
+
+    # Unreachable, but satisfy return type
+    WaitAnyResult(notification_id: 0, bits: 0, found: false)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn wait_one(id: u64) -> u64:
+    """Block until the given notification has bits set. Returns the bits.
+
+    Simple wrapper around syscall 26 for single-notification waits.
+    """
+    # First try a non-blocking poll
+    val poll_bits_raw = syscall(27, id, 0, 0, 0, 0)
+    val poll_bits = poll_bits_raw as u64
+    if poll_bits != 0:
+        return poll_bits
+
+    # Block until bits arrive
+    val wait_bits_raw = syscall(26, id, 0, 0, 0, 0)
+    val wait_bits = wait_bits_raw as u64
+    if wait_bits != 0:
+        return wait_bits
+
+    # Wait returned 0 meaning the thread was blocked and then woken.
+    # The bits were delivered via the syscall return path. Poll once more.
+    val final_bits_raw = syscall(27, id, 0, 0, 0, 0)
+    val final_bits = final_bits_raw as u64
+    final_bits

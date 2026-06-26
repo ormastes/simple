@@ -1,0 +1,267 @@
+# dhcpv6.spl
+# DHCPv6 -- Dynamic Host Configuration Protocol for IPv6 (RFC 8415)
+# MDSOC: feature dimension, network layer.
+#
+# Message format:
+#   msg_type(1) transaction_id(3) options...
+#
+# Option TLV:
+#   code(2) length(2) value(length bytes)
+#
+# Typed sub-parsers for IA_NA (option 3) and IAADDR (option 5).
+# Recursive nesting: IA_NA embeds its own [Dhcpv6Option] sub-list.
+# Sub-options parsed from value bytes using a fresh ByteReader each level.
+#
+# Integer constants for msg_type and option codes -- NOT enums (JIT-safe).
+
+use std.common.net.byte_cursor.{ByteReader, ByteWriter}
+use std.common.net.addr.{Ipv6Addr}
+
+# ============================================================================
+# DHCPv6 message type constants
+# ============================================================================
+
+val DHCPV6_SOLICIT:             u8 = 1
+val DHCPV6_ADVERTISE:           u8 = 2
+val DHCPV6_REQUEST:             u8 = 3
+val DHCPV6_CONFIRM:             u8 = 4
+val DHCPV6_RENEW:               u8 = 5
+val DHCPV6_REBIND:              u8 = 6
+val DHCPV6_REPLY:               u8 = 7
+val DHCPV6_RELEASE:             u8 = 8
+val DHCPV6_DECLINE:             u8 = 9
+val DHCPV6_RECONFIGURE:         u8 = 10
+val DHCPV6_INFORMATION_REQUEST: u8 = 11
+val DHCPV6_RELAY_FORW:          u8 = 12
+val DHCPV6_RELAY_REPL:          u8 = 13
+
+# ============================================================================
+# DHCPv6 option code constants
+# ============================================================================
+
+val DHCPV6_OPT_CLIENTID:   u16 = 1
+val DHCPV6_OPT_SERVERID:   u16 = 2
+val DHCPV6_OPT_IA_NA:      u16 = 3
+val DHCPV6_OPT_IA_TA:      u16 = 4
+val DHCPV6_OPT_IAADDR:     u16 = 5
+val DHCPV6_OPT_ORO:        u16 = 6
+val DHCPV6_OPT_PREFERENCE: u16 = 7
+val DHCPV6_OPT_ELAPSED:    u16 = 8
+val DHCPV6_OPT_RELAY_MSG:  u16 = 9
+val DHCPV6_OPT_STATUS:     u16 = 13
+val DHCPV6_OPT_DNS:        u16 = 23
+val DHCPV6_OPT_DOMAIN:     u16 = 24
+
+# ============================================================================
+# Flat Dhcpv6Option TLV
+# ============================================================================
+
+struct Dhcpv6Option:
+    """One DHCPv6 option: code(2) len(2) value(len bytes)."""
+    code:  u16
+    len_:  u16
+    value: [u8]
+
+fn dhcpv6_option_parse_one(r: ByteReader) -> Result<Dhcpv6Option, text>:
+    """Parse one option from a ByteReader (advances cursor)."""
+    val code_r = r.read_u16()
+    if code_r.is_err():
+        return Err("DHCPv6 option: read code")
+    val len_r = r.read_u16()
+    if len_r.is_err():
+        return Err("DHCPv6 option: read length")
+    val opt_len = len_r.unwrap().to_u64()
+    val val_r = r.read_bytes(opt_len)
+    if val_r.is_err():
+        return Err("DHCPv6 option code={code_r.unwrap()}: truncated value")
+    Ok(Dhcpv6Option(
+        code: code_r.unwrap(),
+        len_: len_r.unwrap(),
+        value: val_r.unwrap()
+    ))
+
+fn dhcpv6_options_parse(data: [u8]) -> Result<[Dhcpv6Option], text>:
+    """Parse all options from a byte slice (typically after msg_type+txid)."""
+    var r = ByteReader.new(data)
+    var opts: [Dhcpv6Option] = []
+    # BUG(bytereader_by_value_param_no_cursor_propagation): passing `r` to the free
+    # fn dhcpv6_option_parse_one(r) copies the ByteReader, so its cursor advances on
+    # the COPY only and the caller's `r.has(4)` never goes false -> infinite loop.
+    # Inline the reads so the same `r` cursor advances. (sctp/dccp use offset loops.)
+    while r.has(4):
+        val code_r = r.read_u16()
+        if code_r.is_err():
+            return Err("DHCPv6 option: read code")
+        val len_r = r.read_u16()
+        if len_r.is_err():
+            return Err("DHCPv6 option: read length")
+        val opt_len = len_r.unwrap().to_u64()
+        val val_r = r.read_bytes(opt_len)
+        if val_r.is_err():
+            return Err("DHCPv6 option code={code_r.unwrap()}: truncated value")
+        opts.push(Dhcpv6Option(
+            code: code_r.unwrap(),
+            len_: len_r.unwrap(),
+            value: val_r.unwrap()
+        ))
+    Ok(opts)
+
+fn dhcpv6_option_build(opt: Dhcpv6Option) -> [u8]:
+    """Serialize one DHCPv6 option."""
+    var w = ByteWriter.new()
+    w.write_u16(opt.code)
+    w.write_u16(opt.len_)
+    w.write_bytes(opt.value)
+    w.to_bytes()
+
+fn dhcpv6_options_build(opts: [Dhcpv6Option]) -> [u8]:
+    """Serialize all options to wire bytes."""
+    var w = ByteWriter.new()
+    var i: u64 = 0
+    while i < opts.len():
+        val ob = dhcpv6_option_build(opts[i])
+        w.write_bytes(ob)
+        i = i + 1
+    w.to_bytes()
+
+# ============================================================================
+# Typed IA_NA sub-parser (option code 3)
+# ============================================================================
+
+struct IaNa:
+    """Parsed IA_NA option body: iaid(4) t1(4) t2(4) sub-options."""
+    iaid:    u32
+    t1:      u32
+    t2:      u32
+    options: [Dhcpv6Option]
+
+fn dhcpv6_parse_ia_na(value: [u8]) -> Result<IaNa, text>:
+    """Parse IA_NA from its value bytes (minimum 12)."""
+    if value.len() < 12:
+        return Err("IA_NA truncated: need 12 bytes, got {value.len()}")
+    var r = ByteReader.new(value)
+    val iaid_r = r.read_u32()
+    if iaid_r.is_err():
+        return Err("IA_NA: read iaid")
+    val t1_r = r.read_u32()
+    if t1_r.is_err():
+        return Err("IA_NA: read t1")
+    val t2_r = r.read_u32()
+    if t2_r.is_err():
+        return Err("IA_NA: read t2")
+    # sub-options: collect remaining bytes then parse
+    val sub_bytes_r = r.read_bytes(r.remaining())
+    if sub_bytes_r.is_err():
+        return Err("IA_NA: read sub-option bytes")
+    val sub_opts_r = dhcpv6_options_parse(sub_bytes_r.unwrap())
+    if sub_opts_r.is_err():
+        return Err("IA_NA sub-options: {sub_opts_r.unwrap_err()}")
+    Ok(IaNa(
+        iaid: iaid_r.unwrap(),
+        t1: t1_r.unwrap(),
+        t2: t2_r.unwrap(),
+        options: sub_opts_r.unwrap()
+    ))
+
+fn dhcpv6_build_ia_na(ia: IaNa) -> [u8]:
+    """Serialize an IA_NA to value bytes (without outer code/len)."""
+    var w = ByteWriter.new()
+    w.write_u32(ia.iaid)
+    w.write_u32(ia.t1)
+    w.write_u32(ia.t2)
+    val sub = dhcpv6_options_build(ia.options)
+    w.write_bytes(sub)
+    w.to_bytes()
+
+# ============================================================================
+# Typed IAADDR sub-parser (option code 5)
+# ============================================================================
+
+struct IaAddr:
+    """Parsed IAADDR option body: addr(16) preferred(4) valid(4) sub-options."""
+    addr:                Ipv6Addr
+    preferred_lifetime:  u32
+    valid_lifetime:      u32
+    options:             [Dhcpv6Option]
+
+fn dhcpv6_parse_iaaddr(value: [u8]) -> Result<IaAddr, text>:
+    """Parse IAADDR from its value bytes (minimum 24)."""
+    if value.len() < 24:
+        return Err("IAADDR truncated: need 24 bytes, got {value.len()}")
+    var r = ByteReader.new(value)
+    val hi_r = r.read_u64()
+    if hi_r.is_err():
+        return Err("IAADDR: read addr hi")
+    val lo_r = r.read_u64()
+    if lo_r.is_err():
+        return Err("IAADDR: read addr lo")
+    val pref_r = r.read_u32()
+    if pref_r.is_err():
+        return Err("IAADDR: read preferred_lifetime")
+    val valid_r = r.read_u32()
+    if valid_r.is_err():
+        return Err("IAADDR: read valid_lifetime")
+    val sub_bytes_r = r.read_bytes(r.remaining())
+    if sub_bytes_r.is_err():
+        return Err("IAADDR: read sub-option bytes")
+    val sub_opts_r = dhcpv6_options_parse(sub_bytes_r.unwrap())
+    if sub_opts_r.is_err():
+        return Err("IAADDR sub-options: {sub_opts_r.unwrap_err()}")
+    Ok(IaAddr(
+        addr: Ipv6Addr.from_halves(hi_r.unwrap(), lo_r.unwrap()),
+        preferred_lifetime: pref_r.unwrap(),
+        valid_lifetime: valid_r.unwrap(),
+        options: sub_opts_r.unwrap()
+    ))
+
+fn dhcpv6_build_iaaddr(ia: IaAddr) -> [u8]:
+    """Serialize an IAADDR to value bytes (without outer code/len)."""
+    var w = ByteWriter.new()
+    w.write_bytes(ia.addr.to_bytes())
+    w.write_u32(ia.preferred_lifetime)
+    w.write_u32(ia.valid_lifetime)
+    val sub = dhcpv6_options_build(ia.options)
+    w.write_bytes(sub)
+    w.to_bytes()
+
+# ============================================================================
+# DHCPv6 top-level message
+# ============================================================================
+
+struct Dhcpv6Message:
+    """DHCPv6 message: msg_type(1) transaction_id(3) options..."""
+    msg_type:       u8
+    transaction_id: u32   # 24-bit value; upper byte ignored on wire
+    options:        [Dhcpv6Option]
+
+fn dhcpv6_parse(data: [u8]) -> Result<Dhcpv6Message, text>:
+    """Parse a DHCPv6 message from raw bytes (min 4 bytes)."""
+    if data.len() < 4:
+        return Err("DHCPv6 truncated: need 4 bytes, got {data.len()}")
+    var r = ByteReader.new(data)
+    val type_r = r.read_u8()
+    if type_r.is_err():
+        return Err("DHCPv6: read msg_type")
+    val txid_r = r.read_u24()
+    if txid_r.is_err():
+        return Err("DHCPv6: read transaction_id")
+    val opt_bytes_r = r.read_bytes(r.remaining())
+    if opt_bytes_r.is_err():
+        return Err("DHCPv6: read options bytes")
+    val opts_r = dhcpv6_options_parse(opt_bytes_r.unwrap())
+    if opts_r.is_err():
+        return Err("DHCPv6 options: {opts_r.unwrap_err()}")
+    Ok(Dhcpv6Message(
+        msg_type: type_r.unwrap(),
+        transaction_id: txid_r.unwrap(),
+        options: opts_r.unwrap()
+    ))
+
+fn dhcpv6_build(msg: Dhcpv6Message) -> [u8]:
+    """Serialize a DHCPv6 message to wire bytes."""
+    var w = ByteWriter.new()
+    w.write_u8(msg.msg_type)
+    w.write_u24(msg.transaction_id)
+    val ob = dhcpv6_options_build(msg.options)
+    w.write_bytes(ob)
+    w.to_bytes()
