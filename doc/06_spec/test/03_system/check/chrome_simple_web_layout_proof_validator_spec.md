@@ -27,7 +27,7 @@ chrome_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -93,6 +93,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   counts, and frame timing values must be real JSON numbers, not stringified
   rows, and malformed live numeric rows must not be re-emitted as normalized
   numeric evidence.
+- The top-level proof must carry the live Chrome capture source marker; a
+  hand-authored proof object with valid-looking artifacts is not sufficient.
 - The live Chrome wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 
@@ -110,7 +112,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -125,6 +127,7 @@ val evidence = file_read(root + "/evidence.env")
 step("Inspect normalized Chrome layout proof rows")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=pass")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_source=tools/chrome-live-bitmap/capture_html_argb.js")
 expect(evidence).to_contain("chrome_simple_web_layout_mismatch_count=0")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=1250")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_width=96")
@@ -147,6 +150,43 @@ expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_width=96
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_height=64")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_item_count=1")
 expect(evidence).to_contain("chrome_simple_web_layout_blur_or_tolerance_used=false")
+```
+
+</details>
+
+#### rejects proof without the live Chrome capture source marker
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Chrome proof must identify the live capture producer
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-validator-source"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/missing.json", "delete p.proof_source") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+    _proof_command(root + "/wrong.json", "p.proof_source=\"tools/manual/chrome-proof.json\"") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/wrong.json > " + root + "/wrong.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing = file_read(root + "/missing.env")
+val wrong = file_read(root + "/wrong.env")
+step("Confirm Chrome proof must identify the live capture producer")
+expect(missing).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(missing).to_contain("chrome_simple_web_layout_validation_reason=unexpected-chrome-proof-source")
+expect(missing).to_contain("chrome_simple_web_layout_proof_source=")
+expect(wrong).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(wrong).to_contain("chrome_simple_web_layout_validation_reason=unexpected-chrome-proof-source")
+expect(wrong).to_contain("chrome_simple_web_layout_proof_source=tools/manual/chrome-proof.json")
 ```
 
 </details>
@@ -639,13 +679,14 @@ expect(pixel).to_contain("chrome_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs")
 expect(script).to_contain("validate-chrome-simple-web-layout-proof.js")
 expect(script).to_contain("chrome_simple_web_layout_validation_status")
+expect(script).to_contain("chrome_simple_web_layout_proof_source")
 expect(script).to_contain("capture-viewport-mismatch")
 expect(script).to_contain("chrome_simple_web_layout_capture_width")
 expect(script).to_contain("chrome_simple_web_layout_captured_argb_format")
@@ -655,6 +696,7 @@ expect(script).to_contain("status=divergent")
 val capture = file_read("tools/chrome-live-bitmap/capture_html_argb.js")
 expect(capture).to_contain("return sum.toString()")
 expect(capture).to_contain("captured_argb_path: outputPath")
+expect(capture).to_contain("proof_source: \"tools/chrome-live-bitmap/capture_html_argb.js\"")
 expect(capture).to_contain("producer: \"chrome-headless-screenshot\"")
 expect(capture).to_contain("geometry_path: geometryOutputPath")
 ```
@@ -665,8 +707,8 @@ expect(capture).to_contain("geometry_path: geometryOutputPath")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

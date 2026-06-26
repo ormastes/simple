@@ -604,6 +604,7 @@ const proof = {
   reason: "pass",
   width,
   height,
+  proof_source: "tools/chrome-live-bitmap/capture_html_argb.js",
   checksum: actualChecksum,
   expected_checksum: expectedChecksum,
   weighted_checksum: actualWeighted,

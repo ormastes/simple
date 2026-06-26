@@ -142,10 +142,13 @@ const geometryJson = readJsonArtifact(geometryStat, {});
 const geometry = geometryJson.value || {};
 const geometryViewport = geometry.viewport || {};
 const geometryItems = Array.isArray(geometry.items) ? geometry.items : [];
+const expectedProofSource = 'tools/chrome-live-bitmap/capture_html_argb.js';
 
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
   reason = 'blur-or-tolerance-not-allowed';
+} else if (proof.proof_source !== expectedProofSource) {
+  reason = 'unexpected-chrome-proof-source';
 } else if (decimalIntegerText(proof.checksum) === null || decimalIntegerText(proof.expected_checksum) === null) {
   reason = 'missing-checksum-proof';
 } else if (!sameInteger(proof.checksum, proof.expected_checksum)) {
@@ -198,6 +201,7 @@ if (proof.blur_or_tolerance_used !== false) {
 
 emit('chrome_simple_web_layout_validation_status', reason === 'pass' ? 'pass' : 'fail');
 emit('chrome_simple_web_layout_validation_reason', reason);
+emit('chrome_simple_web_layout_proof_source', proof.proof_source);
 emit('chrome_simple_web_layout_simple_checksum', integerTextOrClean(proof.expected_checksum));
 emit('chrome_simple_web_layout_chrome_checksum', integerTextOrClean(proof.checksum));
 emit('chrome_simple_web_layout_simple_weighted_checksum', integerTextOrClean(proof.expected_weighted_checksum));
