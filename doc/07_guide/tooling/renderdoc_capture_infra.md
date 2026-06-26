@@ -447,7 +447,10 @@ sh scripts/check/check-macos-metal-render-log-compare.shs
 ```
 
 Set `MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1` on a host where Xcode GPU
-Frame Capture evidence is expected. Completion keys:
+Frame Capture evidence is expected. Strict capture mode requires
+`macos_metal_gpu_capture_artifact` and
+`macos_metal_gpu_capture_artifact_magic=XCODE-GPUTRACE`; a status-only capture
+row is diagnostic and does not prove native Metal GPU capture. Completion keys:
 
 ```text
 macos_metal_render_log_compare_status=pass
@@ -473,7 +476,12 @@ sh scripts/check/check-windows-d3d12-render-log-compare.shs
 ```
 
 Set `WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1` when PIX or an equivalent GPU
-debugger capture is required. Completion keys:
+debugger capture is required. Strict mode requires either
+`windows_d3d12_pix_capture_artifact` with
+`windows_d3d12_pix_capture_artifact_magic=PIX`, or
+`windows_d3d12_gpu_debugger_capture_artifact` for an equivalent debugger log.
+Status-only debugger rows are diagnostic and do not prove native D3D12 capture.
+Completion keys:
 
 ```text
 windows_d3d12_render_log_compare_status=pass

@@ -27,7 +27,7 @@ macos_metal_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -77,6 +77,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/macos_metal_render_log_compa
 4. If Xcode GPU Frame Capture is required for the host, write
    `build/macos-metal-gpu-capture/evidence.env` and set
    `MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1`.
+   Strict capture mode requires both `macos_metal_gpu_capture_artifact` and
+   `macos_metal_gpu_capture_artifact_magic=XCODE-GPUTRACE`; a status-only row
+   is diagnostic, not native GPU-capture proof.
 5. Run `scripts/check/check-macos-metal-render-log-compare.shs` and consume the
    normalized `macos_metal_render_log_compare_*` keys from the output env.
 
@@ -151,6 +154,8 @@ macos_metal_render_log_compare_pairwise_status=pass
 4. Reject pairwise rows whose Simple, Chrome, or Electron ARGB evidence is
    blank or uses mismatched viewport geometry.
 5. Reject missing Xcode GPU capture when strict capture mode is enabled.
+6. Reject status-only Xcode GPU capture rows that omit the capture artifact or
+   native artifact marker.
 
 ## Scenarios
 
@@ -293,12 +298,38 @@ expect(evidence).to_contain("macos_metal_render_log_compare_require_gpu_capture=
 
 </details>
 
+#### rejects status-only Xcode GPU capture rows in strict Metal mode
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-macos-metal-render-log-status-only-capture && mkdir -p build/test-macos-metal-render-log-status-only-capture && " +
+    "printf 'metal_generated_2d_readback_status=pass\\nmetal_generated_2d_readback_module_verified=true\\nmetal_generated_2d_readback_submit_attempted=true\\nmetal_generated_2d_readback_readback_available=true\\nmetal_generated_2d_readback_expected_checksum=7\\nmetal_generated_2d_readback_actual_checksum=7\\n' > build/test-macos-metal-render-log-status-only-capture/generated.env && " +
+    "printf 'metal_engine2d_framebuffer_readback_status=pass\\nmetal_engine2d_framebuffer_gpu_readback_available=true\\nmetal_engine2d_framebuffer_blur_or_tolerance_used=false\\n' > build/test-macos-metal-render-log-status-only-capture/framebuffer.env && " +
+    "printf 'macos_metal_electron_browser_backing_status=pass\\nmacos_metal_chrome_browser_backing_status=pass\\nmacos_metal_browser_backing_status=pass\\nmacos_metal_pixel_comparison_status=pass\\nmacos_metal_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_electron_simple_pairwise_diff_status=pass\\nmacos_metal_chrome_simple_pairwise_diff_status=pass\\nmacos_metal_simple_argb_width=3840\\nmacos_metal_simple_argb_height=2160\\nmacos_metal_simple_argb_nonblank_pixel_count=42\\nmacos_metal_chrome_argb_width=3840\\nmacos_metal_chrome_argb_height=2160\\nmacos_metal_chrome_argb_nonblank_pixel_count=42\\nmacos_metal_electron_argb_width=3840\\nmacos_metal_electron_argb_height=2160\\nmacos_metal_electron_argb_nonblank_pixel_count=42\\n' > build/test-macos-metal-render-log-status-only-capture/browser.env && " +
+    "printf 'macos_metal_gpu_capture_status=pass\\nmacos_metal_gpu_capture_tool=xcode-gpu-frame-capture\\n' > build/test-macos-metal-render-log-status-only-capture/capture.env && " +
+    "BUILD_DIR=build/test-macos-metal-render-log-status-only-capture/out METAL_GENERATED_2D_READBACK_ENV=build/test-macos-metal-render-log-status-only-capture/generated.env METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=build/test-macos-metal-render-log-status-only-capture/framebuffer.env MACOS_METAL_BROWSER_ENV=build/test-macos-metal-render-log-status-only-capture/browser.env MACOS_METAL_CAPTURE_ENV=build/test-macos-metal-render-log-status-only-capture/capture.env MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1 sh scripts/check/check-macos-metal-render-log-compare.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-macos-metal-render-log-status-only-capture/out/evidence.env")
+expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
+expect(evidence).to_contain("macos-metal-gpu-capture-artifact-missing")
+expect(evidence).to_contain("macos-metal-gpu-capture-magic-missing")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
