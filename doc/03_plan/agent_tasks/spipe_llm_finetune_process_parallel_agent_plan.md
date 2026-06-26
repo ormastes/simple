@@ -156,9 +156,9 @@ Evidence:
   `STATUS: WARN retry5-cache-manifest` while the manifest is missing, and only
   reports PASS when `license_review=approved`, `data_access=granted`, the cache
   path exists, and `checksum` matches the cached file's `sha256:<hex>`. The
-  gate now emits parseable proof fields for review:
-  `manifest_exists`, `cache_path_exists`, `expected_checksum`,
-  `actual_checksum`, and `checksum_match`.
+  gate emits parseable proof fields for review: `manifest_exists`,
+  `cache_path_exists`, `expected_checksum`, `actual_checksum`, and
+  `checksum_match`.
 - `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry5.sdn`
   records the retry target as licensed data acquisition, cache/checksum
   verification, QLoRA rerun, and target eval.
@@ -181,6 +181,4 @@ Evidence:
   app handoff evidence exist.
 
 Next normal-LLM work: obtain licensed data approval and write cache/checksum
-evidence for retry5 by copying the retry5 cache manifest template to the
-manifest path and filling approved access plus a real sha256 checksum before
-any real training or acceptance claim.
+evidence for retry5 before any real training or acceptance claim.

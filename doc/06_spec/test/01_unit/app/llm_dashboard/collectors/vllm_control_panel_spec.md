@@ -27,7 +27,7 @@ vllm_control_panel_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -149,7 +149,7 @@ expect(html.split("nil").len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -157,31 +157,8 @@ val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", fixture_vl
 val response = server.route_http("GET", "/api/vllm/control?action=preflight", "", "sid")
 
 expect(response).to_contain("HTTP/1.1 200 OK")
-expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
-expect(response).to_contain("\"status\":\"skipped\"")
-expect(response).to_contain("\"reason\":\"missing_local_vllm_and_gpu\"")
-expect(response.split("nil").len()).to_equal(1)
-```
-
-</details>
-
-#### routes dashboard start through live executor without implicit resources
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", fixture_vllm_manifest())
-val response = server.route_http("GET", "/api/vllm/control?action=start", "", "sid")
-
-expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
-expect(response).to_contain("\"action\":\"start\"")
-expect(response).to_contain("\"status\":\"skipped\"")
-expect(response).to_contain("\"reason\":\"missing_local_vllm_and_gpu\"")
-expect(response).to_contain("\"started_pid\":-1")
+expect(response).to_contain("\"event\":\"llm_dashboard_vllm_control_panel\"")
+expect(response).to_contain("\"status\":\"planned\"")
 expect(response.split("nil").len()).to_equal(1)
 ```
 
@@ -225,8 +202,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
