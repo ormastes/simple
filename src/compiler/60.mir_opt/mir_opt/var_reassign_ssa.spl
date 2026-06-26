@@ -164,16 +164,20 @@ fn ssa_replace_operand_local(operand: MirOperand, original_id: i64, replacement_
 
 fn ssa_max_local_from_operand(current: i64, operand: MirOperand) -> i64:
     val local = var_reassign_operand_local(operand)
-    if local.? and local.unwrap() > current:
-        local.unwrap()
+    if val local_id = local:
+        if local_id > current:
+            local_id
+        else:
+            current
     else:
         current
 
 fn ssa_max_local_from_inst(current: i64, inst: MirInst) -> i64:
     var max_id = current
     val written = var_reassign_written_local(inst)
-    if written.? and written.unwrap() > max_id:
-        max_id = written.unwrap()
+    if val written_id = written:
+        if written_id > max_id:
+            max_id = written_id
     match inst.kind:
         case Copy(_, src):
             if src.id > max_id:
@@ -224,8 +228,8 @@ fn ssa_max_local_from_inst(current: i64, inst: MirInst) -> i64:
 fn ssa_max_local_from_term(current: i64, term: MirTerminator) -> i64:
     match term:
         case Ret(value):
-            if value.?:
-                ssa_max_local_from_operand(current, value.unwrap())
+            if val ret_value = value:
+                ssa_max_local_from_operand(current, ret_value)
             else:
                 current
         case If(cond, _, _):
@@ -234,8 +238,9 @@ fn ssa_max_local_from_term(current: i64, term: MirTerminator) -> i64:
             ssa_max_local_from_operand(current, value)
         case CallTerminator(dest, func, args, _, _):
             var max_id = current
-            if dest.? and dest.unwrap().id > max_id:
-                max_id = dest.unwrap().id
+            if val term_dest = dest:
+                if term_dest.id > max_id:
+                    max_id = term_dest.id
             max_id = ssa_max_local_from_operand(max_id, func)
             for arg in args:
                 max_id = ssa_max_local_from_operand(max_id, arg)
@@ -332,8 +337,8 @@ fn ssa_rewrite_inst(inst: MirInst, keys: [i64], values: [i64], next_local_id: i6
 fn ssa_rewrite_term(term: MirTerminator, keys: [i64], values: [i64]) -> MirTerminator:
     match term:
         case Ret(value):
-            if value.?:
-                MirTerminator.Ret(Some(ssa_rewrite_operand(value.unwrap(), keys, values)))
+            if val ret_value = value:
+                MirTerminator.Ret(Some(ssa_rewrite_operand(ret_value, keys, values)))
             else:
                 term
         case _:
@@ -465,8 +470,8 @@ fn ssa_replace_inst_operands_for_local(inst: MirInst, original_id: i64, replacem
 fn ssa_replace_term_operands_for_local(term: MirTerminator, original_id: i64, replacement_id: i64) -> MirTerminator:
     match term:
         case Ret(value):
-            if value.?:
-                MirTerminator.Ret(Some(ssa_replace_operand_local(value.unwrap(), original_id, replacement_id)))
+            if val ret_value = value:
+                MirTerminator.Ret(Some(ssa_replace_operand_local(ret_value, original_id, replacement_id)))
             else:
                 term
         case If(cond, then_, else_):
@@ -486,8 +491,8 @@ fn ssa_block_written_locals(block: MirBlock) -> [i64]:
     var locals: [i64] = []
     for inst in block.instructions:
         val written = var_reassign_written_local(inst)
-        if written.?:
-            locals = local_list_push_unique(locals, written.unwrap())
+        if val written_id = written:
+            locals = local_list_push_unique(locals, written_id)
     locals
 
 fn ssa_common_locals(left: [i64], right: [i64]) -> [i64]:
@@ -505,23 +510,23 @@ fn ssa_phi_required_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
         case If(_, then_block, else_block):
             val then_opt = ssa_block_by_id(blocks, then_block.id)
             val else_opt = ssa_block_by_id(blocks, else_block.id)
-            if not then_opt.?:
-                return []
-            if not else_opt.?:
-                return []
-            val then_body = then_opt.unwrap()
-            val else_body = else_opt.unwrap()
-            match then_body.terminator:
-                case Goto(then_join):
-                    match else_body.terminator:
-                        case Goto(else_join):
-                            if then_join.id != else_join.id:
-                                return []
-                            ssa_common_locals(ssa_block_written_locals(then_body), ssa_block_written_locals(else_body))
+            if val then_body = then_opt:
+                if val else_body = else_opt:
+                    match then_body.terminator:
+                        case Goto(then_join):
+                            match else_body.terminator:
+                                case Goto(else_join):
+                                    if then_join.id != else_join.id:
+                                        return []
+                                    ssa_common_locals(ssa_block_written_locals(then_body), ssa_block_written_locals(else_body))
+                                case _:
+                                    []
                         case _:
                             []
-                case _:
-                    []
+                else:
+                    return []
+            else:
+                return []
         case _:
             []
 
@@ -541,40 +546,40 @@ fn ssa_phi_plans_for_blocks(blocks: [MirBlock]) -> [SsaPhiPlan]:
         case If(_, then_block, else_block):
             val then_opt = ssa_block_by_id(blocks, then_block.id)
             val else_opt = ssa_block_by_id(blocks, else_block.id)
-            if not then_opt.?:
-                return []
-            if not else_opt.?:
-                return []
-            val then_body = then_opt.unwrap()
-            val else_body = else_opt.unwrap()
-            match then_body.terminator:
-                case Goto(then_join):
-                    match else_body.terminator:
-                        case Goto(else_join):
-                            if then_join.id != else_join.id:
-                                return []
-                            val locals = ssa_common_locals(ssa_block_written_locals(then_body), ssa_block_written_locals(else_body))
-                            var plans: [SsaPhiPlan] = []
-                            var next_local = ssa_max_local_from_blocks(blocks) + 1
-                            for local_id in locals:
-                                val then_value = next_local
-                                val else_value = next_local + 1
-                                val phi_dest = next_local + 2
-                                plans = plans.push(SsaPhiPlan(
-                                    join_block_id: then_join.id,
-                                    original_local_id: local_id,
-                                    then_block_id: then_block.id,
-                                    then_value_local_id: then_value,
-                                    else_block_id: else_block.id,
-                                    else_value_local_id: else_value,
-                                    phi_dest_local_id: phi_dest
-                                ))
-                                next_local = next_local + 3
-                            plans
+            if val then_body = then_opt:
+                if val else_body = else_opt:
+                    match then_body.terminator:
+                        case Goto(then_join):
+                            match else_body.terminator:
+                                case Goto(else_join):
+                                    if then_join.id != else_join.id:
+                                        return []
+                                    val locals = ssa_common_locals(ssa_block_written_locals(then_body), ssa_block_written_locals(else_body))
+                                    var plans: [SsaPhiPlan] = []
+                                    var next_local = ssa_max_local_from_blocks(blocks) + 1
+                                    for local_id in locals:
+                                        val then_value = next_local
+                                        val else_value = next_local + 1
+                                        val phi_dest = next_local + 2
+                                        plans = plans.push(SsaPhiPlan(
+                                            join_block_id: then_join.id,
+                                            original_local_id: local_id,
+                                            then_block_id: then_block.id,
+                                            then_value_local_id: then_value,
+                                            else_block_id: else_block.id,
+                                            else_value_local_id: else_value,
+                                            phi_dest_local_id: phi_dest
+                                        ))
+                                        next_local = next_local + 3
+                                    plans
+                                case _:
+                                    []
                         case _:
                             []
-                case _:
+                else:
                     []
+            else:
+                []
         case _:
             []
 
