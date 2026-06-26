@@ -813,8 +813,12 @@ impl Fat32Core:
             return Err("invalid FAT32 geometry")
         val of_rc = self.get_open_file(handle)
         if of_rc.is_err():
-            return Err(of_rc.unwrap_err())
-        val of = of_rc.unwrap()
+            return match of_rc:
+                Ok(_): Err("invalid file handle")
+                Err(err): Err(err)
+        val of = match of_rc:
+            Ok(value): value
+            Err(err): return Err(err)
         if of.is_dir:
             return Err("direct I/O unsupported for directories")
         val sector_size = self.bytes_per_sector.to_i64()
@@ -829,8 +833,12 @@ impl Fat32Core:
             return Err("direct I/O range crosses FAT32 cluster")
         val chain_rc = self.follow_chain(of.start_cluster)
         if chain_rc.is_err():
-            return Err(chain_rc.unwrap_err())
-        val chain = chain_rc.unwrap()
+            return match chain_rc:
+                Ok(_): Err("failed to follow FAT chain")
+                Err(err): Err(err)
+        val chain = match chain_rc:
+            Ok(value): value
+            Err(err): return Err(err)
         val cluster_index = (file_offset / cluster_bytes).to_i32()
         if cluster_index < 0 or cluster_index >= chain.len():
             return Err("direct I/O cluster not found")
@@ -850,8 +858,12 @@ impl Fat32Core:
             return Err("filesystem not mounted")
         val entry_rc = self.resolve_path(path)
         if entry_rc.is_err():
-            return Err(entry_rc.unwrap_err())
-        val entry = entry_rc.unwrap()
+            return match entry_rc:
+                Ok(_): Err("failed to resolve path")
+                Err(err): Err(err)
+        val entry = match entry_rc:
+            Ok(value): value
+            Err(err): return Err(err)
         val cluster = entry.inode.id.to_u32()
         val handle = self.alloc_file_handle(cluster, entry.size, entry.is_dir)
         Ok(handle)
@@ -869,21 +881,34 @@ impl Fat32Core:
                 continue
             val entry_rc = self.find_entry_in_dir(dir_cluster, part)
             if entry_rc.is_err():
-                return Err(entry_rc.unwrap_err())
-            dir_cluster = entry_rc.unwrap().inode.id.to_u32()
+                return match entry_rc:
+                    Ok(_): Err("failed to resolve path entry")
+                    Err(err): Err(err)
+            val entry = match entry_rc:
+                Ok(value): value
+                Err(err): return Err(err)
+            dir_cluster = entry.inode.id.to_u32()
             pi = pi + 1
         # Now scan the raw directory entries for the target name
         val target = _lower_text(parts[parts.len() - 1])
         val chain_rc = self.follow_chain(dir_cluster)
         if chain_rc.is_err():
-            return Err(chain_rc.unwrap_err())
-        val chain = chain_rc.unwrap()
+            return match chain_rc:
+                Ok(_): Err("failed to follow FAT chain")
+                Err(err): Err(err)
+        val chain = match chain_rc:
+            Ok(value): value
+            Err(err): return Err(err)
         var ci = 0
         while ci < chain.len():
             val cdata_rc = self.read_cluster(chain[ci])
             if cdata_rc.is_err():
-                return Err(cdata_rc.unwrap_err())
-            val cdata = cdata_rc.unwrap()
+                return match cdata_rc:
+                    Ok(_): Err("failed to read cluster data")
+                    Err(err): Err(err)
+            val cdata = match cdata_rc:
+                Ok(value): value
+                Err(err): return Err(err)
             val epc = (self.bytes_per_sector * self.sectors_per_cluster) / FAT32_DIR_ENTRY_SIZE
             var ei: u32 = 0
             while ei < epc:
@@ -955,17 +980,26 @@ impl Fat32Core:
         val cluster_limit = _fat32_cluster_bytes_to_i32(self.bytes_per_sector, self.sectors_per_cluster)
         val chain_rc = self.follow_chain(of.start_cluster)
         if chain_rc.is_err():
-            return Err(chain_rc.unwrap_err())
-        val chain = chain_rc.unwrap()
+            return match chain_rc:
+                Ok(_): Err("failed to follow FAT chain")
+                Err(err): Err(err)
+        val chain = match chain_rc:
+            Ok(value): value
+            Err(err): return Err(err)
         if to_read == cluster_bytes and (of.position % cluster_bytes) == 0:
             val cluster_index = (of.position / cluster_bytes).to_i32()
             if cluster_index < chain.len():
                 val cdata_rc = self.read_cluster(chain[cluster_index])
                 if cdata_rc.is_err():
-                    return Err(cdata_rc.unwrap_err())
+                    return match cdata_rc:
+                        Ok(_): Err("failed to read cluster data")
+                        Err(err): Err(err)
+                val cdata = match cdata_rc:
+                    Ok(value): value
+                    Err(err): return Err(err)
                 of.position = of.position + cluster_bytes
                 self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
-                return Ok(cdata_rc.unwrap())
+                return Ok(cdata)
         if to_read > 0 and (of.position % cluster_bytes) == 0 and (to_read % cluster_bytes) == 0:
             var result: [u8] = []
             var pos = of.position
@@ -979,8 +1013,13 @@ impl Fat32Core:
                 if cdata_rc.is_err():
                     of.position = pos
                     self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
-                    return Err(cdata_rc.unwrap_err())
-                result = result + cdata_rc.unwrap()
+                    return match cdata_rc:
+                        Ok(_): Err("failed to read cluster data")
+                        Err(err): Err(err)
+                val cdata = match cdata_rc:
+                    Ok(value): value
+                    Err(err): return Err(err)
+                result = result + cdata
                 pos = pos + cluster_bytes
             of.position = pos
             self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
@@ -998,8 +1037,12 @@ impl Fat32Core:
             if cdata_rc.is_err():
                 of.position = pos
                 self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
-                return Err(cdata_rc.unwrap_err())
-            val cdata = cdata_rc.unwrap()
+                return match cdata_rc:
+                    Ok(_): Err("failed to read cluster data")
+                    Err(err): Err(err)
+            val cdata = match cdata_rc:
+                Ok(value): value
+                Err(err): return Err(err)
             var bi = offset_in_cluster
             while bi < cluster_limit and result.len().to_i64() < to_read:
                 result.push(cdata[bi])
