@@ -26,12 +26,18 @@ fn _aes256_encrypt_block(key32: [u8], block16: [u8]) -> [u8]:
 # ============================================================================
 
 fn _polyval_mul(a: [u8], b: [u8]) -> [u8]:
-    """Multiply two 128-bit elements in POLYVAL's GF(2^128).
+    """Multiply two 128-bit elements in POLYVAL's GF(2^128) (RFC 8452 §3).
 
-    POLYVAL uses polynomial x^128 + x^127 + x^126 + x^121 + 1 with
-    little-endian bit ordering (LSB of byte 0 = coefficient of x^0).
-    Reduction constant R (byte representation, POLYVAL LE bit order):
-      byte0 = 0x01 (x^0), bytes1-14 = 0x00, byte15 = 0xC2 (x^127+x^126+x^121)
+    Computes dot(a, b) = a * b * x^-128 mod (x^128 + x^127 + x^126 + x^121 + 1)
+    in POLYVAL's little-endian bit ordering (LSB of byte 0 = coefficient of
+    x^0). The x^-128 factor makes this a right-shifting algorithm: the bits of
+    'a' are processed from x^127 (MSB of byte15) down to x^0 (LSB of byte0);
+    each step first divides the running multiplier v by x — shift the 128-bit
+    value right by one bit, and when the x^0 bit is shifted out reduce by
+    byte15 ^= 0xE1 (x^-1 = x^127 + x^126 + x^125 + x^120) — then conditionally
+    accumulates v into z. (A left-shifting multiply-by-x with the
+    byte0^0x01/byte15^0xC2 reduction computes the plain product a*b, NOT the
+    POLYVAL dot product, and produces wrong tags for non-empty inputs.)
     """
     var z: [u8] = rt_array_new_with_cap(16)
     var i: u64 = 0
@@ -45,27 +51,12 @@ fn _polyval_mul(a: [u8], b: [u8]) -> [u8]:
         v.push(_u8_at(b, i))
         i = i + 1
 
-    # Iterate over bits of 'a' from x^0 (LSB of byte0) to x^127 (MSB of byte15)
-    i = 0
-    while i < 128:
-        val byte_idx = i / 8
-        val bit_idx = i % 8   # LSB-first within each byte
-
-        if ((_u8_at(a, byte_idx) >> bit_idx) & 0x01) != 0:
-            # z ^= v
-            var z_next: [u8] = rt_array_new_with_cap(16)
-            var j: u64 = 0
-            while j < 16:
-                z_next.push(_u8_at(z, j) ^ _u8_at(v, j))
-                j = j + 1
-            z = z_next
-
-        # Shift v right by 1 bit in LE representation (x^0 is in byte0 bit0):
-        # rightmost bit (x^0) = LSB of byte0; shifting right means byte0 carries
-        # the bit that was in byte0 bit1, etc.
-        val msb = (_u8_at(v, 15) >> 7) & 0x01   # MSB of byte15 = coefficient of x^127
+    # Process bits of 'a' from x^127 down to x^0.
+    var bit: i64 = 127
+    while bit >= 0:
+        # v = v * x^-1 : shift the 128-bit LE value right by one bit.
+        val lsb = _u8_at(v, 0) & 0x01   # x^0 coefficient about to shift out
         var v_next: [u8] = rt_array_new_with_cap(16)
-        # last byte (byte15): shift right by 1 (no carry in from above)
         v_next.push((_u8_at(v, 0).to_u32() >> 1).to_u8() | ((_u8_at(v, 1).to_u32() & 0x01) << 7).to_u8())
         var j: u64 = 1
         while j < 15:
@@ -74,14 +65,11 @@ fn _polyval_mul(a: [u8], b: [u8]) -> [u8]:
             j = j + 1
         v_next.push((_u8_at(v, 15).to_u32() >> 1).to_u8())
 
-        if msb != 0:
-            # Reduce: XOR with polynomial constant (x^127+x^126+x^121+x^0)
-            # In POLYVAL LE bit order: byte0 ^= 0x01, byte15 ^= 0xC2
-            val b0 = _u8_at(v_next, 0) ^ 0x01
-            val b15 = _u8_at(v_next, 15) ^ 0xC2
+        if lsb != 0:
+            # x^-1 reduction in POLYVAL LE bit order: byte15 ^= 0xE1.
+            val b15 = _u8_at(v_next, 15) ^ 0xE1
             var v_red: [u8] = rt_array_new_with_cap(16)
-            v_red.push(b0)
-            j = 1
+            j = 0
             while j < 15:
                 v_red.push(_u8_at(v_next, j))
                 j = j + 1
@@ -90,7 +78,18 @@ fn _polyval_mul(a: [u8], b: [u8]) -> [u8]:
         else:
             v = v_next
 
-        i = i + 1
+        # Accumulate z ^= v when bit 'bit' of 'a' is set.
+        val byte_idx = (bit / 8).to_u64()
+        val bit_idx = (bit % 8).to_u32()
+        if ((_u8_at(a, byte_idx).to_u32() >> bit_idx) & 0x01) != 0:
+            var z_next: [u8] = rt_array_new_with_cap(16)
+            j = 0
+            while j < 16:
+                z_next.push(_u8_at(z, j) ^ _u8_at(v, j))
+                j = j + 1
+            z = z_next
+
+        bit = bit - 1
 
     z
 
