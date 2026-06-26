@@ -82,8 +82,10 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 - Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
   match the proof viewport, include the expected pixel count, and contain
   nonzero pixels with numeric uint32 JSON pixel values.
-- Requested viewport, native capture provenance, ARGB readback dimensions, and
-  frame timing values must be real JSON numbers, not stringified rows.
+- Requested viewport, native capture provenance, ARGB readback dimensions,
+  mismatch counts, and frame timing values must be real JSON numbers, not
+  stringified rows, and malformed live numeric rows must not be re-emitted as
+  normalized numeric evidence.
 - Proof renderer must be the live Electron capture page and scenes must stay
   within the Simple Web layout scene family.
 - The live Electron layout wrapper consumes the validator and still maps real
@@ -179,12 +181,13 @@ expect(scene).to_contain("electron_simple_web_layout_validation_reason=unexpecte
 
 -  proof command
    - Expected: code equals `1`
+   - Expected: evidence does not contain `electron_simple_web_layout_electron_frame_us=not-a-number`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -198,7 +201,8 @@ expect(code).to_equal(1)
 val evidence = file_read(root + "/evidence.env")
 expect(evidence).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(evidence).to_contain("electron_simple_web_layout_validation_reason=missing-electron-timing")
-expect(evidence).to_contain("electron_simple_web_layout_electron_frame_us=not-a-number")
+expect(evidence).to_contain("electron_simple_web_layout_electron_frame_us=")
+expect(evidence.contains("electron_simple_web_layout_electron_frame_us=not-a-number")).to_equal(false)
 ```
 
 </details>
@@ -377,12 +381,16 @@ expect(mismatch).to_contain("electron_simple_web_layout_capture_native_width=95"
 -  proof command
    - Expected: code equals `1`
 - Confirm live Electron layout numeric proof cannot be stringified
+   - Expected: requested does not contain `electron_simple_web_layout_requested_width=96`
+   - Expected: argb does not contain `electron_simple_web_layout_captured_argb_width=96`
+   - Expected: native does not contain `electron_simple_web_layout_capture_native_width=96`
+   - Expected: timing does not contain `electron_simple_web_layout_electron_frame_us=1250`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -406,16 +414,20 @@ val timing = file_read(root + "/timing.env")
 step("Confirm live Electron layout numeric proof cannot be stringified")
 expect(requested).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(requested).to_contain("electron_simple_web_layout_validation_reason=missing-viewport-proof")
-expect(requested).to_contain("electron_simple_web_layout_requested_width=96")
+expect(requested).to_contain("electron_simple_web_layout_requested_width=")
+expect(requested.contains("electron_simple_web_layout_requested_width=96")).to_equal(false)
 expect(argb).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(argb).to_contain("electron_simple_web_layout_validation_reason=captured-argb-viewport-mismatch")
-expect(argb).to_contain("electron_simple_web_layout_captured_argb_width=96")
+expect(argb).to_contain("electron_simple_web_layout_captured_argb_width=")
+expect(argb.contains("electron_simple_web_layout_captured_argb_width=96")).to_equal(false)
 expect(native).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(native).to_contain("electron_simple_web_layout_validation_reason=missing-capture-provenance")
-expect(native).to_contain("electron_simple_web_layout_capture_native_width=96")
+expect(native).to_contain("electron_simple_web_layout_capture_native_width=")
+expect(native.contains("electron_simple_web_layout_capture_native_width=96")).to_equal(false)
 expect(timing).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(timing).to_contain("electron_simple_web_layout_validation_reason=missing-electron-timing")
-expect(timing).to_contain("electron_simple_web_layout_electron_frame_us=1250")
+expect(timing).to_contain("electron_simple_web_layout_electron_frame_us=")
+expect(timing.contains("electron_simple_web_layout_electron_frame_us=1250")).to_equal(false)
 ```
 
 </details>
@@ -424,13 +436,16 @@ expect(timing).to_contain("electron_simple_web_layout_electron_frame_us=1250")
 
 -  proof command
 -  proof command
+-  proof command
    - Expected: code equals `1`
+   - Expected: mismatch does not contain `electron_simple_web_layout_mismatch_count=bad`
+   - Expected: string_zero does not contain `electron_simple_web_layout_mismatch_count=0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -439,15 +454,22 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=true") +
     " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/blur.json > " + root + "/blur.env; " +
     _proof_command(root + "/mismatch.json", "p.mismatch_count=\"bad\"") +
-    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env"
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env; " +
+    _proof_command(root + "/string-zero.json", "p.mismatch_count=\"0\"") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/string-zero.json > " + root + "/string-zero.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val blur = file_read(root + "/blur.env")
 val mismatch = file_read(root + "/mismatch.env")
+val string_zero = file_read(root + "/string-zero.env")
 expect(blur).to_contain("electron_simple_web_layout_validation_reason=blur-or-tolerance-not-allowed")
 expect(mismatch).to_contain("electron_simple_web_layout_validation_reason=malformed-mismatch-count")
-expect(mismatch).to_contain("electron_simple_web_layout_mismatch_count=bad")
+expect(mismatch).to_contain("electron_simple_web_layout_mismatch_count=")
+expect(mismatch.contains("electron_simple_web_layout_mismatch_count=bad")).to_equal(false)
+expect(string_zero).to_contain("electron_simple_web_layout_validation_reason=malformed-mismatch-count")
+expect(string_zero).to_contain("electron_simple_web_layout_mismatch_count=")
+expect(string_zero.contains("electron_simple_web_layout_mismatch_count=0")).to_equal(false)
 ```
 
 </details>
