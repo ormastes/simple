@@ -27,6 +27,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
   payload details, or UI proof rows are missing or malformed.
 - Chromium timing must include an explicit positive `performance.now()` delta;
   `0` does not prove distinct timing samples.
+- Boolean readiness, timing, animation, and CSS probe fields must be real JSON
+  booleans; string values like `"true"` are not structured event proof.
 - Event counts, animation frame counts, traffic button counts, and dispatched
   move coordinates must be decimal integers; fractional values are not valid
   DOM event-routing proof.
@@ -100,6 +102,27 @@ describe "WM browser event-routing proof validator":
         expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
         expect(evidence).to_contain("wm_browser_event_routing_performance_now_available=true")
         expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=0")
+
+    it "rejects string booleans for readiness timing and animation proof":
+        val command = "rm -rf build/test-wm-browser-event-validator-string-booleans && mkdir -p build/test-wm-browser-event-validator-string-booleans && " +
+            _fixture_command("build/test-wm-browser-event-validator-string-booleans/ready.json", "p.ready=\"true\"") +
+            " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-booleans/ready.json > build/test-wm-browser-event-validator-string-booleans/ready.env; " +
+            _fixture_command("build/test-wm-browser-event-validator-string-booleans/perf.json", "p.performance_now_available=\"true\";p.animation_frame_available=\"true\";p.css_animation_probe=\"true\"") +
+            " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-booleans/perf.json > build/test-wm-browser-event-validator-string-booleans/perf.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val ready = file_read("build/test-wm-browser-event-validator-string-booleans/ready.env")
+        val perf = file_read("build/test-wm-browser-event-validator-string-booleans/perf.env")
+        step("Confirm string booleans do not satisfy structured Electron event proof")
+        expect(ready).to_contain("wm_browser_event_routing_validation_status=fail")
+        expect(ready).to_contain("wm_browser_event_routing_validation_reason=event-routing-ready-missing")
+        expect(ready).to_contain("wm_browser_event_routing_ready=true")
+        expect(perf).to_contain("wm_browser_event_routing_validation_status=fail")
+        expect(perf).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+        expect(perf).to_contain("wm_browser_event_routing_performance_now_available=true")
+        expect(perf).to_contain("wm_browser_event_routing_animation_frame_available=true")
+        expect(perf).to_contain("wm_browser_event_routing_css_animation_probe=true")
 
     it "rejects pass true proof when payload details do not match dispatched DOM events":
         val command = "rm -rf build/test-wm-browser-event-validator-payload && mkdir -p build/test-wm-browser-event-validator-payload && " +

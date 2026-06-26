@@ -6,8 +6,8 @@ function clean(value) {
   return String(value).replace(/[\r\n]/g, ' ');
 }
 
-function boolValue(value) {
-  return value === true || value === 'true';
+function boolTrue(value) {
+  return value === true;
 }
 
 function decimalIntegerText(value) {
@@ -130,9 +130,9 @@ const rows = {
 };
 
 let reason = 'pass';
-if (!boolValue(proof.pass)) {
+if (!boolTrue(proof.pass)) {
   reason = 'probe-reported-fail';
-} else if (!boolValue(proof.ready) || !boolValue(proof.wm_found)) {
+} else if (!boolTrue(proof.ready) || !boolTrue(proof.wm_found)) {
   reason = 'event-routing-ready-missing';
 } else if (
   !integerAtLeast(proof.focus_count, 1) ||
@@ -145,11 +145,11 @@ if (!boolValue(proof.pass)) {
 ) {
   reason = 'event-routing-contract-missing';
 } else if (
-  !boolValue(proof.performance_now_available) ||
+  !boolTrue(proof.performance_now_available) ||
   !decimalGreaterThan(proof.performance_now_delta_ms, 0) ||
-  !boolValue(proof.animation_frame_available) ||
+  !boolTrue(proof.animation_frame_available) ||
   !integerAtLeast(proof.animation_frame_count, 2) ||
-  !boolValue(proof.css_animation_probe)
+  !boolTrue(proof.css_animation_probe)
 ) {
   reason = 'event-routing-performance-animation-contract-missing';
 } else if (

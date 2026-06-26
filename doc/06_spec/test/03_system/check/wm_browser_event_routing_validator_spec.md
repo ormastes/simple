@@ -27,7 +27,7 @@ wm_browser_event_routing_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,6 +76,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
   payload details, or UI proof rows are missing or malformed.
 - Chromium timing must include an explicit positive `performance.now()` delta;
   `0` does not prove distinct timing samples.
+- Boolean readiness, timing, animation, and CSS probe fields must be real JSON
+  booleans; string values like `"true"` are not structured event proof.
 - Event counts, animation frame counts, traffic button counts, and dispatched
   move coordinates must be decimal integers; fractional values are not valid
   DOM event-routing proof.
@@ -203,6 +205,44 @@ expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=0
 
 </details>
 
+#### rejects string booleans for readiness timing and animation proof
+
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm string booleans do not satisfy structured Electron event proof
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-string-booleans && mkdir -p build/test-wm-browser-event-validator-string-booleans && " +
+    _fixture_command("build/test-wm-browser-event-validator-string-booleans/ready.json", "p.ready=\"true\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-booleans/ready.json > build/test-wm-browser-event-validator-string-booleans/ready.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-booleans/perf.json", "p.performance_now_available=\"true\";p.animation_frame_available=\"true\";p.css_animation_probe=\"true\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-booleans/perf.json > build/test-wm-browser-event-validator-string-booleans/perf.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val ready = file_read("build/test-wm-browser-event-validator-string-booleans/ready.env")
+val perf = file_read("build/test-wm-browser-event-validator-string-booleans/perf.env")
+step("Confirm string booleans do not satisfy structured Electron event proof")
+expect(ready).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(ready).to_contain("wm_browser_event_routing_validation_reason=event-routing-ready-missing")
+expect(ready).to_contain("wm_browser_event_routing_ready=true")
+expect(perf).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(perf).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+expect(perf).to_contain("wm_browser_event_routing_performance_now_available=true")
+expect(perf).to_contain("wm_browser_event_routing_animation_frame_available=true")
+expect(perf).to_contain("wm_browser_event_routing_css_animation_probe=true")
+```
+
+</details>
+
 #### rejects pass true proof when payload details do not match dispatched DOM events
 
 -  fixture command
@@ -319,8 +359,8 @@ expect(script).to_contain("wm_browser_event_routing_validation_reason")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
