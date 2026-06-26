@@ -222,7 +222,10 @@ completion evidence. The 8K row must likewise prove
 `gui_showcase_8k_perf_time_log_file_status=pass`, RSS budget status, and the
 same native binary provenance fields. Interpreter or fallback rows remain useful
 diagnostics, but they are not 4K/8K completion evidence.
-Producer-side wrapper rows also include
+The aggregate validates producer-side native artifact proof for completion rows:
+missing alias source, native binary, or native build log status turns an
+otherwise passing retained 4K/8K row into a native-artifact failure.
+Producer-side wrapper rows include
 `*_alias_src_file_status`, `*_native_bin_file_status`, and
 `*_native_build_log_file_status` so a reviewer can distinguish a planned probe
 route from a completed native binary measurement with a retained build log.
