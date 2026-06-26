@@ -7,13 +7,13 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 60
+- **Total Lines:** 174
 
 ---
 
-## Application (1 features)
+## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Web Dashboard Diagnostics Panel Specification](test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.md) | Partial | N/A | 6 | 40% | 60 lines |
+| [GUI RenderDoc feature coverage status gate](test/03_system/check/gui_renderdoc_feature_coverage_status_spec.md) | Partial | N/A | 27 | 60% | 174 lines |
 

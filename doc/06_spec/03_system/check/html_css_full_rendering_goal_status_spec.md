@@ -75,9 +75,9 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
 ## Acceptance
 
 - All 105 HTML tags are rendered in the 50-case fixture manifest.
-- All 66 implemented Simple Web CSS properties are rendered in fixture CSS.
-- The current full CSS inventory is tested as 394 properties, with 328 still
-  unrendered and 335 held in unsupported-inventory ownership.
+- All 117 implemented Simple Web CSS properties are rendered in fixture CSS.
+- The current full CSS inventory is tested as 394 properties, with 277 still
+  unrendered and 284 held in unsupported-inventory ownership.
 - Animation, transition, and transform CSS are reported as a separate
   incomplete sub-goal until those properties have rendered fixture coverage.
 - The full W3C CSS rendering goal reports `incomplete` while unsupported CSS
@@ -94,18 +94,18 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
    - Expected: code equals `0`
 - Read the full rendering goal evidence
    - Expected: full_css_total equals `394`
-   - Expected: full_css_rendered equals `66`
-   - Expected: full_css_unrendered equals `328`
-   - Expected: unsupported_inventory equals `335`
-   - Expected: full_css_unrendered_properties.split(",").len() equals `328`
-   - Expected: animation_css_unrendered_properties.split(",").len() equals `18`
+   - Expected: full_css_rendered equals `117`
+   - Expected: full_css_unrendered equals `277`
+   - Expected: unsupported_inventory equals `284`
+   - Expected: full_css_unrendered_properties.split(",").len() equals `277`
+   - Expected: animation_css_unrendered_properties equals ``
 - Verify the operator report names the full CSS gap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 64 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -127,22 +127,19 @@ expect(evidence).to_contain("html_css_full_rendering_goal_html_tag_rendered_coun
 expect(evidence).to_contain("html_css_full_rendering_goal_html_tag_missing=")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_scope=implemented-simple-web-css")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=66")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=66")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=117")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=117")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_missing=")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_required_min_count=390")
-expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=66")
+expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=117")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_unrendered_properties=")
-expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_status=incomplete")
+expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_scope=animation-transition-transform-css")
-expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_total_count=18")
+expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_total_count=0")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_rendered_count=0")
-expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_unrendered_count=18")
+expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_unrendered_count=0")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_unrendered_properties=")
-expect(evidence).to_contain("animation-duration")
-expect(evidence).to_contain("transition-property")
-expect(evidence).to_contain("transform-origin")
 expect(evidence).to_contain("accent-color")
 expect(evidence).to_contain("grid-template-columns")
 expect(evidence).to_contain("writing-mode")
@@ -156,11 +153,11 @@ val full_css_unrendered_properties = _value_of(evidence, "html_css_full_renderin
 val animation_css_unrendered_properties = _value_of(evidence, "html_css_full_rendering_goal_animation_css_unrendered_properties")
 val unsupported_inventory = _value_of(evidence, "html_css_full_rendering_goal_unsupported_css_inventory_count")
 expect(full_css_total).to_equal("394")
-expect(full_css_rendered).to_equal("66")
-expect(full_css_unrendered).to_equal("328")
-expect(unsupported_inventory).to_equal("335")
-expect(full_css_unrendered_properties.split(",").len()).to_equal(328)
-expect(animation_css_unrendered_properties.split(",").len()).to_equal(18)
+expect(full_css_rendered).to_equal("117")
+expect(full_css_unrendered).to_equal("277")
+expect(unsupported_inventory).to_equal("284")
+expect(full_css_unrendered_properties.split(",").len()).to_equal(277)
+expect(animation_css_unrendered_properties).to_equal("")
 expect(full_css_unrendered_properties).to_contain("accent-color")
 expect(full_css_unrendered_properties).to_contain("border-image-source")
 expect(full_css_unrendered_properties).to_contain("grid-template-columns")
@@ -173,9 +170,9 @@ val report = file_read("build/test-html-css-full-rendering-goal-status/report.md
 expect(report).to_contain("# HTML/CSS Full Rendering Goal Status")
 expect(report).to_contain("- status: incomplete")
 expect(report).to_contain("- HTML tags rendered: 105/105")
-expect(report).to_contain("- implemented CSS rendered: 66/66")
+expect(report).to_contain("- implemented CSS rendered: 117/117")
 expect(report).to_contain("- full CSS unrendered:")
-expect(report).to_contain("- animation CSS rendered: 0/18 (incomplete)")
+expect(report).to_contain("- animation CSS rendered: 0/0 (pass)")
 ```
 
 </details>
@@ -190,7 +187,7 @@ expect(report).to_contain("- animation CSS rendered: 0/18 (incomplete)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -203,7 +200,7 @@ step("Assert strict mode still writes inspectable evidence")
 val evidence = file_read("build/test-html-css-full-rendering-goal-status-strict/evidence.env")
 expect(evidence).to_contain("html_css_full_rendering_goal_status=incomplete")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_status=incomplete")
-expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_status=incomplete")
+expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_unrendered_count=")
 ```
 

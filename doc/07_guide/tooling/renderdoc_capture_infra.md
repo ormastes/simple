@@ -712,7 +712,7 @@ manifest traceability details from
 the manifest and fixture paths, HTML tag covered/total counts, implemented CSS
 property covered/total counts, missing tag/property lists, fixture scene count,
 and manifest scenes missing fixture HTML. A restart audit should therefore show
-the 105/105 HTML tag coverage and 105/105 implemented CSS property coverage in
+the 105/105 HTML tag coverage and 117/117 implemented CSS property coverage in
 the same evidence env as the Simple, original Chrome, Electron, and production
 parity gates. GUI widget witness provenance is inspectable as widget/class
 pairs through `gui_widget_rendering_fixture_coverage_spec_widget_classes`,
@@ -756,9 +756,9 @@ Animation-related CSS is also reported as its own sub-goal:
 `html_css_full_rendering_goal_animation_css_rendered_count`, and
 `html_css_full_rendering_goal_animation_css_unrendered_properties` cover the
 `animation-*`, `transition-*`, and `transform-*` families. The top-level GUI
-RenderDoc audit keeps `CSS animation/transition/transform rendering coverage`
-in `blocked_completion_gates` until that sub-goal reports `pass`; do not use a
-static Chrome/Electron bitmap or generic CSS inventory count as animation proof.
+RenderDoc audit only keeps `CSS animation/transition/transform rendering coverage`
+in `blocked_completion_gates` when that sub-goal is incomplete; do not use a
+generic CSS inventory count as animation proof without the fixture evidence.
 Use `--strict` when a CI or release lane should fail unless the full CSS
 inventory is rendered.
 

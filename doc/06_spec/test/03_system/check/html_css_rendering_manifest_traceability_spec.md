@@ -78,7 +78,7 @@ sh scripts/check/check-html-css-rendering-manifest-traceability.shs
   keys.
 - All 105 current HTML elements have concrete rendered fixture element
   coverage; manifest prose alone is not sufficient.
-- All 105 implemented Simple Web CSS properties appear in actual rendered
+- All 117 implemented Simple Web CSS properties appear in actual rendered
   fixture CSS.
 - Every scene in the 50-case manifest has a fixture HTML assignment.
 - The manifest must keep the required 50-case render matrix, not just enough
@@ -103,9 +103,9 @@ sh scripts/check/check-html-css-rendering-manifest-traceability.shs
    - Expected: tag_manifest_only_count equals `0`
    - Expected: tag_manifest_only equals ``
    - Expected: tag_missing equals ``
-   - Expected: css_count equals `105`
-   - Expected: css_covered equals `105`
-   - Expected: css_covered_names.split(",").len() equals `105`
+   - Expected: css_count equals `117`
+   - Expected: css_covered equals `117`
+   - Expected: css_covered_names.split(",").len() equals `117`
    - Expected: css_missing equals ``
    - Expected: manifest_cases equals `50`
    - Expected: required_manifest_cases equals `50`
@@ -156,8 +156,8 @@ expect(tag_fixture_covered).to_equal("105")
 expect(tag_manifest_only_count).to_equal("0")
 expect(tag_manifest_only).to_equal("")
 expect(tag_missing).to_equal("")
-expect(css_count).to_equal("105")
-expect(css_covered).to_equal("105")
+expect(css_count).to_equal("117")
+expect(css_covered).to_equal("117")
 expect(css_covered_names).to_contain("align-content")
 expect(css_covered_names).to_contain("align-items")
 expect(css_covered_names).to_contain("align-self")
@@ -165,7 +165,7 @@ expect(css_covered_names).to_contain("display")
 expect(css_covered_names).to_contain("justify-content")
 expect(css_covered_names).to_contain("border-style")
 expect(css_covered_names).to_contain("transition-property")
-expect(css_covered_names.split(",").len()).to_equal(105)
+expect(css_covered_names.split(",").len()).to_equal(117)
 expect(css_missing).to_equal("")
 expect(manifest_cases).to_equal("50")
 expect(required_manifest_cases).to_equal("50")
@@ -175,7 +175,7 @@ step("Verify the operator report was written")
 val report = file_read("build/test-html-css-rendering-manifest-traceability/report.md") ?? ""
 expect(report).to_contain("# HTML/CSS Rendering Manifest Traceability")
 expect(report).to_contain("- HTML tags: 105/105")
-expect(report).to_contain("- implemented CSS properties: 105/105")
+expect(report).to_contain("- implemented CSS properties: 117/117")
 ```
 
 </details>

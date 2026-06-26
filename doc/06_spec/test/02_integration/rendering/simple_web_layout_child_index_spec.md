@@ -27,7 +27,7 @@ simple_web_layout_child_index_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -430,6 +430,43 @@ expect(simple_web_layout_debug_style_by_id(html, "override", "transition_timing_
 
 </details>
 
+#### keeps static animation and transform metadata in computed style
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>" +
+    "html,body{margin:0;padding:0;background-color:#ffffff}" +
+    "#box{width:10px;height:10px;background-color:#22c55e;animation:fade 1200ms ease-out 50ms 2 alternate both paused;transform-origin:left top;transform-box:content-box;transform-style:preserve-3d}" +
+    "#override{width:10px;height:10px;background-color:#3b82f6;animation:move 1s linear;animation-name:pulse;animation-duration:75ms;animation-delay:10ms;animation-timing-function:ease-in;animation-iteration-count:infinite;animation-direction:reverse;animation-fill-mode:forwards;animation-play-state:running}" +
+    "</style></head><body><div id=\"box\"></div><div id=\"override\"></div></body></html>"
+expect(simple_web_layout_debug_style_by_id(html, "box", "animation_name")).to_equal("fade")
+expect(simple_web_layout_debug_style_by_id(html, "box", "animation_duration_ms")).to_equal("1200")
+expect(simple_web_layout_debug_style_by_id(html, "box", "animation_delay_ms")).to_equal("50")
+expect(simple_web_layout_debug_style_by_id(html, "box", "animation_timing_function")).to_equal("ease-out")
+expect(simple_web_layout_debug_style_by_id(html, "box", "animation_iteration_count")).to_equal("2")
+expect(simple_web_layout_debug_style_by_id(html, "box", "animation_direction")).to_equal("alternate")
+expect(simple_web_layout_debug_style_by_id(html, "box", "animation_fill_mode")).to_equal("both")
+expect(simple_web_layout_debug_style_by_id(html, "box", "animation_play_state")).to_equal("paused")
+expect(simple_web_layout_debug_style_by_id(html, "box", "transform_origin")).to_equal("left top")
+expect(simple_web_layout_debug_style_by_id(html, "box", "transform_box")).to_equal("content-box")
+expect(simple_web_layout_debug_style_by_id(html, "box", "transform_style")).to_equal("preserve-3d")
+expect(simple_web_layout_debug_style_by_id(html, "override", "animation_name")).to_equal("pulse")
+expect(simple_web_layout_debug_style_by_id(html, "override", "animation_duration_ms")).to_equal("75")
+expect(simple_web_layout_debug_style_by_id(html, "override", "animation_delay_ms")).to_equal("10")
+expect(simple_web_layout_debug_style_by_id(html, "override", "animation_timing_function")).to_equal("ease-in")
+expect(simple_web_layout_debug_style_by_id(html, "override", "animation_iteration_count")).to_equal("infinite")
+expect(simple_web_layout_debug_style_by_id(html, "override", "animation_direction")).to_equal("reverse")
+expect(simple_web_layout_debug_style_by_id(html, "override", "animation_fill_mode")).to_equal("forwards")
+expect(simple_web_layout_debug_style_by_id(html, "override", "animation_play_state")).to_equal("running")
+```
+
+</details>
+
 #### keeps already sorted positive z-index paint order stable
 
 <details>
@@ -487,8 +524,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
