@@ -21,7 +21,11 @@ record_value() {
   sed -n "s/^[[:space:]]*${key}: \"\\(.*\\)\"[[:space:]]*$/\\1/p" "$ATTEMPT" | tail -1
 }
 
-UPSTREAM_CHECK="$("${SCRIPT_DIR}/check_retry6_training_eval_gate.shs" "$UPSTREAM_ATTEMPT")"
+if [ "$#" -ge 8 ]; then
+  UPSTREAM_CHECK="$("${SCRIPT_DIR}/check_retry6_training_eval_gate.shs" "$UPSTREAM_ATTEMPT" "$4" "$5" "$6" "$7" "$8")"
+else
+  UPSTREAM_CHECK="$("${SCRIPT_DIR}/check_retry6_training_eval_gate.shs" "$UPSTREAM_ATTEMPT")"
+fi
 upstream_status="$(printf '%s\n' "$UPSTREAM_CHECK" | status_for)"
 upstream_result="$(printf '%s\n' "$UPSTREAM_CHECK" | value_for result)"
 training_allowed="$(printf '%s\n' "$UPSTREAM_CHECK" | value_for training_allowed)"
@@ -36,6 +40,7 @@ safety_eval=missing
 deployment_evidence=missing
 license_constraints=missing
 handoff_doc=missing
+handoff_doc_ready=false
 
 if [ -f "$ATTEMPT" ]; then
   ATTEMPT_CHECK="$("${SCRIPT_DIR}/verify_attempt.shs" "$ATTEMPT" || true)"
@@ -45,6 +50,12 @@ if [ -f "$ATTEMPT" ]; then
   deployment_evidence="$(record_value deployment_evidence)"
   license_constraints="$(record_value license_constraints)"
   handoff_doc="$(record_value handoff_doc)"
+fi
+
+if [ -n "$handoff_doc" ] &&
+   [ "$handoff_doc" != "missing" ] &&
+   [ -f "$handoff_doc" ]; then
+  handoff_doc_ready=true
 fi
 
 acceptance_allowed=false
@@ -70,7 +81,8 @@ if [ "$attempt_status" = "PASS llm-finetune-attempt-record" ] &&
    [ "$target_eval_reached" = "true" ] &&
    [ "$safety_eval" != "not-run" ] &&
    [ "$deployment_evidence" != "not-deployable" ] &&
-   [ "$license_constraints" != "pending" ]; then
+   [ "$license_constraints" != "pending" ] &&
+   [ "$handoff_doc_ready" = "true" ]; then
   acceptance_allowed=true
   result="READY_FOR_RELEASE_HANDOFF_REVIEW"
   next_action="release handoff may cite accepted fine-tune evidence"
@@ -93,6 +105,7 @@ safety_eval=${safety_eval:-missing}
 deployment_evidence=${deployment_evidence:-missing}
 license_constraints=${license_constraints:-missing}
 handoff_doc=${handoff_doc:-missing}
+handoff_doc_ready=${handoff_doc_ready}
 acceptance_allowed=${acceptance_allowed}
 acceptance_reason=normal acceptance requires retry6 target eval, accepted decision, license, safety, deployment, and app handoff evidence
 next_action=${next_action}
