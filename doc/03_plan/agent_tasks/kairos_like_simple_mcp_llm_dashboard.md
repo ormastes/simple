@@ -229,6 +229,10 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
      - `test/01_unit/app/llm_dashboard/ios_mode_spec.spl` and mirrored
        `test/unit/app/llm_dashboard/ios_mode_spec.spl` pass after preserving the
        existing dashboard server constructor surface.
+     - `test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl`
+       passes and proves authenticated `/api/vllm/control` JSONL readback,
+       query-style overrides, missing-resource skipped evidence, redaction,
+       dashboard HTML embedding, and the dashboard-safe collector boundary.
 
 ## Open Bugs Found During This Lane
 
