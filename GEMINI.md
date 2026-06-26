@@ -218,6 +218,7 @@ This repo is a registered Gemini CLI extension via `gemini-extension.json`.
 
 ## Critical Rules
 
+- **Default tooling = pure-Simple self-hosted binary, not the Rust seed.** `test`/`lint`/`fmt`/`build`/`run`/MCP/LSP all run on `bin/release/<triple>/simple` (built via bootstrap). The seed (`src/compiler_rust/target/bootstrap/simple`) is bootstrap-only. If the self-hosted binary is slow/unstable, fix it in pure-Simple (`src/compiler`/`src/lib`/`src/app`) and re-deploy or file a bug — don't fall back to the seed. See `.claude/rules/bootstrap.md`
 - **Self-sufficient**: never fail because another LLM didn't do its step — do it yourself
 - NEVER overwrite another LLM's research — append and annotate
 - All requirement options must include pros, cons, and effort estimate

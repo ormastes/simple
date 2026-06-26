@@ -303,6 +303,7 @@ MCP server available via npm: `@simple-lang/mcp-server`
 
 ## Critical Rules
 
+- **Default tooling = pure-Simple self-hosted binary, not the Rust seed.** `test`/`lint`/`fmt`/`build`/`run`/MCP/LSP all run on `bin/release/<triple>/simple` (built via bootstrap). The seed (`src/compiler_rust/target/bootstrap/simple`) is bootstrap-only. If the self-hosted binary is slow/unstable, fix it in pure-Simple (`src/compiler`/`src/lib`/`src/app`) and re-deploy or file a bug — don't fall back to the seed. See `.claude/rules/bootstrap.md`
 - **Self-sufficient**: never fail because another LLM didn't do its step — do it yourself
 - When a short, safe grammar or compact expression form fails, compiles too slowly, or forces a workaround, fix it or record a concrete bug/feature request instead of silently normalizing the workaround
 - When you hit a meaningful perf regression during implementation or verification, either fix it in the same change or record it as a concrete bug/todo before moving on

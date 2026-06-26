@@ -8,6 +8,15 @@ This guide covers the Simple build system, project configuration, build commands
 
 The Simple language build system is fully self-hosted, written in Simple and configured with SDN (Simple Data Notation).
 
+> **Default toolchain = pure-Simple, not the Rust seed.** All tooling
+> (`test`, `lint`, `fmt`, `check`, `build`, `run`, `-c`, the MCP/LSP servers,
+> doc-coverage) is expected to run on the **self-hosted** binary
+> `bin/release/<triple>/simple` (what `bin/simple` should point at), produced
+> by bootstrap. The Rust seed at `src/compiler_rust/target/bootstrap/simple`
+> is **bootstrap-only**. If the self-hosted binary is slow or unstable, fix the
+> problem in pure-Simple (`src/compiler`, `src/lib`, `src/app`) and re-deploy —
+> don't make the seed the default. See `.claude/rules/bootstrap.md`.
+
 | Command | Description |
 |---------|-------------|
 | `bin/simple build` | Build the project |

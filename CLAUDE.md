@@ -39,6 +39,7 @@ bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 - When a short, safe grammar or compact expression form fails, compiles too slowly, or forces a workaround, fix it or record a concrete bug/feature request instead of silently normalizing the workaround
 - When you hit a meaningful perf regression during implementation or verification, either fix it in the same change or record it as a concrete bug/todo before moving on
 - **NEVER over-engineer.** **DO NOT ADD REPORT TO GIT** unless requested
+- **Default tooling = pure-Simple self-hosted binary, not the Rust seed.** `test`/`lint`/`fmt`/`build`/`run`/MCP/LSP all run on `bin/release/<triple>/simple` (built via bootstrap). Seed is bootstrap-only. If the self-hosted binary is slow/unstable, fix it in pure-Simple and re-deploy or file a bug — don't fall back to the seed. See `.claude/rules/bootstrap.md`
 - **MDSOC+ by default** — use MDSOC outer + ECS business layer for userland services/apps; kernel/drivers stay MDSOC-only. See `doc/04_architecture/compiler/mdsoc_architecture_tobe.md` (MDSOC+ section)
 
 ## Owned-Code Scope

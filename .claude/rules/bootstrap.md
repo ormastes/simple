@@ -7,11 +7,25 @@ alwaysApply: false
 ---
 # Bootstrap & Binary Architecture
 
+## Default tooling runs on pure-Simple, NOT the Rust seed
+**Policy:** every tool — `test`, `lint`, `fmt`, `check`, `build`, `run`, `-c`,
+the MCP/LSP servers, doc-coverage, etc. — must run on the **pure-Simple
+self-hosted binary** (`bin/release/<triple>/simple`, built + deployed via
+bootstrap). The Rust seed (`src/compiler_rust/target/bootstrap/simple`) is
+**bootstrap-only** and must not be the day-to-day `bin/simple`.
+- If the self-hosted binary has a **perf or robustness problem** (slow startup,
+  high RSS, a crash, a wrong result), **fix it in pure-Simple** (`src/compiler`,
+  `src/lib`, `src/app`) and re-deploy — do **not** fall back to the seed as the
+  default. File a bug/feature request for anything that can't be fixed in place.
+- Verify bug fixes with the **deployed pure-Simple test runner**, not the seed.
+- Reverting `bin/simple` to the seed is an emergency stopgap only, never the
+  resting state; record a bug when you do it.
+
 | Binary | Path | Role |
 |--------|------|------|
-| **Real binary** | `bin/release/simple` (`.exe` on Windows) | Self-hosted production compiler |
-| **Platform binaries** | `bin/release/<triple>/simple` | Per-platform release |
-| **Rust seed** | `src/compiler_rust/target/bootstrap/simple` | Bootstrap-only seed |
+| **Real binary** | `bin/release/simple` (`.exe` on Windows) | Self-hosted production compiler — **default for all tools** |
+| **Platform binaries** | `bin/release/<triple>/simple` | Per-platform release (this is what `bin/simple` should point at) |
+| **Rust seed** | `src/compiler_rust/target/bootstrap/simple` | Bootstrap-only seed (NOT for day-to-day tooling) |
 
 - **NEVER copy Rust bootstrap binary to `bin/release/simple`** — that's the self-hosted binary
 - **Bootstrap entry points**: `src/app/cli/main.spl` (full CLI), `src/app/cli/bootstrap_main.spl` (minimal)

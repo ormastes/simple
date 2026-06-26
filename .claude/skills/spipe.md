@@ -9,6 +9,15 @@ SPipe is the process layer. SSpec is the executable `.spl` scenario authoring
 surface. New manuals should be written as step-based SSpec scenarios and run or
 mirrored through SPipe.
 
+> **Run specs on the pure-Simple self-hosted binary, not the Rust seed.** The
+> SPipe runner, docgen, and every `bin/simple test`/`run` invocation default to
+> the self-hosted `bin/release/<triple>/simple` (built via bootstrap), not
+> `src/compiler_rust/target/bootstrap/simple` (bootstrap-only). If a spec is
+> slow or flaky because of a self-hosted compiler perf/robustness bug, fix it in
+> pure-Simple (`src/compiler`/`src/lib`/`src/app`) and re-deploy, or file a
+> bug/feature request — don't switch the runner back to the seed. See
+> `.claude/rules/bootstrap.md` § "Default tooling runs on pure-Simple".
+
 The SPipe dev entrypoint lives at:
 
 **[.claude/agents/spipe/dev.md](../agents/spipe/dev.md)**
