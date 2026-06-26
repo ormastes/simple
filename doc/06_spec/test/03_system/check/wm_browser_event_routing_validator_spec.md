@@ -27,7 +27,7 @@ wm_browser_event_routing_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,6 +74,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
   `wm_browser_event_routing_*` rows.
 - `pass=true` JSON still fails when event counts, Chromium timing, animation,
   payload details, or UI proof rows are missing or malformed.
+- Event counts, animation frame counts, traffic button counts, and dispatched
+  move coordinates must be decimal integers; fractional values are not valid
+  DOM event-routing proof.
 - The live shell evidence wrapper consumes the standalone validator instead of
   trusting only the probe's top-level `pass` flag.
 
@@ -222,6 +225,46 @@ expect(evidence).to_contain("wm_browser_event_routing_titlebar_display=block")
 
 </details>
 
+#### rejects pass true proof when event counts or move coordinates are fractional
+
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm fractional event count and move payload values are rejected
+   - Expected: counts does not contain `wm_browser_event_routing_pointer_down_count=1.5`
+   - Expected: payload does not contain `wm_browser_event_routing_move_payload_x=86.5`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-fractional && mkdir -p build/test-wm-browser-event-validator-fractional && " +
+    _fixture_command("build/test-wm-browser-event-validator-fractional/counts.json", "p.pointer_down_count=1.5") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-fractional/counts.json > build/test-wm-browser-event-validator-fractional/counts.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-fractional/payload.json", "p.move_payload.x=86.5") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-fractional/payload.json > build/test-wm-browser-event-validator-fractional/payload.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val counts = file_read("build/test-wm-browser-event-validator-fractional/counts.env")
+val payload = file_read("build/test-wm-browser-event-validator-fractional/payload.env")
+step("Confirm fractional event count and move payload values are rejected")
+expect(counts).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(counts).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+expect(counts).to_contain("wm_browser_event_routing_pointer_down_count=")
+expect(counts.contains("wm_browser_event_routing_pointer_down_count=1.5")).to_equal(false)
+expect(payload).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(payload).to_contain("wm_browser_event_routing_validation_reason=event-routing-payload-contract-missing")
+expect(payload).to_contain("wm_browser_event_routing_move_payload_x=")
+expect(payload.contains("wm_browser_event_routing_move_payload_x=86.5")).to_equal(false)
+```
+
+</details>
+
 #### keeps the live shell wrapper wired to the validator result
 
 <details>
@@ -244,8 +287,8 @@ expect(script).to_contain("wm_browser_event_routing_validation_reason")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

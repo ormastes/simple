@@ -6,25 +6,50 @@ function clean(value) {
   return String(value).replace(/[\r\n]/g, ' ');
 }
 
-function numberValue(value) {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
-  if (typeof value === 'string' && value.trim() !== '') return Number(value);
-  return NaN;
-}
-
 function boolValue(value) {
   return value === true || value === 'true';
 }
 
-function min(value, required) {
-  const n = numberValue(value);
-  return Number.isFinite(n) && n >= required;
+function decimalIntegerText(value) {
+  if (typeof value === 'number' && Number.isInteger(value)) return String(value);
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'string' && /^-?[0-9]+$/.test(value.trim())) return value.trim();
+  return null;
 }
 
-function equalsNumber(actual, expected) {
-  const a = numberValue(actual);
-  const e = numberValue(expected);
-  return Number.isFinite(a) && Number.isFinite(e) && a === e;
+function decimalNumberText(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'string' && /^-?(?:[0-9]+)(?:\.[0-9]+)?$/.test(value.trim())) return value.trim();
+  return null;
+}
+
+function integerAtLeast(value, required) {
+  const text = decimalIntegerText(value);
+  if (text === null) return false;
+  return BigInt(text) >= BigInt(required);
+}
+
+function decimalAtLeast(value, required) {
+  const text = decimalNumberText(value);
+  if (text === null) return false;
+  return Number(text) >= required;
+}
+
+function sameInteger(actual, expected) {
+  const a = decimalIntegerText(actual);
+  const e = decimalIntegerText(expected);
+  if (a === null || e === null) return false;
+  return BigInt(a) === BigInt(e);
+}
+
+function integerTextOrBlank(value) {
+  const text = decimalIntegerText(value);
+  return text === null ? '' : text;
+}
+
+function decimalTextOrClean(value) {
+  const text = decimalNumberText(value);
+  return text === null ? clean(value) : text;
 }
 
 function row(key, value) {
@@ -55,43 +80,43 @@ const text = proof.text_payload || {};
 const rows = {
   ready: proof.ready,
   wm_found: proof.wm_found,
-  window_cmd_count: proof.window_cmd_count,
-  input_event_count: proof.input_event_count,
-  focus_count: proof.focus_count,
-  move_count: proof.move_count,
-  maximize_count: proof.maximize_count,
-  title_command_count: proof.title_command_count,
-  text_input_count: proof.text_input_count,
-  pointer_down_count: proof.pointer_down_count,
-  pointer_up_count: proof.pointer_up_count,
+  window_cmd_count: integerTextOrBlank(proof.window_cmd_count),
+  input_event_count: integerTextOrBlank(proof.input_event_count),
+  focus_count: integerTextOrBlank(proof.focus_count),
+  move_count: integerTextOrBlank(proof.move_count),
+  maximize_count: integerTextOrBlank(proof.maximize_count),
+  title_command_count: integerTextOrBlank(proof.title_command_count),
+  text_input_count: integerTextOrBlank(proof.text_input_count),
+  pointer_down_count: integerTextOrBlank(proof.pointer_down_count),
+  pointer_up_count: integerTextOrBlank(proof.pointer_up_count),
   performance_now_available: proof.performance_now_available,
-  performance_now_delta_ms: proof.performance_now_delta_ms,
+  performance_now_delta_ms: decimalTextOrClean(proof.performance_now_delta_ms),
   animation_frame_available: proof.animation_frame_available,
-  animation_frame_count: proof.animation_frame_count,
+  animation_frame_count: integerTextOrBlank(proof.animation_frame_count),
   css_animation_probe: proof.css_animation_probe,
   title_text: proof.title_text,
   title_context_text: proof.title_context_text,
-  traffic_button_count: proof.traffic_button_count,
+  traffic_button_count: integerTextOrBlank(proof.traffic_button_count),
   title_input_tag: proof.title_input_tag,
   titlebar_height: proof.titlebar_height,
   titlebar_display: proof.titlebar_display,
   titlebar_cursor: proof.titlebar_cursor,
   titlebar_background: proof.titlebar_background,
   title_color: proof.title_color,
-  title_font_weight: proof.title_font_weight,
+  title_font_weight: integerTextOrBlank(proof.title_font_weight),
   title_input_min_width: proof.title_input_min_width,
   title_input_width: proof.title_input_width,
-  title_input_width_px: proof.title_input_width_px,
+  title_input_width_px: decimalTextOrClean(proof.title_input_width_px),
   title_input_height: proof.title_input_height,
   title_input_cursor: proof.title_input_cursor,
   title_input_background: proof.title_input_background,
   close_button_background: proof.close_button_background,
   minimize_button_background: proof.minimize_button_background,
   maximize_button_background: proof.maximize_button_background,
-  expected_move_x: proof.expected_move_x,
-  expected_move_y: proof.expected_move_y,
-  move_payload_x: move.x,
-  move_payload_y: move.y,
+  expected_move_x: integerTextOrBlank(proof.expected_move_x),
+  expected_move_y: integerTextOrBlank(proof.expected_move_y),
+  move_payload_x: integerTextOrBlank(move.x),
+  move_payload_y: integerTextOrBlank(move.y),
   move_payload_source: move.source,
   move_payload_window_id_hint: move.window_id_hint,
   title_command_text: title.command_text,
@@ -104,28 +129,28 @@ if (!boolValue(proof.pass)) {
 } else if (!boolValue(proof.ready) || !boolValue(proof.wm_found)) {
   reason = 'event-routing-ready-missing';
 } else if (
-  !min(proof.focus_count, 1) ||
-  !min(proof.move_count, 1) ||
-  !min(proof.maximize_count, 1) ||
-  !min(proof.title_command_count, 1) ||
-  !min(proof.text_input_count, 1) ||
-  !min(proof.pointer_down_count, 1) ||
-  !min(proof.pointer_up_count, 1)
+  !integerAtLeast(proof.focus_count, 1) ||
+  !integerAtLeast(proof.move_count, 1) ||
+  !integerAtLeast(proof.maximize_count, 1) ||
+  !integerAtLeast(proof.title_command_count, 1) ||
+  !integerAtLeast(proof.text_input_count, 1) ||
+  !integerAtLeast(proof.pointer_down_count, 1) ||
+  !integerAtLeast(proof.pointer_up_count, 1)
 ) {
   reason = 'event-routing-contract-missing';
 } else if (
   !boolValue(proof.performance_now_available) ||
-  !min(proof.performance_now_delta_ms, 0) ||
+  !decimalAtLeast(proof.performance_now_delta_ms, 0) ||
   !boolValue(proof.animation_frame_available) ||
-  !min(proof.animation_frame_count, 2) ||
+  !integerAtLeast(proof.animation_frame_count, 2) ||
   !boolValue(proof.css_animation_probe)
 ) {
   reason = 'event-routing-performance-animation-contract-missing';
 } else if (
   move.window_id_hint !== 'win1' ||
   move.source !== 'native_event' ||
-  !equalsNumber(move.x, proof.expected_move_x) ||
-  !equalsNumber(move.y, proof.expected_move_y) ||
+  !sameInteger(move.x, proof.expected_move_x) ||
+  !sameInteger(move.y, proof.expected_move_y) ||
   title.command_text !== '/tmp/project' ||
   !text.event ||
   text.event.text !== 'Hello Simple'
@@ -134,16 +159,16 @@ if (!boolValue(proof.pass)) {
 } else if (
   proof.title_text !== 'Terminal' ||
   proof.title_context_text !== 'terminal' ||
-  !min(proof.traffic_button_count, 3) ||
+  !integerAtLeast(proof.traffic_button_count, 3) ||
   proof.title_input_tag !== 'input' ||
   proof.titlebar_height !== '34px' ||
   proof.titlebar_display !== 'flex' ||
   proof.titlebar_cursor !== 'grab' ||
   proof.titlebar_background !== 'rgb(229, 231, 235)' ||
   proof.title_color !== 'rgb(17, 24, 39)' ||
-  !min(proof.title_font_weight, 700) ||
+  !integerAtLeast(proof.title_font_weight, 700) ||
   proof.title_input_min_width !== '142px' ||
-  !min(proof.title_input_width_px, 142) ||
+  !decimalAtLeast(proof.title_input_width_px, 142) ||
   proof.title_input_height !== '24px' ||
   proof.title_input_cursor !== 'text' ||
   proof.title_input_background !== 'rgb(241, 245, 249)' ||
