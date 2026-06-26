@@ -275,6 +275,9 @@ checksum, and exact geometry is downgraded to `fail`.
    - Expected: rendering_manifest_tag_covered_names.split(",").len() equals `105`
    - Expected: rendering_manifest_tag_missing equals ``
    - Expected: rendering_manifest_css_count equals `131`
+   - Expected: rendering_manifest_css_source equals `scripts/check/check-html-css-sspec-traceability.shs`
+   - Expected: rendering_manifest_css_source_status equals `pass`
+   - Expected: rendering_manifest_css_source_count equals `rendering_manifest_css_count`
    - Expected: rendering_manifest_css_covered equals `131`
    - Expected: rendering_manifest_css_covered_names.split(",").len() equals `131`
    - Expected: rendering_manifest_css_missing equals ``
@@ -380,7 +383,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 891 lines folded for reproduction.
+Runnable source: 900 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -400,6 +403,9 @@ expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_command=sh sc
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_command=sh scripts/check/check-html-css-rendering-manifest-traceability.shs")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest=tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_fixture=scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source=scripts/check/check-html-css-sspec-traceability.shs")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_status=pass")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_count=131")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_count=105")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_covered_count=105")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_covered=")
@@ -840,6 +846,9 @@ val rendering_manifest_tag_covered = _value_of(evidence, "html_css_rendering_man
 val rendering_manifest_tag_covered_names = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_covered")
 val rendering_manifest_tag_missing = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_missing")
 val rendering_manifest_css_count = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_count")
+val rendering_manifest_css_source = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_source")
+val rendering_manifest_css_source_status = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_source_status")
+val rendering_manifest_css_source_count = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_source_count")
 val rendering_manifest_css_covered = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_covered_count")
 val rendering_manifest_css_covered_names = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_covered")
 val rendering_manifest_css_missing = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_missing")
@@ -1036,6 +1045,9 @@ expect(rendering_manifest_tag_covered_names).to_contain("video")
 expect(rendering_manifest_tag_covered_names.split(",").len()).to_equal(105)
 expect(rendering_manifest_tag_missing).to_equal("")
 expect(rendering_manifest_css_count).to_equal("131")
+expect(rendering_manifest_css_source).to_equal("scripts/check/check-html-css-sspec-traceability.shs")
+expect(rendering_manifest_css_source_status).to_equal("pass")
+expect(rendering_manifest_css_source_count).to_equal(rendering_manifest_css_count)
 expect(rendering_manifest_css_covered).to_equal("131")
 expect(rendering_manifest_css_covered_names).to_contain("align-content")
 expect(rendering_manifest_css_covered_names).to_contain("align-items")

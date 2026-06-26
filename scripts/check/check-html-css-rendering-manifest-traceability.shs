@@ -28,6 +28,10 @@ FIXTURE = ROOT / os.environ.get(
     "HTML_CSS_RENDERING_FIXTURE_PATH",
     "scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs",
 )
+CSS_SUPPORTED_SOURCE = ROOT / os.environ.get(
+    "HTML_CSS_RENDERING_IMPLEMENTED_CSS_SOURCE",
+    "scripts/check/check-html-css-sspec-traceability.shs",
+)
 REQUIRED_MANIFEST_CASE_COUNT = int(os.environ.get("HTML_CSS_RENDERING_REQUIRED_MANIFEST_CASE_COUNT", "50"))
 HTML_URL = "https://html.spec.whatwg.org/multipage/indices.html"
 
@@ -41,31 +45,6 @@ samp script search section select selectedcontent slot small source span strong
 style summary table tbody td template textarea tfoot th thead time title tr track
 u ul var video wbr
 """.split()
-
-CSS_SUPPORTED = {
-    "align-content", "align-items", "align-self",
-    "animation", "animation-delay", "animation-direction", "animation-duration", "animation-fill-mode", "animation-iteration-count", "animation-name", "animation-play-state", "animation-timing-function",
-    "transform-box", "transform-origin", "transform-style",
-    "background", "background-clip", "background-color", "background-origin", "background-image", "background-position", "background-repeat", "background-size", "border", "border-bottom", "border-bottom-color",
-    "border-bottom-style", "border-bottom-width", "border-color", "border-left", "border-left-color",
-    "border-left-style", "border-left-width", "border-right", "border-right-color", "border-right-style",
-    "border-right-width", "border-style", "border-top", "border-top-color", "border-top-style",
-    "border-top-width", "border-width", "border-radius", "border-bottom-left-radius",
-    "border-bottom-right-radius", "border-top-left-radius", "border-top-right-radius",
-    "box-shadow", "box-sizing",
-    "caret-color", "color", "column-gap", "cursor", "direction", "display", "flex", "flex-basis", "flex-direction",
-    "flex-grow", "flex-shrink", "flex-wrap", "font", "font-size", "font-style", "font-weight", "gap",
-    "height", "justify-content", "left", "letter-spacing", "line-height", "bottom", "margin", "margin-bottom",
-    "margin-left", "margin-right", "margin-top", "max-height", "max-width",
-    "min-height", "min-width", "opacity", "order", "outline", "outline-color",
-    "outline-offset", "outline-style", "outline-width", "overflow", "overflow-wrap", "overflow-x",
-    "overflow-y", "padding", "padding-bottom", "padding-left", "padding-right",
-    "padding-top", "position", "resize", "right", "row-gap", "tab-size", "text-align", "text-decoration",
-    "text-align-last", "text-decoration-color", "text-decoration-line", "text-decoration-style", "text-decoration-thickness", "text-indent", "text-overflow", "text-shadow", "text-transform", "text-underline-offset", "text-underline-position", "top", "transform",
-    "transition", "transition-delay", "transition-duration", "transition-property", "transition-timing-function",
-    "unicode-bidi", "visibility", "white-space", "width", "word-break", "word-spacing", "word-wrap", "z-index",
-}
-
 
 def emit(key: str, value) -> None:
     text = "" if value is None else str(value)
@@ -117,6 +96,19 @@ def manifest_cases(text: str) -> list[tuple[str, str, str, str]]:
     return cases
 
 
+def load_css_supported(path: Path) -> tuple[set[str], str]:
+    if not path.exists():
+        return set(), "missing"
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    match = re.search(r"CSS_SUPPORTED\s*=\s*\{(?P<body>.*?)\n\}", text, re.S)
+    if not match:
+        return set(), "missing-css-supported-set"
+    props = set(re.findall(r'"([^"]+)"', match.group("body")))
+    if not props:
+        return set(), "empty-css-supported-set"
+    return props, "pass"
+
+
 def fixture_html_by_scene(text: str) -> dict[str, str]:
     out = {}
     pattern = re.compile(r'if "\$SCENE" == "([^"]+)":\n\s*html = "((?:[^"\\]|\\.)*)"', re.M)
@@ -135,6 +127,7 @@ def has_css_property(blob: str, prop: str) -> bool:
 
 manifest_text = MANIFEST.read_text(encoding="utf-8", errors="ignore")
 fixture_text = FIXTURE.read_text(encoding="utf-8", errors="ignore")
+css_supported, css_supported_source_status = load_css_supported(CSS_SUPPORTED_SOURCE)
 cases = manifest_cases(manifest_text)
 fixtures = fixture_html_by_scene(fixture_text)
 
@@ -151,11 +144,14 @@ manifest_only_html = [
     and re.search(rf"(?<![a-z0-9-]){re.escape(tag)}(?![a-z0-9-])", manifest_text, re.I) is not None
 ]
 
-missing_css = [prop for prop in sorted(CSS_SUPPORTED) if not has_css_property(fixture_blob, prop)]
+missing_css = [prop for prop in sorted(css_supported) if not has_css_property(fixture_blob, prop)]
 
 status = "pass"
 reason = "pass"
-if len(cases) != REQUIRED_MANIFEST_CASE_COUNT:
+if css_supported_source_status != "pass":
+    status = "fail"
+    reason = "implemented-css-source-unavailable"
+elif len(cases) != REQUIRED_MANIFEST_CASE_COUNT:
     status = "fail"
     reason = "unexpected-manifest-case-count"
 elif missing_fixture:
@@ -172,6 +168,9 @@ emit("html_css_rendering_manifest_traceability_status", status)
 emit("html_css_rendering_manifest_traceability_reason", reason)
 emit("html_css_rendering_manifest_traceability_manifest", rel(MANIFEST))
 emit("html_css_rendering_manifest_traceability_fixture", rel(FIXTURE))
+emit("html_css_rendering_manifest_traceability_css_property_source", rel(CSS_SUPPORTED_SOURCE))
+emit("html_css_rendering_manifest_traceability_css_property_source_status", css_supported_source_status)
+emit("html_css_rendering_manifest_traceability_css_property_source_count", len(css_supported))
 emit("html_css_rendering_manifest_traceability_tag_source", tag_source)
 emit("html_css_rendering_manifest_traceability_html_tag_count", len(html_tags))
 emit("html_css_rendering_manifest_traceability_html_tag_covered_count", len(html_tags) - len(missing_html))
@@ -180,9 +179,9 @@ emit("html_css_rendering_manifest_traceability_html_tag_fixture_covered_count", 
 emit("html_css_rendering_manifest_traceability_html_tag_manifest_only_count", len(manifest_only_html))
 emit("html_css_rendering_manifest_traceability_html_tag_manifest_only", ",".join(manifest_only_html))
 emit("html_css_rendering_manifest_traceability_html_tag_missing", ",".join(missing_html))
-emit("html_css_rendering_manifest_traceability_css_property_count", len(CSS_SUPPORTED))
-emit("html_css_rendering_manifest_traceability_css_property_covered_count", len(CSS_SUPPORTED) - len(missing_css))
-emit("html_css_rendering_manifest_traceability_css_property_covered", ",".join(prop for prop in sorted(CSS_SUPPORTED) if prop not in missing_css))
+emit("html_css_rendering_manifest_traceability_css_property_count", len(css_supported))
+emit("html_css_rendering_manifest_traceability_css_property_covered_count", len(css_supported) - len(missing_css))
+emit("html_css_rendering_manifest_traceability_css_property_covered", ",".join(prop for prop in sorted(css_supported) if prop not in missing_css))
 emit("html_css_rendering_manifest_traceability_css_property_missing", ",".join(missing_css))
 emit("html_css_rendering_manifest_traceability_manifest_case_count", len(cases))
 emit("html_css_rendering_manifest_traceability_required_manifest_case_count", REQUIRED_MANIFEST_CASE_COUNT)

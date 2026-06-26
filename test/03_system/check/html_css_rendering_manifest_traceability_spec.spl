@@ -31,6 +31,9 @@ sh scripts/check/check-html-css-rendering-manifest-traceability.shs
   coverage; manifest prose alone is not sufficient.
 - All 131 implemented Simple Web CSS properties appear in actual rendered
   fixture CSS.
+- The implemented CSS property list is loaded from the canonical SSpec
+  traceability source, so the rendered-fixture gate cannot drift from the
+  assignment inventory.
 - Every scene in the 50-case manifest has a fixture HTML assignment.
 - The manifest must keep the required 50-case render matrix, not just enough
   cases to cover the currently known tag/property names.
@@ -64,6 +67,9 @@ describe "HTML/CSS rendering manifest traceability gate":
         expect(evidence).to_contain("html_css_rendering_manifest_traceability_reason=pass")
         expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest=tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt")
         expect(evidence).to_contain("html_css_rendering_manifest_traceability_fixture=scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs")
+        expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source=scripts/check/check-html-css-sspec-traceability.shs")
+        expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_status=pass")
+        expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_count=131")
 
         val tag_count = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_count")
         val tag_covered = _value_of(evidence, "html_css_rendering_manifest_traceability_html_tag_covered_count")
@@ -123,3 +129,19 @@ describe "HTML/CSS rendering manifest traceability gate":
         expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest=build/test-html-css-rendering-manifest-traceability-truncated/source/truncated_manifest.txt")
         expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest_case_count=49")
         expect(evidence).to_contain("html_css_rendering_manifest_traceability_required_manifest_case_count=50")
+
+    it "rejects canonical implemented CSS properties missing from rendered fixtures":
+        step("Create a temporary implemented CSS source with one extra supported property")
+        val command = "rm -rf build/test-html-css-rendering-manifest-traceability-extra-css && mkdir -p build/test-html-css-rendering-manifest-traceability-extra-css/source && cp scripts/check/check-html-css-sspec-traceability.shs build/test-html-css-rendering-manifest-traceability-extra-css/source/traceability.shs && perl -0pi -e 's/\"z-index\",/\"z-index\",\\n    \"simple-renderdoc-test-extra-property\",/' build/test-html-css-rendering-manifest-traceability-extra-css/source/traceability.shs && BUILD_DIR=build/test-html-css-rendering-manifest-traceability-extra-css/out REPORT_PATH=build/test-html-css-rendering-manifest-traceability-extra-css/report.md HTML_CSS_RENDERING_MANIFEST_FETCH=0 HTML_CSS_RENDERING_IMPLEMENTED_CSS_SOURCE=build/test-html-css-rendering-manifest-traceability-extra-css/source/traceability.shs sh scripts/check/check-html-css-rendering-manifest-traceability.shs || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        step("Assert the rendered fixture gate follows the canonical implemented CSS source")
+        val evidence = file_read("build/test-html-css-rendering-manifest-traceability-extra-css/out/evidence.env") ?? ""
+        expect(evidence).to_contain("html_css_rendering_manifest_traceability_status=fail")
+        expect(evidence).to_contain("html_css_rendering_manifest_traceability_reason=css-properties-missing-rendering-fixture")
+        expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source=build/test-html-css-rendering-manifest-traceability-extra-css/source/traceability.shs")
+        expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_status=pass")
+        expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_count=132")
+        expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_count=132")
+        expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_missing=simple-renderdoc-test-extra-property")
