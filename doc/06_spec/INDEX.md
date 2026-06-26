@@ -24,6 +24,6 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Simple Web Renderer Specification](test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.md) | Minimal | N/A | 62 | 20% | 32 lines |
+| [Simple Web Renderer Specification](test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.md) | Minimal | N/A | 63 | 20% | 32 lines |
 | [Simple Web CSS Inventory Traceability Specification](test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_css_inventory_traceability_spec.md) | Minimal | N/A | 2 | 20% | 23 lines |
 

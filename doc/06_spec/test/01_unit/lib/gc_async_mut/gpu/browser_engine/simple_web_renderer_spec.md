@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 62 | 62 | 0 | 0 |
+| 63 | 63 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -298,6 +298,30 @@ val editor = _draw_ir_command_by_id(batch.commands, "editor")
 expect(_draw_ir_style_value(editor, "caret-color")).to_equal("4278630100")
 expect(_draw_ir_style_value(editor, "tab-size")).to_equal("4")
 expect(_draw_ir_style_value(editor, "unicode-bidi")).to_equal("plaintext")
+```
+
+</details>
+
+#### renders and exposes text decoration thickness offset and style
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.label{color:#111827;font-size:8px;text-decoration-line:underline;text-decoration-color:#dc2626;text-decoration-style:double;text-decoration-thickness:2px;text-underline-offset:2px;text-underline-position:under}</style></head><body><span id='label' class='label'>UNDER</span></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 96, 40)
+val batch = composition.batches[0]
+val label = _draw_ir_command_by_id(batch.commands, "label")
+val pixels = simple_web_render_html_to_pixels(html, 96, 40)
+
+expect(_draw_ir_style_value(label, "text-decoration-style")).to_equal("double")
+expect(_draw_ir_style_value(label, "text-decoration-thickness")).to_equal("2px")
+expect(_draw_ir_style_value(label, "text-underline-offset")).to_equal("2px")
+expect(_draw_ir_style_value(label, "text-underline-position")).to_equal("under")
+expect(_count_color(pixels, 0xFFDC2626u32)).to_be_greater_than(40)
 ```
 
 </details>
@@ -1358,8 +1382,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 62 |
-| Active scenarios | 62 |
+| Total scenarios | 63 |
+| Active scenarios | 63 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
