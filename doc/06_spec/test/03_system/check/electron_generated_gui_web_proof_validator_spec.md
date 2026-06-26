@@ -27,7 +27,7 @@ electron_generated_gui_web_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -79,6 +79,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
 - Blur/tolerance use, missing ARGB capture, missing capture provenance,
   missing viewport proof, capture viewport mismatches, malformed mismatch
   counts, and checksum mismatches are rejected.
+- ARGB capture proof paths must resolve to nonempty files instead of relying
+  on `captured_argb_written=true` alone.
 - The live Electron wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 
@@ -96,7 +98,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -118,7 +120,10 @@ expect(evidence).to_contain("electron_generated_gui_web_requested_height=72")
 expect(evidence).to_contain("electron_generated_gui_web_capture_native_width=96")
 expect(evidence).to_contain("electron_generated_gui_web_capture_native_height=72")
 expect(evidence).to_contain("electron_generated_gui_web_capture_downsampled=false")
+expect(evidence).to_contain("electron_generated_gui_web_captured_argb_path=captured.json")
 expect(evidence).to_contain("electron_generated_gui_web_captured_argb_written=true")
+expect(evidence).to_contain("electron_generated_gui_web_captured_argb_file_status=pass")
+expect(evidence).to_contain("electron_generated_gui_web_captured_argb_size_bytes=2")
 expect(evidence).to_contain("electron_generated_gui_web_blur_or_tolerance_used=false")
 ```
 
@@ -213,6 +218,45 @@ val provenance = file_read(root + "/provenance.env")
 expect(capture).to_contain("electron_generated_gui_web_validation_reason=missing-captured-argb")
 expect(capture).to_contain("electron_generated_gui_web_captured_argb_written=false")
 expect(provenance).to_contain("electron_generated_gui_web_validation_reason=missing-capture-provenance")
+```
+
+</details>
+
+#### rejects missing and empty captured ARGB files
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm boolean ARGB capture flags are not enough without file evidence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-generated-gui-web-validator-captured-files"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/missing.json", "p.captured_argb_path=\"missing.json\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+    _proof_command(root + "/empty.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"\")") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/empty.json > " + root + "/empty.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing = file_read(root + "/missing.env")
+val empty = file_read(root + "/empty.env")
+step("Confirm boolean ARGB capture flags are not enough without file evidence")
+expect(missing).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(missing).to_contain("electron_generated_gui_web_validation_reason=missing-captured-argb-file")
+expect(missing).to_contain("electron_generated_gui_web_captured_argb_file_status=fail")
+expect(missing).to_contain("electron_generated_gui_web_captured_argb_size_bytes=")
+expect(empty).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(empty).to_contain("electron_generated_gui_web_validation_reason=empty-captured-argb-file")
+expect(empty).to_contain("electron_generated_gui_web_captured_argb_file_status=pass")
+expect(empty).to_contain("electron_generated_gui_web_captured_argb_size_bytes=0")
 ```
 
 </details>
@@ -320,13 +364,15 @@ expect(pixel).to_contain("electron_generated_gui_web_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-electron-generated-gui-web-parity-evidence.shs")
 expect(script).to_contain("validate-electron-generated-gui-web-proof.js")
 expect(script).to_contain("electron_generated_gui_web_validation_status")
+expect(script).to_contain("electron_generated_gui_web_captured_argb_file_status")
+expect(script).to_contain("electron_generated_gui_web_captured_argb_size_bytes")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
 ```
@@ -337,8 +383,8 @@ expect(script).to_contain("status=divergent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
