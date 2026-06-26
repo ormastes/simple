@@ -27,7 +27,7 @@ widget_showcase_perf_wrapper_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -360,6 +360,31 @@ expect(script).to_contain("_frame_p95_ns=$frame_p95_ns")
 
 </details>
 
+#### rejects nonnumeric retained readback checksums at the producer
+
+- Read the wrapper source
+- Assert checksum_status fails empty or nonnumeric values
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read the wrapper source")
+val script = file_read("scripts/check/check-widget-showcase-4k-200fps.shs")
+
+step("Assert checksum_status fails empty or nonnumeric values")
+expect(script).to_contain("checksum_status()")
+expect(script).to_contain("\"\"|*[!0-9]*)")
+expect(script).to_contain("echo fail")
+expect(script).to_contain("_checksum_status=$checksum_proof_status")
+```
+
+</details>
+
 #### keeps the GUI showcase 8K env flag wired through the facade
 
 - Read the GUI showcase source
@@ -399,8 +424,8 @@ expect(showcase.contains("rt_env_get(")).to_equal(false)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
