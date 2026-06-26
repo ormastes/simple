@@ -38,6 +38,9 @@ Tasks:
 5. Run direct-env/runtime guard. Status: passed.
 6. Remove shell-backed file I/O. Status: done; context helpers now use
    structured file APIs and specs cover quoted paths plus heredoc-like content.
+7. Align token estimates with the selected design formula `(chars + 3) / 4`.
+   Status: done; stats, generated packs, local index records, and SQL index
+   records all share `context_ops._context_token_estimate`.
 
 ## Lane 2: MCP Ponytail Exposure
 
@@ -226,12 +229,12 @@ Evidence:
   exercise fresh Rust extern changes before release binary rebuild.
 - `release/x86_64-unknown-linux-gnu/simple check` passed for changed context,
   SQLite wrapper, and mirrored spec files.
-- `./src/compiler_rust/target/debug/simple test
+- `release/x86_64-unknown-linux-gnu/simple test
   test/01_unit/app/tooling/context_generate_spec.spl --mode=interpreter` passed
-  with 12/12.
-- `./src/compiler_rust/target/debug/simple test
+  with 13/13 after adding exact character-budget token estimate coverage.
+- `release/x86_64-unknown-linux-gnu/simple test
   test/unit/app/tooling/context_generate_spec.spl --mode=interpreter` passed
-  with 12/12.
+  with 13/13 after adding exact character-budget token estimate coverage.
 
 ## Lane 3: Dashboard Tooling Artifact Panel
 

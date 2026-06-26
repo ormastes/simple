@@ -28,7 +28,7 @@ context_generate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -106,6 +106,24 @@ val stats = context_stats(path, "hello")
 expect(stats).to_contain("status: ready")
 expect(stats).to_contain("lines:")
 expect(stats).to_contain("token_estimate:")
+```
+
+</details>
+
+#### estimates tokens by context character budget
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val path = _write_context_fixture()
+val stats = context_stats(path, "hello")
+expect(stats).to_contain("token_estimate: 10")
+val output = context_index_packs([path], "hello", "text")
+expect(output).to_contain("token_estimate: 10")
 ```
 
 </details>
@@ -297,8 +315,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
