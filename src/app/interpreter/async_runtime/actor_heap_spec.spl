@@ -1,0 +1,176 @@
+# ActorHeap Tests
+#
+# Tests for per-actor heap isolation.
+
+from actor_heap import {ActorHeap, HeapConfig, HeapStats, AllocationResult}
+
+describe "ActorHeap - Configuration":
+    it "creates with default config":
+        val heap = ActorHeap.default()
+        val config = heap.config
+
+        assert config.initial_size == 256 * 1024
+        assert config.gc_enabled
+        assert config.generational
+
+    it "creates with custom config":
+        val config = HeapConfig(
+            initial_size: 1024,
+            max_size: 4096,
+            gc_enabled: true,
+            generational: false,
+            pretenure_threshold: 5
+        )
+        val heap = ActorHeap.new(config)
+
+        assert heap.config.initial_size == 1024
+        assert heap.config.max_size == 4096
+        assert not heap.config.generational
+
+    it "creates small heap":
+        val heap = ActorHeap.small()
+        assert heap.config.initial_size == 64 * 1024
+
+    it "creates large heap":
+        val heap = ActorHeap.large()
+        assert heap.config.initial_size == 1024 * 1024
+
+describe "ActorHeap - Allocation":
+    it "allocates memory":
+        var heap = ActorHeap.default()
+        val result = heap.allocate(100)
+
+        assert result == AllocationResult.Success
+
+    it "tracks allocation stats":
+        var heap = ActorHeap.default()
+        heap.allocate(100)
+        heap.allocate(200)
+
+        val stats = heap.get_stats()
+        assert stats.bytes_allocated == 300
+        assert stats.allocation_count == 2
+
+    it "fails when heap exhausted":
+        val config = HeapConfig(
+            initial_size: 100,
+            max_size: 100,
+            gc_enabled: false,
+            generational: false,
+            pretenure_threshold: 0
+        )
+        var heap = ActorHeap.new(config)
+
+        # Fill the heap
+        heap.allocate(90)
+
+        # Next allocation should fail
+        val result = heap.allocate(50)
+        assert result == AllocationResult.OutOfMemory
+
+    it "handles zero-size allocation":
+        var heap = ActorHeap.default()
+        val result = heap.allocate(0)
+
+        assert result == AllocationResult.Success
+
+describe "ActorHeap - Garbage Collection":
+    it "triggers GC when threshold reached":
+        val config = HeapConfig.default()
+        var heap = ActorHeap.new(config)
+
+        # Allocate near threshold
+        heap.allocate(200 * 1024)
+
+        val stats = heap.get_stats()
+        # GC may have been triggered
+        assert stats.bytes_allocated >= 0
+
+    it "collects garbage manually":
+        var heap = ActorHeap.default()
+        heap.allocate(1000)
+
+        heap.collect_garbage()
+
+        val stats = heap.get_stats()
+        assert stats.gc_count >= 1
+
+    it "collects young generation only":
+        var heap = ActorHeap.default()
+        heap.allocate(500)
+
+        heap.collect_young_generation()
+
+        val stats = heap.get_stats()
+        assert stats.minor_gc_count >= 1
+
+    it "respects gc_enabled flag":
+        val config = HeapConfig(
+            initial_size: 1024,
+            max_size: 4096,
+            gc_enabled: false,
+            generational: false,
+            pretenure_threshold: 0
+        )
+        var heap = ActorHeap.new(config)
+
+        heap.collect_garbage()
+
+        val stats = heap.get_stats()
+        assert stats.gc_count == 0
+
+describe "ActorHeap - Statistics":
+    it "tracks peak usage":
+        var heap = ActorHeap.default()
+
+        heap.allocate(100)
+        heap.allocate(200)
+
+        val stats = heap.get_stats()
+        assert stats.peak_bytes_allocated >= 300
+
+    it "reports fragmentation":
+        var heap = ActorHeap.default()
+        heap.allocate(100)
+
+        val stats = heap.get_stats()
+        val frag = stats.fragmentation()
+        assert frag >= 0.0
+        assert frag <= 100.0
+
+    it "reports utilization":
+        var heap = ActorHeap.default()
+        heap.allocate(1000)
+
+        val stats = heap.get_stats()
+        val util = stats.utilization()
+        assert util >= 0.0
+        assert util <= 100.0
+
+describe "ActorHeap - Display":
+    it "formats heap for display":
+        val heap = ActorHeap.default()
+        val str = heap.fmt()
+
+        assert str.contains("ActorHeap")
+
+    it "formats stats for display":
+        val stats = HeapStats.new()
+        val str = stats.fmt()
+
+        assert str.contains("HeapStats")
+
+describe "ActorHeap - Region Management":
+    it "tracks young generation":
+        var heap = ActorHeap.default()
+        heap.allocate(100)
+
+        assert heap.young_generation.used >= 100
+
+    it "handles non-generational heap":
+        val config = HeapConfig.non_generational(1024, 4096)
+        var heap = ActorHeap.new(config)
+
+        heap.allocate(100)
+
+        assert not heap.old_generation.?

@@ -1,0 +1,184 @@
+"""
+# Location / History API
+
+Simple-script navigation API for the browser engine.
+In-memory URL location and history stack.
+
+JS Equivalent → Simple Function:
+    window.location             → BrowserLocation
+    location.assign()           → location_assign()
+    location.reload()           → location_reload()
+    location.href               → BrowserLocation.href
+    history.pushState()         → history_push_state()
+    history.replaceState()      → history_replace_state()
+    history.back()              → history_back()
+    history.forward()           → history_forward()
+    history.go()                → history_go()
+"""
+
+#![allow(REQC001)]
+
+# =========================================================================
+# BrowserLocation — parsed URL components
+# =========================================================================
+
+pub class BrowserLocation:
+    """Parsed URL location mirroring window.location.
+
+    Fields:
+        href     - full URL string
+        protocol - scheme (e.g. "https:")
+        host     - hostname with optional port
+        pathname - path component
+        search   - query string including leading '?'
+        hash     - fragment including leading '#'
+    """
+    href: text
+    protocol: text
+    host: text
+    pathname: text
+    search: text
+    hash: text
+
+pub fn location_from_url(url: text) -> BrowserLocation:
+    """Parse a URL string into a BrowserLocation.
+
+    Simple parser: splits on '://', '/', '?', '#'.
+    """
+    var protocol = ""
+    var host = ""
+    var pathname = "/"
+    var search = ""
+    var hash = ""
+    var remaining = url
+
+    # Extract protocol
+    val proto_end = _index_of(remaining, "://")
+    if proto_end >= 0:
+        protocol = remaining.slice(0, proto_end + 1)  # includes ':'
+        remaining = remaining.slice(proto_end + 3, remaining.len())
+
+    # Extract hash
+    val hash_idx = _index_of(remaining, "#")
+    if hash_idx >= 0:
+        hash = remaining.slice(hash_idx, remaining.len())
+        remaining = remaining.slice(0, hash_idx)
+
+    # Extract search
+    val search_idx = _index_of(remaining, "?")
+    if search_idx >= 0:
+        search = remaining.slice(search_idx, remaining.len())
+        remaining = remaining.slice(0, search_idx)
+
+    # Split host / pathname
+    val path_idx = _index_of(remaining, "/")
+    if path_idx >= 0:
+        host = remaining.slice(0, path_idx)
+        pathname = remaining.slice(path_idx, remaining.len())
+    else:
+        host = remaining
+
+    BrowserLocation(
+        href: url,
+        protocol: protocol,
+        host: host,
+        pathname: pathname,
+        search: search,
+        hash: hash
+    )
+
+pub fn location_assign(loc: BrowserLocation, url: text):
+    """Navigate to a new URL by updating location fields."""
+    val new_loc = location_from_url(url)
+    loc.href = new_loc.href
+    loc.protocol = new_loc.protocol
+    loc.host = new_loc.host
+    loc.pathname = new_loc.pathname
+    loc.search = new_loc.search
+    loc.hash = new_loc.hash
+
+pub fn location_reload(loc: BrowserLocation):
+    """Reload the current location (no-op in the in-memory model)."""
+    pass_do_nothing
+
+# =========================================================================
+# BrowserHistory — in-memory history stack
+# =========================================================================
+
+pub class BrowserHistory:
+    """In-memory history stack mirroring the History API.
+
+    Fields:
+        entries       - URL entries in the history stack
+        titles        - corresponding titles for each entry
+        current_index - index of the current entry
+    """
+    entries: [text]
+    titles: [text]
+    current_index: i32
+
+    static fn new(initial_url: text) -> BrowserHistory:
+        """Create a history with one initial entry."""
+        BrowserHistory(
+            entries: [initial_url],
+            titles: [""],
+            current_index: 0
+        )
+
+pub fn history_push_state(hist: BrowserHistory, url: text, title: text):
+    """Push a new entry onto the history stack.
+
+    Truncates any forward entries beyond the current position.
+    """
+    # Remove forward entries
+    var new_entries: [text] = []
+    var new_titles: [text] = []
+    var i = 0
+    while i <= hist.current_index and i < hist.entries.len():
+        new_entries.push(hist.entries[i])
+        new_titles.push(hist.titles[i])
+        i = i + 1
+    new_entries.push(url)
+    new_titles.push(title)
+    hist.entries = new_entries
+    hist.titles = new_titles
+    hist.current_index = hist.entries.len() - 1
+
+pub fn history_replace_state(hist: BrowserHistory, url: text, title: text):
+    """Replace the current history entry."""
+    if hist.current_index >= 0 and hist.current_index < hist.entries.len():
+        hist.entries[hist.current_index] = url
+        hist.titles[hist.current_index] = title
+
+pub fn history_back(hist: BrowserHistory):
+    """Go back one entry in the history stack."""
+    if hist.current_index > 0:
+        hist.current_index = hist.current_index - 1
+
+pub fn history_forward(hist: BrowserHistory):
+    """Go forward one entry in the history stack."""
+    if hist.current_index + 1 < hist.entries.len():
+        hist.current_index = hist.current_index + 1
+
+pub fn history_go(hist: BrowserHistory, delta: i32):
+    """Navigate by delta entries in the history stack."""
+    val target = hist.current_index + delta
+    if target >= 0 and target < hist.entries.len():
+        hist.current_index = target
+
+# =========================================================================
+# Internal Helpers
+# =========================================================================
+
+fn _index_of(haystack: text, needle: text) -> i32:
+    """Find the first index of needle in haystack, or -1."""
+    val hlen = haystack.len()
+    val nlen = needle.len()
+    if nlen == 0 or nlen > hlen:
+        return -1
+    var i = 0
+    while i + nlen <= hlen:
+        if haystack.slice(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    -1

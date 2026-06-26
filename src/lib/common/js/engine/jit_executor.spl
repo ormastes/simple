@@ -1,0 +1,391 @@
+# JIT IR executor and register file.
+# Provides JitRegisterFile for register storage, JitExecutor for running
+# compiled IR instructions, and JitStepResult for step-by-step execution.
+
+use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError}
+use std.js.engine.jit_types.{JitIR, JitTypeTag}
+use std.js.types.js_types.{JsValue}
+
+# --- Register file for IR execution ---
+
+class JitRegisterFile:
+    regs: [JsValue]
+    size: i64
+
+    static fn create(size: i64) -> JitRegisterFile:
+        var regs: [JsValue] = []
+        var i = 0
+        while i < size:
+            regs.push(JsValue.Undefined)
+            i = i + 1
+        JitRegisterFile(regs: regs, size: size)
+
+    fn get(idx: i64) -> JsValue:
+        self.regs.get(idx)
+
+    me set(idx: i64, value: JsValue):
+        self.regs[idx] = value
+
+    me reset():
+        var i = 0
+        while i < self.size:
+            self.regs[i] = JsValue.Undefined
+            i = i + 1
+
+# --- Step result for IR execution ---
+
+class JitStepResult:
+    next_pc: i64
+    is_return: bool
+    is_guard_fail: bool
+    value: JsValue
+
+    static fn next(pc: i64) -> JitStepResult:
+        JitStepResult(next_pc: pc, is_return: false, is_guard_fail: false, value: JsValue.Undefined)
+
+    static fn ret(v: JsValue) -> JitStepResult:
+        JitStepResult(next_pc: -1, is_return: true, is_guard_fail: false, value: v)
+
+    static fn guard_fail() -> JitStepResult:
+        JitStepResult(next_pc: -1, is_return: false, is_guard_fail: true, value: JsValue.Undefined)
+
+# --- JIT executor ---
+
+class JitExecutor:
+    register_file: JitRegisterFile
+    locals: [JsValue]
+    logger: Logger
+
+    static fn create(logger: Logger) -> JitExecutor:
+        JitExecutor(
+            register_file: JitRegisterFile.create(256),
+            locals: [],
+            logger: logger
+        )
+
+    me execute(ir: [JitIR], args: [JsValue]) -> BrowserResult<JsValue>:
+        self.register_file.reset()
+        # Load arguments into first registers
+        var arg_i = 0
+        while arg_i < args.len():
+            self.register_file.set(arg_i, args.get(arg_i))
+            arg_i = arg_i + 1
+        # Initialize locals with enough slots
+        var new_locals: [JsValue] = []
+        self.locals = new_locals
+        var li = 0
+        while li < 256:
+            self.locals.push(JsValue.Undefined)
+            li = li + 1
+
+        var pc = 0
+        val ir_len = ir.len()
+        while pc < ir_len:
+            val instr = ir.get(pc)
+            val step_result = self._execute_instruction(instr, pc)
+            if step_result.is_return:
+                return Ok(step_result.value)
+            if step_result.is_guard_fail:
+                return Err(script_error("JIT guard failure: type mismatch, deopt required"))
+            pc = step_result.next_pc
+        Ok(JsValue.Undefined)
+
+    me _execute_instruction(instr: JitIR, pc: i64) -> JitStepResult:
+        match instr:
+            JitIR.LoadConst(reg, value):
+                self.register_file.set(reg, value)
+                JitStepResult.next(pc + 1)
+            JitIR.LoadLocal(reg, slot):
+                self.register_file.set(reg, self.locals.get(slot))
+                JitStepResult.next(pc + 1)
+            JitIR.StoreLocal(slot, reg):
+                val v = self.register_file.get(reg)
+                self.locals[slot] = v
+                JitStepResult.next(pc + 1)
+            JitIR.LoadGlobal(reg, name):
+                # Globals not tracked in JIT executor; return Undefined
+                self.register_file.set(reg, JsValue.Undefined)
+                JitStepResult.next(pc + 1)
+            JitIR.StoreGlobal(name, reg):
+                # Globals store is a no-op in JIT executor
+                JitStepResult.next(pc + 1)
+            JitIR.Add(dst, lhs, rhs):
+                val result = self._js_add(self.register_file.get(lhs), self.register_file.get(rhs))
+                self.register_file.set(dst, result)
+                JitStepResult.next(pc + 1)
+            JitIR.Sub(dst, lhs, rhs):
+                val result = self._js_sub(self.register_file.get(lhs), self.register_file.get(rhs))
+                self.register_file.set(dst, result)
+                JitStepResult.next(pc + 1)
+            JitIR.Mul(dst, lhs, rhs):
+                val result = self._js_mul(self.register_file.get(lhs), self.register_file.get(rhs))
+                self.register_file.set(dst, result)
+                JitStepResult.next(pc + 1)
+            JitIR.Div(dst, lhs, rhs):
+                val result = self._js_div(self.register_file.get(lhs), self.register_file.get(rhs))
+                self.register_file.set(dst, result)
+                JitStepResult.next(pc + 1)
+            JitIR.Mod(dst, lhs, rhs):
+                val result = self._js_mod(self.register_file.get(lhs), self.register_file.get(rhs))
+                self.register_file.set(dst, result)
+                JitStepResult.next(pc + 1)
+            JitIR.IntAdd(dst, lhs, rhs):
+                val result = self._int_add(self.register_file.get(lhs), self.register_file.get(rhs))
+                self.register_file.set(dst, result)
+                JitStepResult.next(pc + 1)
+            JitIR.IntSub(dst, lhs, rhs):
+                val result = self._int_sub(self.register_file.get(lhs), self.register_file.get(rhs))
+                self.register_file.set(dst, result)
+                JitStepResult.next(pc + 1)
+            JitIR.IntMul(dst, lhs, rhs):
+                val result = self._int_mul(self.register_file.get(lhs), self.register_file.get(rhs))
+                self.register_file.set(dst, result)
+                JitStepResult.next(pc + 1)
+            JitIR.IntDiv(dst, lhs, rhs):
+                val result = self._int_div(self.register_file.get(lhs), self.register_file.get(rhs))
+                self.register_file.set(dst, result)
+                JitStepResult.next(pc + 1)
+            JitIR.IntMod(dst, lhs, rhs):
+                val result = self._int_mod(self.register_file.get(lhs), self.register_file.get(rhs))
+                self.register_file.set(dst, result)
+                JitStepResult.next(pc + 1)
+            JitIR.Compare(dst, lhs, rhs, op):
+                val result = self._js_compare(self.register_file.get(lhs), self.register_file.get(rhs), op)
+                self.register_file.set(dst, result)
+                JitStepResult.next(pc + 1)
+            JitIR.Negate(dst, src):
+                val v = self.register_file.get(src)
+                val result = self._js_negate(v)
+                self.register_file.set(dst, result)
+                JitStepResult.next(pc + 1)
+            JitIR.LogicalNot(dst, src):
+                val v = self.register_file.get(src)
+                val result = self._js_logical_not(v)
+                self.register_file.set(dst, result)
+                JitStepResult.next(pc + 1)
+            JitIR.Jump(offset):
+                JitStepResult.next(offset)
+            JitIR.JumpIfFalse(reg, offset):
+                val v = self.register_file.get(reg)
+                if self._is_falsy(v):
+                    JitStepResult.next(offset)
+                else:
+                    JitStepResult.next(pc + 1)
+            JitIR.Call(dst, func_reg, arg_count):
+                # In the JIT executor, calls bail out to interpreter
+                self.register_file.set(dst, JsValue.Undefined)
+                JitStepResult.next(pc + 1)
+            JitIR.Return(reg):
+                val v = self.register_file.get(reg)
+                JitStepResult.ret(v)
+            JitIR.Guard(reg, expected_type):
+                val v = self.register_file.get(reg)
+                if self._check_type(v, expected_type):
+                    JitStepResult.next(pc + 1)
+                else:
+                    JitStepResult.guard_fail()
+            JitIR.Pop(reg):
+                self.register_file.set(reg, JsValue.Undefined)
+                JitStepResult.next(pc + 1)
+            JitIR.Dup(dst, src):
+                self.register_file.set(dst, self.register_file.get(src))
+                JitStepResult.next(pc + 1)
+            JitIR.GetProperty(dst, obj_reg, name):
+                # Property access not supported in JIT executor; return Undefined
+                self.register_file.set(dst, JsValue.Undefined)
+                JitStepResult.next(pc + 1)
+            JitIR.SetProperty(obj_reg, name, val_reg):
+                JitStepResult.next(pc + 1)
+            JitIR.NewObject(dst):
+                self.register_file.set(dst, JsValue.Undefined)
+                JitStepResult.next(pc + 1)
+            JitIR.NewArray(dst, count):
+                self.register_file.set(dst, JsValue.Undefined)
+                JitStepResult.next(pc + 1)
+            JitIR.Nop:
+                JitStepResult.next(pc + 1)
+
+    # --- JS arithmetic helpers ---
+
+    fn _js_add(a: JsValue, b: JsValue) -> JsValue:
+        match a:
+            JsValue.Number(va):
+                match b:
+                    JsValue.Number(vb):
+                        JsValue.Number(v: va + vb)
+                    JsValue.String(vb):
+                        JsValue.String(v: "{va}{vb}")
+                    _: JsValue.Number(v: va)
+            JsValue.String(va):
+                match b:
+                    JsValue.String(vb):
+                        JsValue.String(v: "{va}{vb}")
+                    JsValue.Number(vb):
+                        JsValue.String(v: "{va}{vb}")
+                    _: JsValue.String(v: va)
+            _: JsValue.Undefined
+
+    fn _js_sub(a: JsValue, b: JsValue) -> JsValue:
+        match a:
+            JsValue.Number(va):
+                match b:
+                    JsValue.Number(vb): JsValue.Number(v: va - vb)
+                    _: JsValue.Number(v: va)
+            _: JsValue.Undefined
+
+    fn _js_mul(a: JsValue, b: JsValue) -> JsValue:
+        match a:
+            JsValue.Number(va):
+                match b:
+                    JsValue.Number(vb): JsValue.Number(v: va * vb)
+                    _: JsValue.Number(v: va)
+            _: JsValue.Undefined
+
+    fn _js_div(a: JsValue, b: JsValue) -> JsValue:
+        match a:
+            JsValue.Number(va):
+                match b:
+                    JsValue.Number(vb):
+                        if vb == 0.0:
+                            JsValue.Undefined
+                        else:
+                            JsValue.Number(v: va / vb)
+                    _: JsValue.Undefined
+            _: JsValue.Undefined
+
+    fn _js_mod(a: JsValue, b: JsValue) -> JsValue:
+        match a:
+            JsValue.Number(va):
+                match b:
+                    JsValue.Number(vb):
+                        if vb == 0.0:
+                            JsValue.Undefined
+                        else:
+                            JsValue.Number(v: va % vb)
+                    _: JsValue.Undefined
+            _: JsValue.Undefined
+
+    fn _int_add(a: JsValue, b: JsValue) -> JsValue:
+        match a:
+            JsValue.Number(va):
+                match b:
+                    JsValue.Number(vb): JsValue.Number(v: va + vb)
+                    _: JsValue.Undefined
+            _: JsValue.Undefined
+
+    fn _int_sub(a: JsValue, b: JsValue) -> JsValue:
+        match a:
+            JsValue.Number(va):
+                match b:
+                    JsValue.Number(vb): JsValue.Number(v: va - vb)
+                    _: JsValue.Undefined
+            _: JsValue.Undefined
+
+    fn _int_mul(a: JsValue, b: JsValue) -> JsValue:
+        match a:
+            JsValue.Number(va):
+                match b:
+                    JsValue.Number(vb): JsValue.Number(v: va * vb)
+                    _: JsValue.Undefined
+            _: JsValue.Undefined
+
+    fn _int_div(a: JsValue, b: JsValue) -> JsValue:
+        match a:
+            JsValue.Number(va):
+                match b:
+                    JsValue.Number(vb):
+                        if vb == 0.0:
+                            JsValue.Undefined
+                        else:
+                            JsValue.Number(v: va / vb)
+                    _: JsValue.Undefined
+            _: JsValue.Undefined
+
+    fn _int_mod(a: JsValue, b: JsValue) -> JsValue:
+        match a:
+            JsValue.Number(va):
+                match b:
+                    JsValue.Number(vb):
+                        if vb == 0.0:
+                            JsValue.Undefined
+                        else:
+                            JsValue.Number(v: va % vb)
+                    _: JsValue.Undefined
+            _: JsValue.Undefined
+
+    fn _js_negate(v: JsValue) -> JsValue:
+        match v:
+            JsValue.Number(n): JsValue.Number(v: 0.0 - n)
+            _: JsValue.Undefined
+
+    fn _js_logical_not(v: JsValue) -> JsValue:
+        JsValue.Boolean(v: self._is_falsy(v))
+
+    fn _js_compare(a: JsValue, b: JsValue, op: text) -> JsValue:
+        match a:
+            JsValue.Number(va):
+                match b:
+                    JsValue.Number(vb):
+                        if op == "eq":
+                            JsValue.Boolean(v: va == vb)
+                        else if op == "ne":
+                            JsValue.Boolean(v: va != vb)
+                        else if op == "lt":
+                            JsValue.Boolean(v: va < vb)
+                        else if op == "gt":
+                            JsValue.Boolean(v: va > vb)
+                        else if op == "le":
+                            JsValue.Boolean(v: va <= vb)
+                        else if op == "ge":
+                            JsValue.Boolean(v: va >= vb)
+                        else:
+                            JsValue.Boolean(v: false)
+                    _: JsValue.Boolean(v: false)
+            JsValue.String(va):
+                match b:
+                    JsValue.String(vb):
+                        if op == "eq":
+                            JsValue.Boolean(v: va == vb)
+                        else if op == "ne":
+                            JsValue.Boolean(v: va != vb)
+                        else:
+                            JsValue.Boolean(v: false)
+                    _: JsValue.Boolean(v: false)
+            _: JsValue.Boolean(v: false)
+
+    fn _is_falsy(v: JsValue) -> bool:
+        match v:
+            JsValue.Undefined: true
+            JsValue.Null: true
+            JsValue.Boolean(b): not b
+            JsValue.Number(n): n == 0.0
+            JsValue.String(s): s == ""
+            _: false
+
+    fn _check_type(v: JsValue, expected: JitTypeTag) -> bool:
+        match expected:
+            JitTypeTag.Unknown: true
+            JitTypeTag.TagNumber:
+                match v:
+                    JsValue.Number(_): true
+                    _: false
+            JitTypeTag.TagBoolean:
+                match v:
+                    JsValue.Boolean(_): true
+                    _: false
+            JitTypeTag.TagString:
+                match v:
+                    JsValue.String(_): true
+                    _: false
+            JitTypeTag.TagObject:
+                match v:
+                    JsValue.Object(_): true
+                    _: false
+            JitTypeTag.TagNull:
+                match v:
+                    JsValue.Null: true
+                    _: false
+            JitTypeTag.TagUndefined:
+                match v:
+                    JsValue.Undefined: true
+                    _: false

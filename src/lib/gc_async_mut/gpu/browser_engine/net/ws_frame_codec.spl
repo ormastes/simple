@@ -1,0 +1,325 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+# WebSocket frame types, opcode helpers, encode/decode, masking.
+# Implements RFC 6455 Section 5.2 (framing) and Section 5.3 (masking).
+
+use std.gc_async_mut.gpu.browser_engine.shared.error.{BrowserResult, BrowserError, parse_error}
+use std.gc_async_mut.gpu.browser_engine.net.ws_utils.{encode_byte, decode_byte_val, ws_substring}
+
+# Extended payload length thresholds
+val WS_PAYLOAD_LEN_16BIT = 126   # Use 16-bit extended length
+val WS_PAYLOAD_LEN_64BIT = 127   # Use 64-bit extended length
+val WS_MAX_16BIT_PAYLOAD = 65535  # Maximum value for 16-bit payload length
+
+# Maximum payload for a control frame (RFC 6455 Section 5.5)
+val WS_MAX_CONTROL_PAYLOAD = 125
+
+# --- Opcodes (RFC 6455 Section 5.2) ---
+
+enum WsOpcode:
+    Continuation  # 0x0
+    Text          # 0x1
+    Binary        # 0x2
+    Close         # 0x8
+    Ping          # 0x9
+    Pong          # 0xA
+
+fn opcode_to_id(op: WsOpcode) -> i64:
+    match op:
+        WsOpcode.Continuation: 0
+        WsOpcode.Text: 1
+        WsOpcode.Binary: 2
+        WsOpcode.Close: 8
+        WsOpcode.Ping: 9
+        WsOpcode.Pong: 10
+
+fn id_to_opcode(id: i64) -> Result<WsOpcode>:
+    if id == 0: return Ok(WsOpcode.Continuation)
+    if id == 1: return Ok(WsOpcode.Text)
+    if id == 2: return Ok(WsOpcode.Binary)
+    if id == 8: return Ok(WsOpcode.Close)
+    if id == 9: return Ok(WsOpcode.Ping)
+    if id == 10: return Ok(WsOpcode.Pong)
+    Err(parse_error("ws: unknown opcode: {id}"))
+
+fn opcode_name(op: WsOpcode) -> text:
+    match op:
+        WsOpcode.Continuation: "CONTINUATION"
+        WsOpcode.Text: "TEXT"
+        WsOpcode.Binary: "BINARY"
+        WsOpcode.Close: "CLOSE"
+        WsOpcode.Ping: "PING"
+        WsOpcode.Pong: "PONG"
+
+fn is_control_opcode(op: WsOpcode) -> bool:
+    match op:
+        WsOpcode.Close: true
+        WsOpcode.Ping: true
+        WsOpcode.Pong: true
+        _: false
+
+# --- WsFrame ---
+
+class WsFrame:
+    fin: bool
+    opcode: WsOpcode
+    masked: bool
+    mask_key: [i64]
+    payload: text
+    length: i64
+
+    static fn create(fin: bool, opcode: WsOpcode, payload: text) -> WsFrame:
+        WsFrame(
+            fin: fin,
+            opcode: opcode,
+            masked: false,
+            mask_key: [],
+            payload: payload,
+            length: payload.len()
+        )
+
+    static fn text_frame(data: text) -> WsFrame:
+        WsFrame.create(true, WsOpcode.Text, data)
+
+    static fn binary_frame(data: text) -> WsFrame:
+        WsFrame.create(true, WsOpcode.Binary, data)
+
+    static fn close_frame(code: i64, reason: text) -> WsFrame:
+        val payload = encode_close_payload(code, reason)
+        WsFrame.create(true, WsOpcode.Close, payload)
+
+    static fn ping_frame() -> WsFrame:
+        WsFrame.create(true, WsOpcode.Ping, "")
+
+    static fn pong_frame(data: text) -> WsFrame:
+        WsFrame.create(true, WsOpcode.Pong, data)
+
+    fn is_control() -> bool:
+        is_control_opcode(self.opcode)
+
+    fn description() -> text:
+        val mask_str = if self.masked: "masked" else: "unmasked"
+        val fin_str = if self.fin: "FIN" else: "..."
+        "{opcode_name(self.opcode)} [{fin_str}] {mask_str} len={self.length}"
+
+# --- Frame encoding (RFC 6455 Section 5.2) ---
+
+fn encode_frame(frame: WsFrame) -> text:
+    # Encode a WebSocket frame into its wire format.
+    var result = ""
+
+    # Byte 1: FIN + RSV1-3 + Opcode
+    val fin_bit = if frame.fin: 128 else: 0  # 0x80
+    val opcode_val = opcode_to_id(frame.opcode)
+    val byte1 = fin_bit + opcode_val
+    result = result + encode_byte(byte1)
+
+    # Byte 2: MASK + Payload length
+    val mask_bit = if frame.masked: 128 else: 0  # 0x80
+    val payload_len = frame.payload.len()
+
+    if payload_len < WS_PAYLOAD_LEN_16BIT:
+        # 7-bit length
+        val byte2 = mask_bit + payload_len
+        result = result + encode_byte(byte2)
+    else:
+        if payload_len <= WS_MAX_16BIT_PAYLOAD:
+            # 16-bit extended length
+            val byte2 = mask_bit + WS_PAYLOAD_LEN_16BIT
+            result = result + encode_byte(byte2)
+            val len_hi = (payload_len / 256) % 256
+            val len_lo = payload_len % 256
+            result = result + encode_byte(len_hi)
+            result = result + encode_byte(len_lo)
+        else:
+            # 64-bit extended length
+            val byte2 = mask_bit + WS_PAYLOAD_LEN_64BIT
+            result = result + encode_byte(byte2)
+            result = result + encode_byte(0)
+            result = result + encode_byte(0)
+            result = result + encode_byte(0)
+            result = result + encode_byte(0)
+            val b3 = (payload_len / 16777216) % 256
+            val b2 = (payload_len / 65536) % 256
+            val b1 = (payload_len / 256) % 256
+            val b0 = payload_len % 256
+            result = result + encode_byte(b3)
+            result = result + encode_byte(b2)
+            result = result + encode_byte(b1)
+            result = result + encode_byte(b0)
+
+    # Masking key (4 bytes, only if masked)
+    if frame.masked and frame.mask_key.len() == 4:
+        result = result + encode_byte(frame.mask_key.get(0))
+        result = result + encode_byte(frame.mask_key.get(1))
+        result = result + encode_byte(frame.mask_key.get(2))
+        result = result + encode_byte(frame.mask_key.get(3))
+
+    # Payload data
+    if frame.masked and frame.mask_key.len() == 4:
+        val masked_payload = apply_mask(frame.payload, frame.mask_key)
+        result = result + masked_payload
+    else:
+        result = result + frame.payload
+
+    result
+
+fn decode_frame(data: text) -> Result<WsFrame>:
+    # Decode a WebSocket frame from raw wire data.
+    if data.len() < 2:
+        return Err(parse_error("ws: frame too short ({data.len()} bytes, need at least 2)"))
+
+    var pos = 0
+
+    # Byte 1: FIN + Opcode
+    val byte1 = decode_byte_val(data, pos)
+    pos = pos + 1
+    val fin = (byte1 / 128) >= 1  # Bit 7
+    val opcode_val = byte1 % 16   # Bits 0-3
+    val opcode = id_to_opcode(opcode_val)?
+
+    # Byte 2: MASK + Payload length
+    val byte2 = decode_byte_val(data, pos)
+    pos = pos + 1
+    val masked = (byte2 / 128) >= 1  # Bit 7
+    var payload_len = byte2 % 128      # Bits 0-6
+
+    # Extended payload length
+    if payload_len == WS_PAYLOAD_LEN_16BIT:
+        if data.len() < pos + 2:
+            return Err(parse_error("ws: frame too short for 16-bit payload length"))
+        val len_hi = decode_byte_val(data, pos)
+        val len_lo = decode_byte_val(data, pos + 1)
+        payload_len = len_hi * 256 + len_lo
+        pos = pos + 2
+    else:
+        if payload_len == WS_PAYLOAD_LEN_64BIT:
+            if data.len() < pos + 8:
+                return Err(parse_error("ws: frame too short for 64-bit payload length"))
+            # Read the lower 4 bytes (ignore upper 4 for practical sizes)
+            val b7 = decode_byte_val(data, pos)
+            val b6 = decode_byte_val(data, pos + 1)
+            val b5 = decode_byte_val(data, pos + 2)
+            val b4 = decode_byte_val(data, pos + 3)
+            val b3 = decode_byte_val(data, pos + 4)
+            val b2 = decode_byte_val(data, pos + 5)
+            val b1 = decode_byte_val(data, pos + 6)
+            val b0 = decode_byte_val(data, pos + 7)
+            payload_len = b3 * 16777216 + b2 * 65536 + b1 * 256 + b0
+            pos = pos + 8
+
+    # Masking key (4 bytes if masked)
+    var mask_key = []
+    if masked:
+        if data.len() < pos + 4:
+            return Err(parse_error("ws: frame too short for masking key"))
+        mask_key.push(decode_byte_val(data, pos))
+        mask_key.push(decode_byte_val(data, pos + 1))
+        mask_key.push(decode_byte_val(data, pos + 2))
+        mask_key.push(decode_byte_val(data, pos + 3))
+        pos = pos + 4
+
+    # Payload data
+    if data.len() < pos + payload_len:
+        return Err(parse_error("ws: frame too short for payload (need {pos + payload_len}, have {data.len()})"))
+
+    val payload = if payload_len > 0:
+        ws_substring(data, pos, pos + payload_len)
+    else:
+        ""
+
+    Ok(WsFrame(
+        fin: fin,
+        opcode: opcode,
+        masked: masked,
+        mask_key: mask_key,
+        payload: payload,
+        length: payload_len
+    ))
+
+# --- Masking (RFC 6455 Section 5.3) ---
+
+fn apply_mask(data: text, mask: [i64]) -> text:
+    # Apply XOR masking to payload data.
+    # j = i MOD 4
+    # transformed-octet-i = original-octet-i XOR masking-key-octet-j
+    if mask.len() != 4:
+        return data
+
+    var result = ""
+    var i = 0
+    while i < data.len():
+        val original_byte = decode_byte_val(data, i)
+        val mask_byte = mask.get(i % 4)
+        val transformed = xor_bytes(original_byte, mask_byte)
+        result = result + encode_byte(transformed)
+        i = i + 1
+    result
+
+fn apply_client_mask(frame: WsFrame, mask: [i64]) -> WsFrame:
+    # Apply a masking key to a frame, marking it as masked.
+    # Client-to-server frames MUST be masked (RFC 6455 Section 5.1).
+    WsFrame(
+        fin: frame.fin,
+        opcode: frame.opcode,
+        masked: true,
+        mask_key: mask,
+        payload: frame.payload,
+        length: frame.length
+    )
+
+fn xor_bytes(a: i64, b: i64) -> i64:
+    # XOR two byte values (0-255) using bit decomposition.
+    var result = 0
+    var bit_value = 1
+    var va = a
+    var vb = b
+
+    var bit = 0
+    while bit < 8:
+        val bit_a = va % 2
+        val bit_b = vb % 2
+        if bit_a != bit_b:
+            result = result + bit_value
+        va = va / 2
+        vb = vb / 2
+        bit_value = bit_value * 2
+        bit = bit + 1
+
+    result
+
+# --- Close frame payload ---
+
+fn encode_close_payload(code: i64, reason: text) -> text:
+    # Encode a close frame payload: 2-byte status code + optional reason text.
+    # RFC 6455 Section 5.5.1
+    var payload = ""
+    val code_hi = (code / 256) % 256
+    val code_lo = code % 256
+    payload = payload + encode_byte(code_hi)
+    payload = payload + encode_byte(code_lo)
+
+    if reason.len() > 0:
+        val max_reason_len = WS_MAX_CONTROL_PAYLOAD - 2
+        val truncated = if reason.len() > max_reason_len:
+            ws_substring(reason, 0, max_reason_len)
+        else:
+            reason
+        payload = payload + truncated
+
+    payload
+
+fn decode_close_payload(payload: text) -> Pair<i64, text>:
+    # Decode a close frame payload into (status_code, reason).
+    if payload.len() < 2:
+        return Pair(1005, "")  # WS_CLOSE_NO_STATUS
+
+    val code_hi = decode_byte_val(payload, 0)
+    val code_lo = decode_byte_val(payload, 1)
+    val code = code_hi * 256 + code_lo
+
+    var reason = ""
+    if payload.len() > 2:
+        reason = ws_substring(payload, 2, payload.len())
+
+    Pair(code, reason)

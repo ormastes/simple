@@ -1,0 +1,411 @@
+# MCP API Tools — simple_api
+#
+# Provides visibility-aware API search for Simple modules.
+# Uses TreeSitter outline parser (not regex) to extract symbols,
+# then filters by computed visibility based on caller location.
+#
+# Tool: simple_api
+# Params:
+#   - path: text — Module or file path to inspect
+#   - query: text? — Filter symbols by name substring
+#   - from_module: text? — Caller location for visibility computation
+#   - visibility: text? — Filter: "public", "friend", "package", "all"
+
+use lib.common.text.{is_empty}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+
+# --- JSON helpers (inlined for subprocess isolation) ---
+
+fn js(s: text) -> text:
+    "\"" + escape_json(s) + "\""
+
+fn jp(key: text, value: text) -> text:
+    js(key) + ":" + value
+
+fn jo1(p1: text) -> text:
+    "{" + p1 + "}"
+
+fn jo2(p1: text, p2: text) -> text:
+    "{" + p1 + "," + p2 + "}"
+
+fn jo3(p1: text, p2: text, p3: text) -> text:
+    "{" + p1 + "," + p2 + "," + p3 + "}"
+
+fn escape_json(s: text) -> text:
+    var result = ""
+    for ch in s:
+        if ch == "\"":
+            result = result + "\\\""
+        elif ch == "\\":
+            result = result + "\\\\"
+        elif ch == "\n":
+            result = result + "\\n"
+        elif ch == "\t":
+            result = result + "\\t"
+        else:
+            result = result + ch
+    result
+
+fn extract_nested_string(json: text, parent: text, child: text) -> text:
+    """Extract a nested string value from JSON: {parent: {child: "value"}}."""
+    val parent_key = "\"" + parent + "\""
+    val parent_idx = json.index_of(parent_key)
+    if parent_idx.? == false:
+        return ""
+    val rest = json.substring((parent_idx ?? 0) + parent_key.len())
+    val child_key = "\"" + child + "\""
+    val child_idx = rest.index_of(child_key)
+    if child_idx.? == false:
+        return ""
+    val after_key = rest.substring((child_idx ?? 0) + child_key.len())
+    # Find the colon
+    val colon_idx = after_key.index_of(":")
+    if colon_idx.? == false:
+        return ""
+    val after_colon = after_key.substring((colon_idx ?? 0) + 1).trim()
+    if after_colon.starts_with("\""):
+        # Extract string value
+        val end_quote = after_colon.substring(1).index_of("\"")
+        if end_quote.?:
+            return after_colon.substring(1, (end_quote ?? 0) + 1)
+    ""
+
+# --- Schema ---
+
+fn schema_simple_api() -> text:
+    """Return the JSON schema for the simple_api tool."""
+    val path_prop = jo2(
+        jp("type", js("string")),
+        jp("description", js("Module path or file path to inspect (e.g., 'compiler.frontend' or 'src/compiler/10.frontend/parser_types.spl')"))
+    )
+    val query_prop = jo2(
+        jp("type", js("string")),
+        jp("description", js("Filter symbols by name substring"))
+    )
+    val from_module_prop = jo2(
+        jp("type", js("string")),
+        jp("description", js("Caller module for visibility computation (e.g., 'compiler.mir')"))
+    )
+    val visibility_prop = jo3(
+        jp("type", js("string")),
+        jp("description", js("Visibility filter: public, friend, package, all")),
+        jp("enum", "[" + js("public") + "," + js("friend") + "," + js("package") + "," + js("all") + "]")
+    )
+
+    val props = "{" + jp("path", path_prop) + "," + jp("query", query_prop) + "," + jp("from_module", from_module_prop) + "," + jp("visibility", visibility_prop) + "}"
+    val required = "[" + js("path") + "]"
+
+    val schema = jo3(
+        jp("type", js("object")),
+        jp("properties", props),
+        jp("required", required)
+    )
+
+    val annot = jo3(
+        jp("readOnlyHint", "true"),
+        jp("destructiveHint", "false"),
+        jp("idempotentHint", "true")
+    )
+
+    var result = "{"
+    result = result + jp("name", js("simple_api"))
+    result = result + "," + jp("description", js("Search Simple module API with visibility-aware filtering. Returns functions, classes, structs, enums, and traits with their visibility markers."))
+    result = result + "," + jp("inputSchema", schema)
+    result = result + "," + jp("annotations", annot)
+    result = result + "}"
+    result
+
+# --- Handler ---
+
+fn handle_simple_api(id: text, body: text) -> text:
+    """Handle a simple_api tool call."""
+    val path = extract_nested_string(body, "arguments", "path")
+    if path == "":
+        return make_error_response(id, -32602, "Missing required parameter: path")
+
+    val query = extract_nested_string(body, "arguments", "query")
+    val from_module = extract_nested_string(body, "arguments", "from_module")
+    val vis_filter = extract_nested_string(body, "arguments", "visibility")
+
+    # Resolve the path to a filesystem location
+    val file_path = resolve_api_path(path)
+    if file_path == "":
+        return make_error_response(id, -32602, "Cannot resolve path: " + path)
+
+    # Read the file
+    val source = rt_file_read_text(file_path)
+    if source.is_empty:
+        return make_error_response(id, -32602, "Cannot read file: " + file_path)
+
+    # Parse using heuristic outline (lightweight, no full parse)
+    val symbols = extract_symbols_heuristic(source, file_path)
+
+    # Filter by query
+    var filtered = symbols
+    if query != "":
+        var matched: [SymbolInfo] = []
+        for sym in filtered:
+            if sym.name.contains(query):
+                matched.push(sym)
+        filtered = matched
+
+    # Filter by visibility
+    if vis_filter == "public":
+        var pub_only: [SymbolInfo] = []
+        for sym in filtered:
+            if sym.visibility == "P":
+                pub_only.push(sym)
+        filtered = pub_only
+    elif vis_filter == "friend":
+        var friend_vis: [SymbolInfo] = []
+        for sym in filtered:
+            if sym.visibility == "P" or sym.visibility == "F":
+                friend_vis.push(sym)
+        filtered = friend_vis
+    elif vis_filter == "package":
+        var pkg_vis: [SymbolInfo] = []
+        for sym in filtered:
+            if sym.visibility == "P" or sym.visibility == "F" or sym.visibility == "I":
+                pkg_vis.push(sym)
+        filtered = pkg_vis
+
+    # Format output
+    var output = "# API: {path}\n"
+    output = output + "# File: {file_path}\n"
+    output = output + "# Symbols: {filtered.len()}\n"
+    output = output + "#\n"
+
+    for sym in filtered:
+        output = output + "{sym.visibility}  {sym.kind}> {sym.signature}\n"
+
+    make_tool_result(id, output)
+
+# --- Symbol extraction ---
+
+struct SymbolInfo:
+    name: text
+    kind: text        # "F>" fn, "S>" struct, "C>" class, "E>" enum, "T>" trait
+    visibility: text  # "P" public, "F" friend, "I" internal, "-" private
+    signature: text   # Full signature string
+
+fn extract_symbols_heuristic(source: text, file_path: text) -> [SymbolInfo]:
+    """Extract symbols from source using line-by-line heuristic.
+
+    Recognizes:
+    - fn/me declarations
+    - class/struct/enum/trait declarations
+    - export/internal_export declarations
+    """
+    var symbols: [SymbolInfo] = []
+    var exported_names: [text] = []
+    var internal_exported: [text] = []
+
+    val lines = source.split("\n")
+
+    # First pass: collect exports
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("export "):
+            val rest = trimmed.substring(7)
+            val names = rest.split(",")
+            for name in names:
+                val clean = name.trim()
+                if clean != "" and not clean.starts_with("use "):
+                    exported_names.push(clean)
+        elif trimmed.starts_with("internal_export "):
+            val rest = trimmed.substring(16)
+            val names = rest.split(",")
+            for name in names:
+                val clean = name.trim()
+                if clean != "":
+                    internal_exported.push(clean)
+
+    # Second pass: extract declarations
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Skip comments and empty lines
+        if trimmed == "" or trimmed.starts_with("#"):
+            pass_dn
+        elif trimmed.starts_with("pub(friend) fn ") or trimmed.starts_with("pub(friend) me "):
+            val sig = trimmed.substring(12)
+            val name = extract_fn_name(sig)
+            symbols.push(SymbolInfo(name: name, kind: "F", visibility: "F", signature: sig))
+        elif trimmed.starts_with("pub(package) fn ") or trimmed.starts_with("pub(package) me "):
+            val sig = trimmed.substring(13)
+            val name = extract_fn_name(sig)
+            symbols.push(SymbolInfo(name: name, kind: "F", visibility: "I", signature: sig))
+        elif trimmed.starts_with("pub fn ") or trimmed.starts_with("pub me "):
+            val sig = trimmed.substring(4)
+            val name = extract_fn_name(sig)
+            symbols.push(SymbolInfo(name: name, kind: "F", visibility: "P", signature: sig))
+        elif trimmed.starts_with("fn ") or trimmed.starts_with("me "):
+            val sig = trimmed
+            val name = extract_fn_name(sig)
+            val vis = compute_visibility(name, exported_names, internal_exported)
+            symbols.push(SymbolInfo(name: name, kind: "F", visibility: vis, signature: sig))
+        elif trimmed.starts_with("pub class "):
+            val name = extract_type_name(trimmed.substring(10))
+            symbols.push(SymbolInfo(name: name, kind: "C", visibility: "P", signature: trimmed.substring(4)))
+        elif trimmed.starts_with("class "):
+            val name = extract_type_name(trimmed.substring(6))
+            val vis = compute_visibility(name, exported_names, internal_exported)
+            symbols.push(SymbolInfo(name: name, kind: "C", visibility: vis, signature: trimmed))
+        elif trimmed.starts_with("pub struct "):
+            val name = extract_type_name(trimmed.substring(11))
+            symbols.push(SymbolInfo(name: name, kind: "S", visibility: "P", signature: trimmed.substring(4)))
+        elif trimmed.starts_with("struct "):
+            val name = extract_type_name(trimmed.substring(7))
+            val vis = compute_visibility(name, exported_names, internal_exported)
+            symbols.push(SymbolInfo(name: name, kind: "S", visibility: vis, signature: trimmed))
+        elif trimmed.starts_with("pub enum "):
+            val name = extract_type_name(trimmed.substring(9))
+            symbols.push(SymbolInfo(name: name, kind: "E", visibility: "P", signature: trimmed.substring(4)))
+        elif trimmed.starts_with("enum "):
+            val name = extract_type_name(trimmed.substring(5))
+            val vis = compute_visibility(name, exported_names, internal_exported)
+            symbols.push(SymbolInfo(name: name, kind: "E", visibility: vis, signature: trimmed))
+        elif trimmed.starts_with("pub trait "):
+            val name = extract_type_name(trimmed.substring(10))
+            symbols.push(SymbolInfo(name: name, kind: "T", visibility: "P", signature: trimmed.substring(4)))
+        elif trimmed.starts_with("trait "):
+            val name = extract_type_name(trimmed.substring(6))
+            val vis = compute_visibility(name, exported_names, internal_exported)
+            symbols.push(SymbolInfo(name: name, kind: "T", visibility: vis, signature: trimmed))
+
+    symbols
+
+fn extract_fn_name(sig: text) -> text:
+    """Extract function name from signature: 'fn name(...)' -> 'name'."""
+    var start: i64 = 0
+    if sig.starts_with("fn "):
+        start = 3
+    elif sig.starts_with("me "):
+        start = 3
+    else:
+        return sig
+
+    val rest = sig.substring(start)
+    var end: i64 = 0
+    for ch in rest:
+        if ch == "(" or ch == ":" or ch == " " or ch == "<":
+            return rest.substring(0, end)
+        end = end + 1
+    rest
+
+fn extract_type_name(sig: text) -> text:
+    """Extract type name from declaration: 'TypeName:' -> 'TypeName'."""
+    var end: i64 = 0
+    for ch in sig:
+        if ch == ":" or ch == "(" or ch == " " or ch == "<":
+            return sig.substring(0, end)
+        end = end + 1
+    sig
+
+fn compute_visibility(name: text, exports: [text], internal_exports: [text]) -> text:
+    """Determine visibility marker for a symbol."""
+    for e in exports:
+        if e == name:
+            return "P"
+    for ie in internal_exports:
+        if ie == name:
+            return "F"
+    "-"
+
+fn resolve_api_path(path: text) -> text:
+    """Resolve a module path or file path to a filesystem path."""
+    # If it looks like a file path (contains / or ends with .spl)
+    if path.contains("/") or path.ends_with(".spl"):
+        if rt_file_exists(path):
+            return path
+        # Try relative to src/
+        val src_path = "src/" + path
+        if rt_file_exists(src_path):
+            return src_path
+        return ""
+
+    # Dotted module path: compiler.frontend.parser_types
+    val parts = path.split(".")
+    var dir_path = "src"
+    var i: i64 = 0
+    val last_idx = parts.len() - 1
+
+    for part in parts:
+        if i < last_idx:
+            # Try direct directory
+            val direct = dir_path + "/" + part
+            if rt_dir_exists(direct):
+                dir_path = direct
+            else:
+                # Try numbered directory
+                val numbered = find_numbered_dir_api(dir_path, part)
+                if numbered != "":
+                    dir_path = numbered
+                else:
+                    return ""
+        else:
+            # Last segment: try as .spl file
+            val file = dir_path + "/" + part + ".spl"
+            if rt_file_exists(file):
+                return file
+            # Try as directory with __init__.spl
+            val init = dir_path + "/" + part + "/__init__.spl"
+            if rt_file_exists(init):
+                return init
+            # Try numbered directory
+            val numbered = find_numbered_dir_api(dir_path, part)
+            if numbered != "":
+                val numbered_init = numbered + "/__init__.spl"
+                if rt_file_exists(numbered_init):
+                    return numbered_init
+        i = i + 1
+    ""
+
+fn find_numbered_dir_api(parent: text, segment: text) -> text:
+    """Find NN.segment directory in parent."""
+    if not rt_dir_exists(parent):
+        return ""
+    val entries = rt_dir_list(parent)
+    for entry in entries:
+        var dot_pos: i64 = -1
+        var ci: i64 = 0
+        for ch in entry:
+            if ch == "." and dot_pos == -1:
+                dot_pos = ci
+            ci = ci + 1
+        if dot_pos >= 1 and dot_pos <= 3:
+            val prefix = entry.substring(0, dot_pos)
+            var all_digits = true
+            for ch in prefix:
+                if ch < "0" or ch > "9":
+                    all_digits = false
+            if all_digits:
+                val name = entry.substring(dot_pos + 1)
+                if name == segment:
+                    val full = parent + "/" + entry
+                    if rt_dir_exists(full):
+                        return full
+    ""
+
+# --- Response helpers ---
+
+fn make_tool_result(id: text, content: text) -> text:
+    """Build a JSON-RPC tool result response."""
+    val content_obj = jo2(jp("type", js("text")), jp("text", js(content)))
+    val result_obj = jo1(jp("content", "[" + content_obj + "]"))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", js(id)), jp("result", result_obj))
+
+fn make_error_response(id: text, code: i64, message: text) -> text:
+    """Build a JSON-RPC error response."""
+    val error_obj = jo2(jp("code", "{code}"), jp("message", js(message)))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", js(id)), jp("error", error_obj))
+
+# --- Exports ---
+
+export schema_simple_api
+export handle_simple_api
+export SymbolInfo

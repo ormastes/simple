@@ -1,0 +1,282 @@
+# EasyFix Rules - Public Documentation Check (Text-Scanning)
+#
+# Text-based wrapper for PDOC lint rules. Converts PublicDocWarning
+# diagnostics into EasyFix entries for the fix tool pipeline.
+#
+# Rules:
+#   L:pdoc001 — Public fn/class missing sdoctest or @sdoctest link
+#   L:pdoc002 — @see/@sdoctest references unknown name
+#   L:pdoc003 — @see(X) but X not used in function body
+#   L:pdoc004 — @sdoctest type mismatch (fn refs class, etc.)
+#   L:pdoc005 — @sdoctest target has no sdoctest block
+
+use std.tooling.easy_fix.*
+use super.super.helpers.*
+
+# ============================================================================
+# Rule: public_doc
+# Scans source for doc comment reference and sdoctest issues.
+# Confidence: Certain (text pattern match)
+# ============================================================================
+
+fn check_public_doc_text(source: text, file: text) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    val lines = source.split("\n")
+    val line_count = lines.len()
+
+    # ---- Collect declarations ----
+    var decl_names: [text] = []
+    var decl_kinds: [text] = []
+    var decl_docs: [text] = []
+    var decl_line_nums: [i64] = []
+    var decl_byte_offsets: [i64] = []
+
+    var in_doc_block = false
+    var pending_doc = ""
+    var byte_offset = 0
+    var line_idx = 0
+
+    while line_idx < line_count:
+        val line = lines[line_idx]
+        val trimmed = line.trim()
+        val indent = line.len() - trimmed.len()
+        val line_num = line_idx + 1
+
+        # Track """ blocks at indent 0
+        if not in_doc_block:
+            if indent == 0 and trimmed.starts_with("\"\"\""):
+                val after_open = trimmed.slice(3)
+                if after_open.ends_with("\"\"\"") and after_open.len() >= 3:
+                    pending_doc = after_open.slice(0, after_open.len() - 3)
+                elif after_open == "\"\"\"":
+                    pending_doc = ""
+                elif after_open == "":
+                    in_doc_block = true
+                    pending_doc = ""
+                else:
+                    in_doc_block = true
+                    pending_doc = after_open
+                byte_offset = byte_offset + line.len() + 1
+                line_idx = line_idx + 1
+                continue
+        else:
+            if trimmed.ends_with("\"\"\""):
+                val before = trimmed.slice(0, trimmed.len() - 3)
+                pending_doc = pending_doc + "\n" + before
+                in_doc_block = false
+            else:
+                pending_doc = pending_doc + "\n" + trimmed
+            byte_offset = byte_offset + line.len() + 1
+            line_idx = line_idx + 1
+            continue
+
+        # Detect top-level declarations
+        if indent == 0 and not in_doc_block:
+            var found = false
+            var d_name = ""
+            var d_kind = ""
+
+            if trimmed.starts_with("extern fn "):
+                d_name = pdoc_fix_name(trimmed.slice(10))
+                d_kind = "extern_fn"
+                found = true
+            elif trimmed.starts_with("fn "):
+                d_name = pdoc_fix_name(trimmed.slice(3))
+                d_kind = "fn"
+                found = true
+            elif trimmed.starts_with("class "):
+                d_name = pdoc_fix_name(trimmed.slice(6))
+                d_kind = "class"
+                found = true
+            elif trimmed.starts_with("struct "):
+                d_name = pdoc_fix_name(trimmed.slice(7))
+                d_kind = "struct"
+                found = true
+            elif trimmed.starts_with("enum "):
+                d_name = pdoc_fix_name(trimmed.slice(5))
+                d_kind = "enum"
+                found = true
+            elif trimmed.starts_with("trait "):
+                d_name = pdoc_fix_name(trimmed.slice(6))
+                d_kind = "trait"
+                found = true
+
+            if found:
+                decl_names.push(d_name)
+                decl_kinds.push(d_kind)
+                decl_docs.push(pending_doc)
+                decl_line_nums.push(line_num)
+                decl_byte_offsets.push(byte_offset)
+                pending_doc = ""
+            elif not trimmed.starts_with("#") and trimmed != "":
+                pending_doc = ""
+
+        byte_offset = byte_offset + line.len() + 1
+        line_idx = line_idx + 1
+
+    # ---- Check PDOC rules ----
+    val num = decl_names.len()
+    var di = 0
+    while di < num:
+        val name = decl_names[di]
+        val kind = decl_kinds[di]
+        val doc = decl_docs[di]
+        val dline = decl_line_nums[di]
+        val doffset = decl_byte_offsets[di]
+
+        # Skip exempt
+        if kind == "extern_fn" or name.starts_with("_"):
+            di = di + 1
+            continue
+
+        val has_sdoctest = doc.contains("sdoctest:")
+        val has_at_sdoctest = doc.contains("@sdoctest(")
+        val has_own_sdoctest = has_sdoctest and not has_at_sdoctest
+
+        val see_refs = pdoc_fix_refs(doc, "@see(")
+        val sdoctest_refs = pdoc_fix_refs(doc, "@sdoctest(")
+
+        # PDOC001: Missing sdoctest
+        if kind == "fn" or kind == "class":
+            if not has_own_sdoctest and sdoctest_refs.len() == 0:
+                var fix = EasyFix.create(
+                    id: "L:pdoc001:{dline}",
+                    description: "public {kind} '{name}' missing sdoctest or @sdoctest link",
+                    confidence: FixConfidence.Certain
+                )
+                fix.add_replacement(Replacement.create(
+                    file: file, start: doffset, end: doffset + 1,
+                    line: dline, column: 1, new_text: ""
+                ))
+                fixes.push(fix)
+
+        # PDOC002: Invalid references
+        var si = 0
+        while si < see_refs.len():
+            val ref_name = see_refs[si]
+            if not pdoc_fix_exists(decl_names, ref_name):
+                var fix = EasyFix.create(
+                    id: "L:pdoc002:{dline}:see:{ref_name}",
+                    description: "@see({ref_name}) targets unknown name in '{name}'",
+                    confidence: FixConfidence.Certain
+                )
+                fix.add_replacement(Replacement.create(
+                    file: file, start: doffset, end: doffset + 1,
+                    line: dline, column: 1, new_text: ""
+                ))
+                fixes.push(fix)
+            si = si + 1
+
+        var sdi = 0
+        while sdi < sdoctest_refs.len():
+            val ref_name = sdoctest_refs[sdi]
+            if not pdoc_fix_exists(decl_names, ref_name):
+                var fix = EasyFix.create(
+                    id: "L:pdoc002:{dline}:sdoctest:{ref_name}",
+                    description: "@sdoctest({ref_name}) targets unknown name in '{name}'",
+                    confidence: FixConfidence.Certain
+                )
+                fix.add_replacement(Replacement.create(
+                    file: file, start: doffset, end: doffset + 1,
+                    line: dline, column: 1, new_text: ""
+                ))
+                fixes.push(fix)
+            else:
+                # PDOC004: Type mismatch
+                val target_kind = pdoc_fix_kind(decl_names, decl_kinds, ref_name)
+                var mismatch = false
+                if kind == "fn" and target_kind != "fn" and target_kind != "extern_fn":
+                    mismatch = true
+                elif kind == "class" and target_kind != "class":
+                    mismatch = true
+                if mismatch:
+                    var fix = EasyFix.create(
+                        id: "L:pdoc004:{dline}:{ref_name}",
+                        description: "@sdoctest({ref_name}) type mismatch: '{ref_name}' is {target_kind}, '{name}' is {kind}",
+                        confidence: FixConfidence.Certain
+                    )
+                    fix.add_replacement(Replacement.create(
+                        file: file, start: doffset, end: doffset + 1,
+                        line: dline, column: 1, new_text: ""
+                    ))
+                    fixes.push(fix)
+
+                # PDOC005: Target has no sdoctest
+                val target_doc = pdoc_fix_doc(decl_names, decl_docs, ref_name)
+                if not target_doc.contains("sdoctest:"):
+                    var fix = EasyFix.create(
+                        id: "L:pdoc005:{dline}:{ref_name}",
+                        description: "@sdoctest({ref_name}) target has no sdoctest block, referenced from '{name}'",
+                        confidence: FixConfidence.Certain
+                    )
+                    fix.add_replacement(Replacement.create(
+                        file: file, start: doffset, end: doffset + 1,
+                        line: dline, column: 1, new_text: ""
+                    ))
+                    fixes.push(fix)
+            sdi = sdi + 1
+
+        di = di + 1
+
+    fixes
+
+# ============================================================================
+# Local helpers (prefixed to avoid collision)
+# ============================================================================
+
+fn pdoc_fix_name(s: text) -> text:
+    val paren = s.find("(")
+    val colon = s.find(":")
+    val angle = s.find("<")
+    val space = s.find(" ")
+    var end_pos = s.len()
+    if paren >= 0 and paren < end_pos:
+        end_pos = paren
+    if colon >= 0 and colon < end_pos:
+        end_pos = colon
+    if angle >= 0 and angle < end_pos:
+        end_pos = angle
+    if space >= 0 and space < end_pos:
+        end_pos = space
+    val result = s.slice(0, end_pos)
+    result.trim()
+
+fn pdoc_fix_refs(doc: text, marker: text) -> [text]:
+    var refs: [text] = []
+    val doc_lines = doc.split("\n")
+    for line in doc_lines:
+        val trimmed = line.trim()
+        if trimmed.contains(marker):
+            val pos = trimmed.find(marker)
+            if pos >= 0:
+                val mlen = marker.len()
+                val after = trimmed.slice(pos + mlen)
+                val close = after.find(")")
+                if close >= 0:
+                    val rname = after.slice(0, close)
+                    val clean = rname.trim()
+                    if clean.len() > 0:
+                        refs.push(clean)
+    refs
+
+fn pdoc_fix_exists(names: [text], target: text) -> bool:
+    for n in names:
+        if n == target:
+            return true
+    false
+
+fn pdoc_fix_kind(names: [text], kinds: [text], target: text) -> text:
+    var i = 0
+    while i < names.len():
+        if names[i] == target:
+            return kinds[i]
+        i = i + 1
+    ""
+
+fn pdoc_fix_doc(names: [text], docs: [text], target: text) -> text:
+    var i = 0
+    while i < names.len():
+        if names[i] == target:
+            return docs[i]
+        i = i + 1
+    ""

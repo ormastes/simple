@@ -1,0 +1,79 @@
+# Argument Evaluation Utilities
+#
+# Helpers for evaluating function arguments with defaults,
+# applying lambdas to collections, and type coercion.
+#
+# Port of rust/compiler/src/interpreter_helpers/args.rs (98 lines)
+
+from ..core import {Interpreter, Value, InterpreterError}
+from ..expr import {evaluate}
+
+export eval_arg, eval_arg_int, eval_arg_usize, apply_lambda_to_vec
+
+# Evaluate an argument at index, returning default if not present
+fn eval_arg(interp: Interpreter, args: [Expr], idx: i64, default: Value) -> Result<Value, InterpreterError>:
+    if idx < args.len():
+        evaluate(interp, args[idx])
+    else:
+        Ok(default)
+
+# Evaluate an argument as i64 with default
+fn eval_arg_int(interp: Interpreter, args: [Expr], idx: i64, default: i64) -> Result<i64, InterpreterError>:
+    val result = eval_arg(interp, args, idx, Value.int(default))?
+    result.as_int() ?? Err(InterpreterError.TypeError("expected integer argument"))
+
+# Evaluate an argument as usize (non-negative index) with default
+fn eval_arg_usize(interp: Interpreter, args: [Expr], idx: i64, default: i64) -> Result<i64, InterpreterError>:
+    val n = eval_arg_int(interp, args, idx, default)?
+    if n < 0:
+        Err(InterpreterError.ValueError("expected non-negative index, got {n}"))
+    else:
+        Ok(n)
+
+# Apply a lambda to each item in an array, returning vector of results
+fn apply_lambda_to_vec(interp: Interpreter, arr: [Value], lambda_val: Value) -> Result<[Value], InterpreterError>:
+    if not lambda_val.is_lambda():
+        return Err(InterpreterError.TypeError("expected lambda argument"))
+
+    val params = lambda_val.lambda_params()
+    val body = lambda_val.lambda_body()
+    val captured_env = lambda_val.lambda_env()
+
+    var results = []
+    for item in arr:
+        # Create local environment with captured bindings + parameter
+        interp.env.push_scope()
+        for (name, val) in captured_env:
+            interp.env.define(name, val)
+        if params.len() > 0:
+            interp.env.define(params[0], item)
+
+        val result = evaluate(interp, body)?
+        results = results.push(result)
+        interp.env.pop_scope()
+
+    Ok(results)
+
+# Apply a 2-argument lambda (for reduce)
+fn apply_lambda_with_two_args(interp: Interpreter, lambda_val: Value,
+                               acc: Value, item: Value) -> Result<Value, InterpreterError>:
+    if not lambda_val.is_lambda():
+        return Err(InterpreterError.TypeError("expected lambda argument"))
+
+    val params = lambda_val.lambda_params()
+    val body = lambda_val.lambda_body()
+    val captured_env = lambda_val.lambda_env()
+
+    interp.env.push_scope()
+    for (name, val) in captured_env:
+        interp.env.define(name, val)
+
+    if params.len() >= 2:
+        interp.env.define(params[0], acc)
+        interp.env.define(params[1], item)
+    elif params.len() == 1:
+        interp.env.define(params[0], item)
+
+    val result = evaluate(interp, body)?
+    interp.env.pop_scope()
+    Ok(result)

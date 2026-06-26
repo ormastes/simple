@@ -1,0 +1,537 @@
+# codex-impl
+# Reusable DB GPU offload profiles for DB server query dispatch.
+
+use std.database.query_offload.{
+    DbQueryAccumulatedOffloadExecution,
+    DbQueryOffloadRequest,
+    db_query_work_kind,
+    db_query_estimated_batch_bytes,
+    db_query_offload_execute,
+    db_query_offload_execute_ssd_materialized_scan_device_validated,
+    db_query_offload_execute_ssd_documents,
+    db_query_offload_execute_ssd_documents_device_validated,
+    db_query_offload_execute_scheduled,
+    db_query_offload_execute_accumulating
+}
+use std.database.nosql_offload.{NoSqlSsdDocumentCollection}
+use std.database.storage_mode_offload.{
+    DbStorageOffloadExecution,
+    DbStorageVectorDeviceOffloadExecution,
+    db_storage_execute_documents_with_device_backend_validated,
+    db_storage_execute_vector_with_device_backend_validated,
+    db_storage_profile_allows_gpu,
+    db_storage_offload_used_gpu
+}
+use std.database.vector.types.{DistanceMetric, SearchResult}
+use std.db.dbfs_engine.offload_snapshot.{DbfsSsdScanMaterialization}
+use std.web_db_offload.contract.{GpuWdbWorkKind, GpuWdbBudget, GpuWdbRuntimeSnapshot}
+use std.web_db_offload.queue.{
+    GpuWdbQueueState,
+    GpuWdbQueueSubmission,
+    gpu_wdb_complete_submission,
+    gpu_wdb_queue_initial
+}
+use std.web_db_offload.library.{
+    GpuWdbLibraryRegistry,
+    gpu_wdb_library_snapshot,
+    gpu_wdb_library_with_targets
+}
+use std.web_db_offload.scheduler.{
+    GpuWdbBatchAccumulator,
+    GpuWdbBatchFlushExecution,
+    GpuWdbScheduleClass,
+    gpu_wdb_batch_accumulator_flush_registered
+}
+use std.web_db_offload.device_backend.{
+    GpuWdbDeviceBackend,
+    GpuWdbDeviceRunResult,
+    gpu_wdb_run_device_batch
+}
+
+struct DbOffloadProfile:
+    name: text
+    registry: GpuWdbLibraryRegistry
+    queue_state: GpuWdbQueueState
+    budget: GpuWdbBudget
+    gpu_available: bool
+    cpu_fallback_available: bool
+
+struct DbOffloadProfileAdvancedExecution:
+    profile: DbOffloadProfile
+    execution: DbStorageOffloadExecution
+
+struct DbOffloadProfileAdvancedFlush:
+    profile: DbOffloadProfile
+    flush: GpuWdbBatchFlushExecution
+
+struct DbOffloadProfileDeviceExecution:
+    profile: DbOffloadProfile
+    execution: DbStorageOffloadExecution
+    device_result: GpuWdbDeviceRunResult
+
+struct DbOffloadProfileSsdDocumentDeviceExecution:
+    profile: DbOffloadProfile
+    execution: DbStorageOffloadExecution
+    device_result: GpuWdbDeviceRunResult
+
+struct DbOffloadProfileDocumentDeviceExecution:
+    profile: DbOffloadProfile
+    execution: DbStorageOffloadExecution
+    device_result: GpuWdbDeviceRunResult
+
+struct DbOffloadProfileSsdScanDeviceExecution:
+    profile: DbOffloadProfile
+    execution: DbStorageOffloadExecution
+    device_result: GpuWdbDeviceRunResult
+
+struct DbOffloadProfileVectorDeviceExecution:
+    profile: DbOffloadProfile
+    execution: DbStorageOffloadExecution
+    device_result: GpuWdbDeviceRunResult
+
+fn db_offload_profile_with_queue_state(profile: DbOffloadProfile,
+                                       state: GpuWdbQueueState) -> DbOffloadProfile:
+    DbOffloadProfile(
+        name: profile.name,
+        registry: profile.registry,
+        queue_state: state,
+        budget: profile.budget,
+        gpu_available: profile.gpu_available,
+        cpu_fallback_available: profile.cpu_fallback_available
+    )
+
+fn db_offload_profile_complete_submission(profile: DbOffloadProfile,
+                                          submission: GpuWdbQueueSubmission) -> DbOffloadProfile:
+    db_offload_profile_with_queue_state(
+        profile,
+        gpu_wdb_complete_submission(profile.queue_state, submission)
+    )
+
+fn db_offload_profile_budget(max_queue_depth: i64, max_batch_bytes: i64,
+                             min_gpu_batch_bytes: i64) -> GpuWdbBudget:
+    GpuWdbBudget(
+        max_queue_depth: max_queue_depth,
+        max_batch_bytes: max_batch_bytes,
+        min_gpu_batch_bytes: min_gpu_batch_bytes
+    )
+
+fn db_offload_profile(name: text, backend: text, generation: i64,
+                      stream_count: i64, targets: [text],
+                      budget: GpuWdbBudget, gpu_available: bool,
+                      cpu_fallback_available: bool) -> DbOffloadProfile:
+    DbOffloadProfile(
+        name: name,
+        registry: gpu_wdb_library_with_targets(backend, generation, targets),
+        queue_state: gpu_wdb_queue_initial(stream_count),
+        budget: budget,
+        gpu_available: gpu_available,
+        cpu_fallback_available: cpu_fallback_available
+    )
+
+fn db_offload_profile_ram_heavy(backend: text, generation: i64,
+                                stream_count: i64) -> DbOffloadProfile:
+    db_offload_profile(
+        "ram-heavy",
+        backend,
+        generation,
+        stream_count,
+        ["gpu_db_columnar_scan_batch", "gpu_db_join_aggregate_batch"],
+        db_offload_profile_budget(128, 64 * 1024 * 1024, 4096),
+        true,
+        true
+    )
+
+fn db_offload_profile_ssd_accelerated(backend: text, generation: i64,
+                                      stream_count: i64) -> DbOffloadProfile:
+    db_offload_profile(
+        "ssd-accelerated",
+        backend,
+        generation,
+        stream_count,
+        ["gpu_db_columnar_scan_batch", "gpu_db_join_aggregate_batch"],
+        db_offload_profile_budget(64, 32 * 1024 * 1024, 8192),
+        true,
+        true
+    )
+
+fn db_offload_profile_nosql_gpu(backend: text, generation: i64,
+                                stream_count: i64) -> DbOffloadProfile:
+    db_offload_profile(
+        "nosql-gpu",
+        backend,
+        generation,
+        stream_count,
+        ["gpu_db_document_filter_batch"],
+        db_offload_profile_budget(96, 32 * 1024 * 1024, 4096),
+        true,
+        true
+    )
+
+fn db_offload_profile_vector_gpu(backend: text, generation: i64,
+                                 stream_count: i64) -> DbOffloadProfile:
+    db_offload_profile(
+        "vector-gpu",
+        backend,
+        generation,
+        stream_count,
+        ["gpu_db_vector_search_batch"],
+        db_offload_profile_budget(96, 64 * 1024 * 1024, 4096),
+        true,
+        true
+    )
+
+fn db_offload_profile_all_gpu(backend: text, generation: i64,
+                              stream_count: i64) -> DbOffloadProfile:
+    db_offload_profile(
+        "all-db-gpu",
+        backend,
+        generation,
+        stream_count,
+        [
+            "gpu_db_columnar_scan_batch",
+            "gpu_db_join_aggregate_batch",
+            "gpu_db_document_filter_batch",
+            "gpu_db_vector_search_batch"
+        ],
+        db_offload_profile_budget(128, 64 * 1024 * 1024, 4096),
+        true,
+        true
+    )
+
+fn db_offload_profile_cpu_only(name: text) -> DbOffloadProfile:
+    db_offload_profile(
+        name,
+        "none",
+        0,
+        1,
+        [],
+        db_offload_profile_budget(64, 16 * 1024 * 1024, 4096),
+        false,
+        true
+    )
+
+fn db_offload_profile_execute(profile: DbOffloadProfile,
+                              request: DbQueryOffloadRequest) -> DbStorageOffloadExecution:
+    db_query_offload_execute(
+        request,
+        profile.queue_state,
+        profile.registry,
+        profile.gpu_available,
+        profile.cpu_fallback_available,
+        profile.budget
+    )
+
+fn db_offload_profile_execute_advancing(profile: DbOffloadProfile,
+                                        request: DbQueryOffloadRequest) -> DbOffloadProfileAdvancedExecution:
+    val execution = db_offload_profile_execute(profile, request)
+    DbOffloadProfileAdvancedExecution(
+        profile: db_offload_profile_with_queue_state(profile, execution.state_after),
+        execution: execution
+    )
+
+fn db_offload_profile_execute_device(profile: DbOffloadProfile,
+                                     request: DbQueryOffloadRequest,
+                                     backend: GpuWdbDeviceBackend,
+                                     expected_generation: i64,
+                                     started_us: i64,
+                                     finished_us: i64,
+                                     measured_device_time_us: i64,
+                                     timing_source: text) -> DbOffloadProfileDeviceExecution:
+    val execution = db_offload_profile_execute(profile, request)
+    val device_result = gpu_wdb_run_device_batch(
+        profile.queue_state,
+        backend,
+        db_query_work_kind(request),
+        db_query_estimated_batch_bytes(request),
+        request.item_count,
+        expected_generation,
+        profile.cpu_fallback_available,
+        profile.budget,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    DbOffloadProfileDeviceExecution(
+        profile: db_offload_profile_with_queue_state(profile, device_result.submission.state),
+        execution: execution,
+        device_result: device_result
+    )
+
+fn db_offload_profile_execute_ssd_documents(profile: DbOffloadProfile,
+                                            collection: NoSqlSsdDocumentCollection,
+                                            key: text,
+                                            value: text) -> DbStorageOffloadExecution:
+    db_query_offload_execute_ssd_documents(
+        collection,
+        key,
+        value,
+        profile.queue_state,
+        profile.registry,
+        profile.gpu_available,
+        profile.cpu_fallback_available,
+        profile.budget
+    )
+
+fn db_offload_profile_execute_documents_device(profile: DbOffloadProfile,
+                                               document_count: i64,
+                                               bytes_per_document: i64,
+                                               metadata_filter_cpu_owned: bool,
+                                               generation_current: bool,
+                                               backend: GpuWdbDeviceBackend,
+                                               expected_generation: i64,
+                                               cpu_document_ids: [text],
+                                               gpu_candidate_document_ids: [text],
+                                               started_us: i64,
+                                               finished_us: i64,
+                                               measured_device_time_us: i64,
+                                               timing_source: text) -> DbOffloadProfileDocumentDeviceExecution:
+    val device_execution = db_storage_execute_documents_with_device_backend_validated(
+        document_count,
+        bytes_per_document,
+        metadata_filter_cpu_owned,
+        profile.queue_state,
+        backend,
+        generation_current,
+        expected_generation,
+        profile.cpu_fallback_available,
+        profile.budget,
+        cpu_document_ids,
+        gpu_candidate_document_ids,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    DbOffloadProfileDocumentDeviceExecution(
+        profile: db_offload_profile_with_queue_state(profile, device_execution.device_result.submission.state),
+        execution: device_execution.execution,
+        device_result: device_execution.device_result
+    )
+
+fn db_offload_profile_execute_ssd_documents_device(profile: DbOffloadProfile,
+                                                   collection: NoSqlSsdDocumentCollection,
+                                                   key: text,
+                                                   value: text,
+                                                   backend: GpuWdbDeviceBackend,
+                                                   expected_generation: i64,
+                                                   started_us: i64,
+                                                   finished_us: i64,
+                                                   measured_device_time_us: i64,
+                                                   timing_source: text) -> DbOffloadProfileSsdDocumentDeviceExecution:
+    db_offload_profile_execute_ssd_documents_device_validated(
+        profile,
+        collection,
+        key,
+        value,
+        backend,
+        expected_generation,
+        collection.filter_metadata_ids(key, value),
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+
+fn db_offload_profile_execute_ssd_documents_device_validated(profile: DbOffloadProfile,
+                                                             collection: NoSqlSsdDocumentCollection,
+                                                             key: text,
+                                                             value: text,
+                                                             backend: GpuWdbDeviceBackend,
+                                                             expected_generation: i64,
+                                                             gpu_candidate_document_ids: [text],
+                                                             started_us: i64,
+                                                             finished_us: i64,
+                                                             measured_device_time_us: i64,
+                                                             timing_source: text) -> DbOffloadProfileSsdDocumentDeviceExecution:
+    val device_execution = db_query_offload_execute_ssd_documents_device_validated(
+        collection,
+        key,
+        value,
+        profile.queue_state,
+        backend,
+        expected_generation,
+        profile.cpu_fallback_available,
+        profile.budget,
+        gpu_candidate_document_ids,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    DbOffloadProfileSsdDocumentDeviceExecution(
+        profile: db_offload_profile_with_queue_state(profile, device_execution.device_result.submission.state),
+        execution: device_execution.execution,
+        device_result: device_execution.device_result
+    )
+
+fn db_offload_profile_execute_ssd_materialized_scan_device(profile: DbOffloadProfile,
+                                                           materialization: DbfsSsdScanMaterialization,
+                                                           backend: GpuWdbDeviceBackend,
+                                                           expected_generation: i64,
+                                                           gpu_candidate_row_ids: [i64],
+                                                           started_us: i64,
+                                                           finished_us: i64,
+                                                           measured_device_time_us: i64,
+                                                           timing_source: text) -> DbOffloadProfileSsdScanDeviceExecution:
+    val device_execution = db_query_offload_execute_ssd_materialized_scan_device_validated(
+        materialization,
+        profile.queue_state,
+        backend,
+        expected_generation,
+        profile.cpu_fallback_available,
+        profile.budget,
+        gpu_candidate_row_ids,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    DbOffloadProfileSsdScanDeviceExecution(
+        profile: db_offload_profile_with_queue_state(profile, device_execution.device_execution.device_result.submission.state),
+        execution: device_execution.execution,
+        device_result: device_execution.device_execution.device_result
+    )
+
+fn db_offload_profile_execute_vector_device(profile: DbOffloadProfile,
+                                            metric: DistanceMetric,
+                                            candidate_count: i64,
+                                            dimensions: i64,
+                                            metadata_filter_cpu_owned: bool,
+                                            generation_current: bool,
+                                            backend: GpuWdbDeviceBackend,
+                                            expected_generation: i64,
+                                            cpu_results: [SearchResult],
+                                            gpu_candidate_results: [SearchResult],
+                                            started_us: i64,
+                                            finished_us: i64,
+                                            measured_device_time_us: i64,
+                                            timing_source: text) -> DbOffloadProfileVectorDeviceExecution:
+    val device_execution = db_storage_execute_vector_with_device_backend_validated(
+        metric,
+        candidate_count,
+        dimensions,
+        metadata_filter_cpu_owned,
+        profile.queue_state,
+        backend,
+        generation_current,
+        expected_generation,
+        profile.cpu_fallback_available,
+        profile.budget,
+        cpu_results,
+        gpu_candidate_results,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    DbOffloadProfileVectorDeviceExecution(
+        profile: db_offload_profile_with_queue_state(profile, device_execution.device_result.submission.state),
+        execution: device_execution.execution,
+        device_result: device_execution.device_result
+    )
+
+fn db_offload_profile_execution_allows_gpu(execution: DbStorageOffloadExecution) -> bool:
+    db_storage_profile_allows_gpu(execution)
+
+fn db_offload_profile_execution_used_gpu(execution: DbStorageOffloadExecution) -> bool:
+    db_storage_offload_used_gpu(execution)
+
+fn db_offload_profile_execute_scheduled(profile: DbOffloadProfile,
+                                        request: DbQueryOffloadRequest,
+                                        schedule_class: GpuWdbScheduleClass,
+                                        allow_defer: bool) -> DbStorageOffloadExecution:
+    db_query_offload_execute_scheduled(
+        request,
+        profile.queue_state,
+        profile.registry,
+        profile.gpu_available,
+        profile.cpu_fallback_available,
+        profile.budget,
+        schedule_class,
+        allow_defer
+    )
+
+fn db_offload_profile_execute_scheduled_advancing(profile: DbOffloadProfile,
+                                                  request: DbQueryOffloadRequest,
+                                                  schedule_class: GpuWdbScheduleClass,
+                                                  allow_defer: bool) -> DbOffloadProfileAdvancedExecution:
+    val execution = db_offload_profile_execute_scheduled(profile, request, schedule_class, allow_defer)
+    DbOffloadProfileAdvancedExecution(
+        profile: db_offload_profile_with_queue_state(profile, execution.state_after),
+        execution: execution
+    )
+
+fn db_offload_profile_execute_accumulating(profile: DbOffloadProfile,
+                                           request: DbQueryOffloadRequest,
+                                           schedule_class: GpuWdbScheduleClass,
+                                           accumulator: GpuWdbBatchAccumulator) -> DbQueryAccumulatedOffloadExecution:
+    db_query_offload_execute_accumulating(
+        request,
+        profile.queue_state,
+        profile.registry,
+        profile.gpu_available,
+        profile.cpu_fallback_available,
+        profile.budget,
+        schedule_class,
+        accumulator
+    )
+
+fn db_offload_profile_flush_accumulator(profile: DbOffloadProfile,
+                                        accumulator: GpuWdbBatchAccumulator,
+                                        generation_current: bool) -> GpuWdbBatchFlushExecution:
+    gpu_wdb_batch_accumulator_flush_registered(
+        accumulator,
+        profile.queue_state,
+        profile.registry,
+        GpuWdbRuntimeSnapshot(
+            queue_depth: profile.queue_state.queue_depth,
+            gpu_available: profile.gpu_available,
+            generation_current: generation_current,
+            cpu_fallback_available: profile.cpu_fallback_available
+        ),
+        profile.budget
+    )
+
+fn db_offload_profile_flush_accumulator_advancing(profile: DbOffloadProfile,
+                                                  accumulator: GpuWdbBatchAccumulator,
+                                                  generation_current: bool) -> DbOffloadProfileAdvancedFlush:
+    val flush = db_offload_profile_flush_accumulator(profile, accumulator, generation_current)
+    DbOffloadProfileAdvancedFlush(
+        profile: db_offload_profile_with_queue_state(profile, flush.submission.state),
+        flush: flush
+    )
+
+fn db_offload_profile_flush_accumulator_for_generation(profile: DbOffloadProfile,
+                                                       accumulator: GpuWdbBatchAccumulator,
+                                                       expected_generation: i64) -> GpuWdbBatchFlushExecution:
+    gpu_wdb_batch_accumulator_flush_registered(
+        accumulator,
+        profile.queue_state,
+        profile.registry,
+        gpu_wdb_library_snapshot(
+            profile.queue_state,
+            profile.registry,
+            expected_generation,
+            profile.gpu_available,
+            profile.cpu_fallback_available
+        ),
+        profile.budget
+    )
+
+fn db_offload_profile_flush_accumulator_for_generation_advancing(profile: DbOffloadProfile,
+                                                                 accumulator: GpuWdbBatchAccumulator,
+                                                                 expected_generation: i64) -> DbOffloadProfileAdvancedFlush:
+    val flush = db_offload_profile_flush_accumulator_for_generation(profile, accumulator, expected_generation)
+    DbOffloadProfileAdvancedFlush(
+        profile: db_offload_profile_with_queue_state(profile, flush.submission.state),
+        flush: flush
+    )
+
+fn db_offload_profile_flush_accumulator_current(profile: DbOffloadProfile,
+                                                accumulator: GpuWdbBatchAccumulator) -> GpuWdbBatchFlushExecution:
+    db_offload_profile_flush_accumulator_for_generation(profile, accumulator, profile.registry.generation)
+
+fn db_offload_profile_flush_accumulator_current_advancing(profile: DbOffloadProfile,
+                                                          accumulator: GpuWdbBatchAccumulator) -> DbOffloadProfileAdvancedFlush:
+    db_offload_profile_flush_accumulator_for_generation_advancing(profile, accumulator, profile.registry.generation)

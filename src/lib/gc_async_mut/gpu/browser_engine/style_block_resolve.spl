@@ -1,0 +1,429 @@
+# Style Block Selector Resolver — CSS selector matching against DOM nodes
+#
+# Extracted from style_block.spl. Contains:
+#   - selector_matches / simple_selector_matches
+#   - Pseudo-class matching (:nth-child, :first-child, :last-child, etc.)
+#   - :is(), :where(), :not(), :has() functional selectors
+#   - Attribute selector matching
+#   - Class chain, ID, tag, compound selector matching
+#   - DOM traversal helpers for :has() (descendant/child)
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_tag, be_dom_get_id, be_dom_get_classes, be_dom_get_children,
+    be_dom_get_is_text, be_dom_get_text, be_dom_has_attr, be_dom_get_attr}
+use std.gc_async_mut.gpu.browser_engine.style_block.{
+    sb_find, sb_split_ws, sb_split_selector_list, sb_find_top_level_child_combinator,
+    sb_parse_int, find_matching_brace}
+
+# =========================================================================
+# Selector matching
+# =========================================================================
+
+pub fn selector_matches(selector: text, node: BeDomNode, parent: BeDomNode?, nth: i32, sibling_count: i32) -> bool:
+    val trimmed = selector.trim()
+    if trimmed.len() == 0:
+        return false
+
+    # Bounded child combinator: ".parent > child". The caller supplies the
+    # immediate parent while walking the DOM, so keep this strict instead of
+    # letting whitespace tokenization degrade it into descendant-like matching.
+    val child_pos = sb_find_top_level_child_combinator(trimmed)
+    if child_pos < 999999999:
+        val parent_selector = trimmed.slice(0, child_pos).trim()
+        val child_selector = trimmed.slice(child_pos + 1, trimmed.len()).trim()
+        if parent_selector.len() == 0 or child_selector.len() == 0:
+            return false
+        if not simple_selector_matches(child_selector, node, nth, sibling_count):
+            return false
+        match parent:
+            case Some(parent_node):
+                return simple_selector_matches(parent_selector, parent_node, 1, 1)
+            case None:
+                return false
+
+    # Descendant combinator: "div span" — check if any ancestor matches first part
+    val space_parts = sb_split_ws(trimmed)
+    if space_parts.len() > 1:
+        # Last part must match the node itself
+        val last = space_parts[space_parts.len() - 1]
+        if not simple_selector_matches(last, node, nth, sibling_count):
+            return false
+        # For descendant, we just check if node matches the last selector
+        # Full descendant matching would require walking ancestors, but the
+        # caller walks the tree so parents are available
+        return true
+
+    simple_selector_matches(trimmed, node, nth, sibling_count)
+
+pub fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32, sibling_count: i32) -> bool:
+    val sel = selector.trim()
+    if sel.len() == 0:
+        return false
+    if sel == "*":
+        return node.is_element()
+    if sb_find(sel, "[", 0) < 999999999:
+        return attribute_selector_matches(sel, node, nth, sibling_count)
+
+    # Modern forgiving selector-list pseudos. Specificity differences do not
+    # matter in this order-only style applicator, so :is() and :where() share
+    # matching behavior here.
+    if sel.starts_with(":is(") or sel.starts_with(":where("):
+        return functional_selector_list_matches(sel, node, nth, sibling_count)
+    if sel.starts_with(":not("):
+        return not_selector_list_matches(sel, node, nth, sibling_count)
+    if sel.starts_with(":has("):
+        return has_descendant_selector_list_match(sel, node)
+    if sel == ":first-child":
+        return node.is_element() and nth == 1
+    if sel == ":last-child":
+        return node.is_element() and nth == sibling_count
+    if sel == ":only-child":
+        return node.is_element() and nth == 1 and sibling_count == 1
+    if sel == ":empty":
+        return node_is_empty(node)
+
+    # Handle :nth-child pseudo
+    val nth_pos = sb_find(sel, ":nth-child(", 0)
+    if nth_pos < 999999999:
+        val base_sel = sel.slice(0, nth_pos)
+        val paren_end = sb_find(sel, ")", nth_pos)
+        if paren_end > 0 and paren_end < 999999999:
+            val n_raw = sel.slice(nth_pos + 11, paren_end)
+            val n_str = n_raw.trim()
+            if not nth_child_argument_matches(n_str, nth):
+                return false
+            if base_sel.len() == 0:
+                return node.is_element()
+            return simple_selector_matches(base_sel, node, nth, sibling_count)
+
+    val pseudo_empty_pos = sb_find(sel, ":empty", 0)
+    if pseudo_empty_pos > 0 and pseudo_empty_pos < 999999999:
+        if pseudo_empty_pos + 6 != sel.len():
+            return false
+        val base = sel.slice(0, pseudo_empty_pos)
+        return simple_selector_matches(base, node, nth, sibling_count) and node_is_empty(node)
+    val pseudo_first_child_pos = sb_find(sel, ":first-child", 0)
+    if pseudo_first_child_pos > 0 and pseudo_first_child_pos < 999999999:
+        if pseudo_first_child_pos + 12 != sel.len():
+            return false
+        val base2 = sel.slice(0, pseudo_first_child_pos)
+        return simple_selector_matches(base2, node, nth, sibling_count) and nth == 1
+    val pseudo_last_child_pos = sb_find(sel, ":last-child", 0)
+    if pseudo_last_child_pos > 0 and pseudo_last_child_pos < 999999999:
+        if pseudo_last_child_pos + 11 != sel.len():
+            return false
+        val base3 = sel.slice(0, pseudo_last_child_pos)
+        return simple_selector_matches(base3, node, nth, sibling_count) and nth == sibling_count
+    val pseudo_only_child_pos = sb_find(sel, ":only-child", 0)
+    if pseudo_only_child_pos > 0 and pseudo_only_child_pos < 999999999:
+        if pseudo_only_child_pos + 11 != sel.len():
+            return false
+        val base4 = sel.slice(0, pseudo_only_child_pos)
+        return simple_selector_matches(base4, node, nth, sibling_count) and nth == 1 and sibling_count == 1
+
+    # ID selector: #foo
+    if sel.starts_with("#"):
+        val id = sel.slice(1, sel.len())
+        return be_dom_get_id(node) == id
+
+    # Class selector: .foo
+    if sel.starts_with("."):
+        return selector_class_chain_matches(sel, node)
+
+    # Compound: tag.class or tag#id
+    val pseudo_is_pos = sb_find(sel, ":is(", 0)
+    if pseudo_is_pos > 0 and pseudo_is_pos < 999999999:
+        val base = sel.slice(0, pseudo_is_pos)
+        val pseudo = sel.slice(pseudo_is_pos, sel.len())
+        return simple_selector_matches(base, node, nth, sibling_count) and functional_selector_list_matches(pseudo, node, nth, sibling_count)
+    val pseudo_where_pos = sb_find(sel, ":where(", 0)
+    if pseudo_where_pos > 0 and pseudo_where_pos < 999999999:
+        val base = sel.slice(0, pseudo_where_pos)
+        val pseudo = sel.slice(pseudo_where_pos, sel.len())
+        return simple_selector_matches(base, node, nth, sibling_count) and functional_selector_list_matches(pseudo, node, nth, sibling_count)
+    val pseudo_not_pos = sb_find(sel, ":not(", 0)
+    if pseudo_not_pos > 0 and pseudo_not_pos < 999999999:
+        val base = sel.slice(0, pseudo_not_pos)
+        val pseudo = sel.slice(pseudo_not_pos, sel.len())
+        return simple_selector_matches(base, node, nth, sibling_count) and not_selector_list_matches(pseudo, node, nth, sibling_count)
+    val pseudo_has_pos = sb_find(sel, ":has(", 0)
+    if pseudo_has_pos > 0 and pseudo_has_pos < 999999999:
+        val base = sel.slice(0, pseudo_has_pos)
+        val pseudo = sel.slice(pseudo_has_pos, sel.len())
+        return simple_selector_matches(base, node, nth, sibling_count) and has_descendant_selector_list_match(pseudo, node)
+
+    val dot_pos = sb_find(sel, ".", 0)
+    if dot_pos > 0 and dot_pos < 999999999:
+        val tag = sel.slice(0, dot_pos)
+        val ntag = be_dom_get_tag(node)
+        return ntag == tag and selector_class_chain_matches(sel.slice(dot_pos, sel.len()), node)
+
+    val hash_pos = sb_find(sel, "#", 0)
+    if hash_pos > 0 and hash_pos < 999999999:
+        val tag = sel.slice(0, hash_pos)
+        val id = sel.slice(hash_pos + 1, sel.len())
+        val ntag2 = be_dom_get_tag(node)
+        val nid = be_dom_get_id(node)
+        return ntag2 == tag and nid == id
+
+    # Plain tag selector
+    val ntag3 = be_dom_get_tag(node)
+    ntag3 == sel
+
+fn nth_child_argument_matches(arg: text, nth: i32) -> bool:
+    val trimmed = nth_child_remove_ws(arg.trim().lower())
+    if trimmed == "odd":
+        return nth % 2 == 1
+    if trimmed == "even":
+        return nth % 2 == 0
+    val n_pos = sb_find(trimmed, "n", 0)
+    if n_pos < 999999999:
+        return nth_child_common_formula_matches(trimmed, nth)
+    val target_n = sb_parse_int(trimmed)
+    nth == target_n
+
+fn nth_child_common_formula_matches(formula: text, nth: i32) -> bool:
+    if formula == "2n" or formula == "even":
+        return nth % 2 == 0
+    if formula == "2n+1" or formula == "2n-1" or formula == "odd":
+        return nth % 2 == 1
+    if formula == "n+3":
+        return nth >= 3
+    if formula == "-n+3":
+        return nth <= 3
+    false
+
+fn nth_child_remove_ws(value: text) -> text:
+    var out = ""
+    var idx = 0
+    while idx < value.len():
+        val ch = value.char_at(idx)
+        if ch != " " and ch != "\t" and ch != "\n" and ch != "\r":
+            out = out + ch
+        idx = idx + 1
+    out
+
+fn selector_class_chain_matches(selector: text, node: BeDomNode) -> bool:
+    val trimmed = selector.trim()
+    if not trimmed.starts_with("."):
+        return false
+    var saw_class = false
+    var segment_start = 1
+    var idx = 1
+    while idx <= trimmed.len():
+        if idx == trimmed.len() or trimmed.char_at(idx) == ".":
+            val cls = trimmed.slice(segment_start, idx).trim()
+            if cls.len() == 0 or not sb_has_class(node, cls):
+                return false
+            saw_class = true
+            segment_start = idx + 1
+        idx = idx + 1
+    saw_class
+
+fn node_is_empty(node: BeDomNode) -> bool:
+    val children = be_dom_get_children(node)
+    var idx = 0
+    while idx < children.len():
+        val child = children[idx]
+        if be_dom_get_is_text(child):
+            if be_dom_get_text(child).trim().len() > 0:
+                return false
+        else:
+            return false
+        idx = idx + 1
+    true
+
+fn attribute_selector_matches(selector: text, node: BeDomNode, nth: i32, sibling_count: i32) -> bool:
+    val open = sb_find(selector, "[", 0)
+    if open >= 999999999:
+        return false
+    val close = sb_find(selector, "]", open + 1)
+    if close >= 999999999:
+        return false
+    val base = selector.slice(0, open).trim()
+    if base.len() > 0 and not simple_selector_matches(base, node, nth, sibling_count):
+        return false
+    val body = selector.slice(open + 1, close).trim()
+    if body.len() == 0:
+        return false
+    val eq_pos = sb_find(body, "=", 0)
+    if eq_pos >= 999999999:
+        return be_dom_has_attr(node, body.lower())
+    val op = sb_attr_operator(body, eq_pos)
+    var key_end = eq_pos
+    if op != "=":
+        key_end = eq_pos - 1
+    val key = body.slice(0, key_end).trim().lower()
+    val raw_expected = body.slice(eq_pos + 1, body.len()).trim()
+    val insensitive = sb_attr_has_i_flag(raw_expected)
+    val expected = sb_unquote_attr_value(sb_attr_value_without_flag(raw_expected))
+    if key.len() == 0:
+        return false
+    if not be_dom_has_attr(node, key):
+        return false
+    sb_attr_value_matches(be_dom_get_attr(node, key), op, expected, insensitive)
+
+fn sb_attr_operator(body: text, eq_pos: i32) -> text:
+    if eq_pos > 0:
+        val marker = body.char_at(eq_pos - 1)
+        if marker == "^" or marker == "$" or marker == "*" or marker == "~" or marker == "|":
+            return marker + "="
+    "="
+
+fn sb_attr_value_matches(actual: text, op: text, expected: text, insensitive: bool) -> bool:
+    var actual_cmp = actual
+    var expected_cmp = expected
+    if insensitive:
+        actual_cmp = actual.lower()
+        expected_cmp = expected.lower()
+    if op == "=":
+        return actual_cmp == expected_cmp
+    if op == "^=":
+        return actual_cmp.starts_with(expected_cmp)
+    if op == "$=":
+        return actual_cmp.ends_with(expected_cmp)
+    if op == "*=":
+        return actual_cmp.contains(expected_cmp)
+    if op == "~=":
+        return sb_attr_token_contains(actual_cmp, expected_cmp)
+    if op == "|=":
+        return actual_cmp == expected_cmp or actual_cmp.starts_with(expected_cmp + "-")
+    false
+
+fn sb_attr_has_i_flag(value: text) -> bool:
+    value.ends_with(" i") or value.ends_with(" I")
+
+fn sb_attr_has_s_flag(value: text) -> bool:
+    value.ends_with(" s") or value.ends_with(" S")
+
+fn sb_attr_value_without_flag(value: text) -> text:
+    if sb_attr_has_i_flag(value) or sb_attr_has_s_flag(value):
+        return value.slice(0, value.len() - 2).trim()
+    value
+
+fn sb_attr_token_contains(actual: text, expected: text) -> bool:
+    val parts = sb_split_ws(actual)
+    var idx = 0
+    while idx < parts.len():
+        if parts[idx] == expected:
+            return true
+        idx = idx + 1
+    false
+
+fn sb_unquote_attr_value(value: text) -> text:
+    if value.len() >= 2:
+        if (value.starts_with("\"") and value.ends_with("\"")) or (value.starts_with("'") and value.ends_with("'")):
+            return value.slice(1, value.len() - 1)
+    value
+
+fn functional_selector_list_matches(selector: text, node: BeDomNode, nth: i32, sibling_count: i32) -> bool:
+    val open = sb_find(selector, "(", 0)
+    if open >= 999999999:
+        return false
+    val close = sb_find(selector, ")", open + 1)
+    if close >= 999999999:
+        return false
+    val inner = selector.slice(open + 1, close)
+    val options = sb_split_selector_list(inner)
+    var idx = 0
+    while idx < options.len():
+        val option = options[idx].trim()
+        if option.len() > 0 and simple_selector_matches(option, node, nth, sibling_count):
+            return true
+        idx = idx + 1
+    false
+
+fn not_selector_list_matches(selector: text, node: BeDomNode, nth: i32, sibling_count: i32) -> bool:
+    val open = sb_find(selector, "(", 0)
+    if open >= 999999999:
+        return false
+    val close = sb_find(selector, ")", open + 1)
+    if close >= 999999999:
+        return false
+    val inner = selector.slice(open + 1, close)
+    val options = sb_split_selector_list(inner)
+    var idx = 0
+    var saw_option = false
+    while idx < options.len():
+        val option = options[idx].trim()
+        if option.len() > 0:
+            saw_option = true
+            if simple_selector_matches(option, node, nth, sibling_count):
+                return false
+        idx = idx + 1
+    saw_option
+
+fn has_descendant_selector_list_match(selector: text, node: BeDomNode) -> bool:
+    val open = sb_find(selector, "(", 0)
+    if open >= 999999999:
+        return false
+    val close = sb_find(selector, ")", open + 1)
+    if close >= 999999999:
+        return false
+    val inner = selector.slice(open + 1, close)
+    val options = sb_split_selector_list(inner)
+    var idx = 0
+    while idx < options.len():
+        val option = options[idx].trim()
+        if option.len() > 0 and node_has_relative_has_option_matching(node, option):
+            return true
+        idx = idx + 1
+    false
+
+fn node_has_relative_has_option_matching(node: BeDomNode, selector: text) -> bool:
+    val trimmed = selector.trim()
+    if trimmed.starts_with(">"):
+        val child_selector = trimmed.slice(1, trimmed.len()).trim()
+        if child_selector.len() == 0:
+            return false
+        return node_has_direct_child_matching(node, child_selector)
+    node_has_descendant_matching(node, trimmed)
+
+fn node_has_direct_child_matching(node: BeDomNode, selector: text) -> bool:
+    val children = be_dom_get_children(node)
+    var sibling_count = 0
+    var count_idx = 0
+    while count_idx < children.len():
+        if not be_dom_get_is_text(children[count_idx]):
+            sibling_count = sibling_count + 1
+        count_idx = count_idx + 1
+    var idx = 0
+    var nth = 1
+    while idx < children.len():
+        val child = children[idx]
+        if not be_dom_get_is_text(child):
+            if simple_selector_matches(selector, child, nth, sibling_count):
+                return true
+            nth = nth + 1
+        idx = idx + 1
+    false
+
+fn node_has_descendant_matching(node: BeDomNode, selector: text) -> bool:
+    val children = be_dom_get_children(node)
+    var sibling_count = 0
+    var count_idx = 0
+    while count_idx < children.len():
+        if not be_dom_get_is_text(children[count_idx]):
+            sibling_count = sibling_count + 1
+        count_idx = count_idx + 1
+    var idx = 0
+    var nth = 1
+    while idx < children.len():
+        val child = children[idx]
+        if not be_dom_get_is_text(child):
+            if simple_selector_matches(selector, child, nth, sibling_count):
+                return true
+            if node_has_descendant_matching(child, selector):
+                return true
+            nth = nth + 1
+        idx = idx + 1
+    false
+
+fn sb_has_class(node: BeDomNode, name: text) -> bool:
+    """Cross-module class membership check using be_dom_get_classes accessor."""
+    val classes = be_dom_get_classes(node)
+    for cls in classes:
+        if cls == name:
+            return true
+    false

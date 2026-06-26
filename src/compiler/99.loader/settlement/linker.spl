@@ -1,0 +1,235 @@
+# Settlement Linker
+#
+# Cross-module symbol resolution for the Simple loader.
+# Collects exported symbols from all loaded modules, resolves
+# import references, and produces a unified symbol table.
+#
+# Port of rust/compiler/src/loader/settlement/linker.rs
+
+use std.log.{debug}
+
+# ============================================================================
+# Symbol Types
+# ============================================================================
+
+"""Visibility of an exported symbol."""
+enum SymbolVisibility:
+    Public       # Visible to all modules
+    Internal     # Visible within the same package
+    Hidden       # Not exported (local only)
+
+"""Binding strength for symbol resolution."""
+enum SymbolBinding:
+    Strong       # Normal definition — must be unique
+    Weak         # May be overridden by a strong definition
+    Lazy         # Resolved on first use (JIT placeholder)
+
+"""A resolved or unresolved symbol entry."""
+struct SymbolEntry:
+    name: text
+    address: i64
+    size: i64
+    module_id: text
+    visibility: SymbolVisibility
+    binding: SymbolBinding
+    is_resolved: bool
+
+impl SymbolEntry:
+    static fn unresolved(name: text, module_id: text) -> SymbolEntry:
+        SymbolEntry(
+            name: name,
+            address: 0,
+            size: 0,
+            module_id: module_id,
+            visibility: SymbolVisibility.Public,
+            binding: SymbolBinding.Strong,
+            is_resolved: false
+        )
+
+    static fn resolved(name: text, address: i64, size: i64, module_id: text) -> SymbolEntry:
+        SymbolEntry(
+            name: name,
+            address: address,
+            size: size,
+            module_id: module_id,
+            visibility: SymbolVisibility.Public,
+            binding: SymbolBinding.Strong,
+            is_resolved: true
+        )
+
+"""An unresolved import reference."""
+struct ImportRef:
+    symbol_name: text
+    from_module: text
+    relocation_offset: i64
+    relocation_kind: RelocationKind
+
+"""Relocation type for import patching."""
+enum RelocationKind:
+    Abs64        # Absolute 64-bit address
+    Pc32         # PC-relative 32-bit offset
+    Plt32        # PLT-relative 32-bit offset
+    GotPcRel     # GOT entry PC-relative
+
+# ============================================================================
+# Link Result
+# ============================================================================
+
+enum LinkError:
+    UnresolvedSymbol(name: text, referenced_by: text)
+    DuplicateSymbol(name: text, module_a: text, module_b: text)
+    CircularDependency(modules: [text])
+    RelocationFailed(symbol: text, reason: text)
+
+impl LinkError:
+    fn message() -> text:
+        match self:
+            case UnresolvedSymbol(name, ref_by): "Unresolved symbol '{name}' referenced by {ref_by}"
+            case DuplicateSymbol(name, a, b): "Duplicate strong symbol '{name}' in {a} and {b}"
+            case CircularDependency(mods): "Circular dependency: {mods.join(" -> ")}"
+            case RelocationFailed(sym, reason): "Relocation failed for '{sym}': {reason}"
+
+# ============================================================================
+# Settlement Linker
+# ============================================================================
+
+class SettlementLinker:
+    """Cross-module symbol linker.
+
+    Collects exports from all modules, then resolves imports
+    by matching import names to export entries.
+    """
+    exports: Dict<text, SymbolEntry>     # name -> export entry
+    imports: Dict<text, [ImportRef]>     # name -> list of import refs
+    modules: [text]                      # module IDs in load order
+    resolved_count: i64
+    unresolved_count: i64
+
+impl SettlementLinker:
+    static fn create() -> SettlementLinker:
+        SettlementLinker(
+            exports: {},
+            imports: {},
+            modules: [],
+            resolved_count: 0,
+            unresolved_count: 0
+        )
+
+    me add_export(entry: SymbolEntry) -> Result<(), LinkError>:
+        """Register an exported symbol."""
+        if self.exports.contains(entry.name):
+            val existing = self.exports[entry.name]
+            # Allow weak symbols to be overridden
+            if existing.binding == SymbolBinding.Strong and entry.binding == SymbolBinding.Strong:
+                return Err(LinkError.DuplicateSymbol(
+                    name: entry.name,
+                    module_a: existing.module_id,
+                    module_b: entry.module_id
+                ))
+            # Strong overrides weak
+            if entry.binding == SymbolBinding.Strong:
+                self.exports[entry.name] = entry
+        else:
+            self.exports[entry.name] = entry
+        Ok(())
+
+    me add_import(ref: ImportRef):
+        """Register an import reference to be resolved."""
+        if not self.imports.contains(ref.symbol_name):
+            self.imports[ref.symbol_name] = []
+        self.imports[ref.symbol_name].push(ref)
+
+    me add_module(module_id: text):
+        """Register a module in the link set."""
+        self.modules.push(module_id)
+
+    me resolve() -> Result<Dict<text, SymbolEntry>, [LinkError]>:
+        """Resolve all imports against collected exports.
+
+        Returns the final symbol table on success, or a list of errors.
+        """
+        var errors: [LinkError] = []
+        self.resolved_count = 0
+        self.unresolved_count = 0
+
+        for name in self.imports.keys():
+            val refs = self.imports[name]
+            if self.exports.contains(name):
+                val export = self.exports[name]
+                debug("settlement", "Resolved {name} -> {export.module_id}@{export.address}")
+                self.resolved_count = self.resolved_count + 1
+            else:
+                # Collect all modules that reference this symbol
+                for ref in refs:
+                    errors.push(LinkError.UnresolvedSymbol(
+                        name: name,
+                        referenced_by: ref.from_module
+                    ))
+                self.unresolved_count = self.unresolved_count + 1
+
+        if errors.len() > 0:
+            Err(errors)
+        else:
+            Ok(self.exports)
+
+    me resolve_with_fallback(fallback_fn: fn(text) -> SymbolEntry?) -> Result<Dict<text, SymbolEntry>, [LinkError]>:
+        """Resolve imports, using a fallback for missing symbols (e.g., JIT)."""
+        var errors: [LinkError] = []
+        self.resolved_count = 0
+        self.unresolved_count = 0
+
+        for name in self.imports.keys():
+            if self.exports.contains(name):
+                self.resolved_count = self.resolved_count + 1
+            else:
+                # Try fallback
+                val fb_result = fallback_fn(name)
+                if fb_result.?:
+                    val entry = fb_result.unwrap()
+                    self.exports[name] = entry
+                    self.resolved_count = self.resolved_count + 1
+                else:
+                    val refs = self.imports[name]
+                    for ref in refs:
+                        errors.push(LinkError.UnresolvedSymbol(
+                            name: name,
+                            referenced_by: ref.from_module
+                        ))
+                    self.unresolved_count = self.unresolved_count + 1
+
+        if errors.len() > 0:
+            Err(errors)
+        else:
+            Ok(self.exports)
+
+    fn get_export(name: text) -> SymbolEntry?:
+        """Look up a resolved export by name."""
+        if self.exports.contains(name):
+            Some(self.exports[name])
+        else:
+            nil
+
+    fn get_unresolved_imports() -> [text]:
+        """Get list of import names that have no matching export."""
+        var unresolved: [text] = []
+        for name in self.imports.keys():
+            if not self.exports.contains(name):
+                unresolved.push(name)
+        unresolved
+
+    fn stats() -> LinkerStats:
+        """Get linker statistics."""
+        LinkerStats(
+            total_exports: self.exports.len(),
+            total_imports: self.imports.len(),
+            resolved: self.resolved_count,
+            unresolved: self.unresolved_count,
+            module_count: self.modules.len()
+        )
+
+struct LinkerStats:
+    total_exports: i64
+    total_imports: i64
+    resolved: i64
+    unresolved: i64
+    module_count: i64

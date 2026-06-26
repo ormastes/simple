@@ -1,0 +1,187 @@
+# VHDL Simulation Runner (Orchestrator)
+#
+# Ties VHDL backend compilation + testbench generation + simulator execution
+# into a single end-to-end pipeline.
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use compiler.backend.vhdl.vhdl_simulator.{VhdlSimulator, VhdlSimConfig, VhdlSimResult, VhdlSimulatorRunner}
+use compiler.backend.vhdl.vhdl_testbench.VhdlTestbenchGenerator
+use compiler.backend.vhdl.vhdl_device_target.{VhdlDeviceTarget, VhdlDeviceFamily}
+use lib.io.vhdl_ffi.{vhdl_write_file, vhdl_file_exists, rt_file_exists}
+
+# ============================================================================
+# Emulation Configuration
+# ============================================================================
+
+struct VhdlEmulationConfig:
+    sim_config: VhdlSimConfig
+    device_target: VhdlDeviceTarget
+    testbench_gen: VhdlTestbenchGenerator
+    output_dir: text
+    auto_testbench: bool
+
+    static fn ghdl_default() -> VhdlEmulationConfig:
+        """Default configuration using GHDL."""
+        VhdlEmulationConfig(
+            sim_config: VhdlSimConfig.ghdl_default(),
+            device_target: VhdlDeviceTarget.generic(),
+            testbench_gen: VhdlTestbenchGenerator.create(),
+            output_dir: "build/vhdl",
+            auto_testbench: true
+        )
+
+# ============================================================================
+# Emulation Result
+# ============================================================================
+
+struct VhdlEmulationResult:
+    success: bool
+    vhdl_file: text?
+    testbench_file: text?
+    sim_result: VhdlSimResult?
+    errors: [text]
+
+    static fn ok(vhdl: text, tb: text?, sim: VhdlSimResult) -> VhdlEmulationResult:
+        VhdlEmulationResult(
+            success: sim.success,
+            vhdl_file: Some(vhdl),
+            testbench_file: tb,
+            sim_result: Some(sim),
+            errors: []
+        )
+
+    static fn error(msg: text) -> VhdlEmulationResult:
+        VhdlEmulationResult(
+            success: false,
+            vhdl_file: nil,
+            testbench_file: nil,
+            sim_result: nil,
+            errors: [msg]
+        )
+
+# ============================================================================
+# Simulation Runner
+# ============================================================================
+
+class VhdlSimRunner:
+    """
+    End-to-end VHDL simulation orchestrator.
+
+    Manages the full flow:
+    1. VHDL source file management
+    2. Optional testbench generation
+    3. Simulator invocation (analyze + elaborate + simulate)
+    4. Result collection (waveforms, logs)
+
+    Usage:
+        val runner = VhdlSimRunner.with_ghdl()
+        val result = runner.simulate_vhdl_file("design.vhd", "design_entity")
+    """
+
+    simulator: VhdlSimulatorRunner
+    testbench_gen: VhdlTestbenchGenerator
+    device_target: VhdlDeviceTarget
+    output_dir: text
+    auto_testbench: bool
+
+    static fn create(config: VhdlEmulationConfig) -> VhdlSimRunner:
+        """Create runner from full config."""
+        VhdlSimRunner(
+            simulator: VhdlSimulatorRunner.create(config.sim_config),
+            testbench_gen: config.testbench_gen,
+            device_target: config.device_target,
+            output_dir: config.output_dir,
+            auto_testbench: config.auto_testbench
+        )
+
+    static fn with_ghdl() -> VhdlSimRunner:
+        """Create runner with default GHDL configuration."""
+        VhdlSimRunner.create(VhdlEmulationConfig.ghdl_default())
+
+    fn check_simulator() -> Result<text, text>:
+        """Check if the configured simulator is available."""
+        if self.simulator.is_available():
+            return Ok(self.simulator.simulator_name())
+        val name = self.simulator.simulator_name()
+        Err("{name} is not installed. Install it with:\n  GHDL: apt install ghdl / brew install ghdl\n  ModelSim: Download from Intel FPGA website")
+
+    fn simulate_vhdl_file(path: text, entity: text) -> VhdlEmulationResult:
+        """Simulate an existing VHDL file."""
+        if not rt_file_exists(path):
+            return VhdlEmulationResult.error("VHDL file not found: {path}")
+
+        val check = self.check_simulator()
+        if check.err.?:
+            return VhdlEmulationResult.error(check.err.unwrap())
+
+        val sim_result = self.simulator.full_run(path, entity)
+        VhdlEmulationResult.ok(path, nil, sim_result)
+
+    fn simulate_vhdl_source(vhdl_code: text, entity: text) -> VhdlEmulationResult:
+        """Write VHDL source to file and simulate."""
+        val check = self.check_simulator()
+        if check.err.?:
+            return VhdlEmulationResult.error(check.err.unwrap())
+
+        val vhdl_path = "{self.output_dir}/{entity}.vhd"
+        if not vhdl_write_file(vhdl_path, vhdl_code):
+            return VhdlEmulationResult.error("Failed to write VHDL file: {vhdl_path}")
+
+        val sim_result = self.simulator.full_run(vhdl_path, entity)
+        VhdlEmulationResult.ok(vhdl_path, nil, sim_result)
+
+    fn simulate_with_testbench(vhdl_code: text, entity: text, ports: [(text, text, text)]) -> VhdlEmulationResult:
+        """Generate testbench, write files, and simulate."""
+        val check = self.check_simulator()
+        if check.err.?:
+            return VhdlEmulationResult.error(check.err.unwrap())
+
+        # Write design file
+        val vhdl_path = "{self.output_dir}/{entity}.vhd"
+        if not vhdl_write_file(vhdl_path, vhdl_code):
+            return VhdlEmulationResult.error("Failed to write design file: {vhdl_path}")
+
+        # Analyze design first
+        val analyze_r = self.simulator.analyze(vhdl_path)
+        if not analyze_r.success:
+            return VhdlEmulationResult.error("Design analysis failed: {analyze_r.stderr}")
+
+        # Generate and write testbench
+        val tb_code = self.testbench_gen.generate_basic(entity, ports)
+        val tb_path = "{self.output_dir}/{entity}_tb.vhd"
+        if not vhdl_write_file(tb_path, tb_code):
+            return VhdlEmulationResult.error("Failed to write testbench: {tb_path}")
+
+        # Analyze testbench
+        val tb_analyze = self.simulator.analyze(tb_path)
+        if not tb_analyze.success:
+            return VhdlEmulationResult.error("Testbench analysis failed: {tb_analyze.stderr}")
+
+        # Elaborate and simulate testbench entity
+        val tb_entity = "{entity}_tb"
+        val elab_r = self.simulator.elaborate(tb_entity)
+        if not elab_r.success:
+            return VhdlEmulationResult.error("Elaboration failed: {elab_r.stderr}")
+
+        val sim_r = self.simulator.simulate(tb_entity)
+        VhdlEmulationResult.ok(vhdl_path, Some(tb_path), sim_r)
+
+    fn analyze_only(vhdl_code: text, entity: text) -> VhdlEmulationResult:
+        """Only analyze (syntax+semantic check) without simulation."""
+        val check = self.check_simulator()
+        if check.err.?:
+            return VhdlEmulationResult.error(check.err.unwrap())
+
+        val vhdl_path = "{self.output_dir}/{entity}.vhd"
+        if not vhdl_write_file(vhdl_path, vhdl_code):
+            return VhdlEmulationResult.error("Failed to write VHDL file: {vhdl_path}")
+
+        val r = self.simulator.analyze(vhdl_path)
+        val sim_r = VhdlSimResult(
+            success: r.success,
+            exit_code: r.exit_code,
+            stdout: r.stdout,
+            stderr: r.stderr,
+            waveform_file: nil
+        )
+        VhdlEmulationResult.ok(vhdl_path, nil, sim_r)

@@ -1,0 +1,184 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+# WebSocket opening handshake: HTTP upgrade request/response, key validation,
+# transport I/O helpers, and HandshakeResult.
+# Implements RFC 6455 Section 4.
+
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.Url
+use std.gc_async_mut.gpu.browser_engine.net.tls.{TlsConnection}
+use std.gc_async_mut.gpu.browser_engine.shared.error.{BrowserResult, BrowserError, network_error}
+use std.js.types.pair.{Pair}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{net_ascii_lower}
+use std.gc_async_mut.gpu.browser_engine.net.ws_utils.{
+    decode_byte_val, ws_substring, join_text,
+    find_header, find_header_in_lines, parse_header_line,
+    split_crlf, split_response_header_body
+}
+use std.gc_async_mut.gpu.browser_engine.net.ws_crypto.{compute_accept_key}
+
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_flush(fd: i64) -> bool
+extern fn rt_io_tcp_close(fd: i64) -> bool
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+# WebSocket protocol version
+val WS_VERSION = 13
+
+# Handshake validation result
+class HandshakeResult:
+    protocol: text
+    extensions: [text]
+
+    static fn create(protocol: text, extensions: [text]) -> HandshakeResult:
+        HandshakeResult(protocol, extensions)
+
+# Minimal connection view needed for transport helpers.
+# WsConnection (defined in websocket_client.spl) satisfies this structurally.
+# We pass the fields explicitly to avoid a circular import.
+
+fn ws_write_transport_fd(tls_conn: TlsConnection?, tcp_fd: i64, data: text) -> i64:
+    if val tls_conn = tls_conn:
+        return tls_conn.write_text(data)
+    if tcp_fd < 0:
+        return -1
+    val written = rt_io_tcp_write_text(tcp_fd, data)
+    if written > 0:
+        rt_io_tcp_flush(tcp_fd)
+    written
+
+fn ws_read_transport_fd(tls_conn: TlsConnection?, tcp_fd: i64, max_bytes: i64) -> text:
+    if val tls_conn = tls_conn:
+        return tls_conn.read_text(max_bytes)
+    if tcp_fd < 0:
+        return ""
+    rt_bytes_to_text(rt_io_tcp_read(tcp_fd, max_bytes))
+
+fn build_upgrade_request(host: text, port: i64, path: text, key: text, protocols: [text]) -> text:
+    # Build the HTTP/1.1 upgrade request for the WebSocket handshake.
+    # RFC 6455 Section 4.1
+    val request_path = if path.len() > 0: path else: "/"
+    val host_header = if port == 80 or port == 443: host else: "{host}:{port}"
+
+    var request = "GET {request_path} HTTP/1.1\r\n"
+    request = request + "Host: {host_header}\r\n"
+    request = request + "Upgrade: websocket\r\n"
+    request = request + "Connection: Upgrade\r\n"
+    request = request + "Sec-WebSocket-Key: {key}\r\n"
+    request = request + "Sec-WebSocket-Version: {WS_VERSION}\r\n"
+
+    if not protocols.is_empty():
+        val proto_str = join_text(protocols, ", ")
+        request = request + "Sec-WebSocket-Protocol: {proto_str}\r\n"
+
+    request = request + "Origin: https://{host}\r\n"
+    request = request + "User-Agent: SimpleBrowser/1.0\r\n"
+    request = request + "\r\n"
+
+    request
+
+fn ws_request_path(url: Url) -> text:
+    val path = if url.path.len() > 0: url.path else: "/"
+    val query = if url.query.len() > 0: "?{url.query}" else: ""
+    "{path}{query}"
+
+fn read_ws_response_text(tls_conn: TlsConnection?, tcp_fd: i64) -> text:
+    var response = ""
+    var done = false
+    while not done:
+        val chunk = ws_read_transport_fd(tls_conn, tcp_fd, 8192)
+        if chunk.len() == 0:
+            done = true
+        else:
+            response = response + chunk
+            if response.contains("\r\n\r\n"):
+                done = true
+    response
+
+fn validate_handshake_response(raw: text, key: text, requested_protocols: [text]) -> Result<HandshakeResult>:
+    # Validate the server's handshake response per RFC 6455 Section 4.2.2.
+    # 1. Status must be 101 Switching Protocols
+    # 2. Upgrade header must be "websocket"
+    # 3. Connection header must include "Upgrade"
+    # 4. Sec-WebSocket-Accept must match the expected hash
+    # 5. Sec-WebSocket-Protocol must be one of the requested protocols (if any)
+
+    val header_body = split_response_header_body(raw)
+    val header_section = header_body.first
+
+    val lines = split_crlf(header_section)
+    if lines.is_empty():
+        return Err(network_error("ws: empty handshake response"))
+
+    val status_line = lines.get(0)
+
+    if not status_line.contains("101"):
+        return Err(network_error("ws: expected 101 Switching Protocols, got: {status_line}"))
+
+    var headers: [Pair<text, text>] = []
+    var i = 1
+    while i < lines.len():
+        val line = lines.get(i)
+        if line.len() > 0:
+            val parsed = parse_header_line(line)
+            if val p = parsed:
+                headers.push(p)
+        i = i + 1
+
+    # Validate Upgrade header
+    val upgrade = find_header(headers, "upgrade")
+    if val u = upgrade:
+        if net_ascii_lower(u) != "websocket":
+            return Err(network_error("ws: invalid Upgrade header: {u}"))
+    else:
+        return Err(network_error("ws: missing Upgrade header"))
+
+    # Validate Connection header
+    val connection = find_header(headers, "connection")
+    if val c = connection:
+        if not net_ascii_lower(c).contains("upgrade"):
+            return Err(network_error("ws: Connection header does not include Upgrade: {c}"))
+    else:
+        return Err(network_error("ws: missing Connection header"))
+
+    # Validate Sec-WebSocket-Accept
+    val accept = find_header(headers, "sec-websocket-accept")
+    if val a = accept:
+        val expected = compute_accept_key(key)
+        if a != expected:
+            return Err(network_error("ws: Sec-WebSocket-Accept mismatch: got '{a}', expected '{expected}'"))
+    else:
+        return Err(network_error("ws: missing Sec-WebSocket-Accept header"))
+
+    # Extract negotiated protocol
+    var negotiated_protocol = ""
+    var proto_header = find_header(headers, "sec-websocket-protocol")
+    if not proto_header.?:
+        proto_header = find_header_in_lines(lines, "sec-websocket-protocol")
+    match proto_header:
+        Some(ph):
+            if not requested_protocols.is_empty():
+                var found = false
+                for rp in requested_protocols:
+                    if rp == ph:
+                        found = true
+                if not found:
+                    return Err(network_error("ws: server selected unrequested protocol: {ph}"))
+            negotiated_protocol = ph
+        None:
+            pass_dn
+
+    # Extract extensions
+    var extensions: [text] = []
+    val ext_header = find_header(headers, "sec-websocket-extensions")
+    match ext_header:
+        Some(eh):
+            val ext_parts = eh.split(",")
+            for ext in ext_parts:
+                val trimmed = ext.trim()
+                if trimmed.len() > 0:
+                    extensions.push(trimmed)
+        None:
+            pass_dn
+
+    Ok(HandshakeResult(negotiated_protocol, extensions))

@@ -1,0 +1,165 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(primitive_api)
+# Physics System — 3D Contact Resolution
+#
+# Impulse-based collision response with friction and restitution for 3D.
+# Includes Baumgarte position correction to prevent sinking.
+# Uses Vec3 cross products and diagonal inertia tensor for angular response.
+#
+# Usage (internal):
+#   resolve_contact_3d(body_a, body_b, contact, 0.3, 0.4)
+
+use std.common.engine.math3d.{Vec3, _sqrt}
+use std.common.math.{math_abs}
+use std.nogc_sync_mut.engine.physics.body3d.{InternalBody3D}
+use std.nogc_sync_mut.engine.physics.collision3d.{Contact3D}
+
+# ============================================================================
+# Helper: Apply inverse inertia to a vector (diagonal tensor)
+# ============================================================================
+
+fn _inv_inertia_mul(inv_i: Vec3, v: Vec3) -> Vec3:
+    """Component-wise multiply by inverse inertia diagonal."""
+    Vec3(x: v.x * inv_i.x, y: v.y * inv_i.y, z: v.z * inv_i.z)
+
+# ============================================================================
+# resolve_contact_3d — impulse-based 3D collision response
+# ============================================================================
+
+fn resolve_contact_3d(body_a: InternalBody3D, body_b: InternalBody3D, contact: Contact3D, restitution: f64, friction: f64):
+    """Resolve a collision contact between two internal 3D bodies.
+
+    Applies normal impulse, tangent friction impulse (Coulomb clamped),
+    and Baumgarte position correction. Mutates both bodies' velocities
+    and positions.
+    """
+    # Skip if both bodies are immovable
+    if body_a.inv_mass == 0.0 and body_b.inv_mass == 0.0:
+        return
+
+    val n = contact.normal
+
+    # Vectors from centers to contact point
+    val ra = contact.point.sub(body_a.position)
+    val rb = contact.point.sub(body_b.position)
+
+    # Velocity at contact point: v_linear + omega x r
+    val va = body_a.velocity.add(body_a.angular_velocity.cross(ra))
+    val vb = body_b.velocity.add(body_b.angular_velocity.cross(rb))
+
+    # Relative velocity
+    val rel_vel = vb.sub(va)
+
+    # Velocity along normal
+    val v_along_n = rel_vel.dot(n)
+
+    # Skip if separating
+    if v_along_n > 0.0:
+        return
+
+    # Compute effective mass including angular contribution
+    # (I_a^-1 * (r_a x n)) x r_a + (I_b^-1 * (r_b x n)) x r_b
+    val ra_cross_n = ra.cross(n)
+    val rb_cross_n = rb.cross(n)
+
+    val ang_a = _inv_inertia_mul(body_a.inv_inertia, ra_cross_n).cross(ra)
+    val ang_b = _inv_inertia_mul(body_b.inv_inertia, rb_cross_n).cross(rb)
+
+    val inv_mass_sum = body_a.inv_mass + body_b.inv_mass + ang_a.dot(n) + ang_b.dot(n)
+
+    if inv_mass_sum == 0.0:
+        return
+
+    # Normal impulse magnitude
+    val j = -(1.0 + restitution) * v_along_n / inv_mass_sum
+
+    # Apply normal impulse to linear velocity
+    val impulse = n.mul_scalar(j)
+    val neg_impulse = n.mul_scalar(-j)
+
+    body_a.apply_impulse(neg_impulse)
+    body_b.apply_impulse(impulse)
+
+    # Apply normal impulse to angular velocity
+    val torque_a = ra.cross(impulse)
+    val torque_b = rb.cross(impulse)
+    body_a.angular_velocity = Vec3(
+        x: body_a.angular_velocity.x - torque_a.x * body_a.inv_inertia.x,
+        y: body_a.angular_velocity.y - torque_a.y * body_a.inv_inertia.y,
+        z: body_a.angular_velocity.z - torque_a.z * body_a.inv_inertia.z
+    )
+    body_b.angular_velocity = Vec3(
+        x: body_b.angular_velocity.x + torque_b.x * body_b.inv_inertia.x,
+        y: body_b.angular_velocity.y + torque_b.y * body_b.inv_inertia.y,
+        z: body_b.angular_velocity.z + torque_b.z * body_b.inv_inertia.z
+    )
+
+    # ------------------------------------------------------------------
+    # Friction impulse (tangent direction)
+    # ------------------------------------------------------------------
+    val tangent = Vec3(
+        x: rel_vel.x - v_along_n * n.x,
+        y: rel_vel.y - v_along_n * n.y,
+        z: rel_vel.z - v_along_n * n.z
+    )
+    val tangent_len_sq = tangent.length_squared()
+
+    if tangent_len_sq > 0.0000001:
+        val tangent_len = _sqrt(tangent_len_sq)
+        val t = Vec3(x: tangent.x / tangent_len, y: tangent.y / tangent_len, z: tangent.z / tangent_len)
+
+        # Compute tangent effective mass
+        val ra_cross_t = ra.cross(t)
+        val rb_cross_t = rb.cross(t)
+        val ang_a_t = _inv_inertia_mul(body_a.inv_inertia, ra_cross_t).cross(ra)
+        val ang_b_t = _inv_inertia_mul(body_b.inv_inertia, rb_cross_t).cross(rb)
+        val inv_mass_sum_t = body_a.inv_mass + body_b.inv_mass + ang_a_t.dot(t) + ang_b_t.dot(t)
+
+        if inv_mass_sum_t > 0.0:
+            val jt_raw = -rel_vel.dot(t) / inv_mass_sum_t
+
+            # Coulomb clamp: |jt| <= |j| * friction
+            val max_friction = math_abs(j) * friction
+            var jt = jt_raw
+            if jt > max_friction:
+                jt = max_friction
+            if jt < -max_friction:
+                jt = -max_friction
+
+            val friction_impulse = t.mul_scalar(jt)
+            val neg_friction_impulse = t.mul_scalar(-jt)
+
+            body_a.apply_impulse(neg_friction_impulse)
+            body_b.apply_impulse(friction_impulse)
+
+            # Angular friction
+            val fric_torque_a = ra.cross(friction_impulse)
+            val fric_torque_b = rb.cross(friction_impulse)
+            body_a.angular_velocity = Vec3(
+                x: body_a.angular_velocity.x - fric_torque_a.x * body_a.inv_inertia.x,
+                y: body_a.angular_velocity.y - fric_torque_a.y * body_a.inv_inertia.y,
+                z: body_a.angular_velocity.z - fric_torque_a.z * body_a.inv_inertia.z
+            )
+            body_b.angular_velocity = Vec3(
+                x: body_b.angular_velocity.x + fric_torque_b.x * body_b.inv_inertia.x,
+                y: body_b.angular_velocity.y + fric_torque_b.y * body_b.inv_inertia.y,
+                z: body_b.angular_velocity.z + fric_torque_b.z * body_b.inv_inertia.z
+            )
+
+    # ------------------------------------------------------------------
+    # Baumgarte position correction (prevent sinking)
+    # ------------------------------------------------------------------
+    val slop = 0.01
+    val correction_percent = 0.2
+
+    if contact.penetration > slop:
+        val correction_mag = (contact.penetration - slop) / (body_a.inv_mass + body_b.inv_mass) * correction_percent
+        val correction = n.mul_scalar(correction_mag)
+
+        if body_a.inv_mass > 0.0:
+            val ca = correction.mul_scalar(body_a.inv_mass)
+            body_a.position = body_a.position.sub(ca)
+
+        if body_b.inv_mass > 0.0:
+            val cb = correction.mul_scalar(body_b.inv_mass)
+            body_b.position = body_b.position.add(cb)

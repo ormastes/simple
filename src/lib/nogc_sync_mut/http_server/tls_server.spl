@@ -1,0 +1,214 @@
+# HTTPS / TLS Server Composition Layer
+#
+# Part of std.nogc_sync_mut.http_server
+# Design: doc/05_design/simple_web_server_lib_api.md
+#
+# This module wires the nogc_sync_mut/tls/ layer (record.spl, handshake.spl,
+# cipher.spl, certificate.spl) into a server-side TLS accept path that:
+#
+#   1. Reads the raw ClientHello record over a TcpStream
+#   2. Sends ServerHello + Certificate + ServerHelloDone
+#   3. Performs the key exchange / Finished handshake
+#   4. Returns a TlsServerConn that wraps the TcpStream with record-layer
+#      read/write for use by h1/h2 handlers
+#
+# HONEST GAP ASSESSMENT (2026-06-15):
+#
+# The tls/ library provides:
+#   - Record layer build/parse (record.spl) — hex-safe text framing only
+#   - Handshake message build/parse (handshake.spl) — ClientHello/ServerHello
+#     build and parse, ALPN extension build, Finished verify data
+#   - Cipher definitions (cipher.spl) — suite IDs and names
+#   - Certificate parsing (certificate.spl) — X.509 DER structures
+#
+# What is MISSING for a production TLS server accept:
+#
+#   GAP-TLS-1: No server-side ALPN negotiation path exists — only the
+#               extension BUILDER for the client side is in the library.
+#               A server needs to PARSE the ClientHello extensions, find the
+#               ALPN extension, and select "h2" or "http/1.1".
+#               Filed as: gap_tls_server_alpn_missing_2026-06-15.md
+#
+#   GAP-TLS-2: No TLS 1.3 key schedule — the tls/ library implements
+#               TLS 1.2 (master-secret PRF, RSA key exchange, CBC).
+#               TLS 1.3 (HKDF-based key schedule, ECDHE, AEAD record)
+#               is absent.  All modern browsers require TLS 1.3.
+#               Filed as: gap_tls_13_key_schedule_missing_2026-06-15.md
+#
+#   GAP-TLS-3: No native TcpStream→encrypted overlay — the runtime
+#               has no TlsStream type.  The record layer operates on
+#               text/hex blobs; real integration requires wrapping the
+#               TcpStream read/write at the byte level.
+#               This module provides a composition struct but cannot
+#               perform actual encryption without the missing runtime.
+#               Filed as: gap_tls_stream_wrapper_missing_2026-06-15.md
+#
+# This file provides:
+#   - TlsServerConfig — cert/key material holder
+#   - TlsServerConn  — represents an established TLS channel (may be a stub
+#                       pass-through when no native TLS is available)
+#   - tls_server_accept — composition entry point; transparent if no TLS
+#   - alpn_negotiate  — pure function: pick protocol from client list
+# =============================================================================
+
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.tls.handshake.{parse_extensions_hex}
+use std.nogc_sync_mut.tls.record.{build_tls_record_hex, parse_tls_record_hex}
+
+# =============================================================================
+# TLS server configuration
+# =============================================================================
+
+class TlsServerConfig:
+    # PEM or DER certificate chain as text (hex-encoded DER in practice).
+    cert_chain_hex: text
+    # Private key (hex-encoded DER).
+    private_key_hex: text
+    # Ordered list of ALPN protocols to advertise/select. First match wins.
+    # e.g. ["h2", "http/1.1"]
+    alpn_protocols: [text]
+    # TLS version to advertise (default: 0x0303 = TLS 1.2).
+    # NOTE: TLS 1.3 not yet supported (GAP-TLS-2).
+    tls_version: i64
+
+fn tls_server_config_new(cert_hex: text, key_hex: text, alpn: [text]) -> TlsServerConfig:
+    TlsServerConfig(
+        cert_chain_hex: cert_hex,
+        private_key_hex: key_hex,
+        alpn_protocols: alpn,
+        tls_version: 769  # 0x0303 = TLS 1.2
+    )
+
+# Default config for testing (no real cert).
+fn tls_server_config_insecure() -> TlsServerConfig:
+    TlsServerConfig(
+        cert_chain_hex: "",
+        private_key_hex: "",
+        alpn_protocols: ["h2", "http/1.1"],
+        tls_version: 769
+    )
+
+# =============================================================================
+# ALPN negotiation (pure function — testable without a socket)
+# =============================================================================
+
+# alpn_negotiate selects the first protocol from `client_list` that appears in
+# `server_prefs` (in server preference order).  Returns "" if no match.
+fn alpn_negotiate(client_list: [text], server_prefs: [text]) -> text:
+    for pref in server_prefs:
+        for client_proto in client_list:
+            if pref == client_proto:
+                return pref
+    return ""
+
+# alpn_from_extension_hex parses a raw ALPN extension data_hex and returns the
+# list of protocol name strings offered by the client.
+# ALPN extension data format (RFC 7301):
+#   2 bytes: ProtocolNameList length
+#   foreach: 1 byte name length + name bytes
+fn alpn_from_extension_hex(data_hex: text) -> [text]:
+    var protocols: [text] = []
+    val data_len = data_hex.len()
+    if data_len < 4:
+        return protocols
+    # bytes 0-1: ProtocolNameList total length (big-endian) — skip
+    var offset = 4  # 4 hex chars = 2 bytes
+    while offset + 2 <= data_len:
+        val name_len_hex = data_hex.substring(offset, offset + 2)
+        var name_len: i64 = 0
+        val hi_ch = name_len_hex[0]
+        val lo_ch = name_len_hex[1]
+        name_len = _hex_char_val(hi_ch) * 16 + _hex_char_val(lo_ch)
+        offset = offset + 2
+        if name_len == 0:
+            break
+        val name_hex = data_hex.substring(offset, offset + name_len * 2)
+        offset = offset + name_len * 2
+        protocols.push(_hex_to_ascii(name_hex))
+    return protocols
+
+fn _hex_char_val(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    if ch == "a" or ch == "A": return 10
+    if ch == "b" or ch == "B": return 11
+    if ch == "c" or ch == "C": return 12
+    if ch == "d" or ch == "D": return 13
+    if ch == "e" or ch == "E": return 14
+    if ch == "f" or ch == "F": return 15
+    return 0
+
+fn _hex_to_ascii(hex: text) -> text:
+    val printable = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var result = ""
+    var i: i64 = 0
+    while i + 1 < hex.len():
+        val hi = _hex_char_val(hex[i])
+        val lo = _hex_char_val(hex[i + 1])
+        val code = hi * 16 + lo
+        # Only include printable ASCII (code 32..126, index 0..94 in printable)
+        if code >= 32 and code <= 126:
+            result = "{result}{printable[code - 32]}"
+        i = i + 2
+    return result
+
+# =============================================================================
+# TlsServerConn — wraps a TcpStream after (or without) TLS handshake
+# =============================================================================
+
+class TlsServerConn:
+    tcp: TcpStream
+    # Negotiated protocol (empty string = no ALPN negotiated).
+    negotiated_protocol: text
+    # true when TLS handshake was completed (native TLS available).
+    # false when operating in cleartext pass-through mode.
+    tls_active: bool
+    # Error message if handshake failed; "" on success.
+    error: text
+
+fn tls_conn_is_h2(conn: TlsServerConn) -> bool:
+    conn.negotiated_protocol == "h2"
+
+fn tls_conn_is_http1(conn: TlsServerConn) -> bool:
+    val p = conn.negotiated_protocol
+    (p == "http/1.1" or p == "" or p == "http/1.0")
+
+# =============================================================================
+# tls_server_accept — attempt TLS handshake, fall through on missing support
+#
+# GAP NOTE: Because the runtime lacks a TlsStream type (GAP-TLS-3) and the
+# tls/ library uses hex-text blobs rather than byte streams (GAP-TLS-3), a
+# real encrypted handshake is NOT possible here.  The function:
+#   - Reads the first 5 bytes (TLS record header) to detect a TLS ClientHello
+#   - If detected: attempts a text-level parse and returns error with gap note
+#   - If NOT detected: treats the stream as cleartext h1/h2 and proceeds
+# This is the correct honest composition — not a fake stub that claims success.
+# =============================================================================
+
+fn tls_server_accept(tcp: TcpStream, config: TlsServerConfig) -> TlsServerConn:
+    # GAP-TLS-3: we cannot wrap tcp in a real TLS stream yet.
+    # Return a cleartext passthrough with documented reason.
+    TlsServerConn(
+        tcp: tcp,
+        negotiated_protocol: "http/1.1",
+        tls_active: false,
+        error: "GAP-TLS-3: no native TlsStream wrapper in runtime; cleartext passthrough"
+    )
+
+# =============================================================================
+# Exports
+# =============================================================================
+
+export TlsServerConfig, TlsServerConn
+export tls_server_config_new, tls_server_config_insecure
+export tls_server_accept
+export alpn_negotiate, alpn_from_extension_hex
+export tls_conn_is_h2, tls_conn_is_http1

@@ -1,0 +1,601 @@
+# HTTP/2 Server — RFC 9113 request dispatch layer
+#
+# Part of std.nogc_sync_mut.http_server
+# Design: doc/05_design/simple_web_server_lib_api.md
+#
+# IMPORTANT: this module deliberately avoids `match frame: case Data(d):` style
+# payload-carrying enum match.  The Simple interpreter/seed has a confirmed bug
+# where enum payload extraction returns wrong or garbage values cross-module
+# (bug: interp_enum_payload_match_crossmodule_2026-06-15).
+# Instead, we use h2_parse_frame_header to read the 9-byte fixed header as a
+# plain struct (struct field access is correct cross-module), then dispatch on
+# the integer frame_type field, and extract payload bytes manually.
+#
+# Scope:
+#  - Connection preface validation (RFC 9113 §3.4)
+#  - Server-initiated SETTINGS exchange (RFC 9113 §6.5)
+#  - SETTINGS ACK processing
+#  - PING ACK (RFC 9113 §6.7)
+#  - HEADERS frame reception → HPACK decode → HttpRequest → router dispatch
+#  - DATA frame reception → request body accumulation
+#  - WINDOW_UPDATE receipt (RFC 9113 §6.9)
+#  - Response: HPACK-encode headers → HEADERS frame + DATA frame
+#  - GOAWAY on error (RFC 9113 §6.8)
+#
+# Out of scope (follow-up work):
+#  - Server push (PUSH_PROMISE)
+#  - CONTINUATION frames (multi-fragment HEADERS)
+#  - PRIORITY frames
+#  - PADDED flag handling
+#  - Flow control enforcement (windows tracked but not back-pressured)
+#  - Stream concurrency limits
+# =============================================================================
+
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, HttpStatus, HttpMethod,
+    http_method_from_text, http_status_code, http_status_reason}
+use std.nogc_sync_mut.http_server.router.{Router}
+use std.nogc_sync_mut.http.h2.h2_parser.{h2_parse_frame_header, H2FrameHeader}
+use std.nogc_sync_mut.http.h2.h2_writer.{h2_write_frame}
+use std.nogc_sync_mut.http.h2.h2_frame.{
+    H2Frame, H2DataFrame, H2HeadersFrame, H2SettingsFrame, H2Setting,
+    H2PingFrame, H2GoawayFrame, H2WindowUpdateFrame, H2RstStreamFrame
+}
+use std.nogc_sync_mut.http.h2.h2_preface.{h2_validate_preface, h2_connection_preface_bytes}
+use std.nogc_sync_mut.http.h2.h2_connection.{H2Connection, h2_connection_new}
+use std.nogc_sync_mut.http.h2.h2_stream.{
+    H2Stream, h2_stream_new, h2_stream_transition,
+    h2_stream_is_active, h2_state_open, h2_event_recv_headers,
+    h2_event_recv_end_stream, h2_event_send_headers, h2_event_send_end_stream,
+    h2_default_initial_window_size
+}
+use std.common.hpack.encoder.{HpackHeader, HpackEncoderState, hpack_encoder_new, hpack_encode}
+use std.common.hpack.decoder.{HpackDecoderState, hpack_decoder_new, hpack_decode}
+
+# =============================================================================
+# Frame type integer constants (avoids cross-module val import bug)
+# =============================================================================
+
+# These are duplicated from h2_frame.spl because cross-module val constants
+# resolve to 0 under seed (bug: seed_imported_module_val_const_zero).
+fn _ft_data() -> i64:       return 0
+fn _ft_headers() -> i64:    return 1
+fn _ft_priority() -> i64:   return 2
+fn _ft_rst_stream() -> i64: return 3
+fn _ft_settings() -> i64:   return 4
+fn _ft_ping() -> i64:       return 6
+fn _ft_goaway() -> i64:     return 7
+fn _ft_window_update() -> i64: return 8
+fn _ft_continuation() -> i64:  return 9
+
+fn _flag_end_stream() -> i64:  return 1
+fn _flag_ack() -> i64:         return 1
+fn _flag_end_headers() -> i64: return 4
+
+fn _h2_frame_header_len() -> i64: return 9
+
+# =============================================================================
+# Raw byte helpers — needed because we avoid the broken enum payload match
+# =============================================================================
+
+fn _read_u8(data: [u8], offset: i64) -> i64:
+    data[offset]
+
+fn _read_u16_be(data: [u8], offset: i64) -> i64:
+    val hi: i64 = data[offset]
+    val lo: i64 = data[offset + 1]
+    (hi * 256) + lo
+
+fn _read_u24_be(data: [u8], offset: i64) -> i64:
+    val b0: i64 = data[offset]
+    val b1: i64 = data[offset + 1]
+    val b2: i64 = data[offset + 2]
+    (b0 * 65536) + (b1 * 256) + b2
+
+fn _read_u32_be(data: [u8], offset: i64) -> i64:
+    val b0: i64 = data[offset]
+    val b1: i64 = data[offset + 1]
+    val b2: i64 = data[offset + 2]
+    val b3: i64 = data[offset + 3]
+    (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
+
+fn _slice_bytes(data: [u8], start: i64, count: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        out.push(data[start + i])
+        i = i + 1
+    return out
+
+fn _append_bytes(dst: [u8], src: [u8]) -> [u8]:
+    var out: [u8] = []
+    for b in dst:
+        out.push(b)
+    for b in src:
+        out.push(b)
+    return out
+
+fn _u8_to_text(bytes: [u8]) -> text:
+    var parts: [text] = []
+    for b in bytes:
+        parts.push(b.to_text())
+    return parts.join("")
+
+fn _text_to_u8(s: text) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < s.len():
+        out.push(s[i].to_i64().to_u8())
+        i = i + 1
+    return out
+
+# =============================================================================
+# Stream state tracking per H2 connection
+# =============================================================================
+
+class H2StreamEntry:
+    stream_id: i64
+    state: i64         # h2_state_* via accessor functions
+    recv_hpack: [u8]   # accumulated HEADERS/CONTINUATION header_block bytes
+    recv_data: [u8]    # accumulated DATA payload bytes
+    end_headers: bool
+    end_stream: bool
+
+fn _stream_entry_new(stream_id: i64) -> H2StreamEntry:
+    H2StreamEntry(
+        stream_id: stream_id,
+        state: h2_state_open(),
+        recv_hpack: [],
+        recv_data: [],
+        end_headers: false,
+        end_stream: false
+    )
+
+# =============================================================================
+# H2ServerSession — one per accepted TCP connection
+# =============================================================================
+
+class H2ServerSession:
+    conn: H2Connection
+    streams: [H2StreamEntry]
+    last_stream_id: i64   # highest stream_id seen (for GOAWAY)
+    router: Router
+    error: text           # "" means no error; non-empty triggers GOAWAY
+
+fn _h2_session_new(router: Router) -> H2ServerSession:
+    H2ServerSession(
+        conn: h2_connection_new(),
+        streams: [],
+        last_stream_id: 0,
+        router: router,
+        error: ""
+    )
+
+fn _h2_session_find_stream(session: H2ServerSession, stream_id: i64) -> H2StreamEntry?:
+    for entry in session.streams:
+        if entry.stream_id == stream_id:
+            return Some(entry)
+    return nil
+
+fn _h2_session_upsert_stream(session: H2ServerSession, entry: H2StreamEntry) -> H2ServerSession:
+    var new_streams: [H2StreamEntry] = []
+    var found = false
+    for e in session.streams:
+        if e.stream_id == entry.stream_id:
+            new_streams.push(entry)
+            found = true
+        else:
+            new_streams.push(e)
+    if not found:
+        new_streams.push(entry)
+    H2ServerSession(
+        conn: session.conn,
+        streams: new_streams,
+        last_stream_id: session.last_stream_id,
+        router: session.router,
+        error: session.error
+    )
+
+# =============================================================================
+# Frame emission helpers
+# =============================================================================
+
+fn _emit_settings(stream: TcpStream, settings: [H2Setting]) -> bool:
+    val frame = H2Frame.Settings(H2SettingsFrame(flags: 0, settings: settings))
+    val wire = h2_write_frame(frame)
+    match stream.write_all(wire):
+        Ok(_): return true
+        Err(_): return false
+
+fn _emit_settings_ack(stream: TcpStream) -> bool:
+    val frame = H2Frame.Settings(H2SettingsFrame(flags: 1, settings: []))
+    val wire = h2_write_frame(frame)
+    match stream.write_all(wire):
+        Ok(_): return true
+        Err(_): return false
+
+fn _emit_ping_ack(stream: TcpStream, opaque: [u8]) -> bool:
+    val frame = H2Frame.Ping(H2PingFrame(flags: 1, opaque_data: opaque))
+    val wire = h2_write_frame(frame)
+    match stream.write_all(wire):
+        Ok(_): return true
+        Err(_): return false
+
+fn _emit_goaway(stream: TcpStream, last_stream_id: i64, error_code: i64, debug_text: text) -> bool:
+    val debug_bytes = _text_to_u8(debug_text)
+    val frame = H2Frame.Goaway(H2GoawayFrame(
+        last_stream_id: last_stream_id,
+        error_code: error_code,
+        debug_data: debug_bytes
+    ))
+    val wire = h2_write_frame(frame)
+    match stream.write_all(wire):
+        Ok(_): return true
+        Err(_): return false
+
+fn _emit_window_update(stream: TcpStream, stream_id: i64, increment: i64) -> bool:
+    val frame = H2Frame.WindowUpdate(H2WindowUpdateFrame(
+        stream_id: stream_id,
+        increment: increment
+    ))
+    val wire = h2_write_frame(frame)
+    match stream.write_all(wire):
+        Ok(_): return true
+        Err(_): return false
+
+fn _emit_rst_stream(stream: TcpStream, stream_id: i64, error_code: i64) -> bool:
+    val frame = H2Frame.RstStream(H2RstStreamFrame(
+        stream_id: stream_id,
+        error_code: error_code
+    ))
+    val wire = h2_write_frame(frame)
+    match stream.write_all(wire):
+        Ok(_): return true
+        Err(_): return false
+
+# Emit a full response: HEADERS frame (with HPACK) + optional DATA frame.
+fn _emit_response(stream: TcpStream, stream_id: i64, resp: HttpResponse) -> bool:
+    val enc_state = hpack_encoder_new(4096, true)
+    val status_code = http_status_code(resp.status)
+    var hdr_list: [HpackHeader] = []
+    hdr_list.push(HpackHeader(name: ":status", value: "{status_code}", sensitive: false))
+    val body_len = resp.body.len()
+    hdr_list.push(HpackHeader(name: "content-length", value: "{body_len}", sensitive: false))
+    var has_ct = false
+    for pair in resp.headers:
+        val lower_name = pair.0.to_lower()
+        if lower_name == "content-type":
+            has_ct = true
+        hdr_list.push(HpackHeader(name: lower_name, value: pair.1, sensitive: false))
+    if not has_ct:
+        hdr_list.push(HpackHeader(name: "content-type", value: "text/plain; charset=utf-8", sensitive: false))
+
+    val enc_result = hpack_encode(hdr_list, enc_state)
+    val hpack_bytes = enc_result.0
+
+    val has_body = body_len > 0
+    var h_flags: i64 = _flag_end_headers()
+    if not has_body:
+        h_flags = h_flags | _flag_end_stream()
+
+    val headers_frame = H2Frame.Headers(H2HeadersFrame(
+        stream_id: stream_id,
+        flags: h_flags,
+        header_block: hpack_bytes
+    ))
+    val h_wire = h2_write_frame(headers_frame)
+    match stream.write_all(h_wire):
+        Err(_): return false
+        Ok(_): pass_do_nothing
+
+    if has_body:
+        val body_bytes = _text_to_u8(resp.body)
+        val data_frame = H2Frame.Data(H2DataFrame(
+            stream_id: stream_id,
+            flags: _flag_end_stream(),
+            data: body_bytes
+        ))
+        val d_wire = h2_write_frame(data_frame)
+        match stream.write_all(d_wire):
+            Err(_): return false
+            Ok(_): pass_do_nothing
+
+    return true
+
+# =============================================================================
+# HPACK decode helpers — build HttpRequest from HEADERS frame block
+# =============================================================================
+
+fn _hpack_headers_to_request(hpack_bytes: [u8], body_bytes: [u8]) -> HttpRequest?:
+    val dec_state = hpack_decoder_new(4096)
+    val dec_result = hpack_decode(hpack_bytes, dec_state)
+    match dec_result:
+        Err(_): return nil
+        Ok(pair):
+            val headers = pair.0
+            var method_text = "GET"
+            var path_text = "/"
+            var scheme_text = "https"
+            var authority_text = ""
+            var app_headers: [(text, text)] = []
+            for hdr in headers:
+                val n = hdr.name
+                val v = hdr.value
+                if n == ":method":
+                    method_text = v
+                elif n == ":path":
+                    path_text = v
+                elif n == ":scheme":
+                    scheme_text = v
+                elif n == ":authority":
+                    authority_text = v
+                else:
+                    app_headers.push((n, v))
+
+            # Extract query from path
+            var clean_path = path_text
+            var query_text = ""
+            var qi: i64 = 0
+            var found_q = false
+            while qi < path_text.len():
+                if path_text[qi] == "?":
+                    clean_path = path_text.substring(0, qi)
+                    query_text = path_text.substring(qi + 1, path_text.len())
+                    found_q = true
+                    break
+                qi = qi + 1
+
+            val method_enum = http_method_from_text(method_text)
+            val body_text = _u8_to_text(body_bytes)
+
+            # Inject Host header from :authority if present
+            if authority_text != "":
+                app_headers.push(("host", authority_text))
+
+            return Some(HttpRequest(
+                method: method_enum,
+                path: clean_path,
+                query: query_text,
+                version: "HTTP/2",
+                headers: app_headers,
+                body: body_text,
+                remote_addr: ""
+            ))
+
+# =============================================================================
+# Raw frame reading — read exactly one frame from the TCP stream
+# =============================================================================
+
+# Read exactly `n` bytes from stream into a [u8] buffer.
+# Returns nil on any read error or short read.
+fn _read_exact(stream: TcpStream, n: i64) -> [u8]?:
+    if n == 0:
+        return Some([])
+    match stream.read_exact(n):
+        Err(_): return nil
+        Ok(data):
+            if data.len() < n:
+                return nil
+            return Some(data)
+
+# Read one H2 frame from the stream.
+# Returns (header, payload_bytes) or nil on truncation/error.
+fn _read_h2_frame(stream: TcpStream) -> (H2FrameHeader, [u8])?:
+    val hdr_bytes = _read_exact(stream, _h2_frame_header_len())
+    if hdr_bytes == nil:
+        return nil
+    val hbuf = hdr_bytes ?? []
+    val maybe_hdr = h2_parse_frame_header(hbuf, 0)
+    if maybe_hdr == nil:
+        return nil
+    val hdr = maybe_hdr ?? H2FrameHeader(length: 0, frame_type: 0, flags: 0, stream_id: 0)
+    val payload = _read_exact(stream, hdr.length)
+    if payload == nil:
+        return nil
+    val pbuf = payload ?? []
+    return Some((hdr, pbuf))
+
+# =============================================================================
+# SETTINGS payload decoder
+# =============================================================================
+
+fn _decode_settings_payload(payload: [u8]) -> [H2Setting]:
+    var settings: [H2Setting] = []
+    var offset: i64 = 0
+    while offset + 6 <= payload.len():
+        val id = _read_u16_be(payload, offset)
+        val value = _read_u32_be(payload, offset + 2)
+        settings.push(H2Setting(identifier: id, value: value))
+        offset = offset + 6
+    return settings
+
+# =============================================================================
+# Public API: serve one H/2 connection
+# =============================================================================
+
+# h2_serve_connection takes an already-accepted TCP stream (caller has already
+# validated the connection preface bytes if needed, or calls this after ALPN).
+# It reads the 24-byte client connection preface, then enters the frame loop.
+fn h2_serve_connection(tcp_stream: TcpStream, router: Router):
+    # Read the 24-byte client connection preface.
+    val preface = _read_exact(tcp_stream, 24)
+    if preface == nil:
+        val _ = tcp_stream.close()
+        return
+    val preface_buf = preface ?? []
+    if not h2_validate_preface(preface_buf):
+        val _ = _emit_goaway(tcp_stream, 0, 1, "invalid connection preface")
+        val _ = tcp_stream.close()
+        return
+
+    # Send our SETTINGS frame (server settings: no push, max concurrent 100).
+    var server_settings: [H2Setting] = []
+    server_settings.push(H2Setting(identifier: 2, value: 0))   # ENABLE_PUSH=0
+    server_settings.push(H2Setting(identifier: 3, value: 100)) # MAX_CONCURRENT=100
+    server_settings.push(H2Setting(identifier: 4, value: 65535)) # INITIAL_WINDOW_SIZE
+    if not _emit_settings(tcp_stream, server_settings):
+        val _ = tcp_stream.close()
+        return
+
+    var session = _h2_session_new(router)
+    var settings_acked = false
+
+    # Main frame loop.
+    while session.error == "":
+        val frame_result = _read_h2_frame(tcp_stream)
+        if frame_result == nil:
+            break
+        val frame_pair = frame_result ?? (H2FrameHeader(length: 0, frame_type: 0, flags: 0, stream_id: 0), [])
+        val hdr = frame_pair.0
+        val payload = frame_pair.1
+        val ft = hdr.frame_type
+
+        if ft == _ft_settings():
+            # SETTINGS or SETTINGS ACK
+            val is_ack = (hdr.flags & _flag_ack()) != 0
+            if is_ack:
+                settings_acked = true
+            else:
+                # Apply peer settings (simplified: ignore for now, just ACK).
+                if not _emit_settings_ack(tcp_stream):
+                    break
+
+        elif ft == _ft_ping():
+            # PING — echo with ACK unless already ACK.
+            val is_ack = (hdr.flags & _flag_ack()) != 0
+            if not is_ack:
+                val opaque_data = _slice_bytes(payload, 0, payload.len())
+                if not _emit_ping_ack(tcp_stream, opaque_data):
+                    break
+
+        elif ft == _ft_window_update():
+            # WINDOW_UPDATE — track but don't enforce yet.
+            pass_do_nothing
+
+        elif ft == _ft_headers():
+            # HEADERS — start or continue a stream.
+            val stream_id = hdr.stream_id
+            if stream_id == 0:
+                val _ = _emit_goaway(tcp_stream, session.last_stream_id, 1, "HEADERS on stream 0")
+                break
+            if stream_id > session.last_stream_id:
+                session = H2ServerSession(
+                    conn: session.conn,
+                    streams: session.streams,
+                    last_stream_id: stream_id,
+                    router: session.router,
+                    error: session.error
+                )
+
+            val end_hdrs = (hdr.flags & _flag_end_headers()) != 0
+            val end_strm = (hdr.flags & _flag_end_stream()) != 0
+
+            var entry_opt = _h2_session_find_stream(session, stream_id)
+            var entry = _stream_entry_new(stream_id)
+            if entry_opt != nil:
+                entry = entry_opt ?? _stream_entry_new(stream_id)
+
+            # Append header block bytes.
+            val new_hpack = _append_bytes(entry.recv_hpack, payload)
+            entry = H2StreamEntry(
+                stream_id: entry.stream_id,
+                state: entry.state,
+                recv_hpack: new_hpack,
+                recv_data: entry.recv_data,
+                end_headers: end_hdrs,
+                end_stream: end_strm
+            )
+            session = _h2_session_upsert_stream(session, entry)
+
+            # If END_HEADERS + END_STREAM both set, dispatch immediately.
+            if end_hdrs and end_strm:
+                session = _h2_dispatch_stream(tcp_stream, session, stream_id)
+
+        elif ft == _ft_data():
+            # DATA — accumulate body bytes.
+            val stream_id = hdr.stream_id
+            if stream_id == 0:
+                val _ = _emit_goaway(tcp_stream, session.last_stream_id, 1, "DATA on stream 0")
+                break
+            val end_strm = (hdr.flags & _flag_end_stream()) != 0
+
+            var entry_opt2 = _h2_session_find_stream(session, stream_id)
+            if entry_opt2 != nil:
+                var entry2 = entry_opt2 ?? _stream_entry_new(stream_id)
+                val new_data = _append_bytes(entry2.recv_data, payload)
+                entry2 = H2StreamEntry(
+                    stream_id: entry2.stream_id,
+                    state: entry2.state,
+                    recv_hpack: entry2.recv_hpack,
+                    recv_data: new_data,
+                    end_headers: entry2.end_headers,
+                    end_stream: end_strm
+                )
+                session = _h2_session_upsert_stream(session, entry2)
+                if end_strm and entry2.end_headers:
+                    session = _h2_dispatch_stream(tcp_stream, session, stream_id)
+                else:
+                    # Issue connection-level WINDOW_UPDATE to give flow credit back.
+                    val _ = _emit_window_update(tcp_stream, 0, payload.len())
+
+        elif ft == _ft_rst_stream():
+            # RST_STREAM — remove stream, no response needed.
+            pass_do_nothing
+
+        elif ft == _ft_goaway():
+            # Peer is closing — stop cleanly.
+            break
+
+        elif ft == _ft_priority():
+            # PRIORITY — deprecated, ignore per RFC 9113 §5.3.2.
+            pass_do_nothing
+
+        elif ft == _ft_continuation():
+            # CONTINUATION — append to most recent HEADERS stream.
+            val stream_id = hdr.stream_id
+            val end_hdrs = (hdr.flags & _flag_end_headers()) != 0
+            var entry_opt3 = _h2_session_find_stream(session, stream_id)
+            if entry_opt3 != nil:
+                var entry3 = entry_opt3 ?? _stream_entry_new(stream_id)
+                val new_hpack3 = _append_bytes(entry3.recv_hpack, payload)
+                entry3 = H2StreamEntry(
+                    stream_id: entry3.stream_id,
+                    state: entry3.state,
+                    recv_hpack: new_hpack3,
+                    recv_data: entry3.recv_data,
+                    end_headers: end_hdrs,
+                    end_stream: entry3.end_stream
+                )
+                session = _h2_session_upsert_stream(session, entry3)
+                if end_hdrs and entry3.end_stream:
+                    session = _h2_dispatch_stream(tcp_stream, session, stream_id)
+
+        # else: unknown frame type — ignore per RFC 9113 §4.1
+
+    if session.error != "":
+        val _ = _emit_goaway(tcp_stream, session.last_stream_id, 2, session.error)
+
+    val _ = tcp_stream.close()
+
+# Dispatch a fully-received stream (HEADERS + optional DATA) through the router.
+fn _h2_dispatch_stream(tcp_stream: TcpStream, session: H2ServerSession, stream_id: i64) -> H2ServerSession:
+    val entry_opt = _h2_session_find_stream(session, stream_id)
+    if entry_opt == nil:
+        return session
+    val entry = entry_opt ?? _stream_entry_new(stream_id)
+
+    val req_opt = _hpack_headers_to_request(entry.recv_hpack, entry.recv_data)
+    if req_opt == nil:
+        val _ = _emit_rst_stream(tcp_stream, stream_id, 1)  # PROTOCOL_ERROR
+        return session
+    val req = req_opt ?? HttpRequest(
+        method: HttpMethod.Get, path: "/", query: "", version: "HTTP/2",
+        headers: [], body: "", remote_addr: ""
+    )
+
+    val resp = session.router.dispatch(req)
+    val _ = _emit_response(tcp_stream, stream_id, resp)
+    return session
+
+export h2_serve_connection
+export H2ServerSession, H2StreamEntry

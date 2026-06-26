@@ -1,0 +1,258 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(primitive_api)
+# Physics System — 3D Raycast Queries
+#
+# Pure Simple ray-sphere and ray-AABB intersection for 3D.
+# No external FFI.
+#
+# Usage:
+#   val hit = physics_raycast_3d(world, origin, direction, Distance(value: 100.0))
+#   if hit.node_id.is_valid():
+#       print "Hit node at distance {hit.distance}"
+
+use std.common.engine.ids.{NodeId}
+use std.common.engine.math3d.{Vec3, _sqrt}
+use std.common.engine.units.{Distance}
+use std.common.math.{math_abs, math_min, math_max}
+use std.nogc_sync_mut.engine.physics.types3d.{RaycastHit3D}
+use std.nogc_sync_mut.engine.physics.world3d.{PhysicsWorld3D}
+
+# ============================================================================
+# Raycast — Single hit (nearest)
+# ============================================================================
+
+fn physics_raycast_3d(world: PhysicsWorld3D, origin: Vec3, direction: Vec3, max_distance: Distance) -> RaycastHit3D:
+    """Cast a ray and return the nearest hit, or an invalid result if nothing hit."""
+    val norm_dir = direction.normalize()
+    var best_dist = max_distance.value + 1.0
+    var best_node = NodeId.invalid()
+    var best_point = Vec3.zero()
+    var best_normal = Vec3.zero()
+
+    var i = 0
+    while i < world.colliders.len():
+        val col = world.colliders[i]
+        val body_idx = world._find_body_index(col.node_id)
+        if body_idx >= 0:
+            val pb = world.bodies[body_idx]
+            val ib = world.internal_bodies[pb.body_index]
+            val shape = world.shapes[col.collider_index]
+
+            var hit_dist = -1.0
+            var hit_normal = Vec3.zero()
+
+            if shape.is_sphere():
+                val result = _ray_sphere_3d(origin, norm_dir, ib.position, shape.sphere.radius)
+                if val r = result:
+                    hit_dist = r.0
+                    hit_normal = r.1
+
+            if shape.is_box():
+                val half = Vec3(x: shape.box_shape.half_x, y: shape.box_shape.half_y, z: shape.box_shape.half_z)
+                val result = _ray_aabb_3d(origin, norm_dir, ib.position, half)
+                if val r = result:
+                    hit_dist = r.0
+                    hit_normal = r.1
+
+            if hit_dist >= 0.0 and hit_dist <= max_distance.value and hit_dist < best_dist:
+                best_dist = hit_dist
+                best_node = col.node_id
+                best_point = Vec3(
+                    x: origin.x + norm_dir.x * hit_dist,
+                    y: origin.y + norm_dir.y * hit_dist,
+                    z: origin.z + norm_dir.z * hit_dist
+                )
+                best_normal = hit_normal
+        i = i + 1
+
+    if not best_node.is_valid():
+        return RaycastHit3D(
+            node_id: NodeId.invalid(),
+            point: Vec3.zero(),
+            normal: Vec3.zero(),
+            distance: Distance(value: 0.0)
+        )
+
+    RaycastHit3D(
+        node_id: best_node,
+        point: best_point,
+        normal: best_normal,
+        distance: Distance(value: best_dist)
+    )
+
+# ============================================================================
+# Raycast All — Multiple hits along the ray
+# ============================================================================
+
+fn physics_raycast_all_3d(world: PhysicsWorld3D, origin: Vec3, direction: Vec3, max_distance: Distance) -> [RaycastHit3D]:
+    """Cast a ray and return all hits."""
+    val norm_dir = direction.normalize()
+    var results: [RaycastHit3D] = []
+
+    var i = 0
+    while i < world.colliders.len():
+        val col = world.colliders[i]
+        val body_idx = world._find_body_index(col.node_id)
+        if body_idx >= 0:
+            val pb = world.bodies[body_idx]
+            val ib = world.internal_bodies[pb.body_index]
+            val shape = world.shapes[col.collider_index]
+
+            var hit_dist = -1.0
+            var hit_normal = Vec3.zero()
+
+            if shape.is_sphere():
+                val result = _ray_sphere_3d(origin, norm_dir, ib.position, shape.sphere.radius)
+                if val r = result:
+                    hit_dist = r.0
+                    hit_normal = r.1
+
+            if shape.is_box():
+                val half = Vec3(x: shape.box_shape.half_x, y: shape.box_shape.half_y, z: shape.box_shape.half_z)
+                val result = _ray_aabb_3d(origin, norm_dir, ib.position, half)
+                if val r = result:
+                    hit_dist = r.0
+                    hit_normal = r.1
+
+            if hit_dist >= 0.0 and hit_dist <= max_distance.value:
+                val hit_point = Vec3(
+                    x: origin.x + norm_dir.x * hit_dist,
+                    y: origin.y + norm_dir.y * hit_dist,
+                    z: origin.z + norm_dir.z * hit_dist
+                )
+                val hit = RaycastHit3D(
+                    node_id: col.node_id,
+                    point: hit_point,
+                    normal: hit_normal,
+                    distance: Distance(value: hit_dist)
+                )
+                results.push(hit)
+        i = i + 1
+
+    results
+
+# ============================================================================
+# Ray-Sphere intersection (quadratic formula)
+# Returns Option<(f64, Vec3)> — (distance, normal) or nil
+# ============================================================================
+
+fn _ray_sphere_3d(origin: Vec3, dir: Vec3, center: Vec3, radius: f64) -> Option<(f64, Vec3)>:
+    val oc = origin.sub(center)
+    val a = dir.dot(dir)
+    val b = 2.0 * oc.dot(dir)
+    val c = oc.dot(oc) - radius * radius
+    val discriminant = b * b - 4.0 * a * c
+
+    if discriminant < 0.0:
+        return nil
+
+    val sqrt_disc = _sqrt(discriminant)
+    val t1 = (-b - sqrt_disc) / (2.0 * a)
+    val t2 = (-b + sqrt_disc) / (2.0 * a)
+
+    var t = -1.0
+    if t1 >= 0.0:
+        t = t1
+    elif t2 >= 0.0:
+        t = t2
+    else:
+        return nil
+
+    val hp = Vec3(x: origin.x + dir.x * t, y: origin.y + dir.y * t, z: origin.z + dir.z * t)
+    val d = hp.sub(center)
+    val len = d.length()
+    var normal = Vec3(x: 1.0, y: 0.0, z: 0.0)
+    if len > 0.0000001:
+        normal = Vec3(x: d.x / len, y: d.y / len, z: d.z / len)
+
+    (t, normal)
+
+# ============================================================================
+# Ray-AABB intersection (slab method, 3 axes)
+# Returns Option<(f64, Vec3)> — (distance, normal) or nil
+# ============================================================================
+
+fn _ray_aabb_3d(origin: Vec3, dir: Vec3, center: Vec3, half_extents: Vec3) -> Option<(f64, Vec3)>:
+    val min_x = center.x - half_extents.x
+    val max_x = center.x + half_extents.x
+    val min_y = center.y - half_extents.y
+    val max_y = center.y + half_extents.y
+    val min_z = center.z - half_extents.z
+    val max_z = center.z + half_extents.z
+
+    var tmin = -999999999.0
+    var tmax = 999999999.0
+
+    # X slab
+    if math_abs(dir.x) > 0.0000001:
+        val t1 = (min_x - origin.x) / dir.x
+        val t2 = (max_x - origin.x) / dir.x
+        val t_near = math_min(t1, t2)
+        val t_far = math_max(t1, t2)
+        tmin = math_max(tmin, t_near)
+        tmax = math_min(tmax, t_far)
+    else:
+        if origin.x < min_x or origin.x > max_x:
+            return nil
+
+    # Y slab
+    if math_abs(dir.y) > 0.0000001:
+        val t1 = (min_y - origin.y) / dir.y
+        val t2 = (max_y - origin.y) / dir.y
+        val t_near = math_min(t1, t2)
+        val t_far = math_max(t1, t2)
+        tmin = math_max(tmin, t_near)
+        tmax = math_min(tmax, t_far)
+    else:
+        if origin.y < min_y or origin.y > max_y:
+            return nil
+
+    # Z slab
+    if math_abs(dir.z) > 0.0000001:
+        val t1 = (min_z - origin.z) / dir.z
+        val t2 = (max_z - origin.z) / dir.z
+        val t_near = math_min(t1, t2)
+        val t_far = math_max(t1, t2)
+        tmin = math_max(tmin, t_near)
+        tmax = math_min(tmax, t_far)
+    else:
+        if origin.z < min_z or origin.z > max_z:
+            return nil
+
+    if tmin > tmax or tmax < 0.0:
+        return nil
+
+    var t = tmin
+    if t < 0.0:
+        t = tmax
+
+    # Compute normal from hit point
+    val hp = Vec3(x: origin.x + dir.x * t, y: origin.y + dir.y * t, z: origin.z + dir.z * t)
+    val normal = _aabb_hit_normal_3d(hp, center, half_extents)
+
+    (t, normal)
+
+# ============================================================================
+# AABB hit normal helper
+# ============================================================================
+
+fn _aabb_hit_normal_3d(hit_point: Vec3, center: Vec3, half: Vec3) -> Vec3:
+    """Determine the face normal of the AABB at the hit point."""
+    val dx = hit_point.x - center.x
+    val dy = hit_point.y - center.y
+    val dz = hit_point.z - center.z
+    val px = half.x - math_abs(dx)
+    val py = half.y - math_abs(dy)
+    val pz = half.z - math_abs(dz)
+
+    if px <= py and px <= pz:
+        if dx < 0.0:
+            return Vec3(x: -1.0, y: 0.0, z: 0.0)
+        return Vec3(x: 1.0, y: 0.0, z: 0.0)
+    if py <= pz:
+        if dy < 0.0:
+            return Vec3(x: 0.0, y: -1.0, z: 0.0)
+        return Vec3(x: 0.0, y: 1.0, z: 0.0)
+    if dz < 0.0:
+        return Vec3(x: 0.0, y: 0.0, z: -1.0)
+    Vec3(x: 0.0, y: 0.0, z: 1.0)

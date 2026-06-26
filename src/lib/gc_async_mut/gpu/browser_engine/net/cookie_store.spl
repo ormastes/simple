@@ -1,0 +1,227 @@
+"""
+# Cookie Store
+
+RFC 6265 cookie storage: Set-Cookie parsing, domain/path matching,
+per-domain cap enforcement, and Cookie header generation.
+No network calls — pure logic.
+"""
+
+#![allow(REQC001)]
+
+use std.gc_async_mut.gpu.browser_engine.net.entity.cookie_types.{Cookie, SameSite}
+
+pub fn parse_set_cookie(header: text) -> Cookie:
+    """Parse a Set-Cookie header value into a Cookie struct.
+
+    Handles: name=value; Domain=...; Path=...; Secure; HttpOnly; SameSite=...
+    Defaults: path="/", same_site=Lax, secure=false, http_only=false.
+    """
+    var name = ""
+    var value = ""
+    var domain = ""
+    var path = "/"
+    var secure = false
+    var http_only = false
+    var same_site = SameSite.Lax
+
+    val parts = header.split(";")
+    var i = 0
+    while i < parts.len():
+        val part = parts[i].trim()
+        i = i + 1
+        if i == 1:
+            # First part: name=value
+            val eq = part.index_of("=")
+            if eq >= 0:
+                name = part.slice(0, eq).trim()
+                value = part.slice(eq + 1, part.len()).trim()
+            else:
+                name = part
+        elif part.starts_with("Domain=") or part.starts_with("domain="):
+            val eq = part.index_of("=")
+            domain = part.slice(eq + 1, part.len()).trim()
+        elif part.starts_with("Path=") or part.starts_with("path="):
+            val eq = part.index_of("=")
+            path = part.slice(eq + 1, part.len()).trim()
+        elif part == "Secure" or part == "secure":
+            secure = true
+        elif part == "HttpOnly" or part == "httponly" or part == "HttpOnly":
+            http_only = true
+        elif part.starts_with("SameSite=") or part.starts_with("samesite="):
+            val eq = part.index_of("=")
+            val ss_val = part.slice(eq + 1, part.len()).trim()
+            if ss_val == "Strict":
+                same_site = SameSite.Strict
+            elif ss_val == "None":
+                same_site = SameSite.None
+            else:
+                same_site = SameSite.Lax
+
+    return Cookie {
+        name: name,
+        value: value,
+        domain: domain,
+        path: path,
+        secure: secure,
+        http_only: http_only,
+        same_site: same_site
+    }
+
+pub class CookieJar:
+    """A collection of cookies for a single domain."""
+    cookies: [Cookie]
+
+    static fn new() -> CookieJar:
+        return CookieJar { cookies: [] }
+
+    me fn add(c: Cookie):
+        """Add or replace a cookie with the same name."""
+        var replaced = false
+        var i = 0
+        while i < self.cookies.len():
+            val existing = self.cookies[i]
+            i = i + 1
+            if existing.name == c.name and existing.path == c.path:
+                self.cookies[i - 1] = c
+                replaced = true
+        if not replaced:
+            self.cookies.push(c)
+
+    me fn count() -> i64:
+        return self.cookies.len()
+
+pub class CookieStore:
+    """RFC 6265 cookie store: stores cookies per domain, enforces caps."""
+    _jars: [CookieJar]
+    _domains: [text]
+    _max_per_domain: i64
+
+    static fn new() -> CookieStore:
+        """Create an empty CookieStore with default per-domain cap of 50."""
+        return CookieStore {
+            _jars: [],
+            _domains: [],
+            _max_per_domain: 50
+        }
+
+    static fn domain_matches(cookie_domain: text, request_host: text) -> bool:
+        """RFC 6265 domain matching.
+
+        Exact match always succeeds.
+        Dot-prefixed cookie domain matches any subdomain of the suffix.
+        """
+        if cookie_domain == request_host:
+            return true
+        if cookie_domain.starts_with("."):
+            val suffix = cookie_domain.slice(1, cookie_domain.len())
+            if request_host == suffix:
+                return true
+            if request_host.ends_with("." + suffix):
+                return true
+        return false
+
+    static fn path_matches(cookie_path: text, request_path: text) -> bool:
+        """RFC 6265 path matching.
+
+        The cookie path must be a prefix of the request path.
+        If cookie_path == request_path: match.
+        If cookie_path ends with /: prefix match.
+        Otherwise: request_path must start with cookie_path followed by /.
+        """
+        if cookie_path == request_path:
+            return true
+        if cookie_path == "/":
+            return true
+        if request_path.starts_with(cookie_path + "/"):
+            return true
+        return false
+
+    me fn _jar_for(domain: text) -> CookieJar?:
+        """Find the jar for the given domain key, or none."""
+        var i = 0
+        while i < self._domains.len():
+            if self._domains[i] == domain:
+                return Some(self._jars[i])
+            i = i + 1
+        return none
+
+    me fn _ensure_jar(domain: text) -> i64:
+        """Return index of jar for domain, creating it if needed."""
+        var i = 0
+        while i < self._domains.len():
+            if self._domains[i] == domain:
+                return i
+            i = i + 1
+        self._domains.push(domain)
+        self._jars.push(CookieJar.new())
+        return self._domains.len() - 1
+
+    me fn store(c: Cookie):
+        """Store a cookie. Per-domain cap is enforced (max 50 by default)."""
+        val idx = self._ensure_jar(c.domain)
+        val jar = self._jars[idx]
+        # Check cap before adding (if already at max and not a replacement, evict oldest)
+        if jar.count() >= self._max_per_domain:
+            # Check if it's a replacement (same name+path already exists)
+            var is_replace = false
+            var j = 0
+            while j < jar.cookies.len():
+                val existing = jar.cookies[j]
+                j = j + 1
+                if existing.name == c.name and existing.path == c.path:
+                    is_replace = true
+            if not is_replace:
+                # Evict first cookie
+                val old_cookies = jar.cookies
+                var new_cookies: [Cookie] = []
+                var k = 1
+                while k < old_cookies.len():
+                    new_cookies.push(old_cookies[k])
+                    k = k + 1
+                jar.cookies = new_cookies
+        jar.add(c)
+
+    me fn get_header(host: text, request_path: text) -> text:
+        """Build the Cookie header value for a request to host+path."""
+        var result = ""
+        var i = 0
+        while i < self._domains.len():
+            val dom = self._domains[i]
+            i = i + 1
+            if CookieStore.domain_matches(dom, host):
+                val jar = self._jars[i - 1]
+                var j = 0
+                while j < jar.cookies.len():
+                    val c = jar.cookies[j]
+                    j = j + 1
+                    if CookieStore.path_matches(c.path, request_path):
+                        if result != "":
+                            result = result + "; "
+                        result = result + c.name + "=" + c.value
+        return result
+
+    me fn fill_for_domain(domain: text, n: i64) -> i64:
+        """Fill the store with n cookies for domain. Returns actual count stored."""
+        var i = 0
+        while i < n:
+            val c = Cookie {
+                name: "cookie" + i.to_text(),
+                value: "val" + i.to_text(),
+                domain: domain,
+                path: "/",
+                secure: false,
+                http_only: false,
+                same_site: SameSite.Lax
+            }
+            self.store(c)
+            i = i + 1
+        return self.count_for_domain(domain)
+
+    me fn count_for_domain(domain: text) -> i64:
+        """Return the number of cookies stored for the given domain key."""
+        var i = 0
+        while i < self._domains.len():
+            if self._domains[i] == domain:
+                return self._jars[i].count()
+            i = i + 1
+        return 0

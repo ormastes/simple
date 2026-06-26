@@ -1,0 +1,153 @@
+# Platform Link Defaults - Single source of truth for per-OS/arch link data
+#
+# Consolidates all hardcoded system libraries, CRT search paths, dynamic linker
+# candidates, and library directories that were previously scattered across
+# crt_discovery.spl, linker_wrapper.spl, mold.spl, msvc.spl, and
+# linker_wrapper_lib_support.spl.
+#
+# Bootstrap constraint: only match, arrays, text - no generics, closures,
+# or complex types.
+
+# ============================================================================
+# Data Struct
+# ============================================================================
+
+struct PlatformLinkDefaults:
+    libraries: [text]
+    library_dirs: [text]
+    crt_search_dirs: [text]
+    dynamic_linker_candidates: [text]
+    extra_link_flags: [text]
+
+# ============================================================================
+# Main API
+# ============================================================================
+
+fn platform_defaults(os: text, arch: text) -> PlatformLinkDefaults:
+    PlatformLinkDefaults(
+        libraries: default_libraries(os),
+        library_dirs: default_library_dirs(os),
+        crt_search_dirs: default_crt_search_dirs(os, arch),
+        dynamic_linker_candidates: default_dynamic_linker_candidates(os, arch),
+        extra_link_flags: []
+    )
+
+# ============================================================================
+# System Libraries
+# ============================================================================
+
+fn default_libraries(os: text) -> [text]:
+    if os == "linux":
+        return ["c", "pthread", "dl", "m"]
+    elif os == "macos" or os == "Darwin":
+        return ["c", "pthread", "m", "System"]
+    elif os == "freebsd" or os == "FreeBSD":
+        return ["c", "pthread", "m"]
+    elif os == "windows":
+        return ["kernel32", "user32"]
+    []
+
+# ============================================================================
+# Library Search Directories (for SMF .lsm archives)
+# ============================================================================
+
+fn default_library_dirs(os: text) -> [text]:
+    if os == "windows":
+        return []
+    ["/usr/lib/simple", "/usr/local/lib/simple"]
+
+# ============================================================================
+# CRT Search Directories (Linux only)
+# ============================================================================
+
+fn default_crt_search_dirs(os: text, arch: text) -> [text]:
+    if os != "linux":
+        return []
+    if arch == "x86_64":
+        return ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/lib/x86_64-linux-gnu", "/lib64"]
+    elif arch == "aarch64":
+        return ["/usr/lib/aarch64-linux-gnu", "/usr/aarch64-linux-gnu/lib", "/lib/aarch64-linux-gnu"]
+    elif arch == "riscv64":
+        return ["/usr/lib/riscv64-linux-gnu", "/usr/riscv64-linux-gnu/lib", "/lib/riscv64-linux-gnu"]
+    ["/usr/lib"]
+
+# ============================================================================
+# Dynamic Linker Candidates
+# ============================================================================
+
+fn default_dynamic_linker_candidates(os: text, arch: text) -> [text]:
+    if os == "linux":
+        if arch == "x86_64":
+            return [
+                "/lib64/ld-linux-x86-64.so.2",
+                "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+                "/lib/ld-linux-x86-64.so.2"
+            ]
+        elif arch == "aarch64":
+            return [
+                "/lib/ld-linux-aarch64.so.1",
+                "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
+            ]
+        elif arch == "riscv64":
+            return [
+                "/lib/ld-linux-riscv64-lp64d.so.1",
+                "/lib/riscv64-linux-gnu/ld-linux-riscv64-lp64d.so.1"
+            ]
+        elif arch == "i686" or arch == "i386":
+            return [
+                "/lib/ld-linux.so.2",
+                "/lib/i386-linux-gnu/ld-linux.so.2"
+            ]
+        elif arch == "armv7" or arch == "arm":
+            return [
+                "/lib/ld-linux-armhf.so.3",
+                "/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3"
+            ]
+        elif arch == "riscv32":
+            return [
+                "/lib/ld-linux-riscv32-ilp32d.so.1",
+                "/lib/riscv32-linux-gnu/ld-linux-riscv32-ilp32d.so.1"
+            ]
+        return []
+    elif os == "freebsd" or os == "FreeBSD":
+        return ["/libexec/ld-elf.so.1"]
+    []
+
+# ============================================================================
+# ELF Emulation Mode (used by direct linker invocation)
+# ============================================================================
+
+fn elf_emulation(arch: text) -> text:
+    if arch == "x86_64":
+        return "elf_x86_64"
+    elif arch == "aarch64":
+        return "aarch64linux"
+    elif arch == "i686" or arch == "i386":
+        return "elf_i386"
+    elif arch == "armv7" or arch == "arm":
+        return "armelf_linux_eabi"
+    elif arch == "riscv64":
+        return "elf64lriscv"
+    elif arch == "riscv32":
+        return "elf32lriscv"
+    ""
+
+# ============================================================================
+# GCC Triplet (used for probing GCC library directories)
+# ============================================================================
+
+fn gcc_triplet(arch: text) -> text:
+    if arch == "x86_64":
+        return "x86_64-linux-gnu"
+    elif arch == "aarch64":
+        return "aarch64-linux-gnu"
+    elif arch == "riscv64":
+        return "riscv64-linux-gnu"
+    "x86_64-linux-gnu"
+
+# ============================================================================
+# Windows Library Names (with .lib suffix for MSVC)
+# ============================================================================
+
+fn default_windows_libs_with_suffix() -> [text]:
+    ["kernel32.lib", "user32.lib"]

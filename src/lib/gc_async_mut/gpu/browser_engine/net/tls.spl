@@ -1,0 +1,170 @@
+"""
+# TLS Manager
+
+TLS handshake and certificate validation for the browser engine.
+Delegates cryptographic operations to the hosted runtime via extern.
+"""
+
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types.{TlsConfig, CertChain, TlsVersion}
+use std.gc_async_mut.gpu.browser_engine.shared.error.{BrowserError, network_error}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger}
+
+extern fn rt_tls_client_connect_with_sni(host: text, port: i64, server_name: text) -> i64
+extern fn rt_tls_client_write(conn: i64, data: text) -> i64
+extern fn rt_tls_client_read(conn: i64, max_bytes: i64) -> text
+extern fn rt_tls_client_close(conn: i64) -> bool
+extern fn rt_tls_get_protocol_version(conn: i64) -> text
+
+pub class TlsConnection:
+    host: text
+    port: i64
+    version: TlsVersion
+    cipher: text
+    handle: i64
+
+    static fn create(host: text, port: i64, version: TlsVersion, cipher: text, handle: i64) -> TlsConnection:
+        TlsConnection(host: host, port: port, version: version, cipher: cipher, handle: handle)
+
+    fn description() -> text:
+        val ver = match self.version:
+            TlsVersion.Tls12: "TLS 1.2"
+            TlsVersion.Tls13: "TLS 1.3"
+        "{ver} connection to {self.host}:{self.port} (cipher: {self.cipher})"
+
+    fn write_text(data: text) -> i64:
+        rt_tls_client_write(self.handle, data)
+
+    fn read_text(max_bytes: i64) -> text:
+        rt_tls_client_read(self.handle, max_bytes)
+
+    fn close() -> bool:
+        rt_tls_client_close(self.handle)
+
+pub class TlsManager:
+    config: TlsConfig
+    logger: Logger
+    trusted_certs: [text]
+
+    static fn new(logger: Logger, config: TlsConfig) -> TlsManager:
+        TlsManager(
+            config: config,
+            logger: logger,
+            trusted_certs: default_trusted_certs()
+        )
+
+    me handshake(host: text, port: i64) -> Result<TlsConnection, BrowserError>:
+        self.logger.info("TLS handshake starting with {host}:{port}")
+
+        if host.len() == 0:
+            return Err(network_error("TLS handshake: empty hostname"))
+
+        if port <= 0 or port > 65535:
+            return Err(network_error("TLS handshake: invalid port {port}"))
+
+        val version = negotiate_version(self.config.min_version)
+        val cipher = default_cipher(version)
+
+        val handle = rt_tls_client_connect_with_sni(host, port, host)
+        if handle < 0:
+            return Err(network_error("TLS handshake failed for {host}:{port}: runtime TLS transport unavailable or certificate verification failed"))
+
+        val negotiated = rt_tls_get_protocol_version(handle)
+        val actual_version = if negotiated == "TLSv1.2": TlsVersion.Tls12 else: TlsVersion.Tls13
+        self.logger.info("TLS handshake complete for {host}:{port} ({negotiated})")
+        Ok(TlsConnection.create(host, port, actual_version, cipher, handle))
+
+pub fn verify_certificate(chain: CertChain, hostname: text) -> Result<(), BrowserError>:
+    if chain.certs.len() == 0:
+        return Err(network_error("Certificate chain is empty"))
+
+    val leaf_cert = chain.certs[0]
+    if not check_hostname(leaf_cert, hostname):
+        return Err(network_error("Certificate hostname mismatch: expected {hostname}, got {leaf_cert}"))
+
+    if chain.ca_certs.len() == 0:
+        return Err(network_error("Certificate chain has no trust anchor"))
+
+    val trusted = default_trusted_certs()
+    var i = 0
+    while i < chain.ca_certs.len():
+        val ca = chain.ca_certs[i]
+        i = i + 1
+        var j = 0
+        while j < trusted.len():
+            val root = trusted[j]
+            j = j + 1
+            if ca == root:
+                return Ok(())
+
+    Err(network_error("Certificate trust anchor is not trusted"))
+
+pub fn check_hostname(cert_cn: text, hostname: text) -> bool:
+    val cn = cert_cn.to_lower()
+    val host = hostname.to_lower()
+
+    if cn == host:
+        return true
+
+    if cn.starts_with("*."):
+        val wildcard_base = cn.slice(2, cn.len())
+        if not contains_char(wildcard_base, "."):
+            return false
+
+        if not host.ends_with(wildcard_base):
+            return false
+
+        val prefix_len = host.len() - wildcard_base.len()
+        if prefix_len <= 0:
+            return false
+
+        val prefix = host.slice(0, prefix_len)
+
+        if not prefix.ends_with("."):
+            return false
+
+        val label = prefix.slice(0, prefix.len() - 1)
+        if label.len() == 0:
+            return false
+
+        if contains_char(label, "."):
+            return false
+
+        return true
+
+    false
+
+fn negotiate_version(min_version: TlsVersion) -> TlsVersion:
+    match min_version:
+        TlsVersion.Tls13:
+            TlsVersion.Tls13
+        TlsVersion.Tls12:
+            TlsVersion.Tls13
+
+fn default_cipher(version: TlsVersion) -> text:
+    match version:
+        TlsVersion.Tls13:
+            "TLS_AES_256_GCM_SHA384"
+        TlsVersion.Tls12:
+            "ECDHE-RSA-AES256-GCM-SHA384"
+
+fn default_trusted_certs() -> [text]:
+    [
+        "DigiCert Global Root G2",
+        "ISRG Root X1",
+        "Baltimore CyberTrust Root",
+        "Amazon Root CA 1",
+        "Google Trust Services - GlobalSign Root CA-R2",
+        "Sectigo RSA Domain Validation Secure Server CA"
+    ]
+
+fn contains_char(s: text, ch: text) -> bool:
+    var i = 0
+    while i < s.len():
+        if s.slice(i, i + 1) == ch:
+            return true
+        i = i + 1
+    false
