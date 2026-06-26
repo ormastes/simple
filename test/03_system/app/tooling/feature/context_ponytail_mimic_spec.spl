@@ -3,16 +3,31 @@
 # Context/Ponytail Mimic System Specification
 
 **Feature:** LLM tooling context/ponytail mimic
-**Requirements:** REQ-012, REQ-013, REQ-014, REQ-015
+**Requirements:** doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md
 **Plan:** doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md
 **System Test Plan:** doc/03_plan/sys_test/llm_tooling_context_ponytail_mimic.md
+**Research:** doc/01_research/local/llm_tooling_context_ponytail_mimic.md
+**Design:** doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md
 
 ## Overview
 
-This system spec verifies the shipped tool surfaces for the local
+This system spec verifies REQ-012, REQ-013, REQ-014, and REQ-015 for the local
 context-mode mimic and Ponytail mimic pair. It proves the CLI, app MCP, lower
 MCP, operator guide, and verification guard all describe the same public
 contract.
+
+## Syntax
+
+- `context <file> --sql --index --db=<path>` creates a persisted context pack.
+- `context --sql --query=<text> --db=<path>` queries it without a source file.
+- `simple_context` keeps `file` optional only for `sql=true` and a non-empty
+  `query`; all other calls still need a readable source file.
+
+## Examples
+
+1. Index one source into an embedded SQL context database.
+2. Query that database with `--source-filter=<path>`.
+3. Confirm app MCP and lower MCP advertise the same file-optional contract.
 """
 
 use std.spec
@@ -22,7 +37,7 @@ fn read(path: text) -> text:
     file_read(path)
 
 fn _run_context_cli(args: [text]) -> (text, i64):
-    val (stdout, stderr, exit_code) = process_run("src/compiler_rust/target/debug/simple", ["run", "src/app/context/main.spl"] + args)
+    val (stdout, stderr, exit_code) = process_run("release/x86_64-unknown-linux-gnu/simple", ["run", "src/app/context/main.spl"] + args)
     (stdout + stderr, exit_code)
 
 describe "context/ponytail mimic system surface":
@@ -57,11 +72,13 @@ describe "context/ponytail mimic system surface":
         val dispatch = read("src/app/mcp/main_dispatch.spl")
         expect(handler).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
         expect(handler).to_contain("if file == \"\" and not sourceless_sql_query")
+        expect(handler).to_contain("Missing required parameter: file")
         expect(handler).to_contain("ctx_args.push(\"--query=\" + query)")
         expect(handler).to_contain("ctx_args.push(\"--sql\")")
         expect(handler).to_contain("ctx_args.push(\"--db=\" + db_path)")
         expect(handler).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
         expect(table).to_contain("tool_entry(\"simple_context\"")
+        expect(table).to_contain("Source file path; required except when sql=true and query is non-empty")
         expect(table).to_contain("prop_str(\"source_filter\", \"Filter SQL query rows by stored source path\")")
         expect(table).to_contain("e.required_json = build_required([])")
         expect(static_tools).to_contain("_mcp_static_tool(\"simple_context\"")
@@ -73,14 +90,25 @@ describe "context/ponytail mimic system surface":
         val dispatch = read("src/lib/nogc_async_mut/mcp/main_lazy.spl")
         expect(handler).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
         expect(handler).to_contain("if file == \"\" and not sourceless_sql_query")
+        expect(handler).to_contain("Missing required parameter: file")
         expect(handler).to_contain("ctx_args.push(\"--sql\")")
         expect(handler).to_contain("ctx_args.push(\"--db=\" + db_path)")
         expect(handler).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
         expect(schema).to_contain("make_tool_schema(name: \"simple_context\"")
+        expect(schema).to_contain("Source file path; required except when sql=true and query is non-empty")
         expect(schema).to_contain("jp(\"source_filter\", jo2")
         expect(schema).to_contain("req = \"[]\"")
         expect(dispatch).to_contain("tool_name == \"simple_context\"")
         expect(dispatch).to_contain("handle_simple_context(id, body)")
+
+    it "documents source-less SQL as the only file-optional replacement shape":
+        val guide = read("doc/07_guide/app/mcp/mcp.md")
+        val design = read("doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md")
+        val architecture = read("doc/04_architecture/app/tools/llm_tooling_context_ponytail_mimic.md")
+        expect(guide).to_contain("optional only for the")
+        expect(guide).to_contain("non-empty")
+        expect(design).to_contain("The only source-less accepted shape")
+        expect(architecture).to_contain("The replacement contract is the shared")
 
     it "REQ-014 preserves SQL source filter documentation and absence-safe public output":
         val context_ops = read("src/app/io/context_ops.spl")

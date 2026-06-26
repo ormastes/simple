@@ -308,6 +308,18 @@ Tasks:
 3. Render text and HTML panel summaries with explicit absence text. Status:
    done.
 4. Add focused mirrored unit coverage. Status: done.
+
+## 2026-06-26 Source-less SQL Replacement Contract Hardening
+
+Status: implemented for app MCP and lower MCP metadata/source-contract
+coverage.
+
+The replacement surface now states the same file-optional rule in both MCP
+schemas: `file` is required except when `sql=true` and `query` is non-empty.
+The focused system spec asserts the matching handler guard, missing-file error,
+schema text, operator guide text, design text, and architecture replacement
+language so future context-mode or Ponytail compatibility work cannot drift back
+to an underspecified coexistence path.
 5. Update the MCP operator guide for `simple_context` and `simple_ponytail`.
    Status: done; `doc/07_guide/app/mcp/mcp.md` documents context index/query,
    SQL/`--db`, absence statuses, and Ponytail `audit`/`simplification` modes.

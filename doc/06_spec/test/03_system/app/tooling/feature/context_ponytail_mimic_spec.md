@@ -1,6 +1,6 @@
 # Context/Ponytail Mimic System Specification
 
-> This system spec verifies the shipped tool surfaces for the local context-mode mimic and Ponytail mimic pair. It proves the CLI, app MCP, lower MCP, operator guide, and verification guard all describe the same public contract.
+> This system spec verifies REQ-012, REQ-013, REQ-014, and REQ-015 for the local context-mode mimic and Ponytail mimic pair. It proves the CLI, app MCP, lower MCP, operator guide, and verification guard all describe the same public contract.
 
 <!-- sdn-diagram:id=context_ponytail_mimic_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ context_ponytail_mimic_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Context/Ponytail Mimic System Specification
 
-This system spec verifies the shipped tool surfaces for the local context-mode mimic and Ponytail mimic pair. It proves the CLI, app MCP, lower MCP, operator guide, and verification guard all describe the same public contract.
+This system spec verifies REQ-012, REQ-013, REQ-014, and REQ-015 for the local context-mode mimic and Ponytail mimic pair. It proves the CLI, app MCP, lower MCP, operator guide, and verification guard all describe the same public contract.
 
 ## At a Glance
 
@@ -42,18 +42,33 @@ This system spec verifies the shipped tool surfaces for the local context-mode m
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Requirements | REQ-012, REQ-013, REQ-014, REQ-015 |
+| Requirements | doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md |
 | Plan | doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md |
+| Design | doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md |
+| Research | doc/01_research/local/llm_tooling_context_ponytail_mimic.md |
 | Source | `test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-This system spec verifies the shipped tool surfaces for the local
+This system spec verifies REQ-012, REQ-013, REQ-014, and REQ-015 for the local
 context-mode mimic and Ponytail mimic pair. It proves the CLI, app MCP, lower
 MCP, operator guide, and verification guard all describe the same public
 contract.
+
+## Syntax
+
+- `context <file> --sql --index --db=<path>` creates a persisted context pack.
+- `context --sql --query=<text> --db=<path>` queries it without a source file.
+- `simple_context` keeps `file` optional only for `sql=true` and a non-empty
+  `query`; all other calls still need a readable source file.
+
+## Examples
+
+1. Index one source into an embedded SQL context database.
+2. Query that database with `--source-filter=<path>`.
+3. Confirm app MCP and lower MCP advertise the same file-optional contract.
 
 ## Scenarios
 
@@ -116,7 +131,7 @@ expect(query_output).to_contain("alpha_only")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -126,11 +141,13 @@ val static_tools = read("src/app/mcp/main_static_tools.spl")
 val dispatch = read("src/app/mcp/main_dispatch.spl")
 expect(handler).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
 expect(handler).to_contain("if file == \"\" and not sourceless_sql_query")
+expect(handler).to_contain("Missing required parameter: file")
 expect(handler).to_contain("ctx_args.push(\"--query=\" + query)")
 expect(handler).to_contain("ctx_args.push(\"--sql\")")
 expect(handler).to_contain("ctx_args.push(\"--db=\" + db_path)")
 expect(handler).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
 expect(table).to_contain("tool_entry(\"simple_context\"")
+expect(table).to_contain("Source file path; required except when sql=true and query is non-empty")
 expect(table).to_contain("prop_str(\"source_filter\", \"Filter SQL query rows by stored source path\")")
 expect(table).to_contain("e.required_json = build_required([])")
 expect(static_tools).to_contain("_mcp_static_tool(\"simple_context\"")
@@ -144,7 +161,7 @@ expect(dispatch).to_contain("return handle_simple_context(id, body)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -153,14 +170,36 @@ val schema = read("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl")
 val dispatch = read("src/lib/nogc_async_mut/mcp/main_lazy.spl")
 expect(handler).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
 expect(handler).to_contain("if file == \"\" and not sourceless_sql_query")
+expect(handler).to_contain("Missing required parameter: file")
 expect(handler).to_contain("ctx_args.push(\"--sql\")")
 expect(handler).to_contain("ctx_args.push(\"--db=\" + db_path)")
 expect(handler).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
 expect(schema).to_contain("make_tool_schema(name: \"simple_context\"")
+expect(schema).to_contain("Source file path; required except when sql=true and query is non-empty")
 expect(schema).to_contain("jp(\"source_filter\", jo2")
 expect(schema).to_contain("req = \"[]\"")
 expect(dispatch).to_contain("tool_name == \"simple_context\"")
 expect(dispatch).to_contain("handle_simple_context(id, body)")
+```
+
+</details>
+
+#### documents source-less SQL as the only file-optional replacement shape
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val guide = read("doc/07_guide/app/mcp/mcp.md")
+val design = read("doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md")
+val architecture = read("doc/04_architecture/app/tools/llm_tooling_context_ponytail_mimic.md")
+expect(guide).to_contain("optional only for the")
+expect(guide).to_contain("non-empty")
+expect(design).to_contain("The only source-less accepted shape")
+expect(architecture).to_contain("The replacement contract is the shared")
 ```
 
 </details>
@@ -221,8 +260,8 @@ expect(lower_schema).to_contain("Mode: audit, simplification")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -230,8 +269,10 @@ expect(lower_schema).to_contain("Mode: audit, simplification")
 
 ## Related Documentation
 
-- **Requirements:** [REQ-012, REQ-013, REQ-014, REQ-015](REQ-012, REQ-013, REQ-014, REQ-015)
+- **Requirements:** [doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md](doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md)
 - **Plan:** [doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md](doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md)
+- **Design:** [doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md](doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md)
+- **Research:** [doc/01_research/local/llm_tooling_context_ponytail_mimic.md](doc/01_research/local/llm_tooling_context_ponytail_mimic.md)
 
 
 </details>

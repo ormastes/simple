@@ -8,6 +8,13 @@ Use the existing `simple context` CLI as the first replacement seam. Do not add 
 daemon, external service, or new plugin surface until context generation and
 stats are implemented and verified.
 
+The replacement contract is the shared `simple_context` and `simple_ponytail`
+tool surface in app MCP and lower MCP. Existing callers should converge on that
+surface instead of a parallel context-mode or ponytail plugin path. For
+`simple_context`, `file` remains required except for the persisted SQL query
+shape where `sql=true` and `query` is non-empty; invalid source-less calls must
+return the normal missing-file tool error instead of implicit defaults.
+
 ## Layers
 
 ### CLI Layer
