@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -72,6 +72,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 ## Acceptance
 
 - Complete fixture iOS and Android mobile evidence passes the aggregate gate.
+- Complete fixture iOS evidence must include a WKWebView context line bound to
+  `metal_expected=true` and `metal_layer=CAMetalLayer`; generic Metal text is
+  not enough for the aggregate pass path.
 - Mobile screenshots must carry PNG signature bytes; arbitrary nonempty files
   are not accepted as layout capture proof.
 - Missing iOS MDI proof JSON fails even when iOS status rows claim pass.
@@ -90,7 +93,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -102,15 +105,41 @@ expect(code).to_equal(0)
 val evidence = file_read(root + "/stdout.env")
 step("Inspect normalized mobile artifact gate rows")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_status=pass")
-expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len=1")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len=347702")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_validation_status=pass")
-expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len=1")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len=347702")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_render_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=pass")
+```
+
+</details>
+
+#### rejects an iOS pass claim with generic Metal text instead of WKWebView context
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-generic-ios-metal"
+val command = _run_aggregate_command_with_logs(root, "present", "present", "png", "png", "generic", "valid")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/stdout.env")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-tauri-wkwebview-context-missing")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validation_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_marker_status=pass")
 ```
 
 </details>
@@ -223,8 +252,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
