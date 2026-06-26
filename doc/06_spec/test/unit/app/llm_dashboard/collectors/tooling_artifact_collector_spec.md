@@ -72,7 +72,7 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val path = _write_tooling_fixture("smell", "interface FutureThing:\n    pass_todo\n")
+val path = _write_tooling_fixture("smell", "interface FutureThing:\n    fn ready() -> text\n")
 val text = render_llm_tooling_artifacts_panel_text(collect_llm_tooling_artifacts(path, "FutureThing"))
 
 expect(text).to_contain("LLM Tooling Artifacts")
@@ -137,7 +137,7 @@ expect_absence_marker_hidden(html)
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Source | `test/unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl` |
+| Source | `test/01_unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 

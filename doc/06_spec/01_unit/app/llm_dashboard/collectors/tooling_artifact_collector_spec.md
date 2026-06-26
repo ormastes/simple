@@ -72,7 +72,7 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val path = _write_tooling_fixture("smell", "interface FutureThing:\n    pass_todo\n")
+val path = _write_tooling_fixture("smell", "interface FutureThing:\n    fn ready() -> text\n")
 val text = render_llm_tooling_artifacts_panel_text(collect_llm_tooling_artifacts(path, "FutureThing"))
 
 expect(text).to_contain("LLM Tooling Artifacts")

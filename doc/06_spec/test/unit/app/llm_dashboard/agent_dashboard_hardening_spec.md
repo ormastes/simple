@@ -180,20 +180,20 @@ expect(tree.agent_count()).to_equal(1)
 #### get_agent finds an agent after ensure
 
 - tree ensure agent
-- expect agent id
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val tree = AgentTree.new()
 tree.ensure_agent("a2", LLMProvider.Gemini, "pro")
 val found = tree.get_agent("a2")
-expect_agent_id(found, "a2")
+match found:
+    Some(agent): expect(agent.id).to_equal("a2")
 ```
 
 </details>
@@ -987,7 +987,7 @@ expect(pos.slot).to_be_greater_than(-1)
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Source | `test/unit/app/llm_dashboard/agent_dashboard_hardening_spec.spl` |
+| Source | `test/01_unit/app/llm_dashboard/agent_dashboard_hardening_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
