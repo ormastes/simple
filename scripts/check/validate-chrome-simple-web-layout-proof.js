@@ -18,9 +18,21 @@ function decimalIntegerText(value) {
   return null;
 }
 
+function jsonIntegerText(value) {
+  if (typeof value === 'number' && Number.isInteger(value)) return String(value);
+  return null;
+}
+
 function sameInteger(left, right) {
   const l = decimalIntegerText(left);
   const r = decimalIntegerText(right);
+  if (l === null || r === null) return false;
+  return BigInt(l) === BigInt(r);
+}
+
+function sameJsonInteger(left, right) {
+  const l = jsonIntegerText(left);
+  const r = jsonIntegerText(right);
   if (l === null || r === null) return false;
   return BigInt(l) === BigInt(r);
 }
@@ -31,8 +43,19 @@ function integerAtLeast(value, min) {
   return BigInt(text) >= BigInt(min);
 }
 
+function jsonIntegerAtLeast(value, min) {
+  const text = jsonIntegerText(value);
+  if (text === null) return false;
+  return BigInt(text) >= BigInt(min);
+}
+
 function integerTextOrClean(value) {
   const text = decimalIntegerText(value);
+  return text === null ? clean(value) : text;
+}
+
+function jsonIntegerTextOrClean(value) {
+  const text = jsonIntegerText(value);
   return text === null ? clean(value) : text;
 }
 
@@ -68,8 +91,8 @@ function readJsonArtifact(artifact, fallback) {
 
 function pixelCountMatches(pixels, width, height) {
   if (!Array.isArray(pixels)) return false;
-  const w = decimalIntegerText(width);
-  const h = decimalIntegerText(height);
+  const w = jsonIntegerText(width);
+  const h = jsonIntegerText(height);
   if (w === null || h === null) return false;
   return BigInt(pixels.length) === BigInt(w) * BigInt(h);
 }
@@ -135,7 +158,7 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'malformed-mismatch-count';
 } else if (!sameInteger(proof.mismatch_count, 0)) {
   reason = 'pixel-mismatch';
-} else if (!integerAtLeast(proof.width, 1) || !integerAtLeast(proof.height, 1)) {
+} else if (!jsonIntegerAtLeast(proof.width, 1) || !jsonIntegerAtLeast(proof.height, 1)) {
   reason = 'missing-capture-viewport';
 } else if (proof.captured_argb_written !== true) {
   reason = 'missing-captured-argb';
@@ -149,7 +172,7 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'captured-argb-format-mismatch';
 } else if (capturedArgb.producer !== 'chrome-headless-screenshot') {
   reason = 'captured-argb-producer-mismatch';
-} else if (!sameInteger(capturedArgb.width, proof.width) || !sameInteger(capturedArgb.height, proof.height)) {
+} else if (!sameJsonInteger(capturedArgb.width, proof.width) || !sameJsonInteger(capturedArgb.height, proof.height)) {
   reason = 'captured-argb-viewport-mismatch';
 } else if (!argbPixelsAreUint32Numbers(capturedArgb.pixels)) {
   reason = 'captured-argb-pixel-type-mismatch';
@@ -165,11 +188,11 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'empty-chrome-geometry-file';
 } else if (!geometryJson.ok || geometry.producer !== 'chrome-headless-geometry') {
   reason = 'malformed-chrome-geometry';
-} else if (!sameInteger(geometryViewport.width, proof.width) || !sameInteger(geometryViewport.height, proof.height)) {
+} else if (!sameJsonInteger(geometryViewport.width, proof.width) || !sameJsonInteger(geometryViewport.height, proof.height)) {
   reason = 'chrome-geometry-viewport-mismatch';
 } else if (geometryItems.length < 1) {
   reason = 'missing-chrome-geometry-items';
-} else if (!integerAtLeast(proof.frame_us, 1)) {
+} else if (!jsonIntegerAtLeast(proof.frame_us, 1)) {
   reason = 'missing-chrome-timing';
 }
 
@@ -181,17 +204,17 @@ emit('chrome_simple_web_layout_simple_weighted_checksum', integerTextOrClean(pro
 emit('chrome_simple_web_layout_chrome_weighted_checksum', integerTextOrClean(proof.weighted_checksum));
 emit('chrome_simple_web_layout_mismatch_count', integerTextOrClean(proof.mismatch_count));
 emit('chrome_simple_web_layout_blur_or_tolerance_used', proof.blur_or_tolerance_used === false ? 'false' : clean(proof.blur_or_tolerance_used));
-emit('chrome_simple_web_layout_chrome_frame_us', integerTextOrClean(proof.frame_us));
-emit('chrome_simple_web_layout_capture_width', integerTextOrClean(proof.width));
-emit('chrome_simple_web_layout_capture_height', integerTextOrClean(proof.height));
+emit('chrome_simple_web_layout_chrome_frame_us', jsonIntegerTextOrClean(proof.frame_us));
+emit('chrome_simple_web_layout_capture_width', jsonIntegerTextOrClean(proof.width));
+emit('chrome_simple_web_layout_capture_height', jsonIntegerTextOrClean(proof.height));
 emit('chrome_simple_web_layout_captured_argb_path', proof.captured_argb_path);
 emit('chrome_simple_web_layout_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
 emit('chrome_simple_web_layout_captured_argb_file_status', capturedArgbStat === null ? 'fail' : 'pass');
 emit('chrome_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
 emit('chrome_simple_web_layout_captured_argb_format', capturedArgb.format);
 emit('chrome_simple_web_layout_captured_argb_producer', capturedArgb.producer);
-emit('chrome_simple_web_layout_captured_argb_width', integerTextOrClean(capturedArgb.width));
-emit('chrome_simple_web_layout_captured_argb_height', integerTextOrClean(capturedArgb.height));
+emit('chrome_simple_web_layout_captured_argb_width', jsonIntegerTextOrClean(capturedArgb.width));
+emit('chrome_simple_web_layout_captured_argb_height', jsonIntegerTextOrClean(capturedArgb.height));
 emit('chrome_simple_web_layout_captured_argb_pixel_count', capturedArgbPixels === null ? '' : String(capturedArgbPixels.length));
 emit('chrome_simple_web_layout_captured_argb_nonzero_pixel_count', capturedArgbNonzeroPixelCount);
 emit('chrome_simple_web_layout_geometry_path', proof.geometry_path);
@@ -199,8 +222,8 @@ emit('chrome_simple_web_layout_geometry_written', proof.geometry_written === tru
 emit('chrome_simple_web_layout_geometry_file_status', geometryStat === null ? 'fail' : 'pass');
 emit('chrome_simple_web_layout_geometry_size_bytes', geometryStat === null ? '' : String(geometryStat.stat.size));
 emit('chrome_simple_web_layout_geometry_producer', geometry.producer);
-emit('chrome_simple_web_layout_geometry_viewport_width', integerTextOrClean(geometryViewport.width));
-emit('chrome_simple_web_layout_geometry_viewport_height', integerTextOrClean(geometryViewport.height));
+emit('chrome_simple_web_layout_geometry_viewport_width', jsonIntegerTextOrClean(geometryViewport.width));
+emit('chrome_simple_web_layout_geometry_viewport_height', jsonIntegerTextOrClean(geometryViewport.height));
 emit('chrome_simple_web_layout_geometry_item_count', String(geometryItems.length));
 emit('chrome_simple_web_layout_chrome_bin', proof.chrome_bin);
 

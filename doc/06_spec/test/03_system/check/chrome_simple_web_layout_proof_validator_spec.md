@@ -27,7 +27,7 @@ chrome_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -89,6 +89,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 - Capture viewport dimensions must be explicit positive decimal integers and
   are emitted as normalized rows for the live wrapper to compare against the
   requested Chrome viewport.
+- Capture viewport, ARGB readback viewport, Chrome geometry viewport, and
+  frame timing values must be real JSON numbers, not stringified rows.
 - The live Chrome wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 
@@ -492,6 +494,57 @@ expect(fractional).to_contain("chrome_simple_web_layout_capture_height=64.5")
 
 </details>
 
+#### rejects stringified Chrome viewport geometry and timing proof rows
+
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Chrome live numeric proof cannot be stringified
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-validator-string-numeric-proof"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/capture.json", "p.width=\"96\"") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/capture.json > " + root + "/capture.env; " +
+    _proof_command(root + "/argb.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:\"96\",height:64,format:\"argb-u32\",producer:\"chrome-headless-screenshot\",pixels:Array(96*64).fill(4294967295)}))") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/argb.json > " + root + "/argb.env; " +
+    _proof_command(root + "/geometry.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),JSON.stringify({producer:\"chrome-headless-geometry\",viewport:{width:\"96\",height:64},items:[{label:\"root\",tag:\"div\",x:0,y:0,width:96,height:64}]}))") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/geometry.json > " + root + "/geometry.env; " +
+    _proof_command(root + "/timing.json", "p.frame_us=\"1250\"") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/timing.json > " + root + "/timing.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val capture = file_read(root + "/capture.env")
+val argb = file_read(root + "/argb.env")
+val geometry = file_read(root + "/geometry.env")
+val timing = file_read(root + "/timing.env")
+step("Confirm Chrome live numeric proof cannot be stringified")
+expect(capture).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(capture).to_contain("chrome_simple_web_layout_validation_reason=missing-capture-viewport")
+expect(capture).to_contain("chrome_simple_web_layout_capture_width=96")
+expect(argb).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(argb).to_contain("chrome_simple_web_layout_validation_reason=captured-argb-viewport-mismatch")
+expect(argb).to_contain("chrome_simple_web_layout_captured_argb_width=96")
+expect(geometry).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(geometry).to_contain("chrome_simple_web_layout_validation_reason=chrome-geometry-viewport-mismatch")
+expect(geometry).to_contain("chrome_simple_web_layout_geometry_viewport_width=96")
+expect(timing).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(timing).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-timing")
+expect(timing).to_contain("chrome_simple_web_layout_chrome_frame_us=1250")
+```
+
+</details>
+
 #### rejects blur tolerance and malformed mismatch counts
 
 -  proof command
@@ -587,8 +640,8 @@ expect(capture).to_contain("geometry_path: geometryOutputPath")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
