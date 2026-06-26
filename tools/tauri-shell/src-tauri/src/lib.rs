@@ -1407,8 +1407,8 @@ fn simple_subprocess_args_for(entry: Option<&str>, shared_wm: bool) -> Vec<Strin
 
 // `ui_main` is the path passed to `simple run` ahead of the `tauri` subcommand.
 // Desktop uses the repo-relative `src/app/ui/main.spl` (resolved against cwd).
-// The bundle path passes an ABSOLUTE `<bundleRoot>/src/app/ui/main.spl` so that
-// find_project_root resolves the module graph to <bundleRoot> on device.
+// The mobile bundle path passes an ABSOLUTE entry under `<bundleRoot>/src/...`
+// so find_project_root resolves the module graph to <bundleRoot> on device.
 fn simple_subprocess_args_with_main(
     entry: Option<&str>,
     shared_wm: bool,
@@ -1501,7 +1501,7 @@ pub fn run() {
     let mut entry_file = resolve_entry_file();
     // Path passed to `simple run` before the `tauri` subcommand. Defaults to the
     // repo-relative desktop path; the embedded source bundle overrides it with an
-    // absolute `<bundleRoot>/src/app/ui/main.spl` so find_project_root resolves on device.
+    // absolute `<bundleRoot>/src/...` entry so find_project_root resolves on device.
     let mut ui_main_path = "src/app/ui/main.spl".to_string();
     // Prefer the embedded real-pipeline source bundle (renders the widget showcase
     // via the genuine render_html_tree path) over the hard-coded smoke entry.
@@ -1509,7 +1509,11 @@ pub fn run() {
         match prepare_bundled_ui_bundle() {
             Ok(Some(root)) => {
                 entry_file = Some(format!("{}/widget_showcase_mobile.ui.sdn", root));
-                ui_main_path = format!("{}/src/app/ui/main.spl", root);
+                ui_main_path = if cfg!(mobile) {
+                    format!("{}/src/app/ui.tauri/tauri_entry.spl", root)
+                } else {
+                    format!("{}/src/app/ui/main.spl", root)
+                };
             }
             Ok(None) => {}
             Err(err) => {
@@ -1813,8 +1817,8 @@ mod tests {
     use super::{
         inline_shell_document_script, mdi_shell_html, render_envelope_metadata_js,
         resolve_simple_binary_from, shell_input_message, shell_input_message_for,
-        simple_subprocess_args_for, startup_error_shell_html, tauri_mdi_init_script, ShellMessage,
-        SubprocessMessage,
+        simple_subprocess_args_for, simple_subprocess_args_with_main, startup_error_shell_html,
+        tauri_mdi_init_script, ShellMessage, SubprocessMessage,
     };
     use crate::{
         ANDROID_RUNTIME_AARCH64, ANDROID_RUNTIME_X86_64, IOS_RUNTIME_AARCH64,
@@ -1881,6 +1885,19 @@ mod tests {
             vec![
                 "run".to_string(),
                 "examples/01_getting_started/hello_native.spl".to_string()
+            ]
+        );
+        assert_eq!(
+            simple_subprocess_args_with_main(
+                Some("/tmp/simple-ui-bundle/widget_showcase_mobile.ui.sdn"),
+                false,
+                "/tmp/simple-ui-bundle/src/app/ui.tauri/tauri_entry.spl"
+            ),
+            vec![
+                "run".to_string(),
+                "/tmp/simple-ui-bundle/src/app/ui.tauri/tauri_entry.spl".to_string(),
+                "tauri".to_string(),
+                "/tmp/simple-ui-bundle/widget_showcase_mobile.ui.sdn".to_string()
             ]
         );
     }

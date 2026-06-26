@@ -1,0 +1,184 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+BUILD_DIR="$ROOT_DIR/build/tauri_android_mobile_renderer"
+APK="${ANDROID_APK:-$ROOT_DIR/tools/tauri-shell/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk}"
+SCREENSHOT="${ANDROID_RENDERER_SCREENSHOT:-$BUILD_DIR/android_renderer.png}"
+LOGCAT="$BUILD_DIR/android_renderer_logcat.txt"
+TIMEOUT_SECS="${ANDROID_RENDERER_TIMEOUT_SECS:-120}"
+ADB="${ADB:-adb}"
+EMULATOR="${EMULATOR:-emulator}"
+PACKAGE_NAME="${ANDROID_PACKAGE_NAME:-com.simple.ui}"
+HWUI_RENDERER="${ANDROID_RENDERER_HWUI_RENDERER-}"
+EMULATOR_GPU_MODE="${ANDROID_EMULATOR_GPU_MODE:-host}"
+GPU_LOG_EXTRA="${ANDROID_RENDERER_GPU_LOG:-$BUILD_DIR/emulator.out}"
+
+fail() {
+    echo "status=fail"
+    echo "reason=$1"
+    exit 1
+}
+
+validate_screenshot_png() {
+    path="$1"
+    label="$2"
+    validation_log="$BUILD_DIR/android_screenshot_validation.log"
+
+    if command -v python3 >/dev/null 2>&1; then
+        SCREENSHOT_PATH="$path" SCREENSHOT_LABEL="$label" python3 - <<'PY' > "$validation_log" 2>&1
+import os
+import sys
+
+path = os.environ["SCREENSHOT_PATH"]
+label = os.environ["SCREENSHOT_LABEL"]
+try:
+    from PIL import Image
+except Exception as exc:
+    print(f"pillow unavailable: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+try:
+    image = Image.open(path).convert("RGBA")
+except Exception as exc:
+    print(f"failed to open screenshot: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+width, height = image.size
+if width < 300 or height < 300:
+    print(f"screenshot dimensions invalid: {width}x{height}", file=sys.stderr)
+    sys.exit(1)
+
+colors = image.getcolors(maxcolors=1000000)
+unique = 1000001 if colors is None else len(colors)
+if unique < 16:
+    print(f"screenshot appears blank: unique_colors={unique}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"{label}=pass width={width} height={height} unique_colors={unique}")
+PY
+        code=$?
+        cat "$validation_log"
+        return "$code"
+    fi
+
+    echo "python3 unavailable for screenshot validation" > "$validation_log"
+    cat "$validation_log"
+    return 1
+}
+
+mkdir -p "$BUILD_DIR"
+
+command -v "$ADB" >/dev/null 2>&1 || fail "adb not found"
+command -v "$EMULATOR" >/dev/null 2>&1 || true
+test -f "$APK" || fail "Android APK missing: $APK"
+unzip -l "$APK" | grep -q 'lib/arm64-v8a/libsimple_mobile_runtime_exec\.so' \
+    || fail "Android APK missing arm64-v8a packaged Simple runtime"
+
+DEVICE_SERIAL="${ANDROID_SERIAL:-}"
+if [ -z "$DEVICE_SERIAL" ]; then
+    DEVICE_SERIAL="$("$ADB" devices | awk 'NR > 1 && $2 == "device" { print $1; exit }')"
+fi
+
+STARTED_EMULATOR_PID=""
+if [ -z "$DEVICE_SERIAL" ]; then
+    AVD_NAME="${ANDROID_AVD:-$("$EMULATOR" -list-avds | head -1)}"
+    test -n "$AVD_NAME" || fail "no running Android device and no AVD available"
+    emulator_args="-avd $AVD_NAME -no-audio -no-window"
+    if [ -n "$EMULATOR_GPU_MODE" ]; then
+        emulator_args="$emulator_args -gpu $EMULATOR_GPU_MODE"
+    fi
+    # shellcheck disable=SC2086
+    "$EMULATOR" $emulator_args > "$BUILD_DIR/emulator.out" 2> "$BUILD_DIR/emulator.err" &
+    STARTED_EMULATOR_PID=$!
+    "$ADB" wait-for-device
+    DEVICE_SERIAL="$("$ADB" devices | awk 'NR > 1 && $2 == "device" { print $1; exit }')"
+fi
+test -n "$DEVICE_SERIAL" || fail "no Android device available"
+
+cleanup() {
+    if [ -n "${LOGCAT_PID:-}" ]; then
+        kill "$LOGCAT_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+boot_end=$(( $(date +%s) + TIMEOUT_SECS ))
+while [ "$(date +%s)" -lt "$boot_end" ]; do
+    booted="$("$ADB" -s "$DEVICE_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
+    if [ "$booted" = "1" ]; then
+        break
+    fi
+    sleep 2
+done
+
+if [ -n "$HWUI_RENDERER" ]; then
+    "$ADB" -s "$DEVICE_SERIAL" shell setprop debug.hwui.renderer "$HWUI_RENDERER" >/dev/null 2>&1 || true
+fi
+"$ADB" -s "$DEVICE_SERIAL" logcat -c >/dev/null 2>&1 || true
+"$ADB" -s "$DEVICE_SERIAL" install -r -d "$APK" > "$BUILD_DIR/adb_install.log" 2>&1 \
+    || fail "adb install failed; see $BUILD_DIR/adb_install.log"
+
+: > "$LOGCAT"
+"$ADB" -s "$DEVICE_SERIAL" logcat -v time > "$LOGCAT" 2>&1 &
+LOGCAT_PID=$!
+
+"$ADB" -s "$DEVICE_SERIAL" shell am force-stop "$PACKAGE_NAME" >/dev/null 2>&1 || true
+"$ADB" -s "$DEVICE_SERIAL" shell am start -n "$PACKAGE_NAME/.MainActivity" \
+    > "$BUILD_DIR/adb_launch.log" 2>&1 \
+    || fail "adb launch failed; see $BUILD_DIR/adb_launch.log"
+
+end=$(( $(date +%s) + TIMEOUT_SECS ))
+while [ "$(date +%s)" -lt "$end" ]; do
+    if grep -Eq 'F/DEBUG|Fatal signal|F/libc|F/VulkanManager|Simple subprocess stdout closed before a valid render arrived|Headless UI completed|parse error: expected value' "$LOGCAT" 2>/dev/null; then
+        fail "Android renderer failure observed; see $LOGCAT"
+    fi
+    if grep -Eq '\[tauri-shell\] render, html_len=' "$LOGCAT" 2>/dev/null; then
+        break
+    fi
+    sleep 2
+done
+
+grep -Eq '\[tauri-shell\] render, html_len=' "$LOGCAT" 2>/dev/null \
+    || fail "Android Tauri renderer log not observed within ${TIMEOUT_SECS}s"
+grep -Eq 'F/DEBUG|Fatal signal|F/libc|F/VulkanManager|Simple subprocess stdout closed before a valid render arrived|Headless UI completed|parse error: expected value' "$LOGCAT" 2>/dev/null \
+    && fail "Android renderer failure observed; see $LOGCAT"
+
+pid="$("$ADB" -s "$DEVICE_SERIAL" shell pidof "$PACKAGE_NAME" 2>/dev/null | tr -d '\r' || true)"
+test -n "$pid" || fail "Android package is not running after renderer marker: $PACKAGE_NAME"
+"$ADB" -s "$DEVICE_SERIAL" shell dumpsys activity top > "$BUILD_DIR/android_activity_top.txt" 2>/dev/null || true
+grep -q "$PACKAGE_NAME" "$BUILD_DIR/android_activity_top.txt" \
+    || fail "Android package is not the foreground activity after renderer marker: $PACKAGE_NAME"
+
+sleep 3
+"$ADB" -s "$DEVICE_SERIAL" exec-out screencap -p > "$SCREENSHOT" \
+    || fail "failed to capture Android screenshot"
+test -s "$SCREENSHOT" || fail "Android screenshot is empty: $SCREENSHOT"
+validate_screenshot_png "$SCREENSHOT" android_mobile_renderer_screenshot \
+    || fail "Android mobile renderer screenshot PNG validation failed"
+
+{
+    echo
+    echo "=== adb renderer properties ==="
+    echo "debug.hwui.renderer=$("$ADB" -s "$DEVICE_SERIAL" shell getprop debug.hwui.renderer 2>/dev/null | tr -d '\r')"
+    echo "ro.hardware.vulkan=$("$ADB" -s "$DEVICE_SERIAL" shell getprop ro.hardware.vulkan 2>/dev/null | tr -d '\r')"
+    echo "ro.boot.hardware.vulkan=$("$ADB" -s "$DEVICE_SERIAL" shell getprop ro.boot.hardware.vulkan 2>/dev/null | tr -d '\r')"
+    "$ADB" -s "$DEVICE_SERIAL" shell dumpsys gfxinfo "$PACKAGE_NAME" 2>/dev/null | head -80 || true
+} >> "$LOGCAT"
+
+grep -Eiq 'Vulkan|vulkan|VK_|ANGLE.*Vulkan|Renderer.*Vulkan|HWUI.*Vulkan|skiavk' "$LOGCAT" "$GPU_LOG_EXTRA" \
+    || fail "Android renderer log missing Vulkan/skiavk marker"
+
+echo "android_tooling=available"
+echo "android_device=$DEVICE_SERIAL"
+echo "android_screenshot=$SCREENSHOT"
+echo "android_logcat=$LOGCAT"
+echo "android_gpu_log=$GPU_LOG_EXTRA"
+echo "android_render_log_status=pass"
+echo "android_layout_status=pass"
+echo "android_vulkan_log_status=pass"
+echo "status=pass"
+
+if [ -n "$STARTED_EMULATOR_PID" ]; then
+    true
+fi

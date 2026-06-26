@@ -161,6 +161,20 @@ For Linux Vulkan render-log comparison, require the aggregate audit to expose
 `linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic`; an env file
 that exists without a real `RDOC` artifact remains a blocker.
 
+For Tauri2 mobile renderer parity, use
+`scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`. It must pass
+the desktop production GUI/Web parity source first, then require live iOS
+Tauri2/WKWebView screenshot evidence plus Metal markers and live Android
+Tauri2/WebView screenshot evidence plus Vulkan/skiavk or host-emulator Vulkan
+markers. A packaged APK or a nonblank Android screenshot is not Vulkan proof if
+logcat contains `F/DEBUG`, `Fatal signal`, `VulkanManager`,
+`Headless UI completed`, or subprocess parse failures; leave the aggregate
+unavailable/failed until the Android renderer log and screenshot both pass.
+Host/emulator GPU logs such as ANGLE/Vulkan or Apple/SwiftShader Vulkan are
+supporting evidence only when `com.simple.ui` remains foreground, a
+`[tauri-shell] render, html_len=` marker is present, and the screenshot is
+captured from the live app.
+
 For runtime concurrency work, keep the public API map current in
 `doc/07_guide/lib/misc/stdlib.md`, `doc/07_guide/compiler/check_perf.md`, and
 `.codex/skills/coding/SKILL.md`. In particular, distinguish `thread_spawn`

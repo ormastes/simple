@@ -265,6 +265,17 @@ Simple Vulkan Engine2D and Electron Chromium/Vulkan `.rdc` evidence.
 Defer Linux claims until platform-specific runbooks validate the same evidence
 keys and RDOC gate contract.
 
+For Tauri2 mobile renderer parity, use
+`scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`; it requires
+desktop production GUI/Web parity first, iOS WKWebView screenshot evidence with
+Metal markers, and Android WebView screenshot evidence with Vulkan/skiavk or
+host-emulator Vulkan markers. Treat `F/DEBUG`, `Fatal signal`, `VulkanManager`,
+`Headless UI completed`, or subprocess parse failures in Android logcat as hard
+blockers, not as Vulkan proof. Host/emulator ANGLE/Vulkan startup logs are
+supporting evidence only when `com.simple.ui` remains foreground, a
+`[tauri-shell] render, html_len=` marker is present, and the screenshot is
+captured from the live app.
+
 Prefer the strongest available oracle for the surface:
 
 - HTML/CSS/WASM-backed surfaces: first assert HTML, DOM-visible text,

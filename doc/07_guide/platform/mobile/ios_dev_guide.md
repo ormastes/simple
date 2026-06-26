@@ -98,6 +98,21 @@ The Xcode project is at `tools/tauri-shell/src-tauri/gen/apple/simple-tauri-shel
 Bundle ID: `com.simple.ui` (set in `project.yml`).  
 iOS deployment target: 14.0.
 
+## 4b. Metal-backed renderer evidence
+
+For Tauri2 mobile renderer parity evidence on a simulator, run:
+
+```sh
+sh scripts/check/check-tauri-ios-mobile-renderer-evidence.shs
+```
+
+The script selects an available iPhone simulator, launches the bundled Tauri2
+app without an external dev server, waits for the Simple render/eval log, takes
+a simulator screenshot, validates that the PNG is nonblank, and requires Metal
+log markers. On 2026-06-26 this passed on iPhone 17 Pro with
+`ios_render_log_status=pass`, `ios_layout_status=pass`, and
+`ios_metal_log_status=pass`.
+
 ## 5. Architecture Notes
 
 ```
