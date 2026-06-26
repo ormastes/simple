@@ -4,14 +4,14 @@
 
 ## Quick Stats
 
-- **Total Features:** 7
-- **Complete Documentation:** 7 (100%)
+- **Total Features:** 8
+- **Complete Documentation:** 8 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 838
+- **Total Lines:** 986
 
 ---
 
-## Other (7 features)
+## Other (8 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
@@ -22,3 +22,4 @@
 | [Production GUI/web renderer parity gate](test/03_system/check/production_gui_web_renderer_parity_gate_spec.md) | Partial | N/A | 11 | 60% | 118 lines |
 | [GUI Vulkan Pairwise Mismatch Contract](test/03_system/check/gui_vulkan_pairwise_mismatch_contract_spec.md) | Partial | N/A | 2 | 60% | 107 lines |
 | [Linux Vulkan render-log compare gate](test/03_system/check/linux_vulkan_render_log_compare_spec.md) | Partial | N/A | 10 | 60% | 130 lines |
+| [Widget Showcase Perf Wrapper Contract](test/03_system/check/widget_showcase_perf_wrapper_spec.md) | Partial | N/A | 7 | 60% | 148 lines |

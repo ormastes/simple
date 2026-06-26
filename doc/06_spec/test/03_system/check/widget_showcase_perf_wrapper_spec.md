@@ -27,7 +27,7 @@ widget_showcase_perf_wrapper_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -102,6 +102,8 @@ PLAN_ONLY=1 RESOLUTION=8k sh scripts/check/check-widget-showcase-4k-200fps.shs
   to measured elapsed time and cannot make a slow probe pass 200 FPS.
 - Native plan-only mode writes the generated alias source that calls the
   selected probe function directly.
+- The wrapper resolves a usable Simple launcher before the legacy Rust target
+  when `SIMPLE_BIN` is not explicit, and records the resolution source.
 - The GUI showcase app routes `SHOWCASE_8K_PERF=1` through the env facade to
   `run_8k_perf_probe()` before normal GUI startup, and does not reintroduce a
   raw `rt_env_get` shortcut.
@@ -209,7 +211,7 @@ environment dispatch.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 52 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -250,6 +252,7 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_kind=content-sha256")
 expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl")
 expect(evidence).to_contain("gui_showcase_4k_200fps_simple_bin=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_simple_bin_source=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_use_native=1")
 expect(evidence).to_contain("gui_showcase_4k_200fps_alias_src_file_status=pass")
 expect(evidence).to_contain("gui_showcase_4k_200fps_native_bin_file_status=fail")
@@ -279,7 +282,7 @@ expect(alias_src).to_contain("run_4k_perf_probe()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 52 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -320,6 +323,7 @@ expect(evidence).to_contain("gui_showcase_8k_perf_source_revision=")
 expect(evidence).to_contain("gui_showcase_8k_perf_source_revision_kind=content-sha256")
 expect(evidence).to_contain("gui_showcase_8k_perf_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl")
 expect(evidence).to_contain("gui_showcase_8k_perf_simple_bin=")
+expect(evidence).to_contain("gui_showcase_8k_perf_simple_bin_source=")
 expect(evidence).to_contain("gui_showcase_8k_perf_use_native=1")
 expect(evidence).to_contain("gui_showcase_8k_perf_alias_src_file_status=pass")
 expect(evidence).to_contain("gui_showcase_8k_perf_native_bin_file_status=fail")
@@ -364,6 +368,31 @@ expect(script).to_contain("frame_p95_ns=$frame_avg_ns")
 expect(script).to_contain("_frame_elapsed_ns_status=$frame_elapsed_ns_status")
 expect(script).to_contain("_frame_p50_ns=$frame_p50_ns")
 expect(script).to_contain("_frame_p95_ns=$frame_p95_ns")
+```
+
+</details>
+
+#### resolves repo simple launcher before legacy cargo target
+
+- Read the wrapper source
+- Assert resolver order and provenance evidence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read the wrapper source")
+val script = file_read("scripts/check/check-widget-showcase-4k-200fps.shs")
+
+step("Assert resolver order and provenance evidence")
+expect(script).to_contain("for candidate in bin/simple ./bin/simple src/compiler_rust/target/release/simple")
+expect(script.index_of("bin/simple")).to_be_less_than(script.index_of("src/compiler_rust/target/release/simple"))
+expect(script).to_contain("SIMPLE_BIN_SOURCE=\"${SIMPLE_BIN_SOURCE:-default-missing}\"")
+expect(script).to_contain("_simple_bin_source=$SIMPLE_BIN_SOURCE")
 ```
 
 </details>
@@ -467,8 +496,8 @@ expect(showcase.contains("rt_env_get(")).to_equal(false)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
