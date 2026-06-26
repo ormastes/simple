@@ -115,6 +115,11 @@ or browser process that falls back away from Metal is not a Metal-backed GUI/web
 proof. In strict mode, missing Xcode GPU Frame Capture evidence fails even when
 readback and browser pixels pass. Completion remains platform-local: a macOS
 pass does not prove Linux Vulkan or Windows D3D12.
+Structured blockers are emitted through
+`macos_metal_render_log_compare_blocked_gate_count` and
+`macos_metal_render_log_compare_blocked_gates`, with separate gate statuses for
+generated Metal readback, Engine2D framebuffer readback, browser Metal backing,
+pairwise ARGB diff, ARGB source evidence, and Xcode GPU capture.
 
 ## Host Notes
 
@@ -166,7 +171,8 @@ macos_metal_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+-Runnable source: 21 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -183,6 +189,14 @@ val evidence = file_read("build/test-macos-metal-render-log-pass/out/evidence.en
 expect(evidence).to_contain("macos_metal_render_log_compare_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_required_api=metal")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gate_count=0")
+expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=")
+expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_gate_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_gate_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_pairwise_gate_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_argb_source_gate_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=pass")
 val simple_log = file_read("build/test-macos-metal-render-log-pass/out/simple.srl.env")
 expect(simple_log).to_contain("simple_render_log_platform=macos")
 expect(simple_log).to_contain("simple_render_log_native_api=metal")
@@ -200,7 +214,8 @@ expect(simple_log).to_contain("simple_render_log_artifact_magic=XCODE-GPUTRACE")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -215,6 +230,8 @@ expect(code).to_equal(0)
 val evidence = file_read("build/test-macos-metal-render-log-fail/out/evidence.env")
 expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
 expect(evidence).to_contain("metal-framebuffer-readback-fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_gate_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=metal-framebuffer-readback,argb-source-evidence")
 ```
 
 </details>
@@ -224,7 +241,8 @@ expect(evidence).to_contain("metal-framebuffer-readback-fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+-Runnable source: 14 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -242,6 +260,9 @@ expect(evidence).to_contain("electron-metal-backing-fail")
 expect(evidence).to_contain("browser-metal-backing-fail")
 expect(evidence).to_contain("pixel-comparison-pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_pairwise_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_pairwise_gate_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=browser-metal-backing,pairwise-argb-diff,argb-source-evidence")
 ```
 
 </details>
@@ -251,7 +272,8 @@ expect(evidence).to_contain("macos_metal_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -265,6 +287,8 @@ expect(code).to_equal(0)
 
 val evidence = file_read("build/test-macos-metal-render-log-argb-geometry/out/evidence.env")
 expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_argb_source_gate_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=argb-source-evidence")
 expect(evidence).to_contain("chrome-argb-blank")
 expect(evidence).to_contain("argb-viewport-mismatch")
 val chrome_log = file_read("build/test-macos-metal-render-log-argb-geometry/out/chrome.srl.env")
@@ -278,7 +302,8 @@ expect(chrome_log).to_contain("simple_render_log_nonblank_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -294,6 +319,8 @@ val evidence = file_read("build/test-macos-metal-render-log-strict-capture/out/e
 expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
 expect(evidence).to_contain("macos-metal-gpu-capture-missing")
 expect(evidence).to_contain("macos_metal_render_log_compare_require_gpu_capture=1")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=argb-source-evidence,xcode-gpu-capture")
 ```
 
 </details>
@@ -303,7 +330,8 @@ expect(evidence).to_contain("macos_metal_render_log_compare_require_gpu_capture=
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -320,6 +348,8 @@ val evidence = file_read("build/test-macos-metal-render-log-status-only-capture/
 expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
 expect(evidence).to_contain("macos-metal-gpu-capture-artifact-missing")
 expect(evidence).to_contain("macos-metal-gpu-capture-magic-missing")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=xcode-gpu-capture")
 ```
 
 </details>

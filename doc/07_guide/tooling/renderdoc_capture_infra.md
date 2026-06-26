@@ -90,9 +90,12 @@ keeps these states separate:
 - Simple Engine2D Vulkan readback availability;
 - optional RenderDoc `.rdc` capture availability and gate status.
 
-Current platform order is Linux Vulkan first, then macOS Metal/MoltenVK and
-Windows D3D12/PIX. Use the Linux render-log gate below before claiming Chrome,
-Electron, and Simple are comparable on a Vulkan host.
+Real platform validation is tracked in separate host-session plans:
+`doc/03_plan/agent_tasks/linux_vulkan_real_platform_validation.md`,
+`doc/03_plan/agent_tasks/macos_metal_real_platform_validation.md`, and
+`doc/03_plan/agent_tasks/windows_d3d12_real_platform_validation.md`. This guide
+documents shared capture formats, wrappers, and gates only; do not use the
+current prep lane as completion evidence for any real host.
 
 Run a readiness-only probe first:
 
@@ -495,6 +498,18 @@ macos_metal_render_log_compare_gpu_capture_status=pass
 
 The gate rejects missing Metal submit/readback, missing raw framebuffer
 download, checksum mismatch, browser fallback, and non-pairwise comparisons.
+The macOS row also emits structured blockers:
+`macos_metal_render_log_compare_blocked_gate_count`,
+`macos_metal_render_log_compare_blocked_gates`,
+`macos_metal_render_log_compare_generated_readback_gate_status`,
+`macos_metal_render_log_compare_framebuffer_readback_gate_status`,
+`macos_metal_render_log_compare_browser_backing_gate_status`,
+`macos_metal_render_log_compare_pairwise_gate_status`,
+`macos_metal_render_log_compare_argb_source_gate_status`, and
+`macos_metal_render_log_compare_gpu_capture_gate_status`. Use these fields
+instead of parsing the reason string when assigning a macOS blocker to native
+Metal readback, browser Metal backing, pairwise pixels, ARGB source evidence,
+or Xcode GPU Frame Capture.
 
 ### Windows D3D12/PIX Render-Log Compare
 
@@ -741,7 +756,9 @@ Current local macOS result on 2026-06-21:
 
 Do not use one platform gate to claim another platform. Linux Vulkan, macOS
 Metal, and Windows D3D12/PIX must each pass their own `simple-render-log-v1`
-comparison gate on a matching native host.
+comparison gate on a matching native host. Run those validations in separate
+sessions using the platform plans under `doc/03_plan/agent_tasks/`, then commit
+each platform's evidence/report independently.
 
 ## Evidence Artifacts
 
