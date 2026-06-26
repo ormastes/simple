@@ -26,7 +26,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 - Large integer checksum values compare exactly, without JavaScript number
   rounding.
 - Malformed `frame_us`, malformed mismatch counts, blur/tolerance use, missing
-  ARGB capture, and missing capture provenance are rejected.
+  ARGB capture, missing capture provenance, missing viewport proof, and capture
+  viewport mismatches are rejected.
 - The live Electron layout wrapper consumes the validator and still maps real
   pixel mismatches to `divergent` evidence.
 """
@@ -57,6 +58,8 @@ describe "Electron Simple Web layout proof validator":
         expect(evidence).to_contain("electron_simple_web_layout_electron_weighted_checksum=18446744073709551611")
         expect(evidence).to_contain("electron_simple_web_layout_mismatch_count=0")
         expect(evidence).to_contain("electron_simple_web_layout_electron_frame_us=1250")
+        expect(evidence).to_contain("electron_simple_web_layout_requested_width=96")
+        expect(evidence).to_contain("electron_simple_web_layout_requested_height=64")
         expect(evidence).to_contain("electron_simple_web_layout_capture_native_width=96")
         expect(evidence).to_contain("electron_simple_web_layout_capture_native_height=64")
         expect(evidence).to_contain("electron_simple_web_layout_capture_downsampled=false")
@@ -90,6 +93,24 @@ describe "Electron Simple Web layout proof validator":
         expect(capture).to_contain("electron_simple_web_layout_validation_reason=missing-captured-argb")
         expect(capture).to_contain("electron_simple_web_layout_captured_argb_written=false")
         expect(provenance).to_contain("electron_simple_web_layout_validation_reason=missing-capture-provenance")
+
+    it "rejects missing requested viewport and native capture viewport mismatch":
+        val root = "build/test-electron-layout-validator-viewport"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/missing.json", "delete p.width") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+            _proof_command(root + "/mismatch.json", "p.capture_native_width=95") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val missing = file_read(root + "/missing.env")
+        val mismatch = file_read(root + "/mismatch.env")
+        expect(missing).to_contain("electron_simple_web_layout_validation_reason=missing-viewport-proof")
+        expect(missing).to_contain("electron_simple_web_layout_requested_width=")
+        expect(mismatch).to_contain("electron_simple_web_layout_validation_reason=capture-viewport-mismatch")
+        expect(mismatch).to_contain("electron_simple_web_layout_requested_width=96")
+        expect(mismatch).to_contain("electron_simple_web_layout_capture_native_width=95")
 
     it "rejects blur tolerance and malformed mismatch counts":
         val root = "build/test-electron-layout-validator-blur-mismatch"

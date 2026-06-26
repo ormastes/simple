@@ -27,7 +27,7 @@ electron_generated_gui_web_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -77,7 +77,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
 - Malformed `frame_us` fails closed instead of relying on shell integer
   comparison behavior.
 - Blur/tolerance use, missing ARGB capture, missing capture provenance,
-  malformed mismatch counts, and checksum mismatches are rejected.
+  missing viewport proof, capture viewport mismatches, malformed mismatch
+  counts, and checksum mismatches are rejected.
 - The live Electron wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 
@@ -95,7 +96,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -112,6 +113,8 @@ expect(evidence).to_contain("electron_generated_gui_web_validation_status=pass")
 expect(evidence).to_contain("electron_generated_gui_web_validation_reason=pass")
 expect(evidence).to_contain("electron_generated_gui_web_mismatch_count=0")
 expect(evidence).to_contain("electron_generated_gui_web_electron_frame_us=1250")
+expect(evidence).to_contain("electron_generated_gui_web_requested_width=96")
+expect(evidence).to_contain("electron_generated_gui_web_requested_height=72")
 expect(evidence).to_contain("electron_generated_gui_web_capture_native_width=96")
 expect(evidence).to_contain("electron_generated_gui_web_capture_native_height=72")
 expect(evidence).to_contain("electron_generated_gui_web_capture_downsampled=false")
@@ -214,6 +217,40 @@ expect(provenance).to_contain("electron_generated_gui_web_validation_reason=miss
 
 </details>
 
+#### rejects missing requested viewport and native capture viewport mismatch
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-generated-gui-web-validator-viewport"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/missing.json", "delete p.width") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+    _proof_command(root + "/mismatch.json", "p.capture_native_width=95") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing = file_read(root + "/missing.env")
+val mismatch = file_read(root + "/mismatch.env")
+expect(missing).to_contain("electron_generated_gui_web_validation_reason=missing-viewport-proof")
+expect(missing).to_contain("electron_generated_gui_web_requested_width=")
+expect(mismatch).to_contain("electron_generated_gui_web_validation_reason=capture-viewport-mismatch")
+expect(mismatch).to_contain("electron_generated_gui_web_requested_width=96")
+expect(mismatch).to_contain("electron_generated_gui_web_capture_native_width=95")
+```
+
+</details>
+
 #### rejects blur tolerance and malformed mismatch counts
 
 -  proof command
@@ -300,8 +337,8 @@ expect(script).to_contain("status=divergent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

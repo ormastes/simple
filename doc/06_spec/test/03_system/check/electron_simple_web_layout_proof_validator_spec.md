@@ -27,7 +27,7 @@ electron_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -75,7 +75,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 - Large integer checksum values compare exactly, without JavaScript number
   rounding.
 - Malformed `frame_us`, malformed mismatch counts, blur/tolerance use, missing
-  ARGB capture, and missing capture provenance are rejected.
+  ARGB capture, missing capture provenance, missing viewport proof, and capture
+  viewport mismatches are rejected.
 - The live Electron layout wrapper consumes the validator and still maps real
   pixel mismatches to `divergent` evidence.
 
@@ -93,7 +94,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -112,6 +113,8 @@ expect(evidence).to_contain("electron_simple_web_layout_simple_checksum=18446744
 expect(evidence).to_contain("electron_simple_web_layout_electron_weighted_checksum=18446744073709551611")
 expect(evidence).to_contain("electron_simple_web_layout_mismatch_count=0")
 expect(evidence).to_contain("electron_simple_web_layout_electron_frame_us=1250")
+expect(evidence).to_contain("electron_simple_web_layout_requested_width=96")
+expect(evidence).to_contain("electron_simple_web_layout_requested_height=64")
 expect(evidence).to_contain("electron_simple_web_layout_capture_native_width=96")
 expect(evidence).to_contain("electron_simple_web_layout_capture_native_height=64")
 expect(evidence).to_contain("electron_simple_web_layout_capture_downsampled=false")
@@ -176,6 +179,40 @@ val provenance = file_read(root + "/provenance.env")
 expect(capture).to_contain("electron_simple_web_layout_validation_reason=missing-captured-argb")
 expect(capture).to_contain("electron_simple_web_layout_captured_argb_written=false")
 expect(provenance).to_contain("electron_simple_web_layout_validation_reason=missing-capture-provenance")
+```
+
+</details>
+
+#### rejects missing requested viewport and native capture viewport mismatch
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-layout-validator-viewport"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/missing.json", "delete p.width") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+    _proof_command(root + "/mismatch.json", "p.capture_native_width=95") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing = file_read(root + "/missing.env")
+val mismatch = file_read(root + "/mismatch.env")
+expect(missing).to_contain("electron_simple_web_layout_validation_reason=missing-viewport-proof")
+expect(missing).to_contain("electron_simple_web_layout_requested_width=")
+expect(mismatch).to_contain("electron_simple_web_layout_validation_reason=capture-viewport-mismatch")
+expect(mismatch).to_contain("electron_simple_web_layout_requested_width=96")
+expect(mismatch).to_contain("electron_simple_web_layout_capture_native_width=95")
 ```
 
 </details>
@@ -271,8 +308,8 @@ expect(script).to_contain("status=divergent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

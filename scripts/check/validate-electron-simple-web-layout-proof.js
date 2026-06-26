@@ -72,10 +72,14 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'malformed-mismatch-count';
 } else if (!sameInteger(proof.mismatch_count, 0)) {
   reason = 'pixel-mismatch';
+} else if (!integerAtLeast(proof.width, 1) || !integerAtLeast(proof.height, 1)) {
+  reason = 'missing-viewport-proof';
 } else if (proof.captured_argb_written !== true) {
   reason = 'missing-captured-argb';
 } else if (!integerAtLeast(proof.capture_native_width, 1) || !integerAtLeast(proof.capture_native_height, 1) || typeof proof.capture_downsampled !== 'boolean') {
   reason = 'missing-capture-provenance';
+} else if (!sameInteger(proof.capture_native_width, proof.width) || !sameInteger(proof.capture_native_height, proof.height)) {
+  reason = 'capture-viewport-mismatch';
 } else if (!integerAtLeast(proof.frame_us, 1)) {
   reason = 'missing-electron-timing';
 }
@@ -89,6 +93,8 @@ emit('electron_simple_web_layout_electron_weighted_checksum', integerTextOrClean
 emit('electron_simple_web_layout_mismatch_count', integerTextOrClean(proof.mismatch_count));
 emit('electron_simple_web_layout_blur_or_tolerance_used', proof.blur_or_tolerance_used === false ? 'false' : clean(proof.blur_or_tolerance_used));
 emit('electron_simple_web_layout_electron_frame_us', integerTextOrClean(proof.frame_us));
+emit('electron_simple_web_layout_requested_width', integerTextOrClean(proof.width));
+emit('electron_simple_web_layout_requested_height', integerTextOrClean(proof.height));
 emit('electron_simple_web_layout_capture_native_width', integerTextOrClean(proof.capture_native_width));
 emit('electron_simple_web_layout_capture_native_height', integerTextOrClean(proof.capture_native_height));
 emit('electron_simple_web_layout_capture_downsampled', booleanString(proof.capture_downsampled));

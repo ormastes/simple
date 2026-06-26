@@ -28,7 +28,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
 - Malformed `frame_us` fails closed instead of relying on shell integer
   comparison behavior.
 - Blur/tolerance use, missing ARGB capture, missing capture provenance,
-  malformed mismatch counts, and checksum mismatches are rejected.
+  missing viewport proof, capture viewport mismatches, malformed mismatch
+  counts, and checksum mismatches are rejected.
 - The live Electron wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 """
@@ -57,6 +58,8 @@ describe "Electron generated GUI Web proof validator":
         expect(evidence).to_contain("electron_generated_gui_web_validation_reason=pass")
         expect(evidence).to_contain("electron_generated_gui_web_mismatch_count=0")
         expect(evidence).to_contain("electron_generated_gui_web_electron_frame_us=1250")
+        expect(evidence).to_contain("electron_generated_gui_web_requested_width=96")
+        expect(evidence).to_contain("electron_generated_gui_web_requested_height=72")
         expect(evidence).to_contain("electron_generated_gui_web_capture_native_width=96")
         expect(evidence).to_contain("electron_generated_gui_web_capture_native_height=72")
         expect(evidence).to_contain("electron_generated_gui_web_capture_downsampled=false")
@@ -108,6 +111,24 @@ describe "Electron generated GUI Web proof validator":
         expect(capture).to_contain("electron_generated_gui_web_validation_reason=missing-captured-argb")
         expect(capture).to_contain("electron_generated_gui_web_captured_argb_written=false")
         expect(provenance).to_contain("electron_generated_gui_web_validation_reason=missing-capture-provenance")
+
+    it "rejects missing requested viewport and native capture viewport mismatch":
+        val root = "build/test-electron-generated-gui-web-validator-viewport"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/missing.json", "delete p.width") +
+            " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+            _proof_command(root + "/mismatch.json", "p.capture_native_width=95") +
+            " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val missing = file_read(root + "/missing.env")
+        val mismatch = file_read(root + "/mismatch.env")
+        expect(missing).to_contain("electron_generated_gui_web_validation_reason=missing-viewport-proof")
+        expect(missing).to_contain("electron_generated_gui_web_requested_width=")
+        expect(mismatch).to_contain("electron_generated_gui_web_validation_reason=capture-viewport-mismatch")
+        expect(mismatch).to_contain("electron_generated_gui_web_requested_width=96")
+        expect(mismatch).to_contain("electron_generated_gui_web_capture_native_width=95")
 
     it "rejects blur tolerance and malformed mismatch counts":
         val root = "build/test-electron-generated-gui-web-validator-blur-mismatch"
