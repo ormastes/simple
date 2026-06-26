@@ -324,9 +324,12 @@ Dedicated dashboard view evidence:
   diagnostics, tooling, and vLLM panels.
 - 2026-06-26 public absence hardening: Ponytail, tooling collector, and web
   dashboard diagnostics/tooling specs now assert absence through split-count
-  checks instead of boolean `contains(...).to_equal(false)` wrappers. The
+  checks instead of boolean negative-containment wrappers. The
   matching generated manuals were refreshed, the canonical system manual was
   synced, and the public absence rendering guard passed.
+- 2026-06-26 public manual hardening: Ponytail audit specs now route internal
+  absence-marker checks through a helper so generated public manuals do not
+  display the marker literal in expected-code snippets.
 
 ## Lane 7: MCP Context Index/Query Options
 
