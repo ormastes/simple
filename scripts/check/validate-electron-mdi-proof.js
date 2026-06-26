@@ -98,10 +98,23 @@ try {
 } catch (_err) {
   screenshotStat = null;
 }
+let screenshotMagicOk = false;
+if (screenshotStat !== null && screenshotStat.isFile() && screenshotStat.size >= 8) {
+  try {
+    const fd = fs.openSync(screenshotPath, 'r');
+    const header = Buffer.alloc(8);
+    fs.readSync(fd, header, 0, 8, 0);
+    fs.closeSync(fd);
+    screenshotMagicOk = header.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  } catch (_err) {
+    screenshotMagicOk = false;
+  }
+}
 const captureChecks = {
   screenshotPath: proof.screenshotPath === screenshotPath,
   screenshotFileExists: screenshotStat !== null && screenshotStat.isFile(),
   screenshotFileNonempty: screenshotStat !== null && screenshotStat.isFile() && screenshotStat.size > 0,
+  screenshotPngMagic: screenshotMagicOk,
 };
 const performanceChecks = {
   performanceNowAvailable: proof.performanceNowAvailable === true,
@@ -149,6 +162,7 @@ emit('electron_mdi_css_animation_probe', proof.cssAnimationProbe === true ? 'tru
 emit('electron_mdi_screenshot_path_matches', proof.screenshotPath === screenshotPath ? 'true' : 'false');
 emit('electron_mdi_screenshot_file_status', screenshotStat !== null && screenshotStat.isFile() ? 'pass' : 'fail');
 emit('electron_mdi_screenshot_size_bytes', screenshotStat !== null && screenshotStat.isFile() ? String(screenshotStat.size) : '');
+emit('electron_mdi_screenshot_png_magic_status', screenshotMagicOk ? 'pass' : 'fail');
 if (reason !== 'pass') {
   emit('reason', reason);
   process.exit(1);

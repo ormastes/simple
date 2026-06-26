@@ -27,7 +27,7 @@ electron_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -75,6 +75,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
 - Event routing pass requires DOM events and Electron bridge IPC frames.
 - Capture pass requires the proof screenshot path to match the captured
   screenshot artifact and the artifact file to exist with nonzero bytes.
+- Capture artifacts must carry the PNG signature bytes; an arbitrary nonempty
+  file is not accepted as Electron screenshot proof.
 - Performance and animation pass require `performance.now()`, an explicit
   positive timing delta, at least two animation frames, and a CSS animation
   probe. A zero delta does not prove distinct timing samples.
@@ -88,6 +90,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
 
 #### accepts complete event capture performance and animation proof
 
+-  png capture command
 -  proof command
    - Expected: code equals `0`
 - Inspect normalized proof rows
@@ -96,13 +99,13 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-mdi-validator-pass"
 val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " +
-    "printf 'pngish' > build/electron-proof/screen.png && " +
+    _png_capture_command() + " && " +
     _proof_command(root + "/proof.json", "") +
     " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -114,7 +117,8 @@ expect(evidence).to_contain("electron_mdi_json_proof=pass")
 expect(evidence).to_contain("electron_mdi_event_status=pass")
 expect(evidence).to_contain("electron_mdi_capture_status=pass")
 expect(evidence).to_contain("electron_mdi_screenshot_file_status=pass")
-expect(evidence).to_contain("electron_mdi_screenshot_size_bytes=6")
+expect(evidence).to_contain("electron_mdi_screenshot_size_bytes=13")
+expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=pass")
 expect(evidence).to_contain("electron_mdi_performance_status=pass")
 expect(evidence).to_contain("electron_mdi_animation_status=pass")
 expect(evidence).to_contain("electron_mdi_performance_now_delta_ms=16.7")
@@ -138,7 +142,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-mdi-validator-event"
-val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && printf 'pngish' > build/electron-proof/screen.png && " +
+val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
     _proof_command(root + "/proof.json", "p.bridgeMouseUpFrameRouted=false") +
     " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -162,12 +166,12 @@ expect(evidence).to_contain("bridgeMouseUpFrameRouted")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-mdi-validator-capture"
-val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && printf 'pngish' > build/electron-proof/screen.png && " +
+val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
     _proof_command(root + "/proof.json", "p.screenshotPath=\"build/electron-proof/old.png\"") +
     " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -178,6 +182,7 @@ expect(evidence).to_contain("electron_mdi_json_proof=fail")
 expect(evidence).to_contain("electron_mdi_capture_status=fail")
 expect(evidence).to_contain("electron_mdi_screenshot_path_matches=false")
 expect(evidence).to_contain("electron_mdi_screenshot_file_status=pass")
+expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=pass")
 ```
 
 </details>
@@ -192,7 +197,7 @@ expect(evidence).to_contain("electron_mdi_screenshot_file_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -209,17 +214,52 @@ expect(code).to_equal(1)
 val missing = file_read(root + "/missing.env")
 val empty = file_read(root + "/empty.env")
 expect(missing).to_contain("electron_mdi_json_proof=fail")
-expect(missing).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotFileExists,screenshotFileNonempty")
+expect(missing).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotFileExists,screenshotFileNonempty,screenshotPngMagic")
 expect(missing).to_contain("electron_mdi_capture_status=fail")
 expect(missing).to_contain("electron_mdi_screenshot_path_matches=true")
 expect(missing).to_contain("electron_mdi_screenshot_file_status=fail")
 expect(missing).to_contain("electron_mdi_screenshot_size_bytes=")
+expect(missing).to_contain("electron_mdi_screenshot_png_magic_status=fail")
 expect(empty).to_contain("electron_mdi_json_proof=fail")
-expect(empty).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotFileNonempty")
+expect(empty).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotFileNonempty,screenshotPngMagic")
 expect(empty).to_contain("electron_mdi_capture_status=fail")
 expect(empty).to_contain("electron_mdi_screenshot_path_matches=true")
 expect(empty).to_contain("electron_mdi_screenshot_file_status=pass")
 expect(empty).to_contain("electron_mdi_screenshot_size_bytes=0")
+expect(empty).to_contain("electron_mdi_screenshot_png_magic_status=fail")
+```
+
+</details>
+
+#### rejects non-PNG screenshot artifacts even when they are nonempty
+
+-  proof command
+   - Expected: code equals `1`
+- Confirm screenshot capture proof requires PNG signature bytes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-mdi-validator-capture-magic"
+val command = "rm -rf " + root + " build/electron-proof && mkdir -p " + root + " build/electron-proof && " +
+    "printf 'not-a-png-but-nonempty' > build/electron-proof/screen.png && " +
+    _proof_command(root + "/proof.json", "") +
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm screenshot capture proof requires PNG signature bytes")
+expect(evidence).to_contain("electron_mdi_json_proof=fail")
+expect(evidence).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotPngMagic")
+expect(evidence).to_contain("electron_mdi_capture_status=fail")
+expect(evidence).to_contain("electron_mdi_screenshot_file_status=pass")
+expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=fail")
 ```
 
 </details>
@@ -239,7 +279,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-mdi-validator-performance"
-val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && printf 'pngish' > build/electron-proof/screen.png && " +
+val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
     _proof_command(root + "/proof.json", "delete p.performanceNowDeltaMs") +
     " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -268,7 +308,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-mdi-validator-zero-performance"
-val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && printf 'pngish' > build/electron-proof/screen.png && " +
+val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
     _proof_command(root + "/proof.json", "p.performanceNowDeltaMs=0") +
     " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -298,7 +338,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-mdi-validator-animation"
-val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && printf 'pngish' > build/electron-proof/screen.png && " +
+val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
     _proof_command(root + "/proof.json", "p.animationFrameCount=1;p.cssAnimationProbe=false") +
     " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -331,7 +371,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-mdi-validator-fractional-counts"
-val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && printf 'pngish' > build/electron-proof/screen.png && " +
+val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
     _proof_command(root + "/event.json", "p.bridgeIpcFrameCount=8.5") +
     " && node scripts/check/validate-electron-mdi-proof.js " + root + "/event.json build/electron-proof/screen.png > " + root + "/event.env; " +
     _proof_command(root + "/animation.json", "p.animationFrameCount=2.5") +
@@ -379,8 +419,8 @@ expect(wrapper).to_contain("validate-electron-mdi-proof.js")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
