@@ -53,11 +53,13 @@ Resolved on 2026-06-26:
 
 Still blocked:
 
-- Electron Chromium-on-Vulkan widget `.rdc` evidence with nonblank ARGB proof.
-- 2026-06-26 canonical Electron rerun has concrete source evidence, but still
-  fails with `missing-rdc`; the Chromium GPU process exits `139` under
-  RenderDoc and no ARGB proof is produced:
-  `build/renderdoc/canonical-probe/electron-html/evidence.env`.
+- Electron Chromium-on-Vulkan widget `.rdc` capture. The ARGB proof is now
+  present, so the remaining widget gate is the missing RenderDoc capture file.
+- 2026-06-26 Electron display-helper rerun uses the current Chromium Vulkan
+  launch flags and records a nonblank 1280x720 ARGB proof with 405674 nonblank
+  pixels, but still fails with `missing-rdc`; the Chromium GPU process exits
+  `139` under RenderDoc and no `.rdc` is produced:
+  `build/renderdoc/electron-display-helper/electron-html/evidence.env`.
 - 2026-06-26 no-child-hook RenderDoc diagnostics now record
   `rdoc_renderdoc_hook_children=0`. They avoid the direct child-hook crash path
   but still do not produce a browser GPU-process `.rdc`, so they are diagnostic

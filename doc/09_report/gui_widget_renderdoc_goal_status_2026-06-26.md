@@ -9,11 +9,11 @@
 - Simple gate status: pass
 - Simple source evidence: build/renderdoc/widget-probe-small/simple/evidence.env
 - Electron gate status: fail
-- Electron gate failure class: electron-gate-chromium-gpu-process-crashed-under-renderdoc
-- Electron source evidence: build/renderdoc/canonical-probe/electron-html/evidence.env
+- Electron gate failure class: electron-gate-missing-rdc
+- Electron source evidence: build/renderdoc/electron-display-helper/electron-html/evidence.env
 - Electron fixture path status: pass
 - blocked gates: 1
-- blocked gate list: Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof
+- blocked gate list: Electron Chromium-on-Vulkan widget RenderDoc .rdc capture (ARGB proof already present)
 
 ## Raw Evidence
 - gui_widget_renderdoc_goal_status=incomplete
@@ -48,20 +48,20 @@
 - gui_widget_renderdoc_goal_simple_gate_required_magic=RDOC
 - gui_widget_renderdoc_goal_simple_gate_required_runtime_backend=vulkan
 - gui_widget_renderdoc_goal_electron_gate_status=fail
-- gui_widget_renderdoc_goal_electron_gate_reason=chromium-gpu-process-crashed-under-renderdoc
-- gui_widget_renderdoc_goal_electron_gate_failure_class=electron-gate-chromium-gpu-process-crashed-under-renderdoc
+- gui_widget_renderdoc_goal_electron_gate_reason=missing-rdc
+- gui_widget_renderdoc_goal_electron_gate_failure_class=electron-gate-missing-rdc
 - gui_widget_renderdoc_goal_electron_gate_exit_code=1
-- gui_widget_renderdoc_goal_electron_gate_source_env=build/renderdoc/canonical-probe/electron-html/evidence.env
+- gui_widget_renderdoc_goal_electron_gate_source_env=build/renderdoc/electron-display-helper/electron-html/evidence.env
 - gui_widget_renderdoc_goal_electron_gate_source_env_file_status=pass
 - gui_widget_renderdoc_goal_electron_gate_html_path=/home/ormastes/dev/pub/simple/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
 - gui_widget_renderdoc_goal_electron_gate_fixture_path_status=pass
 - gui_widget_renderdoc_goal_electron_gate_capture_file=
 - gui_widget_renderdoc_goal_electron_gate_capture_file_status=missing
 - gui_widget_renderdoc_goal_electron_gate_capture_file_magic=
-- gui_widget_renderdoc_goal_electron_gate_argb_path=build/renderdoc/canonical-probe/electron-html/electron_argb.json
-- gui_widget_renderdoc_goal_electron_gate_argb_file_status=missing
-- gui_widget_renderdoc_goal_electron_gate_argb_status=missing
-- gui_widget_renderdoc_goal_electron_gate_argb_nonblank_pixel_count=0
+- gui_widget_renderdoc_goal_electron_gate_argb_path=build/renderdoc/electron-display-helper/electron-html/electron_argb.json
+- gui_widget_renderdoc_goal_electron_gate_argb_file_status=pass
+- gui_widget_renderdoc_goal_electron_gate_argb_status=pass
+- gui_widget_renderdoc_goal_electron_gate_argb_nonblank_pixel_count=405674
 - gui_widget_renderdoc_goal_electron_gate_requested_api=vulkan
 - gui_widget_renderdoc_goal_electron_gate_requested_angle=vulkan
 - gui_widget_renderdoc_goal_electron_gate_requested_features=Vulkan
@@ -73,6 +73,6 @@
 - gui_widget_renderdoc_goal_electron_gate_required_angle=vulkan
 - gui_widget_renderdoc_goal_electron_gate_required_features=Vulkan
 - gui_widget_renderdoc_goal_electron_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
-- gui_widget_renderdoc_goal_blocked_gate=Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof
+- gui_widget_renderdoc_goal_blocked_gate=Electron Chromium-on-Vulkan widget RenderDoc .rdc capture (ARGB proof already present)
 - gui_widget_renderdoc_goal_blocked_gate_count=1
-- gui_widget_renderdoc_goal_blocked_gates=Electron Chromium-on-Vulkan widget RenderDoc .rdc with nonblank ARGB proof
+- gui_widget_renderdoc_goal_blocked_gates=Electron Chromium-on-Vulkan widget RenderDoc .rdc capture (ARGB proof already present)

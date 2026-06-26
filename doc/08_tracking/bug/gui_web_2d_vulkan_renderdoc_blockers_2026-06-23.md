@@ -312,6 +312,7 @@ Current 2026-06-26 browser capture findings:
 - The same `--no-zygote` path exposed a separate Electron evidence bug:
   Electron wrote ARGB output relative to the Electron binary directory when the
   helper passed a relative path. The helper now passes absolute ARGB and stage
-  paths. Canonical Electron evidence now records a nonblank 1280x720 ARGB file
-  under RenderDoc launch, but still fails the gate because `.rdc` is missing:
-  `build/renderdoc/canonical-probe/electron-html/evidence.env`.
+  paths. The current Electron display-helper evidence records a nonblank
+  1280x720 ARGB file with 405674 nonblank pixels under RenderDoc launch, but
+  still fails the gate because `.rdc` is missing:
+  `build/renderdoc/electron-display-helper/electron-html/evidence.env`.
