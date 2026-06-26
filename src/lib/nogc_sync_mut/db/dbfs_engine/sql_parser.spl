@@ -449,10 +449,9 @@ fn sql_tokenize(input: text) -> [SqlToken]:
                 word = word + input.char_at(i)
                 i = i + 1
             val kw = _keyword_kind(word)
-            if kw != nil:
-                tokens.push(SqlToken(kind: kw.unwrap(), value: word, pos: start))
-            else:
-                tokens.push(SqlToken(kind: SqlTokenKind.Ident, value: word, pos: start))
+            match kw:
+                case Some(kind): tokens.push(SqlToken(kind: kind, value: word, pos: start))
+                case None: tokens.push(SqlToken(kind: SqlTokenKind.Ident, value: word, pos: start))
             continue
         tokens.push(SqlToken(kind: SqlTokenKind.Unknown, value: c, pos: i))
         i = i + 1
@@ -504,57 +503,54 @@ impl SqlParser:
         self._parse_or()
 
     me fn _parse_or() -> Result<SqlExpr, text>:
-        var left = self._parse_and()
-        if left.err.?:
-            return left
-        var node = left.unwrap()
+        var node = match self._parse_and():
+            case Ok(value): value
+            case Err(err): return Err(err)
         while self._is_kind(SqlTokenKind.Or):
             self._advance()
-            val right = self._parse_and()
-            if right.err.?:
-                return right
-            node = _expr_binop("OR", node, right.unwrap())
+            val right = match self._parse_and():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            node = _expr_binop("OR", node, right)
         Ok(node)
 
     me fn _parse_and() -> Result<SqlExpr, text>:
-        var left = self._parse_not()
-        if left.err.?:
-            return left
-        var node = left.unwrap()
+        var node = match self._parse_not():
+            case Ok(value): value
+            case Err(err): return Err(err)
         while self._is_kind(SqlTokenKind.And):
             self._advance()
-            val right = self._parse_not()
-            if right.err.?:
-                return right
-            node = _expr_binop("AND", node, right.unwrap())
+            val right = match self._parse_not():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            node = _expr_binop("AND", node, right)
         Ok(node)
 
     me fn _parse_not() -> Result<SqlExpr, text>:
         if self._is_kind(SqlTokenKind.Not):
             self._advance()
-            val operand = self._parse_not()
-            if operand.err.?:
-                return operand
-            return Ok(_expr_unary("NOT", operand.unwrap()))
+            val operand = match self._parse_not():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            return Ok(_expr_unary("NOT", operand))
         self._parse_comparison()
 
     me fn _parse_comparison() -> Result<SqlExpr, text>:
-        val left_r = self._parse_addition()
-        if left_r.err.?:
-            return left_r
-        var node = left_r.unwrap()
+        var node = match self._parse_addition():
+            case Ok(value): value
+            case Err(err): return Err(err)
         # IS [NOT] NULL
         if self._is_kind(SqlTokenKind.Is):
             self._advance()
             if self._is_kind(SqlTokenKind.Not):
                 self._advance()
-                val null_r = self._expect(SqlTokenKind.Null)
-                if null_r.err.?:
-                    return Err(null_r.err.?.unwrap())
+                match self._expect(SqlTokenKind.Null):
+                    case Ok(_): pass
+                    case Err(err): return Err(err)
                 return Ok(_expr_is_not_null(node))
-            val null_r = self._expect(SqlTokenKind.Null)
-            if null_r.err.?:
-                return Err(null_r.err.?.unwrap())
+            match self._expect(SqlTokenKind.Null):
+                case Ok(_): pass
+                case Err(err): return Err(err)
             return Ok(_expr_is_null(node))
         # [NOT] IN (...)
         var negate_in = false
@@ -563,23 +559,23 @@ impl SqlParser:
             self._advance()
         if self._is_kind(SqlTokenKind.In):
             self._advance()
-            val lp = self._expect(SqlTokenKind.LParen)
-            if lp.err.?:
-                return Err(lp.err.?.unwrap())
+            match self._expect(SqlTokenKind.LParen):
+                case Ok(_): pass
+                case Err(err): return Err(err)
             var items: [SqlExpr] = []
             if not self._is_kind(SqlTokenKind.RParen):
-                val first = self._parse_expr()
-                if first.err.?:
-                    return first
-                items.push(first.unwrap())
+                val first = match self._parse_expr():
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                items.push(first)
                 while self._skip_if(SqlTokenKind.Comma):
-                    val item = self._parse_expr()
-                    if item.err.?:
-                        return item
-                    items.push(item.unwrap())
-            val rp = self._expect(SqlTokenKind.RParen)
-            if rp.err.?:
-                return Err(rp.err.?.unwrap())
+                    val item = match self._parse_expr():
+                        case Ok(value): value
+                        case Err(err): return Err(err)
+                    items.push(item)
+            match self._expect(SqlTokenKind.RParen):
+                case Ok(_): pass
+                case Err(err): return Err(err)
             var result = _expr_in_list(node, items)
             if negate_in:
                 result = _expr_unary("NOT", result)
@@ -587,36 +583,36 @@ impl SqlParser:
         # [NOT] BETWEEN ... AND ...
         if self._is_kind(SqlTokenKind.Between):
             self._advance()
-            val lo = self._parse_addition()
-            if lo.err.?:
-                return lo
-            val and_t = self._expect(SqlTokenKind.And)
-            if and_t.err.?:
-                return Err(and_t.err.?.unwrap())
-            val hi = self._parse_addition()
-            if hi.err.?:
-                return hi
-            var result = _expr_between(node, lo.unwrap(), hi.unwrap())
+            val lo = match self._parse_addition():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            match self._expect(SqlTokenKind.And):
+                case Ok(_): pass
+                case Err(err): return Err(err)
+            val hi = match self._parse_addition():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            var result = _expr_between(node, lo, hi)
             if negate_in:
                 result = _expr_unary("NOT", result)
             return Ok(result)
         # [NOT] LIKE
         if self._is_kind(SqlTokenKind.Like):
             self._advance()
-            val pat = self._parse_addition()
-            if pat.err.?:
-                return pat
-            var result = _expr_binop("LIKE", node, pat.unwrap())
+            val pat = match self._parse_addition():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            var result = _expr_binop("LIKE", node, pat)
             if negate_in:
                 result = _expr_unary("NOT", result)
             return Ok(result)
         # [NOT] MATCH
         if self._is_kind(SqlTokenKind.Match):
             self._advance()
-            val pat = self._parse_addition()
-            if pat.err.?:
-                return pat
-            var result = _expr_binop("MATCH", node, pat.unwrap())
+            val pat = match self._parse_addition():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            var result = _expr_binop("MATCH", node, pat)
             if negate_in:
                 result = _expr_unary("NOT", result)
             return Ok(result)
@@ -626,81 +622,79 @@ impl SqlParser:
         val k = self._peek_kind()
         if k == SqlTokenKind.Eq:
             self._advance()
-            val r = self._parse_addition()
-            if r.err.?:
-                return r
-            return Ok(_expr_binop("=", node, r.unwrap()))
+            val r = match self._parse_addition():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            return Ok(_expr_binop("=", node, r))
         if k == SqlTokenKind.Ne:
             self._advance()
-            val r = self._parse_addition()
-            if r.err.?:
-                return r
-            return Ok(_expr_binop("!=", node, r.unwrap()))
+            val r = match self._parse_addition():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            return Ok(_expr_binop("!=", node, r))
         if k == SqlTokenKind.Lt:
             self._advance()
-            val r = self._parse_addition()
-            if r.err.?:
-                return r
-            return Ok(_expr_binop("<", node, r.unwrap()))
+            val r = match self._parse_addition():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            return Ok(_expr_binop("<", node, r))
         if k == SqlTokenKind.Gt:
             self._advance()
-            val r = self._parse_addition()
-            if r.err.?:
-                return r
-            return Ok(_expr_binop(">", node, r.unwrap()))
+            val r = match self._parse_addition():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            return Ok(_expr_binop(">", node, r))
         if k == SqlTokenKind.Le:
             self._advance()
-            val r = self._parse_addition()
-            if r.err.?:
-                return r
-            return Ok(_expr_binop("<=", node, r.unwrap()))
+            val r = match self._parse_addition():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            return Ok(_expr_binop("<=", node, r))
         if k == SqlTokenKind.Ge:
             self._advance()
-            val r = self._parse_addition()
-            if r.err.?:
-                return r
-            return Ok(_expr_binop(">=", node, r.unwrap()))
+            val r = match self._parse_addition():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            return Ok(_expr_binop(">=", node, r))
         Ok(node)
 
     me fn _parse_addition() -> Result<SqlExpr, text>:
-        var left = self._parse_multiplication()
-        if left.err.?:
-            return left
-        var node = left.unwrap()
+        var node = match self._parse_multiplication():
+            case Ok(value): value
+            case Err(err): return Err(err)
         while self._is_kind(SqlTokenKind.Plus) or self._is_kind(SqlTokenKind.Minus):
             val op = self._advance()
-            val right = self._parse_multiplication()
-            if right.err.?:
-                return right
-            node = _expr_binop(op.value, node, right.unwrap())
+            val right = match self._parse_multiplication():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            node = _expr_binop(op.value, node, right)
         Ok(node)
 
     me fn _parse_multiplication() -> Result<SqlExpr, text>:
-        var left = self._parse_unary()
-        if left.err.?:
-            return left
-        var node = left.unwrap()
+        var node = match self._parse_unary():
+            case Ok(value): value
+            case Err(err): return Err(err)
         while self._is_kind(SqlTokenKind.Star) or self._is_kind(SqlTokenKind.Slash) or self._is_kind(SqlTokenKind.Percent):
             val op = self._advance()
-            val right = self._parse_unary()
-            if right.err.?:
-                return right
-            node = _expr_binop(op.value, node, right.unwrap())
+            val right = match self._parse_unary():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            node = _expr_binop(op.value, node, right)
         Ok(node)
 
     me fn _parse_unary() -> Result<SqlExpr, text>:
         if self._is_kind(SqlTokenKind.Minus):
             self._advance()
-            val operand = self._parse_unary()
-            if operand.err.?:
-                return operand
-            return Ok(_expr_unary("-", operand.unwrap()))
+            val operand = match self._parse_unary():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            return Ok(_expr_unary("-", operand))
         if self._is_kind(SqlTokenKind.Not):
             self._advance()
-            val operand = self._parse_unary()
-            if operand.err.?:
-                return operand
-            return Ok(_expr_unary("NOT", operand.unwrap()))
+            val operand = match self._parse_unary():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            return Ok(_expr_unary("NOT", operand))
         self._parse_primary()
 
     me fn _parse_primary() -> Result<SqlExpr, text>:
@@ -728,9 +722,9 @@ impl SqlParser:
             val inner = self._parse_expr()
             if inner.err.?:
                 return inner
-            val rp = self._expect(SqlTokenKind.RParen)
-            if rp.err.?:
-                return Err(rp.err.?.unwrap())
+            match self._expect(SqlTokenKind.RParen):
+                case Ok(_): pass
+                case Err(err): return Err(err)
             return inner
         if t.kind == SqlTokenKind.Ident:
             self._advance()
@@ -751,18 +745,18 @@ impl SqlParser:
                 self._advance()
                 var arguments: [SqlExpr] = []
                 if not self._is_kind(SqlTokenKind.RParen):
-                    val first = self._parse_expr()
-                    if first.err.?:
-                        return first
-                    arguments.push(first.unwrap())
+                    val first = match self._parse_expr():
+                        case Ok(value): value
+                        case Err(err): return Err(err)
+                    arguments.push(first)
                     while self._skip_if(SqlTokenKind.Comma):
-                        val arg = self._parse_expr()
-                        if arg.err.?:
-                            return arg
-                        arguments.push(arg.unwrap())
-                val rp = self._expect(SqlTokenKind.RParen)
-                if rp.err.?:
-                    return Err(rp.err.?.unwrap())
+                        val arg = match self._parse_expr():
+                            case Ok(value): value
+                            case Err(err): return Err(err)
+                        arguments.push(arg)
+                match self._expect(SqlTokenKind.RParen):
+                    case Ok(_): pass
+                    case Err(err): return Err(err)
                 return Ok(_expr_call(name, arguments))
             return Ok(_expr_col(name))
         # Keywords that can be column names in some contexts
@@ -775,26 +769,26 @@ impl SqlParser:
         var arguments: [SqlExpr] = []
         while self._is_kind(SqlTokenKind.When):
             self._advance()
-            val cond = self._parse_expr()
-            if cond.err.?:
-                return cond
-            val then_t = self._expect(SqlTokenKind.Then)
-            if then_t.err.?:
-                return Err(then_t.err.?.unwrap())
-            val result = self._parse_expr()
-            if result.err.?:
-                return result
-            arguments.push(cond.unwrap())
-            arguments.push(result.unwrap())
+            val cond = match self._parse_expr():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            match self._expect(SqlTokenKind.Then):
+                case Ok(_): pass
+                case Err(err): return Err(err)
+            val result = match self._parse_expr():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            arguments.push(cond)
+            arguments.push(result)
         if self._is_kind(SqlTokenKind.Else):
             self._advance()
-            val else_val = self._parse_expr()
-            if else_val.err.?:
-                return else_val
-            arguments.push(else_val.unwrap())
-        val end_t = self._expect(SqlTokenKind.End)
-        if end_t.err.?:
-            return Err(end_t.err.?.unwrap())
+            val else_val = match self._parse_expr():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            arguments.push(else_val)
+        match self._expect(SqlTokenKind.End):
+            case Ok(_): pass
+            case Err(err): return Err(err)
         Ok(_expr_call("CASE", arguments))
 
     # ── Statement parsing ─────────────────────────────────────────────────
@@ -820,90 +814,88 @@ impl SqlParser:
             distinct = true
         # columns
         var columns: [SqlExpr] = []
-        val first_col = self._parse_select_expr()
-        if first_col.err.?:
-            return Err(first_col.err.?.unwrap())
-        columns.push(first_col.unwrap())
+        val first_col = match self._parse_select_expr():
+            case Ok(value): value
+            case Err(err): return Err(err)
+        columns.push(first_col)
         while self._skip_if(SqlTokenKind.Comma):
-            val col = self._parse_select_expr()
-            if col.err.?:
-                return Err(col.err.?.unwrap())
-            columns.push(col.unwrap())
+            val col = match self._parse_select_expr():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            columns.push(col)
         # FROM
         var from_table = ""
         var from_alias = ""
         if self._skip_if(SqlTokenKind.From):
-            val tbl = self._expect(SqlTokenKind.Ident)
-            if tbl.err.?:
-                return Err(tbl.err.?.unwrap())
-            from_table = tbl.unwrap().value
+            val tbl = match self._expect(SqlTokenKind.Ident):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            from_table = tbl.value
             if self._skip_if(SqlTokenKind.As):
-                val alias = self._expect(SqlTokenKind.Ident)
-                if alias.err.?:
-                    return Err(alias.err.?.unwrap())
-                from_alias = alias.unwrap().value
+                val alias = match self._expect(SqlTokenKind.Ident):
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                from_alias = alias.value
             elif self._is_kind(SqlTokenKind.Ident):
                 from_alias = self._advance().value
         # JOINs
         var joins: [SqlJoin] = []
         while self._is_join_start():
-            val j = self._parse_join()
-            if j.err.?:
-                return Err(j.err.?.unwrap())
-            joins.push(j.unwrap())
+            val j = match self._parse_join():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            joins.push(j)
         # WHERE
-        val _wh = self._parse_optional_clause(SqlTokenKind.Where)
-        if _wh.err.?:
-            return Err(_wh.err.?.unwrap())
-        val where_expr = _wh.unwrap()
+        val where_expr = match self._parse_optional_clause(SqlTokenKind.Where):
+            case Ok(value): value
+            case Err(err): return Err(err)
         # GROUP BY
         var group_by: [SqlExpr] = []
         if self._skip_if(SqlTokenKind.Group):
-            val by_t = self._expect(SqlTokenKind.By)
-            if by_t.err.?:
-                return Err(by_t.err.?.unwrap())
-            val first_g = self._parse_expr()
-            if first_g.err.?:
-                return Err(first_g.err.?.unwrap())
-            group_by.push(first_g.unwrap())
+            match self._expect(SqlTokenKind.By):
+                case Ok(_): pass
+                case Err(err): return Err(err)
+            val first_g = match self._parse_expr():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            group_by.push(first_g)
             while self._skip_if(SqlTokenKind.Comma):
-                val g = self._parse_expr()
-                if g.err.?:
-                    return Err(g.err.?.unwrap())
-                group_by.push(g.unwrap())
+                val g = match self._parse_expr():
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                group_by.push(g)
         # HAVING
-        val _hv = self._parse_optional_clause(SqlTokenKind.Having)
-        if _hv.err.?:
-            return Err(_hv.err.?.unwrap())
-        val having = _hv.unwrap()
+        val having = match self._parse_optional_clause(SqlTokenKind.Having):
+            case Ok(value): value
+            case Err(err): return Err(err)
         # ORDER BY
         var order_by: [SqlOrderBy] = []
         if self._skip_if(SqlTokenKind.Order):
-            val by_t = self._expect(SqlTokenKind.By)
-            if by_t.err.?:
-                return Err(by_t.err.?.unwrap())
-            val first_o = self._parse_order_item()
-            if first_o.err.?:
-                return Err(first_o.err.?.unwrap())
-            order_by.push(first_o.unwrap())
+            match self._expect(SqlTokenKind.By):
+                case Ok(_): pass
+                case Err(err): return Err(err)
+            val first_o = match self._parse_order_item():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            order_by.push(first_o)
             while self._skip_if(SqlTokenKind.Comma):
-                val o = self._parse_order_item()
-                if o.err.?:
-                    return Err(o.err.?.unwrap())
-                order_by.push(o.unwrap())
+                val o = match self._parse_order_item():
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                order_by.push(o)
         # LIMIT / OFFSET
         var limit_val: i64 = -1
         var offset_val: i64 = -1
         if self._skip_if(SqlTokenKind.Limit):
-            val lv = self._expect(SqlTokenKind.IntLit)
-            if lv.err.?:
-                return Err(lv.err.?.unwrap())
-            limit_val = lv.unwrap().value.parse_int() ?? -1
+            val lv = match self._expect(SqlTokenKind.IntLit):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            limit_val = lv.value.parse_int() ?? -1
         if self._skip_if(SqlTokenKind.Offset):
-            val ov = self._expect(SqlTokenKind.IntLit)
-            if ov.err.?:
-                return Err(ov.err.?.unwrap())
-            offset_val = ov.unwrap().value.parse_int() ?? -1
+            val ov = match self._expect(SqlTokenKind.IntLit):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            offset_val = ov.value.parse_int() ?? -1
         self._skip_if(SqlTokenKind.Semicolon)
         val sel = SqlSelect(
             distinct: distinct,
@@ -921,15 +913,14 @@ impl SqlParser:
         Ok(_stmt_select(sel))
 
     me fn _parse_select_expr() -> Result<SqlExpr, text>:
-        val expr = self._parse_expr()
-        if expr.err.?:
-            return expr
-        var node = expr.unwrap()
+        var node = match self._parse_expr():
+            case Ok(value): value
+            case Err(err): return Err(err)
         if self._skip_if(SqlTokenKind.As):
-            val alias = self._expect(SqlTokenKind.Ident)
-            if alias.err.?:
-                return Err(alias.err.?.unwrap())
-            node = _expr_binop("AS", node, _expr_col(alias.unwrap().value))
+            val alias = match self._expect(SqlTokenKind.Ident):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            node = _expr_binop("AS", node, _expr_col(alias.value))
         elif node.kind == SqlExprKind.Column or node.kind == SqlExprKind.FunctionCall:
             if self._is_kind(SqlTokenKind.Ident):
                 val alias_t = self._advance()
@@ -937,15 +928,15 @@ impl SqlParser:
         Ok(node)
 
     me fn _parse_order_item() -> Result<SqlOrderBy, text>:
-        val expr = self._parse_expr()
-        if expr.err.?:
-            return Err(expr.err.?.unwrap())
+        val expr = match self._parse_expr():
+            case Ok(value): value
+            case Err(err): return Err(err)
         var dir = SqlOrderDir.Asc
         if self._skip_if(SqlTokenKind.Desc):
             dir = SqlOrderDir.Desc
         elif self._skip_if(SqlTokenKind.Asc):
             dir = SqlOrderDir.Asc
-        Ok(SqlOrderBy(expr: expr.unwrap(), dir: dir))
+        Ok(SqlOrderBy(expr: expr, dir: dir))
 
     fn _is_join_start() -> bool:
         val k = self._peek_kind()
@@ -960,10 +951,10 @@ impl SqlParser:
     me fn _parse_optional_clause(kind: SqlTokenKind) -> Result<SqlExpr?, text>:
         if not self._skip_if(kind):
             return Ok(nil)
-        val w = self._parse_expr()
-        if w.err.?:
-            return Err(w.err.?.unwrap())
-        Ok(w.unwrap())
+        val w = match self._parse_expr():
+            case Ok(value): value
+            case Err(err): return Err(err)
+        Ok(w)
 
     me fn _parse_join() -> Result<SqlJoin, text>:
         var jk = JoinKind.Inner
@@ -986,181 +977,178 @@ impl SqlParser:
             self._advance()
             self._skip_if(SqlTokenKind.Outer)
             jk = JoinKind.Left
-        val join_t = self._expect(SqlTokenKind.Join)
-        if join_t.err.?:
-            return Err(join_t.err.?.unwrap())
-        val tbl = self._expect(SqlTokenKind.Ident)
-        if tbl.err.?:
-            return Err(tbl.err.?.unwrap())
+        match self._expect(SqlTokenKind.Join):
+            case Ok(_): pass
+            case Err(err): return Err(err)
+        val tbl = match self._expect(SqlTokenKind.Ident):
+            case Ok(value): value
+            case Err(err): return Err(err)
         var alias = ""
         if self._skip_if(SqlTokenKind.As):
-            val a = self._expect(SqlTokenKind.Ident)
-            if a.err.?:
-                return Err(a.err.?.unwrap())
-            alias = a.unwrap().value
+            val a = match self._expect(SqlTokenKind.Ident):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            alias = a.value
         elif self._is_kind(SqlTokenKind.Ident) and not self._is_kind(SqlTokenKind.On):
             alias = self._advance().value
-        val _on = self._parse_optional_clause(SqlTokenKind.On)
-        if _on.err.?:
-            return Err(_on.err.?.unwrap())
-        val on_expr = _on.unwrap()
-        Ok(SqlJoin(kind: jk, table: tbl.unwrap().value, alias: alias, on_expr: on_expr))
+        val on_expr = match self._parse_optional_clause(SqlTokenKind.On):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        Ok(SqlJoin(kind: jk, table: tbl.value, alias: alias, on_expr: on_expr))
 
     me fn _parse_insert() -> Result<SqlStatement, text>:
         self._expect(SqlTokenKind.Insert)
-        val into_t = self._expect(SqlTokenKind.Into)
-        if into_t.err.?:
-            return Err(into_t.err.?.unwrap())
-        val tbl = self._expect(SqlTokenKind.Ident)
-        if tbl.err.?:
-            return Err(tbl.err.?.unwrap())
-        val table_name = tbl.unwrap().value
+        match self._expect(SqlTokenKind.Into):
+            case Ok(_): pass
+            case Err(err): return Err(err)
+        val tbl = match self._expect(SqlTokenKind.Ident):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        val table_name = tbl.value
         # optional column list
         var col_names: [text] = []
         if self._skip_if(SqlTokenKind.LParen):
-            val first = self._expect(SqlTokenKind.Ident)
-            if first.err.?:
-                return Err(first.err.?.unwrap())
-            col_names.push(first.unwrap().value)
+            val first = match self._expect(SqlTokenKind.Ident):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            col_names.push(first.value)
             while self._skip_if(SqlTokenKind.Comma):
-                val c = self._expect(SqlTokenKind.Ident)
-                if c.err.?:
-                    return Err(c.err.?.unwrap())
-                col_names.push(c.unwrap().value)
-            val rp = self._expect(SqlTokenKind.RParen)
-            if rp.err.?:
-                return Err(rp.err.?.unwrap())
-        val vals_t = self._expect(SqlTokenKind.Values)
-        if vals_t.err.?:
-            return Err(vals_t.err.?.unwrap())
+                val c = match self._expect(SqlTokenKind.Ident):
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                col_names.push(c.value)
+            match self._expect(SqlTokenKind.RParen):
+                case Ok(_): pass
+                case Err(err): return Err(err)
+        match self._expect(SqlTokenKind.Values):
+            case Ok(_): pass
+            case Err(err): return Err(err)
         var all_rows: [[SqlExpr]] = []
-        val first_row = self._parse_value_row()
-        if first_row.err.?:
-            return Err(first_row.err.?.unwrap())
-        all_rows.push(first_row.unwrap())
+        val first_row = match self._parse_value_row():
+            case Ok(value): value
+            case Err(err): return Err(err)
+        all_rows.push(first_row)
         while self._skip_if(SqlTokenKind.Comma):
-            val row = self._parse_value_row()
-            if row.err.?:
-                return Err(row.err.?.unwrap())
-            all_rows.push(row.unwrap())
+            val row = match self._parse_value_row():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            all_rows.push(row)
         self._skip_if(SqlTokenKind.Semicolon)
         Ok(_stmt_insert(SqlInsert(table: table_name, columns: col_names, values: all_rows)))
 
     me fn _parse_value_row() -> Result<[SqlExpr], text>:
-        val lp = self._expect(SqlTokenKind.LParen)
-        if lp.err.?:
-            return Err(lp.err.?.unwrap())
+        match self._expect(SqlTokenKind.LParen):
+            case Ok(_): pass
+            case Err(err): return Err(err)
         var row: [SqlExpr] = []
-        val first = self._parse_expr()
-        if first.err.?:
-            return Err(first.err.?.unwrap())
-        row.push(first.unwrap())
+        val first = match self._parse_expr():
+            case Ok(value): value
+            case Err(err): return Err(err)
+        row.push(first)
         while self._skip_if(SqlTokenKind.Comma):
-            val v = self._parse_expr()
-            if v.err.?:
-                return Err(v.err.?.unwrap())
-            row.push(v.unwrap())
-        val rp = self._expect(SqlTokenKind.RParen)
-        if rp.err.?:
-            return Err(rp.err.?.unwrap())
+            val v = match self._parse_expr():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            row.push(v)
+        match self._expect(SqlTokenKind.RParen):
+            case Ok(_): pass
+            case Err(err): return Err(err)
         Ok(row)
 
     me fn _parse_update() -> Result<SqlStatement, text>:
         self._expect(SqlTokenKind.Update)
-        val tbl = self._expect(SqlTokenKind.Ident)
-        if tbl.err.?:
-            return Err(tbl.err.?.unwrap())
-        val set_t = self._expect(SqlTokenKind.Set)
-        if set_t.err.?:
-            return Err(set_t.err.?.unwrap())
+        val tbl = match self._expect(SqlTokenKind.Ident):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        match self._expect(SqlTokenKind.Set):
+            case Ok(_): pass
+            case Err(err): return Err(err)
         var assignments: Dict<text, SqlExpr> = {}
-        val first_col = self._expect(SqlTokenKind.Ident)
-        if first_col.err.?:
-            return Err(first_col.err.?.unwrap())
-        val eq1 = self._expect(SqlTokenKind.Eq)
-        if eq1.err.?:
-            return Err(eq1.err.?.unwrap())
-        val first_val = self._parse_expr()
-        if first_val.err.?:
-            return Err(first_val.err.?.unwrap())
-        assignments[first_col.unwrap().value] = first_val.unwrap()
+        val first_col = match self._expect(SqlTokenKind.Ident):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        match self._expect(SqlTokenKind.Eq):
+            case Ok(_): pass
+            case Err(err): return Err(err)
+        val first_val = match self._parse_expr():
+            case Ok(value): value
+            case Err(err): return Err(err)
+        assignments[first_col.value] = first_val
         while self._skip_if(SqlTokenKind.Comma):
-            val cn = self._expect(SqlTokenKind.Ident)
-            if cn.err.?:
-                return Err(cn.err.?.unwrap())
-            val eq2 = self._expect(SqlTokenKind.Eq)
-            if eq2.err.?:
-                return Err(eq2.err.?.unwrap())
-            val cv = self._parse_expr()
-            if cv.err.?:
-                return Err(cv.err.?.unwrap())
-            assignments[cn.unwrap().value] = cv.unwrap()
-        val _wh = self._parse_optional_clause(SqlTokenKind.Where)
-        if _wh.err.?:
-            return Err(_wh.err.?.unwrap())
-        val where_expr = _wh.unwrap()
+            val cn = match self._expect(SqlTokenKind.Ident):
+                case Ok(value): value
+                case Err(err): return Err(err)
+            match self._expect(SqlTokenKind.Eq):
+                case Ok(_): pass
+                case Err(err): return Err(err)
+            val cv = match self._parse_expr():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            assignments[cn.value] = cv
+        val where_expr = match self._parse_optional_clause(SqlTokenKind.Where):
+            case Ok(value): value
+            case Err(err): return Err(err)
         self._skip_if(SqlTokenKind.Semicolon)
-        Ok(_stmt_update(SqlUpdate(table: tbl.unwrap().value, assignments: assignments, where_expr: where_expr)))
+        Ok(_stmt_update(SqlUpdate(table: tbl.value, assignments: assignments, where_expr: where_expr)))
 
     me fn _parse_delete() -> Result<SqlStatement, text>:
         self._expect(SqlTokenKind.Delete)
-        val from_t = self._expect(SqlTokenKind.From)
-        if from_t.err.?:
-            return Err(from_t.err.?.unwrap())
-        val delete_table_tok = self._expect(SqlTokenKind.Ident)
-        if delete_table_tok.err.?:
-            return Err(delete_table_tok.err.?.unwrap())
-        val _wh = self._parse_optional_clause(SqlTokenKind.Where)
-        if _wh.err.?:
-            return Err(_wh.err.?.unwrap())
-        val where_expr = _wh.unwrap()
+        match self._expect(SqlTokenKind.From):
+            case Ok(_): pass
+            case Err(err): return Err(err)
+        val delete_table_tok = match self._expect(SqlTokenKind.Ident):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        val where_expr = match self._parse_optional_clause(SqlTokenKind.Where):
+            case Ok(value): value
+            case Err(err): return Err(err)
         self._skip_if(SqlTokenKind.Semicolon)
-        Ok(_stmt_delete(SqlDelete(table: delete_table_tok.unwrap().value, where_expr: where_expr)))
+        Ok(_stmt_delete(SqlDelete(table: delete_table_tok.value, where_expr: where_expr)))
 
     me fn _parse_create_table() -> Result<SqlStatement, text>:
         self._expect(SqlTokenKind.Create)
-        val tbl_t = self._expect(SqlTokenKind.Table)
-        if tbl_t.err.?:
-            return Err(tbl_t.err.?.unwrap())
+        match self._expect(SqlTokenKind.Table):
+            case Ok(_): pass
+            case Err(err): return Err(err)
         var if_not_exists = false
         if self._is_kind(SqlTokenKind.If):
             self._advance()
-            val not_t = self._expect(SqlTokenKind.Not)
-            if not_t.err.?:
-                return Err(not_t.err.?.unwrap())
-            val ex_t = self._expect(SqlTokenKind.Exists)
-            if ex_t.err.?:
-                return Err(ex_t.err.?.unwrap())
+            match self._expect(SqlTokenKind.Not):
+                case Ok(_): pass
+                case Err(err): return Err(err)
+            match self._expect(SqlTokenKind.Exists):
+                case Ok(_): pass
+                case Err(err): return Err(err)
             if_not_exists = true
-        val tbl = self._expect(SqlTokenKind.Ident)
-        if tbl.err.?:
-            return Err(tbl.err.?.unwrap())
-        val lp = self._expect(SqlTokenKind.LParen)
-        if lp.err.?:
-            return Err(lp.err.?.unwrap())
+        val tbl = match self._expect(SqlTokenKind.Ident):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        match self._expect(SqlTokenKind.LParen):
+            case Ok(_): pass
+            case Err(err): return Err(err)
         var cols: [SqlColumnDef] = []
-        val first_cd = self._parse_column_def()
-        if first_cd.err.?:
-            return Err(first_cd.err.?.unwrap())
-        cols.push(first_cd.unwrap())
+        val first_cd = match self._parse_column_def():
+            case Ok(value): value
+            case Err(err): return Err(err)
+        cols.push(first_cd)
         while self._skip_if(SqlTokenKind.Comma):
-            val cd = self._parse_column_def()
-            if cd.err.?:
-                return Err(cd.err.?.unwrap())
-            cols.push(cd.unwrap())
-        val rp = self._expect(SqlTokenKind.RParen)
-        if rp.err.?:
-            return Err(rp.err.?.unwrap())
+            val cd = match self._parse_column_def():
+                case Ok(value): value
+                case Err(err): return Err(err)
+            cols.push(cd)
+        match self._expect(SqlTokenKind.RParen):
+            case Ok(_): pass
+            case Err(err): return Err(err)
         self._skip_if(SqlTokenKind.Semicolon)
-        Ok(_stmt_create(SqlCreateTable(table: tbl.unwrap().value, columns: cols, if_not_exists: if_not_exists)))
+        Ok(_stmt_create(SqlCreateTable(table: tbl.value, columns: cols, if_not_exists: if_not_exists)))
 
     me fn _parse_column_def() -> Result<SqlColumnDef, text>:
-        val name_t = self._expect(SqlTokenKind.Ident)
-        if name_t.err.?:
-            return Err(name_t.err.?.unwrap())
-        val col_type = self._parse_column_type()
-        if col_type.err.?:
-            return Err(col_type.err.?.unwrap())
+        val name_t = match self._expect(SqlTokenKind.Ident):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        val col_type = match self._parse_column_type():
+            case Ok(value): value
+            case Err(err): return Err(err)
         var nullable = true
         var primary_key = false
         var default_value = ""
@@ -1184,13 +1172,13 @@ impl SqlParser:
                     return Err("expected KEY after PRIMARY")
             elif self._is_kind(SqlTokenKind.Ident) and self._cur().value.to_lower() == "default":
                 self._advance()
-                val dv = self._parse_expr()
-                if dv.err.?:
-                    return Err(dv.err.?.unwrap())
-                default_value = dv.unwrap().value
+                val dv = match self._parse_expr():
+                    case Ok(value): value
+                    case Err(err): return Err(err)
+                default_value = dv.value
             else:
                 break
-        Ok(SqlColumnDef(name: name_t.unwrap().value, col_type: col_type.unwrap(), nullable: nullable, primary_key: primary_key, default_value: default_value))
+        Ok(SqlColumnDef(name: name_t.value, col_type: col_type, nullable: nullable, primary_key: primary_key, default_value: default_value))
 
     me fn _parse_column_type() -> Result<SqlColumnType, text>:
         val t = self._cur()
