@@ -142,12 +142,19 @@ const capturedArgbJson = readJsonArtifact(capturedArgbStat);
 const capturedArgb = capturedArgbJson.value || {};
 const capturedArgbPixels = Array.isArray(capturedArgb.pixels) ? capturedArgb.pixels : [];
 const capturedArgbNonzeroPixels = nonzeroPixelCount(capturedArgbPixels);
+const expectedProofSource = 'tools/electron-live-bitmap/exact_fixture.js';
+const frameUsText = jsonIntegerText(proof.frame_us);
+const estimatedFpsFloor = frameUsText === null || BigInt(frameUsText) <= 0n
+  ? ''
+  : String(1000000n / BigInt(frameUsText));
 
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
   reason = 'blur-or-tolerance-not-allowed';
 } else if (proof.renderer !== 'electron-live-capture-page') {
   reason = 'unexpected-electron-renderer';
+} else if (proof.proof_source !== expectedProofSource) {
+  reason = 'unexpected-proof-source';
 } else if (typeof proof.scene !== 'string' || !proof.scene.startsWith('simple-web-engine2d-')) {
   reason = 'unexpected-electron-scene';
 } else if (decimalIntegerText(proof.checksum) === null || decimalIntegerText(proof.expected_checksum) === null) {
@@ -184,6 +191,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-capture-provenance';
 } else if (!sameJsonInteger(proof.capture_native_width, proof.width) || !sameJsonInteger(proof.capture_native_height, proof.height)) {
   reason = 'capture-viewport-mismatch';
+} else if (!jsonIntegerAtLeast(proof.iterations, 2)) {
+  reason = 'missing-performance-iterations';
 } else if (!jsonIntegerAtLeast(proof.frame_us, 1)) {
   reason = 'missing-electron-timing';
 }
@@ -191,6 +200,7 @@ if (proof.blur_or_tolerance_used !== false) {
 emit('electron_simple_web_engine2d_validation_status', reason === 'pass' ? 'pass' : 'fail');
 emit('electron_simple_web_engine2d_validation_reason', reason);
 emit('electron_simple_web_engine2d_renderer', proof.renderer);
+emit('electron_simple_web_engine2d_proof_source', proof.proof_source);
 emit('electron_simple_web_engine2d_scene', proof.scene);
 emit('electron_simple_web_engine2d_simple_checksum', integerTextOrClean(proof.expected_checksum));
 emit('electron_simple_web_engine2d_electron_checksum', integerTextOrClean(proof.checksum));
@@ -198,7 +208,9 @@ emit('electron_simple_web_engine2d_simple_weighted_checksum', integerTextOrClean
 emit('electron_simple_web_engine2d_electron_weighted_checksum', integerTextOrClean(proof.weighted_checksum));
 emit('electron_simple_web_engine2d_mismatch_count', jsonIntegerTextOrBlank(proof.mismatch_count));
 emit('electron_simple_web_engine2d_blur_or_tolerance_used', proof.blur_or_tolerance_used === false ? 'false' : clean(proof.blur_or_tolerance_used));
+emit('electron_simple_web_engine2d_proof_iterations', jsonIntegerTextOrBlank(proof.iterations));
 emit('electron_simple_web_engine2d_electron_frame_us', jsonIntegerTextOrBlank(proof.frame_us));
+emit('electron_simple_web_engine2d_estimated_fps_floor', estimatedFpsFloor);
 emit('electron_simple_web_engine2d_requested_width', jsonIntegerTextOrBlank(proof.width));
 emit('electron_simple_web_engine2d_requested_height', jsonIntegerTextOrBlank(proof.height));
 emit('electron_simple_web_engine2d_capture_native_width', jsonIntegerTextOrBlank(proof.capture_native_width));

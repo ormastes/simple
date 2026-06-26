@@ -327,7 +327,9 @@ Measures: binary size only (Qt minimal widget vs Simple web artifact).
 
 ### Known GUI perf gaps
 
-- **FPS measurement** — not yet implemented; scripts measure frame latency (us/iteration) not sustained FPS
+- **Sustained FPS coverage** — Electron Engine2D proof emits a conservative
+  FPS floor from measured frame latency, but broader sustained-FPS coverage
+  across GUI backends is still incomplete
 - **User interaction latency** — scripts test static scenes only, not event-driven UI response time
 
 ### Benchmark template (pure Simple)
