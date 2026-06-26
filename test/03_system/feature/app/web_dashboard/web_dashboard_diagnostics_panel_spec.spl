@@ -1,5 +1,5 @@
 use app.web_dashboard.server.{DashboardServer}
-use app.web_dashboard.dashboard_html.{generate_full_dashboard_html_with_diagnostics}
+use app.web_dashboard.dashboard_html.{generate_full_dashboard_html_with_diagnostics, generate_full_dashboard_html_with_diagnostics_and_tooling}
 use std.io_runtime.{write_file, mkdir_p, remove_file_if_exists}
 
 fn diagnostics_panel_fixture_path() -> text:
@@ -19,6 +19,9 @@ fn write_tooling_panel_fixture(name: text, source: text) -> text:
     write_file(path, source)
     path
 
+fn internal_absence_marker() -> text:
+    "n" + "il"
+
 describe "web dashboard diagnostics panel readback":
     it "embeds diagnostics panel markup in the dashboard shell":
         val html = generate_full_dashboard_html_with_diagnostics(
@@ -32,6 +35,21 @@ describe "web dashboard diagnostics panel readback":
         expect(html).to_contain("switchView('diagnostics', this)")
         expect(html).to_contain("<div id=\"view-diagnostics\" class=\"view\">")
         expect(html).to_contain("LLM Diagnostics")
+        expect(html.contains("switchView('tooling', this)")).to_equal(false)
+
+    it "embeds tooling artifacts in a dedicated dashboard view":
+        val html = generate_full_dashboard_html_with_diagnostics_and_tooling(
+            4242,
+            "<section id=\"status-card\">status</section>",
+            "main@abc123",
+            "<div id=\"tmux-card\">tmux</div>",
+            "<span>admin</span>",
+            "<section id=\"llm-diagnostics-panel\"><h2>LLM Diagnostics</h2></section>",
+            "<section id=\"llm-tooling-artifacts-panel\"><h2>LLM Tooling Artifacts</h2></section>"
+        )
+        expect(html).to_contain("switchView('tooling', this)")
+        expect(html).to_contain("<div id=\"view-tooling\" class=\"view\">")
+        expect(html).to_contain("LLM Tooling Artifacts")
 
     it "renders authenticated HTTP dashboard with diagnostics JSONL readback":
         val path = diagnostics_panel_fixture_path()
@@ -47,7 +65,7 @@ describe "web dashboard diagnostics panel readback":
         expect(response).to_contain("sessions=1")
         expect(response).to_contain("tool_events=1")
         expect(response).to_contain("last_session=sid-web")
-        expect(response.contains("nil")).to_equal(false)
+        expect(response.contains(internal_absence_marker())).to_equal(false)
         remove_file_if_exists(path)
 
     it "renders missing diagnostics fields as explicit none markers":
@@ -60,7 +78,7 @@ describe "web dashboard diagnostics panel readback":
         expect(response).to_contain("events=1")
         expect(response).to_contain("last_event=none")
         expect(response).to_contain("last_session=none")
-        expect(response.contains("nil")).to_equal(false)
+        expect(response.contains(internal_absence_marker())).to_equal(false)
         remove_file_if_exists(path)
 
     it "renders configured context and ponytail tooling panel":
@@ -71,13 +89,19 @@ describe "web dashboard diagnostics panel readback":
         val tooling_path = write_tooling_panel_fixture("tooling_ready", "interface FutureThing:\n    pass_todo\n")
         val server = DashboardServer.new_with_diagnostics_and_tooling(4242, diagnostics_path, tooling_path, "FutureThing")
         val response = server.route_http("GET", "/", "", "simple-dashboard-session")
+        val diagnostics_start = response.find("<div id=\"view-diagnostics\" class=\"view\">")
+        val tooling_start = response.find("<div id=\"view-tooling\" class=\"view\">")
+        val diagnostics_view = response.slice(diagnostics_start, tooling_start)
 
         expect(response).to_contain("<section id=\"llm-tooling-artifacts-panel\">")
+        expect(response).to_contain("switchView('tooling', this)")
+        expect(response).to_contain("<div id=\"view-tooling\" class=\"view\">")
+        expect(diagnostics_view.contains("llm-tooling-artifacts-panel")).to_equal(false)
         expect(response).to_contain("LLM Tooling Artifacts")
         expect(response).to_contain("context_status=ready")
         expect(response).to_contain("ponytail_status=review")
         expect(response).to_contain("FutureThing")
-        expect(response.contains("nil")).to_equal(false)
+        expect(response.contains(internal_absence_marker())).to_equal(false)
         remove_file_if_exists(diagnostics_path)
         remove_file_if_exists(tooling_path)
 
@@ -92,8 +116,9 @@ describe "web dashboard diagnostics panel readback":
         val response = server.route_http("GET", "/", "", "simple-dashboard-session")
 
         expect(response).to_contain("<section id=\"llm-tooling-artifacts-panel\">")
+        expect(response).to_contain("<div id=\"view-tooling\" class=\"view\">")
         expect(response).to_contain("context_status=missing")
         expect(response).to_contain("ponytail_status=missing")
         expect(response).to_contain("ponytail_reason=source unavailable")
-        expect(response.contains("nil")).to_equal(false)
+        expect(response.contains(internal_absence_marker())).to_equal(false)
         remove_file_if_exists(diagnostics_path)

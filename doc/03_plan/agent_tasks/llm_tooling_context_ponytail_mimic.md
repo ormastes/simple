@@ -268,13 +268,17 @@ Evidence:
 - `test/unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl`
   passed with 4/4 scenarios.
 - `test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl`
-  passed with 5/5 scenarios, including configured and missing tooling panel
-  readback.
+  passed with 6/6 scenarios, including configured/missing tooling panel
+  readback and dedicated tooling tab/view evidence.
 
 Remaining:
 
-- Dedicated tab/routing for tooling artifacts, if the diagnostics-tab placement
-  becomes too cramped.
+- Dedicated tab/routing for tooling artifacts is implemented on 2026-06-26.
+  `src/app/web_dashboard/dashboard_html.spl` keeps the existing diagnostics
+  helper API and adds
+  `generate_full_dashboard_html_with_diagnostics_and_tooling(...)`; the web
+  dashboard server now mounts context/ponytail tooling artifacts into
+  `view-tooling` instead of appending them to `view-diagnostics`.
 
 ## Lane 7: MCP Context Index/Query Options
 

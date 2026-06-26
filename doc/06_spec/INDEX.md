@@ -7,7 +7,7 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 120
+- **Total Lines:** 60
 
 ---
 
@@ -15,5 +15,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Context Generate Specification](test/unit/app/tooling/context_generate_spec.md) | Partial | N/A | 12 | 60% | 120 lines |
+| [Web Dashboard Diagnostics Panel Specification](test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.md) | Partial | N/A | 6 | 40% | 60 lines |
 
