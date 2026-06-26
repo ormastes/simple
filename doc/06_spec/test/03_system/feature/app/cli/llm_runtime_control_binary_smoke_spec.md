@@ -43,7 +43,7 @@ This system smoke test proves the tracked release Simple binary ships the top-le
 | Feature IDs | #LLM-RUNTIME-CONTROL-BINARY-001 |
 | Category | App CLI |
 | Difficulty | 2/5 |
-| Status | Draft |
+| Status | Implemented |
 | Requirements | doc/02_requirements/feature/llm_runtime_vllm_torch_interface.md |
 | Plan | doc/03_plan/agent_tasks/llm_runtime_vllm_torch_interface.md |
 | Design | doc/05_design/app/llm_runtime_vllm_torch_interface.md |
