@@ -87,6 +87,11 @@ rows.
 The canonical production wrapper promotes the same values under
 `production_gui_web_renderer_parity_backend_*`, so archived full-wrapper reports
 can be compared without opening the nested backend evidence file.
+The wrapper keeps collecting independent backend, font offload/readback, and
+raw Metal readback evidence after an earlier matrix or layout failure. Treat
+the top-level `production_gui_web_renderer_parity_reason` as the first failing
+gate, then read the promoted nested fields to see which later gates are already
+proven, unavailable, or failing.
 
 The canonical production GUI font offload/readback evidence gate is:
 

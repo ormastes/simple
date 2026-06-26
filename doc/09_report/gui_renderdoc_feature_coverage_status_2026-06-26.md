@@ -40,14 +40,15 @@
 - GUI/web/2D Simple Vulkan: pass (pass; backend vulkan)
 - macOS Vulkan: unavailable (unavailable)
 - macOS RenderDoc: unavailable
-- Production GUI/web core parity: fail (core-gui-web-parity-missing:layout_manifest:<missing>!=pass,layout_manifest_case_count:<missing>!=50,layout_manifest_pass_count:<missing>!=36,layout_manifest_tracked_count:<missing>!=14,layout_manifest_fail_count:<missing>!=0,surface_manifest:<missing>!=pass,surface_manifest_electron_capture:<missing>!=pass,surface_manifest_tauri_capture:<missing>!=pass,surface_manifest_chrome_capture:<missing>!=pass,surface_manifest_tauri_live_capture:<missing>!=true,surface_manifest_chrome_live_capture:<missing>!=true,surface_manifest_tauri_case_count:<missing>!=50,surface_manifest_tauri_pass_count:<missing>!=36,surface_manifest_tauri_tracked_count:<missing>!=14,surface_manifest_tauri_fail_count:<missing>!=0,surface_manifest_chrome_case_count:<missing>!=50,surface_manifest_chrome_pass_count:<missing>!=36,surface_manifest_chrome_tracked_count:<missing>!=14,surface_manifest_chrome_fail_count:<missing>!=0,surface_manifest_tauri_mismatch_count:<missing>!=0,surface_manifest_chrome_mismatch_count:<missing>!=0,surface_manifest_no_fake_capture:<missing>!=true,surface_manifest_blur_or_tolerance_used:<missing>!=false,backend:<missing>!=pass)
-- Production GUI/web parity gate: fail (partial-production-parity-source-status)
+- Production GUI/web core parity: fail (core-gui-web-parity-missing:layout_manifest:timeout!=pass,layout_manifest_case_count:<missing>!=50,layout_manifest_pass_count:<missing>!=36,layout_manifest_tracked_count:<missing>!=14,layout_manifest_fail_count:<missing>!=0,surface_manifest:fail!=pass,surface_manifest_electron_capture:<missing>!=pass,surface_manifest_tauri_capture:unavailable!=pass,surface_manifest_chrome_capture:unavailable!=pass,surface_manifest_tauri_live_capture:false!=true,surface_manifest_chrome_live_capture:false!=true,surface_manifest_tauri_case_count:0!=50,surface_manifest_tauri_pass_count:0!=36,surface_manifest_tauri_tracked_count:0!=14,surface_manifest_chrome_case_count:0!=50,surface_manifest_chrome_pass_count:0!=36,surface_manifest_chrome_tracked_count:0!=14)
+- Production GUI/web parity gate: fail (electron-layout-manifest-failed)
 - Production GUI/web parity source env: build/production_gui_web_renderer_parity_evidence/evidence.env (pass)
+- Production GUI/web font blocker: doc/08_tracking/bug/production_gui_font_offload_runtime_readback_2026-06-23.md
 - GUI/web/2D 4K retained perf: pass (met-200fps; resolution 4k; size 3840x2160; pixels 8294400; frames 200; fps_x1000 56689342; frame_p50_ns 17640; frame_p95_ns 17640; target_fps 200; render_mode retained-static-frame; redraw_frames 1; nonzero_pixels 5458; checksum 23357114226484; rss 131072/262144 kB; source 51ba1025b4d9; simple_bin src/compiler_rust/target/release/simple; native_build_mode aggressive-native; fallback none)
 - GUI/web/2D 8K retained perf: pass (met-target-fps; resolution 8k; size 7680x4320; pixels 33177600; frames 200; fps_x1000 22711787; frame_p50_ns 44030; frame_p95_ns 44030; target_fps 200; render_mode retained-static-frame; redraw_frames 1; nonzero_pixels 203; checksum 869060580878; rss 520192/750000 kB; source 51ba1025b4d9; simple_bin src/compiler_rust/target/release/simple; native_build_mode aggressive-native; fallback none)
-- Production surface host:
-- Production Tauri surface capture:
-- Production Chrome surface capture:
+- Production surface host: (Linux / x86_64)
+- Production Tauri surface capture: unavailable (tauri-live-capture-configured; backend x11-xvfb-window-screenshot)
+- Production Chrome surface capture: unavailable (chrome-live-capture-configured; backend chrome-live-bitmap)
 - blocked completion gates: 9
 - blocked gate list:
   - original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic
@@ -444,8 +445,8 @@
 - gui_web_2d_vulkan_renderdoc_electron_exit_code=
 - production_gui_web_renderer_parity_command=ELECTRON_BITMAP_TIMEOUT_SECS=20 sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
 - production_gui_web_renderer_parity_existing_env=build/production_gui_web_renderer_parity_evidence/evidence.env
-- production_gui_web_renderer_parity_existing_status=missing-status
-- production_gui_web_renderer_parity_existing_reason=existing-evidence-env-missing-production-status
+- production_gui_web_renderer_parity_existing_status=fail
+- production_gui_web_renderer_parity_existing_reason=electron-layout-manifest-failed
 - production_gui_web_renderer_parity_existing_layout_case_count=
 - production_gui_web_renderer_parity_existing_layout_pass_count=
 - production_gui_web_renderer_parity_existing_layout_tracked_count=
@@ -453,70 +454,70 @@
 - production_gui_web_renderer_parity_gate_command=PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_evidence/evidence.env sh scripts/check/check-production-gui-web-renderer-parity-gate.shs
 - production_gui_web_renderer_parity_gate_exit_code=1
 - production_gui_web_renderer_parity_gate_status=fail
-- production_gui_web_renderer_parity_gate_reason=partial-production-parity-source-status
+- production_gui_web_renderer_parity_gate_reason=electron-layout-manifest-failed
 - production_gui_web_renderer_parity_gate_source_env=build/production_gui_web_renderer_parity_evidence/evidence.env
 - production_gui_web_renderer_parity_gate_source_env_status=pass
-- production_gui_web_renderer_parity_gate_source_status=
+- production_gui_web_renderer_parity_gate_source_status=fail
 - production_gui_web_renderer_parity_gate_matrix_exit_code=0
 - production_gui_web_renderer_parity_gate_matrix_status=pass
 - production_gui_web_renderer_parity_gate_matrix_reason=pass
 - production_gui_web_renderer_parity_gate_matrix_timed_out=false
-- production_gui_web_renderer_parity_gate_matrix_timeout_secs=0
-- production_gui_web_renderer_parity_gate_layout_manifest_exit_code=
-- production_gui_web_renderer_parity_gate_layout_manifest_status=
-- production_gui_web_renderer_parity_gate_layout_manifest_reason=
-- production_gui_web_renderer_parity_gate_layout_manifest_timed_out=
-- production_gui_web_renderer_parity_gate_layout_manifest_timeout_secs=
+- production_gui_web_renderer_parity_gate_matrix_timeout_secs=120
+- production_gui_web_renderer_parity_gate_layout_manifest_exit_code=124
+- production_gui_web_renderer_parity_gate_layout_manifest_status=timeout
+- production_gui_web_renderer_parity_gate_layout_manifest_reason=layout-manifest-timeout
+- production_gui_web_renderer_parity_gate_layout_manifest_timed_out=true
+- production_gui_web_renderer_parity_gate_layout_manifest_timeout_secs=120
 - production_gui_web_renderer_parity_gate_layout_manifest_case_count=
 - production_gui_web_renderer_parity_gate_layout_manifest_pass_count=
 - production_gui_web_renderer_parity_gate_layout_manifest_tracked_count=
 - production_gui_web_renderer_parity_gate_layout_manifest_fail_count=
-- production_gui_web_renderer_parity_gate_surface_manifest_exit_code=
-- production_gui_web_renderer_parity_gate_surface_manifest_status=
-- production_gui_web_renderer_parity_gate_surface_manifest_reason=
-- production_gui_web_renderer_parity_gate_surface_manifest_timed_out=
-- production_gui_web_renderer_parity_gate_surface_manifest_timeout_secs=
+- production_gui_web_renderer_parity_gate_surface_manifest_exit_code=1
+- production_gui_web_renderer_parity_gate_surface_manifest_status=fail
+- production_gui_web_renderer_parity_gate_surface_manifest_reason=tauri-tauri-live-capture-configured;chrome-chrome-live-capture-configured
+- production_gui_web_renderer_parity_gate_surface_manifest_timed_out=false
+- production_gui_web_renderer_parity_gate_surface_manifest_timeout_secs=120
 - production_gui_web_renderer_parity_gate_surface_manifest_electron_capture_status=
-- production_gui_web_renderer_parity_gate_surface_manifest_host_uname_s=
-- production_gui_web_renderer_parity_gate_surface_manifest_host_uname_m=
-- production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_status=
-- production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_reason=
-- production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_backend=
-- production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_required_commands=
+- production_gui_web_renderer_parity_gate_surface_manifest_host_uname_s=Linux
+- production_gui_web_renderer_parity_gate_surface_manifest_host_uname_m=x86_64
+- production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_status=unavailable
+- production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_reason=tauri-live-capture-configured
+- production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_backend=x11-xvfb-window-screenshot
+- production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_required_commands=cargo,xvfb-run,dbus-run-session,xdotool,import,convert,node
 - production_gui_web_renderer_parity_gate_surface_manifest_tauri_capture_missing_commands=
-- production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_status=
-- production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_reason=
-- production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_backend=
-- production_gui_web_renderer_parity_gate_surface_manifest_tauri_live_capture=
-- production_gui_web_renderer_parity_gate_surface_manifest_chrome_live_capture=
-- production_gui_web_renderer_parity_gate_surface_manifest_tauri_case_count=
-- production_gui_web_renderer_parity_gate_surface_manifest_tauri_pass_count=
-- production_gui_web_renderer_parity_gate_surface_manifest_tauri_tracked_count=
-- production_gui_web_renderer_parity_gate_surface_manifest_tauri_fail_count=
-- production_gui_web_renderer_parity_gate_surface_manifest_chrome_case_count=
-- production_gui_web_renderer_parity_gate_surface_manifest_chrome_pass_count=
-- production_gui_web_renderer_parity_gate_surface_manifest_chrome_tracked_count=
-- production_gui_web_renderer_parity_gate_surface_manifest_chrome_fail_count=
-- production_gui_web_renderer_parity_gate_surface_manifest_tauri_mismatch_count=
-- production_gui_web_renderer_parity_gate_surface_manifest_chrome_mismatch_count=
-- production_gui_web_renderer_parity_gate_surface_manifest_no_fake_capture=
-- production_gui_web_renderer_parity_gate_surface_manifest_blur_or_tolerance_used=
-- production_gui_web_renderer_parity_gate_backend_exit_code=
-- production_gui_web_renderer_parity_gate_backend_status=
-- production_gui_web_renderer_parity_gate_backend_reason=
-- production_gui_web_renderer_parity_gate_backend_timed_out=
-- production_gui_web_renderer_parity_gate_backend_timeout_secs=
-- production_gui_web_renderer_parity_gate_font_offload_exit_code=
-- production_gui_web_renderer_parity_gate_font_offload_status=
-- production_gui_web_renderer_parity_gate_font_offload_reason=
-- production_gui_web_renderer_parity_gate_font_offload_blocker_doc=
-- production_gui_web_renderer_parity_gate_font_offload_timed_out=
-- production_gui_web_renderer_parity_gate_font_offload_timeout_secs=
-- production_gui_web_renderer_parity_gate_metal_readback_exit_code=
-- production_gui_web_renderer_parity_gate_metal_readback_status=
-- production_gui_web_renderer_parity_gate_metal_readback_reason=
-- production_gui_web_renderer_parity_gate_metal_readback_timed_out=
-- production_gui_web_renderer_parity_gate_metal_readback_timeout_secs=
+- production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_status=unavailable
+- production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_reason=chrome-live-capture-configured
+- production_gui_web_renderer_parity_gate_surface_manifest_chrome_capture_backend=chrome-live-bitmap
+- production_gui_web_renderer_parity_gate_surface_manifest_tauri_live_capture=false
+- production_gui_web_renderer_parity_gate_surface_manifest_chrome_live_capture=false
+- production_gui_web_renderer_parity_gate_surface_manifest_tauri_case_count=0
+- production_gui_web_renderer_parity_gate_surface_manifest_tauri_pass_count=0
+- production_gui_web_renderer_parity_gate_surface_manifest_tauri_tracked_count=0
+- production_gui_web_renderer_parity_gate_surface_manifest_tauri_fail_count=0
+- production_gui_web_renderer_parity_gate_surface_manifest_chrome_case_count=0
+- production_gui_web_renderer_parity_gate_surface_manifest_chrome_pass_count=0
+- production_gui_web_renderer_parity_gate_surface_manifest_chrome_tracked_count=0
+- production_gui_web_renderer_parity_gate_surface_manifest_chrome_fail_count=0
+- production_gui_web_renderer_parity_gate_surface_manifest_tauri_mismatch_count=0
+- production_gui_web_renderer_parity_gate_surface_manifest_chrome_mismatch_count=0
+- production_gui_web_renderer_parity_gate_surface_manifest_no_fake_capture=true
+- production_gui_web_renderer_parity_gate_surface_manifest_blur_or_tolerance_used=false
+- production_gui_web_renderer_parity_gate_backend_exit_code=0
+- production_gui_web_renderer_parity_gate_backend_status=pass
+- production_gui_web_renderer_parity_gate_backend_reason=pass
+- production_gui_web_renderer_parity_gate_backend_timed_out=false
+- production_gui_web_renderer_parity_gate_backend_timeout_secs=120
+- production_gui_web_renderer_parity_gate_font_offload_exit_code=0
+- production_gui_web_renderer_parity_gate_font_offload_status=unavailable
+- production_gui_web_renderer_parity_gate_font_offload_reason=vector-font-gpu-glyph-return-missing;runtime-unavailable
+- production_gui_web_renderer_parity_gate_font_offload_blocker_doc=doc/08_tracking/bug/production_gui_font_offload_runtime_readback_2026-06-23.md
+- production_gui_web_renderer_parity_gate_font_offload_timed_out=false
+- production_gui_web_renderer_parity_gate_font_offload_timeout_secs=120
+- production_gui_web_renderer_parity_gate_metal_readback_exit_code=1
+- production_gui_web_renderer_parity_gate_metal_readback_status=fail
+- production_gui_web_renderer_parity_gate_metal_readback_reason=metal-engine2d-read-pixels-contract-changed-review-required
+- production_gui_web_renderer_parity_gate_metal_readback_timed_out=false
+- production_gui_web_renderer_parity_gate_metal_readback_timeout_secs=120
 - production_gui_web_renderer_parity_gate_required_source_status=pass
 - production_gui_web_renderer_parity_gate_required_matrix_status=pass
 - production_gui_web_renderer_parity_gate_required_layout_manifest_status=pass
@@ -546,8 +547,8 @@
 - production_gui_web_renderer_parity_gate_required_font_offload_status=pass
 - production_gui_web_renderer_parity_gate_required_metal_readback_status=pass
 - production_gui_web_renderer_parity_core_status=fail
-- production_gui_web_renderer_parity_core_reason=core-gui-web-parity-missing:layout_manifest:<missing>!=pass,layout_manifest_case_count:<missing>!=50,layout_manifest_pass_count:<missing>!=36,layout_manifest_tracked_count:<missing>!=14,layout_manifest_fail_count:<missing>!=0,surface_manifest:<missing>!=pass,surface_manifest_electron_capture:<missing>!=pass,surface_manifest_tauri_capture:<missing>!=pass,surface_manifest_chrome_capture:<missing>!=pass,surface_manifest_tauri_live_capture:<missing>!=true,surface_manifest_chrome_live_capture:<missing>!=true,surface_manifest_tauri_case_count:<missing>!=50,surface_manifest_tauri_pass_count:<missing>!=36,surface_manifest_tauri_tracked_count:<missing>!=14,surface_manifest_tauri_fail_count:<missing>!=0,surface_manifest_chrome_case_count:<missing>!=50,surface_manifest_chrome_pass_count:<missing>!=36,surface_manifest_chrome_tracked_count:<missing>!=14,surface_manifest_chrome_fail_count:<missing>!=0,surface_manifest_tauri_mismatch_count:<missing>!=0,surface_manifest_chrome_mismatch_count:<missing>!=0,surface_manifest_no_fake_capture:<missing>!=true,surface_manifest_blur_or_tolerance_used:<missing>!=false,backend:<missing>!=pass
-- production_gui_web_renderer_parity_core_missing=layout_manifest:<missing>!=pass|layout_manifest_case_count:<missing>!=50|layout_manifest_pass_count:<missing>!=36|layout_manifest_tracked_count:<missing>!=14|layout_manifest_fail_count:<missing>!=0|surface_manifest:<missing>!=pass|surface_manifest_electron_capture:<missing>!=pass|surface_manifest_tauri_capture:<missing>!=pass|surface_manifest_chrome_capture:<missing>!=pass|surface_manifest_tauri_live_capture:<missing>!=true|surface_manifest_chrome_live_capture:<missing>!=true|surface_manifest_tauri_case_count:<missing>!=50|surface_manifest_tauri_pass_count:<missing>!=36|surface_manifest_tauri_tracked_count:<missing>!=14|surface_manifest_tauri_fail_count:<missing>!=0|surface_manifest_chrome_case_count:<missing>!=50|surface_manifest_chrome_pass_count:<missing>!=36|surface_manifest_chrome_tracked_count:<missing>!=14|surface_manifest_chrome_fail_count:<missing>!=0|surface_manifest_tauri_mismatch_count:<missing>!=0|surface_manifest_chrome_mismatch_count:<missing>!=0|surface_manifest_no_fake_capture:<missing>!=true|surface_manifest_blur_or_tolerance_used:<missing>!=false|backend:<missing>!=pass
+- production_gui_web_renderer_parity_core_reason=core-gui-web-parity-missing:layout_manifest:timeout!=pass,layout_manifest_case_count:<missing>!=50,layout_manifest_pass_count:<missing>!=36,layout_manifest_tracked_count:<missing>!=14,layout_manifest_fail_count:<missing>!=0,surface_manifest:fail!=pass,surface_manifest_electron_capture:<missing>!=pass,surface_manifest_tauri_capture:unavailable!=pass,surface_manifest_chrome_capture:unavailable!=pass,surface_manifest_tauri_live_capture:false!=true,surface_manifest_chrome_live_capture:false!=true,surface_manifest_tauri_case_count:0!=50,surface_manifest_tauri_pass_count:0!=36,surface_manifest_tauri_tracked_count:0!=14,surface_manifest_chrome_case_count:0!=50,surface_manifest_chrome_pass_count:0!=36,surface_manifest_chrome_tracked_count:0!=14
+- production_gui_web_renderer_parity_core_missing=layout_manifest:timeout!=pass|layout_manifest_case_count:<missing>!=50|layout_manifest_pass_count:<missing>!=36|layout_manifest_tracked_count:<missing>!=14|layout_manifest_fail_count:<missing>!=0|surface_manifest:fail!=pass|surface_manifest_electron_capture:<missing>!=pass|surface_manifest_tauri_capture:unavailable!=pass|surface_manifest_chrome_capture:unavailable!=pass|surface_manifest_tauri_live_capture:false!=true|surface_manifest_chrome_live_capture:false!=true|surface_manifest_tauri_case_count:0!=50|surface_manifest_tauri_pass_count:0!=36|surface_manifest_tauri_tracked_count:0!=14|surface_manifest_chrome_case_count:0!=50|surface_manifest_chrome_pass_count:0!=36|surface_manifest_chrome_tracked_count:0!=14
 - gui_showcase_4k_200fps_env=build/widget-showcase-4k-200fps/status.env
 - gui_showcase_4k_200fps_status=pass
 - gui_showcase_4k_200fps_reason=met-200fps

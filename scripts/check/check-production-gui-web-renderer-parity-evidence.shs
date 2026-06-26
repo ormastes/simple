@@ -479,43 +479,71 @@ run_metal_readback() {
 status=pass
 reason=pass
 
-run_matrix || {
+remember_failure() {
+    if [ "$status" = "pass" ]; then
+        status=fail
+        reason="$1"
+    fi
+}
+
+run_matrix || remember_failure "electron-generated-gui-matrix-failed"
+
+if [ "$(field_of production_gui_web_renderer_parity_matrix_status "$BUILD_ROOT/evidence.env")" = "pass" ]; then
+    run_layout_manifest || remember_failure "electron-layout-manifest-failed"
+else
+    remember_failure "electron-generated-gui-matrix-failed"
+fi
+
+if [ -s "$BUILD_ROOT/layout_manifest/evidence.env" ]; then
+    run_surface_manifest || remember_failure "tauri-chrome-layout-manifest-failed"
+else
+    remember_failure "electron-layout-manifest-failed"
+fi
+
+run_backend || remember_failure "backend-executed-parity-failed"
+
+run_font_offload || remember_failure "font-offload-evidence-failed"
+
+run_metal_readback || {
+    if [ "$reason" = "font-offload-evidence-failed" ]; then
+        reason=font-offload-and-metal-framebuffer-readback-failed
+    else
+        remember_failure "metal-framebuffer-readback-failed"
+    fi
+}
+
+matrix_status_final="$(field_of production_gui_web_renderer_parity_matrix_status "$BUILD_ROOT/evidence.env")"
+layout_status_final="$(field_of production_gui_web_renderer_parity_layout_manifest_status "$BUILD_ROOT/evidence.env")"
+surface_status_final="$(field_of production_gui_web_renderer_parity_surface_manifest_status "$BUILD_ROOT/evidence.env")"
+backend_status_final="$(field_of production_gui_web_renderer_parity_backend_status "$BUILD_ROOT/evidence.env")"
+font_status_final="$(field_of production_gui_web_renderer_parity_font_offload_status "$BUILD_ROOT/evidence.env")"
+metal_status_final="$(field_of production_gui_web_renderer_parity_metal_readback_status "$BUILD_ROOT/evidence.env")"
+metal_reason_final="$(field_of production_gui_web_renderer_parity_metal_readback_reason "$BUILD_ROOT/evidence.env")"
+
+if [ "$matrix_status_final" != "pass" ]; then
     status=fail
     reason=electron-generated-gui-matrix-failed
-}
-if [ "$status" = "pass" ]; then
-    run_layout_manifest || {
-        status=fail
-        reason=electron-layout-manifest-failed
-    }
-fi
-if [ "$status" = "pass" ]; then
-    run_surface_manifest || {
-        status=fail
-        reason=tauri-chrome-layout-manifest-failed
-    }
-fi
-if [ "$status" = "pass" ]; then
-    run_backend || {
-        status=fail
-        reason=backend-executed-parity-failed
-    }
-fi
-if [ "$status" = "pass" ]; then
-    run_font_offload || {
-        status=fail
-        reason=font-offload-evidence-failed
-    }
-fi
-if [ "$status" = "pass" ] || [ "$reason" = "font-offload-evidence-failed" ]; then
-    run_metal_readback || {
-        if [ "$reason" = "font-offload-evidence-failed" ]; then
-            reason=font-offload-and-metal-framebuffer-readback-failed
-        else
-            status=fail
-            reason=metal-framebuffer-readback-failed
-        fi
-    }
+elif [ "$layout_status_final" != "pass" ]; then
+    status=fail
+    reason=electron-layout-manifest-failed
+elif [ "$surface_status_final" != "pass" ]; then
+    status=fail
+    reason=tauri-chrome-layout-manifest-failed
+elif [ "$backend_status_final" != "pass" ]; then
+    status=fail
+    reason=backend-executed-parity-failed
+elif [ "$font_status_final" != "pass" ] && [ "$metal_status_final" != "pass" ] && [ "$metal_reason_final" != "metal-requires-macos" ]; then
+    status=fail
+    reason=font-offload-and-metal-framebuffer-readback-failed
+elif [ "$font_status_final" != "pass" ]; then
+    status=fail
+    reason=font-offload-evidence-failed
+elif [ "$metal_status_final" != "pass" ] && [ "$metal_reason_final" != "metal-requires-macos" ]; then
+    status=fail
+    reason=metal-framebuffer-readback-failed
+else
+    status=pass
+    reason=pass
 fi
 
 {

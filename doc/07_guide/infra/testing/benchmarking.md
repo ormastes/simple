@@ -204,6 +204,9 @@ Linux hosts, native Metal readback is recorded as `unavailable` with
 pass. The generated-GUI matrix records `text_normalization_pixels` for the
 fixture-specific Chrome/Simple text antialiasing normalization and still
 requires exact checksums, `mismatch_count=0`, and `blur_or_tolerance=false`.
+The wrapper continues independent backend, font offload/readback, and raw Metal
+readback checks after an earlier layout or surface failure so one report can
+show the first failing gate and later already-proven or still-blocked gates.
 
 ### Linux QEMU Network Parity
 
