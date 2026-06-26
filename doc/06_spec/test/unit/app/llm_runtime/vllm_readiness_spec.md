@@ -39,7 +39,7 @@ vllm_readiness_spec -> std
 
 ### vLLM runtime readiness bridge
 
-#### validates a static manifest but keeps known Torch placeholders blocked
+#### validates a static manifest but reports unavailable Torch explicitly
 
 <details>
 <summary>Executable SSpec</summary>
@@ -49,15 +49,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val manifest = llm_runtime_manifest("meta-llama/test", "http://127.0.0.1:8000/v1", "", [], "disabled")
-val result = llm_runtime_probe_manifest(manifest)
+val result = llm_runtime_probe_manifest_with_torch_status(manifest, "unavailable")
 
 expect(result.status).to_equal("blocked")
-expect(result.reason).to_equal("torch_or_svllm_placeholder_blocker")
+expect(result.reason).to_equal("torch_unavailable")
 expect(result.base_model).to_equal("redacted")
 expect(result.chat_template_status).to_equal("none")
 expect(result.dynamic_lora_status).to_equal("disabled")
-expect(result.torch_ready).to_equal("blocked")
-expect(result.evidence_jsonl.contains("<internal absence marker>")).to_equal(false)
+expect(result.torch_ready).to_equal("unavailable")
+expect(result.evidence_jsonl.contains(absence_marker())).to_equal(false)
 ```
 
 </details>
@@ -113,12 +113,12 @@ expect(result.status).to_equal("missing")
 expect(result.reason).to_equal("invalid_adapter_entry")
 expect(plan.status).to_equal("missing")
 expect(plan.reason).to_equal("invalid_adapter_entry")
-expect(plan.evidence_jsonl.contains("<internal absence marker>")).to_equal(false)
+expect(plan.evidence_jsonl.contains(absence_marker())).to_equal(false)
 ```
 
 </details>
 
-#### reports missing required fields and missing optional chat templates without internal absence markers
+#### reports missing required fields and missing optional chat templates with explicit absence
 
 <details>
 <summary>Executable SSpec</summary>
@@ -134,7 +134,7 @@ expect(result.status).to_equal("missing")
 expect(result.reason).to_equal("missing_base_model")
 expect(result.base_model).to_equal("missing")
 expect(result.chat_template_status).to_equal("missing")
-expect(result.evidence_jsonl.contains("<internal absence marker>")).to_equal(false)
+expect(result.evidence_jsonl.contains(absence_marker())).to_equal(false)
 ```
 
 </details>
@@ -153,7 +153,7 @@ val result = llm_runtime_probe_manifest_with_torch_check(llm_runtime_manifest("b
 expect(result.status).to_equal("missing")
 expect(result.reason).to_equal("invalid_endpoint")
 expect(result.endpoint_status).to_equal("invalid")
-expect(result.evidence_jsonl.contains("<internal absence marker>")).to_equal(false)
+expect(result.evidence_jsonl.contains(absence_marker())).to_equal(false)
 ```
 
 </details>
@@ -178,7 +178,7 @@ expect(trusted.dynamic_lora_status).to_equal("trusted")
 
 </details>
 
-#### reports Torch or svLLM placeholder readiness as blocked
+#### reports injected Torch readiness as ready
 
 <details>
 <summary>Executable SSpec</summary>
@@ -188,11 +188,11 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val manifest = llm_runtime_manifest("base", "http://127.0.0.1:8000/v1", "", [], "disabled")
-val result = llm_runtime_probe_manifest_with_torch_check(manifest, true)
+val result = llm_runtime_probe_manifest_with_torch_status(manifest, "ready")
 
-expect(result.status).to_equal("blocked")
-expect(result.reason).to_equal("torch_or_svllm_placeholder_blocker")
-expect(result.torch_ready).to_equal("blocked")
+expect(result.status).to_equal("ready")
+expect(result.reason).to_equal("static_manifest_ready")
+expect(result.torch_ready).to_equal("ready")
 ```
 
 </details>
@@ -253,7 +253,7 @@ val panel = collect_llm_diagnostics_jsonl(path)
 
 expect(panel.event_count).to_equal(1)
 expect(panel.last_event).to_equal("llm_runtime_vllm_readiness")
-expect(result.evidence_jsonl.contains("<internal absence marker>")).to_equal(false)
+expect(result.evidence_jsonl.contains(absence_marker())).to_equal(false)
 remove_file_if_exists(path)
 ```
 
@@ -269,7 +269,7 @@ remove_file_if_exists(path)
    - Expected: plan.command_preview does not contain `adapter_path`
    - Expected: plan.evidence_jsonl does not contain `/mnt/private-models`
    - Expected: plan.evidence_jsonl does not contain `password`
-   - Expected: plan.evidence_jsonl does not contain the internal absence marker
+   - Expected: plan.evidence_jsonl does not contain `absence_marker()`
 - remove file if exists
 
 
@@ -299,7 +299,7 @@ expect(plan.command_preview).to_contain("--lora-modules 1-redacted")
 expect(plan.command_preview.contains(adapter_path)).to_equal(false)
 expect(plan.evidence_jsonl.contains("/mnt/private-models")).to_equal(false)
 expect(plan.evidence_jsonl.contains("password")).to_equal(false)
-expect(plan.evidence_jsonl.contains("<internal absence marker>")).to_equal(false)
+expect(plan.evidence_jsonl.contains(absence_marker())).to_equal(false)
 remove_file_if_exists(adapter_path)
 ```
 
@@ -327,7 +327,7 @@ expect(plan.evidence_jsonl.contains("models/customer-a")).to_equal(false)
 
 </details>
 
-#### blocks unsafe serve-plan modes and reports missing fields without internal absence markers
+#### blocks unsafe serve-plan modes and reports missing fields with explicit absence
 
 <details>
 <summary>Executable SSpec</summary>
@@ -349,9 +349,9 @@ expect(missing.command_preview).to_equal("missing")
 expect(invalid_endpoint.status).to_equal("missing")
 expect(invalid_endpoint.reason).to_equal("invalid_endpoint")
 expect(invalid_endpoint.endpoint_status).to_equal("invalid")
-expect(dynamic.evidence_jsonl.contains("<internal absence marker>")).to_equal(false)
-expect(missing.evidence_jsonl.contains("<internal absence marker>")).to_equal(false)
-expect(invalid_endpoint.evidence_jsonl.contains("<internal absence marker>")).to_equal(false)
+expect(dynamic.evidence_jsonl.contains(absence_marker())).to_equal(false)
+expect(missing.evidence_jsonl.contains(absence_marker())).to_equal(false)
+expect(invalid_endpoint.evidence_jsonl.contains(absence_marker())).to_equal(false)
 ```
 
 </details>

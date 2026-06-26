@@ -39,16 +39,16 @@ vllm_torch_readiness_spec -> std
 
 ### vLLM Torch readiness bridge
 
-#### records nil-free local readiness evidence for dashboard readback
+#### records absence-marker-free local readiness evidence for dashboard readback
 
 - mkdir p
 - write file
    - Expected: readiness.status equals `blocked`
-   - Expected: readiness.reason equals `torch_or_svllm_placeholder_blocker`
-   - Expected: readiness.torch_ready equals `blocked`
+   - Expected: readiness.reason equals `torch_unavailable`
+   - Expected: readiness.torch_ready equals `unavailable`
    - Expected: readiness.chat_template_status equals `none`
-   - Expected: readiness.evidence_jsonl does not contain `nil`
-   - Expected: panel_text does not contain `nil`
+   - Expected: readiness.evidence_jsonl does not contain `absence_marker()`
+   - Expected: panel_text does not contain `absence_marker()`
 - remove file if exists
 
 
@@ -62,20 +62,20 @@ Reproduction: this block contains the complete executable scenario source.
 mkdir_p(".build/llm_runtime/system")
 val started = rt_time_now_unix_micros()
 val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
-val readiness = llm_runtime_probe_manifest(manifest)
+val readiness = llm_runtime_probe_manifest_with_torch_status(manifest, "unavailable")
 write_file(evidence_path(), readiness.evidence_jsonl)
 val panel_text = render_llm_diagnostics_panel_text(collect_llm_diagnostics_jsonl(evidence_path()))
 val elapsed = rt_time_now_unix_micros() - started
 
 expect(readiness.status).to_equal("blocked")
-expect(readiness.reason).to_equal("torch_or_svllm_placeholder_blocker")
-expect(readiness.torch_ready).to_equal("blocked")
+expect(readiness.reason).to_equal("torch_unavailable")
+expect(readiness.torch_ready).to_equal("unavailable")
 expect(readiness.chat_template_status).to_equal("none")
 expect(elapsed).to_be_less_than(2_000_000)
-expect(readiness.evidence_jsonl.contains("nil")).to_equal(false)
+expect(readiness.evidence_jsonl.contains(absence_marker())).to_equal(false)
 expect(panel_text).to_contain("events=1")
 expect(panel_text).to_contain("llm_runtime_vllm_readiness")
-expect(panel_text.contains("nil")).to_equal(false)
+expect(panel_text.contains(absence_marker())).to_equal(false)
 remove_file_if_exists(evidence_path())
 ```
 
@@ -97,12 +97,12 @@ expect(readiness.status).to_equal("blocked")
 expect(readiness.reason).to_equal("dynamic_lora_requires_trusted_mode")
 expect(readiness.base_model).to_equal("redacted")
 expect(readiness.evidence_jsonl.contains("/mnt/models")).to_equal(false)
-expect(readiness.evidence_jsonl.contains("nil")).to_equal(false)
+expect(readiness.evidence_jsonl.contains(absence_marker())).to_equal(false)
 ```
 
 </details>
 
-#### records nil-free static serve-plan evidence without live vLLM
+#### records absence-marker-free static serve-plan evidence without live vLLM
 
 - mkdir p
 - write file
@@ -110,8 +110,8 @@ expect(readiness.evidence_jsonl.contains("nil")).to_equal(false)
    - Expected: plan.reason equals `static_serve_plan_only`
    - Expected: plan.evidence_jsonl does not contain `/mnt/models`
    - Expected: plan.evidence_jsonl does not contain `password`
-   - Expected: plan.evidence_jsonl does not contain `nil`
-   - Expected: panel_text does not contain `nil`
+   - Expected: plan.evidence_jsonl does not contain `absence_marker()`
+   - Expected: panel_text does not contain `absence_marker()`
 - remove file if exists
 
 
@@ -133,15 +133,15 @@ expect(plan.reason).to_equal("static_serve_plan_only")
 expect(plan.command_preview).to_contain("vllm serve redacted")
 expect(plan.evidence_jsonl.contains("/mnt/models")).to_equal(false)
 expect(plan.evidence_jsonl.contains("password")).to_equal(false)
-expect(plan.evidence_jsonl.contains("nil")).to_equal(false)
+expect(plan.evidence_jsonl.contains(absence_marker())).to_equal(false)
 expect(panel_text).to_contain("llm_runtime_vllm_serve_plan")
-expect(panel_text.contains("nil")).to_equal(false)
+expect(panel_text.contains(absence_marker())).to_equal(false)
 remove_file_if_exists(evidence_path())
 ```
 
 </details>
 
-#### records nil-free malformed serve-plan reasons
+#### records absence-marker-free malformed serve-plan reasons
 
 <details>
 <summary>Executable SSpec</summary>
@@ -161,8 +161,8 @@ expect(malformed_adapter.status).to_equal("missing")
 expect(malformed_adapter.reason).to_equal("invalid_adapter_entry")
 expect(invalid_endpoint.status).to_equal("missing")
 expect(invalid_endpoint.reason).to_equal("invalid_endpoint")
-expect(malformed_adapter.evidence_jsonl.contains("nil")).to_equal(false)
-expect(invalid_endpoint.evidence_jsonl.contains("nil")).to_equal(false)
+expect(malformed_adapter.evidence_jsonl.contains(absence_marker())).to_equal(false)
+expect(invalid_endpoint.evidence_jsonl.contains(absence_marker())).to_equal(false)
 ```
 
 </details>

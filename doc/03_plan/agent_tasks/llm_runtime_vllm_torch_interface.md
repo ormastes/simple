@@ -68,11 +68,12 @@ Evidence:
 
 - `simple check` passed for `src/app/llm_runtime` and the readiness specs.
 - `test/01_unit/app/llm_runtime/vllm_readiness_spec.spl` passed after adding
-  path-like model redaction and conservative Torch-blocked default coverage.
+  path-like model redaction, explicit Torch-unavailable evidence, and injected
+  Torch-ready coverage.
 - `test/unit/app/llm_runtime/vllm_readiness_spec.spl` passed with the same
   mirrored coverage.
 - `test/03_system/app/llm_runtime/feature/vllm_torch_readiness_spec.spl`
-  passed after covering dashboard readback, Torch placeholder blocking,
+  passed after covering dashboard readback, Torch unavailable evidence,
   dynamic LoRA blocking, static serve-plan metadata, path/credential redaction,
   explicit absence rendering, and the local under-2s NFR.
 - `test/01_unit/app/llm_runtime/vllm_live_models_probe_spec.spl` covers ready
@@ -137,8 +138,14 @@ Reported files:
 Tasks:
 
 1. Replace hard-disabled availability with real owner-module readiness.
-   Status: partially done for `std.common.torch.dyn_sffi_ops.dyn_torch_available`;
-   it now delegates to `rt_torch_available()` instead of returning `false`.
+   Status: done for the static vLLM readiness bridge and dynamic Torch facade.
+   `std.common.torch.dyn_sffi_ops.dyn_torch_available` delegates to
+   `rt_torch_available()` instead of returning `false`, and
+   `app.llm_runtime.probe.llm_runtime_probe_manifest(...)` now reports default
+   Torch readiness from that facade as `ready` or `unavailable` instead of
+   hard-coding `blocked`. Deterministic specs use
+   `llm_runtime_probe_manifest_with_torch_status(...)` to prove both
+   unavailable and ready outcomes without depending on host libtorch.
 2. Replace placeholder returns with SFFI calls or explicit unavailable errors.
    Status: partially done for
    `std.common.torch.dyn_sffi_ops.dyn_torch_tensor_linalg_solve`; it now checks
