@@ -162,8 +162,9 @@ The spec covers ten cases:
    completion.
 7. A fixture with blank and mismatched ARGB rows. This proves pairwise status
    alone cannot pass without comparable nonblank source pixels.
-8. A source contract check that keeps the default RenderDoc evidence paths on
-   the focused current-capture rows instead of stale canonical probe rows.
+8. A source contract check that keeps split setup wrapper evidence directories
+   and default RenderDoc evidence paths on focused current-capture rows instead
+   of stale canonical probe rows.
 9. A status-only RenderDoc spoof row fails when the referenced artifact bytes
    are not `RDOC`.
 10. A missing RenderDoc source env is surfaced in the top-level Linux evidence
@@ -719,9 +720,10 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_
 
 </details>
 
-#### defaults RenderDoc inputs to focused current capture evidence
+#### keeps setup and RenderDoc inputs on focused current capture evidence
 
-- Read the Linux render-log wrapper defaults
+- Read the Linux setup and render-log wrapper defaults
+- Assert setup wrapper honors split evidence build directories
 - Assert default RenderDoc env paths use focused evidence rows
    - Expected: script does not contain `build/renderdoc/canonical-probe/simple/evidence.env`
    - Expected: script does not contain `build/renderdoc/canonical-probe/html/evidence.env`
@@ -731,12 +733,19 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Read the Linux render-log wrapper defaults")
+step("Read the Linux setup and render-log wrapper defaults")
+val setup_script = file_read("scripts/setup/setup-gui-web-2d-vulkan-env.shs")
 val script = file_read("scripts/check/check-linux-vulkan-render-log-compare.shs")
+
+step("Assert setup wrapper honors split evidence build directories")
+expect(setup_script).to_contain("GUI_WEB_2D_VULKAN_BUILD_DIR")
+expect(setup_script).to_contain("BUILD_DIR:-")
+expect(setup_script).to_contain("GUI_WEB_2D_VULKAN_TIMEOUT_SECS")
+expect(setup_script).to_contain("TIMEOUT_SECS:-45")
 
 step("Assert default RenderDoc env paths use focused evidence rows")
 expect(script).to_contain("RDOC_SIMPLE_EVIDENCE_ENV")
