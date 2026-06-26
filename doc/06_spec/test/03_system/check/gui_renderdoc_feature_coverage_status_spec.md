@@ -2114,7 +2114,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 198 lines folded for reproduction.
+Runnable source: 201 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2138,6 +2138,9 @@ expect(setup_script).to_contain("chrome-vulkan-hardware-missing")
 expect(setup_script).to_contain("function sourceFileStatus(path)")
 expect(setup_script).to_contain("gui_web_2d_vulkan_electron_browser_backing_source_file_status")
 expect(setup_script).to_contain("gui_web_2d_vulkan_chrome_browser_backing_source_file_status")
+expect(setup_script).to_contain("ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT")
+expect(setup_script).to_contain("browser_target_gpu_info_status")
+expect(setup_script).to_contain("gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_status")
 val aggregate_script = file_read("scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
 expect(aggregate_script).to_contain("default_simple_renderdoc_env = \"build/gui-web-2d-vulkan-env-renderdoc-simple/renderdoc/simple/evidence.env\"")
 expect(aggregate_script.contains("default_simple_renderdoc_env = \"build/gui-web-2d-vulkan-env-renderdoc-simple-explicit-layer-owner-env/renderdoc/simple/evidence.env\"")).to_be(false)
