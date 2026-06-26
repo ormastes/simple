@@ -141,6 +141,10 @@ check covers SPipe command routing. The `doc/06_spec` guard covers scenario 5.
   `license_review=missing`, `data_access=missing`,
   `cache_checksum=missing`, `training_allowed=false`, and
   `STATUS: WARN retry5-data-access-gate`.
+- `fine-tune-status llm_backed_app_server_dry_run_retry5` now executes the
+  recorded `data_checks.sdn` checker and reports `data_check_execution=warn`
+  with `data_check_status="STATUS: WARN retry5-cache-manifest"` instead of
+  treating registry-row presence as ready evidence.
 - Retry5 must continue to fail `fine-tune-ready` until licensed data access,
   cache path, checksum evidence, real QLoRA training, target-reaching eval, and
   an accepted decision are all recorded.

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readlinkSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -420,6 +421,14 @@ function commandFineTuneDataPlan(args) {
   console.log(registryBlockForAttempt(root, "data_downloads.sdn", attemptId) || "  missing");
   console.log("data_checks:");
   console.log(registryBlockForAttempt(root, "data_checks.sdn", attemptId) || "  missing");
+  const gate = fineTuneDataGateStatus(root, attemptId);
+  if (gate) {
+    console.log("data_check_execution:");
+    console.log(`  checker: "${quoteSdn(gate.checker)}"`);
+    console.log(`  result: "${quoteSdn(gate.result)}"`);
+    console.log(`  status: "${quoteSdn(gate.status)}"`);
+    if (gate.statusLine) console.log(`  status_line: "${quoteSdn(gate.statusLine)}"`);
+  }
 }
 
 function initRegistry(root, fileName, header, rootKey) {
@@ -1154,12 +1163,20 @@ function commandFineTuneStatus(args) {
   ];
 
   let failures = 0;
+  let warnings = 0;
   console.log(`attempt_id=${attemptId}`);
   for (const [name, ok] of checks) {
     if (!ok) failures += 1;
     console.log(`${name}=${ok ? "present" : "missing"}`);
   }
-  console.log(failures === 0 ? "STATUS: PASS llm-finetune-status" : "STATUS: FAIL llm-finetune-status");
+  const gate = fineTuneDataGateStatus(root, attemptId);
+  if (gate) {
+    if (gate.status === "WARN") warnings += 1;
+    if (gate.status === "FAIL") failures += 1;
+    console.log(`data_check_execution=${gate.status === "PASS" ? "pass" : gate.status === "WARN" ? "warn" : "fail"}`);
+    console.log(`data_check_status="${quoteSdn(gate.statusLine)}"`);
+  }
+  console.log(failures === 0 && warnings === 0 ? "STATUS: PASS llm-finetune-status" : failures ? "STATUS: FAIL llm-finetune-status" : "STATUS: WARN llm-finetune-status");
   process.exitCode = failures === 0 ? 0 : 1;
 }
 
@@ -1229,6 +1246,13 @@ function commandFineTuneDoctor(args) {
     }
   }
 
+  const gate = fineTuneDataGateStatus(root, attemptId);
+  if (gate) {
+    if (gate.status === "WARN") warnings += 1;
+    if (gate.status === "FAIL") failures += 1;
+    console.log(`${gate.status === "PASS" ? "OK" : gate.status} data_check_execution ${gate.statusLine}`);
+  }
+
   const decisionStatus = registryValueForAttempt(root, "decisions.sdn", attemptId, "status") || readQuotedValue(attemptContent, "status");
   const retryTarget = registryValueForAttempt(root, "decisions.sdn", attemptId, "retry_target") || readQuotedValue(attemptContent, "retry_target");
   const nextAttempt = registryValueForAttempt(root, "decisions.sdn", attemptId, "next_attempt") || readQuotedValue(attemptContent, "next_attempt");
@@ -1263,6 +1287,53 @@ function registryValueForAttempt(root, fileName, attemptId, key) {
     }
   }
   return latest;
+}
+
+function fineTuneDataGateStatus(root, attemptId) {
+  const checker = registryValueForAttempt(root, "data_checks.sdn", attemptId, "checker");
+  if (!checker) return null;
+
+  const parts = checker.trim().split(/\s+/).filter(Boolean);
+  const script = parts[0] || "";
+  if (!script.startsWith(".spipe/llm-finetune-process/scripts/") || !script.endsWith(".shs")) {
+    return {
+      checker,
+      result: "blocked-unsafe-checker-path",
+      status: "FAIL",
+      statusLine: "STATUS: FAIL llm-finetune-data-gate"
+    };
+  }
+
+  const run = spawnSync(script, parts.slice(1), {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    shell: false
+  });
+  const output = `${run.stdout || ""}${run.stderr || ""}`;
+  const statusLine = output.split(/\r?\n/).reverse().find((line) => /^STATUS: (PASS|WARN|FAIL) /.test(line)) || "";
+  const match = statusLine.match(/^STATUS: (PASS|WARN|FAIL) /);
+  if (run.error) {
+    return {
+      checker,
+      result: `checker-error:${run.error.code || run.error.message}`,
+      status: "FAIL",
+      statusLine: "STATUS: FAIL llm-finetune-data-gate"
+    };
+  }
+  if (run.status !== 0 && !match) {
+    return {
+      checker,
+      result: `checker-exit-${run.status}`,
+      status: "FAIL",
+      statusLine: "STATUS: FAIL llm-finetune-data-gate"
+    };
+  }
+  return {
+    checker,
+    result: match ? match[1].toLowerCase() : "missing-status",
+    status: match ? match[1] : "FAIL",
+    statusLine: statusLine || "STATUS: FAIL llm-finetune-data-gate"
+  };
 }
 
 function commandFineTuneReady(args) {

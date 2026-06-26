@@ -170,6 +170,11 @@ Evidence:
   cache evidence is missing, and carries the manifest/file/checksum proof
   fields from the cache gate. Even after the cache gate passes, acceptance stays
   false until real QLoRA target eval and app handoff evidence are recorded.
+- `fine-tune-status llm_backed_app_server_dry_run_retry5` now runs the
+  repo-local checker recorded in `data_checks.sdn` and reports
+  `STATUS: WARN llm-finetune-status` with
+  `data_check_status="STATUS: WARN retry5-cache-manifest"` while the licensed
+  cache manifest is missing or incomplete.
 - `.spipe/llm-finetune-process/README.md` now documents the retry5 cache
   manifest and normal-review handoff commands, including the proof fields and
   the rule that `acceptance_allowed=false` remains true until target eval plus

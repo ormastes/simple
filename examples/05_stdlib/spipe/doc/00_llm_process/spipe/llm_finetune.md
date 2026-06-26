@@ -98,7 +98,10 @@ Use `spipe fine-tune-create-retry <source_attempt_id> <next_attempt_id> [goal]
 [target]` after a failed decision to create the next attempt and record the
 retune handoff to that retry attempt.
 Use `spipe fine-tune-status <attempt_id>` before handoff to confirm the attempt
-has data, model, training, eval, and decision evidence.
+has data, model, training, eval, and decision evidence. If a data-check registry
+row records a repo-local `.spipe/llm-finetune-process/scripts/*.shs` checker,
+status also prints the checker execution state so a present registry row cannot
+hide a WARN cache/license gate.
 Use `spipe fine-tune-doctor <attempt_id>` to check registry evidence,
 placeholder values, and the next readiness action before treating an attempt as
 production evidence.

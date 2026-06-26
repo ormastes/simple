@@ -230,6 +230,11 @@ Audit an attempt across all evidence registries:
 node examples/05_stdlib/spipe/cli/spipe.js fine-tune-status <attempt_id>
 ```
 
+When a `data_checks.sdn` row records a repo-local executable `checker` under
+`.spipe/llm-finetune-process/scripts/*.shs`, `fine-tune-status` also runs that
+checker and prints `data_check_execution` plus the checker `STATUS:` line. A
+WARN checker means registry rows exist but the data/cache gate is not ready.
+
 Check evidence quality, placeholders, and next readiness action:
 
 ```sh
