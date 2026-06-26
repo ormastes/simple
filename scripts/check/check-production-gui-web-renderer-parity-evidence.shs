@@ -58,6 +58,38 @@ append_prefixed_env() {
     fi
 }
 
+derive_layout_manifest_counts() {
+    file="$1"
+    derived_case_count=0
+    derived_pass_count=0
+    derived_tracked_count=0
+    derived_fail_count=0
+    if [ ! -s "$file" ]; then
+        return 0
+    fi
+    sed -n 's/^electron_simple_web_layout_manifest_case=//p' "$file" | while IFS= read -r case_id; do
+        policy="$(field_of "electron_simple_web_layout_manifest_${case_id}_policy" "$file")"
+        case_status="$(field_of "electron_simple_web_layout_manifest_${case_id}_status" "$file")"
+        mismatch_count="$(field_of "electron_simple_web_layout_manifest_${case_id}_mismatch_count" "$file")"
+        blur_used="$(field_of "electron_simple_web_layout_manifest_${case_id}_blur_or_tolerance_used" "$file")"
+        derived_case_count=$((derived_case_count + 1))
+        if [ "$policy" = "exact" ] && [ "$case_status" = "pass" ] && [ "$mismatch_count" = "0" ] && [ "$blur_used" = "false" ]; then
+            derived_pass_count=$((derived_pass_count + 1))
+        elif [ "$policy" = "track-text-divergence" ] && [ "$blur_used" = "false" ]; then
+            if [ "$case_status" = "divergent" ] && [ -n "$mismatch_count" ] && [ "$mismatch_count" != "0" ]; then
+                derived_tracked_count=$((derived_tracked_count + 1))
+            elif [ "$case_status" = "pass" ] && [ "$mismatch_count" = "0" ]; then
+                derived_tracked_count=$((derived_tracked_count + 1))
+            else
+                derived_fail_count=$((derived_fail_count + 1))
+            fi
+        else
+            derived_fail_count=$((derived_fail_count + 1))
+        fi
+        printf '%s %s %s %s\n' "$derived_case_count" "$derived_pass_count" "$derived_tracked_count" "$derived_fail_count"
+    done | tail -n 1
+}
+
 run_subcheck() {
     if [ "$SUBCHECK_TIMEOUT_SECS" -gt 0 ] 2>/dev/null; then
         timeout "$SUBCHECK_TIMEOUT_SECS" "$@"
@@ -143,6 +175,16 @@ run_layout_manifest() {
     if [ "$code" -eq 124 ]; then
         status=timeout
         reason=layout-manifest-timeout
+        if [ "$case_count" = "" ] || [ "$pass_count" = "" ] || [ "$tracked_count" = "" ] || [ "$fail_count" = "" ]; then
+            derived_counts="$(derive_layout_manifest_counts "$env_file")"
+            if [ "$derived_counts" != "" ]; then
+                set -- $derived_counts
+                case_count="$1"
+                pass_count="$2"
+                tracked_count="$3"
+                fail_count="$4"
+            fi
+        fi
     fi
     {
         echo "production_gui_web_renderer_parity_layout_manifest_exit_code=$code"

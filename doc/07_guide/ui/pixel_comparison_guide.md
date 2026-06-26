@@ -92,6 +92,9 @@ raw Metal readback evidence after an earlier matrix or layout failure. Treat
 the top-level `production_gui_web_renderer_parity_reason` as the first failing
 gate, then read the promoted nested fields to see which later gates are already
 proven, unavailable, or failing.
+If the Simple Web layout manifest times out after writing per-case rows, the
+wrapper still derives and promotes partial case/pass/tracked/fail counts while
+leaving `production_gui_web_renderer_parity_layout_manifest_status=timeout`.
 
 The canonical production GUI font offload/readback evidence gate is:
 

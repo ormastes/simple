@@ -27,7 +27,7 @@ production_gui_web_renderer_parity_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -226,6 +226,39 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_metal_readback_r
 
 </details>
 
+#### derives partial layout manifest counts after timeout
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-production-gui-web-renderer-parity-layout-timeout-counts"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_ROOT\"\\nprintf \"electron_generated_gui_web_matrix_status=pass\\\\nelectron_generated_gui_web_matrix_reason=pass\\\\n\" > \"$BUILD_ROOT/evidence.env\"\\n' > " + root + "/fixture/matrix.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"electron_simple_web_layout_manifest_case=exact_case\\\\nelectron_simple_web_layout_manifest_exact_case_policy=exact\\\\nelectron_simple_web_layout_manifest_exact_case_status=pass\\\\nelectron_simple_web_layout_manifest_exact_case_mismatch_count=0\\\\nelectron_simple_web_layout_manifest_exact_case_blur_or_tolerance_used=false\\\\nelectron_simple_web_layout_manifest_case=bad_case\\\\nelectron_simple_web_layout_manifest_bad_case_policy=exact\\\\nelectron_simple_web_layout_manifest_bad_case_status=divergent\\\\nelectron_simple_web_layout_manifest_bad_case_mismatch_count=7\\\\nelectron_simple_web_layout_manifest_bad_case_blur_or_tolerance_used=false\\\\n\" > \"$BUILD_DIR/evidence.env\"\\nsleep 5\\n' > " + root + "/fixture/layout.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"tauri_chrome_simple_web_layout_manifest_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_reason=pass\\\\ntauri_chrome_simple_web_layout_manifest_electron_capture_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_chrome_capture_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_tauri_live_capture=true\\\\ntauri_chrome_simple_web_layout_manifest_chrome_live_capture=true\\\\ntauri_chrome_simple_web_layout_manifest_tauri_case_count=2\\\\ntauri_chrome_simple_web_layout_manifest_tauri_pass_count=2\\\\ntauri_chrome_simple_web_layout_manifest_tauri_tracked_count=0\\\\ntauri_chrome_simple_web_layout_manifest_tauri_fail_count=0\\\\ntauri_chrome_simple_web_layout_manifest_chrome_case_count=2\\\\ntauri_chrome_simple_web_layout_manifest_chrome_pass_count=2\\\\ntauri_chrome_simple_web_layout_manifest_chrome_tracked_count=0\\\\ntauri_chrome_simple_web_layout_manifest_chrome_fail_count=0\\\\ntauri_chrome_simple_web_layout_manifest_tauri_mismatch_count=0\\\\ntauri_chrome_simple_web_layout_manifest_chrome_mismatch_count=0\\\\ntauri_chrome_simple_web_layout_manifest_no_fake_capture=true\\\\ntauri_chrome_simple_web_layout_manifest_blur_or_tolerance_used=false\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/surface.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"production_gui_backend_status=pass\\\\nproduction_gui_backend_reason=pass\\\\nproduction_gui_backend_exact_backend_parity=true\\\\nproduction_gui_backend_cpu_simd_different_pixels=0\\\\nproduction_gui_backend_metal_resolved=software\\\\nproduction_gui_backend_metal_different_pixels=0\\\\nproduction_gui_backend_metal_gpu_frame_complete=false\\\\nproduction_gui_backend_blur_or_tolerance_used=false\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/backend.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"production_gui_font_offload_status=pass\\\\nproduction_gui_font_offload_reason=pass\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/font.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"metal_engine2d_framebuffer_readback_status=unavailable\\\\nmetal_engine2d_framebuffer_readback_reason=metal-requires-macos\\\\nmetal_engine2d_framebuffer_readback_spec_status=skipped\\\\nmetal_engine2d_framebuffer_gpu_readback_available=false\\\\nmetal_engine2d_framebuffer_blur_or_tolerance_used=false\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/metal.sh && " +
+    "PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS=1 PRODUCTION_GUI_WEB_RENDERER_PARITY_MATRIX_SCRIPT=" + root + "/fixture/matrix.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_SCRIPT=" + root + "/fixture/layout.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_SCRIPT=" + root + "/fixture/surface.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_BACKEND_SCRIPT=" + root + "/fixture/backend.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_FONT_OFFLOAD_SCRIPT=" + root + "/fixture/font.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_METAL_READBACK_SCRIPT=" + root + "/fixture/metal.sh BUILD_ROOT=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_status=fail")
+expect(evidence).to_contain("production_gui_web_renderer_parity_reason=electron-layout-manifest-failed")
+expect(evidence).to_contain("production_gui_web_renderer_parity_layout_manifest_status=timeout")
+expect(evidence).to_contain("production_gui_web_renderer_parity_layout_manifest_case_count=2")
+expect(evidence).to_contain("production_gui_web_renderer_parity_layout_manifest_pass_count=1")
+expect(evidence).to_contain("production_gui_web_renderer_parity_layout_manifest_tracked_count=0")
+expect(evidence).to_contain("production_gui_web_renderer_parity_layout_manifest_fail_count=1")
+```
+
+</details>
+
 #### fails top-level parity when font offload is unavailable
 
 <details>
@@ -312,8 +345,8 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_surface_manifest
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
