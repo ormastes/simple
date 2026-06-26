@@ -13,6 +13,15 @@ use compiler.common.diagnostics.span.{Span}
 use .vhdl_backend.{VhdlBackend}
 
 impl VhdlBackend:
+    fn emit_operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
+        self.operand_to_vhdl(operand)
+
+    fn process_emit_operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
+        self.process_operand_to_vhdl(operand)
+
+    fn helper_emit_operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
+        self.helper_operand_to_vhdl(operand)
+
     fn integer_width(ty: MirType) -> i64?:
         match ty.kind:
             case I64 | U64: Some(64)
@@ -24,8 +33,9 @@ impl VhdlBackend:
 
     fn validate_concrete_bit_width(width: i64) -> Result<(), CompileError>:
         val diagnostic = self.type_mapper.fixed_width_diagnostic(width)
-        if diagnostic.?:
-            return Err(self.backend_error(diagnostic.unwrap()))
+        match diagnostic:
+            case Some(message): return Err(self.backend_error(message))
+            case None: ()
         Ok(())
 
     fn is_signed_integer_type(ty: MirType) -> bool:
@@ -41,9 +51,9 @@ impl VhdlBackend:
             case _: false
 
     fn resize_expr_to_vhdl(operand: text, signed: bool, new_width: i64) -> Result<text, CompileError>:
-        val width_result = self.validate_concrete_bit_width(new_width)
-        if width_result.is_err():
-            return Err(width_result.unwrap_err())
+        match self.validate_concrete_bit_width(new_width):
+            case Ok(_): pass
+            case Err(err): return Err(err)
         if signed:
             Ok("resize(signed({operand}), {new_width})")
         else:
@@ -52,25 +62,32 @@ impl VhdlBackend:
     fn require_matching_fixed_integer_widths(op: MirBinOp, left_ty: MirType, right_ty: MirType) -> Result<(), CompileError>:
         val left_width = self.integer_width(left_ty)
         val right_width = self.integer_width(right_ty)
-        if left_width.?:
-            val left_width_result = self.validate_concrete_bit_width(left_width.unwrap())
-            if left_width_result.is_err():
-                return Err(left_width_result.unwrap_err())
-        if right_width.?:
-            val right_width_result = self.validate_concrete_bit_width(right_width.unwrap())
-            if right_width_result.is_err():
-                return Err(right_width_result.unwrap_err())
-        if left_width.? and right_width.?:
-            if left_width.unwrap() != right_width.unwrap():
-                return Err(self.backend_error("Ambiguous VHDL integer width mismatch for {op}: left {left_ty.kind} is {left_width.unwrap()} bits, right {right_ty.kind} is {right_width.unwrap()} bits; insert an explicit cast or VhdlResize"))
+        match left_width:
+            case Some(width):
+                match self.validate_concrete_bit_width(width):
+                    case Ok(_): pass
+                    case Err(err): return Err(err)
+            case None: ()
+        match right_width:
+            case Some(width):
+                match self.validate_concrete_bit_width(width):
+                    case Ok(_): pass
+                    case Err(err): return Err(err)
+            case None: ()
+        match left_width:
+            case Some(left_value):
+                match right_width:
+                    case Some(right_value):
+                        if left_value != right_value:
+                            return Err(self.backend_error("Ambiguous VHDL integer width mismatch for {op}: left {left_ty.kind} is {left_value} bits, right {right_ty.kind} is {right_value} bits; insert an explicit cast or VhdlResize"))
+                    case None: ()
+            case None: ()
         Ok(())
 
     fn binop_with_matching_integer_widths(op: MirBinOp, left: text, left_ty: MirType, right: text, right_ty: MirType, expr: text) -> Result<text, CompileError>:
-        val width_result = self.require_matching_fixed_integer_widths(op, left_ty, right_ty)
-        if width_result.is_err():
-            Err(width_result.unwrap_err())
-        else:
-            Ok(expr)
+        match self.require_matching_fixed_integer_widths(op, left_ty, right_ty):
+            case Ok(_): Ok(expr)
+            case Err(err): Err(err)
 
     fn mir_type_to_vhdl(ty: MirType) -> Result<text, CompileError>:
         """Convert MIR type to VHDL type string."""
@@ -79,8 +96,9 @@ impl VhdlBackend:
     fn mir_type_to_vhdl_at(ty: MirType, span: Span?) -> Result<text, CompileError>:
         """Convert MIR type to VHDL type string with an optional diagnostic span."""
         val unsupported = self.unsupported_type_error(ty, "type emission", span)
-        if unsupported.?:
-            return Err(unsupported.unwrap())
+        match unsupported:
+            case Some(err): return Err(err)
+            case None: ()
         match ty.kind:
             case I64: Ok("signed(63 downto 0)")
             case I32: Ok("signed(31 downto 0)")
@@ -91,37 +109,31 @@ impl VhdlBackend:
             case U16: Ok("unsigned(15 downto 0)")
             case U8: Ok("unsigned(7 downto 0)")
             case Bits(width, signed):
-                val width_result = self.validate_concrete_bit_width(width)
-                if width_result.is_err():
-                    Err(width_result.unwrap_err())
-                else:
-                    Ok(self.type_mapper.map_fixed_bits(width, signed))
+                match self.validate_concrete_bit_width(width):
+                    case Ok(_): Ok(self.type_mapper.map_fixed_bits(width, signed))
+                    case Err(err): Err(err)
             case Bool:
                 if self.use_resolved:
                     Ok("std_logic")
                 else:
                     Ok("bit")
             case Array(elem, size):
-                val elem_type_result = self.mir_type_to_vhdl_at(elem, span)
-                if elem_type_result.is_err():
-                    Err(elem_type_result.unwrap_err())
-                else:
-                    Ok("array (0 to {size - 1}) of {elem_type_result.unwrap()}")
+                val elem_type = match self.mir_type_to_vhdl_at(elem, span):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                Ok("array (0 to {size - 1}) of {elem_type}")
             case Tuple(elements):
                 if elements.len() == 0:
                     return Err(self.backend_error("Empty tuple types are not supported by the VHDL backend"))
                 val tuple_key = self.tuple_type_key(ty)
-                val tuple_name = self.active_tuple_type_names.get(tuple_key)
-                if tuple_name.?:
-                    Ok(tuple_name.unwrap())
-                else:
-                    Err(self.backend_error("Tuple type {ty.kind} was not registered before VHDL type emission"))
+                match self.active_tuple_type_names.get(tuple_key):
+                    case Some(tuple_name): Ok(tuple_name)
+                    case None: Err(self.backend_error("Tuple type {ty.kind} was not registered before VHDL type emission"))
             case Struct(symbol) | Enum(symbol):
-                val type_def_result = self.type_def_by_symbol(symbol)
-                if type_def_result.is_err():
-                    Err(type_def_result.unwrap_err())
-                else:
-                    Ok(type_def_result.unwrap().name)
+                val type_def = match self.type_def_by_symbol(symbol):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                Ok(type_def.name)
             case _:
                 Err(self.backend_error_at("Unsupported VHDL type: {ty.kind}", span))
 
@@ -137,19 +149,18 @@ impl VhdlBackend:
                         var entries: [text] = []
                         var idx = 0
                         for operand in operands:
-                            val value_result = self.operand_to_vhdl(operand)
-                            if value_result.is_err():
-                                return Err(value_result.unwrap_err())
-                            entries = entries.push("f{idx} => {value_result.unwrap()}")
+                            val value = match self.operand_to_vhdl(operand):
+                                case Ok(result): result
+                                case Err(err): return Err(err)
+                            entries = entries.push("f{idx} => {value}")
                             idx = idx + 1
                         Ok("({entries.join(\", \")})")
                     case _:
                         Err(self.backend_error("Tuple aggregate destination is not a tuple type: {dest_type.kind}"))
             case Struct(symbol):
-                val type_def_result = self.type_def_by_symbol(symbol)
-                if type_def_result.is_err():
-                    return Err(type_def_result.unwrap_err())
-                val type_def = type_def_result.unwrap()
+                val type_def = match self.type_def_by_symbol(symbol):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
                 match type_def.kind:
                     case Struct(fields):
                         if operands.len() != fields.len():
@@ -157,10 +168,10 @@ impl VhdlBackend:
                         var entries: [text] = []
                         var idx = 0
                         for operand in operands:
-                            val value_result = self.operand_to_vhdl(operand)
-                            if value_result.is_err():
-                                return Err(value_result.unwrap_err())
-                            entries = entries.push("{fields[idx].name} => {value_result.unwrap()}")
+                            val value = match self.operand_to_vhdl(operand):
+                                case Ok(result): result
+                                case Err(err): return Err(err)
+                            entries = entries.push("{fields[idx].name} => {value}")
                             idx = idx + 1
                         Ok("({entries.join(\", \")})")
                     case _:
@@ -173,19 +184,18 @@ impl VhdlBackend:
                         var entries: [text] = []
                         var idx = 0
                         for operand in operands:
-                            val value_result = self.operand_to_vhdl(operand)
-                            if value_result.is_err():
-                                return Err(value_result.unwrap_err())
-                            entries = entries.push("{idx} => {value_result.unwrap()}")
+                            val value = match self.operand_to_vhdl(operand):
+                                case Ok(result): result
+                                case Err(err): return Err(err)
+                            entries = entries.push("{idx} => {value}")
                             idx = idx + 1
                         Ok("({entries.join(\", \")})")
                     case _:
                         Err(self.backend_error("Array aggregate destination is not an array type: {dest_type.kind}"))
             case Enum(symbol, variant):
-                val type_def_result = self.type_def_by_symbol(symbol)
-                if type_def_result.is_err():
-                    return Err(type_def_result.unwrap_err())
-                val type_def = type_def_result.unwrap()
+                val type_def = match self.type_def_by_symbol(symbol):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
                 match type_def.kind:
                     case Enum(variants):
                         self.enum_aggregate_literal_to_vhdl(type_def, variants, variant, operands, "aggregate", span)
@@ -206,19 +216,18 @@ impl VhdlBackend:
                         var entries: [text] = []
                         var idx = 0
                         for operand in operands:
-                            val value_result = self.process_operand_to_vhdl(operand)
-                            if value_result.is_err():
-                                return Err(value_result.unwrap_err())
-                            entries = entries.push("f{idx} => {value_result.unwrap()}")
+                            val value = match self.process_operand_to_vhdl(operand):
+                                case Ok(result): result
+                                case Err(err): return Err(err)
+                            entries = entries.push("f{idx} => {value}")
                             idx = idx + 1
                         Ok("({entries.join(\", \")})")
                     case _:
                         Err(self.backend_error("Tuple aggregate destination is not a tuple type: {dest_type.kind}"))
             case Struct(symbol):
-                val type_def_result = self.type_def_by_symbol(symbol)
-                if type_def_result.is_err():
-                    return Err(type_def_result.unwrap_err())
-                val type_def = type_def_result.unwrap()
+                val type_def = match self.type_def_by_symbol(symbol):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
                 match type_def.kind:
                     case Struct(fields):
                         if operands.len() != fields.len():
@@ -226,10 +235,10 @@ impl VhdlBackend:
                         var entries: [text] = []
                         var idx = 0
                         for operand in operands:
-                            val value_result = self.process_operand_to_vhdl(operand)
-                            if value_result.is_err():
-                                return Err(value_result.unwrap_err())
-                            entries = entries.push("{fields[idx].name} => {value_result.unwrap()}")
+                            val value = match self.process_operand_to_vhdl(operand):
+                                case Ok(result): result
+                                case Err(err): return Err(err)
+                            entries = entries.push("{fields[idx].name} => {value}")
                             idx = idx + 1
                         Ok("({entries.join(\", \")})")
                     case _:
@@ -242,19 +251,18 @@ impl VhdlBackend:
                         var entries: [text] = []
                         var idx = 0
                         for operand in operands:
-                            val value_result = self.process_operand_to_vhdl(operand)
-                            if value_result.is_err():
-                                return Err(value_result.unwrap_err())
-                            entries = entries.push("{idx} => {value_result.unwrap()}")
+                            val value = match self.process_operand_to_vhdl(operand):
+                                case Ok(result): result
+                                case Err(err): return Err(err)
+                            entries = entries.push("{idx} => {value}")
                             idx = idx + 1
                         Ok("({entries.join(\", \")})")
                     case _:
                         Err(self.backend_error("Array aggregate destination is not an array type: {dest_type.kind}"))
             case Enum(symbol, variant):
-                val type_def_result = self.type_def_by_symbol(symbol)
-                if type_def_result.is_err():
-                    return Err(type_def_result.unwrap_err())
-                val type_def = type_def_result.unwrap()
+                val type_def = match self.type_def_by_symbol(symbol):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
                 match type_def.kind:
                     case Enum(variants):
                         self.enum_aggregate_literal_to_vhdl(type_def, variants, variant, operands, "process aggregate", span)
@@ -275,19 +283,18 @@ impl VhdlBackend:
                         var entries: [text] = []
                         var idx = 0
                         for operand in operands:
-                            val value_result = self.helper_operand_to_vhdl(operand)
-                            if value_result.is_err():
-                                return Err(value_result.unwrap_err())
-                            entries = entries.push("f{idx} => {value_result.unwrap()}")
+                            val value = match self.helper_operand_to_vhdl(operand):
+                                case Ok(result): result
+                                case Err(err): return Err(err)
+                            entries = entries.push("f{idx} => {value}")
                             idx = idx + 1
                         Ok("({entries.join(\", \")})")
                     case _:
                         Err(self.backend_error("Tuple aggregate destination is not a tuple type: {dest_type.kind}"))
             case Struct(symbol):
-                val type_def_result = self.type_def_by_symbol(symbol)
-                if type_def_result.is_err():
-                    return Err(type_def_result.unwrap_err())
-                val type_def = type_def_result.unwrap()
+                val type_def = match self.type_def_by_symbol(symbol):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
                 match type_def.kind:
                     case Struct(fields):
                         if operands.len() != fields.len():
@@ -295,10 +302,10 @@ impl VhdlBackend:
                         var entries: [text] = []
                         var idx = 0
                         for operand in operands:
-                            val value_result = self.helper_operand_to_vhdl(operand)
-                            if value_result.is_err():
-                                return Err(value_result.unwrap_err())
-                            entries = entries.push("{fields[idx].name} => {value_result.unwrap()}")
+                            val value = match self.helper_operand_to_vhdl(operand):
+                                case Ok(result): result
+                                case Err(err): return Err(err)
+                            entries = entries.push("{fields[idx].name} => {value}")
                             idx = idx + 1
                         Ok("({entries.join(\", \")})")
                     case _:
@@ -311,19 +318,18 @@ impl VhdlBackend:
                         var entries: [text] = []
                         var idx = 0
                         for operand in operands:
-                            val value_result = self.helper_operand_to_vhdl(operand)
-                            if value_result.is_err():
-                                return Err(value_result.unwrap_err())
-                            entries = entries.push("{idx} => {value_result.unwrap()}")
+                            val value = match self.helper_operand_to_vhdl(operand):
+                                case Ok(result): result
+                                case Err(err): return Err(err)
+                            entries = entries.push("{idx} => {value}")
                             idx = idx + 1
                         Ok("({entries.join(\", \")})")
                     case _:
                         Err(self.backend_error("Array aggregate destination is not an array type: {dest_type.kind}"))
             case Enum(symbol, variant):
-                val type_def_result = self.type_def_by_symbol(symbol)
-                if type_def_result.is_err():
-                    return Err(type_def_result.unwrap_err())
-                val type_def = type_def_result.unwrap()
+                val type_def = match self.type_def_by_symbol(symbol):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
                 match type_def.kind:
                     case Enum(variants):
                         self.enum_aggregate_literal_to_vhdl(type_def, variants, variant, operands, "helper aggregate", span)
@@ -356,15 +362,16 @@ impl VhdlBackend:
         for candidate in variants:
             if candidate.payload.?:
                 val field_name = self.payload_enum_field_name(candidate)
-                val default_result = self.default_vhdl_value(candidate.payload.unwrap(), span)
-                if default_result.is_err():
-                    return Err(default_result.unwrap_err())
-                var value: text = default_result.unwrap()
+                val payload_type = match candidate.payload:
+                    case Some(result): result
+                    case None: return Err(self.backend_error_at("Payload enum `{type_def.name}.{candidate.name}` is missing payload type during {lowering_context} lowering", span))
+                var value: text = match self.default_vhdl_value(payload_type, span):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
                 if candidate.discriminant == selected.discriminant and selected.payload.?:
-                    val payload_value_result = self.payload_operand_to_vhdl_for_context(operands[0], lowering_context)
-                    if payload_value_result.is_err():
-                        return Err(payload_value_result.unwrap_err())
-                    value = payload_value_result.unwrap()
+                    value = match self.payload_operand_to_vhdl_for_context(operands[0], lowering_context):
+                        case Ok(result): result
+                        case Err(err): return Err(err)
                     payload_operand_used = true
                 entries = entries.push("{field_name} => {value}")
         if selected.payload.? and not payload_operand_used:
@@ -419,15 +426,14 @@ impl VhdlBackend:
                 Err(self.backend_error_at("Payload enum default value is not defined for payload type `{ty.kind}`", span))
 
     me field_name_for_operand(base: MirOperand, field: i64) -> Result<text, CompileError>:
-        val type_result = self.operand_type(base)
-        if type_result.is_err():
-            return Err(type_result.unwrap_err())
-        match type_result.unwrap().kind:
+        val base_type = match self.operand_type(base):
+            case Ok(result): result
+            case Err(err): return Err(err)
+        match base_type.kind:
             case Struct(symbol):
-                val type_def_result = self.type_def_by_symbol(symbol)
-                if type_def_result.is_err():
-                    return Err(type_def_result.unwrap_err())
-                val type_def = type_def_result.unwrap()
+                val type_def = match self.type_def_by_symbol(symbol):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
                 match type_def.kind:
                     case Struct(fields):
                         if field < 0 or field >= fields.len():
@@ -436,10 +442,9 @@ impl VhdlBackend:
                     case _:
                         Err(self.backend_error("Field access target {type_def.name} is not a struct type"))
             case Enum(symbol):
-                val type_def_result = self.type_def_by_symbol(symbol)
-                if type_def_result.is_err():
-                    return Err(type_def_result.unwrap_err())
-                val type_def = type_def_result.unwrap()
+                val type_def = match self.type_def_by_symbol(symbol):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
                 match type_def.kind:
                     case Enum(variants):
                         if field == 0:
@@ -463,26 +468,28 @@ impl VhdlBackend:
     me const_value_to_vhdl_at(value: MirConstValue, ty: MirType, span: Span?) -> Result<text, CompileError>:
         """Convert a constant value to VHDL literal with an optional diagnostic span."""
         val unsupported = self.unsupported_type_error(ty, "constant emission", span)
-        if unsupported.?:
-            return Err(unsupported.unwrap())
+        match unsupported:
+            case Some(err): return Err(err)
+            case None: ()
         match value:
             case Int(v):
                 val width = self.integer_width(ty)
-                if not width.?:
-                    return Err(self.backend_error_at("Integer constant requires fixed-width integer type, got {ty.kind}", span))
-                val width_result = self.validate_concrete_bit_width(width.unwrap())
-                if width_result.is_err():
-                    return Err(width_result.unwrap_err())
+                val fixed_width = match width:
+                    case Some(result): result
+                    case None: return Err(self.backend_error_at("Integer constant requires fixed-width integer type, got {ty.kind}", span))
+                match self.validate_concrete_bit_width(fixed_width):
+                    case Ok(_): pass
+                    case Err(err): return Err(err)
                 match ty.kind:
                     case I64 | I32 | I16 | I8:
-                        Ok("to_signed({v}, {width.unwrap()})")
+                        Ok("to_signed({v}, {fixed_width})")
                     case U64 | U32 | U16 | U8:
-                        Ok("to_unsigned({v}, {width.unwrap()})")
+                        Ok("to_unsigned({v}, {fixed_width})")
                     case Bits(_, signed):
                         if signed:
-                            Ok("to_signed({v}, {width.unwrap()})")
+                            Ok("to_signed({v}, {fixed_width})")
                         else:
-                            Ok("to_unsigned({v}, {width.unwrap()})")
+                            Ok("to_unsigned({v}, {fixed_width})")
                     case _:
                         Err(self.backend_error_at("Unsupported integer literal target type: {ty.kind}", span))
             case Float(v):
@@ -514,17 +521,15 @@ impl VhdlBackend:
             case BitOr: self.binop_with_matching_integer_widths(op, left, left_ty, right, right_ty, "{left} or {right}")
             case BitXor: self.binop_with_matching_integer_widths(op, left, left_ty, right, right_ty, "{left} xor {right}")
             case Shl:
-                val shift_count_result = self.shift_count_to_vhdl(right, right_ty, right_operand)
-                if shift_count_result.is_err():
-                    Err(shift_count_result.unwrap_err())
-                else:
-                    Ok("shift_left({left}, {shift_count_result.unwrap()})")
+                val shift_count = match self.shift_count_to_vhdl(right, right_ty, right_operand):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                Ok("shift_left({left}, {shift_count})")
             case Shr:
-                val shift_count_result = self.shift_count_to_vhdl(right, right_ty, right_operand)
-                if shift_count_result.is_err():
-                    Err(shift_count_result.unwrap_err())
-                else:
-                    Ok("shift_right({left}, {shift_count_result.unwrap()})")
+                val shift_count = match self.shift_count_to_vhdl(right, right_ty, right_operand):
+                    case Ok(result): result
+                    case Err(err): return Err(err)
+                Ok("shift_right({left}, {shift_count})")
             case _:
                 Err(self.backend_error("Unsupported VHDL binary operator: {op}"))
 
@@ -549,55 +554,57 @@ impl VhdlBackend:
         """Convert a MIR cast/bitcast to a synthesizable VHDL expression."""
         val source_width = self.integer_width(source)
         val target_width = self.integer_width(target)
-        if target_width.?:
-            val target_width_result = self.validate_concrete_bit_width(target_width.unwrap())
-            if target_width_result.is_err():
-                return Err(target_width_result.unwrap_err())
-            match target.kind:
-                case I64 | I32 | I16 | I8:
-                    match source.kind:
-                        case Bool:
-                            Ok("to_signed(1, {target_width.unwrap()}) when {operand} = '1' else to_signed(0, {target_width.unwrap()})")
-                        case _:
-                            self.resize_expr_to_vhdl(operand, true, target_width.unwrap())
-                case U64 | U32 | U16 | U8:
-                    match source.kind:
-                        case Bool:
-                            Ok("to_unsigned(1, {target_width.unwrap()}) when {operand} = '1' else to_unsigned(0, {target_width.unwrap()})")
-                        case _:
-                            self.resize_expr_to_vhdl(operand, false, target_width.unwrap())
-                case Bits(_, signed):
-                    match source.kind:
-                        case Bool:
-                            if signed:
-                                Ok("to_signed(1, {target_width.unwrap()}) when {operand} = '1' else to_signed(0, {target_width.unwrap()})")
-                            else:
-                                Ok("to_unsigned(1, {target_width.unwrap()}) when {operand} = '1' else to_unsigned(0, {target_width.unwrap()})")
-                        case _:
-                            self.resize_expr_to_vhdl(operand, signed, target_width.unwrap())
-                case _:
-                    Err(self.backend_error("Unsupported VHDL cast target: {target.kind}"))
-        else:
-            match target.kind:
-                case Bool:
-                    if source_width.?:
-                        val source_width_result = self.validate_concrete_bit_width(source_width.unwrap())
-                        if source_width_result.is_err():
-                            return Err(source_width_result.unwrap_err())
-                        if self.is_unsigned_integer_type(source):
-                            Ok("'1' when {operand} /= to_unsigned(0, {source_width.unwrap()}) else '0'")
-                        elif self.is_signed_integer_type(source):
-                            Ok("'1' when {operand} /= to_signed(0, {source_width.unwrap()}) else '0'")
-                        else:
-                            Err(self.backend_error("Unsupported VHDL bool cast source: {source.kind}"))
-                    else:
+        match target_width:
+            case Some(width):
+                match self.validate_concrete_bit_width(width):
+                    case Ok(_): pass
+                    case Err(err): return Err(err)
+                match target.kind:
+                    case I64 | I32 | I16 | I8:
                         match source.kind:
                             case Bool:
-                                Ok(operand)
+                                Ok("to_signed(1, {width}) when {operand} = '1' else to_signed(0, {width})")
                             case _:
-                                Err(self.backend_error("Unsupported VHDL bool cast source: {source.kind}"))
-                case _:
-                    Err(self.backend_error("Unsupported VHDL cast target: {target.kind}"))
+                                self.resize_expr_to_vhdl(operand, true, width)
+                    case U64 | U32 | U16 | U8:
+                        match source.kind:
+                            case Bool:
+                                Ok("to_unsigned(1, {width}) when {operand} = '1' else to_unsigned(0, {width})")
+                            case _:
+                                self.resize_expr_to_vhdl(operand, false, width)
+                    case Bits(_, signed):
+                        match source.kind:
+                            case Bool:
+                                if signed:
+                                    Ok("to_signed(1, {width}) when {operand} = '1' else to_signed(0, {width})")
+                                else:
+                                    Ok("to_unsigned(1, {width}) when {operand} = '1' else to_unsigned(0, {width})")
+                            case _:
+                                self.resize_expr_to_vhdl(operand, signed, width)
+                    case _:
+                        Err(self.backend_error("Unsupported VHDL cast target: {target.kind}"))
+            case None:
+                match target.kind:
+                    case Bool:
+                        match source_width:
+                            case Some(width):
+                                match self.validate_concrete_bit_width(width):
+                                    case Ok(_): pass
+                                    case Err(err): return Err(err)
+                                if self.is_unsigned_integer_type(source):
+                                    Ok("'1' when {operand} /= to_unsigned(0, {width}) else '0'")
+                                elif self.is_signed_integer_type(source):
+                                    Ok("'1' when {operand} /= to_signed(0, {width}) else '0'")
+                                else:
+                                    Err(self.backend_error("Unsupported VHDL bool cast source: {source.kind}"))
+                            case None:
+                                match source.kind:
+                                    case Bool:
+                                        Ok(operand)
+                                    case _:
+                                        Err(self.backend_error("Unsupported VHDL bool cast source: {source.kind}"))
+                    case _:
+                        Err(self.backend_error("Unsupported VHDL cast target: {target.kind}"))
 
     fn unaryop_to_vhdl(op: MirUnaryOp, operand: text) -> Result<text, CompileError>:
         """Convert unary operation to VHDL expression."""
