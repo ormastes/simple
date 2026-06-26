@@ -1446,10 +1446,13 @@ function commandFineTuneReady(args) {
   const handoffDoc = registryValueForAttempt(root, "app_handoffs.sdn", attemptId, "handoff_doc") || readQuotedValue(attemptContent, "handoff_doc");
   const artifactReady = modelArtifactReady(modelArtifact);
   const evalTargetReached = fineTuneEvalTargetStatus(root, attemptId, attemptContent);
+  const gate = fineTuneDataGateStatus(root, attemptId);
+  const dataCheckReady = !gate || gate.status === "PASS";
 
   const checks = [
     ["feature_option_selected", featureOption && featureOption !== "pending-user-selection"],
     ["nfr_option_selected", nfrOption && nfrOption !== "pending-user-selection"],
+    ["data_check_gate_ready", dataCheckReady],
     ["base_model_selected", baseModel && baseModel !== "not-selected"],
     ["tuning_method_real", method && method !== "dry-run-record-only"],
     ["model_artifact_created", artifactReady],
@@ -1465,6 +1468,20 @@ function commandFineTuneReady(args) {
   for (const [name, ok] of checks) {
     if (!ok) failures += 1;
     console.log(`${name}=${ok ? "ready" : "pending"}`);
+  }
+  if (gate) {
+    console.log(`data_check_execution=${gate.status === "PASS" ? "pass" : gate.status === "WARN" ? "warn" : "fail"}`);
+    console.log(`data_check_status="${quoteSdn(gate.statusLine)}"`);
+    printFineTuneGateFields(gate, [
+      "result",
+      "training_allowed",
+      "model_manifest_exists",
+      "eval_result_exists",
+      "target_accuracy",
+      "required_accuracy",
+      "target_eval_reached",
+      "acceptance_allowed"
+    ]);
   }
   console.log(failures === 0 ? "STATUS: PASS llm-finetune-ready" : "STATUS: FAIL llm-finetune-ready");
   process.exitCode = failures === 0 ? 0 : 1;
