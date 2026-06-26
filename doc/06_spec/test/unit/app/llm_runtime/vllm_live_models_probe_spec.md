@@ -56,7 +56,7 @@ expect(result.reason).to_equal("models_endpoint_ready")
 expect(result.endpoint_status).to_equal("configured")
 expect(result.model_count).to_equal(1)
 expect(result.base_model_status).to_equal("present")
-expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>

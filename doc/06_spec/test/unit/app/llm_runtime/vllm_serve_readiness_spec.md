@@ -57,7 +57,7 @@ expect(result.running_status).to_equal("not_started")
 expect(result.endpoint_status).to_equal("configured")
 expect(result.models_status).to_equal("not_fetched")
 expect(result.evidence_jsonl.split("base-model").len()).to_equal(1)
-expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -260,7 +260,7 @@ expect(run.status).to_equal("blocked")
 expect(run.reason).to_equal("auth_rejected")
 expect(run.stopped_pid).to_equal(12345)
 expect(run.stopped_by_orchestrator).to_equal(true)
-expect(run.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(run.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -281,7 +281,7 @@ expect(result.status).to_equal("skipped")
 expect(result.reason).to_equal("missing_local_vllm_and_gpu")
 expect(result.running_status).to_equal("not_started")
 expect(result.models_status).to_equal("not_fetched")
-expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -326,7 +326,7 @@ expect(run.attempts).to_equal(0)
 expect(run.started_pid).to_equal(-1)
 expect(run.stopped_pid).to_equal(-1)
 expect(run.stopped_by_orchestrator).to_equal(false)
-expect(run.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(run.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>

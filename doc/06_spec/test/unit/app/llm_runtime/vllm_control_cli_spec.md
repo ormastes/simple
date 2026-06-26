@@ -112,7 +112,7 @@ val response = llm_runtime_control_cli_response(["llm-runtime-control", "--actio
 expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
-expect(response.split("nil").len()).to_equal(1)
+expect(response.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -130,7 +130,7 @@ val response = llm_runtime_control_cli_response(["simple", "run", "src/app/llm_r
 
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"endpoint\":\"configured\"")
-expect(response.split("nil").len()).to_equal(1)
+expect(response.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -148,7 +148,7 @@ val response = llm_runtime_control_cli_response(["simple", "run", "src/app/llm_r
 
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
-expect(response.split("nil").len()).to_equal(1)
+expect(response.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>

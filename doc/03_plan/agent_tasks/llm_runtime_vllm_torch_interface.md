@@ -506,7 +506,7 @@ Runtime-adjacent decision record for runtime control resource detection:
 The vLLM/Torch readiness, live probe, live transport, live request-plan, serve
 readiness, serve lifecycle, and system readiness specs now assert public
 absence/redaction through split-count checks instead of boolean
-`contains(...).to_equal(false)` wrappers. This keeps the executable evidence
+negative-containment wrappers. This keeps the executable evidence
 aligned with the public absence-marker policy while preserving the same observable
 behavior: missing/private values must render as explicit statuses or be absent
 from JSONL, never as the internal absence marker.
@@ -518,6 +518,26 @@ Evidence:
   lifecycle/readiness still emit the known subprocess diagnostic line while the
   runner reports all examples passed and exits successfully.
 - `simple spipe-docgen` regenerated 17 matching manuals with 100% complete docs.
-- The targeted source/manual scan found no remaining
-  `contains(...).to_equal(false)` or `expect(false).to_equal(true)` wrappers in
-  the vLLM/Torch readiness artifacts.
+- The targeted source/manual scan found no remaining boolean
+  negative-containment or forced-failure placeholder wrappers in the vLLM/Torch
+  readiness artifacts.
+
+## 2026-06-26 Public Manual Absence Marker Helper Hardening
+
+The vLLM lifecycle, control CLI, live environment, models probe, serve
+readiness, chat probe, dashboard live control, live transport, and request-plan
+specs now route internal absence-marker assertions through `absence_marker()`
+helpers instead of embedding the literal marker in executable assertions. This
+keeps generated operator manuals from displaying the internal marker in public
+expected-code snippets while preserving the same rendered-output contract.
+
+Evidence:
+
+- Focused `simple check` passed for the 18 edited vLLM spec files.
+- Focused interpreter tests passed for the 18 edited unit specs; lifecycle,
+  control CLI, serve readiness, and dashboard live control still emit the known
+  subprocess diagnostic line inside passing runs.
+- `simple spipe-docgen` regenerated 18 matching manuals with 100% complete docs.
+- Targeted source scan found no remaining direct literal-marker split
+  assertions in `test/01_unit/app/llm_runtime` or
+  `test/unit/app/llm_runtime`.

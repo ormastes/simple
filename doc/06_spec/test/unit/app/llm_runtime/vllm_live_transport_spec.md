@@ -60,7 +60,7 @@ expect(result.response_status).to_equal("ready")
 expect(result.response_reason).to_equal("models_endpoint_ready")
 expect(result.body_status).to_equal("present")
 expect(result.evidence_jsonl.split("base-model").len()).to_equal(1)
-expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>

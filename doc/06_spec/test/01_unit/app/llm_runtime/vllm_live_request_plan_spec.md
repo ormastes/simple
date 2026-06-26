@@ -57,7 +57,7 @@ expect(plan.path).to_equal("/models")
 expect(plan.url_preview).to_equal("http://127.0.0.1:8000/v1/models")
 expect(plan.execution_status).to_equal("plan_only_not_fetched")
 expect(plan.evidence_jsonl.split("password").len()).to_equal(1)
-expect(plan.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(plan.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>

@@ -54,7 +54,7 @@ expect(result.reason).to_equal("missing_local_vllm_and_gpu")
 expect(result.vllm_status).to_equal("missing")
 expect(result.gpu_status).to_equal("missing")
 expect(result.gpu_name).to_equal("none")
-expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -131,7 +131,7 @@ val result = llm_runtime_vllm_live_environment_evidence(true, true, "/home/alice
 expect(result.gpu_name).to_equal("redacted")
 expect(result.evidence_jsonl.split("/home/alice").len()).to_equal(1)
 expect(result.evidence_jsonl.split("token").len()).to_equal(1)
-expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>

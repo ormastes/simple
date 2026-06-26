@@ -27,7 +27,7 @@ vllm_dashboard_live_control_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -57,7 +57,7 @@ expect(result.models_status).to_equal("not_fetched")
 expect(result.requires_runtime_executor).to_equal(false)
 expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":false")
 expect(result.evidence_jsonl.split("base-model").len()).to_equal(1)
-expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -178,7 +178,7 @@ val result = llm_runtime_execute_dashboard_control(manifest, "restart", 12345, t
 expect(result.status).to_equal("rejected")
 expect(result.reason).to_equal("unknown_action")
 expect(result.requires_runtime_executor).to_equal(false)
-expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -241,7 +241,7 @@ expect(boundary.reason).to_equal("live_executor_required")
 expect(boundary.live_executor_status).to_equal("runtime_owner_required")
 expect(boundary.process_access).to_equal("runtime_owner_only")
 expect(boundary.http_access).to_equal("runtime_owner_only")
-expect(boundary.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(boundary.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -265,6 +265,99 @@ expect(jsonl).to_contain("\"acceptance_status\":\"not_live_evidence\"")
 
 </details>
 
+#### live executor preflight reports missing resources without process or HTTP side effects
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+val result = llm_runtime_execute_dashboard_control_live(manifest, "preflight", -1, false, false)
+
+expect(result.action).to_equal("preflight")
+expect(result.status).to_equal("skipped")
+expect(result.reason).to_equal("missing_local_vllm_and_gpu")
+expect(result.running_status).to_equal("not_started")
+expect(result.models_reason).to_equal("environment_skipped")
+expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":false")
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+```
+
+</details>
+
+#### live executor start delegates to safe planning when local resources are missing
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+val result = llm_runtime_execute_dashboard_control_live(manifest, "start", -1, false, true)
+
+expect(result.action).to_equal("start")
+expect(result.status).to_equal("skipped")
+expect(result.reason).to_equal("missing_local_vllm")
+expect(result.started_pid).to_equal(-1)
+expect(result.requires_runtime_executor).to_equal(false)
+```
+
+</details>
+
+#### live executor poll, probe, and stop handle invalid pids without host effects
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+val poll = llm_runtime_execute_dashboard_control_live(manifest, "poll", 0, true, true)
+val probe = llm_runtime_execute_dashboard_control_live(manifest, "probe", 0, true, true)
+val stop = llm_runtime_execute_dashboard_control_live(manifest, "stop", -1, true, true)
+
+expect(poll.status).to_equal("not_ready")
+expect(poll.reason).to_equal("invalid_pid")
+expect(probe.status).to_equal("not_ready")
+expect(probe.reason).to_equal("invalid_pid")
+expect(stop.status).to_equal("not_stopped")
+expect(stop.reason).to_equal("invalid_pid")
+expect(stop.evidence_jsonl).to_contain("\"stopped_pid\":-1")
+expect(stop.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+```
+
+</details>
+
+#### live executor observation mapping emits public JSONL evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = llm_runtime_dashboard_control_execution_from_observation("probe", "ready", "models_ready", 42, "running", "configured", "ready", "models_listed", 200, -1, -1)
+
+expect(result.action).to_equal("probe")
+expect(result.status).to_equal("ready")
+expect(result.reason).to_equal("models_ready")
+expect(result.evidence_jsonl).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
+expect(result.evidence_jsonl).to_contain("\"http_status\":200")
+expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":true")
+expect(result.evidence_jsonl.split("base-model").len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -272,7 +365,7 @@ expect(jsonl).to_contain("\"acceptance_status\":\"not_live_evidence\"")
 | Category | Application |
 | Status | Active |
 | Source | `test/unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl` |
-| Updated | 2026-06-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -284,8 +377,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

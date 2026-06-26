@@ -58,7 +58,7 @@ expect(result.choice_count).to_equal(1)
 expect(result.content_status).to_equal("present")
 expect(result.finish_reason_status).to_equal("stop")
 expect(result.evidence_jsonl.split("secret generated answer").len()).to_equal(1)
-expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
