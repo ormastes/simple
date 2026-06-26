@@ -191,11 +191,13 @@ Tasks:
    carries pin/device-staging intent flags, and reports
    `plan_only_not_scheduled`.
 8. Prevent false NVFS readiness claims in the bring-up std_fs adapter.
-   Status: done for local-file-backed execution coverage.
-   The std_fs adapter now validates local byte ranges with `file_read_bytes`,
-   returns deterministic read byte counts, and provides pure local
-   `BufHandle` registration/unregistration. This is not pinned memory or GPU
-   staging; it is the bring-up execution adapter for local pack streaming.
+   Status: done for explicit unsupported coverage, then advanced with a local
+   byte-returning read helper.
+   The std_fs adapter specs assert trait `read_range`, `register_buffer`, and
+   `unregister_buffer` remain unsupported until a real caller-buffer write
+   primitive and pinned-buffer adapter exist. They also cover
+   `read_range_bytes`, a local helper that returns bounded file-backed bytes
+   through the owner file facade without claiming pinned DMA or device staging.
 
 Evidence:
 
@@ -241,9 +243,9 @@ Evidence:
 - `test/unit/lib/gc_async_mut/svllm/model_loader_stream_plan_spec.spl` mirrors
   the same stream-plan coverage.
 - `test/01_unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl` and
-  `test/unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl` cover local
-  `read_range` byte-count execution, invalid range/buffer rejection,
-  deterministic buffer registration/unregistration, and unknown-handle errors.
+  `test/unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl` cover
+  unsupported trait `read_range`/buffer registration, local `read_range_bytes`
+  payload correctness, and out-of-bounds rejection.
 - `src/lib/gc_async_mut/svllm/model_executor/model_loader/streaming_readiness.spl`
   adds a single readiness gate that combines the existing tensor stream plan
   with native `read_range`, pinned-buffer, and device-staging capability
@@ -275,11 +277,12 @@ Evidence:
 
 Still open:
 
-- Full svLLM streaming through NVFS remains open: async scheduling, native
-  scheduler integration, real pinned buffer registration, and device staging
-  remain open. Local std_fs `read_range` and buffer handles now execute enough
-  to prove local pack streaming boundaries, but they are not native pinned/GPU
-  adapters.
+- Full svLLM streaming through NVFS remains open: async scheduling, true pinned
+  buffer registration, and device staging are now surfaced by absence-safe JSONL
+  streaming readiness evidence but still report unavailable until real native
+  adapters are implemented. The std_fs adapter only proves local file-backed
+  byte reads through `read_range_bytes`; trait `read_range` remains unsupported
+  because no pointer-write primitive exists for caller buffers.
 - Live CUDA placement against libtorch remains open; source-contract coverage
   now proves optimizer state preserves the parameter device for already-CUDA
   parameters, but end-to-end optimizer execution against a live libtorch CUDA

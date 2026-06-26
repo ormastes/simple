@@ -27,7 +27,7 @@ std_fs_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -178,81 +178,33 @@ expect(r.is_ok()).to_equal(true)
 
 </details>
 
-### StdFsNvfsClient streaming local execution
+### StdFsNvfsClient streaming capability gaps
 
-#### reads a local byte range into a registered buffer handle
-
-- bytes push
-- bytes push
-- bytes push
-- bytes push
-   - Expected: client.write(obj, bytes).is_ok() is true
-   - Expected: read.is_ok() is true
-   - Expected: read.unwrap() equals `2`
-   - Expected: nvfs_unit_status(client.unregister_buffer(buf)) equals `ok`
-
+#### reports read_range as unsupported instead of pretending to write caller buffers
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val client = StdFsNvfsClient.new()
 val obj = client.create(_tmp_path("read_range.bin"), ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
-var bytes: [u8] = []
-bytes.push(0x01 as u8)
-bytes.push(0x02 as u8)
-bytes.push(0x03 as u8)
-bytes.push(0x04 as u8)
-expect(client.write(obj, bytes).is_ok()).to_equal(true)
-val buf = client.register_buffer(0, 2).unwrap()
-
-val read = client.read_range(obj, 1, 2, buf)
-
-expect(read.is_ok()).to_equal(true)
-expect(read.unwrap()).to_equal(2)
-expect(nvfs_unit_status(client.unregister_buffer(buf))).to_equal("ok")
+expect(nvfs_status(client.read_range(obj, 0, 1, BufHandle.null()))).to_equal("unsupported")
 ```
 
 </details>
 
-#### rejects invalid local read ranges and unregistered buffers
+#### returns local read_range bytes through the bring-up helper
 
 - bytes push
+- bytes push
+- bytes push
    - Expected: client.write(obj, bytes).is_ok() is true
-   - Expected: nvfs_status(client.read_range(obj, -1, 1, buf)) equals `invalid_argument`
-   - Expected: nvfs_status(client.read_range(obj, 0, 2, buf)) equals `invalid_argument`
-   - Expected: nvfs_status(client.read_range(obj, 0, 1, BufHandle.null())) equals `invalid_argument`
-   - Expected: nvfs_unit_status(client.unregister_buffer(buf)) equals `ok`
-   - Expected: nvfs_status(client.read_range(obj, 0, 1, buf)) equals `invalid_argument`
+   - Expected: read.is_ok() is true
+   - Expected: read.unwrap() equals `[0x20 as u8, 0x30 as u8]`
 
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val client = StdFsNvfsClient.new()
-val obj = client.create(_tmp_path("read_range_invalid.bin"), ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
-var bytes: [u8] = []
-bytes.push(0x01 as u8)
-expect(client.write(obj, bytes).is_ok()).to_equal(true)
-val buf = client.register_buffer(0, 1).unwrap()
-
-expect(nvfs_status(client.read_range(obj, -1, 1, buf))).to_equal("invalid_argument")
-expect(nvfs_status(client.read_range(obj, 0, 2, buf))).to_equal("invalid_argument")
-expect(nvfs_status(client.read_range(obj, 0, 1, BufHandle.null()))).to_equal("invalid_argument")
-expect(nvfs_unit_status(client.unregister_buffer(buf))).to_equal("ok")
-expect(nvfs_status(client.read_range(obj, 0, 1, buf))).to_equal("invalid_argument")
-```
-
-</details>
-
-#### registers and unregisters local buffer handles deterministically
 
 <details>
 <summary>Executable SSpec</summary>
@@ -262,15 +214,56 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val client = StdFsNvfsClient.new()
-val registered = client.register_buffer(0, 4096)
-expect(nvfs_buffer_status(registered)).to_equal("ok")
-val buf = registered.unwrap()
-expect(buf.is_null()).to_equal(false)
-expect(buf.len).to_equal(4096)
-expect(nvfs_unit_status(client.unregister_buffer(buf))).to_equal("ok")
-expect(nvfs_unit_status(client.unregister_buffer(buf))).to_equal("invalid_argument")
-expect(nvfs_buffer_status(client.register_buffer(-1, 4096))).to_equal("invalid_argument")
-expect(nvfs_buffer_status(client.register_buffer(0, 0))).to_equal("invalid_argument")
+val obj = client.create(_tmp_path("read_range_bytes.bin"), ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
+var bytes: [u8] = []
+bytes.push(0x10 as u8)
+bytes.push(0x20 as u8)
+bytes.push(0x30 as u8)
+expect(client.write(obj, bytes).is_ok()).to_equal(true)
+val read = client.read_range_bytes(obj, 1, 2)
+expect(read.is_ok()).to_equal(true)
+expect(read.unwrap()).to_equal([0x20 as u8, 0x30 as u8])
+```
+
+</details>
+
+#### rejects local read_range bytes past the file end
+
+- bytes push
+   - Expected: client.write(obj, bytes).is_ok() is true
+   - Expected: r.is_err() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val client = StdFsNvfsClient.new()
+val obj = client.create(_tmp_path("read_range_oob.bin"), ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
+var bytes: [u8] = []
+bytes.push(0x41 as u8)
+expect(client.write(obj, bytes).is_ok()).to_equal(true)
+val r = client.read_range_bytes(obj, 0, 2)
+expect(r.is_err()).to_equal(true)
+```
+
+</details>
+
+#### reports buffer registration as unsupported until a real pinned buffer adapter exists
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val client = StdFsNvfsClient.new()
+expect(nvfs_buffer_status(client.register_buffer(0, 4096))).to_equal("unsupported")
+expect(nvfs_unit_status(client.unregister_buffer(BufHandle.null()))).to_equal("unsupported")
 ```
 
 </details>
@@ -293,14 +286,14 @@ Tests covering:
 - StdFsNvfsClient.seal (A2)
 - StdFsNvfsClient.publish_atomic (A2)
 - StdFsNvfsClient.sync (A2)
-- StdFsNvfsClient streaming local execution
+- StdFsNvfsClient streaming capability gaps
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

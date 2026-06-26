@@ -105,46 +105,34 @@ describe "StdFsNvfsClient.sync (A2)":
         val r = client.sync(obj, SyncScope.File)
         expect(r.is_ok()).to_equal(true)
 
-describe "StdFsNvfsClient streaming local execution":
-    it "reads a local byte range into a registered buffer handle":
+describe "StdFsNvfsClient streaming capability gaps":
+    it "reports read_range as unsupported instead of pretending to write caller buffers":
         val client = StdFsNvfsClient.new()
         val obj = client.create(_tmp_path("read_range.bin"), ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
+        expect(nvfs_status(client.read_range(obj, 0, 1, BufHandle.null()))).to_equal("unsupported")
+
+    it "returns local read_range bytes through the bring-up helper":
+        val client = StdFsNvfsClient.new()
+        val obj = client.create(_tmp_path("read_range_bytes.bin"), ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
         var bytes: [u8] = []
-        bytes.push(0x01 as u8)
-        bytes.push(0x02 as u8)
-        bytes.push(0x03 as u8)
-        bytes.push(0x04 as u8)
+        bytes.push(0x10 as u8)
+        bytes.push(0x20 as u8)
+        bytes.push(0x30 as u8)
         expect(client.write(obj, bytes).is_ok()).to_equal(true)
-        val buf = client.register_buffer(0, 2).unwrap()
-
-        val read = client.read_range(obj, 1, 2, buf)
-
+        val read = client.read_range_bytes(obj, 1, 2)
         expect(read.is_ok()).to_equal(true)
-        expect(read.unwrap()).to_equal(2)
-        expect(nvfs_unit_status(client.unregister_buffer(buf))).to_equal("ok")
+        expect(read.unwrap()).to_equal([0x20 as u8, 0x30 as u8])
 
-    it "rejects invalid local read ranges and unregistered buffers":
+    it "rejects local read_range bytes past the file end":
         val client = StdFsNvfsClient.new()
-        val obj = client.create(_tmp_path("read_range_invalid.bin"), ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
+        val obj = client.create(_tmp_path("read_range_oob.bin"), ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
         var bytes: [u8] = []
-        bytes.push(0x01 as u8)
+        bytes.push(0x41 as u8)
         expect(client.write(obj, bytes).is_ok()).to_equal(true)
-        val buf = client.register_buffer(0, 1).unwrap()
+        val r = client.read_range_bytes(obj, 0, 2)
+        expect(r.is_err()).to_equal(true)
 
-        expect(nvfs_status(client.read_range(obj, -1, 1, buf))).to_equal("invalid_argument")
-        expect(nvfs_status(client.read_range(obj, 0, 2, buf))).to_equal("invalid_argument")
-        expect(nvfs_status(client.read_range(obj, 0, 1, BufHandle.null()))).to_equal("invalid_argument")
-        expect(nvfs_unit_status(client.unregister_buffer(buf))).to_equal("ok")
-        expect(nvfs_status(client.read_range(obj, 0, 1, buf))).to_equal("invalid_argument")
-
-    it "registers and unregisters local buffer handles deterministically":
+    it "reports buffer registration as unsupported until a real pinned buffer adapter exists":
         val client = StdFsNvfsClient.new()
-        val registered = client.register_buffer(0, 4096)
-        expect(nvfs_buffer_status(registered)).to_equal("ok")
-        val buf = registered.unwrap()
-        expect(buf.is_null()).to_equal(false)
-        expect(buf.len).to_equal(4096)
-        expect(nvfs_unit_status(client.unregister_buffer(buf))).to_equal("ok")
-        expect(nvfs_unit_status(client.unregister_buffer(buf))).to_equal("invalid_argument")
-        expect(nvfs_buffer_status(client.register_buffer(-1, 4096))).to_equal("invalid_argument")
-        expect(nvfs_buffer_status(client.register_buffer(0, 0))).to_equal("invalid_argument")
+        expect(nvfs_buffer_status(client.register_buffer(0, 4096))).to_equal("unsupported")
+        expect(nvfs_unit_status(client.unregister_buffer(BufHandle.null()))).to_equal("unsupported")
