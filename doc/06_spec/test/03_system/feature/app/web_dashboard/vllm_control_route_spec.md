@@ -118,7 +118,7 @@ expect_absence_marker_hidden(response)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -131,6 +131,7 @@ expect(response).to_contain("\"action\":\"start\"")
 expect(response).to_contain("\"status\":\"skipped\"")
 expect(response).to_contain("\"reason\":\"missing_local_vllm\"")
 expect(response).to_contain("\"requires_runtime_executor\":false")
+expect(response).to_contain("\"live_evidence_status\":\"not_live_evidence\"")
 expect_absence_marker_hidden(response)
 ```
 
@@ -144,7 +145,7 @@ expect_absence_marker_hidden(response)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -158,6 +159,7 @@ expect(response).to_contain("\"status\":\"skipped\"")
 expect(response).to_contain("\"reason\":\"missing_local_gpu\"")
 expect(response).to_contain("\"models_reason\":\"environment_skipped\"")
 expect(response).to_contain("\"requires_runtime_executor\":false")
+expect(response).to_contain("\"live_evidence_status\":\"not_live_evidence\"")
 expect_absence_marker_hidden(response)
 ```
 
@@ -171,7 +173,7 @@ expect_absence_marker_hidden(response)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -185,6 +187,7 @@ expect(response).to_contain("\"status\":\"skipped\"")
 expect(response).to_contain("\"reason\":\"missing_local_vllm_and_gpu\"")
 expect(response).to_contain("\"models_reason\":\"environment_skipped\"")
 expect(response).to_contain("\"requires_runtime_executor\":false")
+expect(response).to_contain("\"live_evidence_status\":\"not_live_evidence\"")
 expect_absence_marker_hidden(response)
 ```
 
