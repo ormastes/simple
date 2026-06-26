@@ -4,17 +4,16 @@
 
 ## Quick Stats
 
-- **Total Features:** 2
-- **Complete Documentation:** 2 (100%)
+- **Total Features:** 1
+- **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 180
+- **Total Lines:** 104
 
 ---
 
-## Application (2 features)
+## Tooling (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Diagnostics Jsonl Collector Specification](test/01_unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.md) | Partial | N/A | 9 | 40% | 90 lines |
-| [Diagnostics Jsonl Collector Specification](test/unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.md) | Partial | N/A | 9 | 40% | 90 lines |
+| [LLM Fine-Tune Retry7 Acceptance Gate Specification](test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.md) | Implemented | 2/5 | 6 | 60% | 104 lines |
 

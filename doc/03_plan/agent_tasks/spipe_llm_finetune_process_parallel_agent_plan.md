@@ -268,6 +268,11 @@ Evidence:
   `acceptance_allowed` directly. The retry6 system spec covers both public
   surfaces so target-eval blockers are not hidden behind only
   `data_check_status`.
+- 2026-06-26 next-action status hardening: `fine-tune-next` now prints
+  `STATUS: WARN llm-finetune-next` for non-ready attempts and
+  `STATUS: PASS llm-finetune-next` only when readiness is complete. The retry7
+  system spec covers the current `retry-implementation` next action, retry
+  target, WARN status, and public absence-marker policy.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS

@@ -1525,6 +1525,7 @@ function commandFineTuneNext(args) {
   if (!existsSync(attemptPath)) {
     console.log(`attempt_id=${attemptId}`);
     console.log("next_action=create-attempt");
+    console.log("STATUS: WARN llm-finetune-next");
     process.exitCode = 1;
     return;
   }
@@ -1537,6 +1538,7 @@ function commandFineTuneNext(args) {
     console.log(`next_action=${decisionStatus}`);
     console.log(`retry_target=${retryTarget}`);
     if (nextAttempt) console.log(`next_attempt=${nextAttempt}`);
+    console.log("STATUS: WARN llm-finetune-next");
     process.exitCode = 1;
     return;
   }
@@ -1544,12 +1546,14 @@ function commandFineTuneNext(args) {
     if (!ok) {
       console.log(`attempt_id=${attemptId}`);
       console.log(`next_action=${action}`);
+      console.log("STATUS: WARN llm-finetune-next");
       process.exitCode = 1;
       return;
     }
   }
   console.log(`attempt_id=${attemptId}`);
   console.log("next_action=ready");
+  console.log("STATUS: PASS llm-finetune-next");
 }
 
 function registryBlockForAttempt(root, fileName, attemptId) {

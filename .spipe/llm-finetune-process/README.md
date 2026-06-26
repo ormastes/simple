@@ -282,9 +282,11 @@ Print the next phase required before real training/use:
 node examples/05_stdlib/spipe/cli/spipe.js fine-tune-next <attempt_id>
 ```
 
-`fine-tune-next` exits nonzero unless the attempt is ready. In shell automation,
-capture its output explicitly instead of chaining it as a green check for retry
-states.
+`fine-tune-next` exits nonzero unless the attempt is ready. It prints
+`STATUS: WARN llm-finetune-next` for non-ready next actions and
+`STATUS: PASS llm-finetune-next` only when the next action is `ready`. In shell
+automation, capture its output explicitly instead of chaining it as a green
+check for retry states.
 
 An attempt is expected to fail `fine-tune-ready` until it has an accepted
 decision backed by target-reaching eval evidence. When the best available model
