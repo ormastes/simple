@@ -225,7 +225,9 @@ diagnostics, but they are not 4K/8K completion evidence.
 The aggregate validates producer-side native artifact proof for completion rows:
 missing alias source, native binary, native executable bit, recognized native
 binary format, or native build log status turns an otherwise passing retained
-4K/8K row into a native-artifact failure.
+4K/8K row into a native-artifact failure. Explicit producer-side `pass` claims
+are verified against the referenced files; a chmodded text file or stale status
+row cannot satisfy native binary proof without actual ELF, Mach-O, or PE magic.
 Producer-side wrapper rows include
 `*_alias_src_file_status`, `*_native_bin_file_status`, and
 `*_native_bin_executable_status`, `*_native_bin_format_status`, and

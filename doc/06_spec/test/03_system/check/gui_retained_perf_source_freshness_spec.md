@@ -27,7 +27,7 @@ gui_retained_perf_source_freshness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -110,6 +110,12 @@ The report summary must also expose `source_status` and `current_source` so a
 human reviewer can identify stale performance rows without opening the raw env
 file.
 
+Explicit producer artifact statuses are claims, not authority. When a retained
+row says `*_native_bin_file_status=pass`,
+`*_native_bin_executable_status=pass`, or `*_native_bin_format_status=pass`,
+the aggregate must still inspect the referenced file and fail completion if the
+actual bytes are not a recognized native binary.
+
 ## Syntax
 
 ```sh
@@ -151,6 +157,39 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_native_bin_format_status=fai
 expect(evidence).to_contain("gui_showcase_4k_200fps_native_build_log_file_status=missing")
 expect(evidence).to_contain("gui_showcase_4k_200fps_reason=missing-4k-native-artifacts:alias_src=missing;native_bin=missing;native_bin_executable=missing;native_bin_format=fail;native_build_log=missing")
 expect(report).to_contain("4K retained perf native artifacts: alias_src missing; native_bin missing; native_bin_executable missing; native_bin_format fail (unknown); native_build_log missing")
+```
+
+</details>
+
+#### rejects retained perf rows whose explicit native artifact pass claims contradict the file bytes
+
+- Create a retained 4K performance row with a chmodded text file pretending to be native
+   - Expected: code equals `0`
+- Assert the aggregate uses actual native binary magic over explicit pass claims
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create a retained 4K performance row with a chmodded text file pretending to be native")
+val command = "rm -rf build/test-gui-retained-perf-spoofed-native-artifact && mkdir -p build/test-gui-retained-perf-spoofed-native-artifact/source && printf 'showcase retained log\\n' > build/test-gui-retained-perf-spoofed-native-artifact/source/showcase.log && printf 'elapsed_ms=597\\n' > build/test-gui-retained-perf-spoofed-native-artifact/source/time.log && printf 'alias4k\\n' > build/test-gui-retained-perf-spoofed-native-artifact/source/alias4k.spl && printf 'not-native\\n' > build/test-gui-retained-perf-spoofed-native-artifact/source/native4k.bin && chmod +x build/test-gui-retained-perf-spoofed-native-artifact/source/native4k.bin && printf 'native build log\\n' > build/test-gui-retained-perf-spoofed-native-artifact/source/build4k.log && printf 'gui_showcase_4k_200fps_status=pass\\ngui_showcase_4k_200fps_reason=met-target-fps\\ngui_showcase_4k_200fps_resolution=4k\\ngui_showcase_4k_200fps_width=3840\\ngui_showcase_4k_200fps_height=2160\\ngui_showcase_4k_200fps_frames=200\\ngui_showcase_4k_200fps_fps_x1000=201000\\ngui_showcase_4k_200fps_frame_avg_ns=4975124\\ngui_showcase_4k_200fps_frame_p50_ns=4975124\\ngui_showcase_4k_200fps_frame_p95_ns=4975124\\ngui_showcase_4k_200fps_target_fps=200\\ngui_showcase_4k_200fps_max_rss_kb=131072\\ngui_showcase_4k_200fps_max_rss_budget_kb=262144\\ngui_showcase_4k_200fps_rss_status=pass\\ngui_showcase_4k_200fps_pixels=8294400\\ngui_showcase_4k_200fps_nonzero_pixels=1000\\ngui_showcase_4k_200fps_checksum=123456\\ngui_showcase_4k_200fps_render_mode=retained-static-frame\\ngui_showcase_4k_200fps_redraw_frames=1\\ngui_showcase_4k_200fps_source_revision=artifact-test\\ngui_showcase_4k_200fps_simple_bin=src/compiler_rust/target/release/simple\\ngui_showcase_4k_200fps_use_native=1\\ngui_showcase_4k_200fps_native_bin=build/test-gui-retained-perf-spoofed-native-artifact/source/native4k.bin\\ngui_showcase_4k_200fps_native_bin_file_status=pass\\ngui_showcase_4k_200fps_native_bin_executable_status=pass\\ngui_showcase_4k_200fps_native_bin_magic=7f454c46\\ngui_showcase_4k_200fps_native_bin_format=elf\\ngui_showcase_4k_200fps_native_bin_format_status=pass\\ngui_showcase_4k_200fps_alias_src=build/test-gui-retained-perf-spoofed-native-artifact/source/alias4k.spl\\ngui_showcase_4k_200fps_alias_src_file_status=pass\\ngui_showcase_4k_200fps_native_build_log=build/test-gui-retained-perf-spoofed-native-artifact/source/build4k.log\\ngui_showcase_4k_200fps_native_build_log_file_status=pass\\ngui_showcase_4k_200fps_native_build_mode=aggressive-native\\ngui_showcase_4k_200fps_fallback_state=none\\ngui_showcase_4k_200fps_log=build/test-gui-retained-perf-spoofed-native-artifact/source/showcase.log\\ngui_showcase_4k_200fps_time_log=build/test-gui-retained-perf-spoofed-native-artifact/source/time.log\\n' > build/test-gui-retained-perf-spoofed-native-artifact/source/status4k.env && GUI_SHOWCASE_4K_PERF_ENV=build/test-gui-retained-perf-spoofed-native-artifact/source/status4k.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-retained-perf-spoofed-native-artifact/out REPORT_PATH=build/test-gui-retained-perf-spoofed-native-artifact/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate uses actual native binary magic over explicit pass claims")
+val evidence = file_read("build/test-gui-retained-perf-spoofed-native-artifact/out/evidence.env")
+val report = file_read("build/test-gui-retained-perf-spoofed-native-artifact/report.md")
+expect(evidence).to_contain("gui_showcase_4k_200fps_status=fail")
+expect(evidence).to_contain("gui_showcase_4k_200fps_native_bin_file_status=pass")
+expect(evidence).to_contain("gui_showcase_4k_200fps_native_bin_executable_status=pass")
+expect(evidence).to_contain("gui_showcase_4k_200fps_native_bin_format=unknown")
+expect(evidence).to_contain("gui_showcase_4k_200fps_native_bin_format_status=fail")
+expect(evidence).to_contain("gui_showcase_4k_200fps_reason=missing-4k-native-artifacts:alias_src=pass;native_bin=pass;native_bin_executable=pass;native_bin_format=fail;native_build_log=pass")
+expect(report).to_contain("4K retained perf native artifacts: alias_src pass; native_bin pass; native_bin_executable pass; native_bin_format fail (unknown); native_build_log pass")
 ```
 
 </details>
@@ -211,8 +250,8 @@ expect(report).to_contain("8K retained perf native artifacts: alias_src pass; na
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
