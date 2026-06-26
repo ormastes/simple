@@ -268,6 +268,11 @@ Evidence:
 - `release/x86_64-unknown-linux-gnu/simple test
   test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl --mode=interpreter` passed
   with 23/23 after adding app MCP source-less SQL context contracts.
+- 2026-06-26 persisted CLI SQL evidence: interpreter-mode `rt_sqlite_open` /
+  `rt_sqlite_close` now load and store the facade database at `--db=<path>`,
+  so a separate `context --sql --query=<text> --db=<path> --source-filter=<text>`
+  subprocess can read records created by an earlier `context <file> --sql
+  --index --db=<path>` subprocess. The focused mimic system spec passes 6/6.
 
 ## Lane 3: Dashboard Tooling Artifact Panel
 

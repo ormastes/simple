@@ -7,6 +7,8 @@
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use std::sync::Mutex;
 
 // ============================================================================
@@ -166,6 +168,149 @@ fn arg_str(args: &[Value], idx: usize, fn_name: &str) -> Result<String, CompileE
             Value::Int(n) => format!("{n}"),
             _ => format!("{v:?}"),
         })
+}
+
+fn sqlite_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+fn sqlite_unescape(value: &str) -> String {
+    let mut out = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn sqlite_serialize_value(value: &SqlValue) -> String {
+    match value {
+        SqlValue::Null => "N".to_string(),
+        SqlValue::Int(v) => format!("I:{v}"),
+        SqlValue::Float(v) => format!("F:{v}"),
+        SqlValue::Text(v) => format!("T:{}", sqlite_escape(v)),
+    }
+}
+
+fn sqlite_deserialize_value(value: &str) -> SqlValue {
+    if value == "N" {
+        return SqlValue::Null;
+    }
+    if let Some(rest) = value.strip_prefix("I:") {
+        return SqlValue::Int(rest.parse().unwrap_or(0));
+    }
+    if let Some(rest) = value.strip_prefix("F:") {
+        return SqlValue::Float(rest.parse().unwrap_or(0.0));
+    }
+    if let Some(rest) = value.strip_prefix("T:") {
+        return SqlValue::Text(sqlite_unescape(rest));
+    }
+    SqlValue::Text(sqlite_unescape(value))
+}
+
+fn sqlite_load_file(path: &str) -> Option<SqlDatabase> {
+    let text = fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    if lines.next() != Some("SIMPLE_SQLITE_FACADE_V1") {
+        return None;
+    }
+    let mut db = SqlDatabase::default();
+    for line in lines {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.is_empty() {
+            continue;
+        }
+        if parts[0] == "table" && parts.len() >= 5 {
+            let name = sqlite_unescape(parts[1]);
+            let next_id = parts[2].parse().unwrap_or(1);
+            let col_count = parts[3].parse::<usize>().unwrap_or(0);
+            let mut columns = Vec::new();
+            for idx in 0..col_count {
+                if let Some(col) = parts.get(4 + idx) {
+                    columns.push(sqlite_unescape(col));
+                }
+            }
+            db.tables.insert(
+                name,
+                SqlTable {
+                    columns,
+                    rows: Vec::new(),
+                    next_id,
+                },
+            );
+        } else if parts[0] == "row" && parts.len() >= 4 {
+            let name = sqlite_unescape(parts[1]);
+            let value_count = parts[2].parse::<usize>().unwrap_or(0);
+            let mut row = Vec::new();
+            for idx in 0..value_count {
+                if let Some(value) = parts.get(3 + idx) {
+                    row.push(sqlite_deserialize_value(value));
+                }
+            }
+            if let Some(table) = db.tables.get_mut(&name) {
+                table.rows.push(row);
+            }
+        }
+    }
+    Some(db)
+}
+
+fn sqlite_store_file(path: &str, db: &SqlDatabase) {
+    if path == ":memory:" || path.is_empty() {
+        return;
+    }
+    let mut out = String::from("SIMPLE_SQLITE_FACADE_V1\n");
+    let mut names: Vec<&String> = db.tables.keys().collect();
+    names.sort();
+    for name in names {
+        let table = &db.tables[name];
+        out.push_str("table\t");
+        out.push_str(&sqlite_escape(name));
+        out.push('\t');
+        out.push_str(&table.next_id.to_string());
+        out.push('\t');
+        out.push_str(&table.columns.len().to_string());
+        for column in &table.columns {
+            out.push('\t');
+            out.push_str(&sqlite_escape(column));
+        }
+        out.push('\n');
+        for row in &table.rows {
+            out.push_str("row\t");
+            out.push_str(&sqlite_escape(name));
+            out.push('\t');
+            out.push_str(&row.len().to_string());
+            for value in row {
+                out.push('\t');
+                out.push_str(&sqlite_serialize_value(value));
+            }
+            out.push('\n');
+        }
+    }
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = fs::create_dir_all(parent);
+        }
+    }
+    let _ = fs::write(path, out);
 }
 
 // ============================================================================
@@ -974,7 +1119,13 @@ fn sqlite_select_rows(db: &SqlDatabase, sql: &str) -> Option<(Vec<String>, Vec<V
 
 pub fn rt_sqlite_open_fn(args: &[Value]) -> Result<Value, CompileError> {
     let path = arg_str(args, 0, "rt_sqlite_open")?;
-    let db = SQLITE_FILES.lock().unwrap().get(&path).cloned().unwrap_or_default();
+    let db = SQLITE_FILES
+        .lock()
+        .unwrap()
+        .get(&path)
+        .cloned()
+        .or_else(|| sqlite_load_file(&path))
+        .unwrap_or_default();
     Ok(Value::Int(sqlite_alloc_conn(SqlConn {
         path,
         db,
@@ -1002,6 +1153,7 @@ pub fn rt_sqlite_close_fn(args: &[Value]) -> Result<Value, CompileError> {
     if let Some(Some(conn)) = conns.get(idx) {
         if conn.path != ":memory:" {
             SQLITE_FILES.lock().unwrap().insert(conn.path.clone(), conn.db.clone());
+            sqlite_store_file(&conn.path, &conn.db);
         }
     }
     if idx < conns.len() {

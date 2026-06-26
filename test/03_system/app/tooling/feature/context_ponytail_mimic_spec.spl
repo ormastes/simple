@@ -16,10 +16,14 @@ contract.
 """
 
 use std.spec
-use std.io_runtime.{file_read}
+use std.io_runtime.{file_read, file_write, dir_create_all, process_run}
 
 fn read(path: text) -> text:
     file_read(path)
+
+fn _run_context_cli(args: [text]) -> (text, i64):
+    val (stdout, stderr, exit_code) = process_run("src/compiler_rust/target/debug/simple", ["run", "src/app/context/main.spl"] + args)
+    (stdout + stderr, exit_code)
 
 describe "context/ponytail mimic system surface":
     it "REQ-012 exposes source-less SQL context DB query through the CLI":
@@ -27,6 +31,24 @@ describe "context/ponytail mimic system surface":
         expect(cli).to_contain("context_args_allow_sourceless_sql_query(args)")
         expect(cli).to_contain("context_sql_query_packs_by_source([], \"\", sourceless_query, sourceless_source_filter, sourceless_db_path, sourceless_format)")
         expect(cli).to_contain("--source-filter=")
+
+    it "REQ-012 and REQ-014 execute persisted source-less SQL CLI queries":
+        dir_create_all("build/test/context_ponytail_system")
+        val source_path = "build/test/context_ponytail_system/alpha.spl"
+        val db_path = "build/test/context_ponytail_system/context_cli.db"
+        file_write(source_path, "fn alpha_context() -> text:\n    \"shared_context_marker alpha_only\"\n")
+
+        val (index_output, index_code) = _run_context_cli([source_path, "--sql", "--index", "--db=" + db_path, "--text", "--no-progress"])
+        expect(index_code).to_equal(0)
+        expect(index_output).to_contain("status: ready")
+        expect(index_output).to_contain("pack_count: 1")
+
+        val (query_output, query_code) = _run_context_cli(["--sql", "--query=shared_context_marker", "--db=" + db_path, "--source-filter=" + source_path, "--text", "--no-progress"])
+        expect(query_code).to_equal(0)
+        expect(query_output).to_contain("status: ready")
+        expect(query_output).to_contain("source_filter: " + source_path)
+        expect(query_output).to_contain("matches: 1")
+        expect(query_output).to_contain("alpha_only")
 
     it "REQ-013 and REQ-015 expose SQL query and source filter through app MCP":
         val handler = read("src/app/mcp/main_lazy_query_tools.spl")

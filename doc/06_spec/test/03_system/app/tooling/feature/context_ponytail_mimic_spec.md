@@ -27,7 +27,7 @@ context_ponytail_mimic_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -72,6 +72,41 @@ val cli = read("src/app/context/main.spl")
 expect(cli).to_contain("context_args_allow_sourceless_sql_query(args)")
 expect(cli).to_contain("context_sql_query_packs_by_source([], \"\", sourceless_query, sourceless_source_filter, sourceless_db_path, sourceless_format)")
 expect(cli).to_contain("--source-filter=")
+```
+
+</details>
+
+#### REQ-012 and REQ-014 execute persisted source-less SQL CLI queries
+
+- dir create all
+- file write
+   - Expected: index_code equals `0`
+   - Expected: query_code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+dir_create_all("build/test/context_ponytail_system")
+val source_path = "build/test/context_ponytail_system/alpha.spl"
+val db_path = "build/test/context_ponytail_system/context_cli.db"
+file_write(source_path, "fn alpha_context() -> text:\n    \"shared_context_marker alpha_only\"\n")
+
+val (index_output, index_code) = _run_context_cli([source_path, "--sql", "--index", "--db=" + db_path, "--text", "--no-progress"])
+expect(index_code).to_equal(0)
+expect(index_output).to_contain("status: ready")
+expect(index_output).to_contain("pack_count: 1")
+
+val (query_output, query_code) = _run_context_cli(["--sql", "--query=shared_context_marker", "--db=" + db_path, "--source-filter=" + source_path, "--text", "--no-progress"])
+expect(query_code).to_equal(0)
+expect(query_output).to_contain("status: ready")
+expect(query_output).to_contain("source_filter: " + source_path)
+expect(query_output).to_contain("matches: 1")
+expect(query_output).to_contain("alpha_only")
 ```
 
 </details>
@@ -186,8 +221,8 @@ expect(lower_schema).to_contain("Mode: audit, simplification")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
