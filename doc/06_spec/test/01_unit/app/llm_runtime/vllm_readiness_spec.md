@@ -57,7 +57,7 @@ expect(result.base_model).to_equal("redacted")
 expect(result.chat_template_status).to_equal("none")
 expect(result.dynamic_lora_status).to_equal("disabled")
 expect(result.torch_ready).to_equal("unavailable")
-expect(result.evidence_jsonl.contains(absence_marker())).to_equal(false)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -85,7 +85,7 @@ val result = llm_runtime_probe_manifest(manifest)
 
 expect(result.status).to_equal("blocked")
 expect(result.lora_adapter_count).to_equal(1)
-expect(result.evidence_jsonl.contains(adapter_path)).to_equal(false)
+expect(result.evidence_jsonl.split(adapter_path).len()).to_equal(1)
 remove_file_if_exists(adapter_path)
 ```
 
@@ -113,7 +113,7 @@ expect(result.status).to_equal("missing")
 expect(result.reason).to_equal("invalid_adapter_entry")
 expect(plan.status).to_equal("missing")
 expect(plan.reason).to_equal("invalid_adapter_entry")
-expect(plan.evidence_jsonl.contains(absence_marker())).to_equal(false)
+expect(plan.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -134,7 +134,7 @@ expect(result.status).to_equal("missing")
 expect(result.reason).to_equal("missing_base_model")
 expect(result.base_model).to_equal("missing")
 expect(result.chat_template_status).to_equal("missing")
-expect(result.evidence_jsonl.contains(absence_marker())).to_equal(false)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -153,7 +153,7 @@ val result = llm_runtime_probe_manifest_with_torch_check(llm_runtime_manifest("b
 expect(result.status).to_equal("missing")
 expect(result.reason).to_equal("invalid_endpoint")
 expect(result.endpoint_status).to_equal("invalid")
-expect(result.evidence_jsonl.contains(absence_marker())).to_equal(false)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -210,8 +210,8 @@ val manifest = llm_runtime_manifest("secret-model-token", "http://user:password@
 val result = llm_runtime_probe_manifest(manifest)
 
 expect(result.base_model).to_equal("redacted")
-expect(result.evidence_jsonl.contains("secret-model-token")).to_equal(false)
-expect(result.evidence_jsonl.contains("password")).to_equal(false)
+expect(result.evidence_jsonl.split("secret-model-token").len()).to_equal(1)
+expect(result.evidence_jsonl.split("password").len()).to_equal(1)
 ```
 
 </details>
@@ -229,7 +229,7 @@ val manifest = llm_runtime_manifest("/home/alice/.cache/huggingface/private-mode
 val result = llm_runtime_probe_manifest(manifest)
 
 expect(result.base_model).to_equal("redacted")
-expect(result.evidence_jsonl.contains("/home/alice")).to_equal(false)
+expect(result.evidence_jsonl.split("/home/alice").len()).to_equal(1)
 ```
 
 </details>
@@ -253,7 +253,7 @@ val panel = collect_llm_diagnostics_jsonl(path)
 
 expect(panel.event_count).to_equal(1)
 expect(panel.last_event).to_equal("llm_runtime_vllm_readiness")
-expect(result.evidence_jsonl.contains(absence_marker())).to_equal(false)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 remove_file_if_exists(path)
 ```
 
@@ -266,10 +266,10 @@ remove_file_if_exists(path)
    - Expected: plan.reason equals `static_serve_plan_only`
    - Expected: plan.base_model equals `redacted`
    - Expected: plan.endpoint_status equals `configured`
-   - Expected: plan.command_preview does not contain `adapter_path`
-   - Expected: plan.evidence_jsonl does not contain `/mnt/private-models`
-   - Expected: plan.evidence_jsonl does not contain `password`
-   - Expected: plan.evidence_jsonl does not contain `absence_marker()`
+   - Expected: plan.command_preview.split(adapter_path).len() equals `1`
+   - Expected: plan.evidence_jsonl.split("/mnt/private-models").len() equals `1`
+   - Expected: plan.evidence_jsonl.split("password").len() equals `1`
+   - Expected: plan.evidence_jsonl.split(absence_marker()).len() equals `1`
 - remove file if exists
 
 
@@ -296,10 +296,10 @@ expect(plan.base_model).to_equal("redacted")
 expect(plan.endpoint_status).to_equal("configured")
 expect(plan.command_preview).to_contain("vllm serve redacted")
 expect(plan.command_preview).to_contain("--lora-modules 1-redacted")
-expect(plan.command_preview.contains(adapter_path)).to_equal(false)
-expect(plan.evidence_jsonl.contains("/mnt/private-models")).to_equal(false)
-expect(plan.evidence_jsonl.contains("password")).to_equal(false)
-expect(plan.evidence_jsonl.contains(absence_marker())).to_equal(false)
+expect(plan.command_preview.split(adapter_path).len()).to_equal(1)
+expect(plan.evidence_jsonl.split("/mnt/private-models").len()).to_equal(1)
+expect(plan.evidence_jsonl.split("password").len()).to_equal(1)
+expect(plan.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 remove_file_if_exists(adapter_path)
 ```
 
@@ -321,8 +321,8 @@ val plan = llm_runtime_static_serve_plan(manifest)
 expect(result.base_model).to_equal("redacted")
 expect(plan.base_model).to_equal("redacted")
 expect(plan.command_preview).to_contain("vllm serve redacted")
-expect(result.evidence_jsonl.contains("models/customer-a")).to_equal(false)
-expect(plan.evidence_jsonl.contains("models/customer-a")).to_equal(false)
+expect(result.evidence_jsonl.split("models/customer-a").len()).to_equal(1)
+expect(plan.evidence_jsonl.split("models/customer-a").len()).to_equal(1)
 ```
 
 </details>
@@ -349,9 +349,9 @@ expect(missing.command_preview).to_equal("missing")
 expect(invalid_endpoint.status).to_equal("missing")
 expect(invalid_endpoint.reason).to_equal("invalid_endpoint")
 expect(invalid_endpoint.endpoint_status).to_equal("invalid")
-expect(dynamic.evidence_jsonl.contains(absence_marker())).to_equal(false)
-expect(missing.evidence_jsonl.contains(absence_marker())).to_equal(false)
-expect(invalid_endpoint.evidence_jsonl.contains(absence_marker())).to_equal(false)
+expect(dynamic.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+expect(missing.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+expect(invalid_endpoint.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>

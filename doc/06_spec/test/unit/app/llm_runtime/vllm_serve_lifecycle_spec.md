@@ -54,7 +54,7 @@ expect(result.status).to_equal("not_started")
 expect(result.reason).to_equal("missing_base_model")
 expect(result.pid).to_equal(-1)
 expect(result.running_status).to_equal("not_started")
-expect(result.evidence_jsonl.contains("nil")).to_equal(false)
+expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
 ```
 
 </details>

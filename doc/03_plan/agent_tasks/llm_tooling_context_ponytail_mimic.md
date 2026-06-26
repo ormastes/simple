@@ -322,7 +322,7 @@ Dedicated dashboard view evidence:
   verifies the dedicated `view-tooling` rendering, explicit missing-source
   output, and `doc/07_guide/app/dashboard.md` operator-guide coverage for
   diagnostics, tooling, and vLLM panels.
-- 2026-06-26 nil/absence hardening: Ponytail, tooling collector, and web
+- 2026-06-26 public absence hardening: Ponytail, tooling collector, and web
   dashboard diagnostics/tooling specs now assert absence through split-count
   checks instead of boolean `contains(...).to_equal(false)` wrappers. The
   matching generated manuals were refreshed, the canonical system manual was

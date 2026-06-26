@@ -59,8 +59,8 @@ expect(result.http_status).to_equal(200)
 expect(result.response_status).to_equal("ready")
 expect(result.response_reason).to_equal("models_endpoint_ready")
 expect(result.body_status).to_equal("present")
-expect(result.evidence_jsonl.contains("base-model")).to_equal(false)
-expect(result.evidence_jsonl.contains("nil")).to_equal(false)
+expect(result.evidence_jsonl.split("base-model").len()).to_equal(1)
+expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
 ```
 
 </details>
@@ -83,7 +83,7 @@ expect(result.method).to_equal("POST")
 expect(result.path).to_equal("/chat/completions")
 expect(result.response_status).to_equal("ready")
 expect(result.response_reason).to_equal("chat_completions_ready")
-expect(result.evidence_jsonl.contains("private answer")).to_equal(false)
+expect(result.evidence_jsonl.split("private answer").len()).to_equal(1)
 ```
 
 </details>

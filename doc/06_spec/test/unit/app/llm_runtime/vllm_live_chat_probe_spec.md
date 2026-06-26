@@ -57,8 +57,8 @@ expect(result.endpoint_status).to_equal("configured")
 expect(result.choice_count).to_equal(1)
 expect(result.content_status).to_equal("present")
 expect(result.finish_reason_status).to_equal("stop")
-expect(result.evidence_jsonl.contains("secret generated answer")).to_equal(false)
-expect(result.evidence_jsonl.contains("nil")).to_equal(false)
+expect(result.evidence_jsonl.split("secret generated answer").len()).to_equal(1)
+expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
 ```
 
 </details>

@@ -500,3 +500,24 @@ Runtime-adjacent decision record for runtime control resource detection:
   runtime-owned plan evidence, but it still deliberately avoids owning live
   process or HTTP side effects until integration evidence proves the
   `dashboard_live_control_executor` path is safe to call from the web route.
+
+## 2026-06-26 Public Absence Assertion Hardening
+
+The vLLM/Torch readiness, live probe, live transport, live request-plan, serve
+readiness, serve lifecycle, and system readiness specs now assert public
+absence/redaction through split-count checks instead of boolean
+`contains(...).to_equal(false)` wrappers. This keeps the executable evidence
+aligned with the public absence-marker policy while preserving the same observable
+behavior: missing/private values must render as explicit statuses or be absent
+from JSONL, never as the internal absence marker.
+
+Evidence:
+
+- Focused `simple check` passed for the 17 edited vLLM/Torch spec files.
+- Focused interpreter tests passed for the edited unit/system specs; serve
+  lifecycle/readiness still emit the known subprocess diagnostic line while the
+  runner reports all examples passed and exits successfully.
+- `simple spipe-docgen` regenerated 17 matching manuals with 100% complete docs.
+- The targeted source/manual scan found no remaining
+  `contains(...).to_equal(false)` or `expect(false).to_equal(true)` wrappers in
+  the vLLM/Torch readiness artifacts.

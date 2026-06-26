@@ -38,7 +38,7 @@ vllm_live_models_probe_spec -> app
 
 ### vLLM live models response probe
 
-#### marks a matching /v1/models response as ready without exposing internal absence markers
+#### marks a matching /v1/models response as ready without exposing the absence marker
 
 <details>
 <summary>Executable SSpec</summary>
@@ -56,7 +56,7 @@ expect(result.reason).to_equal("models_endpoint_ready")
 expect(result.endpoint_status).to_equal("configured")
 expect(result.model_count).to_equal(1)
 expect(result.base_model_status).to_equal("present")
-expect(result.evidence_jsonl.contains("nil")).to_equal(false)
+expect(result.evidence_jsonl.split("nil").len()).to_equal(1)
 ```
 
 </details>
@@ -77,7 +77,7 @@ val result = llm_runtime_probe_vllm_models_response(manifest, 200, body)
 expect(result.status).to_equal("ready")
 expect(result.base_model).to_equal("redacted")
 expect(result.base_model_status).to_equal("present")
-expect(result.evidence_jsonl.contains("/mnt/private")).to_equal(false)
+expect(result.evidence_jsonl.split("/mnt/private").len()).to_equal(1)
 ```
 
 </details>

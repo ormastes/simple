@@ -56,8 +56,8 @@ expect(plan.method).to_equal("GET")
 expect(plan.path).to_equal("/models")
 expect(plan.url_preview).to_equal("http://127.0.0.1:8000/v1/models")
 expect(plan.execution_status).to_equal("plan_only_not_fetched")
-expect(plan.evidence_jsonl.contains("password")).to_equal(false)
-expect(plan.evidence_jsonl.contains("nil")).to_equal(false)
+expect(plan.evidence_jsonl.split("password").len()).to_equal(1)
+expect(plan.evidence_jsonl.split("nil").len()).to_equal(1)
 ```
 
 </details>
@@ -119,7 +119,7 @@ val plan = llm_runtime_vllm_chat_request_plan(manifest, "", 0)
 expect(plan.status).to_equal("missing")
 expect(plan.reason).to_equal("missing_chat_body")
 expect(plan.body_status).to_equal("missing")
-expect(plan.evidence_jsonl.contains("messages")).to_equal(false)
+expect(plan.evidence_jsonl.split("messages").len()).to_equal(1)
 ```
 
 </details>

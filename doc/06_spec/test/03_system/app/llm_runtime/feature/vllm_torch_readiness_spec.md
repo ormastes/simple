@@ -47,8 +47,8 @@ vllm_torch_readiness_spec -> std
    - Expected: readiness.reason equals `torch_unavailable`
    - Expected: readiness.torch_ready equals `unavailable`
    - Expected: readiness.chat_template_status equals `none`
-   - Expected: readiness.evidence_jsonl does not contain `absence_marker()`
-   - Expected: panel_text does not contain `absence_marker()`
+   - Expected: readiness.evidence_jsonl.split(absence_marker()).len() equals `1`
+   - Expected: panel_text.split(absence_marker()).len() equals `1`
 - remove file if exists
 
 
@@ -72,10 +72,10 @@ expect(readiness.reason).to_equal("torch_unavailable")
 expect(readiness.torch_ready).to_equal("unavailable")
 expect(readiness.chat_template_status).to_equal("none")
 expect(elapsed).to_be_less_than(2_000_000)
-expect(readiness.evidence_jsonl.contains(absence_marker())).to_equal(false)
+expect(readiness.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 expect(panel_text).to_contain("events=1")
 expect(panel_text).to_contain("llm_runtime_vllm_readiness")
-expect(panel_text.contains(absence_marker())).to_equal(false)
+expect(panel_text.split(absence_marker()).len()).to_equal(1)
 remove_file_if_exists(evidence_path())
 ```
 
@@ -96,8 +96,8 @@ val readiness = llm_runtime_probe_manifest(manifest)
 expect(readiness.status).to_equal("blocked")
 expect(readiness.reason).to_equal("dynamic_lora_requires_trusted_mode")
 expect(readiness.base_model).to_equal("redacted")
-expect(readiness.evidence_jsonl.contains("/mnt/models")).to_equal(false)
-expect(readiness.evidence_jsonl.contains(absence_marker())).to_equal(false)
+expect(readiness.evidence_jsonl.split("/mnt/models").len()).to_equal(1)
+expect(readiness.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -108,10 +108,10 @@ expect(readiness.evidence_jsonl.contains(absence_marker())).to_equal(false)
 - write file
    - Expected: plan.status equals `planned`
    - Expected: plan.reason equals `static_serve_plan_only`
-   - Expected: plan.evidence_jsonl does not contain `/mnt/models`
-   - Expected: plan.evidence_jsonl does not contain `password`
-   - Expected: plan.evidence_jsonl does not contain `absence_marker()`
-   - Expected: panel_text does not contain `absence_marker()`
+   - Expected: plan.evidence_jsonl.split("/mnt/models").len() equals `1`
+   - Expected: plan.evidence_jsonl.split("password").len() equals `1`
+   - Expected: plan.evidence_jsonl.split(absence_marker()).len() equals `1`
+   - Expected: panel_text.split(absence_marker()).len() equals `1`
 - remove file if exists
 
 
@@ -131,11 +131,11 @@ val panel_text = render_llm_diagnostics_panel_text(collect_llm_diagnostics_jsonl
 expect(plan.status).to_equal("planned")
 expect(plan.reason).to_equal("static_serve_plan_only")
 expect(plan.command_preview).to_contain("vllm serve redacted")
-expect(plan.evidence_jsonl.contains("/mnt/models")).to_equal(false)
-expect(plan.evidence_jsonl.contains("password")).to_equal(false)
-expect(plan.evidence_jsonl.contains(absence_marker())).to_equal(false)
+expect(plan.evidence_jsonl.split("/mnt/models").len()).to_equal(1)
+expect(plan.evidence_jsonl.split("password").len()).to_equal(1)
+expect(plan.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 expect(panel_text).to_contain("llm_runtime_vllm_serve_plan")
-expect(panel_text.contains(absence_marker())).to_equal(false)
+expect(panel_text.split(absence_marker()).len()).to_equal(1)
 remove_file_if_exists(evidence_path())
 ```
 
@@ -161,8 +161,8 @@ expect(malformed_adapter.status).to_equal("missing")
 expect(malformed_adapter.reason).to_equal("invalid_adapter_entry")
 expect(invalid_endpoint.status).to_equal("missing")
 expect(invalid_endpoint.reason).to_equal("invalid_endpoint")
-expect(malformed_adapter.evidence_jsonl.contains(absence_marker())).to_equal(false)
-expect(invalid_endpoint.evidence_jsonl.contains(absence_marker())).to_equal(false)
+expect(malformed_adapter.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+expect(invalid_endpoint.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
 ```
 
 </details>
