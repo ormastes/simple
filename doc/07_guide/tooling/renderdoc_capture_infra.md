@@ -1046,6 +1046,14 @@ The current canonical evidence contract is:
   `production_gui_web_renderer_parity_surface_manifest_chrome_capture_backend`.
   Missing provenance or nonempty missing-command evidence fails the gate instead
   of being backfilled from the current host.
+  The same source env must now include Electron/Chromium interaction evidence
+  from `scripts/check/check-wm-browser-event-routing-evidence.shs`. The
+  wrapper forwards it as `production_gui_web_renderer_parity_event_routing_*`,
+  and the non-launching gate requires `status=pass`, `ready=true`,
+  `wm_found=true`, counts of at least one for focus, move, maximize,
+  title-command, text-input, pointer-down, and pointer-up, plus
+  `blur_or_tolerance_used=false`. Saved render/capture evidence without these
+  event-routing keys is no longer a production GUI/web pass claim.
 
 ## External Host Gate
 

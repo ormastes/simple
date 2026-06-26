@@ -182,7 +182,12 @@ Vulkan IO-level RenderDoc evidence.
 For HTML-backed GUI modernization, screenshots and DOM audits are not enough
 when a lane claims event handling. Require structured Electron interaction
 evidence for focus, keyboard/input, pointer, and click delivery on visible
-controls, or an explicit host-unavailable result.
+controls, or an explicit host-unavailable result. The production GUI/web
+renderer parity wrapper now consumes
+`scripts/check/check-wm-browser-event-routing-evidence.shs`; a green production
+claim must expose `production_gui_web_renderer_parity_event_routing_*` with
+focus, move, maximize, title-command, text-input, pointer-down, pointer-up, and
+`blur_or_tolerance=false`.
 
 For GUI/web/2D Vulkan comparison, use
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check` for readiness,

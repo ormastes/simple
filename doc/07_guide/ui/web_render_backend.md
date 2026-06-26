@@ -151,6 +151,14 @@ fail-closed as `missing-simple-bin`. The wrappers emit
 `explicit-env`, `in-tree-release`, `repo-bin`, `path-opt-in`, and
 `default-missing` evidence.
 
+The renderer parity wrapper also runs the Electron/Chromium event-routing probe
+before a top-level pass. Saved evidence must include
+`production_gui_web_renderer_parity_event_routing_status=pass`, readiness and
+WM discovery flags, focus/move/maximize/title-command/text-input/pointer
+counts, and `production_gui_web_renderer_parity_event_routing_blur_or_tolerance_used=false`.
+This keeps a visually correct capture from passing when visible controls no
+longer receive DOM events.
+
 The focused production web endpoint gate is:
 
 ```bash

@@ -370,7 +370,12 @@ Generated-GUI evidence may record explicit `text_normalization_pixels` for
 fixture-scoped browser text antialiasing normalization, but must still require
 matching checksums, `mismatch_count=0`, and `blur_or_tolerance=false`. Treat
 Linux Metal readback as host-unavailable (`metal-requires-macos`) and require
-native raw Metal readback evidence on macOS.
+native raw Metal readback evidence on macOS. A production renderer pass must
+also forward `scripts/check/check-wm-browser-event-routing-evidence.shs` under
+`production_gui_web_renderer_parity_event_routing_*` and require focus, window
+move/maximize, title-command keyboard input, body text input, pointer down/up,
+and `blur_or_tolerance=false`; render/capture parity without interaction
+delivery is incomplete evidence.
 For GUI/web queue proof, runtime queue/drain receipts are necessary but not
 sufficient. Production proof requires same-frame backend `device_readback`, a
 positive backend handle, and matching checksum; runtime-only, synthetic-handle,
