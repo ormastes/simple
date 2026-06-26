@@ -231,6 +231,10 @@ Evidence:
   `doc/06_spec/test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.md`
   and
   `doc/06_spec/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.md`.
+- 2026-06-26 manual hardening: retry7 absence assertions now use an internal
+  marker helper, the focused system spec still passes 4/4, and both generated
+  manuals were refreshed so public expected-code snippets do not expose the
+  internal absence marker.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS
