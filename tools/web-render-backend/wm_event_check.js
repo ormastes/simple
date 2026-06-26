@@ -141,6 +141,11 @@ async function main() {
         return f.payload && (f.payload.kind === cmd || f.payload.cmd_type === cmd || f.payload.event?.kind === cmd);
       });
     }
+    function frameName(frame) {
+      const payload = frame && frame.payload ? frame.payload : {};
+      const kind = payload.kind || payload.cmd_type || payload.event?.kind || 'unknown';
+      return frame && frame.t ? frame.t + ':' + kind : 'unknown:' + kind;
+    }
 
     const titlebar = eventTarget('.wm-titlebar');
     const title = eventTarget('.wm-title');
@@ -230,6 +235,7 @@ async function main() {
     out.text_input_count = frames('input_event', 'text_input').length;
     out.pointer_down_count = frames('input_event', 'pointer_down').length;
     out.pointer_up_count = frames('input_event', 'pointer_up').length;
+    out.event_sequence = window.__wmFrames.map(frameName);
     out.move_payload = frames('window_cmd', 'move')[0]?.payload || null;
     out.title_payload = frames('window_cmd', 'title_command')[0]?.payload || null;
     out.text_payload = frames('input_event', 'text_input')[0]?.payload || null;
@@ -250,6 +256,8 @@ async function main() {
       out.css_animation_probe === true &&
       out.move_payload.window_id_hint === 'win1' &&
       out.move_payload.source === 'native_event' &&
+      Array.isArray(out.event_sequence) &&
+      out.event_sequence.join(',') === 'host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up' &&
       out.move_payload.x === expectedMoveX &&
       out.move_payload.y === expectedMoveY &&
       out.title_text === 'Terminal' &&

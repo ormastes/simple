@@ -62,6 +62,27 @@ function row(key, value) {
   console.log(`${key}=${clean(value)}`);
 }
 
+const expectedEventSequence = [
+  'host_wm_pointer:down',
+  'window_cmd:focus',
+  'window_cmd:move',
+  'window_cmd:title_command',
+  'window_cmd:maximize',
+  'input_event:text_input',
+  'input_event:pointer_down',
+  'input_event:pointer_up',
+];
+
+function eventSequenceText(value) {
+  if (!Array.isArray(value)) return '';
+  return value.map(clean).join(',');
+}
+
+function sameEventSequence(value) {
+  if (!Array.isArray(value) || value.length !== expectedEventSequence.length) return false;
+  return expectedEventSequence.every((entry, index) => value[index] === entry);
+}
+
 const jsonPath = process.argv[2];
 if (!jsonPath) {
   row('wm_browser_event_routing_validation_status', 'fail');
@@ -95,6 +116,7 @@ const rows = {
   text_input_count: integerTextOrBlank(proof.text_input_count),
   pointer_down_count: integerTextOrBlank(proof.pointer_down_count),
   pointer_up_count: integerTextOrBlank(proof.pointer_up_count),
+  event_sequence: eventSequenceText(proof.event_sequence),
   performance_now_available: proof.performance_now_available,
   performance_now_delta_ms: decimalTextOrClean(proof.performance_now_delta_ms),
   animation_frame_available: proof.animation_frame_available,
@@ -144,6 +166,8 @@ if (!boolTrue(proof.pass)) {
   !integerAtLeast(proof.pointer_up_count, 1)
 ) {
   reason = 'event-routing-contract-missing';
+} else if (!sameEventSequence(proof.event_sequence)) {
+  reason = 'event-routing-sequence-contract-missing';
 } else if (
   !boolTrue(proof.performance_now_available) ||
   !decimalGreaterThan(proof.performance_now_delta_ms, 0) ||

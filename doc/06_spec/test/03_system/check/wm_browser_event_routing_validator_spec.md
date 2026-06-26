@@ -27,7 +27,7 @@ wm_browser_event_routing_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,6 +74,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
   `wm_browser_event_routing_*` rows.
 - `pass=true` JSON still fails when event counts, Chromium timing, animation,
   payload details, or UI proof rows are missing or malformed.
+- The raw frame stream must include the canonical event sequence from host pointer, focus,
+  drag move, title command, maximize, text input, pointer down, and pointer up;
+  counts alone are not enough event-routing proof.
 - Chromium timing must include an explicit positive `performance.now()` delta;
   `0` does not prove distinct timing samples.
 - Boolean readiness, timing, animation, and CSS probe fields must be real JSON
@@ -97,7 +100,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -115,6 +118,7 @@ expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=1
 expect(evidence).to_contain("wm_browser_event_routing_animation_frame_available=true")
 expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=2")
 expect(evidence).to_contain("wm_browser_event_routing_css_animation_probe=true")
+expect(evidence).to_contain("wm_browser_event_routing_event_sequence=host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up")
 expect(evidence).to_contain("wm_browser_event_routing_move_payload_source=native_event")
 expect(evidence).to_contain("wm_browser_event_routing_title_command_text=/tmp/project")
 expect(evidence).to_contain("wm_browser_event_routing_text_input_text=Hello Simple")
@@ -145,6 +149,42 @@ val evidence = file_read("build/test-wm-browser-event-validator-counts/evidence.
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
 expect(evidence).to_contain("wm_browser_event_routing_focus_count=0")
+```
+
+</details>
+
+#### rejects pass true proof when the frame sequence is missing or reordered
+
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm event routing proof requires structured frame order
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-sequence && mkdir -p build/test-wm-browser-event-validator-sequence && " +
+    _fixture_command("build/test-wm-browser-event-validator-sequence/reordered.json", "p.event_sequence=[\"host_wm_pointer:down\",\"window_cmd:focus\",\"window_cmd:title_command\",\"window_cmd:move\",\"window_cmd:maximize\",\"input_event:text_input\",\"input_event:pointer_down\",\"input_event:pointer_up\"]") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-sequence/reordered.json > build/test-wm-browser-event-validator-sequence/reordered.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-sequence/string.json", "p.event_sequence=\"window_cmd:focus,window_cmd:move\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-sequence/string.json > build/test-wm-browser-event-validator-sequence/string.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val reordered = file_read("build/test-wm-browser-event-validator-sequence/reordered.env")
+val string_sequence = file_read("build/test-wm-browser-event-validator-sequence/string.env")
+step("Confirm event routing proof requires structured frame order")
+expect(reordered).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(reordered).to_contain("wm_browser_event_routing_validation_reason=event-routing-sequence-contract-missing")
+expect(reordered).to_contain("wm_browser_event_routing_event_sequence=host_wm_pointer:down,window_cmd:focus,window_cmd:title_command,window_cmd:move")
+expect(string_sequence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(string_sequence).to_contain("wm_browser_event_routing_validation_reason=event-routing-sequence-contract-missing")
+expect(string_sequence).to_contain("wm_browser_event_routing_event_sequence=")
 ```
 
 </details>
@@ -342,7 +382,7 @@ expect(payload.contains("wm_browser_event_routing_move_payload_x=86.5")).to_equa
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -351,6 +391,7 @@ expect(script).to_contain("validate-wm-browser-event-routing-proof.js")
 expect(script).to_contain("validator_code")
 expect(script).to_contain("wm_browser_event_routing_validation_status")
 expect(script).to_contain("wm_browser_event_routing_validation_reason")
+expect(script).to_contain("wm_browser_event_routing_event_sequence")
 ```
 
 </details>
@@ -359,8 +400,8 @@ expect(script).to_contain("wm_browser_event_routing_validation_reason")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
