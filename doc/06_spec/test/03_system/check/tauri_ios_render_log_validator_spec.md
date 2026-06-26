@@ -368,7 +368,7 @@ expect(evidence).to_contain("ios_render_log_failure_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -379,6 +379,7 @@ expect(direct).to_contain("validate-tauri-ios-render-log-proof.js")
 expect(direct).to_contain("ios_render_log.validation.env")
 expect(aggregate).to_contain("TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_count")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_coherence_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status")
