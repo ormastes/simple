@@ -395,10 +395,15 @@ pixel count, and the three viewport dimensions must match before the Linux row
 can pass. A bare `pairwise-argb-diff` pass without comparable nonblank source
 rows is rejected. Missing RenderDoc `.rdc` evidence is reported through
 `linux_vulkan_render_log_compare_renderdoc_*_status` plus the matching
-`linux_vulkan_render_log_compare_renderdoc_*_reason`; by default Simple,
+`linux_vulkan_render_log_compare_renderdoc_*_reason`,
+`linux_vulkan_render_log_compare_renderdoc_*_env_file_status`,
+`linux_vulkan_render_log_compare_renderdoc_*_artifact_file_status`, and
+`linux_vulkan_render_log_compare_renderdoc_*_artifact_magic`; by default Simple,
 Chrome, and Electron RenderDoc rows must pass with real `.rdc` files and `RDOC`
-magic in the first four artifact bytes; env metadata that merely claims
-`rdoc_capture_magic=RDOC` is not completion proof. Set
+magic in the first four artifact bytes. Env metadata that merely claims
+`rdoc_capture_magic=RDOC` is not completion proof; `env_file_status=pass` plus
+`artifact_file_status=missing` means the diagnostic env exists but the native
+capture artifact still has not been produced. Set
 `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0` only for diagnostic
 partial-log inspection, and never use that mode to claim Linux platform-matrix
 completion.
@@ -418,10 +423,19 @@ linux_vulkan_render_log_compare_required_api=vulkan
 linux_vulkan_render_log_compare_pairwise_status=pass
 linux_vulkan_render_log_compare_renderdoc_simple_status=pass
 linux_vulkan_render_log_compare_renderdoc_simple_reason=pass
+linux_vulkan_render_log_compare_renderdoc_simple_env_file_status=pass
+linux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status=pass
+linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=RDOC
 linux_vulkan_render_log_compare_renderdoc_chrome_status=pass
 linux_vulkan_render_log_compare_renderdoc_chrome_reason=pass
+linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass
+linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass
+linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=RDOC
 linux_vulkan_render_log_compare_renderdoc_electron_status=pass
 linux_vulkan_render_log_compare_renderdoc_electron_reason=pass
+linux_vulkan_render_log_compare_renderdoc_electron_env_file_status=pass
+linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=pass
+linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=RDOC
 ```
 
 The source logs use `simple-render-log-v1` and include

@@ -149,6 +149,17 @@ tested, run `scripts/check/check-gui-widget-renderdoc-goal-status.shs`; require
 Simple Vulkan Engine2D and Electron Chromium/Vulkan `.rdc` evidence. Defer
 Windows and Linux claims until platform-specific runbooks validate the same
 evidence keys and RDOC gate contract.
+For Linux Vulkan render-log comparison, require the aggregate audit to expose
+`linux_vulkan_render_log_compare_renderdoc_simple_env_file_status`,
+`linux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status`,
+`linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status`,
+`linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic`,
+`linux_vulkan_render_log_compare_renderdoc_electron_env_file_status`,
+`linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status`, and
+`linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic`; an env file
+that exists without a real `RDOC` artifact remains a blocker.
 
 For runtime concurrency work, keep the public API map current in
 `doc/07_guide/lib/misc/stdlib.md`, `doc/07_guide/compiler/check_perf.md`, and

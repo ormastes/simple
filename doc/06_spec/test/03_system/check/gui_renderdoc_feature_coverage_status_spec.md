@@ -380,7 +380,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 882 lines folded for reproduction.
+Runnable source: 891 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -457,6 +457,15 @@ expect(evidence).to_contain("native_render_log_platform_matrix_required_platform
 expect(evidence).to_contain("native_render_log_platform_matrix_missing_platforms=")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_status=")
 expect(evidence).to_contain("linux_vulkan_render_log_compare_required_api=vulkan")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_simple_env_file_status=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_env_file_status=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=")
 expect(evidence).to_contain("macos_metal_render_log_compare_status=")
 expect(evidence).to_contain("macos_metal_render_log_compare_required_api=metal")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_status=")
