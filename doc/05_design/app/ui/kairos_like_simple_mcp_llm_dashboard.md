@@ -35,6 +35,9 @@ Proposed module family:
 - `src/app/dashboard.views/assistant_status.spl`
 - `src/app/dashboard.views/assistant_timeline.spl`
 - `src/app/dashboard.views/assistant_tasks.spl`
+- `src/app/llm_dashboard/collectors/diagnostics_jsonl_collector.spl`
+- `src/app/web_dashboard/dashboard_html.spl`
+- `src/app/web_dashboard/server.spl`
 
 Responsibilities:
 
@@ -43,6 +46,9 @@ Responsibilities:
 - render session/timeline/task views
 - support replay/import mode
 - host the web login entrypoint and persist operator auth session state under `.build/llm_dashboard/auth`
+- summarize diagnostics hook JSONL into an operator-visible Diagnostics panel
+- keep missing diagnostics fields rendered as explicit `none` text in
+  rendered text/HTML
 
 ### bridge side
 
@@ -87,6 +93,7 @@ For the web login slice:
 Initial MCP controls:
 
 - `assistant_start`
+- `assistant_spawn_task`
 - `assistant_pause`
 - `assistant_resume`
 - `assistant_brief`
@@ -102,7 +109,6 @@ Broad-scope follow-on controls:
 - `assistant_subscribe`
 - `assistant_ack_notification`
 - `assistant_set_policy`
-- `assistant_spawn_task`
 
 ## Scheduling Design
 
@@ -216,6 +222,106 @@ Web-login operator failures should surface concrete guidance for:
 5. standalone dashboard replay/import
 6. combined live bridge
 7. degraded/failure modes
+8. diagnostics JSONL collector summary and absence-safe dashboard readback
+
+Implemented diagnostics readback coverage:
+
+- `test/unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.spl`
+- `test/01_unit/app/llm_dashboard/collectors/diagnostics_jsonl_collector_spec.spl`
+- `test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl`
+
+Implemented dashboard replay/live projection coverage:
+
+- `test/01_unit/app/llm_dashboard/agent_dashboard_hardening_spec.spl`
+- `test/unit/app/llm_dashboard/agent_dashboard_hardening_spec.spl`
+- `test/01_unit/app/llm_dashboard/assistant_collectors_spec.spl`
+- `test/unit/app/llm_dashboard/assistant_collectors_spec.spl`
+- `test/01_unit/app/llm_dashboard/assistant_bridge_spec.spl`
+- `test/unit/app/llm_dashboard/assistant_bridge_spec.spl`
+- `test/01_unit/app/llm_dashboard/assistant_live_view_spec.spl`
+- `test/unit/app/llm_dashboard/assistant_live_view_spec.spl`
+- `test/01_unit/app/llm_dashboard/assistant_import_spec.spl`
+- `test/unit/app/llm_dashboard/assistant_import_spec.spl`
+- `test/01_unit/app/llm_dashboard/assistant_digest_spec.spl`
+- `test/unit/app/llm_dashboard/assistant_digest_spec.spl`
+- `test/01_unit/app/llm_dashboard/assistant_retention_spec.spl`
+- `test/unit/app/llm_dashboard/assistant_retention_spec.spl`
+- `test/01_unit/app/llm_dashboard/jsonl_watcher_spec.spl`
+- `test/unit/app/llm_dashboard/jsonl_watcher_spec.spl`
+
+The dashboard collector reads the MCP assistant file store as replay data and
+selects the latest local session by `updated_at_ms`, using the session ID as a
+deterministic tie-breaker. It loads sessions through the assistant store API so
+timeline-merged metadata is visible in dashboard snapshots. The bridge
+projection treats replay-only snapshots as read-only, fresh live snapshots as
+routable to `assistant_core`, and stale or degraded snapshots as blocked with
+refresh guidance. The dashboard live view converts those projections into
+renderable absence-safe state lines and operator notices: fresh live sessions route
+actions to `assistant_core`, while replay/stale/degraded sessions render
+read-only guidance. Snapshot import writes exported sessions, timeline events,
+and notifications into a selected durable replay root, then reuses the same
+collector path as local file-store replay. Malformed imports return structured
+errors without creating new replay records. Required snapshot arrays
+(`sessions`, `timeline`, and `notifications`) are validated before any replay
+streams are written, so missing arrays cannot create orphan timeline or
+notification files.
+Snapshot import preserves task-tree replay fields (`children`, `tool_use_ids`,
+`warnings`, and `child_tasks`) and replaces per-session imported
+timeline/notification streams on repeat import so replay roots do not accumulate
+duplicate events from the same snapshot.
+The live view also renders explicit failure evidence fields (`failure_state`,
+`failure_detail`, and `failure_count`) for assistant crash metadata, missing
+selected sessions, and stale/degraded bridge states. These failure lines are
+absence-safe and are covered by the assistant live-view specs.
+The dashboard retention projection applies bounded visible timeline and
+notification windows over a snapshot, coalesces repeated low-value signal and
+notification bursts, and reports retained/dropped/coalesced counts with a
+absence-safe operator notice. It is a dashboard projection only: durable store
+pruning and digest-checkpoint retention are left to the store/digest policy
+lane.
+The dashboard digest projection renders persisted summary/checkpoint readback
+from replay snapshots: session summary, digest checkpoint ID, latest event
+detail, task result-summary counts, warning counts, and notifications. It is
+absence-safe and uses `none`/`missing` for absent data. It does not implement the
+background digest generator; that remains in the MCP store/digest policy lane.
+The transcript JSONL watcher scans project directories under a dashboard root,
+starts newly discovered transcript files at EOF, tails appended JSONL lines,
+holds incomplete trailing records until they are newline-terminated, resets
+offsets after truncation/rotation, and ignores stray files in the root.
+Watcher specs use narrow `std.io_runtime` fixture helpers to avoid unrelated
+runtime/process surfaces in dashboard verification.
+
+Implemented MCP assistant control/readback coverage:
+
+- `test/01_unit/app/mcp_unit/assistant_surface_spec.spl`
+- `test/unit/app/mcp_unit/assistant_surface_spec.spl`
+- `test/01_unit/app/mcp_unit/assistant_task_linking_spec.spl`
+- `test/unit/app/mcp_unit/assistant_task_linking_spec.spl`
+- `test/01_unit/app/mcp_unit/assistant_dashboard_e2e_spec.spl`
+- `test/unit/app/mcp_unit/assistant_dashboard_e2e_spec.spl`
+
+The MCP control surface exposes start/spawn/pause/resume/brief/list/timeline/
+signal/task/notification tools as in-process handlers. Handler readback uses
+explicit `match Some(session)/Option-none` branches for assistant store `Option`
+results, and dashboard replay collectors expose timeline readback directly.
+Signal push checks timeline persistence before returning success, and task list
+rendering no longer checks impossible absent child-task records.
+The dashboard collector and e2e specs use `std.io_runtime` fixture file helpers
+instead of broad `app.io.mod` imports, so they pass without internal
+process-exit diagnostics.
+
+Implemented assistant store/view hardening:
+
+- root-facing assistant store APIs normalize parsed JSON tool input
+- root-facing `any` APIs reject non-object parsed values
+- typed session creation generates missing session IDs for valid session objects
+- typed MCP assistant callers use record-specific store functions
+- session detail recomputes event counts from timeline records rather than
+  accumulating stale stored counts across loads
+- state updates increment persisted event metadata before writing session JSON
+- compact briefs render numeric counts with `str(...)`, not placeholder text
+- incoming parsed JSON signal events normalize persisted event kind to
+  `signal_event`, preserving the operator-visible wake reason in `signal`
 
 ### Critical edge cases
 

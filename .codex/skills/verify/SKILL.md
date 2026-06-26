@@ -246,6 +246,10 @@ STATUS: FAIL (3 failures, 1 warning)
 - Audit new `rt_*` use and fail runtime bypasses outside infrastructure/provider
   code unless a concrete direct-hardware or Simple-codegen/performance blocker
   is recorded.
+- For `simple_context` or context-mode changes, verify the MCP/tooling guide,
+  `doc/06_spec` manuals, and relevant skill/command docs mention any new
+  `--sql`/`--db` behavior, embedded SQLite facade boundary, and explicit
+  absence statuses. Run `scripts/check/check-llm-tooling-public-absence-rendering.shs`.
 - Verify cache invalidation exists for write flows that affect cached or indexed data
 - Require startup and representative request performance evidence for performance-sensitive tooling changes
 - For `simple run` script-startup changes, require evidence from

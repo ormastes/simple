@@ -2274,8 +2274,7 @@ fn test_freestanding_qualified_to_bare_alias_bridges_export_symbol() {
             .success());
     }
 
-    let aliases =
-        NativeProjectBuilder::freestanding_qualified_to_bare_defsyms(&[def_o, caller_o], &[]).unwrap();
+    let aliases = NativeProjectBuilder::freestanding_qualified_to_bare_defsyms(&[def_o, caller_o], &[]).unwrap();
 
     assert_eq!(
         aliases,

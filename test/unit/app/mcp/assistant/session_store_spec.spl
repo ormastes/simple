@@ -22,6 +22,53 @@ fn non_empty_lines_count(content: text) -> i64:
     count
 
 describe "assistant session store":
+    it "rejects non-object root inputs and generates missing session ids":
+        val root = test_root("input")
+
+        expect(assistant_store_create_session(root, json_parse("1"))).to_be_nil()
+        expect(assistant_store_append_event(root, json_parse("1"))).to_be_nil()
+        expect(assistant_store_create_child_task(root, json_parse("1"))).to_be_nil()
+
+        val created = assistant_store_create_session(
+            root,
+            json_parse(r"""{"name":"Generated Session","prompt":"generate an id"}""")
+        )
+        match created:
+            case Some(session):
+                expect(session.session_id.starts_with("assistant-")).to_equal(true)
+                expect(session.name).to_equal("Generated Session")
+                expect(session.summary).to_equal("generate an id")
+            case nil:
+                fail("valid object session without id should be created")
+
+    it "normalizes signal events without hanging and preserves wake reason":
+        val root = test_root("signal")
+        assistant_store_create_session(
+            root,
+            json_parse(r"""{"session_id":"assistant-signal-1","name":"Signal Session","summary":"signal","objective":"signal","prompt":"signal","mode":"proactive","state":"running"}""")
+        )
+
+        val appended = assistant_store_append_event(
+            root,
+            json_parse(r"""{"session_id":"assistant-signal-1","kind":"signal","message":"wake payload","signal":"wake","timestamp_ms":1000,"event_id":"event-signal-1"}""")
+        )
+        match appended:
+            case Some(session):
+                expect(session.last_event_kind).to_equal("signal_event")
+                expect(session.last_signal).to_equal("wake")
+                expect(session.last_event_detail).to_equal("wake payload")
+                expect(session.event_count).to_equal(1)
+            case nil:
+                fail("assistant signal event append should return session")
+
+        val loaded = assistant_store_load_session(root, "assistant-signal-1")
+        match loaded:
+            case Some(session):
+                expect(session.last_event_kind).to_equal("signal_event")
+                expect(session.last_signal).to_equal("wake")
+            case nil:
+                fail("assistant signal session should load")
+
     it "creates, loads, updates, and tracks child metadata":
         val root = test_root("roundtrip")
         val created = assistant_store_create_session(

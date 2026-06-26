@@ -18,6 +18,10 @@ and route verification failures into retry/retune actions.
 - `node examples/05_stdlib/spipe/cli/spipe.js fine-tune-next <attempt_id>`
 - `node examples/05_stdlib/spipe/cli/spipe.js fine-tune-verify <record.sdn>`
 
+`fine-tune-next` and `fine-tune-doctor` intentionally exit nonzero for
+unfinished retry states. In automation, assert on their printed `next_action`
+instead of chaining them as green checks unless the attempt is ready.
+
 ## Required Scenarios
 
 1. Submodule separation:
@@ -58,9 +62,83 @@ The two SPipe build scripts cover scenarios 1 through 4 with temporary host
 fixtures and full attempt-record verification. The repository-level installer
 check covers SPipe command routing. The `doc/06_spec` guard covers scenario 5.
 
+2026-06-25 retry-attempt evidence:
+
+- `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry1.sdn`
+  passes the structural attempt verifier.
+- `fine-tune-status llm_backed_app_server_dry_run_retry1` reports every
+  registry present.
+- `fine-tune-next` and `fine-tune-doctor` for
+  `llm_backed_app_server_dry_run_retry1` report
+  `next_action=retry-data-research`, the recorded `retry_target`, and
+  `next_attempt=llm_backed_app_server_dry_run_retry2`.
+- `fine-tune-ready llm_backed_app_server_dry_run_retry1` intentionally fails
+  `decision_accepted` because the recorded MedGemma evidence is below the
+  target and must not be treated as deployable.
+
+2026-06-25 retry2 fixed-format evidence:
+
+- `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry2.sdn`
+  passes the structural attempt verifier.
+- `.spipe/llm-finetune-process/scripts/check_fixed_format_data_quality.shs`
+  passes on the repo-local synthetic MCQ fixture with `records=3` and
+  `invalid_records=0`.
+- `fine-tune-status llm_backed_app_server_dry_run_retry2` reports every
+  registry present.
+- `fine-tune-next` and `fine-tune-doctor` for
+  `llm_backed_app_server_dry_run_retry2` route to
+  `next_action=retry-implementation` and
+  `next_attempt=llm_backed_app_server_dry_run_retry3`.
+- `fine-tune-ready llm_backed_app_server_dry_run_retry2` intentionally fails
+  `model_artifact_created` and `decision_accepted`; retry2 is a data-format
+  gate, not a trained or accepted model.
+
+2026-06-25 retry3 implementation dry-run evidence:
+
+- `.spipe/llm-finetune-process/scripts/run_retry3_local_artifact_eval.shs`
+  passes the fixed-format fixture gate, writes
+  `.spipe/llm-finetune-process/artifacts/llm_backed_app_server_dry_run_retry3/model_manifest.json`,
+  and writes
+  `.spipe/llm-finetune-process/artifacts/llm_backed_app_server_dry_run_retry3/eval_result.json`.
+- `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry3.sdn`
+  passes the structural attempt verifier.
+- `fine-tune-status llm_backed_app_server_dry_run_retry3` reports every
+  registry present.
+- `fine-tune-doctor` and `fine-tune-next` for
+  `llm_backed_app_server_dry_run_retry3` route to
+  `next_action=retry-implementation` and
+  `next_attempt=llm_backed_app_server_dry_run_retry4`. Both commands
+  intentionally exit nonzero for unfinished retry states.
+- `fine-tune-ready llm_backed_app_server_dry_run_retry3` intentionally fails
+  `model_artifact_created` and `decision_accepted`; retry3 has an
+  implementation dry-run manifest, but it is `deployable=false` and no real
+  target model eval has run.
+
+2026-06-25 retry4 license/data-access gate evidence:
+
+- `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry4.sdn`
+  passes the structural attempt verifier.
+- `.spipe/llm-finetune-process/scripts/check_retry4_license_gate.shs
+  llm_backed_app_server_dry_run_retry4` reports
+  `license_review=missing`, `data_access=missing`,
+  `training_allowed=false`, and `STATUS: WARN retry4-license-gate`.
+- `fine-tune-status llm_backed_app_server_dry_run_retry4` reports every
+  registry present.
+- `fine-tune-next` and `fine-tune-doctor` for
+  `llm_backed_app_server_dry_run_retry4` route to
+  `next_action=retry-data-research` and
+  `next_attempt=llm_backed_app_server_dry_run_retry5`.
+- `fine-tune-ready llm_backed_app_server_dry_run_retry4` intentionally fails
+  `model_artifact_created` and `decision_accepted`; retry4 is a license/data
+  gate, not a trained or accepted model.
+
 ## Manual Gate
 
-Final requirements remain blocked by user choice. Do not generate
-`doc/02_requirements/feature/spipe_llm_finetune_process.md` or
-`doc/02_requirements/nfr/spipe_llm_finetune_process.md` until the user selects
-one feature option and one NFR option.
+Final SPipe fine-tune process requirements are selected in
+`doc/02_requirements/language/tools/spipe_llm_finetune_process.md` and
+`doc/02_requirements/nfr/spipe_llm_finetune_process.md`.
+
+The remaining manual gate is model acceptance and licensed data access: do not
+mark a fine-tune attempt ready until the decision registry records `accepted`
+after target-reaching eval evidence, license review, cache/checksum evidence,
+and app/server handoff verification.

@@ -872,7 +872,9 @@ impl LlvmBackend {
             } => {
                 self.compile_indirect_call(*dest, *callee, param_types, return_type, args, vreg_map, builder)?;
             }
-            MirInst::InterpCall { dest, func_name, args, .. } => {
+            MirInst::InterpCall {
+                dest, func_name, args, ..
+            } => {
                 self.compile_interp_call(*dest, func_name, args, vreg_map, builder, module)?;
             }
             MirInst::InterpEval { dest, expr_index } => {

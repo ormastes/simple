@@ -4,10 +4,49 @@
 # may additionally fsync the inode via `rt_file_fsync`.
 
 use std.gc_async_mut.svllm.nvfs_client.std_fs.{StdFsNvfsClient}
-use std.gc_async_mut.svllm.nvfs_client.{ObjHandle, ObjClass, CreateFlags, NvfsError, SyncScope}
+use std.gc_async_mut.svllm.nvfs_client.{ObjHandle, BufHandle, ObjClass, CreateFlags, NvfsError, SyncScope}
 
 fn _tmp_path(name: text) -> text:
     "/tmp/svllm_a2_" + name
+
+fn nvfs_status(r: Result<i64, NvfsError>) -> text:
+    match r:
+        Ok(_) => "ok"
+        Err(e) =>
+            match e:
+                NvfsError.NotFound => "not_found"
+                NvfsError.PermissionDenied => "permission_denied"
+                NvfsError.Unsupported => "unsupported"
+                NvfsError.IoError => "io_error"
+                NvfsError.InvalidArgument => "invalid_argument"
+                NvfsError.Sealed => "sealed"
+                NvfsError.AlreadyExists => "already_exists"
+
+fn nvfs_buffer_status(r: Result<BufHandle, NvfsError>) -> text:
+    match r:
+        Ok(_) => "ok"
+        Err(e) =>
+            match e:
+                NvfsError.NotFound => "not_found"
+                NvfsError.PermissionDenied => "permission_denied"
+                NvfsError.Unsupported => "unsupported"
+                NvfsError.IoError => "io_error"
+                NvfsError.InvalidArgument => "invalid_argument"
+                NvfsError.Sealed => "sealed"
+                NvfsError.AlreadyExists => "already_exists"
+
+fn nvfs_unit_status(r: Result<(), NvfsError>) -> text:
+    match r:
+        Ok(_) => "ok"
+        Err(e) =>
+            match e:
+                NvfsError.NotFound => "not_found"
+                NvfsError.PermissionDenied => "permission_denied"
+                NvfsError.Unsupported => "unsupported"
+                NvfsError.IoError => "io_error"
+                NvfsError.InvalidArgument => "invalid_argument"
+                NvfsError.Sealed => "sealed"
+                NvfsError.AlreadyExists => "already_exists"
 
 describe "StdFsNvfsClient.create (A2)":
     it "opens a fresh AppendOnly object and returns Ok":
@@ -65,3 +104,14 @@ describe "StdFsNvfsClient.sync (A2)":
         val obj = client.create(_tmp_path("sync.bin"), ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
         val r = client.sync(obj, SyncScope.File)
         expect(r.is_ok()).to_equal(true)
+
+describe "StdFsNvfsClient streaming capability gaps":
+    it "reports read_range as unsupported instead of pretending to schedule NVFS reads":
+        val client = StdFsNvfsClient.new()
+        val obj = client.create(_tmp_path("read_range.bin"), ObjClass.AppendOnly, CreateFlags.defaults()).unwrap()
+        expect(nvfs_status(client.read_range(obj, 0, 1, BufHandle.null()))).to_equal("unsupported")
+
+    it "reports buffer registration as unsupported until a real pinned buffer adapter exists":
+        val client = StdFsNvfsClient.new()
+        expect(nvfs_buffer_status(client.register_buffer(0, 4096))).to_equal("unsupported")
+        expect(nvfs_unit_status(client.unregister_buffer(BufHandle.null()))).to_equal("unsupported")

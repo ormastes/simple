@@ -40,6 +40,105 @@ struct DbTable {
 static TABLES: std::sync::LazyLock<Mutex<Vec<Option<DbTable>>>> = std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
 
 // ============================================================================
+// Minimal embedded SQLite facade for interpreter mode
+// ============================================================================
+
+#[derive(Clone, Debug)]
+enum SqlValue {
+    Null,
+    Int(i64),
+    Float(f64),
+    Text(String),
+}
+
+impl SqlValue {
+    fn as_text(&self) -> String {
+        match self {
+            SqlValue::Null => String::new(),
+            SqlValue::Int(v) => v.to_string(),
+            SqlValue::Float(v) => v.to_string(),
+            SqlValue::Text(v) => v.clone(),
+        }
+    }
+
+    fn as_int(&self) -> i64 {
+        match self {
+            SqlValue::Int(v) => *v,
+            SqlValue::Float(v) => *v as i64,
+            SqlValue::Text(v) => v.parse().unwrap_or(0),
+            SqlValue::Null => 0,
+        }
+    }
+
+    fn as_float(&self) -> f64 {
+        match self {
+            SqlValue::Float(v) => *v,
+            SqlValue::Int(v) => *v as f64,
+            SqlValue::Text(v) => v.parse().unwrap_or(0.0),
+            SqlValue::Null => 0.0,
+        }
+    }
+
+    fn type_name(&self) -> &'static str {
+        match self {
+            SqlValue::Null => "null",
+            SqlValue::Int(_) => "integer",
+            SqlValue::Float(_) => "float",
+            SqlValue::Text(_) => "text",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SqlTable {
+    columns: Vec<String>,
+    rows: Vec<Vec<SqlValue>>,
+    next_id: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SqlDatabase {
+    tables: HashMap<String, SqlTable>,
+}
+
+#[derive(Clone, Debug)]
+struct SqlConn {
+    path: String,
+    db: SqlDatabase,
+    last_insert_rowid: i64,
+    changes: i64,
+    error: String,
+}
+
+#[derive(Clone, Debug)]
+enum SqlStmtKind {
+    Query,
+    Insert {
+        conn: usize,
+        table: String,
+        columns: Vec<String>,
+        executed: bool,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct SqlStmt {
+    columns: Vec<String>,
+    rows: Vec<Vec<SqlValue>>,
+    cursor: usize,
+    current: Option<Vec<SqlValue>>,
+    binds: HashMap<usize, SqlValue>,
+    kind: SqlStmtKind,
+}
+
+static SQLITE_CONNS: std::sync::LazyLock<Mutex<Vec<Option<SqlConn>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+static SQLITE_STMTS: std::sync::LazyLock<Mutex<Vec<Option<SqlStmt>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+static SQLITE_FILES: std::sync::LazyLock<Mutex<HashMap<String, SqlDatabase>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -629,4 +728,615 @@ pub fn rt_db_idelete_fn(args: &[Value]) -> Result<Value, CompileError> {
     let pk = format!("{pk_int}");
     let str_args = vec![Value::Int(handle as i64), Value::Str(pk)];
     rt_db_delete_fn(&str_args)
+}
+
+fn arg_float(args: &[Value], idx: usize, fn_name: &str) -> Result<f64, CompileError> {
+    args.get(idx)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                format!("{fn_name} expects argument at index {idx}"),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_float()
+}
+
+fn sqlite_handle_to_index(handle: i64) -> Option<usize> {
+    if handle <= 0 {
+        None
+    } else {
+        Some((handle - 1) as usize)
+    }
+}
+
+fn sqlite_alloc_conn(conn: SqlConn) -> i64 {
+    let mut conns = SQLITE_CONNS.lock().unwrap();
+    for (idx, slot) in conns.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(conn);
+            return (idx + 1) as i64;
+        }
+    }
+    conns.push(Some(conn));
+    conns.len() as i64
+}
+
+fn sqlite_alloc_stmt(stmt: SqlStmt) -> i64 {
+    let mut stmts = SQLITE_STMTS.lock().unwrap();
+    for (idx, slot) in stmts.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(stmt);
+            return (idx + 1) as i64;
+        }
+    }
+    stmts.push(Some(stmt));
+    stmts.len() as i64
+}
+
+fn sqlite_set_error(conn: &mut SqlConn, message: impl Into<String>) -> i64 {
+    conn.error = message.into();
+    conn.changes = 0;
+    0
+}
+
+fn sqlite_split_statements(sql: &str) -> Vec<String> {
+    sql.split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn sqlite_unquote_literal(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+        return trimmed[1..trimmed.len() - 1].replace("''", "'");
+    }
+    trimmed.to_string()
+}
+
+fn sqlite_parse_create(sql: &str) -> Option<(String, Vec<String>)> {
+    let lower = sql.to_ascii_lowercase();
+    if !lower.starts_with("create table") {
+        return None;
+    }
+    let open = sql.find('(')?;
+    let close = sql.rfind(')')?;
+    let before = sql[..open].trim();
+    let table = before.split_whitespace().last()?.trim_matches('"').to_string();
+    let columns = sql[open + 1..close]
+        .split(',')
+        .filter_map(|part| part.split_whitespace().next())
+        .map(|name| name.trim_matches('"').to_string())
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    Some((table, columns))
+}
+
+fn sqlite_parse_insert(sql: &str) -> Option<(String, Vec<String>)> {
+    let lower = sql.to_ascii_lowercase();
+    if !lower.starts_with("insert into ") {
+        return None;
+    }
+    let open = sql.find('(')?;
+    let close = sql[open + 1..].find(')')? + open + 1;
+    let table = sql["INSERT INTO ".len()..open].trim().to_string();
+    let columns = sql[open + 1..close]
+        .split(',')
+        .map(|part| part.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    Some((table, columns))
+}
+
+fn sqlite_like(value: &str, pattern: &str) -> bool {
+    if pattern == "%" {
+        return true;
+    }
+    let needle = pattern.trim_matches('%');
+    if pattern.starts_with('%') && pattern.ends_with('%') {
+        value.contains(needle)
+    } else if pattern.starts_with('%') {
+        value.ends_with(needle)
+    } else if pattern.ends_with('%') {
+        value.starts_with(needle)
+    } else {
+        value == needle
+    }
+}
+
+fn sqlite_execute_statement(conn: &mut SqlConn, sql: &str) -> i64 {
+    let lower = sql.to_ascii_lowercase();
+    conn.error.clear();
+    if let Some((table_name, columns)) = sqlite_parse_create(sql) {
+        conn.db.tables.entry(table_name.clone()).or_insert(SqlTable {
+            columns,
+            rows: Vec::new(),
+            next_id: 1,
+        });
+        conn.changes = 0;
+        return 1;
+    }
+    if lower.starts_with("delete from ") {
+        let table_name = sql["DELETE FROM ".len()..].split_whitespace().next().unwrap_or("");
+        if let Some(table) = conn.db.tables.get_mut(table_name) {
+            conn.changes = table.rows.len() as i64;
+            table.rows.clear();
+            table.next_id = 1;
+            return 1;
+        }
+        return sqlite_set_error(conn, format!("table not found: {table_name}"));
+    }
+    if let Some((table, columns)) = sqlite_parse_insert(sql) {
+        let values_part = lower
+            .find("values")
+            .and_then(|idx| sql[idx..].find('(').map(|open| idx + open + 1));
+        let values_end = sql.rfind(')');
+        if let (Some(start), Some(end)) = (values_part, values_end) {
+            let values = sql[start..end]
+                .split(',')
+                .map(|part| SqlValue::Text(sqlite_unquote_literal(part)))
+                .collect::<Vec<_>>();
+            return sqlite_insert_row(conn, &table, &columns, &values);
+        }
+    }
+    sqlite_set_error(conn, format!("unsupported SQL: {sql}"))
+}
+
+fn sqlite_insert_row(conn: &mut SqlConn, table_name: &str, columns: &[String], values: &[SqlValue]) -> i64 {
+    let table = match conn.db.tables.get_mut(table_name) {
+        Some(table) => table,
+        None => {
+            conn.error = format!("table not found: {table_name}");
+            conn.changes = 0;
+            return 0;
+        }
+    };
+    let mut row = vec![SqlValue::Null; table.columns.len()];
+    if let Some(id_idx) = table.columns.iter().position(|name| name == "id") {
+        row[id_idx] = SqlValue::Int(table.next_id);
+    }
+    for (idx, column) in columns.iter().enumerate() {
+        if let Some(col_idx) = table.columns.iter().position(|name| name == column) {
+            row[col_idx] = values.get(idx).cloned().unwrap_or(SqlValue::Null);
+        }
+    }
+    conn.last_insert_rowid = table.next_id;
+    table.next_id += 1;
+    table.rows.push(row);
+    conn.changes = 1;
+    conn.error.clear();
+    1
+}
+
+fn sqlite_select_rows(db: &SqlDatabase, sql: &str) -> Option<(Vec<String>, Vec<Vec<SqlValue>>)> {
+    let lower = sql.to_ascii_lowercase();
+    if lower.starts_with("select count(*) from sqlite_master") {
+        let needle = "name=";
+        let name = lower
+            .find(needle)
+            .map(|idx| sqlite_unquote_literal(&sql[idx + needle.len()..]))
+            .unwrap_or_default();
+        let exists = db.tables.contains_key(&name);
+        return Some((
+            vec!["COUNT(*)".to_string()],
+            vec![vec![SqlValue::Int(if exists { 1 } else { 0 })]],
+        ));
+    }
+    if lower.starts_with("select count(*) from ") {
+        let table_name = sql["SELECT COUNT(*) FROM ".len()..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        let count = db.tables.get(table_name).map(|table| table.rows.len()).unwrap_or(0);
+        return Some((vec!["COUNT(*)".to_string()], vec![vec![SqlValue::Int(count as i64)]]));
+    }
+    if !lower.starts_with("select ") {
+        return None;
+    }
+    let from_idx = lower.find(" from ")?;
+    let cols_part = &sql["SELECT ".len()..from_idx];
+    let after_from = &sql[from_idx + " from ".len()..];
+    let table_name = after_from.split_whitespace().next()?;
+    let table = db.tables.get(table_name)?;
+    let columns = cols_part
+        .split(',')
+        .map(|part| part.trim().to_string())
+        .collect::<Vec<_>>();
+    let selected_indices = columns
+        .iter()
+        .filter_map(|name| table.columns.iter().position(|col| col == name))
+        .collect::<Vec<_>>();
+    let like_pattern = if let Some(where_idx) = lower.find(" where ") {
+        let where_part = &sql[where_idx..];
+        where_part
+            .find("LIKE")
+            .or_else(|| where_part.find("like"))
+            .and_then(|idx| {
+                let after = &where_part[idx + "LIKE".len()..];
+                Some(sqlite_unquote_literal(after.split(" OR ").next().unwrap_or(after)))
+            })
+    } else {
+        None
+    };
+    let mut rows = Vec::new();
+    for row in &table.rows {
+        if let Some(pattern) = &like_pattern {
+            let matches = row.iter().any(|value| sqlite_like(&value.as_text(), pattern));
+            if !matches {
+                continue;
+            }
+        }
+        rows.push(selected_indices.iter().map(|idx| row[*idx].clone()).collect());
+    }
+    Some((columns, rows))
+}
+
+pub fn rt_sqlite_open_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let path = arg_str(args, 0, "rt_sqlite_open")?;
+    let db = SQLITE_FILES.lock().unwrap().get(&path).cloned().unwrap_or_default();
+    Ok(Value::Int(sqlite_alloc_conn(SqlConn {
+        path,
+        db,
+        last_insert_rowid: 0,
+        changes: 0,
+        error: String::new(),
+    })))
+}
+
+pub fn rt_sqlite_open_memory_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(sqlite_alloc_conn(SqlConn {
+        path: ":memory:".to_string(),
+        db: SqlDatabase::default(),
+        last_insert_rowid: 0,
+        changes: 0,
+        error: String::new(),
+    })))
+}
+
+pub fn rt_sqlite_close_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_close")?) else {
+        return Ok(Value::Int(0));
+    };
+    let mut conns = SQLITE_CONNS.lock().unwrap();
+    if let Some(Some(conn)) = conns.get(idx) {
+        if conn.path != ":memory:" {
+            SQLITE_FILES.lock().unwrap().insert(conn.path.clone(), conn.db.clone());
+        }
+    }
+    if idx < conns.len() {
+        conns[idx] = None;
+        return Ok(Value::Int(1));
+    }
+    Ok(Value::Int(0))
+}
+
+pub fn rt_sqlite_execute_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_execute")?) else {
+        return Ok(Value::Int(0));
+    };
+    let sql = arg_str(args, 1, "rt_sqlite_execute")?;
+    let mut conns = SQLITE_CONNS.lock().unwrap();
+    let Some(Some(conn)) = conns.get_mut(idx) else {
+        return Ok(Value::Int(0));
+    };
+    Ok(Value::Int(sqlite_execute_statement(conn, &sql)))
+}
+
+pub fn rt_sqlite_execute_batch_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_execute_batch")?) else {
+        return Ok(Value::Int(0));
+    };
+    let sql = arg_str(args, 1, "rt_sqlite_execute_batch")?;
+    let mut conns = SQLITE_CONNS.lock().unwrap();
+    let Some(Some(conn)) = conns.get_mut(idx) else {
+        return Ok(Value::Int(0));
+    };
+    for statement in sqlite_split_statements(&sql) {
+        if sqlite_execute_statement(conn, &statement) != 1 {
+            return Ok(Value::Int(0));
+        }
+    }
+    Ok(Value::Int(1))
+}
+
+pub fn rt_sqlite_query_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_query")?) else {
+        return Ok(Value::Int(0));
+    };
+    let sql = arg_str(args, 1, "rt_sqlite_query")?;
+    let conns = SQLITE_CONNS.lock().unwrap();
+    let Some(Some(conn)) = conns.get(idx) else {
+        return Ok(Value::Int(0));
+    };
+    let Some((columns, rows)) = sqlite_select_rows(&conn.db, &sql) else {
+        return Ok(Value::Int(0));
+    };
+    Ok(Value::Int(sqlite_alloc_stmt(SqlStmt {
+        columns,
+        rows,
+        cursor: 0,
+        current: None,
+        binds: HashMap::new(),
+        kind: SqlStmtKind::Query,
+    })))
+}
+
+pub fn rt_sqlite_prepare_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(conn_idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_prepare")?) else {
+        return Ok(Value::Int(0));
+    };
+    let sql = arg_str(args, 1, "rt_sqlite_prepare")?;
+    let Some((table, columns)) = sqlite_parse_insert(&sql) else {
+        return Ok(Value::Int(0));
+    };
+    Ok(Value::Int(sqlite_alloc_stmt(SqlStmt {
+        columns: Vec::new(),
+        rows: Vec::new(),
+        cursor: 0,
+        current: None,
+        binds: HashMap::new(),
+        kind: SqlStmtKind::Insert {
+            conn: conn_idx,
+            table,
+            columns,
+            executed: false,
+        },
+    })))
+}
+
+pub fn rt_sqlite_query_next_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(stmt_idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_query_next")?) else {
+        return Ok(Value::Int(0));
+    };
+    let mut stmts = SQLITE_STMTS.lock().unwrap();
+    let Some(Some(stmt)) = stmts.get_mut(stmt_idx) else {
+        return Ok(Value::Int(0));
+    };
+    match &mut stmt.kind {
+        SqlStmtKind::Query => {
+            if stmt.cursor >= stmt.rows.len() {
+                stmt.current = None;
+                Ok(Value::Int(0))
+            } else {
+                stmt.current = Some(stmt.rows[stmt.cursor].clone());
+                stmt.cursor += 1;
+                Ok(Value::Int(1))
+            }
+        }
+        SqlStmtKind::Insert {
+            conn,
+            table,
+            columns,
+            executed,
+        } => {
+            if *executed {
+                return Ok(Value::Int(0));
+            }
+            let values = (1..=columns.len())
+                .map(|idx| stmt.binds.get(&idx).cloned().unwrap_or(SqlValue::Null))
+                .collect::<Vec<_>>();
+            let mut conns = SQLITE_CONNS.lock().unwrap();
+            let Some(Some(conn)) = conns.get_mut(*conn) else {
+                return Ok(Value::Int(0));
+            };
+            *executed = true;
+            Ok(Value::Int(sqlite_insert_row(conn, table, columns, &values)))
+        }
+    }
+}
+
+pub fn rt_sqlite_query_done_fn(args: &[Value]) -> Result<Value, CompileError> {
+    rt_sqlite_finalize_fn(args)
+}
+
+pub fn rt_sqlite_column_count_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_column_count")?) else {
+        return Ok(Value::Int(0));
+    };
+    let stmts = SQLITE_STMTS.lock().unwrap();
+    let count = stmts
+        .get(idx)
+        .and_then(|slot| slot.as_ref())
+        .map(|stmt| stmt.columns.len())
+        .unwrap_or(0);
+    Ok(Value::Int(count as i64))
+}
+
+pub fn rt_sqlite_column_name_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(stmt_idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_column_name")?) else {
+        return Ok(Value::Str(String::new()));
+    };
+    let col_idx = arg_int(args, 1, "rt_sqlite_column_name")? as usize;
+    let stmts = SQLITE_STMTS.lock().unwrap();
+    let value = stmts
+        .get(stmt_idx)
+        .and_then(|slot| slot.as_ref())
+        .and_then(|stmt| stmt.columns.get(col_idx))
+        .cloned()
+        .unwrap_or_default();
+    Ok(Value::Str(value))
+}
+
+fn sqlite_column_value(stmt: &SqlStmt, idx: usize) -> SqlValue {
+    stmt.current
+        .as_ref()
+        .and_then(|row| row.get(idx))
+        .cloned()
+        .unwrap_or(SqlValue::Null)
+}
+
+pub fn rt_sqlite_column_text_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(stmt_idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_column_text")?) else {
+        return Ok(Value::Str(String::new()));
+    };
+    let col_idx = arg_int(args, 1, "rt_sqlite_column_text")? as usize;
+    let stmts = SQLITE_STMTS.lock().unwrap();
+    let value = stmts
+        .get(stmt_idx)
+        .and_then(|slot| slot.as_ref())
+        .map(|stmt| sqlite_column_value(stmt, col_idx).as_text())
+        .unwrap_or_default();
+    Ok(Value::Str(value))
+}
+
+pub fn rt_sqlite_column_int_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(stmt_idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_column_int")?) else {
+        return Ok(Value::Int(0));
+    };
+    let col_idx = arg_int(args, 1, "rt_sqlite_column_int")? as usize;
+    let stmts = SQLITE_STMTS.lock().unwrap();
+    let value = stmts
+        .get(stmt_idx)
+        .and_then(|slot| slot.as_ref())
+        .map(|stmt| sqlite_column_value(stmt, col_idx).as_int())
+        .unwrap_or(0);
+    Ok(Value::Int(value))
+}
+
+pub fn rt_sqlite_column_float_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(stmt_idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_column_float")?) else {
+        return Ok(Value::Float(0.0));
+    };
+    let col_idx = arg_int(args, 1, "rt_sqlite_column_float")? as usize;
+    let stmts = SQLITE_STMTS.lock().unwrap();
+    let value = stmts
+        .get(stmt_idx)
+        .and_then(|slot| slot.as_ref())
+        .map(|stmt| sqlite_column_value(stmt, col_idx).as_float())
+        .unwrap_or(0.0);
+    Ok(Value::Float(value))
+}
+
+pub fn rt_sqlite_column_type_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(stmt_idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_column_type")?) else {
+        return Ok(Value::Str("null".to_string()));
+    };
+    let col_idx = arg_int(args, 1, "rt_sqlite_column_type")? as usize;
+    let stmts = SQLITE_STMTS.lock().unwrap();
+    let value = stmts
+        .get(stmt_idx)
+        .and_then(|slot| slot.as_ref())
+        .map(|stmt| sqlite_column_value(stmt, col_idx).type_name().to_string())
+        .unwrap_or_else(|| "null".to_string());
+    Ok(Value::Str(value))
+}
+
+pub fn rt_sqlite_bind_text_fn(args: &[Value]) -> Result<Value, CompileError> {
+    sqlite_bind(
+        args,
+        "rt_sqlite_bind_text",
+        SqlValue::Text(arg_str(args, 2, "rt_sqlite_bind_text")?),
+    )
+}
+
+pub fn rt_sqlite_bind_int_fn(args: &[Value]) -> Result<Value, CompileError> {
+    sqlite_bind(
+        args,
+        "rt_sqlite_bind_int",
+        SqlValue::Int(arg_int(args, 2, "rt_sqlite_bind_int")?),
+    )
+}
+
+pub fn rt_sqlite_bind_float_fn(args: &[Value]) -> Result<Value, CompileError> {
+    sqlite_bind(
+        args,
+        "rt_sqlite_bind_float",
+        SqlValue::Float(arg_float(args, 2, "rt_sqlite_bind_float")?),
+    )
+}
+
+pub fn rt_sqlite_bind_null_fn(args: &[Value]) -> Result<Value, CompileError> {
+    sqlite_bind(args, "rt_sqlite_bind_null", SqlValue::Null)
+}
+
+fn sqlite_bind(args: &[Value], fn_name: &str, value: SqlValue) -> Result<Value, CompileError> {
+    let Some(stmt_idx) = sqlite_handle_to_index(arg_int(args, 0, fn_name)?) else {
+        return Ok(Value::Int(0));
+    };
+    let bind_idx = arg_int(args, 1, fn_name)? as usize;
+    let mut stmts = SQLITE_STMTS.lock().unwrap();
+    let Some(Some(stmt)) = stmts.get_mut(stmt_idx) else {
+        return Ok(Value::Int(0));
+    };
+    stmt.binds.insert(bind_idx, value);
+    Ok(Value::Int(1))
+}
+
+pub fn rt_sqlite_reset_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(stmt_idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_reset")?) else {
+        return Ok(Value::Int(0));
+    };
+    let mut stmts = SQLITE_STMTS.lock().unwrap();
+    let Some(Some(stmt)) = stmts.get_mut(stmt_idx) else {
+        return Ok(Value::Int(0));
+    };
+    stmt.cursor = 0;
+    stmt.current = None;
+    if let SqlStmtKind::Insert { executed, .. } = &mut stmt.kind {
+        *executed = false;
+    }
+    Ok(Value::Int(1))
+}
+
+pub fn rt_sqlite_finalize_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(stmt_idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_finalize")?) else {
+        return Ok(Value::Nil);
+    };
+    let mut stmts = SQLITE_STMTS.lock().unwrap();
+    if stmt_idx < stmts.len() {
+        stmts[stmt_idx] = None;
+    }
+    Ok(Value::Nil)
+}
+
+pub fn rt_sqlite_begin_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(1))
+}
+
+pub fn rt_sqlite_commit_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(1))
+}
+
+pub fn rt_sqlite_rollback_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(1))
+}
+
+pub fn rt_sqlite_last_insert_rowid_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_last_insert_rowid")?) else {
+        return Ok(Value::Int(0));
+    };
+    let conns = SQLITE_CONNS.lock().unwrap();
+    let value = conns
+        .get(idx)
+        .and_then(|slot| slot.as_ref())
+        .map(|conn| conn.last_insert_rowid)
+        .unwrap_or(0);
+    Ok(Value::Int(value))
+}
+
+pub fn rt_sqlite_changes_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_changes")?) else {
+        return Ok(Value::Int(0));
+    };
+    let conns = SQLITE_CONNS.lock().unwrap();
+    let value = conns
+        .get(idx)
+        .and_then(|slot| slot.as_ref())
+        .map(|conn| conn.changes)
+        .unwrap_or(0);
+    Ok(Value::Int(value))
+}
+
+pub fn rt_sqlite_error_message_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_error_message")?) else {
+        return Ok(Value::Str("Invalid connection".to_string()));
+    };
+    let conns = SQLITE_CONNS.lock().unwrap();
+    let value = conns
+        .get(idx)
+        .and_then(|slot| slot.as_ref())
+        .map(|conn| conn.error.clone())
+        .unwrap_or_default();
+    Ok(Value::Str(value))
 }

@@ -1,0 +1,103 @@
+use app.io.context_ops.{context_generate, context_stats}
+use app.ponytail.audit.{ponytail_audit}
+
+pub struct LlmToolingArtifactPanel:
+    source_path: text
+    target: text
+    context_status: text
+    context_lines: i64
+    context_token_estimate: i64
+    context_preview: text
+    ponytail_status: text
+    ponytail_reason: text
+
+    fn empty(path: text, target: text) -> LlmToolingArtifactPanel:
+        LlmToolingArtifactPanel(
+            source_path: path,
+            target: target,
+            context_status: "missing",
+            context_lines: 0,
+            context_token_estimate: 0,
+            context_preview: "",
+            ponytail_status: "missing",
+            ponytail_reason: "not_collected"
+        )
+
+pub fn collect_llm_tooling_artifacts(path: text, target: text) -> LlmToolingArtifactPanel:
+    val stats = context_stats(path, target)
+    val context_text = context_generate(path, target, "text")
+    val ponytail = ponytail_audit(path)
+    LlmToolingArtifactPanel(
+        source_path: path,
+        target: _public_absence(target),
+        context_status: _field_value(stats, "status"),
+        context_lines: _field_i64(stats, "lines"),
+        context_token_estimate: _field_i64(stats, "token_estimate"),
+        context_preview: _preview_content(context_text),
+        ponytail_status: _field_value(ponytail, "status"),
+        ponytail_reason: _public_absence(_field_value(ponytail, "reason"))
+    )
+
+pub fn render_llm_tooling_artifacts_panel_text(panel: LlmToolingArtifactPanel) -> text:
+    "LLM Tooling Artifacts source=" + _public_absence(panel.source_path) +
+        " target=" + _public_absence(panel.target) +
+        " context_status=" + _public_absence(panel.context_status) +
+        " lines=" + panel.context_lines.to_text() +
+        " token_estimate=" + panel.context_token_estimate.to_text() +
+        " ponytail_status=" + _public_absence(panel.ponytail_status) +
+        " ponytail_reason=" + _public_absence(panel.ponytail_reason) +
+        " preview=" + _public_absence(panel.context_preview)
+
+pub fn render_llm_tooling_artifacts_panel_html(panel: LlmToolingArtifactPanel) -> text:
+    "<section id=\"llm-tooling-artifacts-panel\"><h2>LLM Tooling Artifacts</h2><p>source=" +
+        _html_escape(_public_absence(panel.source_path)) + "</p><p>target=" +
+        _html_escape(_public_absence(panel.target)) + "</p><p>context_status=" +
+        _html_escape(_public_absence(panel.context_status)) + "</p><p>lines=" +
+        panel.context_lines.to_text() + "</p><p>token_estimate=" +
+        panel.context_token_estimate.to_text() + "</p><p>ponytail_status=" +
+        _html_escape(_public_absence(panel.ponytail_status)) + "</p><p>ponytail_reason=" +
+        _html_escape(_public_absence(panel.ponytail_reason)) + "</p><pre>" +
+        _html_escape(_public_absence(panel.context_preview)) + "</pre></section>"
+
+fn _field_value(content: text, key: text) -> text:
+    val prefix = key + ": "
+    for line in content.split("\n"):
+        if line.starts_with(prefix):
+            return line.slice(prefix.len(), line.len()).trim()
+    ""
+
+fn _field_i64(content: text, key: text) -> i64:
+    val value = _field_value(content, key)
+    if value == "":
+        return 0
+    value.to_i64()
+
+fn _preview_content(content: text) -> text:
+    var found_blank = false
+    var preview: [text] = []
+    for line in content.split("\n"):
+        if found_blank:
+            if line.trim() != "":
+                preview.push(line)
+        else if line.trim() == "":
+            found_blank = true
+    if preview.len() == 0:
+        return ""
+    val joined = preview.join("\n")
+    if joined.len() > 240:
+        return joined.slice(0, 240)
+    joined
+
+fn _html_escape(value: text) -> text:
+    var escaped = value.split("&").join("&amp;")
+    escaped = escaped.split("<").join("&lt;")
+    escaped = escaped.split(">").join("&gt;")
+    escaped.split("\"").join("&quot;")
+
+fn _public_absence(value: text) -> text:
+    if value == "":
+        return "none"
+    value
+
+export LlmToolingArtifactPanel
+export collect_llm_tooling_artifacts, render_llm_tooling_artifacts_panel_text, render_llm_tooling_artifacts_panel_html

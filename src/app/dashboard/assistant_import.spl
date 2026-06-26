@@ -1,0 +1,286 @@
+use app.mcp.assistant.session_store_helpers.{
+    assistant_store_ensure_dirs,
+    assistant_store_session_path,
+    assistant_store_timeline_path,
+    assistant_store_notifications_path,
+    assistant_store_write_json,
+    assistant_store_text_array_json,
+    assistant_store_child_tasks_json,
+    assistant_store_child_tasks_from_json_text
+}
+use app.mcp.main_lazy_json.{LB, RB, jp, js}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_get_type, json_to_number, json_to_string}
+
+pub class AssistantDashboardImportResult:
+    imported: bool
+    root: text
+    session_count: i64
+    timeline_count: i64
+    notification_count: i64
+    error: text
+
+fn _json_text_value(value: any) -> text:
+    val raw = json_to_string(value)
+    if raw == nil:
+        ""
+    else:
+        raw
+
+fn _json_required_text(obj: any, key: text) -> text:
+    _json_text_value(json_object_get(obj, key))
+
+fn _json_i64_value(obj: any, key: text) -> i64:
+    val raw = json_to_number(json_object_get(obj, key))
+    if raw == nil:
+        0
+    else:
+        raw.to_i64() ?? 0
+
+fn _json_first_text(obj: any, first: text, second: text) -> text:
+    val value = _json_required_text(obj, first)
+    if value != "":
+        value
+    else:
+        _json_required_text(obj, second)
+
+fn _json_first_i64(obj: any, first: text, second: text) -> i64:
+    val value = _json_i64_value(obj, first)
+    if value != 0:
+        value
+    else:
+        _json_i64_value(obj, second)
+
+fn _json_text_array_json(obj: any, key: text) -> text:
+    val value = json_object_get(obj, key)
+    if value == nil or json_get_type(value) != "array":
+        return "[]"
+    var items: [text] = []
+    var i: i64 = 0
+    val count = json_array_length(value)
+    while i < count:
+        val item = json_array_get(value, i)
+        val text_value = _json_text_value(item)
+        if text_value != "":
+            items.push(text_value)
+        i = i + 1
+    assistant_store_text_array_json(items)
+
+fn _import_session_json(item: any, session_id: text) -> text:
+    val updated_at = _json_first_i64(item, "updated_at_ms", "updated_at")
+    val created_at = _json_first_i64(item, "created_at_ms", "created_at")
+    val session_without_tasks = _import_session_base_json(item, session_id, "[]", "[]", "[]")
+    val child_tasks = assistant_store_child_tasks_from_json_text(session_without_tasks.replace("\"child_tasks\":[]", "\"child_tasks\":" + _raw_array_json(item, "child_tasks")))
+    _import_session_base_json(
+        item,
+        session_id,
+        _json_text_array_json(item, "tool_use_ids"),
+        _json_text_array_json(item, "children"),
+        assistant_store_child_tasks_json(child_tasks)
+    )
+
+fn _import_session_base_json(item: any, session_id: text, tool_use_ids: text, children: text, child_tasks: text) -> text:
+    val updated_at = _json_first_i64(item, "updated_at_ms", "updated_at")
+    val created_at = _json_first_i64(item, "created_at_ms", "created_at")
+    LB() +
+    jp("id", js(session_id)) +
+    "," + jp("session_id", js(session_id)) +
+    "," + jp("name", js(_json_required_text(item, "name"))) +
+    "," + jp("summary", js(_json_first_text(item, "summary", "objective"))) +
+    "," + jp("objective", js(_json_first_text(item, "objective", "summary"))) +
+    "," + jp("prompt", js(_json_required_text(item, "prompt"))) +
+    "," + jp("mode", js(_json_required_text(item, "mode"))) +
+    "," + jp("state", js(_json_first_text(item, "state", "status"))) +
+    "," + jp("status", js(_json_first_text(item, "state", "status"))) +
+    "," + jp("parent_session_id", js(_json_required_text(item, "parent_session_id"))) +
+    "," + jp("last_signal", js(_json_required_text(item, "last_signal"))) +
+    "," + jp("created_at_ms", str(created_at)) +
+    "," + jp("updated_at_ms", str(updated_at)) +
+    "," + jp("event_count", str(_json_i64_value(item, "event_count"))) +
+    "," + jp("error_count", str(_json_i64_value(item, "error_count"))) +
+    "," + jp("digest_checkpoint_id", js(_json_required_text(item, "digest_checkpoint_id"))) +
+    "," + jp("tool_use_ids", tool_use_ids) +
+    "," + jp("children", children) +
+    "," + jp("child_tasks", child_tasks) +
+    "," + jp("warnings", _json_text_array_json(item, "warnings")) +
+    RB()
+
+fn _raw_array_json(obj: any, key: text) -> text:
+    val value = json_object_get(obj, key)
+    if value == nil or json_get_type(value) != "array":
+        return "[]"
+    var raw_items: [text] = []
+    var i: i64 = 0
+    val count = json_array_length(value)
+    while i < count:
+        val item = json_array_get(value, i)
+        if item != nil and json_get_type(item) == "object":
+            raw_items.push(_import_child_task_json(item))
+        i = i + 1
+    "[" + raw_items.join(",") + "]"
+
+fn _import_child_task_json(item: any) -> text:
+    LB() +
+    jp("id", js(_json_first_text(item, "task_id", "id"))) +
+    "," + jp("task_id", js(_json_first_text(item, "task_id", "id"))) +
+    "," + jp("session_id", js(_json_required_text(item, "session_id"))) +
+    "," + jp("parent_session_id", js(_json_required_text(item, "parent_session_id"))) +
+    "," + jp("parent_task_id", js(_json_required_text(item, "parent_task_id"))) +
+    "," + jp("child_session_id", js(_json_required_text(item, "child_session_id"))) +
+    "," + jp("objective", js(_json_first_text(item, "objective", "summary"))) +
+    "," + jp("owner_kind", js(_json_required_text(item, "owner_kind"))) +
+    "," + jp("status", js(_json_first_text(item, "status", "state"))) +
+    "," + jp("state", js(_json_first_text(item, "status", "state"))) +
+    "," + jp("resource_policy", js(_json_first_text(item, "resource_policy", "policy"))) +
+    "," + jp("result_summary", js(_json_first_text(item, "result_summary", "summary"))) +
+    "," + jp("created_at_ms", str(_json_first_i64(item, "created_at_ms", "created_at"))) +
+    "," + jp("updated_at_ms", str(_json_first_i64(item, "updated_at_ms", "updated_at"))) +
+    "," + jp("started_at_ms", str(_json_first_i64(item, "started_at_ms", "started_at"))) +
+    "," + jp("ended_at_ms", str(_json_first_i64(item, "ended_at_ms", "ended_at"))) +
+    RB()
+
+fn _import_event_json(item: any, session_id: text) -> text:
+    val timestamp = _json_first_i64(item, "timestamp_ms", "timestamp")
+    val kind = _json_first_text(item, "kind", "event_type")
+    val message = _json_first_text(item, "message", "detail")
+    LB() +
+    jp("id", js(_json_first_text(item, "event_id", "id"))) +
+    "," + jp("event_id", js(_json_first_text(item, "event_id", "id"))) +
+    "," + jp("session_id", js(session_id)) +
+    "," + jp("timestamp_ms", str(timestamp)) +
+    "," + jp("kind", js(kind)) +
+    "," + jp("event_type", js(kind)) +
+    "," + jp("detail", js(_json_first_text(item, "detail", "message"))) +
+    "," + jp("message", js(message)) +
+    "," + jp("signal", js(_json_required_text(item, "signal"))) +
+    "," + jp("source", js(_json_required_text(item, "source"))) +
+    RB()
+
+fn _json_array_count(root: any, key: text) -> i64:
+    val value = json_object_get(root, key)
+    if value == nil:
+        return -1
+    if json_get_type(value) != "array":
+        return -1
+    json_array_length(value)
+
+fn _import_error(root: text, message: text) -> AssistantDashboardImportResult:
+    AssistantDashboardImportResult(
+        imported: false,
+        root: root,
+        session_count: 0,
+        timeline_count: 0,
+        notification_count: 0,
+        error: message
+    )
+
+pub fn assistant_dashboard_import_snapshot(root: text, snapshot_json: text) -> AssistantDashboardImportResult:
+    val parsed = json_parse(snapshot_json)
+    if parsed == nil:
+        return _import_error(root, "invalid snapshot json")
+    if json_get_type(parsed) != "object":
+        return _import_error(root, "snapshot must be a json object")
+
+    val sessions_count = _json_array_count(parsed, "sessions")
+    if sessions_count < 0:
+        return _import_error(root, "sessions must be an array")
+    val timeline_count = _json_array_count(parsed, "timeline")
+    if timeline_count < 0:
+        return _import_error(root, "timeline must be an array")
+    val notification_count = _json_array_count(parsed, "notifications")
+    if notification_count < 0:
+        return _import_error(root, "notifications must be an array")
+
+    assistant_store_ensure_dirs(root)
+
+    val sessions = json_object_get(parsed, "sessions")
+    var imported_sessions: i64 = 0
+    var i: i64 = 0
+    while i < sessions_count:
+        val item = json_array_get(sessions, i)
+        if item != nil and json_get_type(item) == "object":
+            val session_id = _json_required_text(item, "session_id")
+            val fallback_id = _json_required_text(item, "id")
+            val resolved_id = if session_id != "": session_id else: fallback_id
+            if resolved_id != "":
+                if assistant_store_write_json(assistant_store_session_path(root, resolved_id), _import_session_json(item, resolved_id)):
+                    imported_sessions = imported_sessions + 1
+        i = i + 1
+
+    val timeline = json_object_get(parsed, "timeline")
+    var imported_timeline: i64 = 0
+    var timeline_session_ids: [text] = []
+    i = 0
+    while i < timeline_count:
+        val item = json_array_get(timeline, i)
+        if item != nil and json_get_type(item) == "object":
+            val session_id = _json_required_text(item, "session_id")
+            if session_id != "":
+                timeline_session_ids = _append_unique_text(timeline_session_ids, session_id)
+        i = i + 1
+    for session_id in timeline_session_ids:
+        if assistant_store_write_json(assistant_store_timeline_path(root, session_id), _import_events_jsonl_for_session(timeline, timeline_count, session_id)):
+            imported_timeline = imported_timeline + _count_events_for_session(timeline, timeline_count, session_id)
+
+    val notifications = json_object_get(parsed, "notifications")
+    var imported_notifications: i64 = 0
+    var notification_session_ids: [text] = []
+    i = 0
+    while i < notification_count:
+        val item = json_array_get(notifications, i)
+        if item != nil and json_get_type(item) == "object":
+            val session_id = _json_required_text(item, "session_id")
+            if session_id != "":
+                notification_session_ids = _append_unique_text(notification_session_ids, session_id)
+        i = i + 1
+    for session_id in notification_session_ids:
+        if assistant_store_write_json(assistant_store_notifications_path(root, session_id), _import_events_jsonl_for_session(notifications, notification_count, session_id)):
+            imported_notifications = imported_notifications + _count_events_for_session(notifications, notification_count, session_id)
+
+    AssistantDashboardImportResult(
+        imported: imported_sessions > 0,
+        root: root,
+        session_count: imported_sessions,
+        timeline_count: imported_timeline,
+        notification_count: imported_notifications,
+        error: ""
+    )
+
+fn _append_unique_text(items: [text], value: text) -> [text]:
+    for item in items:
+        if item == value:
+            return items
+    var out: [text] = []
+    for item in items:
+        out.push(item)
+    out.push(value)
+    out
+
+fn _import_events_jsonl_for_session(items: any, count: i64, session_id: text) -> text:
+    var lines: [text] = []
+    var i: i64 = 0
+    while i < count:
+        val item = json_array_get(items, i)
+        if item != nil and json_get_type(item) == "object":
+            if _json_required_text(item, "session_id") == session_id:
+                lines.push(_import_event_json(item, session_id))
+        i = i + 1
+    if lines.len() == 0:
+        return ""
+    lines.join("\n") + "\n"
+
+fn _count_events_for_session(items: any, count: i64, session_id: text) -> i64:
+    var matched: i64 = 0
+    var i: i64 = 0
+    while i < count:
+        val item = json_array_get(items, i)
+        if item != nil and json_get_type(item) == "object":
+            if _json_required_text(item, "session_id") == session_id:
+                matched = matched + 1
+        i = i + 1
+    matched
+
+export AssistantDashboardImportResult
+export assistant_dashboard_import_snapshot

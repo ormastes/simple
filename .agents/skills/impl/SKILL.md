@@ -55,6 +55,10 @@ description: Implement a feature end-to-end. Self-sufficient — if research, re
   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
   `.claude/agents/spipe/`, and `.gemini/commands/` instructions before `$verify`; stale process docs are
   implementation work, not release cleanup.
+- For `simple_context` or context-mode changes, keep the MCP/tooling guide and
+  mirrored generated manuals current. SQL-backed context paths must document the
+  `--sql`/`--db` CLI flags, embedded SQLite facade boundary, explicit absence
+  statuses, and public-absence guard.
 - Executable specs must stay under `test/`; generated/manual docs mirror that
   path under `doc/06_spec` after stripping the leading `test/` segment and must
   be `.md` only. Require

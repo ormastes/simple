@@ -165,6 +165,15 @@ Rationale:
 - WebSocket channel for live event stream
 - Phase 2 work (after library is stable)
 
+Implemented dashboard JSONL readback slice:
+
+- `src/app/llm_dashboard/collectors/diagnostics_jsonl_collector.spl` summarizes
+  hook JSONL files for dashboard panels.
+- `src/app/web_dashboard/server.spl` accepts a diagnostics JSONL path and embeds
+  the rendered diagnostics panel into authenticated dashboard HTML.
+- Rendered diagnostics text/HTML must not expose internal absence as literal
+  `nil`; empty strings are used for missing event/session fields.
+
 ---
 
 ## 6. Provider Expansion Plan

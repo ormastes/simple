@@ -7,8 +7,8 @@
 use .main_lazy_json
 use .assistant.types.{AssistantSessionRecord, AssistantTimelineRecord, AssistantChildTaskRecord}
 use .assistant.session_store.{
-    assistant_store_create_session, assistant_store_load_session, assistant_store_list_sessions,
-    assistant_store_append_event, assistant_store_update_state, assistant_store_create_child_task
+    assistant_store_create_session_record, assistant_store_load_session, assistant_store_list_sessions,
+    assistant_store_append_event_record, assistant_store_update_state, assistant_store_create_child_task_record
 }
 use .assistant.session_views.{
     assistant_store_session_brief, assistant_store_collect_timeline, assistant_store_collect_notifications
@@ -448,7 +448,7 @@ fn handle_assistant_start(id: text, body: text) -> text:
         child_tasks: [],
         warnings: []
     )
-    val created = assistant_store_create_session(ASSIST_ROOT, session_obj)
+    val created = assistant_store_create_session_record(ASSIST_ROOT, session_obj)
     if created == nil:
         return make_tool_error(id, -32603, "Failed to create assistant session")
     val event_obj = AssistantTimelineRecord(
@@ -466,10 +466,12 @@ fn handle_assistant_start(id: text, body: text) -> text:
         source: "assistant",
         correlation_id: ""
     )
-    assistant_store_append_event(ASSIST_ROOT, event_obj)
-    if val session = assistant_store_load_session(ASSIST_ROOT, session_id):
-        return make_tool_result(id, _assistant_session_detail_json(session))
-    return make_tool_error(id, -32603, "Failed to record assistant start event")
+    assistant_store_append_event_record(ASSIST_ROOT, event_obj)
+    match assistant_store_load_session(ASSIST_ROOT, session_id):
+        case Some(session):
+            return make_tool_result(id, _assistant_session_detail_json(session))
+        case nil:
+            return make_tool_error(id, -32603, "Failed to record assistant start event")
 
 fn handle_assistant_spawn_task(id: text, body: text) -> text:
     val now = _assistant_now_ms()
@@ -518,7 +520,7 @@ fn handle_assistant_spawn_task(id: text, body: text) -> text:
         child_tasks: [],
         warnings: []
     )
-    val created = assistant_store_create_session(ASSIST_ROOT, session_obj)
+    val created = assistant_store_create_session_record(ASSIST_ROOT, session_obj)
     if created == nil:
         return make_tool_error(id, -32603, "Failed to create assistant child session")
     val event_obj = AssistantTimelineRecord(
@@ -536,7 +538,9 @@ fn handle_assistant_spawn_task(id: text, body: text) -> text:
         source: "assistant",
         correlation_id: ""
     )
-    assistant_store_append_event(ASSIST_ROOT, event_obj)
+    val appended = assistant_store_append_event_record(ASSIST_ROOT, event_obj)
+    if appended == nil:
+        return make_tool_error(id, -32603, "Failed to append signal event: " + signal)
     if parent_session_id != "":
         val child_task_obj = AssistantChildTaskRecord(
             task_id: "",
@@ -554,11 +558,13 @@ fn handle_assistant_spawn_task(id: text, body: text) -> text:
             started_at_ms: now,
             ended_at_ms: 0
         )
-        if assistant_store_create_child_task(ASSIST_ROOT, child_task_obj) == nil:
+        if assistant_store_create_child_task_record(ASSIST_ROOT, child_task_obj) == nil:
             return make_tool_error(id, -32603, "Failed to record parent child-task state")
-    if val session = assistant_store_load_session(ASSIST_ROOT, session_id):
-        return make_tool_result(id, _assistant_session_detail_json(session))
-    return make_tool_error(id, -32603, "Failed to record assistant spawn event")
+    match assistant_store_load_session(ASSIST_ROOT, session_id):
+        case Some(session):
+            return make_tool_result(id, _assistant_session_detail_json(session))
+        case nil:
+            return make_tool_error(id, -32603, "Failed to record assistant spawn event")
 
 fn handle_assistant_pause(id: text, body: text) -> text:
     val session_id = extract_field(body, "session_id")
@@ -584,10 +590,12 @@ fn handle_assistant_pause(id: text, body: text) -> text:
         source: "assistant",
         correlation_id: ""
     )
-    assistant_store_append_event(ASSIST_ROOT, event_obj)
-    if val session = assistant_store_load_session(ASSIST_ROOT, session_id):
-        return make_tool_result(id, _assistant_session_detail_json(session))
-    return make_tool_error(id, -32603, "Failed to record assistant pause event")
+    assistant_store_append_event_record(ASSIST_ROOT, event_obj)
+    match assistant_store_load_session(ASSIST_ROOT, session_id):
+        case Some(session):
+            return make_tool_result(id, _assistant_session_detail_json(session))
+        case nil:
+            return make_tool_error(id, -32603, "Failed to record assistant pause event")
 
 fn handle_assistant_resume(id: text, body: text) -> text:
     val session_id = extract_field(body, "session_id")
@@ -613,10 +621,12 @@ fn handle_assistant_resume(id: text, body: text) -> text:
         source: "assistant",
         correlation_id: ""
     )
-    assistant_store_append_event(ASSIST_ROOT, event_obj)
-    if val session = assistant_store_load_session(ASSIST_ROOT, session_id):
-        return make_tool_result(id, _assistant_session_detail_json(session))
-    return make_tool_error(id, -32603, "Failed to record assistant resume event")
+    assistant_store_append_event_record(ASSIST_ROOT, event_obj)
+    match assistant_store_load_session(ASSIST_ROOT, session_id):
+        case Some(session):
+            return make_tool_result(id, _assistant_session_detail_json(session))
+        case nil:
+            return make_tool_error(id, -32603, "Failed to record assistant resume event")
 
 fn handle_assistant_brief(id: text, body: text) -> text:
     val session_id = extract_field(body, "session_id")
@@ -640,9 +650,11 @@ fn handle_assistant_get_session(id: text, body: text) -> text:
     val session_id = extract_field(body, "session_id")
     if session_id == "":
         return make_tool_error(id, -32602, "Missing required parameter: session_id")
-    if val session = assistant_store_load_session(ASSIST_ROOT, session_id):
-        return make_tool_result(id, _assistant_session_detail_json(session))
-    return make_tool_error(id, -32602, "Session not found: " + session_id)
+    match assistant_store_load_session(ASSIST_ROOT, session_id):
+        case Some(session):
+            return make_tool_result(id, _assistant_session_detail_json(session))
+        case nil:
+            return make_tool_error(id, -32602, "Session not found: " + session_id)
 
 fn handle_assistant_get_timeline(id: text, body: text) -> text:
     val session_id = extract_field(body, "session_id")
@@ -683,7 +695,7 @@ fn handle_assistant_push_signal(id: text, body: text) -> text:
         source: "assistant",
         correlation_id: ""
     )
-    assistant_store_append_event(ASSIST_ROOT, event_obj)
+    assistant_store_append_event_record(ASSIST_ROOT, event_obj)
     val current_state = match assistant_store_load_session(ASSIST_ROOT, session_id):
         case Some(session): session.state
         case nil: ""
@@ -698,30 +710,29 @@ fn handle_assistant_list_tasks(id: text, body: text) -> text:
     var items: [text] = []
     if source_filter == "" or source_filter == "assistant":
         if session_filter != "":
-            if val session = assistant_store_load_session(ASSIST_ROOT, session_filter):
-                items.push(_assistant_session_task_json_from_record(session))
-                for task in session.child_tasks:
-                    if task == nil:
-                        continue
-                    items.push(_assistant_child_task_json(
-                        session,
-                        task.task_id,
-                        task.objective,
-                        task.status,
-                        task.parent_task_id,
-                        task.child_session_id,
-                        task.resource_policy,
-                        task.owner_kind,
-                        task.result_summary,
-                        task.created_at_ms,
-                        task.updated_at_ms
-                    ))
+            match assistant_store_load_session(ASSIST_ROOT, session_filter):
+                case Some(session):
+                    items.push(_assistant_session_task_json_from_record(session))
+                    for task in session.child_tasks:
+                        items.push(_assistant_child_task_json(
+                            session,
+                            task.task_id,
+                            task.objective,
+                            task.status,
+                            task.parent_task_id,
+                            task.child_session_id,
+                            task.resource_policy,
+                            task.owner_kind,
+                            task.result_summary,
+                            task.created_at_ms,
+                            task.updated_at_ms
+                        ))
+                case nil:
+                    pass
         else:
             for session in assistant_store_list_sessions(ASSIST_ROOT):
                 items.push(_assistant_session_task_json_from_record(session))
                 for task in session.child_tasks:
-                    if task == nil:
-                        continue
                     items.push(_assistant_child_task_json(
                         session,
                         task.task_id,

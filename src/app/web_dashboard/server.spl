@@ -1,0 +1,72 @@
+use app.web_dashboard.dashboard_html.{generate_full_dashboard_html_with_diagnostics}
+use app.llm_dashboard.collectors.diagnostics_jsonl_collector.{collect_llm_diagnostics_jsonl, render_llm_diagnostics_panel_html}
+use app.llm_dashboard.collectors.tooling_artifact_collector.{collect_llm_tooling_artifacts, render_llm_tooling_artifacts_panel_html}
+
+val DEFAULT_DIAGNOSTICS_JSONL = ".build/llm_dashboard/diagnostics/session.jsonl"
+
+fn _status_text(status: i64) -> text:
+    match status:
+        case 200:
+            "OK"
+        case 302:
+            "Found"
+        case 401:
+            "Unauthorized"
+        case _:
+            "Error"
+
+pub fn http_response(status: i64, content_type: text, body: text) -> text:
+    var response = "HTTP/1.1 " + str(status) + " " + _status_text(status) + "\r\n"
+    response = response + "Content-Type: " + content_type + "\r\n"
+    response = response + "Content-Length: " + str(body.len()) + "\r\n\r\n"
+    response + body
+
+pub fn http_redirect(location: text) -> text:
+    "HTTP/1.1 302 Found\r\nLocation: " + location + "\r\nContent-Length: 0\r\n\r\n"
+
+pub fn http_error(status: i64, message: text) -> text:
+    http_response(status, "text/plain", message)
+
+pub struct DashboardServer:
+    port: i64
+    diagnostics_path: text
+    tooling_source_path: text
+    tooling_target: text
+
+    static fn new(port: i64) -> DashboardServer:
+        DashboardServer(port: port, diagnostics_path: DEFAULT_DIAGNOSTICS_JSONL, tooling_source_path: "", tooling_target: "")
+
+    static fn new_with_diagnostics(port: i64, diagnostics_path: text) -> DashboardServer:
+        DashboardServer(port: port, diagnostics_path: diagnostics_path, tooling_source_path: "", tooling_target: "")
+
+    static fn new_with_diagnostics_and_tooling(port: i64, diagnostics_path: text, tooling_source_path: text, tooling_target: text) -> DashboardServer:
+        DashboardServer(port: port, diagnostics_path: diagnostics_path, tooling_source_path: tooling_source_path, tooling_target: tooling_target)
+
+    fn render_dashboard_html() -> text:
+        val panel = collect_llm_diagnostics_jsonl(self.diagnostics_path)
+        val diagnostics_html = render_llm_diagnostics_panel_html(panel)
+        val tooling_html = _render_tooling_panel_if_configured(self.tooling_source_path, self.tooling_target)
+        generate_full_dashboard_html_with_diagnostics(
+            self.port,
+            "<section id=\"status-card\">status</section>",
+            "diagnostics@fixture",
+            "<div id=\"tmux-card\">tmux</div>",
+            "<span>admin</span><a href=\"/logout\">Log out</a>",
+            diagnostics_html + tooling_html
+        )
+
+    fn route_http(method: text, path: text, body: text, session: text?) -> text:
+        if session == nil:
+            if path.starts_with("/api/"):
+                return http_error(401, "Authentication required")
+            return http_redirect("/login")
+        if path.starts_with("/api/tmux"):
+            return http_response(200, "application/json", "[]")
+        if method != "GET":
+            return http_error(401, "Method not supported")
+        http_response(200, "text/html", self.render_dashboard_html())
+
+fn _render_tooling_panel_if_configured(path: text, target: text) -> text:
+    if path.trim() == "":
+        return ""
+    render_llm_tooling_artifacts_panel_html(collect_llm_tooling_artifacts(path, target))

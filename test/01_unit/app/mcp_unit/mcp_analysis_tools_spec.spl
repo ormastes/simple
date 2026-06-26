@@ -64,8 +64,9 @@ path must keep diagnostics timeout handling in argv form to avoid shell quoting
 regressions around file names.
 
 `simple_ponytail` is the ponytail mimic surface. It should delegate to the
-shared audit implementation and preserve the audit categories that flag stubs
-and abstraction smells.
+shared audit and simplification implementations, preserve the audit categories
+that flag stubs and abstraction smells, and expose report mode as an explicit
+option-like selector.
 
 `simple_search` is a bounded source search builder. It should keep generated
 commands predictable and scoped instead of walking unrelated repository trees.
@@ -190,6 +191,8 @@ describe "simple_context tool":
         expect(source).to_contain("ctx_args")
         expect(source).to_contain("\"context\", file")
         expect(source).to_contain("process_run_timeout(_mcp_find_simple_binary(), ctx_args")
+        expect(source).to_contain("ctx_args.push(\"--json\")")
+        expect(source).to_contain("ctx_args.push(\"--text\")")
 
     it "app MCP context validates requested context format":
         val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
@@ -209,6 +212,7 @@ describe "simple_context tool":
         expect(source).to_contain("_mcp_render_context_pack")
         expect(source).to_contain("\\\"line_count\\\"")
         expect(source).to_contain("\\\"target_lines\\\"")
+        expect(source).to_contain("_mcp_json_escape(content)")
         expect(source).to_contain("# Context Pack")
 
         val schema = rt_file_read_text("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl") ?? ""
@@ -241,29 +245,38 @@ describe "simple_ponytail tool":
     it "app MCP ponytail uses shared audit implementation":
         val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
         expect(source).to_contain("ponytail_audit")
+        expect(source).to_contain("ponytail_simplification_report")
 
     it "app MCP ponytail renders requested output format":
         val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
         expect(source).to_contain("var format = extract_field(body, \"format\")")
+        expect(source).to_contain("var mode = extract_field(body, \"mode\")")
         expect(source).to_contain("Invalid format: ")
-        expect(source).to_contain("_render_ponytail_mcp(file, result, format)")
+        expect(source).to_contain("Invalid mode: ")
+        expect(source).to_contain("_render_ponytail_mcp(file, mode, result, format)")
         expect(source).to_contain("_mcp_json_escape")
         expect(source).to_contain("value.char_code_at(i)")
         expect(source.contains("value.replace")).to_equal(false)
-        expect(source).to_contain("Ponytail Audit")
+        expect(source).to_contain("# Ponytail \" + mode")
 
     it "lower MCP ponytail validates requested output format":
         val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
         expect(source).to_contain("val format = _mcp_output_format(body)")
+        expect(source).to_contain("var mode = extract_field(body, \"mode\")")
         expect(source).to_contain("Invalid format: ")
+        expect(source).to_contain("Invalid mode: ")
         expect(source).to_contain("_mcp_render_ponytail_report")
+        expect(source).to_contain("ponytail_simplification_report_source")
         expect(source).to_contain("\\\"command\\\":\\\"ponytail\\\"")
         expect(source).to_contain("\\\"status\\\":\\\"ok\\\"")
-        expect(source).to_contain("# Ponytail Audit")
+        expect(source).to_contain("\\\"mode\\\":")
+        expect(source).to_contain("# Ponytail \" + mode")
 
         val schema = rt_file_read_text("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl") ?? ""
         expect(schema).to_contain("elif name == \"simple_ponytail\"")
         expect(schema).to_contain("jp(\"file\", jo2")
+        expect(schema).to_contain("jp(\"mode\", jo2")
+        expect(schema).to_contain("Mode: audit, simplification")
         expect(schema).to_contain("jp(\"format\", jo2")
         expect(schema).to_contain("Output format: text, markdown, json")
         expect(schema).to_contain("req = \"[\" + js(\"file\") + \"]\"")
@@ -276,6 +289,18 @@ describe "simple_ponytail tool":
         val dispatcher = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy.spl") ?? ""
         expect(dispatcher).to_contain("tool_name == \"simple_ponytail\"")
         expect(dispatcher).to_contain("handle_simple_ponytail(id, body)")
+
+    it "app MCP advertises and routes simple_ponytail":
+        val table = rt_file_read_text("src/app/mcp/tool_table.spl") ?? ""
+        expect(table).to_contain("tool_entry(\"simple_ponytail\"")
+        expect(table).to_contain("Ponytail over-engineering audit")
+
+        val static_tools = rt_file_read_text("src/app/mcp/main_static_tools.spl") ?? ""
+        expect(static_tools).to_contain("_mcp_static_tool(\"simple_ponytail\"")
+
+        val dispatcher = rt_file_read_text("src/app/mcp/main_dispatch.spl") ?? ""
+        expect(dispatcher).to_contain("name == \"simple_ponytail\"")
+        expect(dispatcher).to_contain("return handle_simple_ponytail(id, body)")
 
     it "flags pass markers":
         val marker = "pass_" + "todo"

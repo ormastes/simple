@@ -36,11 +36,7 @@ pub fn apply_hybrid_transform(
 }
 
 /// Transform a single function for hybrid execution.
-fn transform_function(
-    func: &mut MirFunction,
-    non_compilable: &HashSet<String>,
-    boxed_returns: &HashSet<String>,
-) {
+fn transform_function(func: &mut MirFunction, non_compilable: &HashSet<String>, boxed_returns: &HashSet<String>) {
     for block in &mut func.blocks {
         let mut new_instructions = Vec::new();
 

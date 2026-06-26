@@ -699,12 +699,7 @@ impl Lowerer {
             let mut trait_names: Vec<&String> = self.module.trait_infos.keys().collect();
             trait_names.sort();
             for tn in trait_names {
-                if let Some(sig) = self
-                    .module
-                    .trait_infos
-                    .get(tn)
-                    .and_then(|ti| ti.methods.get(method))
-                {
+                if let Some(sig) = self.module.trait_infos.get(tn).and_then(|ti| ti.methods.get(method)) {
                     if sig.return_type != TypeId::ANY && sig.return_type != TypeId::VOID {
                         return sig.return_type;
                     }

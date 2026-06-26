@@ -98,3 +98,9 @@ pub extern "C" fn rt_torch_linalg_solve(a_handle: u64, b_handle: u64) -> u64 {
         0
     }
 }
+
+/// Backward-compatible Simple SFFI symbol for tensor linalg solve.
+#[no_mangle]
+pub extern "C" fn rt_torch_torchtensor_linalg_solve(a_handle: u64, b_handle: u64) -> u64 {
+    rt_torch_linalg_solve(a_handle, b_handle)
+}

@@ -150,4 +150,8 @@ not create, rewrite, or weaken SPipe after verification.
 - Do not mark PASS when workflow/tooling changes left stale `doc/07_guide`,
   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
   `.claude/agents/spipe/`, or `.gemini/commands/` instructions behind
+- For `simple_context` or context-mode changes, verify the MCP/tooling guide,
+  generated manuals, and skill/command docs mention any new `--sql`/`--db`
+  behavior, embedded SQLite facade boundary, and explicit absence statuses.
+  Run `scripts/check/check-llm-tooling-public-absence-rendering.shs`.
 - Do not mark PASS for compiler/core/lib or MCP/LSP work unless the matching smoke checks passed

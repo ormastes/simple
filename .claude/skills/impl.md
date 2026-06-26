@@ -112,6 +112,10 @@ Before verify/sync, workflow, tool-contract, evidence-wrapper, or
 verification-contract changes must refresh matching `doc/07_guide`,
 `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
 `.claude/agents/spipe/`, and `.gemini/commands/` process docs.
+For `simple_context` or context-mode changes, keep the MCP/tooling guide and
+mirrored generated manuals current. SQL-backed context paths must document
+`--sql`/`--db`, the embedded SQLite facade boundary, explicit absence statuses,
+and the public-absence guard.
 For GUI/web/2D RenderDoc+Vulkan work, use
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc` as
 the macOS top-level readiness/direct-run/capture wrapper. Keep Windows and

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readlinkSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1229,8 +1229,17 @@ function commandFineTuneDoctor(args) {
     }
   }
 
+  const decisionStatus = registryValueForAttempt(root, "decisions.sdn", attemptId, "status") || readQuotedValue(attemptContent, "status");
+  const retryTarget = registryValueForAttempt(root, "decisions.sdn", attemptId, "retry_target") || readQuotedValue(attemptContent, "retry_target");
+  const nextAttempt = registryValueForAttempt(root, "decisions.sdn", attemptId, "next_attempt") || readQuotedValue(attemptContent, "next_attempt");
   const next = readinessChecks(root, attemptId).find(([, ok]) => !ok);
-  console.log(`next_action=${next ? next[0] : "ready"}`);
+  if (decisionStatus && decisionStatus !== "accepted" && retryTarget) {
+    console.log(`next_action=${decisionStatus}`);
+    console.log(`retry_target=${retryTarget}`);
+    if (nextAttempt) console.log(`next_attempt=${nextAttempt}`);
+  } else {
+    console.log(`next_action=${next ? next[0] : "ready"}`);
+  }
   const ready = !next && failures === 0;
   console.log(ready ? "STATUS: PASS llm-finetune-doctor" : failures ? "STATUS: FAIL llm-finetune-doctor" : "STATUS: WARN llm-finetune-doctor");
   process.exitCode = ready ? 0 : failures ? 1 : 1;
@@ -1280,13 +1289,14 @@ function commandFineTuneReady(args) {
   const method = registryValueForAttempt(root, "tuning_methods.sdn", attemptId, "method") || readQuotedValue(attemptContent, "method");
   const modelArtifact = registryValueForAttempt(root, "training_scripts.sdn", attemptId, "model_artifact") || readQuotedValue(attemptContent, "model_artifact");
   const status = registryValueForAttempt(root, "decisions.sdn", attemptId, "status") || readQuotedValue(attemptContent, "status");
+  const artifactReady = modelArtifactReady(modelArtifact);
 
   const checks = [
     ["feature_option_selected", featureOption && featureOption !== "pending-user-selection"],
     ["nfr_option_selected", nfrOption && nfrOption !== "pending-user-selection"],
     ["base_model_selected", baseModel && baseModel !== "not-selected"],
     ["tuning_method_real", method && method !== "dry-run-record-only"],
-    ["model_artifact_created", modelArtifact && modelArtifact !== "not-created"],
+    ["model_artifact_created", artifactReady],
     ["decision_accepted", status === "accepted"]
   ];
 
@@ -1312,9 +1322,22 @@ function readinessChecks(root, attemptId) {
     ["requirements-selection", featureOption && featureOption !== "pending-user-selection" && nfrOption && nfrOption !== "pending-user-selection"],
     ["base-model-selection", baseModel && baseModel !== "not-selected"],
     ["tuning-method-selection", method && method !== "dry-run-record-only"],
-    ["model-artifact", modelArtifact && modelArtifact !== "not-created"],
+    ["model-artifact", modelArtifactReady(modelArtifact)],
     ["acceptance-decision", status === "accepted"]
   ];
+}
+
+function modelArtifactReady(modelArtifact) {
+  if (!modelArtifact || modelArtifact === "not-created") return false;
+
+  let artifactPath = modelArtifact;
+  if (!isAbsolute(artifactPath)) artifactPath = join(process.cwd(), artifactPath);
+  if (!existsSync(artifactPath)) return true;
+
+  const content = readFileSync(artifactPath, "utf8");
+  if (content.includes('"deployable":false') || content.includes('"deployable": false')) return false;
+  if (content.includes("FAIL_IMPLEMENTATION_DRY_RUN_NO_REAL_TRAINING")) return false;
+  return true;
 }
 
 function commandFineTuneNext(args) {
@@ -1331,6 +1354,18 @@ function commandFineTuneNext(args) {
   if (!existsSync(attemptPath)) {
     console.log(`attempt_id=${attemptId}`);
     console.log("next_action=create-attempt");
+    process.exitCode = 1;
+    return;
+  }
+  const attemptContent = readFileSync(attemptPath, "utf8");
+  const decisionStatus = registryValueForAttempt(root, "decisions.sdn", attemptId, "status") || readQuotedValue(attemptContent, "status");
+  const retryTarget = registryValueForAttempt(root, "decisions.sdn", attemptId, "retry_target") || readQuotedValue(attemptContent, "retry_target");
+  const nextAttempt = registryValueForAttempt(root, "decisions.sdn", attemptId, "next_attempt") || readQuotedValue(attemptContent, "next_attempt");
+  if (decisionStatus && decisionStatus !== "accepted" && retryTarget) {
+    console.log(`attempt_id=${attemptId}`);
+    console.log(`next_action=${decisionStatus}`);
+    console.log(`retry_target=${retryTarget}`);
+    if (nextAttempt) console.log(`next_attempt=${nextAttempt}`);
     process.exitCode = 1;
     return;
   }

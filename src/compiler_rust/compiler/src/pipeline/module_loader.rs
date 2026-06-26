@@ -1042,7 +1042,10 @@ fn warn_duplicate_private_signatures(module: &Module) {
         if distinct.len() < 2 {
             continue; // all identical → harmless under last-write-wins
         }
-        let key = format!("{name}|{}", distinct.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("|"));
+        let key = format!(
+            "{name}|{}",
+            distinct.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("|")
+        );
         if let Ok(mut set) = warned.lock() {
             if !set.insert(key) {
                 continue;

@@ -33,6 +33,24 @@ src/app/llm_diag_hook/
 ├── main.spl                 # Hook binary entry point
 ```
 
+Dashboard JSONL readback slice:
+
+```
+src/app/llm_dashboard/
+├── data/types.spl
+├── collectors/diagnostics_jsonl_collector.spl
+└── collectors/task_daemon_collector.spl
+
+src/app/web_dashboard/
+├── dashboard_html.spl
+└── server.spl
+```
+
+The diagnostics collector owns `LlmDiagnosticPanel` and returns the panel from
+the same module to avoid cross-module imported-type failures in interpreter
+loads. The web dashboard calls the collector during authenticated dashboard
+rendering and embeds the HTML panel in `view-diagnostics`.
+
 ---
 
 ## 2. Core Types (`types.spl`)

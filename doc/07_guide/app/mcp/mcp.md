@@ -294,6 +294,24 @@ bin/simple_mcp_server
 | `simple_context` | Context pack (required: file) |
 | `simple_search` | Code search (required: query) |
 
+`simple_context` shares the `src/app/context` implementation with the CLI. The
+CLI accepts:
+
+- `context <file> --index` to render a local serialized context-pack index.
+- `context <file> --query=<text>` to build/query a one-file local index.
+- `context <file> --sql --index [--db=<path>]` to build the index through the
+  embedded SQLite facade.
+- `context <file> --sql --query=<text> [--db=<path>]` to query SQLite-backed
+  context records with `backend: sqlite` in the output.
+
+The SQL-backed context path uses the existing `app.io.sqlite_sffi` facade. In
+interpreter mode the compiler provides a narrow `rt_sqlite_*` subset for context
+indexing/querying: open/close, create table, delete, prepared insert/bind,
+select explicit columns, count, ordered rows, and simple `LIKE`. It is not a
+general SQL planner. Public context output must render explicit statuses such
+as `ready`, `empty_query`, `no_matches`, or `unavailable`; it must not expose the
+internal absence marker.
+
 ### UI Access (11 tools)
 
 These tools expose the canonical semantic UI model over active `UISession`

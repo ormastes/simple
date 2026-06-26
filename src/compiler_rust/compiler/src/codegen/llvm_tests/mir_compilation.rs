@@ -676,7 +676,7 @@ fn test_mir_interp_call() {
         dest: Some(v1),
         func_name: "complex_fn".to_string(),
         args: vec![v0],
-            boxed_result: false,
+        boxed_result: false,
     });
     func.blocks[0].terminator = Terminator::Return(Some(v1));
 

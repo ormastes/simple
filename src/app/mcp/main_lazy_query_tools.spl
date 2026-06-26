@@ -13,7 +13,7 @@
 # context` subprocess below instead. See
 # doc/08_tracking/bug/mcp_source_mode_large_import_graph_2026-06-23.md
 use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
-use app.ponytail.audit.{ponytail_audit}
+use app.ponytail.audit.{ponytail_audit, ponytail_simplification_report}
 use std.io_runtime.{env_get, file_exists}
 
 fn _mcp_json_escape(value: text) -> text:
@@ -32,13 +32,13 @@ fn _mcp_json_escape(value: text) -> text:
         i = i + 1
     out
 
-fn _render_ponytail_mcp(path: text, audit: text, format: text) -> text:
+fn _render_ponytail_mcp(path: text, mode: text, report: text, format: text) -> text:
     if format == "json":
-        "{\"command\":\"ponytail\",\"status\":\"ok\",\"source\":\"{_mcp_json_escape(path)}\",\"audit\":\"{_mcp_json_escape(audit)}\"}"
+        "{\"command\":\"ponytail\",\"status\":\"ok\",\"mode\":\"{_mcp_json_escape(mode)}\",\"source\":\"{_mcp_json_escape(path)}\",\"audit\":\"{_mcp_json_escape(report)}\",\"report\":\"{_mcp_json_escape(report)}\"}"
     elif format == "markdown":
-        "# Ponytail Audit\n\nsource: `" + path + "`\n\n```text\n" + audit + "\n```"
+        "# Ponytail " + mode + "\n\nsource: `" + path + "`\n\n```text\n" + report + "\n```"
     else:
-        audit
+        report
 
 fn _mcp_find_simple_binary() -> text:
     val env_bin = env_get("SIMPLE_BINARY") ?? ""
@@ -233,6 +233,10 @@ fn handle_simple_context(id: text, body: text) -> text:
     var ctx_args = ["context", file]
     if target != "":
         ctx_args = ["context", file, target]
+    if format == "json":
+        ctx_args.push("--json")
+    elif format == "text":
+        ctx_args.push("--text")
     val (ctx_out, ctx_err, ctx_exit) = process_run_timeout(_mcp_find_simple_binary(), ctx_args, 15000)
     if ctx_exit == 0 and ctx_out != "":
         out_parts.push(ctx_out)
@@ -259,16 +263,25 @@ fn handle_simple_context(id: text, body: text) -> text:
 fn handle_simple_ponytail(id: text, body: text) -> text:
     val file = extract_field(body, "file")
     var format = extract_field(body, "format")
+    var mode = extract_field(body, "mode")
     if format == "":
         format = "text"
+    if mode == "":
+        mode = "audit"
     if file == "":
         return make_tool_error(id, -32602, "Missing required parameter: file")
     if format != "text" and format != "markdown" and format != "json":
         return make_tool_error(id, -32602, "Invalid format: " + format)
-    val result = ponytail_audit(file)
+    if mode != "audit" and mode != "simplification":
+        return make_tool_error(id, -32602, "Invalid mode: " + mode)
+    var result = ""
+    if mode == "simplification":
+        result = ponytail_simplification_report(file)
+    else:
+        result = ponytail_audit(file)
     if result == "":
         return make_tool_error(id, -32602, "Could not read file: " + file)
-    make_tool_result(id, _render_ponytail_mcp(file, result, format))
+    make_tool_result(id, _render_ponytail_mcp(file, mode, result, format))
 
 # simple_search — Language-aware code search
 fn handle_simple_search(id: text, body: text) -> text:

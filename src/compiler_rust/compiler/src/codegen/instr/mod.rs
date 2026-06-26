@@ -281,11 +281,7 @@ fn looks_like_const_data_name(name: &str) -> bool {
 /// `vtable_type_ids` map so constructor writes and field reads can never
 /// disagree. When the receiver's static type is unknown (not in `vreg_types`)
 /// or has no vtable, the offset is returned unchanged.
-fn effective_field_offset<M: Module>(
-    ctx: &InstrContext<'_, M>,
-    object: VReg,
-    byte_offset: u32,
-) -> u32 {
+fn effective_field_offset<M: Module>(ctx: &InstrContext<'_, M>, object: VReg, byte_offset: u32) -> u32 {
     if let Some(&type_id) = ctx.vreg_types.get(&object) {
         if ctx.vtable_type_ids.contains_key(&type_id) {
             return byte_offset + 8;
@@ -545,7 +541,12 @@ pub fn compile_instruction<M: Module>(
             compile_wait(ctx, builder, *dest, *target)?;
         }
 
-        MirInst::InterpCall { dest, func_name, args, boxed_result } => {
+        MirInst::InterpCall {
+            dest,
+            func_name,
+            args,
+            boxed_result,
+        } => {
             compile_interp_call(ctx, builder, dest, func_name, args, *boxed_result)?;
         }
 

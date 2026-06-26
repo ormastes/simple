@@ -1,0 +1,312 @@
+# Detail Design: LLM Runtime vLLM/Torch Interface
+
+Date: 2026-06-25
+
+## Data Shape
+
+`LlmRuntimeManifest`:
+
+- `base_model`: text
+- `endpoint`: text
+- `chat_template`: option-like text field
+- `lora_adapters`: list of `{name, path}`
+- `dynamic_lora`: `disabled`, `trusted`, or `blocked`
+- `invalid_adapter_count`: count of malformed adapter tokens found while
+  parsing manifest text
+
+`LlmRuntimeProbeResult`:
+
+- `status`: `ready`, `missing`, `blocked`, or `error`
+- `reason`: text
+- `base_model`: public model label or `redacted`
+- `endpoint_status`: `configured` or `missing`
+- `chat_template_status`: `none`, `present`, or `missing`
+- `lora_adapter_count`: integer count without adapter paths
+- `dynamic_lora_status`: `disabled`, `trusted`, or `blocked`
+- `torch_ready`: `blocked` or `unchecked` in Option A
+- `evidence_jsonl`: one SPipe/dashboard diagnostics event
+
+`LlmRuntimeServePlan`:
+
+- `status`: `planned`, `missing`, or `blocked`
+- `reason`: text such as `static_serve_plan_only`, `invalid_endpoint`, or
+  `dynamic_lora_requires_trusted_mode`
+- `binary`: `vllm`
+- `base_model`: public model label or `redacted`
+- `endpoint_status`: `configured`, `missing`, or `invalid`
+- `command_preview`: sanitized metadata string, never an executable command
+  with private paths or credentials
+- `lora_adapter_count`: integer count without adapter paths
+- `dynamic_lora_status`: `disabled`, `trusted`, or `blocked`
+- `evidence_jsonl`: one SPipe/dashboard diagnostics event
+
+## Algorithms
+
+1. Parse manifest from a small key/value file or construct it directly.
+2. Validate required fields.
+3. Validate optional chat template and adapter paths without exposing internal
+   absence markers.
+4. Surface malformed adapter tokens as `invalid_adapter_entry`.
+5. Emit one SPipe JSONL event with normalized status and reason.
+6. Generate a sanitized static serve-plan event when requested; do not start
+   vLLM or probe HTTP in this slice.
+7. Let the existing dashboard diagnostics collector summarize that event.
+8. Defer live `/v1/models` probing to the live vLLM option.
+9. For the live vLLM option, parse already-fetched `/v1/models` response
+   bodies first. Transport and process supervision are separate follow-on work.
+10. Build sanitized request-plan metadata for `/v1/models` and
+    `/v1/chat/completions` before adding HTTP transport. Unsupported chat
+    parameters block at the planner boundary.
+11. Parse already-fetched `/v1/chat/completions` response bodies before adding
+    transport. Public evidence must report status and counts without exposing
+    generated assistant content.
+
+## Error Handling
+
+- Missing optional values become `none` or omitted fields.
+- Missing required values become `status=missing` with a specific reason.
+- Dynamic LoRA requested without trusted mode becomes `status=blocked`.
+- Endpoint failures become `status=error` and include only sanitized host/path
+  context.
+- Invalid endpoint strings in the static serve-plan path become
+  `status=missing` with `reason=invalid_endpoint`.
+- Malformed adapter entries become `reason=invalid_adapter_entry` instead of
+  being silently dropped.
+- Known Torch/SFFI or svLLM loader placeholder behavior becomes
+  `status=blocked`; it must not be normalized into `ready`.
+
+## Test Design
+
+- Manifest with base model and no LoRA is blocked by default while Torch/svLLM
+  placeholder readiness remains unresolved.
+- Absent chat template is reported as `none`; a configured but missing chat
+  template path is reported as `missing`.
+- Static LoRA adapter path is recorded.
+- Static LoRA adapter paths are validated locally but omitted from public
+  evidence.
+- Dynamic LoRA is blocked unless trusted mode is explicit.
+- JSONL evidence renders absence with explicit text states.
+- Dashboard renders the evidence without exposing internal absence markers.
+- Public manuals and evidence are covered by
+  `scripts/check/check-llm-tooling-public-absence-rendering.shs`, which ignores
+  folded executable source blocks but fails prose/evidence that exposes the
+  internal Option-none marker.
+- Dashboard output for this runtime slice redacts credentials, API-key-like
+  labels, and local model/adapter paths by default. Prompt and tool-payload
+  redaction belongs to callers that create prompt/tool evidence.
+- Static serve-plan metadata redacts base model IDs with path separators,
+  endpoint credentials,
+  and LoRA adapter paths.
+- Malformed adapter tokens and invalid endpoints are reported explicitly.
+- Live vLLM tests, when selected, cover `/v1/models`, `/v1/chat/completions`,
+  base/adapter model selection, auth rejection, and unsupported parameters.
+- The first live `/v1/models` slice covers already-fetched response parsing:
+  ready model lists, auth rejection, malformed bodies, wrong-model responses,
+  invalid endpoints, and path/sensitive model redaction without exposing the
+  internal absence marker.
+
+## Ponytail Cut
+
+The first implementation should stop at manifest/probe/evidence. No trainer, no
+new scheduler, no vLLM supervisor, and no adapter plugin until live evidence
+requires it.
+
+If implementation starts from the runtime blocker lane instead, the cut is:
+clear the reported Torch availability/seed/device placeholders and svLLM loader
+stubs with focused tests, then return to the readiness bridge.
+
+## Implemented Option A Evidence
+
+- `src/app/llm_runtime/manifest.spl`
+- `src/app/llm_runtime/probe.spl`
+- `src/app/llm_runtime/serve_plan.spl`
+- `test/01_unit/app/llm_runtime/vllm_readiness_spec.spl`
+- `test/unit/app/llm_runtime/vllm_readiness_spec.spl`
+- `test/03_system/app/llm_runtime/feature/vllm_torch_readiness_spec.spl`
+- `doc/06_spec/03_system/app/llm_runtime/feature/vllm_torch_readiness_spec.md`
+
+The implemented bridge validates required local manifest fields, reports
+optional absence with explicit text states, surfaces malformed adapter tokens,
+blocks untrusted dynamic LoRA, omits adapter paths and sensitive-looking model
+labels from JSONL evidence, and keeps Torch/svLLM placeholder readiness as
+`blocked` by default while those owner modules are known placeholders. The
+static serve-plan path emits sanitized vLLM command metadata and rejects invalid
+endpoints without starting vLLM or probing live HTTP endpoints.
+
+## Implemented Live Models Response Slice
+
+- `src/app/llm_runtime/live_models_probe.spl`
+- `test/01_unit/app/llm_runtime/vllm_live_models_probe_spec.spl`
+- `test/unit/app/llm_runtime/vllm_live_models_probe_spec.spl`
+- `doc/06_spec/01_unit/app/llm_runtime/vllm_live_models_probe_spec.md`
+
+The live models response parser consumes an already-fetched HTTP status and
+`/v1/models` response body. It reports `ready` only when a successful models
+response includes the configured base model, redacts sensitive or path-like
+model identifiers in public evidence, distinguishes auth rejection from
+malformed responses, and rejects invalid endpoints before trusting response
+bodies. It does not start vLLM, fetch HTTP, call chat completions, or prove GPU
+serving readiness.
+
+## Implemented Live Request Plan Slice
+
+- `src/app/llm_runtime/live_request_plan.spl`
+- `test/01_unit/app/llm_runtime/vllm_live_request_plan_spec.spl`
+- `test/unit/app/llm_runtime/vllm_live_request_plan_spec.spl`
+- `doc/06_spec/01_unit/app/llm_runtime/vllm_live_request_plan_spec.md`
+
+The live request planner produces sanitized, plan-only metadata for the
+`/v1/models` GET and `/v1/chat/completions` POST surfaces. It removes endpoint
+credentials from public URL previews, rejects invalid endpoints, reports missing
+chat bodies without exposing request content, and blocks unsupported chat
+parameters before transport. It does not fetch HTTP or supervise vLLM.
+
+## Implemented Live Chat Response Slice
+
+- `src/app/llm_runtime/live_chat_probe.spl`
+- `test/01_unit/app/llm_runtime/vllm_live_chat_probe_spec.spl`
+- `test/unit/app/llm_runtime/vllm_live_chat_probe_spec.spl`
+- `doc/06_spec/01_unit/app/llm_runtime/vllm_live_chat_probe_spec.md`
+
+The live chat response parser consumes an already-fetched HTTP status and
+`/v1/chat/completions` response body. It reports `ready` only when a successful
+chat response includes at least one choice with assistant content, redacts
+generated content from public evidence, distinguishes auth rejection from
+malformed responses, and rejects invalid endpoints before trusting response
+bodies. It does not fetch HTTP, evaluate answer quality, supervise vLLM, or
+prove GPU serving readiness.
+
+## Implemented Live HTTP Transport Slice
+
+- `src/app/llm_runtime/live_transport.spl`
+- `test/01_unit/app/llm_runtime/vllm_live_transport_spec.spl`
+- `test/unit/app/llm_runtime/vllm_live_transport_spec.spl`
+- `doc/06_spec/01_unit/app/llm_runtime/vllm_live_transport_spec.md`
+
+The live transport wrapper reuses the existing app-owned
+`std.nogc_sync_mut.io.http_sffi.http_request` facade for GET/POST calls. It
+gates transport through the live request planner, summarizes HTTP status and
+parser status, and keeps response bodies, prompts, and generated assistant
+content out of public JSONL evidence. It does not start or supervise `vllm
+serve`, discover a local endpoint, or prove GPU-backed serving.
+
+Runtime-adjacent decision record:
+
+- `runtime_need`: perform local vLLM-compatible HTTP GET/POST once request
+  planning succeeds.
+- `facade_checked`: `app.io.http_sffi`, `std.nogc_sync_mut.io.http_sffi`,
+  `std.nogc_async_mut.io.http_sffi`, and pure HTTP request/response modules.
+- `chosen_path`: `reuse-facade` via `std.nogc_sync_mut.io.http_sffi.http_request`.
+- `rejected_shortcuts`: raw `rt_http_request` imports in `app.llm_runtime`,
+  shelling out to curl, and process-based fetch wrappers.
+
+## Implemented Serve Lifecycle Slice
+
+- `src/app/llm_runtime/serve_lifecycle.spl`
+- `test/01_unit/app/llm_runtime/vllm_serve_lifecycle_spec.spl`
+- `test/unit/app/llm_runtime/vllm_serve_lifecycle_spec.spl`
+- `doc/06_spec/01_unit/app/llm_runtime/vllm_serve_lifecycle_spec.md`
+
+The lifecycle wrapper gates `vllm serve` startup through the static serve plan,
+then uses `app.io.mod.process_spawn_async`, `process_is_running`, and
+`process_kill` for process lifecycle actions. Public evidence reports process
+state and sanitized command previews only. Endpoint readiness remains the
+responsibility of the live request/transport/probe path.
+
+Runtime-adjacent decision record:
+
+- `runtime_need`: start, poll, and stop a local `vllm serve` process.
+- `facade_checked`: `app.io.mod` process exports, `app.io.process_ops`, and
+  raw runtime process extern locations.
+- `chosen_path`: `reuse-facade` via `app.io.mod.process_spawn_async`,
+  `process_is_running`, and `process_kill`.
+- `rejected_shortcuts`: raw `rt_process_*` imports in `app.llm_runtime`, shell
+  wrappers, and curl/process-based HTTP transport.
+
+## Implemented Serve Readiness Orchestration Slice
+
+- `src/app/llm_runtime/serve_readiness.spl`
+- `test/01_unit/app/llm_runtime/vllm_serve_readiness_spec.spl`
+- `test/unit/app/llm_runtime/vllm_serve_readiness_spec.spl`
+- `doc/06_spec/01_unit/app/llm_runtime/vllm_serve_readiness_spec.md`
+
+The readiness orchestration layer composes the static serve plan, request plan,
+process lifecycle result, and `/v1/models` transport result into one
+dashboard-consumable state. It has a pure preflight path that does not spawn or
+fetch, and an observed-evidence path that refuses to report `ready` until the
+process has been polled as `running` and the models endpoint reports `ready`.
+It also defines a default policy, live orchestrator, and synthetic sequence
+runner. The sequence runner covers retry/cleanup decisions without real process
+or HTTP side effects; the live orchestrator is ready for a later integration
+slice that has an installed vLLM environment.
+
+Runtime-adjacent decision record:
+
+- `runtime_need`: combine lifecycle and endpoint evidence without creating a
+  hidden process or HTTP side effect in unit tests.
+- `facade_checked`: `serve_lifecycle`, `live_request_plan`, and
+  `live_transport`.
+- `chosen_path`: `reuse-facade` through pure result-object composition.
+- `rejected_shortcuts`: raw process polling in the readiness summary,
+  curl/shell endpoint checks, and using PID spawn success as HTTP readiness.
+
+## Implemented Live Environment Evidence Slice
+
+- `src/app/llm_runtime/live_environment.spl`
+- `test/01_unit/app/llm_runtime/vllm_live_environment_spec.spl`
+- `test/unit/app/llm_runtime/vllm_live_environment_spec.spl`
+- `doc/06_spec/01_unit/app/llm_runtime/vllm_live_environment_spec.md`
+
+The live-environment evidence classifier records whether a host has observed
+local vLLM and GPU availability. Missing capabilities produce explicit
+`skipped` reasons (`missing_local_vllm`, `missing_local_gpu`, or
+`missing_local_vllm_and_gpu`) so SPipe and dashboard evidence can distinguish an
+unrun live serving check from a failed model endpoint. Serve-readiness now has
+resource-aware preflight/orchestration wrappers that short-circuit with
+`skipped` before process spawn or HTTP fetch when those resources are absent.
+
+Runtime-adjacent decision record:
+
+- `runtime_need`: represent local vLLM/GPU availability evidence for live
+  serving gates.
+- `facade_checked`: existing live readiness and lifecycle result APIs.
+- `chosen_path`: pure evidence classifier fed by a future owner probe or
+  integration harness.
+- `rejected_shortcuts`: shelling out to `which vllm`, reading CUDA environment
+  directly in `app.llm_runtime`, or treating missing host capability as a model
+  failure.
+
+## Implemented Torch Readiness Slice
+
+- `src/lib/common/torch/dyn_sffi_ops.spl`
+- `test/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl`
+- `test/unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl`
+- `doc/06_spec/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.md`
+
+The dynamic Torch SFFI availability helper now delegates to
+`rt_torch_available()` instead of hardcoding `false`. This removes one
+owner-module placeholder without claiming full Torch readiness. The dynamic
+Torch linalg-solve helper now checks runtime availability and delegates to the
+documented `rt_torch_torchtensor_linalg_solve(a, b)` SFFI instead of returning an
+unconditional failure handle. Torch training seed helpers now return explicit
+`unsupported` status instead of silently no-oping while no owner manual-seed
+SFFI exists. Explicit Torch CUDA device ids now pass through GC/NoGC backend
+placement, `Tensor.cuda`, and stream creation instead of being forced to device
+`0`; optimizer state initialization no longer silently moves state tensors to
+CUDA `0` while device-aware optimizer-state SFFI remains unselected. svLLM
+canonical v0 manifests now parse, non-empty tensor/chunk
+metadata materializes into `TensorPack`, declared chunk digests are shape
+validated, already-read manifests load without throwing, and filesystem-backed
+pack roots load `manifest.sdn` and verify chunk existence, byte length, and
+SHA-256 through the existing owner file facade. The loader can now return the
+declared byte range for a named tensor from a validated pack, including spans
+that start in one chunk and continue through following chunks, with explicit
+`tensor_not_found`, `tensor_range_invalid`, and chunk errors. The loader now
+also exposes a plan-only tensor stream plan that decomposes single-chunk and
+cross-chunk tensor spans into ordered chunk read segments and carries
+pin/device-staging intent as explicit flags while reporting
+`plan_only_not_scheduled`. The `std_fs` NVFS adapter still reports
+`read_range`, `register_buffer`, and `unregister_buffer` as unsupported, so it
+cannot be treated as async NVFS execution. Remaining blockers include full async
+NVFS scheduling, pinned/device staging, live CUDA placement evidence, and
+device-preserving optimizer state for already-CUDA parameters.

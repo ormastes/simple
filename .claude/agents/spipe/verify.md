@@ -115,6 +115,10 @@
   changes must update matching `doc/07_guide`, `doc/06_spec`,
   `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
   `.claude/agents/spipe/`, and `.gemini/commands/` process docs before PASS
+- **Context docs fresh:** `simple_context` or context-mode changes must update
+  the MCP/tooling guide, generated manuals, and skill/command docs for any new
+  `--sql`/`--db` behavior, embedded SQLite facade boundary, explicit absence
+  statuses, and public-absence guard.
 - **Cooperative review complete:** Broad lanes must finish the recorded
   lower-model sidecars or mark them `N/A`, then pass normal/highest-capability
   review before PASS

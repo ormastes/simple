@@ -50,12 +50,15 @@ Owns:
 - failure/blocker/notification views
 - replay/import mode from persisted records
 - web login surface and operator session handling for dashboard access
+- LLM diagnostics JSONL replay panels that summarize hook events without
+  exposing absent values as literal `nil`
 
 Primary inputs:
 
 - snapshot records
 - imported timelines
 - live bridge deltas
+- diagnostics hook JSONL files under `.build/llm_dashboard/diagnostics/`
 
 ### Layer 3: Synergy Bridge
 
@@ -154,6 +157,16 @@ Fields:
 1. Dashboard loads persisted assistant records or snapshots.
 2. Dashboard reconstructs session, event, task, and digest views.
 3. No live actions are available unless the bridge and assistant core are attached.
+
+### Diagnostics JSONL Readback Flow
+
+1. The dashboard reads a configured diagnostics JSONL path.
+2. The collector counts events, unique sessions, tool events, and latest session
+   markers.
+3. The web dashboard embeds the rendered diagnostics panel in the Diagnostics
+   view for authenticated operators.
+4. Missing fields render as empty values; user-visible output must not render the
+   internal absence value `nil`.
 
 ### Web Login / PBP Bootstrap Flow
 

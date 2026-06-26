@@ -142,18 +142,15 @@ pub fn rt_file_hash_sha256(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::read(&path) {
         Ok(content) => {
-            // Simple hash computation using std::hash
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-
-            let mut hasher = DefaultHasher::new();
-            content.hash(&mut hasher);
-            let hash = hasher.finish();
-
-            // Return as hex string
-            Ok(Value::Str(format!("{:016x}", hash)))
+            let digest = ring::digest::digest(&ring::digest::SHA256, &content);
+            let hex = digest
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{:02x}", byte))
+                .collect::<String>();
+            Ok(Value::Str(hex))
         }
-        Err(_) => Ok(Value::Str(String::from("0000000000000000"))),
+        Err(_) => Ok(Value::Str(String::new())),
     }
 }
 

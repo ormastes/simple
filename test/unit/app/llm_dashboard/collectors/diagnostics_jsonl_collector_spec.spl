@@ -1,0 +1,89 @@
+use app.llm_dashboard.collectors.diagnostics_jsonl_collector.{collect_llm_diagnostics_jsonl, render_llm_diagnostics_panel_text, render_llm_diagnostics_panel_html}
+use std.io_runtime.{write_file, mkdir_p, remove_file_if_exists}
+
+fn fixture_diag_path() -> text:
+    ".build/llm_dashboard/diagnostics/diagnostics_jsonl_collector_spec.jsonl"
+
+fn fixture_diag_jsonl() -> text:
+    "{\"ts\":1710000000000,\"event\":\"SessionStart\",\"sid\":\"sid-a\",\"data\":{\"hook_event_name\":\"SessionStart\",\"session_id\":\"sid-a\"}}\n" +
+        "{\"ts\":1710000000100,\"event\":\"PreToolUse\",\"sid\":\"sid-a\",\"data\":{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"sid-a\",\"tool_name\":\"Read\"}}\n" +
+        "{\"ts\":1710000000200,\"event\":\"PostToolUse\",\"sid\":\"sid-a\",\"data\":{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"sid-a\",\"tool_name\":\"Read\"}}\n" +
+        "{\"ts\":1710000000300,\"event\":\"SessionStart\",\"sid\":\"sid-b\",\"data\":{\"hook_event_name\":\"SessionStart\",\"session_id\":\"sid-b\"}}\n"
+
+fn fixture_nested_diag_jsonl() -> text:
+    "{\"ts\":1710000000000,\"data\":{\"hook_event_name\":\"SessionStart\",\"session_id\":\"sid-nested\"}}\n" +
+        "{\"ts\":1710000000100,\"data\":{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"sid-nested\",\"tool_name\":\"Read\"}}\n"
+
+fn fixture_missing_fields_jsonl() -> text:
+    "{\"ts\":1710000000000,\"data\":{}}\n" +
+        "{\"ts\":1710000000100,\"event\":\"PostToolUse\"}\n"
+
+describe "LLM diagnostics dashboard JSONL collector":
+    it "summarizes hook JSONL for dashboard panels":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, fixture_diag_jsonl())
+        val panel = collect_llm_diagnostics_jsonl(path)
+        expect(panel.event_count).to_equal(4)
+        expect(panel.session_count).to_equal(2)
+        expect(panel.tool_event_count).to_equal(2)
+        expect(panel.last_session_id).to_equal("sid-b")
+        remove_file_if_exists(path)
+
+    it "renders absence-safe diagnostics panel summary":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, fixture_diag_jsonl())
+        val text = render_llm_diagnostics_panel_text(collect_llm_diagnostics_jsonl(path))
+        expect(text).to_contain("LLM Diagnostics")
+        expect(text).to_contain("events=4")
+        expect(text.contains("nil")).to_equal(false)
+        remove_file_if_exists(path)
+
+    it "uses nested hook data fields from real hook payloads":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, fixture_nested_diag_jsonl())
+        val panel = collect_llm_diagnostics_jsonl(path)
+        expect(panel.event_count).to_equal(2)
+        expect(panel.session_count).to_equal(1)
+        expect(panel.tool_event_count).to_equal(1)
+        expect(panel.last_event).to_equal("PreToolUse")
+        expect(panel.last_session_id).to_equal("sid-nested")
+        remove_file_if_exists(path)
+
+    it "keeps missing diagnostics fields nil-free":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, fixture_missing_fields_jsonl())
+        val text = render_llm_diagnostics_panel_text(collect_llm_diagnostics_jsonl(path))
+        expect(text).to_contain("events=2")
+        expect(text).to_contain("last_event=PostToolUse")
+        expect(text).to_contain("last_session=none")
+        expect(text.contains("nil")).to_equal(false)
+        remove_file_if_exists(path)
+
+    it "keeps missing files nil-free":
+        val path = fixture_diag_path()
+        remove_file_if_exists(path)
+        val text = render_llm_diagnostics_panel_text(collect_llm_diagnostics_jsonl(path))
+        expect(text).to_contain("events=0")
+        expect(text).to_contain("last_event=none")
+        expect(text).to_contain("last_session=none")
+        expect(text.contains("nil")).to_equal(false)
+
+    it "escapes diagnostics field text in html":
+        val path = fixture_diag_path()
+        mkdir_p(".build/llm_dashboard/diagnostics")
+        remove_file_if_exists(path)
+        write_file(path, "{\"event\":\"PreToolUse<tag>\",\"sid\":\"sid&\"}\n")
+        val html = render_llm_diagnostics_panel_html(collect_llm_diagnostics_jsonl(path))
+        expect(html).to_contain("PreToolUse&lt;tag&gt;")
+        expect(html).to_contain("sid&amp;")
+        expect(html.contains("<tag>")).to_equal(false)
+        expect(html.contains("nil")).to_equal(false)
+        remove_file_if_exists(path)

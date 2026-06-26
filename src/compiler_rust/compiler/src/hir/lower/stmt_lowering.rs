@@ -369,12 +369,8 @@ impl Lowerer {
                                 value: Some(elif_subject_hir),
                             };
 
-                            let elif_condition = self.lower_pattern_condition_stmt(
-                                elif_subject_idx,
-                                elif_subject_ty,
-                                ep,
-                                ctx,
-                            )?;
+                            let elif_condition =
+                                self.lower_pattern_condition_stmt(elif_subject_idx, elif_subject_ty, ep, ctx)?;
 
                             let elif_bindings = self.extract_pattern_bindings(ep, elif_subject_ty);
                             let elif_mutability = if matches!(ep, Pattern::MutIdentifier(_)) {
@@ -395,15 +391,10 @@ impl Lowerer {
                                 let binding_type_map: std::collections::HashMap<String, TypeId> =
                                     elif_bindings.iter().cloned().collect();
                                 for (i, p) in payload_patterns.iter().enumerate() {
-                                    if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) =
-                                        p
-                                    {
+                                    if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = p {
                                         if let Some(local_idx) = ctx.local_map.get(name) {
                                             let local_idx = *local_idx;
-                                            let binding_ty = binding_type_map
-                                                .get(name)
-                                                .copied()
-                                                .unwrap_or(TypeId::ANY);
+                                            let binding_ty = binding_type_map.get(name).copied().unwrap_or(TypeId::ANY);
                                             let payload_expr = HirExpr {
                                                 kind: HirExprKind::BuiltinCall {
                                                     name: "rt_enum_payload".to_string(),
@@ -1874,7 +1865,10 @@ mod host_gpu_lane_statement_tests {
             .iter()
             .find_map(|stmt| builtin_args(stmt, "rt_host_gpu_queue_emit"))
             .expect("gpu lane should emit runtime queue packet");
-        assert!(matches!(queue_args.get(2).map(|expr| &expr.kind), Some(HirExprKind::Integer(4096))));
+        assert!(matches!(
+            queue_args.get(2).map(|expr| &expr.kind),
+            Some(HirExprKind::Integer(4096))
+        ));
     }
 
     #[test]
