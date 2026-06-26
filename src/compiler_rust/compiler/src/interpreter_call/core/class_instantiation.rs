@@ -3,7 +3,7 @@
 use super::arg_binding::bind_args_with_injected;
 use super::di_injection::resolve_injected_args;
 use crate::error::{codes, typo, CompileError, ErrorContext};
-use crate::interpreter::{evaluate_expr, exec_block};
+use crate::interpreter::{evaluate_expr, exec_block, exec_block_fn};
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, SelfMode};
 use simple_runtime::value::diagram_sffi;
@@ -164,7 +164,7 @@ pub(crate) fn instantiate_class(
             // Mark this class as currently in its `new` method
             IN_NEW_METHOD.with(|set| set.borrow_mut().insert(class_name.to_string()));
 
-            let result = match exec_block(
+            let result = match exec_block_fn(
                 &new_method.body,
                 &mut local_env,
                 functions,
@@ -172,8 +172,17 @@ pub(crate) fn instantiate_class(
                 enums,
                 impl_methods,
             ) {
-                Ok(crate::interpreter::Control::Return(v)) => Ok(v),
-                Ok(_) => Ok(local_env.get("self").cloned().unwrap_or(Value::Object {
+                Ok((crate::interpreter::Control::Return(v), _)) => Ok(v),
+                // Implicit return: a `new` whose body ends in a bare expression that
+                // constructs its own type (e.g. `SymbolId(id: id)`) returns that value,
+                // like any function — previously its value was discarded and the
+                // default-field `self` returned instead (fields left nil). Restricted
+                // to an own-class object so mutation-style `new` (ending in an
+                // assignment or bare `self`) still returns the mutated `self`.
+                Ok((_, Some(Value::Object { class, fields: obj_fields }))) if class == class_name => {
+                    Ok(Value::Object { class, fields: obj_fields })
+                }
+                Ok((_, _)) => Ok(local_env.get("self").cloned().unwrap_or(Value::Object {
                     class: class_name.to_string(),
                     fields: Arc::new(fields),
                 })),
