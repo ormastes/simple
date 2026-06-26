@@ -333,10 +333,11 @@ impl ConstEvaluator:
     # Evaluate variable reference
     me eval_var(symbol: SymbolId, span: Span) -> Result<ConstValue, ConstEvalError>:
         val sym = self.module.symbols.get(symbol)
-        if not sym.?:
-            return Err(ConstEvalError.UndefinedVariable("<unknown>", span))
-
-        val name = sym.unwrap().name
+        val name = match sym:
+            case Some(value):
+                value.name
+            case nil:
+                return Err(ConstEvalError.UndefinedVariable("<unknown>", span))
 
         # Check local variables first (function parameters)
         if self.locals.has(name):
@@ -360,16 +361,19 @@ impl ConstEvaluator:
         match callee.kind:
             case HirExprKind.Var(sym):
                 val func_sym = self.module.symbols.get(sym)
-                if func_sym.?:
-                    val name = func_sym.unwrap().name
-                    # Try builtin first
-                    val builtin_result = self.eval_builtin(name, args, span)
-                    match builtin_result:
-                        case Ok(_):
-                            return builtin_result
-                        case _:
-                            # Try user-defined const function
-                            return self.eval_const_fn_call(sym, args, span)
+                match func_sym:
+                    case Some(func_symbol):
+                        val name = func_symbol.name
+                        # Try builtin first
+                        val builtin_result = self.eval_builtin(name, args, span)
+                        match builtin_result:
+                            case Ok(_):
+                                return builtin_result
+                            case _:
+                                # Try user-defined const function
+                                return self.eval_const_fn_call(sym, args, span)
+                    case nil:
+                        pass
             case _:
                 pass
         Err(ConstEvalError.NotConstant("function call", span))
@@ -484,10 +488,11 @@ impl ConstEvaluator:
                 # Evaluate then branch
                 self.eval_block(then_)
             case ConstValue.Bool(false):
-                if else_.?:
-                    self.eval_block(else_.unwrap())
-                else:
-                    Ok(ConstValue.Unit)
+                match else_:
+                    case Some(block):
+                        self.eval_block(block)
+                    case nil:
+                        Ok(ConstValue.Unit)
             case _:
                 Err(ConstEvalError.TypeError("bool", cond_val.to_text(), span))
 
@@ -501,16 +506,22 @@ impl ConstEvaluator:
                 case HirStmtKind.Let(symbol, _, init):
                     # Evaluate initializer and bind to local
                     val sym = self.module.symbols.get(symbol)
-                    if sym.?:
-                        val name = sym.unwrap().name
-                        val value = self.eval(init)?
-                        self.locals[name] = value
+                    match sym:
+                        case Some(symbol_value):
+                            val name = symbol_value.name
+                            val value = self.eval(init)?
+                            self.locals[name] = value
+                        case nil:
+                            pass
                     result = ConstValue.Unit
                 case _:
                     # Other statements not supported in const context
                     result = ConstValue.Unit
-        if block.value.?:
-            result = self.eval(block.value.unwrap())?
+        match block.value:
+            case Some(value):
+                result = self.eval(value)?
+            case nil:
+                pass
         Ok(result)
 
 # Convenience function: evaluate a constant expression
