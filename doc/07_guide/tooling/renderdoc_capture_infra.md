@@ -1134,6 +1134,26 @@ diagnostic that starts capture as soon as `vkGetInstanceProcAddr` is resolved;
 on this host it crashes Chrome's GPU process with exit code 139 and still does
 not produce `.rdc`, so keep it off for canonical evidence runs.
 
+Every loaded autocapture shim now appends a final summary row to the launcher
+log:
+
+```text
+rdoc_autocapture_summary=status:<state> api:<0|1> started:<0|1> finished:<0|1> start_source:<hook> end_source:<hook> submit:<n> present:<n> egl_swap:<n> ...
+```
+
+Use that row only for blocker triage. `status:not-started api:0` means the shim
+loaded but RenderDoc API discovery did not complete. `api:1 started:0` means the
+RenderDoc API was reachable but no configured submit/present/EGL hook started a
+capture. `started:1 finished:0` records a start hook without a matching end
+hook before process exit. `status:ended` still is not a browser pass unless the
+normal evidence wrapper also records a `.rdc` with `RDOC` magic.
+
+The host-independent contract is covered by:
+
+```sh
+SIMPLE_LIB=src bin/simple test test/03_system/check/renderdoc_vulkan_autocapture_spec.spl --native
+```
+
 For the Simple-side GUI widget RenderDoc proof, capture the generated widget
 fixture with the dedicated Simple program:
 

@@ -95,9 +95,11 @@ Current 2026-06-26 browser capture findings:
 - Chrome GPU-process autocapture through
   `RDOC_CHROME_GPU_AUTOCAPTURE=1` preloads
   `scripts/tool/renderdoc-vulkan-autocapture.c` into the GPU process, but the
-  shim only records `rdoc_autocapture_loaded=1`; Chromium does not reach the
-  wrapped Vulkan queue submit/present hooks before timeout/failure, so no
-  `.rdc` is produced. Evidence:
+  shim only records diagnostic state; Chromium does not reach the wrapped
+  Vulkan queue submit/present hooks before timeout/failure, so no `.rdc` is
+  produced. Fresh runs should inspect `rdoc_autocapture_summary=...` in
+  `gpu-launcher.log` to distinguish API discovery, start-hook, end-hook, and
+  counter state. Evidence:
   `build/renderdoc/chrome-gpu-autocapture-wrap/html/evidence.env` and
   `build/renderdoc/chrome-gpu-autocapture-wrap/html/gpu-launcher.log`.
 - A follow-up Chrome GPU autocapture probe added wrappers for

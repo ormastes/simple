@@ -35,6 +35,8 @@ static real_dlsym_fn_t real_dlsym_fn;
 static int capture_started;
 static int capture_finished;
 static int delay_thread_started;
+static const char *capture_start_source;
+static const char *capture_end_source;
 static uint64_t submit_count;
 static uint64_t present_count;
 static uint64_t egl_swap_count;
@@ -163,6 +165,7 @@ static void maybe_start_capture(const char *source) {
     load_renderdoc_api();
     if (!rdoc_api) return;
     capture_started = 1;
+    capture_start_source = source;
     if (env_enabled("RDOC_AUTOCAPTURE_TRIGGER_ONLY")) {
         rdoc_api->TriggerCapture();
     } else {
@@ -182,11 +185,41 @@ static void maybe_end_capture(const char *source) {
         return;
     }
     capture_finished = 1;
+    capture_end_source = source;
     uint32_t ok = rdoc_api->EndFrameCapture(NULL, NULL);
     char buf[160];
     snprintf(buf, sizeof(buf), "rdoc_autocapture_end=%s ok=%u submit=%llu present=%llu egl_swap=%llu",
         source, ok, (unsigned long long)submit_count, (unsigned long long)present_count,
         (unsigned long long)egl_swap_count);
+    log_line(buf);
+}
+
+static void log_capture_summary(void) {
+    const char *status = "not-started";
+    if (capture_started && capture_finished) {
+        status = "ended";
+    } else if (capture_started && env_enabled("RDOC_AUTOCAPTURE_TRIGGER_ONLY")) {
+        status = "trigger-only";
+    } else if (capture_started) {
+        status = "started-not-ended";
+    }
+    char buf[384];
+    snprintf(buf, sizeof(buf),
+        "rdoc_autocapture_summary=status:%s api:%u started:%u finished:%u start_source:%s end_source:%s submit:%llu present:%llu egl_swap:%llu egl_prepare_swap:%llu egl_wait_scheduled:%llu egl_vk_lock:%llu egl_vk_unlock:%llu proc_trace:%llu",
+        status,
+        rdoc_api ? 1u : 0u,
+        capture_started ? 1u : 0u,
+        capture_finished ? 1u : 0u,
+        capture_start_source ? capture_start_source : "none",
+        capture_end_source ? capture_end_source : "none",
+        (unsigned long long)submit_count,
+        (unsigned long long)present_count,
+        (unsigned long long)egl_swap_count,
+        (unsigned long long)egl_prepare_swap_count,
+        (unsigned long long)egl_wait_scheduled_count,
+        (unsigned long long)egl_vulkan_queue_lock_count,
+        (unsigned long long)egl_vulkan_queue_unlock_count,
+        (unsigned long long)proc_trace_count);
     log_line(buf);
 }
 
@@ -688,4 +721,5 @@ static void rdoc_autocapture_init(void) {
 __attribute__((destructor))
 static void rdoc_autocapture_fini(void) {
     maybe_end_capture("destructor");
+    log_capture_summary();
 }
