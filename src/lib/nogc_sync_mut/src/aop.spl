@@ -158,7 +158,9 @@ impl AspectRegistry:
             if not adv.enabled:
                 continue
             val pattern = adv.pointcut.pattern
-            val effective_pattern = if pattern.is_some(): pattern.unwrap() else: "*"
+            val effective_pattern = match pattern:
+                case Some(value): value
+                case None: "*"
             val matches = _match_join_point(adv.pointcut.kind, effective_pattern, join_point)
             if matches:
                 matched = matched.push(adv)
@@ -202,7 +204,9 @@ impl AspectRegistry:
             if not aspect.enabled:
                 continue
             val pattern = aspect.pointcut.pattern
-            val effective_pattern = if pattern.is_some(): pattern.unwrap() else: "*"
+            val effective_pattern = match pattern:
+                case Some(value): value
+                case None: "*"
             val matches = _match_join_point(aspect.pointcut.kind, effective_pattern, join_point)
             if matches:
                 matched = matched.push(aspect)
@@ -349,7 +353,9 @@ impl AspectWeaver:
                 case Before:
                     val res = aspect.advice.handler(before_ctx)
                     if res.is_err():
-                        val e = res.unwrap_err()
+                        val e = match res:
+                            case Ok(_): "before advice failed without error"
+                            case Err(err): err
                         _record_denial(fn_name, "before", e)
                         return Err(e)
                 case Around:
@@ -357,7 +363,9 @@ impl AspectWeaver:
                     # not available because handler signature lacks it.
                     val res = aspect.advice.handler(before_ctx)
                     if res.is_err():
-                        val e = res.unwrap_err()
+                        val e = match res:
+                            case Ok(_): "around advice failed without error"
+                            case Err(err): err
                         _record_denial(fn_name, "around", e)
                         return Err(e)
                 case After:
@@ -388,7 +396,9 @@ impl AspectWeaver:
                 Ok(())
             val handler_res = adv.handler(before_ctx, proceed)
             if handler_res.is_err():
-                val e = handler_res.unwrap_err()
+                val e = match handler_res:
+                    case Ok(_): "around advice failed without error"
+                    case Err(err): err
                 val ran_note = if _aop_proceed_called > 0: " (target ran)" else: " (target did not run)"
                 _record_denial(fn_name, "around", e + ran_note)
                 return Err(e)
@@ -422,7 +432,9 @@ impl AspectWeaver:
                     val res = aspect.advice.handler(after_ctx)
                     if res.is_err():
                         # Join point already ran; the denial here masks its result.
-                        val e = res.unwrap_err()
+                        val e = match res:
+                            case Ok(_): "after advice failed without error"
+                            case Err(err): err
                         _record_denial(fn_name, "after(target-executed)", e)
                         return Err(e)
                 case Before:
@@ -527,28 +539,36 @@ var global_weaver: AspectWeaver? = nil
 # Not pub — only the init path may seal the registry.
 fn _seal_registry():
     if global_registry.is_some():
-        var reg = global_registry.unwrap()
-        reg.sealed = true
-        global_registry = Some(reg)
+        match global_registry:
+            case Some(reg):
+                var sealed_reg = reg
+                sealed_reg.sealed = true
+                global_registry = Some(sealed_reg)
+            case None:
+                pass_do_nothing
 
 pub fn init_aop(config: AopConfig):
     # SECURITY: only initialize once. Re-initialization would wipe all registered security aspects.
     if global_registry.is_some():
         return
     global_registry = Some(AspectRegistry.empty())
-    global_weaver = Some(AspectWeaver.with_registry(global_registry.unwrap()))
+    global_weaver = Some(AspectWeaver.with_registry(get_registry()))
     # Seal after creation so security aspects registered immediately after cannot be removed.
     _seal_registry()
 
 pub fn get_registry() -> AspectRegistry:
     if global_registry.is_none():
         global_registry = Some(AspectRegistry.empty())
-    global_registry.unwrap()
+    match global_registry:
+        case Some(reg): reg
+        case None: AspectRegistry.empty()
 
 pub fn get_weaver() -> AspectWeaver:
     if global_weaver.is_none():
         global_weaver = Some(AspectWeaver.with_registry(get_registry()))
-    global_weaver.unwrap()
+    match global_weaver:
+        case Some(weaver): weaver
+        case None: AspectWeaver.with_registry(get_registry())
 
 pub fn register_aspect(aspect: Aspect):
     get_registry().register(aspect)
