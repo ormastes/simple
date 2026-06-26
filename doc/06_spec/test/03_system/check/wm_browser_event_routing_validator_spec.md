@@ -27,7 +27,7 @@ wm_browser_event_routing_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -88,6 +88,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
   hand-authored JSON object with matching counters is not sufficient.
 - The live shell evidence wrapper consumes the standalone validator instead of
   trusting only the probe's top-level `pass` flag.
+- The live shell evidence wrapper keeps validation, proof-source, event,
+  timing, and animation diagnostic rows on early dependency failures.
 
 ## Scenarios
 
@@ -501,12 +503,44 @@ expect(script).to_contain("wm_browser_event_routing_event_sequence")
 
 </details>
 
+#### keeps wrapper diagnostics on early dependency failures
+
+- Confirm early WM event wrapper failure preserves normalized diagnostics
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-wrapper-early-fail"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "PATH=/bin:/usr/bin BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-wm-browser-event-routing-evidence.shs > " + root + "/stdout.env 2> " + root + "/stderr.log; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm early WM event wrapper failure preserves normalized diagnostics")
+expect(evidence).to_contain("wm_browser_event_routing_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_reason=missing-command:node")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=missing-command:node")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source=")
+expect(evidence).to_contain("wm_browser_event_routing_event_sequence=")
+expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=")
+expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
