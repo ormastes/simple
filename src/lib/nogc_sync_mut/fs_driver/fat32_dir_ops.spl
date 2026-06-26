@@ -497,8 +497,12 @@ fn fat32_truncate_path(core: Fat32Core, path: text, new_size: i64) -> Result<(),
             continue
         val entry_rc = core.find_entry_in_dir(dir_cluster, part)
         if entry_rc.is_err():
-            return Err(entry_rc.unwrap_err())
-        val entry = entry_rc.unwrap()
+            return match entry_rc:
+                Ok(_): Err("failed to resolve path entry")
+                Err(err): Err(err)
+        val entry = match entry_rc:
+            Ok(value): value
+            Err(err): return Err(err)
         if not entry.is_dir:
             return Err("not a directory in path")
         dir_cluster = entry.inode.id.to_u32()
@@ -507,14 +511,22 @@ fn fat32_truncate_path(core: Fat32Core, path: text, new_size: i64) -> Result<(),
     # Scan directory entries to find the file
     val chain_rc = core.follow_chain(dir_cluster)
     if chain_rc.is_err():
-        return Err(chain_rc.unwrap_err())
-    val chain = chain_rc.unwrap()
+        return match chain_rc:
+            Ok(_): Err("failed to follow directory chain")
+            Err(err): Err(err)
+    val chain = match chain_rc:
+        Ok(value): value
+        Err(err): return Err(err)
     var ci = 0
     while ci < chain.len():
         val cdata_rc = core.read_cluster(chain[ci])
         if cdata_rc.is_err():
-            return Err(cdata_rc.unwrap_err())
-        var cdata = cdata_rc.unwrap()
+            return match cdata_rc:
+                Ok(_): Err("failed to read directory cluster")
+                Err(err): Err(err)
+        var cdata = match cdata_rc:
+            Ok(value): value
+            Err(err): return Err(err)
         val epc = (core.bytes_per_sector * core.sectors_per_cluster) / FAT32_DIR_ENTRY_SIZE
         var ei: u32 = 0
         while ei < epc:
@@ -536,8 +548,12 @@ fn fat32_truncate_path(core: Fat32Core, path: text, new_size: i64) -> Result<(),
                 # Truncate the cluster chain
                 val trunc_rc = core.truncate_chain(file_cluster, new_size.to_u64())
                 if trunc_rc.is_err():
-                    return Err(trunc_rc.unwrap_err())
-                val new_first = trunc_rc.unwrap()
+                    return match trunc_rc:
+                        Ok(_): Err("failed to truncate FAT chain")
+                        Err(err): Err(err)
+                val new_first = match trunc_rc:
+                    Ok(value): value
+                    Err(err): return Err(err)
                 # Update the directory entry: first cluster and file size
                 val size_u32 = new_size.to_u32()
                 cdata[off + 20] = ((new_first >> 16) & 0xFF).to_u8()
@@ -550,7 +566,9 @@ fn fat32_truncate_path(core: Fat32Core, path: text, new_size: i64) -> Result<(),
                 cdata[off + 31] = ((size_u32 >> 24) & 0xFF).to_u8()
                 val wrc = core.write_cluster(chain[ci], cdata)
                 if wrc.is_err():
-                    return Err(wrc.unwrap_err())
+                    return match wrc:
+                        Ok(_): Err("failed to write directory cluster")
+                        Err(err): Err(err)
                 core.invalidate_path_prefix(path)
                 core.invalidate_dir_cache(dir_cluster)
                 # Update any matching open file handles
