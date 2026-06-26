@@ -114,6 +114,8 @@ emit("mdi_proof_json", jsonPath);
 emit("mdi_proof_status", eventPass && capturePass && performancePass && animationPass ? "pass" : "fail");
 emit("mdi_proof_reason", eventPass && capturePass && performancePass && animationPass ? "pass" : "contract-missing");
 emit("mdi_proof_window_count", integerTextOrBlank(proof.count));
+emit("mdi_event_taskbar_item_count", integerTextOrBlank(proof.taskbarItemCount));
+emit("mdi_event_taskbar_icon_count", integerTextOrBlank(proof.taskbarIconCount));
 emit("mdi_event_status", eventPass ? "pass" : "fail");
 emit("mdi_capture_status", capturePass ? "pass" : "fail");
 emit("mdi_capture_viewport_width", integerTextOrBlank(proof.viewportWidth));

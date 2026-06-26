@@ -62,8 +62,9 @@ render-log markers.
 - Passing Android evidence requires a screenshot/layout proof and Vulkan log
   marker.
 - Passing mobile MDI evidence requires validator-derived viewport dimensions,
-  performance.now timing, requestAnimationFrame count, and CSS animation detail
-  rows; stale status-only pass rows fail closed.
+  window/taskbar event counts, performance.now timing, requestAnimationFrame
+  count, CSS animation detail rows, and viewport dimensions; stale status-only
+  pass rows fail closed.
 - Missing render, Metal, or Vulkan markers fail closed and do not masquerade as
   mobile GPU-backed proof.
 
@@ -81,7 +82,7 @@ render-log markers.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -105,6 +106,9 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_status=
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_layout_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_metal_log_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_window_count=4")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_taskbar_item_count=4")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_taskbar_icon_count=4")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_capture_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_capture_viewport_width=390")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_capture_viewport_height=844")
@@ -119,6 +123,9 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_sta
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_layout_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_vulkan_log_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_window_count=4")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_taskbar_item_count=4")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_taskbar_icon_count=4")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_viewport_width=390")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_viewport_height=844")
