@@ -27,7 +27,7 @@ tauri_mobile_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -73,7 +73,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 - Complete mobile MDI proof logs validate and emit normalized
   `{prefix}_mdi_*` rows.
 - `performanceNowAvailable=true` is not enough: the proof must include an
-  explicit finite non-negative `performanceNowDeltaMs`.
+  explicit finite positive `performanceNowDeltaMs` from distinct samples.
 - Capture viewport and animation-frame details must also be explicit finite
   numeric proof values, not defaulted placeholder values.
 - Event counts, viewport dimensions, and animation-frame counts must be decimal
@@ -94,7 +94,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -116,8 +116,10 @@ expect(evidence).to_contain("ios_mdi_capture_status=pass")
 expect(evidence).to_contain("ios_mdi_capture_viewport_width=390")
 expect(evidence).to_contain("ios_mdi_capture_viewport_height=844")
 expect(evidence).to_contain("ios_mdi_performance_status=pass")
+expect(evidence).to_contain("ios_mdi_performance_now_available=true")
 expect(evidence).to_contain("ios_mdi_performance_now_delta_ms=1.25")
 expect(evidence).to_contain("ios_mdi_animation_status=pass")
+expect(evidence).to_contain("ios_mdi_animation_frame_available=true")
 expect(evidence).to_contain("ios_mdi_animation_frame_count=2")
 expect(evidence).to_contain("ios_mdi_css_animation_probe=true")
 ```
@@ -156,8 +158,9 @@ expect(evidence.contains("ios_mdi_performance_now_delta_ms=0")).to_equal(false)
 
 </details>
 
-#### rejects malformed or negative timing deltas
+#### rejects zero malformed or negative timing deltas
 
+-  proof log command
 -  proof log command
    - Expected: code equals `1`
 
@@ -165,21 +168,28 @@ expect(evidence.contains("ios_mdi_performance_now_delta_ms=0")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-tauri-mobile-mdi-validator-bad-delta"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-    _proof_log_command(root + "/device.log", "p.performanceNowDeltaMs=-1") +
-    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
+    _proof_log_command(root + "/zero.log", "p.performanceNowDeltaMs=0") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/zero.json " + root + "/zero.log > " + root + "/zero.env; " +
+    _proof_log_command(root + "/negative.log", "p.performanceNowDeltaMs=-1") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/negative.json " + root + "/negative.log > " + root + "/negative.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
-val evidence = file_read(root + "/evidence.env")
-expect(evidence).to_contain("android_mdi_proof_status=fail")
-expect(evidence).to_contain("android_mdi_performance_status=fail")
-expect(evidence).to_contain("android_mdi_performance_now_delta_ms=-1")
+val zero = file_read(root + "/zero.env")
+val negative = file_read(root + "/negative.env")
+expect(zero).to_contain("android_mdi_proof_status=fail")
+expect(zero).to_contain("android_mdi_performance_status=fail")
+expect(zero).to_contain("android_mdi_performance_now_available=true")
+expect(zero).to_contain("android_mdi_performance_now_delta_ms=0")
+expect(negative).to_contain("android_mdi_proof_status=fail")
+expect(negative).to_contain("android_mdi_performance_status=fail")
+expect(negative).to_contain("android_mdi_performance_now_delta_ms=-1")
 ```
 
 </details>
@@ -326,12 +336,49 @@ expect(evidence.contains("android_mdi_animation_frame_count=0")).to_equal(false)
 
 </details>
 
+#### rejects disabled performance and animation APIs even when detail rows look valid
+
+-  proof log command
+-  proof log command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-disabled-apis"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_log_command(root + "/perf.log", "p.performanceNowAvailable=false") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/perf.json " + root + "/perf.log > " + root + "/perf.env; " +
+    _proof_log_command(root + "/anim.log", "p.animationFrameAvailable=false") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/anim.json " + root + "/anim.log > " + root + "/anim.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val perf = file_read(root + "/perf.env")
+val anim = file_read(root + "/anim.env")
+expect(perf).to_contain("ios_mdi_proof_status=fail")
+expect(perf).to_contain("ios_mdi_performance_status=fail")
+expect(perf).to_contain("ios_mdi_performance_now_available=false")
+expect(perf).to_contain("ios_mdi_performance_now_delta_ms=1.25")
+expect(anim).to_contain("android_mdi_proof_status=fail")
+expect(anim).to_contain("android_mdi_animation_status=fail")
+expect(anim).to_contain("android_mdi_animation_frame_available=false")
+expect(anim).to_contain("android_mdi_animation_frame_count=2")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -157,13 +157,15 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_now_available")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_frame_available")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status")
 ```

@@ -198,8 +198,9 @@ It also validates the live `[tauri-shell] mdi proof:` JSON from each mobile lane
 `ios_mdi_event_status`, `ios_mdi_capture_status`,
 `ios_mdi_performance_status`, `ios_mdi_animation_status`, and the matching
 Android keys to all be `pass`; those fields prove MDI event routing, live
-viewport capture dimensions, `performance.now()`, two animation frames, and CSS
-animation support. Evidence is written to
+viewport capture dimensions, `performance.now()` availability with a positive
+timing delta, `requestAnimationFrame` availability with at least two animation
+frames, and CSS animation support. Evidence is written to
 `doc/09_report/tauri_mobile_renderer_parity_evidence_<date>.md`.
 
 2026-06-26 status: pass. iOS simulator Metal-backed Tauri2/WKWebView rendering

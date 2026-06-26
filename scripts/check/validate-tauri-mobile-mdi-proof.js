@@ -32,10 +32,10 @@ function integerAtLeast(value, min) {
   return BigInt(text) >= BigInt(min);
 }
 
-function decimalAtLeast(value, min) {
+function decimalGreaterThan(value, min) {
   const text = decimalNumberText(value);
   if (text === null) return false;
-  return Number(text) >= min;
+  return Number(text) > min;
 }
 
 function integerTextOrBlank(value) {
@@ -104,7 +104,7 @@ const capturePass =
   integerAtLeast(proof.viewportHeight, 300);
 const performancePass =
   proof.performanceNowAvailable === true &&
-  decimalAtLeast(proof.performanceNowDeltaMs, 0);
+  decimalGreaterThan(proof.performanceNowDeltaMs, 0);
 const animationPass =
   proof.animationFrameAvailable === true &&
   integerAtLeast(proof.animationFrameCount, 2) &&
@@ -121,8 +121,10 @@ emit("mdi_capture_status", capturePass ? "pass" : "fail");
 emit("mdi_capture_viewport_width", integerTextOrBlank(proof.viewportWidth));
 emit("mdi_capture_viewport_height", integerTextOrBlank(proof.viewportHeight));
 emit("mdi_performance_status", performancePass ? "pass" : "fail");
+emit("mdi_performance_now_available", proof.performanceNowAvailable === true ? "true" : "false");
 emit("mdi_performance_now_delta_ms", decimalTextOrBlank(proof.performanceNowDeltaMs));
 emit("mdi_animation_status", animationPass ? "pass" : "fail");
+emit("mdi_animation_frame_available", proof.animationFrameAvailable === true ? "true" : "false");
 emit("mdi_animation_frame_count", integerTextOrBlank(proof.animationFrameCount));
 emit("mdi_css_animation_probe", proof.cssAnimationProbe === true ? "true" : "false");
 
