@@ -164,6 +164,14 @@ check covers SPipe command routing. The `doc/06_spec` guard covers scenario 5.
   review passes, real QLoRA writes a model manifest, target eval reaches the
   selected threshold, safety/deployment/app handoff evidence is recorded, and a
   normal LLM records an accepted decision.
+- `test/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.spl`
+  covers retry6's direct gate behavior with deterministic retry5 cache
+  fixtures. It proves below-target eval remains
+  `BLOCKED_MODEL_OR_TARGET_EVAL_INCOMPLETE` and threshold-met eval only reaches
+  `TARGET_EVAL_REVIEW_REQUIRED`; `acceptance_allowed=false` remains true in
+  both cases.
+- `doc/06_spec/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.md`
+  is the operator manual for that retry6 handoff evidence.
 
 2026-06-26 retry7 normal acceptance-review gate evidence:
 
