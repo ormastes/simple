@@ -23,6 +23,10 @@ function integerAtLeast(value, min) {
   return BigInt(text) >= BigInt(min);
 }
 
+function integerNumberAtLeast(value, min) {
+  return typeof value === 'number' && Number.isInteger(value) && value >= min;
+}
+
 function finiteNumberGreaterThan(value, min) {
   return typeof value === 'number' && Number.isFinite(value) && value > min;
 }
@@ -72,23 +76,23 @@ if (proof.target !== 'electron') {
   reason = 'unexpected-width';
 } else if (!Number.isInteger(expectedHeight) || expectedHeight < 1 || proof.height !== expectedHeight) {
   reason = 'unexpected-height';
-} else if (!integerAtLeast(proof.body_html_length, 1)) {
+} else if (!integerNumberAtLeast(proof.body_html_length, 1)) {
   reason = 'missing-render-html';
-} else if (!integerAtLeast(proof.css_length, 1)) {
+} else if (!integerNumberAtLeast(proof.css_length, 1)) {
   reason = 'missing-render-css';
 } else if (proof.app_element_present !== true) {
   reason = 'missing-app-element';
-} else if (!integerAtLeast(proof.body_text_length, 1)) {
+} else if (!integerNumberAtLeast(proof.body_text_length, 1)) {
   reason = 'missing-rendered-text';
 } else if (
   textSample(proof.body_text_sample).length < 1 ||
   !textSample(proof.body_text_sample).includes('Hello World from Web!') ||
-  textSample(proof.body_text_sample).length > Number(decimalIntegerText(proof.body_text_length))
+  textSample(proof.body_text_sample).length > proof.body_text_length
 ) {
   reason = 'missing-rendered-text-sample';
 } else if (proof.performance_now_available !== true || !finiteNumberGreaterThan(proof.performance_now_delta_ms, 0)) {
   reason = 'missing-performance-now';
-} else if (proof.animation_frame_available !== true || !integerAtLeast(proof.animation_frame_count, 2)) {
+} else if (proof.animation_frame_available !== true || !integerNumberAtLeast(proof.animation_frame_count, 2)) {
   reason = 'missing-animation-frames';
 } else if (proof.css_animation_probe !== true) {
   reason = 'missing-css-animation';

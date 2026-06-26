@@ -27,7 +27,7 @@ electron_live_smoke_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,6 +74,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 - Missing DOM render text, missing CSS envelope, missing rendered text sample,
   missing `performance.now`, zero timing deltas, missing two animation frames,
   missing CSS animation support, and blur/tolerance use fail closed.
+- DOM length counters and animation frame counts must be live numeric JSON
+  values; decimal strings are rejected as stale or hand-authored proof.
 - The rendered text sample must include the live-smoke entry text and must not
   exceed the reported rendered text length.
 - Requested capture viewport dimensions must be explicit decimal integers; the
@@ -249,6 +251,50 @@ expect(css).to_contain("electron_live_smoke_validation_reason=missing-css-animat
 
 </details>
 
+#### rejects decimal strings for live DOM and animation counters
+
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm numeric-looking text is not accepted as live Chromium counters
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-live-smoke-validator-string-counters"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/html.json", "p.body_html_length=\"64\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/html.json 1280 720 > " + root + "/html.env; " +
+    _proof_command(root + "/text.json", "p.body_text_length=\"23\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/text.json 1280 720 > " + root + "/text.env; " +
+    _proof_command(root + "/frames.json", "p.animation_frame_count=\"2\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/frames.json 1280 720 > " + root + "/frames.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val html = file_read(root + "/html.env")
+val text = file_read(root + "/text.env")
+val frames = file_read(root + "/frames.env")
+step("Confirm numeric-looking text is not accepted as live Chromium counters")
+expect(html).to_contain("electron_live_smoke_validation_status=fail")
+expect(html).to_contain("electron_live_smoke_validation_reason=missing-render-html")
+expect(html).to_contain("electron_live_smoke_body_html_length=64")
+expect(text).to_contain("electron_live_smoke_validation_status=fail")
+expect(text).to_contain("electron_live_smoke_validation_reason=missing-rendered-text")
+expect(text).to_contain("electron_live_smoke_body_text_length=23")
+expect(frames).to_contain("electron_live_smoke_validation_status=fail")
+expect(frames).to_contain("electron_live_smoke_validation_reason=missing-animation-frames")
+expect(frames).to_contain("electron_live_smoke_animation_frame_count=2")
+```
+
+</details>
+
 #### rejects tolerance use and dimensions that do not match the requested viewport
 
 -  proof command
@@ -345,8 +391,8 @@ expect(envelopes).to_contain("css_length")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
