@@ -34,6 +34,8 @@ bin/simple test test/03_system/check/widget_showcase_malformed_readback_wrapper_
   `reason=readback-nonblank-unverified`.
 - A malformed 8K `nonzero_pixels` row fails with
   `reason=readback-nonblank-unverified`.
+- Malformed checksum, render mode, and redraw rows fail with their specific
+  producer-side reasons for both 4K and 8K.
 - Both rows emit `*_nonzero_pixels_status=fail`.
 - The wrapper exits through its normal failure path without shell integer-test
   diagnostics.
@@ -127,11 +129,25 @@ fn _value_of(lines: text, key: text) -> text:
             found = line.slice(prefix.len(), line.len())
     found
 
-fn _fake_probe_command(dir: text, resolution: text) -> text:
+fn _fake_probe_command_for(dir: text, resolution: text, nonzero: text, checksum: text, render_mode: text, redraw_frames: text) -> text:
     "rm -rf " + dir + " && mkdir -p " + dir + " && " +
-    "printf '%s\\n' '#!/bin/sh' 'prefix=gui_showcase_4k_perf' 'width=3840' 'height=2160' 'pixels=8294400' 'if env | grep -q ^SHOWCASE_8K_PERF=1$; then' 'prefix=gui_showcase_8k_perf' 'width=7680' 'height=4320' 'pixels=33177600' 'fi' 'echo $prefix'\"'\"'_width='\"'\"'$width' 'echo $prefix'\"'\"'_height='\"'\"'$height' 'echo $prefix'\"'\"'_frame_elapsed_ns=1000000000'\"'\"'' 'echo $prefix'\"'\"'_pixels='\"'\"'$pixels' 'echo $prefix'\"'\"'_nonzero_pixels=not-a-number'\"'\"'' 'echo $prefix'\"'\"'_checksum=123456'\"'\"'' 'echo $prefix'\"'\"'_render_mode=retained-static-frame'\"'\"'' 'echo $prefix'\"'\"'_redraw_frames=bad'\"'\"'' > " + dir + "/fake-native && chmod +x " + dir + "/fake-native && " +
+    "printf '%s\\n' '#!/bin/sh' 'prefix=gui_showcase_4k_perf' 'width=3840' 'height=2160' 'pixels=8294400' 'if env | grep -q ^SHOWCASE_8K_PERF=1$; then' 'prefix=gui_showcase_8k_perf' 'width=7680' 'height=4320' 'pixels=33177600' 'fi' 'echo $prefix'\"'\"'_width='\"'\"'$width' 'echo $prefix'\"'\"'_height='\"'\"'$height' 'echo $prefix'\"'\"'_frame_elapsed_ns=1000000000'\"'\"'' 'echo $prefix'\"'\"'_pixels='\"'\"'$pixels' 'echo $prefix'\"'\"'_nonzero_pixels=" + nonzero + "'\"'\"'' 'echo $prefix'\"'\"'_checksum=" + checksum + "'\"'\"'' 'echo $prefix'\"'\"'_render_mode=" + render_mode + "'\"'\"'' 'echo $prefix'\"'\"'_redraw_frames=" + redraw_frames + "'\"'\"'' > " + dir + "/fake-native && chmod +x " + dir + "/fake-native && " +
     "printf '%s\\n' '#!/bin/sh' 'out=' 'while [ $# -gt 0 ]; do' 'if [ $1 = --output ]; then' 'shift' 'out=$1' 'fi' 'shift || true' 'done' 'cp " + dir + "/fake-native $out' 'chmod +x $out' > " + dir + "/fake-simple && chmod +x " + dir + "/fake-simple && " +
     "SIMPLE_BIN=" + dir + "/fake-simple BUILD_DIR=" + dir + " RESOLUTION=" + resolution + " TIMEOUT_SECS=5 sh scripts/check/check-widget-showcase-4k-200fps.shs > " + dir + "/stdout.txt 2> " + dir + "/stderr.txt"
+
+fn _fake_probe_command(dir: text, resolution: text) -> text:
+    _fake_probe_command_for(dir, resolution, "not-a-number", "123456", "retained-static-frame", "bad")
+
+fn _assert_malformed_case(dir: text, resolution: text, prefix: text, nonzero: text, checksum: text, render_mode: text, redraw_frames: text, reason: text, status_key: text):
+    val command = _fake_probe_command_for(dir, resolution, nonzero, checksum, render_mode, redraw_frames)
+    val (_stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
+    expect(code).to_equal(1)
+    expect(stderr.contains("integer expression expected")).to_equal(false)
+
+    val evidence = file_read(dir + "/status.env")
+    expect(_value_of(evidence, prefix + "_status")).to_equal("fail")
+    expect(_value_of(evidence, prefix + "_reason")).to_equal(reason)
+    expect(_value_of(evidence, prefix + "_" + status_key)).to_equal("fail")
 
 describe "Widget showcase malformed readback wrapper contract":
 
@@ -162,3 +178,27 @@ describe "Widget showcase malformed readback wrapper contract":
         expect(_value_of(evidence, "gui_showcase_8k_perf_reason")).to_equal("readback-nonblank-unverified")
         expect(_value_of(evidence, "gui_showcase_8k_perf_nonzero_pixels_status")).to_equal("fail")
         expect(_value_of(evidence, "gui_showcase_8k_perf_retained_redraw_status")).to_equal("fail")
+
+    it "classifies malformed 4K checksum rows without shell integer diagnostics":
+        step("Run the wrapper with a fake native 4K checksum failure")
+        _assert_malformed_case("build/test-widget-showcase-malformed-checksum-4k", "4k", "gui_showcase_4k_200fps", "100", "bad-checksum", "retained-static-frame", "1", "readback-checksum-missing", "checksum_status")
+
+    it "classifies malformed 8K checksum rows without shell integer diagnostics":
+        step("Run the wrapper with a fake native 8K checksum failure")
+        _assert_malformed_case("build/test-widget-showcase-malformed-checksum-8k", "8k", "gui_showcase_8k_perf", "100", "bad-checksum", "retained-static-frame", "1", "readback-checksum-missing", "checksum_status")
+
+    it "classifies malformed 4K render mode rows without shell integer diagnostics":
+        step("Run the wrapper with a fake native 4K render mode failure")
+        _assert_malformed_case("build/test-widget-showcase-malformed-render-mode-4k", "4k", "gui_showcase_4k_200fps", "100", "123456", "redraw-every-frame", "1", "not-retained-static-frame", "retained_render_mode_status")
+
+    it "classifies malformed 8K render mode rows without shell integer diagnostics":
+        step("Run the wrapper with a fake native 8K render mode failure")
+        _assert_malformed_case("build/test-widget-showcase-malformed-render-mode-8k", "8k", "gui_showcase_8k_perf", "100", "123456", "redraw-every-frame", "1", "not-retained-static-frame", "retained_render_mode_status")
+
+    it "classifies malformed 4K redraw rows without shell integer diagnostics":
+        step("Run the wrapper with a fake native 4K redraw failure")
+        _assert_malformed_case("build/test-widget-showcase-malformed-redraw-4k", "4k", "gui_showcase_4k_200fps", "100", "123456", "retained-static-frame", "bad", "unexpected-redraw-count", "retained_redraw_status")
+
+    it "classifies malformed 8K redraw rows without shell integer diagnostics":
+        step("Run the wrapper with a fake native 8K redraw failure")
+        _assert_malformed_case("build/test-widget-showcase-malformed-redraw-8k", "8k", "gui_showcase_8k_perf", "100", "123456", "retained-static-frame", "bad", "unexpected-redraw-count", "retained_redraw_status")

@@ -27,7 +27,7 @@ widget_showcase_malformed_readback_wrapper_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -83,6 +83,8 @@ bin/simple test test/03_system/check/widget_showcase_malformed_readback_wrapper_
   `reason=readback-nonblank-unverified`.
 - A malformed 8K `nonzero_pixels` row fails with
   `reason=readback-nonblank-unverified`.
+- Malformed checksum, render mode, and redraw rows fail with their specific
+  producer-side reasons for both 4K and 8K.
 - Both rows emit `*_nonzero_pixels_status=fail`.
 - The wrapper exits through its normal failure path without shell integer-test
   diagnostics.
@@ -235,12 +237,126 @@ expect(_value_of(evidence, "gui_showcase_8k_perf_retained_redraw_status")).to_eq
 
 </details>
 
+#### classifies malformed 4K checksum rows without shell integer diagnostics
+
+- Run the wrapper with a fake native 4K checksum failure
+-  assert malformed case
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the wrapper with a fake native 4K checksum failure")
+_assert_malformed_case("build/test-widget-showcase-malformed-checksum-4k", "4k", "gui_showcase_4k_200fps", "100", "bad-checksum", "retained-static-frame", "1", "readback-checksum-missing", "checksum_status")
+```
+
+</details>
+
+#### classifies malformed 8K checksum rows without shell integer diagnostics
+
+- Run the wrapper with a fake native 8K checksum failure
+-  assert malformed case
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the wrapper with a fake native 8K checksum failure")
+_assert_malformed_case("build/test-widget-showcase-malformed-checksum-8k", "8k", "gui_showcase_8k_perf", "100", "bad-checksum", "retained-static-frame", "1", "readback-checksum-missing", "checksum_status")
+```
+
+</details>
+
+#### classifies malformed 4K render mode rows without shell integer diagnostics
+
+- Run the wrapper with a fake native 4K render mode failure
+-  assert malformed case
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the wrapper with a fake native 4K render mode failure")
+_assert_malformed_case("build/test-widget-showcase-malformed-render-mode-4k", "4k", "gui_showcase_4k_200fps", "100", "123456", "redraw-every-frame", "1", "not-retained-static-frame", "retained_render_mode_status")
+```
+
+</details>
+
+#### classifies malformed 8K render mode rows without shell integer diagnostics
+
+- Run the wrapper with a fake native 8K render mode failure
+-  assert malformed case
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the wrapper with a fake native 8K render mode failure")
+_assert_malformed_case("build/test-widget-showcase-malformed-render-mode-8k", "8k", "gui_showcase_8k_perf", "100", "123456", "redraw-every-frame", "1", "not-retained-static-frame", "retained_render_mode_status")
+```
+
+</details>
+
+#### classifies malformed 4K redraw rows without shell integer diagnostics
+
+- Run the wrapper with a fake native 4K redraw failure
+-  assert malformed case
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the wrapper with a fake native 4K redraw failure")
+_assert_malformed_case("build/test-widget-showcase-malformed-redraw-4k", "4k", "gui_showcase_4k_200fps", "100", "123456", "retained-static-frame", "bad", "unexpected-redraw-count", "retained_redraw_status")
+```
+
+</details>
+
+#### classifies malformed 8K redraw rows without shell integer diagnostics
+
+- Run the wrapper with a fake native 8K redraw failure
+-  assert malformed case
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the wrapper with a fake native 8K redraw failure")
+_assert_malformed_case("build/test-widget-showcase-malformed-redraw-8k", "8k", "gui_showcase_8k_perf", "100", "123456", "retained-static-frame", "bad", "unexpected-redraw-count", "retained_redraw_status")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
