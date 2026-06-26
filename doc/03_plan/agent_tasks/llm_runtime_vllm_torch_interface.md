@@ -292,6 +292,15 @@ Tasks:
    `serve_readiness`, and `live_transport` for actual live execution when the
    runtime owner wires it. Unit coverage stays on the pure boundary to avoid
    live process teardown diagnostics.
+8. Add runtime control response surface. Status: done for in-process JSONL
+   response generation through `src/app/llm_runtime/control_cli.spl`; not yet
+   exposed as a top-level `simple` command because direct runtime argv/main
+   execution produced blank non-usage output under the current runner. The
+   verified surface is `llm_runtime_control_cli_response(argv)`.
+9. Harden pure vLLM planning evidence constructors. Status: done for
+   `serve_plan`, `live_request_plan`, `live_environment`, and
+   `dashboard_live_control`; these now precompute JSONL without post-construction
+   field mutation, and request/serve private helpers use module-specific names.
 
 ## Sidecars
 
@@ -308,6 +317,9 @@ Tasks:
   installed local `vllm`; the runtime owner now has a live wrapper, but the web
   dashboard route remains intent-only until integration evidence proves the
   process/HTTP imports do not reintroduce dashboard test teardown diagnostics.
+- Top-level `simple llm-runtime-control` command wiring; in-process response
+  generation is covered, but direct app `main()`/argv execution needs a separate
+  runner investigation before it is safe to expose.
 
 Runtime-adjacent decision record for live HTTP transport:
 

@@ -346,6 +346,38 @@ Runtime-adjacent decision record:
 - `rejected_shortcuts`: dashboard-owned process/HTTP imports, shell/curl
   execution, and treating a valid pid as endpoint readiness.
 
+## Implemented Runtime Control Response Slice
+
+- `src/app/llm_runtime/control_cli.spl`
+- `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
+- `test/unit/app/llm_runtime/vllm_control_cli_spec.spl`
+- `doc/06_spec/test/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
+- `doc/06_spec/test/unit/app/llm_runtime/vllm_control_cli_spec.md`
+
+The runtime exposes an in-process control response helper,
+`llm_runtime_control_cli_response(argv)`, that accepts explicit action,
+base-model, endpoint, pid, and local resource flags and emits public JSONL
+through the same runtime control decision boundary as the dashboard. It is
+intentionally not registered as a top-level `simple llm-runtime-control`
+command yet: direct app `main()`/argv execution returned blank non-usage output
+under the current runner, while the in-process response surface is covered.
+
+This slice also removed post-construction evidence mutation from
+`serve_plan`, `live_request_plan`, `live_environment`, and
+`dashboard_live_control` on the pure control path, and renamed request/serve
+private plan helpers to avoid co-compiled private symbol collisions.
+
+Runtime-adjacent decision record:
+
+- `runtime_need`: provide operator/agent JSONL control evidence without routing
+  through the web dashboard.
+- `facade_checked`: runtime pure control decision API and existing serve/request
+  planning evidence APIs.
+- `chosen_path`: expose an in-process response helper first; defer top-level
+  CLI registration until direct runner argv/main behavior is proven.
+- `rejected_shortcuts`: shipping a top-level command that emits blank output,
+  shelling out to dashboard routes, or adding raw process/runtime shortcuts.
+
 ## Implemented Torch Readiness Slice
 
 - `src/lib/common/torch/dyn_sffi_ops.spl`

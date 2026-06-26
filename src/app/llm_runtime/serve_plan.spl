@@ -17,35 +17,37 @@ pub fn llm_runtime_static_serve_plan(manifest: LlmRuntimeManifest) -> LlmRuntime
     val required_status = _required_status(manifest)
     val adapter_status = _adapter_status(manifest.lora_adapters)
     val dynamic_status = _dynamic_status(manifest.dynamic_lora)
-    val status = _plan_status(required_status, adapter_status, dynamic_status)
-    val reason = _plan_reason(status, required_status, adapter_status, dynamic_status)
+    val status = _serve_plan_status(required_status, adapter_status, dynamic_status)
+    val reason = _serve_plan_reason(status, required_status, adapter_status, dynamic_status)
     val base_model = _public_text(manifest.base_model, "missing")
     val endpoint_status = _endpoint_status(manifest.endpoint)
-    val plan = LlmRuntimeServePlan(
+    val command_preview = _command_preview(status, base_model, endpoint_status, manifest.lora_adapters.len(), dynamic_status)
+    LlmRuntimeServePlan(
         status: status,
         reason: reason,
         binary: "vllm",
         base_model: base_model,
         endpoint_status: endpoint_status,
-        command_preview: _command_preview(status, base_model, endpoint_status, manifest.lora_adapters.len(), dynamic_status),
+        command_preview: command_preview,
         lora_adapter_count: manifest.lora_adapters.len(),
         dynamic_lora_status: dynamic_status,
-        evidence_jsonl: ""
+        evidence_jsonl: _serve_plan_jsonl_event(status, reason, "vllm", base_model, endpoint_status, command_preview, manifest.lora_adapters.len(), dynamic_status)
     )
-    plan.evidence_jsonl = llm_runtime_serve_plan_jsonl_event(plan)
-    plan
 
 pub fn llm_runtime_serve_plan_jsonl_event(plan: LlmRuntimeServePlan) -> text:
+    _serve_plan_jsonl_event(plan.status, plan.reason, plan.binary, plan.base_model, plan.endpoint_status, plan.command_preview, plan.lora_adapter_count, plan.dynamic_lora_status)
+
+fn _serve_plan_jsonl_event(status: text, reason: text, binary: text, base_model: text, endpoint_status: text, command_preview: text, lora_adapter_count: i64, dynamic_lora_status: text) -> text:
     LB() +
     jp("event", js("llm_runtime_vllm_serve_plan")) +
-    "," + jp("status", js(plan.status)) +
-    "," + jp("reason", js(plan.reason)) +
-    "," + jp("binary", js(plan.binary)) +
-    "," + jp("base_model", js(plan.base_model)) +
-    "," + jp("endpoint", js(plan.endpoint_status)) +
-    "," + jp("command_preview", js(plan.command_preview)) +
-    "," + jp("lora_adapter_count", str(plan.lora_adapter_count)) +
-    "," + jp("dynamic_lora", js(plan.dynamic_lora_status)) +
+    "," + jp("status", js(status)) +
+    "," + jp("reason", js(reason)) +
+    "," + jp("binary", js(binary)) +
+    "," + jp("base_model", js(base_model)) +
+    "," + jp("endpoint", js(endpoint_status)) +
+    "," + jp("command_preview", js(command_preview)) +
+    "," + jp("lora_adapter_count", str(lora_adapter_count)) +
+    "," + jp("dynamic_lora", js(dynamic_lora_status)) +
     RB() + "\n"
 
 fn _required_status(manifest: LlmRuntimeManifest) -> text:
@@ -86,7 +88,7 @@ fn _dynamic_status(mode: text) -> text:
         return "disabled"
     "blocked"
 
-fn _plan_status(required_status: text, adapter_status: text, dynamic_status: text) -> text:
+fn _serve_plan_status(required_status: text, adapter_status: text, dynamic_status: text) -> text:
     if required_status != "ok":
         return "missing"
     if adapter_status != "ok":
@@ -95,7 +97,7 @@ fn _plan_status(required_status: text, adapter_status: text, dynamic_status: tex
         return "blocked"
     "planned"
 
-fn _plan_reason(status: text, required_status: text, adapter_status: text, dynamic_status: text) -> text:
+fn _serve_plan_reason(status: text, required_status: text, adapter_status: text, dynamic_status: text) -> text:
     if required_status != "ok":
         return required_status
     if adapter_status != "ok":

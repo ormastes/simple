@@ -21,39 +21,42 @@ pub fn llm_runtime_vllm_chat_request_plan(manifest: LlmRuntimeManifest, messages
     _request_plan(manifest, "POST", "/chat/completions", body_status, unsupported_param_count)
 
 pub fn llm_runtime_live_request_plan_jsonl_event(plan: LlmRuntimeLiveRequestPlan) -> text:
+    _live_request_plan_jsonl_event(plan.status, plan.reason, plan.endpoint_status, plan.method, plan.path, plan.url_preview, plan.body_status, plan.unsupported_param_count, plan.execution_status)
+
+fn _live_request_plan_jsonl_event(status: text, reason: text, endpoint_status: text, method: text, path: text, url_preview: text, body_status: text, unsupported_param_count: i64, execution_status: text) -> text:
     LB() +
     jp("event", js("llm_runtime_vllm_live_request_plan")) +
-    "," + jp("status", js(plan.status)) +
-    "," + jp("reason", js(plan.reason)) +
-    "," + jp("endpoint", js(plan.endpoint_status)) +
-    "," + jp("method", js(plan.method)) +
-    "," + jp("path", js(plan.path)) +
-    "," + jp("url_preview", js(plan.url_preview)) +
-    "," + jp("body", js(plan.body_status)) +
-    "," + jp("unsupported_param_count", str(plan.unsupported_param_count)) +
-    "," + jp("execution_status", js(plan.execution_status)) +
+    "," + jp("status", js(status)) +
+    "," + jp("reason", js(reason)) +
+    "," + jp("endpoint", js(endpoint_status)) +
+    "," + jp("method", js(method)) +
+    "," + jp("path", js(path)) +
+    "," + jp("url_preview", js(url_preview)) +
+    "," + jp("body", js(body_status)) +
+    "," + jp("unsupported_param_count", str(unsupported_param_count)) +
+    "," + jp("execution_status", js(execution_status)) +
     RB() + "\n"
 
 fn _request_plan(manifest: LlmRuntimeManifest, method: text, path: text, body_status: text, unsupported_param_count: i64) -> LlmRuntimeLiveRequestPlan:
     val endpoint_status = _endpoint_status(manifest.endpoint)
-    val status = _plan_status(endpoint_status, body_status, unsupported_param_count)
-    val reason = _plan_reason(status, endpoint_status, body_status, unsupported_param_count)
-    val plan = LlmRuntimeLiveRequestPlan(
+    val status = _live_request_plan_status(endpoint_status, body_status, unsupported_param_count)
+    val reason = _live_request_plan_reason(status, endpoint_status, body_status, unsupported_param_count)
+    val url_preview = _url_preview(status, manifest.endpoint, path)
+    val execution_status = "plan_only_not_fetched"
+    LlmRuntimeLiveRequestPlan(
         status: status,
         reason: reason,
         endpoint_status: endpoint_status,
         method: method,
         path: path,
-        url_preview: _url_preview(status, manifest.endpoint, path),
+        url_preview: url_preview,
         body_status: body_status,
         unsupported_param_count: unsupported_param_count,
-        execution_status: "plan_only_not_fetched",
-        evidence_jsonl: ""
+        execution_status: execution_status,
+        evidence_jsonl: _live_request_plan_jsonl_event(status, reason, endpoint_status, method, path, url_preview, body_status, unsupported_param_count, execution_status)
     )
-    plan.evidence_jsonl = llm_runtime_live_request_plan_jsonl_event(plan)
-    plan
 
-fn _plan_status(endpoint_status: text, body_status: text, unsupported_param_count: i64) -> text:
+fn _live_request_plan_status(endpoint_status: text, body_status: text, unsupported_param_count: i64) -> text:
     if endpoint_status != "configured":
         return "missing"
     if body_status == "missing":
@@ -62,7 +65,7 @@ fn _plan_status(endpoint_status: text, body_status: text, unsupported_param_coun
         return "blocked"
     "planned"
 
-fn _plan_reason(status: text, endpoint_status: text, body_status: text, unsupported_param_count: i64) -> text:
+fn _live_request_plan_reason(status: text, endpoint_status: text, body_status: text, unsupported_param_count: i64) -> text:
     if endpoint_status == "missing":
         return "missing_endpoint"
     if endpoint_status == "invalid":
@@ -98,10 +101,10 @@ fn _redact_endpoint(endpoint: text) -> text:
     if scheme == "":
         return value
     val rest = value.slice(scheme.len(), value.len())
-    val at = rest.find("@")
-    if at < 0:
+    val parts = rest.split("@")
+    if parts.len() < 2:
         return value
-    scheme + rest.slice(at + 1, rest.len())
+    scheme + _join_tail(parts, 1, "@")
 
 fn _scheme_prefix(value: text) -> text:
     if value.starts_with("http://"):
@@ -117,6 +120,14 @@ fn _append_path(endpoint: text, path: text) -> text:
     if path.starts_with("/"):
         return base + path
     base + "/" + path
+
+fn _join_tail(parts: [text], start: i64, separator: text) -> text:
+    var out: [text] = []
+    var i = start
+    while i < parts.len():
+        out.push(parts[i])
+        i = i + 1
+    out.join(separator)
 
 export LlmRuntimeLiveRequestPlan
 export llm_runtime_vllm_models_request_plan, llm_runtime_vllm_chat_request_plan, llm_runtime_live_request_plan_jsonl_event

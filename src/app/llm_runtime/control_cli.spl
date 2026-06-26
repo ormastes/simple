@@ -1,0 +1,83 @@
+use app.llm_runtime.manifest.{llm_runtime_manifest}
+use app.llm_runtime.dashboard_live_control.{llm_runtime_execute_dashboard_control, llm_runtime_dashboard_control_execution_jsonl_event}
+
+pub class LlmRuntimeControlCliOptions:
+    action: text
+    base_model: text
+    endpoint: text
+    pid: i64
+    vllm_available: bool
+    gpu_available: bool
+    status: text
+    reason: text
+
+pub fn llm_runtime_control_cli_options(argv: [text]) -> LlmRuntimeControlCliOptions:
+    var opts = LlmRuntimeControlCliOptions(
+        action: "preflight",
+        base_model: "",
+        endpoint: "",
+        pid: -1,
+        vllm_available: false,
+        gpu_available: false,
+        status: "ok",
+        reason: "parsed"
+    )
+    var i = 1
+    while i < argv.len():
+        val arg = argv[i]
+        if arg == "--":
+            i = i + 1
+            continue
+        if not arg.starts_with("--"):
+            i = i + 1
+            continue
+        if arg == "--help" or arg == "-h":
+            opts.status = "usage"
+            opts.reason = "help_requested"
+            return opts
+        if arg == "--action" and i + 1 < argv.len():
+            opts.action = argv[i + 1]
+            i = i + 2
+            continue
+        if arg == "--base-model" and i + 1 < argv.len():
+            opts.base_model = argv[i + 1]
+            i = i + 2
+            continue
+        if arg == "--endpoint" and i + 1 < argv.len():
+            opts.endpoint = argv[i + 1]
+            i = i + 2
+            continue
+        if arg == "--pid" and i + 1 < argv.len():
+            opts.pid = argv[i + 1].to_i64() ?? -1
+            i = i + 2
+            continue
+        if arg == "--vllm-available":
+            opts.vllm_available = true
+            i = i + 1
+            continue
+        if arg == "--gpu-available":
+            opts.gpu_available = true
+            i = i + 1
+            continue
+        opts.status = "usage"
+        opts.reason = "unknown_or_incomplete_option"
+        return opts
+    opts
+
+pub fn llm_runtime_control_cli_response(argv: [text]) -> text:
+    val opts = llm_runtime_control_cli_options(argv)
+    if opts.status == "usage":
+        return "{\"event\":\"llm_runtime_vllm_control_cli\",\"status\":\"usage\",\"reason\":\"" + opts.reason + "\"}\n"
+    val manifest = llm_runtime_manifest(opts.base_model, opts.endpoint, "", [], "disabled")
+    val result = llm_runtime_execute_dashboard_control(manifest, opts.action, opts.pid, opts.vllm_available, opts.gpu_available)
+    llm_runtime_dashboard_control_execution_jsonl_event(result)
+
+pub fn llm_runtime_control_cli_run(argv: [text]) -> i64:
+    val response = llm_runtime_control_cli_response(argv)
+    print(response)
+    if response.contains("\"status\":\"usage\""):
+        return 2
+    0
+
+export LlmRuntimeControlCliOptions
+export llm_runtime_control_cli_options, llm_runtime_control_cli_response, llm_runtime_control_cli_run
