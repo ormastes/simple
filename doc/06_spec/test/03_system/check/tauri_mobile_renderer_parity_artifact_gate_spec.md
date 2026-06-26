@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -83,6 +83,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   files claim pass.
 - Malformed mobile MDI performance and animation detail rows fail even when
   the high-level performance and animation statuses claim pass.
+- The aggregate requires detailed desktop production backend parity rows before
+  accepting mobile renderer evidence.
 - The aggregate emits explicit mobile screenshot and MDI proof file status rows.
 
 ## Scenarios
@@ -97,7 +99,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -109,6 +111,13 @@ expect(code).to_equal(0)
 val evidence = file_read(root + "/stdout.env")
 step("Inspect normalized mobile artifact gate rows")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_exact=true")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_cpu_simd_different_pixels=0")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_metal_resolved=metal")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_metal_different_pixels=0")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_metal_gpu_frame_complete=true")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_blur_or_tolerance_used=false")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len=347702")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status=pass")
@@ -260,6 +269,34 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_f
 
 </details>
 
+#### rejects mobile pass claims with incomplete desktop backend parity details
+
+- Confirm mobile aggregate pass claims require desktop backend parity details
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-bad-production-backend"
+val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("production_gui_web_renderer_parity_backend_metal_gpu_frame_complete=true", "production_gui_web_renderer_parity_backend_metal_gpu_frame_complete=false")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm mobile aggregate pass claims require desktop backend parity details")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=desktop-production-backend-parity-contract-missing")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_metal_resolved=metal")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_metal_gpu_frame_complete=false")
+```
+
+</details>
+
 #### rejects pass claims with non-PNG mobile screenshots
 
 - Confirm screenshot files need PNG signature bytes
@@ -299,7 +336,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -318,6 +355,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_now_
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_frame_available")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status")
+expect(script).to_contain("production_backend_detail_pass")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal_gpu_frame_complete")
 ```
 
 </details>
@@ -326,8 +365,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
