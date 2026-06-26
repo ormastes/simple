@@ -757,8 +757,29 @@ pub(super) fn eval_bdd_builtin(
                 let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
                 let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
                 let (matched, op_word) = match op {
-                    BinOp::Eq => (left_val == right_val, "equal"),
-                    BinOp::NotEq => (left_val != right_val, "not equal"),
+                    // Bridge `nil` (Value::Nil) and `Option::None`: the language's
+                    // `==` treats an empty optional as equal to `nil` (see
+                    // interpreter/expr/ops.rs BinOp::Eq via is_nil_like), but Rust
+                    // `Value::eq` sees distinct variants. Without this bridge,
+                    // `expect(opt == nil).to_equal(true)` / `expect(opt != nil)...`
+                    // over a `-> T?` return silently failed. Operates on the
+                    // already-evaluated values (no re-eval / side effects).
+                    BinOp::Eq => {
+                        let m = if left_val.is_nil_like() || right_val.is_nil_like() {
+                            left_val.is_nil_like() && right_val.is_nil_like()
+                        } else {
+                            left_val == right_val
+                        };
+                        (m, "equal")
+                    }
+                    BinOp::NotEq => {
+                        let m = if left_val.is_nil_like() || right_val.is_nil_like() {
+                            !(left_val.is_nil_like() && right_val.is_nil_like())
+                        } else {
+                            left_val != right_val
+                        };
+                        (m, "not equal")
+                    }
                     // Ordered comparisons (<, <=, >, >=): defer to the
                     // standard binary-expr evaluator and check truthiness on
                     // the resulting Bool — this avoids re-implementing
