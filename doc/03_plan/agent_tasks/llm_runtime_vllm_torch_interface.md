@@ -223,6 +223,12 @@ Evidence:
   `test/unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl` cover explicit
   unsupported status for `read_range`, `register_buffer`, and
   `unregister_buffer`.
+- `src/lib/gc_async_mut/svllm/model_executor/model_loader/streaming_readiness.spl`
+  adds a single readiness gate that combines the existing tensor stream plan
+  with native `read_range`, pinned-buffer, and device-staging capability
+  statuses. The default pack readiness reports `blocked` with
+  `native_read_range_unavailable`; tests also prove it only reports `ready`
+  when all native statuses are `ready`.
 - `release/x86_64-unknown-linux-gnu/simple check
   src/lib/gc_async_mut/torch/backend.spl
   src/lib/nogc_sync_mut/torch/backend.spl
@@ -242,8 +248,9 @@ Evidence:
 Still open:
 
 - Full svLLM streaming through NVFS remains open: async scheduling, native
-  `read_range` execution, pinned buffer registration, and device staging are not
-  covered by the filesystem byte range reader or plan-only stream metadata.
+  `read_range` execution, pinned buffer registration, and device staging are
+  now surfaced by the streaming readiness gate but still report unavailable
+  until real native adapters are implemented.
 - Live CUDA placement against libtorch and device-preserving optimizer state for
   already-CUDA parameters remain open.
 

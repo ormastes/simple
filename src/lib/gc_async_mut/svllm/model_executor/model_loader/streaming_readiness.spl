@@ -1,0 +1,96 @@
+use std.gc_async_mut.svllm.model_executor.model_loader.loader.{LoaderError, load_tensor_stream_plan_from_pack, load_tensor_stream_plan_from_manifest_text}
+
+struct SvllmStreamingReadiness:
+    status: text
+    reason: text
+    plan_status: text
+    execution_status: text
+    read_range_status: text
+    pinned_buffer_status: text
+    device_staging_status: text
+    segment_count: i64
+    total_byte_len: i64
+
+fn _loader_error_reason(error: LoaderError) -> text:
+    match error:
+        LoaderError.PackRootNotFound => "pack_root_not_found"
+        LoaderError.ManifestInvalid => "manifest_invalid"
+        LoaderError.ChunkOpenFailed => "chunk_open_failed"
+        LoaderError.TensorNotFound => "tensor_not_found"
+        LoaderError.TensorRangeInvalid => "tensor_range_invalid"
+        LoaderError.NvfsUnavailable => "nvfs_unavailable"
+        LoaderError.Unimplemented => "unimplemented"
+
+fn _streaming_reason(read_range_status: text, pinned_buffer_status: text, device_staging_status: text) -> text:
+    if read_range_status != "ready":
+        return "native_read_range_unavailable"
+    if pinned_buffer_status != "ready":
+        return "pinned_buffer_registration_unavailable"
+    if device_staging_status != "ready":
+        return "device_staging_unavailable"
+    "ready"
+
+fn svllm_streaming_readiness_from_statuses(pack_root: text, tensor_name: text, read_range_status: text, pinned_buffer_status: text, device_staging_status: text) -> SvllmStreamingReadiness:
+    match load_tensor_stream_plan_from_pack(pack_root, tensor_name, true, true):
+        Err(error) =>
+            SvllmStreamingReadiness(
+                status: "blocked",
+                reason: _loader_error_reason(error),
+                plan_status: "error",
+                execution_status: "not_scheduled",
+                read_range_status: read_range_status,
+                pinned_buffer_status: pinned_buffer_status,
+                device_staging_status: device_staging_status,
+                segment_count: 0,
+                total_byte_len: 0
+            )
+        Ok(plan) =>
+            val reason = _streaming_reason(read_range_status, pinned_buffer_status, device_staging_status)
+            val status = if reason == "ready": "ready" else: "blocked"
+            val execution_status = if status == "ready": "ready_to_schedule" else: plan.execution_status
+            SvllmStreamingReadiness(
+                status: status,
+                reason: reason,
+                plan_status: "ok",
+                execution_status: execution_status,
+                read_range_status: read_range_status,
+                pinned_buffer_status: pinned_buffer_status,
+                device_staging_status: device_staging_status,
+                segment_count: plan.segment_count,
+                total_byte_len: plan.total_byte_len
+            )
+
+fn svllm_streaming_readiness_from_pack(pack_root: text, tensor_name: text) -> SvllmStreamingReadiness:
+    svllm_streaming_readiness_from_statuses(pack_root, tensor_name, "unsupported", "unsupported", "unsupported")
+
+fn svllm_streaming_readiness_from_manifest_text(pack_root: text, manifest_text: text, tensor_name: text, read_range_status: text, pinned_buffer_status: text, device_staging_status: text) -> SvllmStreamingReadiness:
+    match load_tensor_stream_plan_from_manifest_text(pack_root, manifest_text, tensor_name, true, true):
+        Err(error) =>
+            SvllmStreamingReadiness(
+                status: "blocked",
+                reason: _loader_error_reason(error),
+                plan_status: "error",
+                execution_status: "not_scheduled",
+                read_range_status: read_range_status,
+                pinned_buffer_status: pinned_buffer_status,
+                device_staging_status: device_staging_status,
+                segment_count: 0,
+                total_byte_len: 0
+            )
+        Ok(plan) =>
+            val reason = _streaming_reason(read_range_status, pinned_buffer_status, device_staging_status)
+            val status = if reason == "ready": "ready" else: "blocked"
+            val execution_status = if status == "ready": "ready_to_schedule" else: plan.execution_status
+            SvllmStreamingReadiness(
+                status: status,
+                reason: reason,
+                plan_status: "ok",
+                execution_status: execution_status,
+                read_range_status: read_range_status,
+                pinned_buffer_status: pinned_buffer_status,
+                device_staging_status: device_staging_status,
+                segment_count: plan.segment_count,
+                total_byte_len: plan.total_byte_len
+            )
+
+export SvllmStreamingReadiness, svllm_streaming_readiness_from_pack, svllm_streaming_readiness_from_statuses, svllm_streaming_readiness_from_manifest_text
