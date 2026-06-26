@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 61 | 61 | 0 | 0 |
+| 62 | 62 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -277,6 +277,27 @@ expect(_draw_ir_style_value(panel, "resize")).to_equal("both")
 expect(_draw_ir_style_value(panel, "overflow-wrap")).to_equal("break-word")
 expect(_draw_ir_style_value(panel, "word-wrap")).to_equal("break-word")
 expect(_draw_ir_style_value(panel, "word-break")).to_equal("break-all")
+```
+
+</details>
+
+#### emits editor text metadata CSS in Draw IR computed style
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>#editor { caret-color:#06b6d4; tab-size:4; unicode-bidi:plaintext; }</style></head><body><pre id='editor'>A\tB</pre></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 96, 64)
+val batch = composition.batches[0]
+val editor = _draw_ir_command_by_id(batch.commands, "editor")
+
+expect(_draw_ir_style_value(editor, "caret-color")).to_equal("4278630100")
+expect(_draw_ir_style_value(editor, "tab-size")).to_equal("4")
+expect(_draw_ir_style_value(editor, "unicode-bidi")).to_equal("plaintext")
 ```
 
 </details>
@@ -1337,8 +1358,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 61 |
-| Active scenarios | 61 |
+| Total scenarios | 62 |
+| Active scenarios | 62 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
