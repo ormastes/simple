@@ -223,12 +223,13 @@ completion evidence. The 8K row must likewise prove
 same native binary provenance fields. Interpreter or fallback rows remain useful
 diagnostics, but they are not 4K/8K completion evidence.
 The aggregate validates producer-side native artifact proof for completion rows:
-missing alias source, native binary, or native build log status turns an
+missing alias source, native binary, native executable bit, or native build log status turns an
 otherwise passing retained 4K/8K row into a native-artifact failure.
 Producer-side wrapper rows include
 `*_alias_src_file_status`, `*_native_bin_file_status`, and
-`*_native_build_log_file_status` so a reviewer can distinguish a planned probe
-route from a completed native binary measurement with a retained build log.
+`*_native_bin_executable_status`, and `*_native_build_log_file_status` so a
+reviewer can distinguish a planned probe route from a completed native binary
+measurement with a runnable binary and retained build log.
 Use `PLAN_ONLY=1 RESOLUTION=4k|8k
 scripts/check/check-widget-showcase-4k-200fps.shs` to verify wrapper routing
 without launching the expensive native perf run. Plan-only evidence is not
