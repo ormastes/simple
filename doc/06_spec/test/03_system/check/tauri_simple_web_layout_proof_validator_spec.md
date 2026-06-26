@@ -27,7 +27,7 @@ tauri_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,6 +80,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   malformed WebKit expected-profile metadata are rejected.
 - ARGB capture proof paths must resolve to nonempty files instead of relying
   on `captured_argb_written=true` alone.
+- ARGB capture files must parse as `argb-u32` artifacts from the Tauri window
+  screenshot converter, match the requested viewport, contain the exact pixel
+  count, and include nonzero pixels.
 - The live Tauri wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 
@@ -97,7 +100,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -113,11 +116,19 @@ step("Inspect normalized Tauri layout proof rows")
 expect(evidence).to_contain("tauri_simple_web_layout_validation_status=pass")
 expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=pass")
 expect(evidence).to_contain("tauri_simple_web_layout_mismatch_count=0")
+expect(evidence).to_contain("tauri_simple_web_layout_requested_width=96")
+expect(evidence).to_contain("tauri_simple_web_layout_requested_height=64")
 expect(evidence).to_contain("tauri_simple_web_layout_tauri_frame_us=1250")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_path=captured.json")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_written=true")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_file_status=pass")
-expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=2")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_format=argb-u32")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_producer=tauri-x11-window-screenshot")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_width=96")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_height=64")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_pixel_count=6144")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_nonzero_pixel_count=6144")
 expect(evidence).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=false")
 expect(evidence).to_contain("tauri_simple_web_layout_expected_profile=webkitgtk")
 expect(evidence).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=12")
@@ -262,6 +273,78 @@ expect(empty).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=0")
 
 </details>
 
+#### rejects malformed captured ARGB shape and pixel data
+
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-layout-validator-argb-shape"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/malformed.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"{}\")") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/malformed.json > " + root + "/malformed.env; " +
+    _proof_command(root + "/viewport.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:95,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(95*64).fill(4294967295)}))") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/viewport.json > " + root + "/viewport.env; " +
+    _proof_command(root + "/short.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(4).fill(4294967295)}))") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/short.json > " + root + "/short.env; " +
+    _proof_command(root + "/blank.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(96*64).fill(0)}))") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/blank.json > " + root + "/blank.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val malformed = file_read(root + "/malformed.env")
+val viewport = file_read(root + "/viewport.env")
+val short = file_read(root + "/short.env")
+val blank = file_read(root + "/blank.env")
+expect(malformed).to_contain("tauri_simple_web_layout_validation_reason=malformed-captured-argb")
+expect(viewport).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-viewport-mismatch")
+expect(viewport).to_contain("tauri_simple_web_layout_captured_argb_width=95")
+expect(short).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-pixel-count-mismatch")
+expect(short).to_contain("tauri_simple_web_layout_captured_argb_pixel_count=4")
+expect(blank).to_contain("tauri_simple_web_layout_validation_reason=blank-captured-argb")
+expect(blank).to_contain("tauri_simple_web_layout_captured_argb_nonzero_pixel_count=0")
+```
+
+</details>
+
+#### rejects missing or malformed requested viewport proof
+
+-  proof command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-layout-validator-viewport-proof"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/missing.json", "delete p.width;p.height=64.5") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/missing.json > " + root + "/missing.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/missing.env")
+expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=missing-viewport-proof")
+expect(evidence).to_contain("tauri_simple_web_layout_requested_width=")
+expect(evidence).to_contain("tauri_simple_web_layout_requested_height=64.5")
+```
+
+</details>
+
 #### rejects blur tolerance and malformed mismatch counts
 
 -  proof command
@@ -336,7 +419,7 @@ expect(pixel).to_contain("tauri_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -345,6 +428,9 @@ expect(script).to_contain("validate-tauri-simple-web-layout-proof.js")
 expect(script).to_contain("tauri_simple_web_layout_validation_status")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_file_status")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_size_bytes")
+expect(script).to_contain("tauri_simple_web_layout_captured_argb_format")
+expect(script).to_contain("tauri_simple_web_layout_captured_argb_nonzero_pixel_count")
+expect(script).to_contain("tauri_simple_web_layout_requested_width")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
 val converter = file_read("tools/tauri-live-bitmap/raw_rgba_to_argb.js")
@@ -357,8 +443,8 @@ expect(converter).to_contain("captured_argb_path: outputPath")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -31,6 +31,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   malformed WebKit expected-profile metadata are rejected.
 - ARGB capture proof paths must resolve to nonempty files instead of relying
   on `captured_argb_written=true` alone.
+- ARGB capture files must parse as `argb-u32` artifacts from the Tauri window
+  screenshot converter, match the requested viewport, contain the exact pixel
+  count, and include nonzero pixels.
 - The live Tauri wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 """
@@ -41,7 +44,7 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);fs.writeFileSync(path.join(dir,\"captured.json\"),\"{}\");const p={status:\"pass\",reason:\"pass\",width:96,height:64,checksum:100,expected_checksum:100,weighted_checksum:500,expected_weighted_checksum:500,mismatch_count:0,frame_us:1250,captured_argb_path:\"captured.json\",captured_argb_written:true,blur_or_tolerance_used:false,expected_profile:\"webkitgtk\",expected_overlay_pixel_count:12};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);const argb={width:96,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(96*64).fill(4294967295)};fs.writeFileSync(path.join(dir,\"captured.json\"),JSON.stringify(argb));const p={status:\"pass\",reason:\"pass\",width:96,height:64,checksum:100,expected_checksum:100,weighted_checksum:500,expected_weighted_checksum:500,mismatch_count:0,frame_us:1250,captured_argb_path:\"captured.json\",captured_argb_written:true,blur_or_tolerance_used:false,expected_profile:\"webkitgtk\",expected_overlay_pixel_count:12};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Tauri Simple Web layout proof validator":
 
@@ -58,11 +61,19 @@ describe "Tauri Simple Web layout proof validator":
         expect(evidence).to_contain("tauri_simple_web_layout_validation_status=pass")
         expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=pass")
         expect(evidence).to_contain("tauri_simple_web_layout_mismatch_count=0")
+        expect(evidence).to_contain("tauri_simple_web_layout_requested_width=96")
+        expect(evidence).to_contain("tauri_simple_web_layout_requested_height=64")
         expect(evidence).to_contain("tauri_simple_web_layout_tauri_frame_us=1250")
         expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_path=captured.json")
         expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_written=true")
         expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_file_status=pass")
-        expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=2")
+        expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
+        expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_format=argb-u32")
+        expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_producer=tauri-x11-window-screenshot")
+        expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_width=96")
+        expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_height=64")
+        expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_pixel_count=6144")
+        expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_nonzero_pixel_count=6144")
         expect(evidence).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=false")
         expect(evidence).to_contain("tauri_simple_web_layout_expected_profile=webkitgtk")
         expect(evidence).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=12")
@@ -139,6 +150,45 @@ describe "Tauri Simple Web layout proof validator":
         expect(empty).to_contain("tauri_simple_web_layout_captured_argb_file_status=pass")
         expect(empty).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=0")
 
+    it "rejects malformed captured ARGB shape and pixel data":
+        val root = "build/test-tauri-layout-validator-argb-shape"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/malformed.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"{}\")") +
+            " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/malformed.json > " + root + "/malformed.env; " +
+            _proof_command(root + "/viewport.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:95,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(95*64).fill(4294967295)}))") +
+            " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/viewport.json > " + root + "/viewport.env; " +
+            _proof_command(root + "/short.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(4).fill(4294967295)}))") +
+            " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/short.json > " + root + "/short.env; " +
+            _proof_command(root + "/blank.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"tauri-x11-window-screenshot\",pixels:Array(96*64).fill(0)}))") +
+            " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/blank.json > " + root + "/blank.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val malformed = file_read(root + "/malformed.env")
+        val viewport = file_read(root + "/viewport.env")
+        val short = file_read(root + "/short.env")
+        val blank = file_read(root + "/blank.env")
+        expect(malformed).to_contain("tauri_simple_web_layout_validation_reason=malformed-captured-argb")
+        expect(viewport).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-viewport-mismatch")
+        expect(viewport).to_contain("tauri_simple_web_layout_captured_argb_width=95")
+        expect(short).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-pixel-count-mismatch")
+        expect(short).to_contain("tauri_simple_web_layout_captured_argb_pixel_count=4")
+        expect(blank).to_contain("tauri_simple_web_layout_validation_reason=blank-captured-argb")
+        expect(blank).to_contain("tauri_simple_web_layout_captured_argb_nonzero_pixel_count=0")
+
+    it "rejects missing or malformed requested viewport proof":
+        val root = "build/test-tauri-layout-validator-viewport-proof"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/missing.json", "delete p.width;p.height=64.5") +
+            " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/missing.json > " + root + "/missing.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/missing.env")
+        expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=missing-viewport-proof")
+        expect(evidence).to_contain("tauri_simple_web_layout_requested_width=")
+        expect(evidence).to_contain("tauri_simple_web_layout_requested_height=64.5")
+
     it "rejects blur tolerance and malformed mismatch counts":
         val root = "build/test-tauri-layout-validator-blur-mismatch"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
@@ -181,6 +231,9 @@ describe "Tauri Simple Web layout proof validator":
         expect(script).to_contain("tauri_simple_web_layout_validation_status")
         expect(script).to_contain("tauri_simple_web_layout_captured_argb_file_status")
         expect(script).to_contain("tauri_simple_web_layout_captured_argb_size_bytes")
+        expect(script).to_contain("tauri_simple_web_layout_captured_argb_format")
+        expect(script).to_contain("tauri_simple_web_layout_captured_argb_nonzero_pixel_count")
+        expect(script).to_contain("tauri_simple_web_layout_requested_width")
         expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
         expect(script).to_contain("status=divergent")
         val converter = file_read("tools/tauri-live-bitmap/raw_rgba_to_argb.js")
