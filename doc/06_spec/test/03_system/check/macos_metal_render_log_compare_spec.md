@@ -171,8 +171,7 @@ macos_metal_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
--Runnable source: 21 lines folded for reproduction.
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -189,6 +188,8 @@ val evidence = file_read("build/test-macos-metal-render-log-pass/out/evidence.en
 expect(evidence).to_contain("macos_metal_render_log_compare_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_required_api=metal")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact=frame.gputrace")
+expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE")
 expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gate_count=0")
 expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=")
 expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_gate_status=pass")
@@ -214,7 +215,6 @@ expect(simple_log).to_contain("simple_render_log_artifact_magic=XCODE-GPUTRACE")
 <details>
 <summary>Executable SSpec</summary>
 
--Runnable source: 11 lines folded for reproduction.
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
@@ -241,7 +241,6 @@ expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=metal-
 <details>
 <summary>Executable SSpec</summary>
 
--Runnable source: 14 lines folded for reproduction.
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
@@ -272,7 +271,6 @@ expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=browse
 <details>
 <summary>Executable SSpec</summary>
 
--Runnable source: 14 lines folded for reproduction.
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
@@ -302,7 +300,6 @@ expect(chrome_log).to_contain("simple_render_log_nonblank_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
--Runnable source: 12 lines folded for reproduction.
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
@@ -330,7 +327,6 @@ expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=argb-s
 <details>
 <summary>Executable SSpec</summary>
 
--Runnable source: 13 lines folded for reproduction.
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
