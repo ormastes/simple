@@ -2,6 +2,8 @@ use app.web_dashboard.dashboard_html.{generate_full_dashboard_html_with_diagnost
 use app.llm_dashboard.collectors.diagnostics_jsonl_collector.{collect_llm_diagnostics_jsonl, render_llm_diagnostics_panel_html}
 use app.llm_dashboard.collectors.tooling_artifact_collector.{collect_llm_tooling_artifacts, render_llm_tooling_artifacts_panel_html}
 use app.llm_dashboard.collectors.vllm_control_panel.{collect_llm_dashboard_vllm_control_preflight, collect_llm_dashboard_vllm_control_action_with_overrides, render_llm_dashboard_vllm_control_panel_html}
+use app.llm_runtime.dashboard_live_control.{llm_runtime_execute_dashboard_control_jsonl}
+use app.llm_runtime.manifest.{llm_runtime_manifest_from_text}
 use app.dashboard.assistant_bridge.{assistant_bridge_default_policy}
 use app.dashboard.assistant_collectors.{collect_assistant_snapshot_from_root}
 use app.dashboard.assistant_live_view.{assistant_dashboard_live_view_from_snapshot, assistant_dashboard_render_live_view}
@@ -114,6 +116,10 @@ pub struct DashboardServer:
         val endpoint = _query_value(path, "endpoint")
         val vllm_available = _query_bool_either(path, "vllm_available", "vllm-available", true)
         val gpu_available = _query_bool_either(path, "gpu_available", "gpu-available", true)
+        val selected_base_model = _selected_non_empty(base_model, fallback_base_model)
+        if _is_vllm_side_effect_action(action):
+            val manifest = llm_runtime_manifest_from_text(_vllm_manifest_text_with_overrides(self.vllm_manifest_text, selected_base_model, endpoint))
+            return llm_runtime_execute_dashboard_control_jsonl(manifest, action, pid, vllm_available, gpu_available)
         if base_model.trim() != "":
             return collect_llm_dashboard_vllm_control_action_with_overrides(self.vllm_manifest_text, action, pid, base_model, endpoint, vllm_available, gpu_available).evidence_jsonl
         collect_llm_dashboard_vllm_control_action_with_overrides(self.vllm_manifest_text, action, pid, fallback_base_model, endpoint, vllm_available, gpu_available).evidence_jsonl
@@ -172,3 +178,20 @@ fn _query_bool_either(path: text, first: text, second: text, fallback: bool) -> 
     if first_value.trim() != "":
         return _query_bool(path, first, fallback)
     _query_bool(path, second, fallback)
+
+fn _selected_non_empty(first: text, second: text) -> text:
+    if first.trim() != "":
+        return first
+    second
+
+fn _is_vllm_side_effect_action(action: text) -> bool:
+    val normalized = action.trim().to_lower()
+    normalized == "start" or normalized == "poll" or normalized == "probe" or normalized == "stop"
+
+fn _vllm_manifest_text_with_overrides(manifest_text: text, base_model: text, endpoint: text) -> text:
+    var out = manifest_text
+    if base_model.trim() != "":
+        out = out + "\nbase_model=" + base_model.trim()
+    if endpoint.trim() != "":
+        out = out + "\nendpoint=" + endpoint.trim()
+    out

@@ -28,7 +28,7 @@ vllm_control_route_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -102,12 +102,12 @@ expect(response.contains(_absence_marker())).to_equal(false)
 
 </details>
 
-#### returns skipped evidence when query-style resource flags report missing vLLM
+#### routes missing-resource start through runtime execution JSONL without spawning
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -115,11 +115,33 @@ val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", _manifest(
 val response = server.route_http("GET", "/api/vllm/control?action=start&vllm_available=false&gpu_available=true", "", "sid")
 
 expect(response).to_contain("HTTP/1.1 200 OK")
+expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
 expect(response).to_contain("\"action\":\"start\"")
 expect(response).to_contain("\"status\":\"skipped\"")
 expect(response).to_contain("\"reason\":\"missing_local_vllm\"")
 expect(response).to_contain("\"requires_runtime_executor\":false")
 expect(response.contains(_absence_marker())).to_equal(false)
+```
+
+</details>
+
+#### routes poll, probe, and stop through runtime execution JSONL with safe invalid-pid inputs
+
+-  assert safe runtime action
+-  assert safe runtime action
+-  assert safe runtime action
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+_assert_safe_runtime_action("action=poll&pid=0&vllm_available=true&gpu_available=true", "poll", "not_ready", "invalid_pid")
+_assert_safe_runtime_action("action=probe&pid=0&vllm_available=true&gpu_available=true", "probe", "not_ready", "invalid_pid")
+_assert_safe_runtime_action("action=stop&pid=0&vllm_available=true&gpu_available=true", "stop", "not_stopped", "invalid_pid")
 ```
 
 </details>
@@ -146,27 +168,32 @@ expect(response.contains(_absence_marker())).to_equal(false)
 
 </details>
 
-#### keeps the web route on the dashboard-safe collector boundary
+#### keeps preflight on the collector and side-effect actions on runtime-owner execution JSONL
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val server_source = _read_source(SERVER_PATH)
 val collector_source = _read_source(COLLECTOR_PATH)
 val runtime_boundary = _read_source(RUNTIME_BOUNDARY_PATH)
+val live_executor = _read_source(LIVE_EXECUTOR_PATH)
 
 expect(server_source).to_contain("collect_llm_dashboard_vllm_control_action_with_overrides")
+expect(server_source).to_contain("llm_runtime_execute_dashboard_control_jsonl")
+expect(server_source).to_contain("_is_vllm_side_effect_action")
 expect(server_source).to_contain("if path.starts_with(\"/api/vllm/control\")")
 expect(server_source).to_contain("vllm_available")
 expect(server_source).to_contain("gpu_available")
 expect(server_source.contains("dashboard_live_control_executor")).to_equal(false)
 expect(collector_source).to_contain("llm_runtime_execute_dashboard_control")
+expect(collector_source).to_contain("requires_runtime_executor")
 expect(runtime_boundary).to_contain("process_access")
 expect(runtime_boundary).to_contain("http_access")
+expect(live_executor).to_contain("llm_runtime_execute_dashboard_control_live")
 ```
 
 </details>
@@ -190,8 +217,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

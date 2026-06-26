@@ -7,6 +7,7 @@ use app.web_dashboard.server.{DashboardServer}
 val SERVER_PATH = "src/app/web_dashboard/server.spl"
 val COLLECTOR_PATH = "src/app/llm_dashboard/collectors/vllm_control_panel.spl"
 val RUNTIME_BOUNDARY_PATH = "src/app/llm_runtime/dashboard_live_control.spl"
+val LIVE_EXECUTOR_PATH = "src/app/llm_runtime/dashboard_live_control_executor.spl"
 
 fn _read_source(path: text) -> text:
     file_read(path)
@@ -16,6 +17,18 @@ fn _manifest() -> text:
 
 fn _absence_marker() -> text:
     "n" + "il"
+
+fn _assert_safe_runtime_action(path_suffix: text, action: text, status: text, reason: text):
+    val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", _manifest())
+    val response = server.route_http("GET", "/api/vllm/control?" + path_suffix, "", "sid")
+
+    expect(response).to_contain("HTTP/1.1 200 OK")
+    expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
+    expect(response).to_contain("\"action\":\"" + action + "\"")
+    expect(response).to_contain("\"status\":\"" + status + "\"")
+    expect(response).to_contain("\"reason\":\"" + reason + "\"")
+    expect(response.contains("base-model")).to_equal(false)
+    expect(response.contains(_absence_marker())).to_equal(false)
 
 describe "vLLM dashboard control web route":
     it "serves authenticated preflight control JSONL":
@@ -48,16 +61,22 @@ describe "vLLM dashboard control web route":
         expect(response.contains("base-model")).to_equal(false)
         expect(response.contains(_absence_marker())).to_equal(false)
 
-    it "returns skipped evidence when query-style resource flags report missing vLLM":
+    it "routes missing-resource start through runtime execution JSONL without spawning":
         val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", _manifest())
         val response = server.route_http("GET", "/api/vllm/control?action=start&vllm_available=false&gpu_available=true", "", "sid")
 
         expect(response).to_contain("HTTP/1.1 200 OK")
+        expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
         expect(response).to_contain("\"action\":\"start\"")
         expect(response).to_contain("\"status\":\"skipped\"")
         expect(response).to_contain("\"reason\":\"missing_local_vllm\"")
         expect(response).to_contain("\"requires_runtime_executor\":false")
         expect(response.contains(_absence_marker())).to_equal(false)
+
+    it "routes poll, probe, and stop through runtime execution JSONL with safe invalid-pid inputs":
+        _assert_safe_runtime_action("action=poll&pid=0&vllm_available=true&gpu_available=true", "poll", "not_ready", "invalid_pid")
+        _assert_safe_runtime_action("action=probe&pid=0&vllm_available=true&gpu_available=true", "probe", "not_ready", "invalid_pid")
+        _assert_safe_runtime_action("action=stop&pid=0&vllm_available=true&gpu_available=true", "stop", "not_stopped", "invalid_pid")
 
     it "embeds the vLLM control panel in authenticated dashboard HTML":
         val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", _manifest())
@@ -70,16 +89,21 @@ describe "vLLM dashboard control web route":
         expect(response).to_contain("value=\"probe\"")
         expect(response.contains(_absence_marker())).to_equal(false)
 
-    it "keeps the web route on the dashboard-safe collector boundary":
+    it "keeps preflight on the collector and side-effect actions on runtime-owner execution JSONL":
         val server_source = _read_source(SERVER_PATH)
         val collector_source = _read_source(COLLECTOR_PATH)
         val runtime_boundary = _read_source(RUNTIME_BOUNDARY_PATH)
+        val live_executor = _read_source(LIVE_EXECUTOR_PATH)
 
         expect(server_source).to_contain("collect_llm_dashboard_vllm_control_action_with_overrides")
+        expect(server_source).to_contain("llm_runtime_execute_dashboard_control_jsonl")
+        expect(server_source).to_contain("_is_vllm_side_effect_action")
         expect(server_source).to_contain("if path.starts_with(\"/api/vllm/control\")")
         expect(server_source).to_contain("vllm_available")
         expect(server_source).to_contain("gpu_available")
         expect(server_source.contains("dashboard_live_control_executor")).to_equal(false)
         expect(collector_source).to_contain("llm_runtime_execute_dashboard_control")
+        expect(collector_source).to_contain("requires_runtime_executor")
         expect(runtime_boundary).to_contain("process_access")
         expect(runtime_boundary).to_contain("http_access")
+        expect(live_executor).to_contain("llm_runtime_execute_dashboard_control_live")

@@ -415,6 +415,17 @@ Tasks:
     values through the dashboard-safe collector facade into the runtime-owned
     planner, so missing local resources produce explicit `skipped` evidence and
     endpoint/model overrides can plan preflight without exposing model ids.
+17. Wire side-effect dashboard actions through runtime-owner execution JSONL.
+    Status: done for deterministic
+    `/api/vllm/control?action=start|poll|probe|stop` evidence:
+    `src/app/web_dashboard/server.spl` keeps preflight on the collector path but
+    routes side-effect API responses through
+    `llm_runtime_execute_dashboard_control_jsonl(...)`.
+    `test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl`
+    proves the route returns `llm_runtime_vllm_dashboard_control_execution`
+    JSONL for missing-resource or invalid-pid inputs, so no process is spawned
+    or stopped during the system spec. The host-dependent live executor remains
+    in `app.llm_runtime.dashboard_live_control_executor`.
 
 ## Sidecars
 
@@ -428,9 +439,9 @@ Tasks:
 - Torch model execution beyond readiness probes.
 - Live endpoint availability evidence against an installed local `vllm`.
 - Live dashboard route wiring of start, poll, probe, and stop against an
-  installed local `vllm`; the runtime owner now has a live wrapper, but the web
-  dashboard route remains intent-only until integration evidence proves the
-  process/HTTP imports do not reintroduce dashboard test teardown diagnostics.
+  installed local `vllm`; the web dashboard route now emits runtime-owner
+  execution JSONL for side-effect actions, but the host-dependent live executor
+  proof is still deferred until an installed local `vllm` is available.
 
 Runtime-adjacent decision record for live HTTP transport:
 

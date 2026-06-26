@@ -1,29 +1,227 @@
-# vLLM Dashboard Control Route System Specification
+# Vllm Control Route Specification
 
-## Purpose
+> <details>
 
-This manual mirrors
-`test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl`.
-It verifies the authenticated web-dashboard `/api/vllm/control` route and the
-embedded dashboard control panel for the vLLM runtime lane.
+<!-- sdn-diagram:id=vllm_control_route_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
 
-## Coverage
+```sdn id=vllm_control_route_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
 
-- Authenticated `GET /api/vllm/control?action=preflight` returns
-  `llm_dashboard_vllm_control_panel` JSONL.
-- Unauthenticated API requests fail with `401 Unauthorized`.
-- Query-style `base_model`, `endpoint`, `vllm_available`, and `gpu_available`
-  parameters are accepted.
-- Public responses redact model ids and do not expose the internal absence
-  marker.
-- The dashboard HTML embeds the vLLM control panel form.
-- The web route stays on the dashboard-safe collector boundary and does not
-  import the live executor directly.
-
-## Verification
-
-Run:
-
-```sh
-release/x86_64-unknown-linux-gnu/simple test test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl --mode=interpreter --clean
+vllm_control_route_spec -> std
+vllm_control_route_spec -> app
 ```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=vllm_control_route_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 7 | 7 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Vllm Control Route Specification
+
+## Scenarios
+
+### vLLM dashboard control web route
+
+#### serves authenticated preflight control JSONL
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", _manifest())
+val response = server.route_http("GET", "/api/vllm/control?action=preflight", "", "sid")
+
+expect(response).to_contain("HTTP/1.1 200 OK")
+expect(response).to_contain("Content-Type: application/json")
+expect(response).to_contain("\"event\":\"llm_dashboard_vllm_control_panel\"")
+expect(response).to_contain("\"action\":\"preflight\"")
+expect(response).to_contain("\"status\":\"planned\"")
+expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
+expect(response.contains("base-model")).to_equal(false)
+expect(response.contains(_absence_marker())).to_equal(false)
+```
+
+</details>
+
+#### rejects unauthenticated vLLM control API requests
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", _manifest())
+val response = server.route_http("GET", "/api/vllm/control?action=preflight", "", "")
+
+expect(response).to_contain("HTTP/1.1 401 Unauthorized")
+expect(response).to_contain("Authentication required")
+```
+
+</details>
+
+#### accepts query-style model and endpoint overrides without leaking model ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", "")
+val response = server.route_http("GET", "/api/vllm/control?action=preflight&base_model=base-model&endpoint=http://127.0.0.1:8000/v1", "", "sid")
+
+expect(response).to_contain("HTTP/1.1 200 OK")
+expect(response).to_contain("\"status\":\"planned\"")
+expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
+expect(response.contains("base-model")).to_equal(false)
+expect(response.contains(_absence_marker())).to_equal(false)
+```
+
+</details>
+
+#### routes missing-resource start through runtime execution JSONL without spawning
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", _manifest())
+val response = server.route_http("GET", "/api/vllm/control?action=start&vllm_available=false&gpu_available=true", "", "sid")
+
+expect(response).to_contain("HTTP/1.1 200 OK")
+expect(response).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
+expect(response).to_contain("\"action\":\"start\"")
+expect(response).to_contain("\"status\":\"skipped\"")
+expect(response).to_contain("\"reason\":\"missing_local_vllm\"")
+expect(response).to_contain("\"requires_runtime_executor\":false")
+expect(response.contains(_absence_marker())).to_equal(false)
+```
+
+</details>
+
+#### routes poll, probe, and stop through runtime execution JSONL with safe invalid-pid inputs
+
+-  assert safe runtime action
+-  assert safe runtime action
+-  assert safe runtime action
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+_assert_safe_runtime_action("action=poll&pid=0&vllm_available=true&gpu_available=true", "poll", "not_ready", "invalid_pid")
+_assert_safe_runtime_action("action=probe&pid=0&vllm_available=true&gpu_available=true", "probe", "not_ready", "invalid_pid")
+_assert_safe_runtime_action("action=stop&pid=0&vllm_available=true&gpu_available=true", "stop", "not_stopped", "invalid_pid")
+```
+
+</details>
+
+#### embeds the vLLM control panel in authenticated dashboard HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server = DashboardServer.new_with_vllm_manifest(3099, "", "", "", _manifest())
+val response = server.route_http("GET", "/", "", "sid")
+
+expect(response).to_contain("HTTP/1.1 200 OK")
+expect(response).to_contain("id=\"llm-vllm-control-panel\"")
+expect(response).to_contain("action=\"/api/vllm/control\"")
+expect(response).to_contain("value=\"start\"")
+expect(response).to_contain("value=\"probe\"")
+expect(response.contains(_absence_marker())).to_equal(false)
+```
+
+</details>
+
+#### keeps preflight on the collector and side-effect actions on runtime-owner execution JSONL
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server_source = _read_source(SERVER_PATH)
+val collector_source = _read_source(COLLECTOR_PATH)
+val runtime_boundary = _read_source(RUNTIME_BOUNDARY_PATH)
+val live_executor = _read_source(LIVE_EXECUTOR_PATH)
+
+expect(server_source).to_contain("collect_llm_dashboard_vllm_control_action_with_overrides")
+expect(server_source).to_contain("llm_runtime_execute_dashboard_control_jsonl")
+expect(server_source).to_contain("_is_vllm_side_effect_action")
+expect(server_source).to_contain("if path.starts_with(\"/api/vllm/control\")")
+expect(server_source).to_contain("vllm_available")
+expect(server_source).to_contain("gpu_available")
+expect(server_source.contains("dashboard_live_control_executor")).to_equal(false)
+expect(collector_source).to_contain("llm_runtime_execute_dashboard_control")
+expect(collector_source).to_contain("requires_runtime_executor")
+expect(runtime_boundary).to_contain("process_access")
+expect(runtime_boundary).to_contain("http_access")
+expect(live_executor).to_contain("llm_runtime_execute_dashboard_control_live")
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/feature/app/web_dashboard/vllm_control_route_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- vLLM dashboard control web route
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 7 |
+| Active scenarios | 7 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
