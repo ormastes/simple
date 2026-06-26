@@ -40,6 +40,9 @@ assistant_digest_spec -> app
 
 #### renders digest checkpoint, summary, task summaries, and warnings without internal absence marker
 
+- expect absence marker hidden
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -58,12 +61,15 @@ expect(view.recent_detail).to_equal("recent detail")
 expect(view.task_summary_count).to_equal(1)
 expect(view.warning_count).to_equal(1)
 expect(view.notification_count).to_equal(1)
-expect(rendered.split(internal_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(rendered)
 ```
 
 </details>
 
 #### renders missing selected sessions as option-like digest absence
+
+- expect absence marker hidden
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -88,7 +94,7 @@ val rendered = lines.join("\n")
 expect(view.status).to_equal("missing")
 expect(view.checkpoint_id).to_equal("none")
 expect(view.summary).to_equal("none")
-expect(rendered.split(internal_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(rendered)
 ```
 
 </details>

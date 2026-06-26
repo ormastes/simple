@@ -40,6 +40,9 @@ assistant_live_view_spec -> app
 
 #### renders replay snapshots as read-only without internal absence marker text
 
+- expect absence marker hidden
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -56,8 +59,8 @@ val rendered = lines.join("\n")
 expect(view.read_only).to_equal(true)
 expect(view.live_controls_enabled).to_equal(false)
 expect(view.primary_action.route_target).to_equal("blocked")
-expect(rendered.split(internal_absence_marker()).len()).to_equal(1)
-expect(rendered.contains("replay snapshot is read-only")).to_equal(true)
+expect_absence_marker_hidden(rendered)
+expect(rendered).to_contain("replay snapshot is read-only")
 ```
 
 </details>
@@ -104,12 +107,15 @@ expect(view.live_controls_enabled).to_equal(false)
 expect(view.freshness_state).to_equal("stale")
 expect(view.primary_action.allowed).to_equal(false)
 expect(view.failure_state).to_equal("bridge_stale")
-expect(lines.join("\n").contains("refresh required before operator actions")).to_equal(true)
+expect(lines.join("\n")).to_contain("refresh required before operator actions")
 ```
 
 </details>
 
 #### renders assistant crash evidence from failed session metadata
+
+- expect absence marker hidden
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -127,13 +133,16 @@ val rendered = lines.join("\n")
 expect(view.failure_state).to_equal("error")
 expect(view.failure_count).to_equal(1)
 expect(view.failure_detail).to_equal("model process crashed")
-expect(rendered.contains("failure error model process crashed")).to_equal(true)
-expect(rendered.split(internal_absence_marker()).len()).to_equal(1)
+expect(rendered).to_contain("failure error model process crashed")
+expect_absence_marker_hidden(rendered)
 ```
 
 </details>
 
 #### renders missing selected-session evidence without internal absence marker text
+
+- expect absence marker hidden
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -158,7 +167,7 @@ val rendered = lines.join("\n")
 
 expect(view.failure_state).to_equal("missing")
 expect(view.failure_detail).to_equal("selected session unavailable")
-expect(rendered.split(internal_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(rendered)
 ```
 
 </details>

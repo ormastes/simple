@@ -50,7 +50,7 @@ assistant_retention_spec -> app
    - Expected: projection.dropped_timeline_count equals `3`
    - Expected: projection.dropped_notification_count equals `1`
    - Expected: projection.backpressure_state equals `backpressure`
-   - Expected: projection.notice.split(internal_absence_marker()).len() equals `1`
+- expect absence marker hidden
    - Expected: projection.visible_timeline[0].event_id equals `event-3`
 
 
@@ -79,7 +79,7 @@ expect(projection.retained_notification_count).to_equal(3)
 expect(projection.dropped_timeline_count).to_equal(3)
 expect(projection.dropped_notification_count).to_equal(1)
 expect(projection.backpressure_state).to_equal("backpressure")
-expect(projection.notice.split(internal_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(projection.notice)
 expect(projection.visible_timeline[0].event_id).to_equal("event-3")
 ```
 
@@ -98,7 +98,6 @@ expect(projection.visible_timeline[0].event_id).to_equal("event-3")
    - Expected: projection.coalesced_notification_count equals `1`
    - Expected: projection.dropped_timeline_count equals `0`
    - Expected: projection.dropped_notification_count equals `1`
-   - Expected: projection.notice contains `signals_coalesced=3`
 
 
 <details>
@@ -127,7 +126,7 @@ expect(projection.coalesced_signal_count).to_equal(3)
 expect(projection.coalesced_notification_count).to_equal(1)
 expect(projection.dropped_timeline_count).to_equal(0)
 expect(projection.dropped_notification_count).to_equal(1)
-expect(projection.notice.contains("signals_coalesced=3")).to_equal(true)
+expect(projection.notice).to_contain("signals_coalesced=3")
 ```
 
 </details>

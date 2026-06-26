@@ -41,6 +41,9 @@ vllm_control_route_spec -> app
 
 #### serves authenticated preflight control JSONL
 
+- expect absence marker hidden
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -58,7 +61,7 @@ expect(response).to_contain("\"action\":\"preflight\"")
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
 expect(response.split("base-model").len()).to_equal(1)
-expect(response.split(_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(response)
 ```
 
 </details>
@@ -83,6 +86,9 @@ expect(response).to_contain("Authentication required")
 
 #### accepts query-style model and endpoint overrides without leaking model ids
 
+- expect absence marker hidden
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -97,12 +103,15 @@ expect(response).to_contain("HTTP/1.1 200 OK")
 expect(response).to_contain("\"status\":\"planned\"")
 expect(response).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
 expect(response.split("base-model").len()).to_equal(1)
-expect(response.split(_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(response)
 ```
 
 </details>
 
 #### routes missing-resource start through runtime execution JSONL without spawning
+
+- expect absence marker hidden
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -120,12 +129,15 @@ expect(response).to_contain("\"action\":\"start\"")
 expect(response).to_contain("\"status\":\"skipped\"")
 expect(response).to_contain("\"reason\":\"missing_local_vllm\"")
 expect(response).to_contain("\"requires_runtime_executor\":false")
-expect(response.split(_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(response)
 ```
 
 </details>
 
 #### routes missing GPU start through runtime execution JSONL without spawning
+
+- expect absence marker hidden
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -144,12 +156,15 @@ expect(response).to_contain("\"status\":\"skipped\"")
 expect(response).to_contain("\"reason\":\"missing_local_gpu\"")
 expect(response).to_contain("\"models_reason\":\"environment_skipped\"")
 expect(response).to_contain("\"requires_runtime_executor\":false")
-expect(response.split(_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(response)
 ```
 
 </details>
 
 #### routes missing vLLM and GPU start through runtime execution JSONL without spawning
+
+- expect absence marker hidden
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -168,7 +183,7 @@ expect(response).to_contain("\"status\":\"skipped\"")
 expect(response).to_contain("\"reason\":\"missing_local_vllm_and_gpu\"")
 expect(response).to_contain("\"models_reason\":\"environment_skipped\"")
 expect(response).to_contain("\"requires_runtime_executor\":false")
-expect(response.split(_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(response)
 ```
 
 </details>
@@ -196,6 +211,9 @@ _assert_safe_runtime_action("action=stop&pid=0&vllm_available=true&gpu_available
 
 #### embeds the vLLM control panel in authenticated dashboard HTML
 
+- expect absence marker hidden
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -211,7 +229,7 @@ expect(response).to_contain("id=\"llm-vllm-control-panel\"")
 expect(response).to_contain("action=\"/api/vllm/control\"")
 expect(response).to_contain("value=\"start\"")
 expect(response).to_contain("value=\"probe\"")
-expect(response.split(_absence_marker()).len()).to_equal(1)
+expect_absence_marker_hidden(response)
 ```
 
 </details>
