@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const fs = require('fs');
+const path = require('path');
 
 function clean(value) {
   if (value === undefined || value === null) return '';
@@ -35,6 +36,27 @@ function integerTextOrClean(value) {
   return text === null ? clean(value) : text;
 }
 
+function artifactStat(value, proofPath) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return null;
+  }
+  const raw = value.trim();
+  const candidates = path.isAbsolute(raw)
+    ? [raw]
+    : [raw, path.join(path.dirname(proofPath), raw)];
+  for (const candidate of candidates) {
+    try {
+      const stat = fs.statSync(candidate);
+      if (stat.isFile()) {
+        return { stat, path: candidate };
+      }
+    } catch (_err) {
+      // Try the next candidate.
+    }
+  }
+  return null;
+}
+
 const proofPath = process.argv[2];
 if (!proofPath) {
   emit('chrome_simple_web_layout_validation_status', 'fail');
@@ -50,6 +72,9 @@ try {
   emit('chrome_simple_web_layout_validation_reason', `invalid-json:${err && err.message ? err.message : err}`);
   process.exit(1);
 }
+
+const capturedArgbStat = artifactStat(proof.captured_argb_path, proofPath);
+const geometryStat = artifactStat(proof.geometry_path, proofPath);
 
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
@@ -68,8 +93,16 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'pixel-mismatch';
 } else if (proof.captured_argb_written !== true) {
   reason = 'missing-captured-argb';
+} else if (capturedArgbStat === null) {
+  reason = 'missing-captured-argb-file';
+} else if (capturedArgbStat.stat.size <= 0) {
+  reason = 'empty-captured-argb-file';
 } else if (proof.geometry_written !== true) {
   reason = 'missing-chrome-geometry';
+} else if (geometryStat === null) {
+  reason = 'missing-chrome-geometry-file';
+} else if (geometryStat.stat.size <= 0) {
+  reason = 'empty-chrome-geometry-file';
 } else if (!integerAtLeast(proof.width, 1) || !integerAtLeast(proof.height, 1)) {
   reason = 'missing-capture-viewport';
 } else if (!integerAtLeast(proof.frame_us, 1)) {
@@ -87,8 +120,14 @@ emit('chrome_simple_web_layout_blur_or_tolerance_used', proof.blur_or_tolerance_
 emit('chrome_simple_web_layout_chrome_frame_us', integerTextOrClean(proof.frame_us));
 emit('chrome_simple_web_layout_capture_width', integerTextOrClean(proof.width));
 emit('chrome_simple_web_layout_capture_height', integerTextOrClean(proof.height));
+emit('chrome_simple_web_layout_captured_argb_path', proof.captured_argb_path);
 emit('chrome_simple_web_layout_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
+emit('chrome_simple_web_layout_captured_argb_file_status', capturedArgbStat === null ? 'fail' : 'pass');
+emit('chrome_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
+emit('chrome_simple_web_layout_geometry_path', proof.geometry_path);
 emit('chrome_simple_web_layout_geometry_written', proof.geometry_written === true ? 'true' : 'false');
+emit('chrome_simple_web_layout_geometry_file_status', geometryStat === null ? 'fail' : 'pass');
+emit('chrome_simple_web_layout_geometry_size_bytes', geometryStat === null ? '' : String(geometryStat.stat.size));
 emit('chrome_simple_web_layout_chrome_bin', proof.chrome_bin);
 
 if (reason !== 'pass') {

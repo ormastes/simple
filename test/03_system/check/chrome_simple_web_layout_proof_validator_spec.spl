@@ -29,6 +29,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   comparison behavior.
 - Blur/tolerance use, missing ARGB capture, missing geometry, malformed
   mismatch counts, and checksum mismatches are rejected.
+- ARGB capture and Chrome geometry proof paths must resolve to nonempty files
+  instead of relying on boolean flags alone.
 - Capture viewport dimensions must be explicit positive decimal integers and
   are emitted as normalized rows for the live wrapper to compare against the
   requested Chrome viewport.
@@ -42,10 +44,10 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={checksum:100,expected_checksum:100,weighted_checksum:500,expected_weighted_checksum:500,mismatch_count:0,width:96,height:64,frame_us:1250,captured_argb_written:true,geometry_written:true,blur_or_tolerance_used:false,chrome_bin:\"/usr/bin/google-chrome\"};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);fs.writeFileSync(path.join(dir,\"captured.json\"),\"{}\");fs.writeFileSync(path.join(dir,\"geometry.json\"),\"{}\");const p={checksum:100,expected_checksum:100,weighted_checksum:500,expected_weighted_checksum:500,mismatch_count:0,width:96,height:64,frame_us:1250,captured_argb_path:\"captured.json\",captured_argb_written:true,geometry_path:\"geometry.json\",geometry_written:true,blur_or_tolerance_used:false,chrome_bin:\"/usr/bin/google-chrome\"};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 fn _large_proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={checksum:\"18446744073709551610\",expected_checksum:\"18446744073709551610\",weighted_checksum:\"18446744073709551611\",expected_weighted_checksum:\"18446744073709551611\",mismatch_count:0,width:96,height:64,frame_us:1250,captured_argb_written:true,geometry_written:true,blur_or_tolerance_used:false,chrome_bin:\"/usr/bin/google-chrome\"};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);fs.writeFileSync(path.join(dir,\"captured.json\"),\"{}\");fs.writeFileSync(path.join(dir,\"geometry.json\"),\"{}\");const p={checksum:\"18446744073709551610\",expected_checksum:\"18446744073709551610\",weighted_checksum:\"18446744073709551611\",expected_weighted_checksum:\"18446744073709551611\",mismatch_count:0,width:96,height:64,frame_us:1250,captured_argb_path:\"captured.json\",captured_argb_written:true,geometry_path:\"geometry.json\",geometry_written:true,blur_or_tolerance_used:false,chrome_bin:\"/usr/bin/google-chrome\"};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Chrome Simple Web layout proof validator":
 
@@ -65,8 +67,14 @@ describe "Chrome Simple Web layout proof validator":
         expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=1250")
         expect(evidence).to_contain("chrome_simple_web_layout_capture_width=96")
         expect(evidence).to_contain("chrome_simple_web_layout_capture_height=64")
+        expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_path=captured.json")
         expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_written=true")
+        expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_file_status=pass")
+        expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_size_bytes=2")
+        expect(evidence).to_contain("chrome_simple_web_layout_geometry_path=geometry.json")
         expect(evidence).to_contain("chrome_simple_web_layout_geometry_written=true")
+        expect(evidence).to_contain("chrome_simple_web_layout_geometry_file_status=pass")
+        expect(evidence).to_contain("chrome_simple_web_layout_geometry_size_bytes=2")
         expect(evidence).to_contain("chrome_simple_web_layout_blur_or_tolerance_used=false")
 
     it "compares large Chrome checksum proof values exactly":
@@ -115,6 +123,48 @@ describe "Chrome Simple Web layout proof validator":
         expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=missing-captured-argb")
         expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_written=false")
         expect(evidence).to_contain("chrome_simple_web_layout_geometry_written=false")
+
+    it "rejects missing and empty captured ARGB files":
+        val root = "build/test-chrome-layout-validator-captured-files"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/missing.json", "p.captured_argb_path=\"missing.json\"") +
+            " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+            _proof_command(root + "/empty.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"\")") +
+            " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/empty.json > " + root + "/empty.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val missing = file_read(root + "/missing.env")
+        val empty = file_read(root + "/empty.env")
+        step("Confirm boolean capture flags are not enough without file evidence")
+        expect(missing).to_contain("chrome_simple_web_layout_validation_status=fail")
+        expect(missing).to_contain("chrome_simple_web_layout_validation_reason=missing-captured-argb-file")
+        expect(missing).to_contain("chrome_simple_web_layout_captured_argb_file_status=fail")
+        expect(empty).to_contain("chrome_simple_web_layout_validation_status=fail")
+        expect(empty).to_contain("chrome_simple_web_layout_validation_reason=empty-captured-argb-file")
+        expect(empty).to_contain("chrome_simple_web_layout_captured_argb_file_status=pass")
+        expect(empty).to_contain("chrome_simple_web_layout_captured_argb_size_bytes=0")
+
+    it "rejects missing and empty Chrome geometry files":
+        val root = "build/test-chrome-layout-validator-geometry-files"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/missing.json", "p.geometry_path=\"missing.json\"") +
+            " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+            _proof_command(root + "/empty.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),\"\")") +
+            " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/empty.json > " + root + "/empty.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val missing = file_read(root + "/missing.env")
+        val empty = file_read(root + "/empty.env")
+        step("Confirm geometry evidence requires a nonempty file")
+        expect(missing).to_contain("chrome_simple_web_layout_validation_status=fail")
+        expect(missing).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-geometry-file")
+        expect(missing).to_contain("chrome_simple_web_layout_geometry_file_status=fail")
+        expect(empty).to_contain("chrome_simple_web_layout_validation_status=fail")
+        expect(empty).to_contain("chrome_simple_web_layout_validation_reason=empty-chrome-geometry-file")
+        expect(empty).to_contain("chrome_simple_web_layout_geometry_file_status=pass")
+        expect(empty).to_contain("chrome_simple_web_layout_geometry_size_bytes=0")
 
     it "rejects missing or fractional capture viewport proof rows":
         val root = "build/test-chrome-layout-validator-viewport-proof"
@@ -178,3 +228,5 @@ describe "Chrome Simple Web layout proof validator":
         expect(script).to_contain("status=divergent")
         val capture = file_read("tools/chrome-live-bitmap/capture_html_argb.js")
         expect(capture).to_contain("return sum.toString()")
+        expect(capture).to_contain("captured_argb_path: outputPath")
+        expect(capture).to_contain("geometry_path: geometryOutputPath")

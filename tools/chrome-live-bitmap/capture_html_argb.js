@@ -117,7 +117,10 @@ function fail(reason) {
     weighted_checksum: 0,
     mismatch_count: 0,
     blur_or_tolerance_used: false,
+    captured_argb_path: outputPath,
     captured_argb_written: false,
+    geometry_path: geometryOutputPath,
+    geometry_written: false,
   };
   if (proofPath) fs.writeFileSync(proofPath, JSON.stringify(proof));
   console.log(`chrome_capture_status=unavailable`);
@@ -607,7 +610,9 @@ const proof = {
   expected_weighted_checksum: expectedWeighted,
   mismatch_count: mismatchCount,
   frame_us: elapsedUs,
+  captured_argb_path: outputPath,
   captured_argb_written: Boolean(outputPath),
+  geometry_path: geometryOutputPath,
   geometry_written: Boolean(geometryOutputPath && geometry),
   blur_or_tolerance_used: false,
   chrome_bin: chromeBin,
