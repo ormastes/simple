@@ -1477,7 +1477,9 @@ impl Fat32Core:
         if rc.is_err():
             return rc
         self._wb_cluster = cluster
-        self._wb_data = rc.unwrap()
+        self._wb_data = match rc:
+            Ok(value): value
+            Err(_): return rc
         self._wb_dirty = false
         Ok(self._wb_data)
 
@@ -1501,15 +1503,23 @@ impl Fat32Core:
         if start < 2:
             val alloc_rc = self.alloc_cluster()
             if alloc_rc.is_err():
-                return Err(alloc_rc.unwrap_err())
-            start = alloc_rc.unwrap()
+                match alloc_rc:
+                    Ok(_): return Err("failed to allocate first file cluster")
+                    Err(err): return Err(err)
+            start = match alloc_rc:
+                Ok(value): value
+                Err(err): return Err(err)
             of.start_cluster = start
             of.current_cluster = start
         if of.position + len <= cluster_bytes:
             val cdata_rc = self._wb_get(start)
             if cdata_rc.is_err():
-                return Err(cdata_rc.unwrap_err())
-            var cdata = cdata_rc.unwrap()
+                match cdata_rc:
+                    Ok(_): return Err("failed to read write-buffer cluster")
+                    Err(err): return Err(err)
+            var cdata = match cdata_rc:
+                Ok(value): value
+                Err(err): return Err(err)
             var bi = of.position.to_i32()
             var si = 0
             val copy_end = if len.to_i32() < buf.len(): len.to_i32() else: buf.len()
@@ -1530,8 +1540,12 @@ impl Fat32Core:
             return Ok(len)
         val chain_rc = self.follow_chain(start)
         if chain_rc.is_err():
-            return Err(chain_rc.unwrap_err())
-        var chain = chain_rc.unwrap()
+            match chain_rc:
+                Ok(_): return Err("failed to follow write cluster chain")
+                Err(err): return Err(err)
+        var chain = match chain_rc:
+            Ok(value): value
+            Err(err): return Err(err)
         var bytes_written: i64 = 0
         var pos = of.position
         while bytes_written < len:
@@ -1546,21 +1560,31 @@ impl Fat32Core:
                     if of.size < pos:
                         of.size = pos
                     self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
-                    return Err(new_rc.unwrap_err())
-                val new_cluster = new_rc.unwrap()
+                    match new_rc:
+                        Ok(_): return Err("failed to allocate extended file cluster")
+                        Err(err): return Err(err)
+                val new_cluster = match new_rc:
+                    Ok(value): value
+                    Err(err): return Err(err)
                 val last = chain[chain.len() - 1]
                 val link_rc = self.write_fat_entry(last, new_cluster)
                 if link_rc.is_err():
                     of.position = pos
                     self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
-                    return Err(link_rc.unwrap_err())
+                    match link_rc:
+                        Ok(_): return Err("failed to link extended file cluster")
+                        Err(err): return Err(err)
                 chain.push(new_cluster)
             val cdata_rc = self._wb_get(chain[cluster_index])
             if cdata_rc.is_err():
                 of.position = pos
                 self.open_files = _fat32_saved_open_files(self.open_files, idx, of)
-                return Err(cdata_rc.unwrap_err())
-            var cdata = cdata_rc.unwrap()
+                match cdata_rc:
+                    Ok(_): return Err("failed to read write-buffer cluster")
+                    Err(err): return Err(err)
+            var cdata = match cdata_rc:
+                Ok(value): value
+                Err(err): return Err(err)
             var bi = offset_in_cluster
             while bi < cluster_limit and bytes_written < len:
                 if bytes_written.to_i32() < buf.len():
