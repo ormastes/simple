@@ -4,17 +4,18 @@
 
 ## Quick Stats
 
-- **Total Features:** 10
-- **Complete Documentation:** 10 (100%)
+- **Total Features:** 11
+- **Complete Documentation:** 11 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 1200
+- **Total Lines:** 1312
 
 ---
 
-## Other (10 features)
+## Other (11 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
+| [Native Render-Log Platform Matrix Contract](test/03_system/check/native_render_log_platform_matrix_contract_spec.md) | Partial | N/A | 3 | 60% | 112 lines |
 | [macOS Metal render-log compare gate](test/03_system/check/macos_metal_render_log_compare_spec.md) | Partial | N/A | 7 | 60% | 115 lines |
 | [Windows D3D12 render-log compare gate](test/03_system/check/windows_d3d12_render_log_compare_spec.md) | Partial | N/A | 7 | 60% | 117 lines |
 | [Electron Simple Web layout manifest evidence](test/03_system/check/electron_simple_web_layout_manifest_evidence_spec.md) | Partial | N/A | 5 | 60% | 139 lines |

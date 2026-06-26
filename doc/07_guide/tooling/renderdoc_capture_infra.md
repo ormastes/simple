@@ -572,6 +572,9 @@ Completion keys are:
 native_render_log_platform_matrix_status=pass
 native_render_log_platform_matrix_required_platforms=linux-vulkan,macos-metal,windows-d3d12
 native_render_log_platform_matrix_missing_platforms=
+native_render_log_platform_matrix_linux_vulkan_command=BUILD_DIR=build/linux-vulkan-render-log-compare sh scripts/check/check-linux-vulkan-render-log-compare.shs
+native_render_log_platform_matrix_macos_metal_command=MACOS_METAL_RENDER_LOG_REQUIRE_GPU_CAPTURE=1 BUILD_DIR=build/macos-metal-render-log-compare sh scripts/check/check-macos-metal-render-log-compare.shs
+native_render_log_platform_matrix_windows_d3d12_command=WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1 BUILD_DIR=build/windows-d3d12-render-log-compare sh scripts/check/check-windows-d3d12-render-log-compare.shs
 ```
 
 The aggregate revalidates each platform row before marking the matrix complete:
