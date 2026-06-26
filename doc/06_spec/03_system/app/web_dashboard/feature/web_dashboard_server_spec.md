@@ -89,7 +89,7 @@ expect(source).to_contain("return http_error(401, \"Authentication required\")")
 
 </details>
 
-#### serves authenticated tmux API placeholder
+#### serves authenticated tmux API as an empty JSON list
 
 <details>
 <summary>Executable SSpec</summary>
