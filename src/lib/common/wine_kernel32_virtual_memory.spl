@@ -1,0 +1,58 @@
+"""Bounded KERNEL32 virtual-memory bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_kernel32_virtual_memory_dispatch_gate}
+use common.wine_nt_virtual_memory.{
+    WineNtVirtualMemoryResult,
+    wine_nt_virtual_memory_alloc,
+    wine_nt_virtual_memory_free,
+    wine_nt_virtual_memory_protect
+}
+use common.wine_vm_adapter.{WineVmSpace}
+
+class WineKernel32VirtualMemoryResult:
+    ok: bool
+    error: text
+    space: WineVmSpace
+    base: i64
+    size: i64
+    old_perms: text
+    operations: text
+
+fn _result(ok: bool, error: text, space: WineVmSpace, base: i64, size: i64, old_perms: text, operations: text) -> WineKernel32VirtualMemoryResult:
+    WineKernel32VirtualMemoryResult(ok: ok, error: error, space: space, base: base, size: size, old_perms: old_perms, operations: operations)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_kernel32_virtual_memory_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 3:
+        return "kernel32-virtual-memory-sequence-count-mismatch"
+    if symbols[0] != "VirtualAlloc":
+        return "kernel32-virtual-memory-sequence-expected:VirtualAlloc"
+    if symbols[1] != "VirtualProtect":
+        return "kernel32-virtual-memory-sequence-expected:VirtualProtect"
+    if symbols[2] != "VirtualFree":
+        return "kernel32-virtual-memory-sequence-expected:VirtualFree"
+    "ready"
+
+fn _failure(symbol: text, step: WineNtVirtualMemoryResult, operations: text) -> WineKernel32VirtualMemoryResult:
+    _result(false, symbol + ":" + step.state, step.space, step.base, step.size, step.old_perms, operations)
+
+pub fn wine_kernel32_execute_virtual_memory(symbols: [text], space: WineVmSpace, base: i64, size: i64, alloc_perms: text, protect_perms: text) -> WineKernel32VirtualMemoryResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, space, 0, 0, "", "")
+
+    val allocated = wine_nt_virtual_memory_alloc(space, base, size, alloc_perms)
+    if not allocated.ok:
+        return _failure("VirtualAlloc", allocated, "")
+
+    val protected = wine_nt_virtual_memory_protect(allocated.space, allocated.base, protect_perms)
+    if not protected.ok:
+        return _failure("VirtualProtect", protected, "VirtualAlloc")
+
+    val freed = wine_nt_virtual_memory_free(protected.space, protected.base)
+    if not freed.ok:
+        return _failure("VirtualFree", freed, "VirtualAlloc VirtualProtect")
+
+    _result(true, "", freed.space, freed.base, freed.size, protected.old_perms, "VirtualAlloc VirtualProtect VirtualFree")
