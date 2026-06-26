@@ -68,6 +68,10 @@ surface: `model_artifact_created=pending`, `target_eval_reached=pending`, and
 `decision_accepted=pending`. License approval, cache path, checksum, and app
 handoff are checked by the retry5 wrappers below before any accepted decision or
 deployment claim.
+The linked retry attempt `llm_backed_app_server_dry_run_retry6` records the
+real-training/eval gate after retry5. It must continue to fail readiness until
+retry5 review passes, a real QLoRA model manifest exists, target eval reaches
+the selected threshold, and normal review records accepted app handoff evidence.
 
 Retry5 has two local evidence wrappers for normal-review handoff:
 
@@ -92,6 +96,19 @@ gate, and data-access gate. It may report `STATUS: PASS
 retry5-review-handoff` when the licensed cache is ready for real QLoRA, but it
 still emits `acceptance_allowed=false`; target eval and app handoff evidence
 remain mandatory before any accepted decision or deployment claim.
+
+Retry6 has a local evidence wrapper for the real-training/eval handoff:
+
+```sh
+.spipe/llm-finetune-process/scripts/check_retry6_training_eval_gate.shs \
+  llm_backed_app_server_dry_run_retry6
+```
+
+The retry6 checker first reads retry5 normal-review status. While retry5 is not
+`PASS`, retry6 reports `STATUS: WARN retry6-training-eval-gate`,
+`training_allowed=false`, and `acceptance_allowed=false`. After retry5 passes,
+the same checker requires retry6 model and target-eval artifacts before normal
+review may inspect the attempt. It never marks acceptance allowed by itself.
 
 Record data-download evidence:
 

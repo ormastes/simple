@@ -149,6 +149,22 @@ check covers SPipe command routing. The `doc/06_spec` guard covers scenario 5.
   cache path, checksum evidence, real QLoRA training, target-reaching eval, and
   an accepted decision are all recorded.
 
+2026-06-26 retry6 real-training/eval gate evidence:
+
+- `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry6.sdn`
+  records the next concrete attempt after retry5.
+- `.spipe/llm-finetune-process/scripts/check_retry6_training_eval_gate.shs
+  llm_backed_app_server_dry_run_retry6` wraps the retry5 normal-review handoff
+  and then checks for retry6 model/eval artifacts. It currently reports
+  `upstream_review_status=WARN retry5-review-handoff`,
+  `training_allowed=false`, `model_manifest_exists=false`,
+  `eval_result_exists=false`, `acceptance_allowed=false`, and
+  `STATUS: WARN retry6-training-eval-gate`.
+- Retry6 must continue to fail `fine-tune-ready` until retry5 licensed cache
+  review passes, real QLoRA writes a model manifest, target eval reaches the
+  selected threshold, safety/deployment/app handoff evidence is recorded, and a
+  normal LLM records an accepted decision.
+
 ## Manual Gate
 
 Final SPipe fine-tune process requirements are selected in

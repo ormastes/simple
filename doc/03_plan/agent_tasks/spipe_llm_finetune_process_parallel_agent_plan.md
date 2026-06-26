@@ -182,3 +182,29 @@ Evidence:
 
 Next normal-LLM work: obtain licensed data approval and write cache/checksum
 evidence for retry5 before any real training or acceptance claim.
+
+## 2026-06-26 Retry6 Training/Eval Gate
+
+Retry attempt `llm_backed_app_server_dry_run_retry6` now exists as the concrete
+real-training/eval gate after retry5. It is intentionally not accepted: retry5
+licensed cache review is still WARN, no model manifest exists, no target eval
+exists, and no accepted decision exists.
+
+Evidence:
+
+- `.spipe/llm-finetune-process/scripts/check_retry6_training_eval_gate.shs
+  llm_backed_app_server_dry_run_retry6` reports
+  `upstream_review_status=WARN retry5-review-handoff`,
+  `training_allowed=false`, `model_manifest_exists=false`,
+  `eval_result_exists=false`, `acceptance_allowed=false`, and
+  `STATUS: WARN retry6-training-eval-gate`.
+- `.spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry6.sdn`
+  passes the structural attempt verifier while recording non-deployable
+  license, safety, and deployment evidence.
+- `fine-tune-status llm_backed_app_server_dry_run_retry6` is expected to report
+  WARN until retry5 cache review, real QLoRA, target eval, app handoff, and an
+  accepted decision are all present.
+
+Next normal-LLM work: complete retry5 licensed cache/checksum evidence before
+running retry6 training. Do not synthesize model/eval artifacts or accept the
+attempt without real evidence.

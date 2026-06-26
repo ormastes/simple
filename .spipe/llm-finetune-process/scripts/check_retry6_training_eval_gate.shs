@@ -1,0 +1,68 @@
+#!/bin/sh
+set -eu
+
+ATTEMPT_ID="${1:-llm_backed_app_server_dry_run_retry6}"
+BASE_DIR="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+UPSTREAM_ATTEMPT="${2:-llm_backed_app_server_dry_run_retry5}"
+MODEL_MANIFEST="${3:-${BASE_DIR}/artifacts/${ATTEMPT_ID}/model_manifest.json}"
+EVAL_RESULT="${4:-${BASE_DIR}/artifacts/${ATTEMPT_ID}/eval_result.json}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+
+status_for() {
+  sed -n 's/^STATUS: //p' | tail -1
+}
+
+value_for() {
+  key="$1"
+  sed -n "s/^${key}=//p" | tail -1
+}
+
+REVIEW_CHECK="$("${SCRIPT_DIR}/check_retry5_review_handoff.shs" "$UPSTREAM_ATTEMPT")"
+review_status="$(printf '%s\n' "$REVIEW_CHECK" | status_for)"
+training_allowed="$(printf '%s\n' "$REVIEW_CHECK" | value_for training_allowed)"
+
+model_manifest_exists=false
+eval_result_exists=false
+target_eval_status=missing
+model_artifact_status=missing
+status="WARN"
+result="BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY"
+next_action="complete retry5 licensed cache/checksum review before retry6 training"
+
+if [ -f "$MODEL_MANIFEST" ]; then
+  model_manifest_exists=true
+  model_artifact_status=present
+fi
+
+if [ -f "$EVAL_RESULT" ]; then
+  eval_result_exists=true
+  target_eval_status=present
+fi
+
+if [ "$review_status" = "PASS retry5-review-handoff" ] &&
+   [ "$training_allowed" = "true" ]; then
+  result="BLOCKED_MODEL_OR_TARGET_EVAL_MISSING"
+  next_action="run real QLoRA, write model manifest and target eval result, then record accepted decision only if target passes"
+  if [ "$model_manifest_exists" = "true" ] && [ "$eval_result_exists" = "true" ]; then
+    result="TARGET_EVAL_REVIEW_REQUIRED"
+    next_action="normal LLM must inspect model manifest, target eval, license, safety, and app handoff before acceptance"
+  fi
+fi
+
+cat <<EOF
+attempt_id=${ATTEMPT_ID}
+upstream_attempt=${UPSTREAM_ATTEMPT}
+upstream_review_status=${review_status:-missing}
+training_allowed=${training_allowed:-false}
+model_manifest=${MODEL_MANIFEST}
+model_manifest_exists=${model_manifest_exists}
+model_artifact_status=${model_artifact_status}
+eval_result=${EVAL_RESULT}
+eval_result_exists=${eval_result_exists}
+target_eval_status=${target_eval_status}
+acceptance_allowed=false
+acceptance_reason=target eval, license, safety, deployment, and app handoff evidence require normal review
+next_action=${next_action}
+result=${result}
+STATUS: ${status} retry6-training-eval-gate
+EOF
