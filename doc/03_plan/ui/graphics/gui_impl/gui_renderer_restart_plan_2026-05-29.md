@@ -728,12 +728,14 @@ render envelopes into the BrowserWindow. The preload forwards key/action input
 as common envelopes. Static Node checks and the package JSON parse pass, and the
 Simple Electron app emits a first render envelope with `target:"electron"`.
 The live Electron BrowserWindow proof also passes on this host under Xvfb; the
-proof file contains
-`{"target":"electron","surface_id":"main","width":1280,"height":720}` after the
-WebView observes `window.__SIMPLE_WEB_RENDER_ENVELOPE__`. The repo-level
-`scripts/check/check-electron-live-smoke.shs` gate now owns dependency checks, Xvfb
-launch, proof cleanup, and JSON validation; `npm --prefix tools/electron-shell
-run live-smoke-ci` delegates to the same gate. The advisory Electron workflow
+proof file now preserves target/surface/viewport metadata plus
+`body_html_length`, nonempty DOM text, `performance.now`, two
+`requestAnimationFrame` callbacks, CSS animation support, and
+`blur_or_tolerance_used=false` after the WebView observes
+`window.__SIMPLE_WEB_RENDER_ENVELOPE__`. The repo-level
+`scripts/check/check-electron-live-smoke.shs` gate now owns dependency checks,
+Xvfb launch, proof cleanup, and validator-backed JSON validation; `npm --prefix
+tools/electron-shell run live-smoke-ci` delegates to the same gate. The advisory Electron workflow
 now installs the live-smoke dependencies and runs the same package command when
 `bin/simple` is available. The existing SWBC1 static-shell cache is also
 verified as the binary artifact storage layer: `web_render_cache_spec` passes

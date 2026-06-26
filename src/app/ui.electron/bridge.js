@@ -37,7 +37,7 @@ function handleSimpleMessageLine(line, win = mainWindow) {
                 .then(() => win.webContents.executeJavaScript(electronWmInitScript()));
             if (process.env.SIMPLE_ELECTRON_PROOF_PATH) {
                 Promise.resolve(rendered)
-                    .then(() => win.webContents.executeJavaScript('window.__SIMPLE_WEB_RENDER_ENVELOPE__'))
+                    .then(() => win.webContents.executeJavaScript(electronLiveSmokeProofScript()))
                     .then(envelope => {
                         fs.writeFileSync(process.env.SIMPLE_ELECTRON_PROOF_PATH, JSON.stringify(envelope));
                         if (app) {
@@ -187,6 +187,55 @@ function initialShellHtml() {
     return 'data:text/html;charset=utf-8,' + encodeURIComponent(
         '<!doctype html><html><head><meta charset="utf-8"><title>Simple Electron</title></head><body><div id="app"></div></body></html>'
     );
+}
+
+function electronLiveSmokeProofScript() {
+    return `
+        new Promise(function(resolve) {
+            var envelope = window.__SIMPLE_WEB_RENDER_ENVELOPE__ || {};
+            var appEl = document.getElementById('app');
+            var performanceNowAvailable = !!(window.performance && typeof window.performance.now === 'function');
+            var start = performanceNowAvailable ? window.performance.now() : 0;
+            var animationFrameAvailable = typeof window.requestAnimationFrame === 'function';
+            var frameCount = 0;
+            var styleProbe = document.createElement('style');
+            styleProbe.textContent = '@keyframes simple-electron-live-smoke-pulse { from { opacity: 0.2; } to { opacity: 0.9; } } .simple-electron-live-smoke-animation { animation: simple-electron-live-smoke-pulse 80ms linear 2; }';
+            document.head.appendChild(styleProbe);
+            var animationProbe = document.createElement('div');
+            animationProbe.className = 'simple-electron-live-smoke-animation';
+            animationProbe.style.cssText = 'position:fixed;left:-1000px;top:-1000px;width:8px;height:8px;';
+            document.body.appendChild(animationProbe);
+            function finish() {
+                var style = window.getComputedStyle(animationProbe);
+                var text = appEl ? (appEl.textContent || '') : '';
+                var proof = Object.assign({}, envelope, {
+                    app_element_present: !!appEl,
+                    body_text_length: text.length,
+                    body_text_sample: text.slice(0, 120),
+                    performance_now_available: performanceNowAvailable,
+                    performance_now_delta_ms: performanceNowAvailable ? Math.max(0, window.performance.now() - start) : null,
+                    animation_frame_available: animationFrameAvailable,
+                    animation_frame_count: frameCount,
+                    css_animation_probe: style.animationName === 'simple-electron-live-smoke-pulse',
+                    blur_or_tolerance_used: false
+                });
+                animationProbe.remove();
+                styleProbe.remove();
+                resolve(proof);
+            }
+            if (animationFrameAvailable) {
+                requestAnimationFrame(function() {
+                    frameCount += 1;
+                    requestAnimationFrame(function() {
+                        frameCount += 1;
+                        finish();
+                    });
+                });
+            } else {
+                finish();
+            }
+        })
+    `;
 }
 
 function electronWmInitScript() {
@@ -827,6 +876,7 @@ if (app) app.on('window-all-closed', () => {
 
 module.exports = {
     commonInputEnvelope,
+    electronLiveSmokeProofScript,
     electronWmInitScript,
     handleSimpleMessageLine,
     parseCliArgs,

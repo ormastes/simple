@@ -5,6 +5,7 @@ const {
   renderEnvelopeScript,
 } = require('../../../../src/app/ui.electron/bridge_envelopes.js');
 const { electronWmInitScript, parseCliArgs, simpleProcessArgs: bridgeSimpleProcessArgs } = require('../../../../src/app/ui.electron/bridge.js');
+const { electronLiveSmokeProofScript } = require('../../../../src/app/ui.electron/bridge.js');
 
 const renderLine = JSON.stringify({
   type: 'render',
@@ -27,6 +28,8 @@ const script = renderEnvelopeScript(JSON.parse(renderLine));
 assert(script.includes('__SIMPLE_WEB_RENDER_ENVELOPE__'));
 assert(script.includes('"target":"electron"'));
 assert(script.includes('"surface_id":"main"'));
+assert(script.includes('"body_html_length":21'));
+assert(script.includes('"css_length":0'));
 assert(script.includes('<main>Electron</main>'));
 
 const resize = commonInputEnvelope('resize', { x: 640, y: 480 });
@@ -82,6 +85,13 @@ assert(wmInit.includes('event_type: eventType'));
 assert(wmInit.includes("type: 'input'"));
 assert(wmInit.includes("sendWindowMouse(id, 'mouse_down'"));
 assert(wmInit.includes("target_id: targetId"));
+
+const liveSmokeProof = electronLiveSmokeProofScript();
+assert(liveSmokeProof.includes('performance_now_available'));
+assert(liveSmokeProof.includes('animation_frame_count'));
+assert(liveSmokeProof.includes('css_animation_probe'));
+assert(liveSmokeProof.includes('blur_or_tolerance_used'));
+assert(liveSmokeProof.includes('body_text_sample'));
 
 const bridgeSource = require('fs').readFileSync(require('path').join(__dirname, '../../../../src/app/ui.electron/bridge.js'), 'utf8');
 assert(bridgeSource.includes("SIMPLE_UI_BACKEND: 'electron'"));

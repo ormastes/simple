@@ -28,8 +28,13 @@ function renderEnvelopeScript(msg) {
     const metadata = renderEnvelopeMetadata(msg);
     const bodyHtml = msg.body_html || msg.html || '';
     const css = msg.css || '';
+    const renderProof = {
+        ...metadata,
+        body_html_length: bodyHtml.length,
+        css_length: css.length
+    };
     return `
-        window.__SIMPLE_WEB_RENDER_ENVELOPE__ = ${JSON.stringify(metadata)};
+        window.__SIMPLE_WEB_RENDER_ENVELOPE__ = ${JSON.stringify(renderProof)};
         (function() {
             var cssText = ${JSON.stringify(css)};
             if (cssText) {

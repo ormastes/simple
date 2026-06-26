@@ -8,6 +8,8 @@ PROOF_PATH="${SIMPLE_ELECTRON_PROOF_PATH:-build/electron_shell_envelope.json}"
 WIDTH="${SIMPLE_ELECTRON_SMOKE_WIDTH:-1280}"
 HEIGHT="${SIMPLE_ELECTRON_SMOKE_HEIGHT:-720}"
 TIMEOUT_SECS="${SIMPLE_ELECTRON_SMOKE_TIMEOUT_SECS:-60}"
+VALIDATOR="scripts/check/validate-electron-live-smoke-proof.js"
+VALIDATION_ENV="${PROOF_PATH}.validation.env"
 
 have() {
     command -v "$1" >/dev/null 2>&1
@@ -33,8 +35,14 @@ if [ ! -f "tools/electron-shell/package.json" ]; then
     exit 1
 fi
 
+if [ ! -f "$VALIDATOR" ]; then
+    echo "electron_live_smoke=unavailable"
+    echo "error=missing_validator:$VALIDATOR"
+    exit 1
+fi
+
 mkdir -p "$(dirname "$PROOF_PATH")"
-rm -f "$PROOF_PATH"
+rm -f "$PROOF_PATH" "$VALIDATION_ENV"
 
 run_smoke() {
     SIMPLE_ELECTRON_PROOF_PATH="../../$PROOF_PATH" \
@@ -50,25 +58,12 @@ else
     run_smoke
 fi
 
-node - "$PROOF_PATH" "$WIDTH" "$HEIGHT" <<'NODE'
-const fs = require('fs');
-const [proofPath, widthText, heightText] = process.argv.slice(2);
-if (!fs.existsSync(proofPath)) {
-  console.error(`missing proof file: ${proofPath}`);
-  process.exit(1);
-}
-const proof = JSON.parse(fs.readFileSync(proofPath, 'utf8'));
-const expected = {
-  target: 'electron',
-  surface_id: 'main',
-  width: Number(widthText),
-  height: Number(heightText),
-};
-for (const [key, value] of Object.entries(expected)) {
-  if (proof[key] !== value) {
-    console.error(`unexpected ${key}: ${JSON.stringify(proof[key])}`);
-    process.exit(1);
-  }
-}
-console.log(`electron_live_smoke=pass proof=${proofPath}`);
-NODE
+if [ ! -s "$PROOF_PATH" ]; then
+    echo "electron_live_smoke=fail"
+    echo "reason=missing-proof-file"
+    exit 1
+fi
+
+node "$VALIDATOR" "$PROOF_PATH" "$WIDTH" "$HEIGHT" >"$VALIDATION_ENV"
+cat "$VALIDATION_ENV"
+echo "electron_live_smoke=pass proof=$PROOF_PATH validation=$VALIDATION_ENV"
