@@ -4,6 +4,9 @@ use app.llm_dashboard.collectors.tooling_artifact_collector.{collect_llm_tooling
 use app.llm_dashboard.collectors.vllm_control_panel.{collect_llm_dashboard_vllm_control_preflight, render_llm_dashboard_vllm_control_panel_html}
 use app.llm_runtime.manifest.{llm_runtime_manifest_from_text}
 use app.llm_runtime.dashboard_live_control.{llm_runtime_execute_dashboard_control_jsonl}
+use app.dashboard.assistant_bridge.{assistant_bridge_default_policy}
+use app.dashboard.assistant_collectors.{collect_assistant_snapshot_from_root}
+use app.dashboard.assistant_live_view.{assistant_dashboard_live_view_from_snapshot, assistant_dashboard_render_live_view}
 
 val DEFAULT_DIAGNOSTICS_JSONL = ".build/llm_dashboard/diagnostics/session.jsonl"
 
@@ -73,10 +76,17 @@ pub struct DashboardServer:
         )
 
     fn route_http(method: text, path: text, body: text, session: text?) -> text:
-        if session == nil:
+        val clean_path = _clean_path(path)
+        if not _session_authenticated(session):
+            if _is_agents_path(clean_path):
+                return http_redirect("/login")
             if path.starts_with("/api/"):
                 return http_error(401, "Authentication required")
             return http_redirect("/login")
+        if _is_agents_path(clean_path):
+            if method != "GET":
+                return http_error(401, "Method not supported")
+            return http_response(200, "text/html", self.render_agents_html())
         if path.starts_with("/api/vllm/control"):
             if method != "GET":
                 return http_error(401, "Method not supported")
@@ -86,6 +96,17 @@ pub struct DashboardServer:
         if method != "GET":
             return http_error(401, "Method not supported")
         http_response(200, "text/html", self.render_dashboard_html())
+
+    fn render_agents_html() -> text:
+        val snapshot = collect_assistant_snapshot_from_root(self.agent_dir)
+        val view = assistant_dashboard_live_view_from_snapshot(snapshot, assistant_bridge_default_policy(), 0, 0, false)
+        val lines = assistant_dashboard_render_live_view(view)
+        var html = "<!doctype html><html><head><title>Agents</title></head><body><main id=\"agent-dashboard\"><h1>Agents</h1>"
+        html = html + "<section id=\"agent-live-view\">"
+        for line in lines:
+            html = html + "<p>" + _html_escape(line) + "</p>"
+        html = html + "</section></main></body></html>"
+        html
 
     fn _route_vllm_control(path: text) -> text:
         val action = _query_value(path, "action")
@@ -99,6 +120,28 @@ fn _render_tooling_panel_if_configured(path: text, target: text) -> text:
     if path.trim() == "":
         return ""
     render_llm_tooling_artifacts_panel_html(collect_llm_tooling_artifacts(path, target))
+
+fn _clean_path(path: text) -> text:
+    val parts = path.split("?")
+    if parts.len() == 0:
+        return path
+    parts[0]
+
+fn _is_agents_path(path: text) -> bool:
+    path == "/agents" or path.starts_with("/agents/")
+
+fn _session_authenticated(session: text?) -> bool:
+    match session:
+        case Some(value):
+            value.trim() != ""
+        case nil:
+            false
+
+fn _html_escape(value: text) -> text:
+    var escaped = value.split("&").join("&amp;")
+    escaped = escaped.split("<").join("&lt;")
+    escaped = escaped.split(">").join("&gt;")
+    escaped.split("\"").join("&quot;")
 
 fn _query_value(path: text, key: text) -> text:
     val marker = key + "="

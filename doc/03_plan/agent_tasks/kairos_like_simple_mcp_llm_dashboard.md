@@ -100,9 +100,20 @@ It does not include vLLM/Torch runtime implementation; that remains gated by
    - Fresh live snapshots enable operator controls routed to `assistant_core`.
    - Replay, stale, and degraded snapshots remain read-only with operator
      notices explaining refresh or replay constraints.
+   - `src/app/web_dashboard/server.spl` now serves authenticated `/agents`
+     requests through the assistant snapshot collector and live-view renderer,
+     redirects unauthenticated or blank-session `/agents` requests to `/login`,
+     matches only `/agents` and `/agents/...` rather than unrelated prefixes,
+     and keeps the dashboard shell linked to `/agents`.
    - Evidence:
      - `test/01_unit/app/llm_dashboard/assistant_live_view_spec.spl` passes.
      - `test/unit/app/llm_dashboard/assistant_live_view_spec.spl` passes.
+     - `test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl`
+       passes with authenticated `/agents` readback, blank-session redirect,
+       absence-safe output, and shell link coverage.
+     - `test/03_system/feature/app/web_dashboard/web_dashboard_server_spec.spl`
+       passes after updating stale login-module source contracts to the current
+       minimal router/auth behavior.
 4. Replay/import mode:
    - `src/app/dashboard/assistant_import.spl` imports JSON snapshot exports
      into a chosen durable replay root using the assistant store layout.
