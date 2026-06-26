@@ -7,7 +7,7 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 109
+- **Total Lines:** 103
 
 ---
 
@@ -15,5 +15,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [GUI Showcase Perf Retained Mode Contract](test/03_system/check/gui_showcase_perf_retained_mode_contract_spec.md) | Partial | N/A | 2 | 60% | 109 lines |
+| [GUI Showcase Perf RSS Contract](test/03_system/check/gui_showcase_perf_rss_contract_spec.md) | Partial | N/A | 2 | 60% | 103 lines |
 
