@@ -274,12 +274,18 @@ For Tauri2 mobile renderer parity, use
 `scripts/check/check-tauri-mobile-renderer-parity-evidence.shs`; it requires
 desktop production GUI/Web parity first, iOS WKWebView screenshot evidence with
 Metal markers, and Android WebView screenshot evidence with Vulkan/skiavk or
-host-emulator Vulkan markers. Treat `F/DEBUG`, `Fatal signal`, `VulkanManager`,
-`Headless UI completed`, or subprocess parse failures in Android logcat as hard
-blockers, not as Vulkan proof. Host/emulator ANGLE/Vulkan startup logs are
-supporting evidence only when `com.simple.ui` remains foreground, a
-`[tauri-shell] render, html_len=` marker is present, and the screenshot is
-captured from the live app.
+host-emulator Vulkan markers. It also requires the mobile MDI proof statuses
+for events, capture, performance, and animation to pass. Read those from
+`*_mdi_event_status`, `*_mdi_capture_status`, `*_mdi_performance_status`, and
+`*_mdi_animation_status`; they are derived from the `[tauri-shell] mdi proof:`
+JSON and prove event routing, viewport capture dimensions, `performance.now()`,
+requestAnimationFrame, and CSS animation support. Treat `F/DEBUG`,
+`Fatal signal`, `VulkanManager`, `Headless UI completed`, or subprocess parse
+failures in Android logcat as hard blockers, not as Vulkan proof.
+Host/emulator ANGLE/Vulkan startup logs are supporting evidence only when
+`com.simple.ui` remains foreground, a `[tauri-shell] render, html_len=` marker
+is present, the screenshot is captured from the live app, and the MDI proof is
+valid.
 
 Prefer the strongest available oracle for the surface:
 

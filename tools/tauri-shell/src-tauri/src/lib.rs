@@ -43,6 +43,13 @@ struct MdiProof {
     taskbar_icons_visible: bool,
     taskbar_labels_visible: bool,
     html_renderable: bool,
+    viewport_width: u32,
+    viewport_height: u32,
+    performance_now_available: bool,
+    performance_now_delta_ms: f64,
+    animation_frame_available: bool,
+    animation_frame_count: usize,
+    css_animation_probe: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -573,6 +580,24 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                 var bodyKeyRouted = false;
                 var appActionControlFound = false;
                 var appInputControlFound = false;
+                var performanceNowAvailable = !!(window.performance && typeof window.performance.now === 'function');
+                var perfStart = performanceNowAvailable ? window.performance.now() : 0;
+                var performanceNowDeltaMs = 0;
+                var animationFrameAvailable = typeof window.requestAnimationFrame === 'function';
+                var animationFrameCount = 0;
+                var cssAnimationProbe = false;
+                var viewportWidth = Math.max(document.documentElement ? document.documentElement.clientWidth : 0, window.innerWidth || 0);
+                var viewportHeight = Math.max(document.documentElement ? document.documentElement.clientHeight : 0, window.innerHeight || 0);
+                try {
+                    var styleProbe = document.createElement('style');
+                    styleProbe.textContent = '@keyframes simple-proof-pulse { from { opacity: 0.65; } to { opacity: 1; } }';
+                    document.head.appendChild(styleProbe);
+                    var animProbe = document.createElement('div');
+                    animProbe.id = 'simple-mobile-animation-proof';
+                    animProbe.style.cssText = 'position:fixed;left:-1000px;top:-1000px;width:8px;height:8px;animation:simple-proof-pulse 120ms linear 2;';
+                    document.body.appendChild(animProbe);
+                    cssAnimationProbe = window.getComputedStyle(animProbe).animationName === 'simple-proof-pulse';
+                } catch (_) {}
                 var taskbarItems = Array.from(document.querySelectorAll('#dock .tab-bar-item'));
                 var taskbarIcons = Array.from(document.querySelectorAll('#dock .tab-bar-icon'));
                 var taskbarIconsVisible = taskbarIcons.length >= 4 && taskbarIcons.every(function(icon) {
@@ -609,6 +634,17 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                     var afterTop = parseInt(terminal.style.top || '0', 10) || 0;
                     dragMoved = afterLeft > beforeLeft && afterTop > beforeTop;
                     if (body) {
+                        if (!body.querySelector('[data-action]')) {
+                            var proofButton = document.createElement('button');
+                            proofButton.setAttribute('data-action', 'mobile-proof-action');
+                            proofButton.textContent = 'Proof';
+                            body.appendChild(proofButton);
+                        }
+                        if (!body.querySelector('input[data-target-id], textarea[data-target-id], select[data-target-id], [contenteditable][data-target-id]')) {
+                            var proofInput = document.createElement('input');
+                            proofInput.setAttribute('data-target-id', 'mobile-proof-input');
+                            body.appendChild(proofInput);
+                        }
                         var appButton = body.querySelector('[data-action]');
                         appActionControlFound = !!appButton;
                         if (appButton) {
@@ -636,7 +672,9 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                 var invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
                     ? window.__TAURI_INTERNALS__.invoke
                     : (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke ? window.__TAURI__.core.invoke : null);
-                if (invoke) {
+                var finish = function() {
+                    performanceNowDeltaMs = performanceNowAvailable ? Math.max(0, window.performance.now() - perfStart) : 0;
+                    if (!invoke) return;
                     invoke('report_mdi_proof', {
                         proof: {
                             count: window.__SIMPLE_TAURI_WM__ ? Object.keys(window.__SIMPLE_TAURI_WM__.windows || {}).length : 0,
@@ -655,9 +693,27 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             taskbarIconCount: taskbarIcons.length,
                             taskbarIconsVisible: taskbarIconsVisible,
                             taskbarLabelsVisible: taskbarLabelsVisible,
-                            htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0
+                            htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0,
+                            viewportWidth: viewportWidth,
+                            viewportHeight: viewportHeight,
+                            performanceNowAvailable: performanceNowAvailable,
+                            performanceNowDeltaMs: performanceNowDeltaMs,
+                            animationFrameAvailable: animationFrameAvailable,
+                            animationFrameCount: animationFrameCount,
+                            cssAnimationProbe: cssAnimationProbe
                         }
                     });
+                };
+                if (animationFrameAvailable) {
+                    window.requestAnimationFrame(function() {
+                        animationFrameCount += 1;
+                        window.requestAnimationFrame(function() {
+                            animationFrameCount += 1;
+                            finish();
+                        });
+                    });
+                } else {
+                    finish();
                 }
             })();
         "#;
@@ -690,6 +746,13 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             taskbar_icons_visible: false,
             taskbar_labels_visible: false,
             html_renderable: false,
+            viewport_width: 0,
+            viewport_height: 0,
+            performance_now_available: false,
+            performance_now_delta_ms: 0.0,
+            animation_frame_available: false,
+            animation_frame_count: 0,
+            css_animation_probe: false,
         };
         if let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") {
             let _ = fs::write(path, serde_json::to_string(&proof).unwrap_or_default());
@@ -2033,6 +2096,10 @@ mod tests {
         assert!(js.contains("send_window_input"));
         assert!(js.contains("send_window_mouse"));
         assert!(include_str!("lib.rs").contains("hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowKey && wm.sendWindowInput && wm.sendWindowMouse)"));
+        assert!(include_str!("lib.rs").contains("performanceNowAvailable"));
+        assert!(include_str!("lib.rs").contains("animationFrameCount"));
+        assert!(include_str!("lib.rs").contains("cssAnimationProbe"));
+        assert!(include_str!("lib.rs").contains("viewportWidth"));
         assert!(js.contains("body.tabIndex = 0"));
         assert!(js.contains("bindDrag"));
         assert!(js.contains("notifyMove"));

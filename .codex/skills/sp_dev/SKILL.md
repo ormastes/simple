@@ -166,14 +166,19 @@ For Tauri2 mobile renderer parity, use
 the desktop production GUI/Web parity source first, then require live iOS
 Tauri2/WKWebView screenshot evidence plus Metal markers and live Android
 Tauri2/WebView screenshot evidence plus Vulkan/skiavk or host-emulator Vulkan
-markers. A packaged APK or a nonblank Android screenshot is not Vulkan proof if
-logcat contains `F/DEBUG`, `Fatal signal`, `VulkanManager`,
-`Headless UI completed`, or subprocess parse failures; leave the aggregate
-unavailable/failed until the Android renderer log and screenshot both pass.
-Host/emulator GPU logs such as ANGLE/Vulkan or Apple/SwiftShader Vulkan are
-supporting evidence only when `com.simple.ui` remains foreground, a
-`[tauri-shell] render, html_len=` marker is present, and the screenshot is
-captured from the live app.
+markers. Both mobile lanes must also expose
+`*_mdi_event_status=pass`, `*_mdi_capture_status=pass`,
+`*_mdi_performance_status=pass`, and `*_mdi_animation_status=pass` from the
+`[tauri-shell] mdi proof:` JSON. That proof covers window-manager event
+delivery, viewport capture provenance, `performance.now()`, two animation
+frames, and CSS animation support. A packaged APK or a nonblank Android
+screenshot is not Vulkan proof if logcat contains `F/DEBUG`, `Fatal signal`,
+`VulkanManager`, `Headless UI completed`, or subprocess parse failures; leave
+the aggregate unavailable/failed until the Android renderer log, screenshot,
+and MDI proof all pass. Host/emulator GPU logs such as ANGLE/Vulkan or
+Apple/SwiftShader Vulkan are supporting evidence only when `com.simple.ui`
+remains foreground, a `[tauri-shell] render, html_len=` marker is present, the
+screenshot is captured from the live app, and the MDI proof is valid.
 
 For runtime concurrency work, keep the public API map current in
 `doc/07_guide/lib/misc/stdlib.md`, `doc/07_guide/compiler/check_perf.md`, and

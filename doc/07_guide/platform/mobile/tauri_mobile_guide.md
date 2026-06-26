@@ -191,14 +191,22 @@ sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs
 The wrapper requires the desktop production parity evidence to pass first, then
 checks generated Tauri2 iOS/Android projects, live iOS simulator rendering with
 Metal log markers, and live Android emulator rendering with Vulkan/skiavk log
-markers plus screenshot proof. Evidence is written to
+markers plus screenshot proof. It also validates the live `[tauri-shell] mdi
+proof:` JSON from each mobile lane. A pass requires
+`ios_mdi_event_status`, `ios_mdi_capture_status`,
+`ios_mdi_performance_status`, `ios_mdi_animation_status`, and the matching
+Android keys to all be `pass`; those fields prove MDI event routing, live
+viewport capture dimensions, `performance.now()`, two animation frames, and CSS
+animation support. Evidence is written to
 `doc/09_report/tauri_mobile_renderer_parity_evidence_<date>.md`.
 
 2026-06-26 status: pass. iOS simulator Metal-backed Tauri2/WKWebView rendering
-passes with a nonblank mobile UI screenshot and Metal markers. Android arm64
-runtime and APK packaging pass, and the Android emulator host-Vulkan lane passes
-with `com.simple.ui` foreground, a real `[tauri-shell] render, html_len=` marker,
-layout screenshot proof, and emulator Vulkan markers (`-gpu host`, Apple M4).
+passes with a nonblank mobile UI screenshot, Metal markers, and MDI
+event/capture/performance/animation proof. Android arm64 runtime and APK
+packaging pass, and the Android emulator host-Vulkan lane passes with
+`com.simple.ui` foreground, a real `[tauri-shell] render, html_len=` marker,
+layout screenshot proof, MDI proof, and emulator Vulkan markers (`-gpu host`,
+Apple M4).
 Guest HWUI `skiavk`, `swiftshader`, and `lavapipe` still crash
 `libhwui`/`VulkanManager` on the local Pixel7 AVD, so record the green lane as
 host/emulator Vulkan translation evidence, not guest `skiavk` evidence.

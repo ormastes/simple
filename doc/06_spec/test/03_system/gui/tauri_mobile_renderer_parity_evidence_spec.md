@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,7 +78,7 @@ render-log markers.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -87,8 +87,8 @@ val command = "rm -rf " + root + " && mkdir -p " + root + "/source " + root + "/
     "printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\n' > " + root + "/source/production.env && " +
     "printf 'pngish' > " + root + "/ios/screenshot.png && printf '[tauri-shell] render, html_len=347702 CAMetalLayer Metal renderer ready\\n' > " + root + "/ios/log_stream.txt && printf 'Tauri iOS external_url: Some ios_mdi_probe.html Metal\\n' > " + root + "/ios/dev.log && " +
     "printf 'pngish' > " + root + "/android/screenshot.png && printf '[tauri-shell] render, html_len=347702 libsimple_mobile_runtime_exec.so subprocess pid=123 Vulkan renderer ready openWindow id=terminal openWindow id=files openWindow id=tasks openWindow id=settings {\"count\":4,\"hasDesktop\":true,\"hasSimpleSmokeText\":true}\\n' > " + root + "/android/logcat.txt && " +
-    _write_fixture_script(root + "/ios.sh", "echo ios_tooling=available\necho ios_screenshot=" + root + "/ios/screenshot.png\necho ios_log_stream=" + root + "/ios/log_stream.txt\necho ios_dev_log=" + root + "/ios/dev.log\necho status=pass") + " && " +
-    _write_fixture_script(root + "/android.sh", "echo android_screenshot=" + root + "/android/screenshot.png\necho android_logcat=" + root + "/android/logcat.txt\necho status=pass") + " && " +
+    _write_fixture_script(root + "/ios.sh", "echo ios_tooling=available\necho ios_screenshot=" + root + "/ios/screenshot.png\necho ios_log_stream=" + root + "/ios/log_stream.txt\necho ios_dev_log=" + root + "/ios/dev.log\n" + _mobile_proof_lines("ios", root) + "\necho status=pass") + " && " +
+    _write_fixture_script(root + "/android.sh", "echo android_screenshot=" + root + "/android/screenshot.png\necho android_logcat=" + root + "/android/logcat.txt\n" + _mobile_proof_lines("android", root) + "\necho status=pass") + " && " +
     "PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=" + root + "/source/production.env TAURI_MOBILE_RENDERER_IOS_SCRIPT=" + root + "/ios.sh TAURI_MOBILE_RENDERER_ANDROID_SCRIPT=" + root + "/android.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
@@ -101,11 +101,19 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_tauri_backend=taur
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_layout_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_metal_log_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_capture_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_animation_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_expected_gpu_backend=vulkan")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_tauri_backend=tauri2-android-webview")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_layout_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_vulkan_log_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_performance_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_status=pass")
 ```
 
 </details>
@@ -130,7 +138,7 @@ val command = "rm -rf " + root + " && mkdir -p " + root + "/source " + root + "/
     "printf 'pngish' > " + root + "/ios/screenshot.png && printf '[tauri-shell] render, html_len=347702 plain webkit log\\n' > " + root + "/ios/log_stream.txt && printf 'external_url: Some ios_mdi_probe.html\\n' > " + root + "/ios/dev.log && " +
     "printf 'pngish' > " + root + "/android/screenshot.png && printf '[tauri-shell] render, html_len=347702 Vulkan renderer ready\\n' > " + root + "/android/logcat.txt && " +
     _write_fixture_script(root + "/ios.sh", "echo ios_tooling=available\necho ios_screenshot=" + root + "/ios/screenshot.png\necho ios_log_stream=" + root + "/ios/log_stream.txt\necho ios_dev_log=" + root + "/ios/dev.log\necho status=pass") + " && " +
-    _write_fixture_script(root + "/android.sh", "echo android_screenshot=" + root + "/android/screenshot.png\necho android_logcat=" + root + "/android/logcat.txt\necho status=pass") + " && " +
+    _write_fixture_script(root + "/android.sh", "echo android_screenshot=" + root + "/android/screenshot.png\necho android_logcat=" + root + "/android/logcat.txt\n" + _mobile_proof_lines("android", root) + "\necho status=pass") + " && " +
     "PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=" + root + "/source/production.env TAURI_MOBILE_RENDERER_IOS_SCRIPT=" + root + "/ios.sh TAURI_MOBILE_RENDERER_ANDROID_SCRIPT=" + root + "/android.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
@@ -164,7 +172,7 @@ val command = "rm -rf " + root + " && mkdir -p " + root + "/source " + root + "/
     "printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\n' > " + root + "/source/production.env && " +
     "printf 'pngish' > " + root + "/ios/screenshot.png && printf '[tauri-shell] render, html_len=347702 CAMetalLayer Metal renderer ready\\n' > " + root + "/ios/log_stream.txt && printf 'external_url: Some ios_mdi_probe.html\\n' > " + root + "/ios/dev.log && " +
     "printf 'pngish' > " + root + "/android/screenshot.png && printf '[tauri-shell] render, html_len=347702 plain android webview log\\n' > " + root + "/android/logcat.txt && " +
-    _write_fixture_script(root + "/ios.sh", "echo ios_tooling=available\necho ios_screenshot=" + root + "/ios/screenshot.png\necho ios_log_stream=" + root + "/ios/log_stream.txt\necho ios_dev_log=" + root + "/ios/dev.log\necho status=pass") + " && " +
+    _write_fixture_script(root + "/ios.sh", "echo ios_tooling=available\necho ios_screenshot=" + root + "/ios/screenshot.png\necho ios_log_stream=" + root + "/ios/log_stream.txt\necho ios_dev_log=" + root + "/ios/dev.log\n" + _mobile_proof_lines("ios", root) + "\necho status=pass") + " && " +
     _write_fixture_script(root + "/android.sh", "echo android_screenshot=" + root + "/android/screenshot.png\necho android_logcat=" + root + "/android/logcat.txt\necho status=pass") + " && " +
     "PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=" + root + "/source/production.env TAURI_MOBILE_RENDERER_IOS_SCRIPT=" + root + "/ios.sh TAURI_MOBILE_RENDERER_ANDROID_SCRIPT=" + root + "/android.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -190,7 +198,7 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_android_vulkan_log_sta
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -199,8 +207,8 @@ val command = "rm -rf " + root + " && mkdir -p " + root + "/source " + root + "/
     "printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\n' > " + root + "/source/production.env && " +
     "printf 'pngish' > " + root + "/ios/screenshot.png && printf '[tauri-shell] render, html_len=347702 CAMetalLayer Metal renderer ready\\n' > " + root + "/ios/log_stream.txt && printf 'external_url: Some ios_mdi_probe.html\\n' > " + root + "/ios/dev.log && " +
     "printf 'pngish' > " + root + "/android/screenshot.png && printf '[tauri-shell] render, html_len=347702 plain android webview log\\n' > " + root + "/android/logcat.txt && printf 'Graphics Adapter Android Emulator OpenGL ES Translator ANGLE Vulkan 1.3\\n' > " + root + "/android/gpu.log && " +
-    _write_fixture_script(root + "/ios.sh", "echo ios_tooling=available\necho ios_screenshot=" + root + "/ios/screenshot.png\necho ios_log_stream=" + root + "/ios/log_stream.txt\necho ios_dev_log=" + root + "/ios/dev.log\necho status=pass") + " && " +
-    _write_fixture_script(root + "/android.sh", "echo android_screenshot=" + root + "/android/screenshot.png\necho android_logcat=" + root + "/android/logcat.txt\necho android_gpu_log=" + root + "/android/gpu.log\necho status=pass") + " && " +
+    _write_fixture_script(root + "/ios.sh", "echo ios_tooling=available\necho ios_screenshot=" + root + "/ios/screenshot.png\necho ios_log_stream=" + root + "/ios/log_stream.txt\necho ios_dev_log=" + root + "/ios/dev.log\n" + _mobile_proof_lines("ios", root) + "\necho status=pass") + " && " +
+    _write_fixture_script(root + "/android.sh", "echo android_screenshot=" + root + "/android/screenshot.png\necho android_logcat=" + root + "/android/logcat.txt\necho android_gpu_log=" + root + "/android/gpu.log\n" + _mobile_proof_lines("android", root) + "\necho status=pass") + " && " +
     "PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=" + root + "/source/production.env TAURI_MOBILE_RENDERER_IOS_SCRIPT=" + root + "/ios.sh TAURI_MOBILE_RENDERER_ANDROID_SCRIPT=" + root + "/android.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
@@ -210,6 +218,7 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_gpu_log=" + root + "/android/gpu.log")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_vulkan_log_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_status=pass")
 ```
 
 </details>
@@ -233,7 +242,7 @@ val command = "rm -rf " + root + " && mkdir -p " + root + "/source " + root + "/
     "printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\n' > " + root + "/source/production.env && " +
     "printf 'pngish' > " + root + "/ios/screenshot.png && printf '[tauri-shell] render, html_len=347702 CAMetalLayer Metal renderer ready\\n' > " + root + "/ios/log_stream.txt && printf 'external_url: Some ios_mdi_probe.html\\n' > " + root + "/ios/dev.log && " +
     "printf 'pngish' > " + root + "/android/screenshot.png && printf 'Vulkan renderer ready but no render marker\\n' > " + root + "/android/logcat.txt && " +
-    _write_fixture_script(root + "/ios.sh", "echo ios_tooling=available\necho ios_screenshot=" + root + "/ios/screenshot.png\necho ios_log_stream=" + root + "/ios/log_stream.txt\necho ios_dev_log=" + root + "/ios/dev.log\necho status=pass") + " && " +
+    _write_fixture_script(root + "/ios.sh", "echo ios_tooling=available\necho ios_screenshot=" + root + "/ios/screenshot.png\necho ios_log_stream=" + root + "/ios/log_stream.txt\necho ios_dev_log=" + root + "/ios/dev.log\n" + _mobile_proof_lines("ios", root) + "\necho status=pass") + " && " +
     _write_fixture_script(root + "/android.sh", "echo android_screenshot=" + root + "/android/screenshot.png\necho android_logcat=" + root + "/android/logcat.txt\necho status=pass") + " && " +
     "PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=" + root + "/source/production.env TAURI_MOBILE_RENDERER_IOS_SCRIPT=" + root + "/ios.sh TAURI_MOBILE_RENDERER_ANDROID_SCRIPT=" + root + "/android.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -247,12 +256,78 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_sta
 
 </details>
 
+#### fails closed when iOS MDI event capture performance animation proof is missing
+
+-  write fixture script
+-  write fixture script
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-renderer-parity-ios-no-mdi-proof"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/source " + root + "/ios " + root + "/android && " +
+    "printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\n' > " + root + "/source/production.env && " +
+    "printf 'pngish' > " + root + "/ios/screenshot.png && printf '[tauri-shell] render, html_len=347702 CAMetalLayer Metal renderer ready\\n' > " + root + "/ios/log_stream.txt && printf 'external_url: Some ios_mdi_probe.html Metal\\n' > " + root + "/ios/dev.log && " +
+    "printf 'pngish' > " + root + "/android/screenshot.png && printf '[tauri-shell] render, html_len=347702 Vulkan renderer ready\\n' > " + root + "/android/logcat.txt && " +
+    _write_fixture_script(root + "/ios.sh", "echo ios_tooling=available\necho ios_screenshot=" + root + "/ios/screenshot.png\necho ios_log_stream=" + root + "/ios/log_stream.txt\necho ios_dev_log=" + root + "/ios/dev.log\necho status=pass") + " && " +
+    _write_fixture_script(root + "/android.sh", "echo android_screenshot=" + root + "/android/screenshot.png\necho android_logcat=" + root + "/android/logcat.txt\n" + _mobile_proof_lines("android", root) + "\necho status=pass") + " && " +
+    "PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=" + root + "/source/production.env TAURI_MOBILE_RENDERER_IOS_SCRIPT=" + root + "/ios.sh TAURI_MOBILE_RENDERER_ANDROID_SCRIPT=" + root + "/android.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-event-capture-performance-animation-proof-missing")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_status=")
+```
+
+</details>
+
+#### fails closed when Android MDI event capture performance animation proof is missing
+
+-  write fixture script
+-  write fixture script
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-renderer-parity-android-no-mdi-proof"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/source " + root + "/ios " + root + "/android && " +
+    "printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_surface_manifest_no_fake_capture=true\\n' > " + root + "/source/production.env && " +
+    "printf 'pngish' > " + root + "/ios/screenshot.png && printf '[tauri-shell] render, html_len=347702 CAMetalLayer Metal renderer ready\\n' > " + root + "/ios/log_stream.txt && printf 'external_url: Some ios_mdi_probe.html Metal\\n' > " + root + "/ios/dev.log && " +
+    "printf 'pngish' > " + root + "/android/screenshot.png && printf '[tauri-shell] render, html_len=347702 Vulkan renderer ready\\n' > " + root + "/android/logcat.txt && " +
+    _write_fixture_script(root + "/ios.sh", "echo ios_tooling=available\necho ios_screenshot=" + root + "/ios/screenshot.png\necho ios_log_stream=" + root + "/ios/log_stream.txt\necho ios_dev_log=" + root + "/ios/dev.log\n" + _mobile_proof_lines("ios", root) + "\necho status=pass") + " && " +
+    _write_fixture_script(root + "/android.sh", "echo android_screenshot=" + root + "/android/screenshot.png\necho android_logcat=" + root + "/android/logcat.txt\necho status=pass") + " && " +
+    "PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=" + root + "/source/production.env TAURI_MOBILE_RENDERER_IOS_SCRIPT=" + root + "/ios.sh TAURI_MOBILE_RENDERER_ANDROID_SCRIPT=" + root + "/android.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-event-capture-performance-animation-proof-missing")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_status=")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

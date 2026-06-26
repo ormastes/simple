@@ -3,9 +3,11 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build/tauri_android_mobile_renderer"
+MDI_PROOF_VALIDATOR="$ROOT_DIR/scripts/check/validate-tauri-mobile-mdi-proof.js"
 APK="${ANDROID_APK:-$ROOT_DIR/tools/tauri-shell/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk}"
 SCREENSHOT="${ANDROID_RENDERER_SCREENSHOT:-$BUILD_DIR/android_renderer.png}"
 LOGCAT="$BUILD_DIR/android_renderer_logcat.txt"
+MDI_PROOF_JSON="$BUILD_DIR/android_mdi_proof.json"
 TIMEOUT_SECS="${ANDROID_RENDERER_TIMEOUT_SECS:-120}"
 ADB="${ADB:-adb}"
 EMULATOR="${EMULATOR:-emulator}"
@@ -71,6 +73,8 @@ mkdir -p "$BUILD_DIR"
 
 command -v "$ADB" >/dev/null 2>&1 || fail "adb not found"
 command -v "$EMULATOR" >/dev/null 2>&1 || true
+command -v node >/dev/null 2>&1 || fail "node not found"
+test -f "$MDI_PROOF_VALIDATOR" || fail "MDI proof validator missing: $MDI_PROOF_VALIDATOR"
 test -f "$APK" || fail "Android APK missing: $APK"
 unzip -l "$APK" | grep -q 'lib/arm64-v8a/libsimple_mobile_runtime_exec\.so' \
     || fail "Android APK missing arm64-v8a packaged Simple runtime"
@@ -169,14 +173,23 @@ validate_screenshot_png "$SCREENSHOT" android_mobile_renderer_screenshot \
 grep -Eiq 'Vulkan|vulkan|VK_|ANGLE.*Vulkan|Renderer.*Vulkan|HWUI.*Vulkan|skiavk' "$LOGCAT" "$GPU_LOG_EXTRA" \
     || fail "Android renderer log missing Vulkan/skiavk marker"
 
+node "$MDI_PROOF_VALIDATOR" android "$MDI_PROOF_JSON" "$LOGCAT" \
+    || fail "Android MDI event/capture/performance/animation proof failed"
+
 echo "android_tooling=available"
 echo "android_device=$DEVICE_SERIAL"
 echo "android_screenshot=$SCREENSHOT"
 echo "android_logcat=$LOGCAT"
 echo "android_gpu_log=$GPU_LOG_EXTRA"
+echo "android_mdi_proof_json=$MDI_PROOF_JSON"
 echo "android_render_log_status=pass"
 echo "android_layout_status=pass"
 echo "android_vulkan_log_status=pass"
+echo "android_mdi_proof_status=pass"
+echo "android_mdi_event_status=pass"
+echo "android_mdi_capture_status=pass"
+echo "android_mdi_performance_status=pass"
+echo "android_mdi_animation_status=pass"
 echo "status=pass"
 
 if [ -n "$STARTED_EMULATOR_PID" ]; then
