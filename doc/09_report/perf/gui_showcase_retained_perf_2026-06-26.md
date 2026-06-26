@@ -15,8 +15,16 @@ RESOLUTION=4k BUILD_DIR=build/widget-showcase-4k-200fps TIMEOUT_SECS=120 \
 SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple \
   sh scripts/check/check-widget-showcase-4k-200fps.shs
 
+RESOLUTION=4k BUILD_DIR=build/widget-showcase-4k-200fps-live-20260626 TIMEOUT_SECS=30 \
+SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple \
+  sh scripts/check/check-widget-showcase-4k-200fps.shs
+
 RESOLUTION=8k BUILD_DIR=build/widget-showcase-8k-perf TIMEOUT_SECS=180 \
 SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple \
+  sh scripts/check/check-widget-showcase-4k-200fps.shs
+
+RESOLUTION=8k BUILD_DIR=build/widget-showcase-8k-perf-live-20260626 TIMEOUT_SECS=60 \
+SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple \
   sh scripts/check/check-widget-showcase-4k-200fps.shs
 
 GUI_SHOWCASE_REQUIRE_CURRENT_SOURCE_REVISION=1 \
@@ -26,14 +34,22 @@ GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/gui-renderdoc-feature-coverage-st
 BUILD_DIR=build/gui-renderdoc-feature-coverage-status \
 REPORT_PATH=build/gui-renderdoc-feature-coverage-status/report.md \
   sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true
+
+GUI_SHOWCASE_REQUIRE_CURRENT_SOURCE_REVISION=1 \
+GUI_SHOWCASE_4K_PERF_ENV=build/widget-showcase-4k-200fps-live-20260626/status.env \
+GUI_SHOWCASE_8K_PERF_ENV=build/widget-showcase-8k-perf-live-20260626/status.env \
+GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/gui-renderdoc-feature-coverage-static-cache \
+BUILD_DIR=build/gui-renderdoc-feature-coverage-status-live-20260626 \
+REPORT_PATH=build/gui-renderdoc-feature-coverage-status-live-20260626/report.md \
+  sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true
 ```
 
 ## Source Freshness
 
 - Revision kind: `content-sha256`
 - Revision files: `scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl`
-- Source revision: `612bdcefecfc`
-- Current source revision: `612bdcefecfc`
+- Source revision: `1f4d4bad665f`
+- Current source revision: `1f4d4bad665f`
 - Source revision status: `current`
 - Strict source requirement: `1`
 
@@ -52,9 +68,11 @@ internal probe loop.
 - Viewport: `3840x2160`
 - Pixels: `8294400`
 - Frames: `200`
-- FPS x1000: `46104195`
+- FPS x1000: `54421768`
 - Target FPS: `200`
-- Frame avg/p50/p95 ns: `21690 / 21690 / 21690`
+- Frame avg/p50/p95 ns: `18375 / 18375 / 18375`
+- Frame elapsed ns: `3675000`
+- Frame elapsed status: `pass`
 - RSS: `131328 / 262144 KiB`
 - RSS status: `pass`
 - Nonzero pixels: `5458`
@@ -71,9 +89,11 @@ internal probe loop.
 - Viewport: `7680x4320`
 - Pixels: `33177600`
 - Frames: `200`
-- FPS x1000: `12452524`
+- FPS x1000: `13609145`
 - Target FPS: `200`
-- Frame avg/p50/p95 ns: `80305 / 80305 / 80305`
+- Frame avg/p50/p95 ns: `73480 / 73480 / 73480`
+- Frame elapsed ns: `14696000`
+- Frame elapsed status: `pass`
 - RSS: `520192 / 750000 KiB`
 - RSS status: `pass`
 - Nonzero pixels: `203`
@@ -88,7 +108,7 @@ internal probe loop.
 With both retained perf env files supplied, the aggregate reports
 `gui_showcase_4k_200fps_status=pass`,
 `gui_showcase_8k_perf_status=pass`, and
-`blocked_completion_gate_count=14`.
+`blocked_completion_gate_count=15`.
 
 The aggregate remains incomplete because Chrome and Electron RenderDoc `.rdc`
 artifacts are missing, GUI widget RenderDoc captures are missing, Vulkan
