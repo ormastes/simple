@@ -148,8 +148,12 @@ artifact contract is `gui_web_2d_vulkan_comparison_fixture_status`,
 `gui_web_2d_vulkan_simple_evidence_file_status`, and
 `gui_web_2d_vulkan_simple_backend_status`; use those fields to decide whether
 the Electron baseline exists and is nonblank, the Chrome ARGB output is
-viewport-matching and nonblank, and the Simple evidence env proves the Vulkan backend
-before making a GUI/web/2D Vulkan comparison claim.
+viewport-matching and nonblank, and the Simple evidence env proves the Vulkan
+backend before making a GUI/web/2D Vulkan comparison claim. The Simple backend
+row is fail-closed: it only reaches `pass` when the same env also carries
+`vulkan_engine2d_readback_validation_status=pass`, zero clear/rect mismatches,
+`vulkan_engine2d_readback_blur_or_tolerance_used=false`, and passing
+Vulkan-strict plus CPU/Vulkan parity exit codes.
 When direct-run evidence is missing, the aggregate still emits the expected
 capture diagnostics under the selected run directory. Inspect
 `gui_web_2d_vulkan_electron_stdout`, `gui_web_2d_vulkan_electron_log`,
@@ -716,6 +720,10 @@ Completion requires typed evidence, not screenshots alone:
   exists and starts with `RDOC`.
 - The Simple lane reports `rdoc_backend=simple`,
   `rdoc_scene=vulkan-engine2d`, and the Simple Vulkan gate passes.
+- The Simple GUI/web/2D Vulkan comparison lane reports
+  `vulkan_engine2d_readback_validation_status=pass`, clear and rect readback
+  statuses `pass`, clear and rect mismatches `0`, no blur/tolerance fallback,
+  and exit code `0` for both the Vulkan strict and CPU/Vulkan parity specs.
 - Any exploratory Electron/Chrome lane reports requested Vulkan/ANGLE metadata and its log
   does not contain Chromium's `angle=vulkan` unavailable failure. A rendered
   bitmap with that log is a browser fallback, not a Vulkan-backed browser proof.
