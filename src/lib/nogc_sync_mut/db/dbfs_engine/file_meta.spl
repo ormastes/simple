@@ -66,10 +66,9 @@ impl InodeHintsCache:
 
     me fn put(path: text, ino_id: i64, generation: i64):
         val existing = self.entries.get(path)
-        val count = if existing.?:
-            existing.unwrap().access_count
-        else:
-            0
+        val count = match existing:
+            Some(entry): entry.access_count
+            None: 0
         if not existing.? and self.entries.keys().len() as i64 >= self.max_entries:
             self.evict_lru()
         self.entries[path] = HintEntry(
@@ -84,7 +83,9 @@ impl InodeHintsCache:
         val entry = self.entries.get(path)
         if entry.?:
             self.hit_count = self.hit_count + 1
-            val e = entry.unwrap()
+            val e = match entry:
+                Some(value): value
+                None: return nil
             self.entries[path] = HintEntry(
                 path: e.path,
                 ino_id: e.ino_id,
@@ -115,7 +116,9 @@ impl InodeHintsCache:
         for key in self.entries.keys():
             val entry = self.entries.get(key)
             if entry.?:
-                val e = entry.unwrap()
+                val e = match entry:
+                    Some(value): value
+                    None: continue
                 if min_count < 0 or e.access_count < min_count:
                     min_count = e.access_count
                     min_key = key
@@ -134,10 +137,14 @@ impl InodeHintsCache:
 fn resolve_path(path: text, dentries: DentryTable, inodes: InodeTable, cache: InodeHintsCache) -> Result<FileMeta, text>:
     val cached = cache.get(path)
     if cached.?:
-        val hint = cached.unwrap()
+        val hint = match cached:
+            Some(value): value
+            None: HintEntry(path: "", ino_id: -1, gen: -1, cached_at: 0, access_count: 0)
         val inode_result = inodes.get(InodeKey(ino_id: hint.ino_id))
         if inode_result.is_ok():
-            val inode = inode_result.unwrap()
+            val inode = match inode_result:
+                Ok(value): value
+                Err(_): return Err("resolve_path: cached inode not found: {hint.ino_id}")
             if inode.gen == hint.gen:
                 val parts = path.split("/")
                 val name = if parts.len() > 0: parts[parts.len() - 1] else: ""
@@ -150,7 +157,9 @@ fn resolve_path(path: text, dentries: DentryTable, inodes: InodeTable, cache: In
                     parent_path = parent_path + parts[pi]
                     pi = pi + 1
                 val parent_dentry = dentries.find_child_accel(1, name)
-                val parent_ino = if parent_dentry.is_ok(): parent_dentry.unwrap().child_ino else: 1
+                val parent_ino = match parent_dentry:
+                    Ok(value): value.child_ino
+                    Err(_): 1
                 return Ok(file_meta_from_inode(inode, path, name, parent_ino))
 
     # Cache miss: walk dentry chain from root (ino=1)
@@ -167,13 +176,18 @@ fn resolve_path(path: text, dentries: DentryTable, inodes: InodeTable, cache: In
         if not dentry_result.is_ok():
             return Err("resolve_path: component not found: {component}")
         prev_ino = cur_ino
-        cur_ino = dentry_result.unwrap().child_ino
+        val dentry = match dentry_result:
+            Ok(value): value
+            Err(_): return Err("resolve_path: component not found: {component}")
+        cur_ino = dentry.child_ino
         i = i + 1
 
     val inode_result = inodes.get(InodeKey(ino_id: cur_ino))
     if not inode_result.is_ok():
         return Err("resolve_path: inode not found: {cur_ino}")
-    val inode = inode_result.unwrap()
+    val inode = match inode_result:
+        Ok(value): value
+        Err(_): return Err("resolve_path: inode not found: {cur_ino}")
     cache.put(path, cur_ino, inode.gen)
 
     val parts = path.split("/")
@@ -192,7 +206,11 @@ fn batch_stat(parent_ino: i64, parent_path: text, dentries: DentryTable, inodes:
         val child = children[i]
         val inode_result = inodes.get(InodeKey(ino_id: child.child_ino))
         if inode_result.is_ok():
-            val inode = inode_result.unwrap()
+            val inode = match inode_result:
+                Ok(value): value
+                Err(_):
+                    i = i + 1
+                    continue
             val child_path = if parent_path == "/" or parent_path.len() == 0:
                 "/{child.name}"
             else:
