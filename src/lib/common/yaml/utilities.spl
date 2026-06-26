@@ -28,19 +28,35 @@ fn yaml_needs_quotes(s: text) -> bool:
         return true
     false
 
-fn yaml_quote_string(s: text) -> text:
+fn yaml_quote_string(s: text, style: text = "double") -> text:
+    if style == "single":
+        return "'" + s.replace("'", "''") + "'"
     "\"" + yaml_escape_string(s) + "\""
 
-fn yaml_indent(level: i64, size: i64) -> text:
-    if level <= 0:
-        return ""
-    var out = ""
-    var i = 0
-    val total = level * size
-    while i < total:
-        out = out + " "
-        i = i + 1
-    out
+# Two forms: yaml_indent(level, size) -> pad string;
+#            yaml_indent(text, level, size) -> text prefixed by level*size spaces.
+fn yaml_indent(a: any, level: i64, size: i64 = -1) -> text:
+    if size < 0:
+        # 2-arg form: a=level, level=size
+        val lvl: i64 = a
+        val sz: i64 = level
+        if lvl <= 0:
+            return ""
+        var out = ""
+        var i = 0
+        val total = lvl * sz
+        while i < total:
+            out = out + " "
+            i = i + 1
+        return out
+    # 3-arg form: indent the text `a` by level*size spaces
+    var pad = ""
+    var j = 0
+    val tot = level * size
+    while j < tot:
+        pad = pad + " "
+        j = j + 1
+    pad + a
 
 fn yaml_detect_indentation(s: text) -> i64:
     val lines = _yaml_u_lines(s)
@@ -405,9 +421,17 @@ fn yaml_flatten_mapping(v: any) -> any:
         return v
     yaml_mapping(_yaml_flatten_pairs(v, ""))
 
-fn yaml_validate_schema(value: any, schema: any) -> (bool, text):
-    if schema == nil or not is_yaml_mapping(schema):
+fn yaml_validate_schema(value: any, schema: any) -> any:
+    if schema == nil:
         return (true, "")
+    # Plain type-name string schema -> bool (e.g. "string", "number").
+    # Match the name set directly; a real yaml_mapping is a tuple and compares
+    # unequal here, so it safely falls through to the mapping logic below
+    # (calling is_yaml_mapping on a plain text would tuple-index it and crash).
+    if schema == "string" or schema == "number" or schema == "boolean" or schema == "null" or schema == "scalar" or schema == "sequence" or schema == "mapping":
+        if yaml_get_scalar_type(value) == schema:
+            return true
+        return false
     val type_spec = yaml_mapping_get(schema, "type")
     if type_spec == nil:
         return (true, "")
