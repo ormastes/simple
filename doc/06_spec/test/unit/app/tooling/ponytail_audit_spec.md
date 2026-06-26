@@ -52,7 +52,7 @@ val path = _write_ponytail_fixture("clean", "fn hello() -> text:\n    \"ok\"\n")
 val output = ponytail_audit(path)
 expect(output).to_contain("Ponytail Audit")
 expect(output).to_contain("status: ok")
-expect(output.contains("nil")).to_equal(false)
+expect(output.split("nil").len()).to_equal(1)
 ```
 
 </details>
@@ -87,7 +87,7 @@ Reproduction: this block contains the complete executable scenario source.
 val output = ponytail_audit("build/test/ponytail/missing.spl")
 expect(output).to_contain("status: missing")
 expect(output).to_contain("reason: source unavailable")
-expect(output.contains("nil")).to_equal(false)
+expect(output.split("nil").len()).to_equal(1)
 ```
 
 </details>
@@ -109,7 +109,7 @@ expect(output).to_contain("cut placeholder passes:")
 expect(output).to_contain("cut speculative abstraction:")
 expect(output).to_contain("resolve todo markers:")
 expect(output).to_contain("total_suggestions:")
-expect(output.contains("nil")).to_equal(false)
+expect(output.split("nil").len()).to_equal(1)
 ```
 
 </details>
@@ -145,7 +145,7 @@ val output = ponytail_simplification_report("build/test/ponytail/report_missing.
 expect(output).to_contain("status: missing")
 expect(output).to_contain("reason: source unavailable")
 expect(output).to_contain("total_suggestions: 0")
-expect(output.contains("nil")).to_equal(false)
+expect(output.split("nil").len()).to_equal(1)
 ```
 
 </details>

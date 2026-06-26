@@ -59,7 +59,7 @@ val html = generate_full_dashboard_html_with_diagnostics(
 expect(html).to_contain("switchView('diagnostics', this)")
 expect(html).to_contain("<div id=\"view-diagnostics\" class=\"view\">")
 expect(html).to_contain("LLM Diagnostics")
-expect(html.contains("switchView('tooling', this)")).to_equal(false)
+expect(html.split("switchView('tooling', this)").len()).to_equal(1)
 ```
 
 </details>
@@ -94,7 +94,7 @@ expect(html).to_contain("LLM Tooling Artifacts")
 - mkdir p
 - remove file if exists
 - write file
-   - Expected: response does not contain `internal_absence_marker()`
+   - Expected: response.split(internal_absence_marker()).len() equals `1`
 - remove file if exists
 
 
@@ -118,7 +118,7 @@ expect(response).to_contain("events=2")
 expect(response).to_contain("sessions=1")
 expect(response).to_contain("tool_events=1")
 expect(response).to_contain("last_session=sid-web")
-expect(response.contains(internal_absence_marker())).to_equal(false)
+expect(response.split(internal_absence_marker()).len()).to_equal(1)
 remove_file_if_exists(path)
 ```
 
@@ -129,7 +129,7 @@ remove_file_if_exists(path)
 - mkdir p
 - remove file if exists
 - write file
-   - Expected: response does not contain `internal_absence_marker()`
+   - Expected: response.split(internal_absence_marker()).len() equals `1`
 - remove file if exists
 
 
@@ -149,7 +149,7 @@ val response = server.route_http("GET", "/", "", "simple-dashboard-session")
 expect(response).to_contain("events=1")
 expect(response).to_contain("last_event=none")
 expect(response).to_contain("last_session=none")
-expect(response.contains(internal_absence_marker())).to_equal(false)
+expect(response.split(internal_absence_marker()).len()).to_equal(1)
 remove_file_if_exists(path)
 ```
 
@@ -160,8 +160,8 @@ remove_file_if_exists(path)
 - mkdir p
 - remove file if exists
 - write file
-   - Expected: diagnostics_view does not contain `llm-tooling-artifacts-panel`
-   - Expected: response does not contain `internal_absence_marker()`
+   - Expected: diagnostics_view.split("llm-tooling-artifacts-panel").len() equals `1`
+   - Expected: response.split(internal_absence_marker()).len() equals `1`
 - remove file if exists
 - remove file if exists
 
@@ -187,12 +187,12 @@ val diagnostics_view = response.slice(diagnostics_start, tooling_start)
 expect(response).to_contain("<section id=\"llm-tooling-artifacts-panel\">")
 expect(response).to_contain("switchView('tooling', this)")
 expect(response).to_contain("<div id=\"view-tooling\" class=\"view\">")
-expect(diagnostics_view.contains("llm-tooling-artifacts-panel")).to_equal(false)
+expect(diagnostics_view.split("llm-tooling-artifacts-panel").len()).to_equal(1)
 expect(response).to_contain("LLM Tooling Artifacts")
 expect(response).to_contain("context_status=ready")
 expect(response).to_contain("ponytail_status=review")
 expect(response).to_contain("FutureThing")
-expect(response.contains(internal_absence_marker())).to_equal(false)
+expect(response.split(internal_absence_marker()).len()).to_equal(1)
 remove_file_if_exists(diagnostics_path)
 remove_file_if_exists(tooling_path)
 ```
@@ -205,7 +205,7 @@ remove_file_if_exists(tooling_path)
 - remove file if exists
 - write file
 - remove file if exists
-   - Expected: response does not contain `internal_absence_marker()`
+   - Expected: response.split(internal_absence_marker()).len() equals `1`
 - remove file if exists
 
 
@@ -230,7 +230,7 @@ expect(response).to_contain("<div id=\"view-tooling\" class=\"view\">")
 expect(response).to_contain("context_status=missing")
 expect(response).to_contain("ponytail_status=missing")
 expect(response).to_contain("ponytail_reason=source unavailable")
-expect(response.contains(internal_absence_marker())).to_equal(false)
+expect(response.split(internal_absence_marker()).len()).to_equal(1)
 remove_file_if_exists(diagnostics_path)
 ```
 
@@ -254,7 +254,7 @@ expect(guide).to_contain("llm-tooling-artifacts-panel")
 expect(guide).to_contain("/api/vllm/control")
 expect(guide).to_contain("simple_context")
 expect(guide).to_contain("simple_ponytail")
-expect(guide.contains(internal_absence_marker())).to_equal(false)
+expect(guide.split(internal_absence_marker()).len()).to_equal(1)
 ```
 
 </details>

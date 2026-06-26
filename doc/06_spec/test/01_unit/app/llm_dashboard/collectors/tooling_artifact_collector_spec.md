@@ -125,7 +125,7 @@ val html = render_llm_tooling_artifacts_panel_html(collect_llm_tooling_artifacts
 
 expect(html).to_contain("llm-tooling-artifacts-panel")
 expect(html).to_contain("&lt;tag&gt;&amp;")
-expect(html.contains("<tag>")).to_equal(false)
+expect(html.split("<tag>").len()).to_equal(1)
 expect_no_internal_absence_marker(html)
 ```
 
