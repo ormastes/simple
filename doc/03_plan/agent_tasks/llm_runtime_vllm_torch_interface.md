@@ -148,8 +148,9 @@ Tasks:
    Status: done for public GC/NoGC backend CUDA placement, `Tensor.cuda`,
    stream creation, and optimizer state initialization. Explicit `device_id`
    arguments now flow through to the Torch SFFI instead of forcing CUDA device
-   `0`; optimizer state no longer implicitly moves state tensors to CUDA `0`
-   while no device-aware optimizer-state SFFI contract exists.
+   `0`; optimizer state now queries `rt_torch_torchtensor_device(param)` and
+   moves zero state tensors to the same CUDA device when parameters are already
+   CUDA-backed.
 4. Make seed helpers either functional or explicitly unsupported.
    Status: done for GC async, NoGC async, and NoGC sync Torch training helpers;
    they now return `unsupported` instead of silently no-oping while no owner
@@ -241,9 +242,11 @@ Evidence:
   test/01_unit/lib/common/torch/torch_device_placement_status_spec.spl
   test/unit/lib/common/torch/torch_device_placement_status_spec.spl` passed.
 - `test/01_unit/lib/common/torch/torch_device_placement_status_spec.spl`
-  passed with 4/4 scenarios.
+  passed with 5/5 scenarios, including same-parameter-device optimizer state
+  initialization.
 - `test/unit/lib/common/torch/torch_device_placement_status_spec.spl` passed
-  with 4/4 scenarios.
+  with 5/5 scenarios, including same-parameter-device optimizer state
+  initialization.
 
 Still open:
 
@@ -251,8 +254,10 @@ Still open:
   `read_range` execution, pinned buffer registration, and device staging are
   now surfaced by the streaming readiness gate but still report unavailable
   until real native adapters are implemented.
-- Live CUDA placement against libtorch and device-preserving optimizer state for
-  already-CUDA parameters remain open.
+- Live CUDA placement against libtorch remains open; source-contract coverage
+  now proves optimizer state preserves the parameter device for already-CUDA
+  parameters, but end-to-end optimizer execution against a live libtorch CUDA
+  installation remains unproven.
 
 Runtime-adjacent decision record for seed helpers:
 
