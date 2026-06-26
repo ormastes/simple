@@ -1,28 +1,39 @@
-# LLM Agent Dashboard Web Contracts
+# Llm Agent Dashboard Specification
 
-| Field | Value |
-|---|---|
-| Source | `test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl` |
-| Feature IDs | `#WEB-DASHBOARD-AGENTS` |
-| Category | Application |
-| Status | Implemented |
-| Requirements | N/A |
-| Plan | N/A |
-| Design | N/A |
-| Research | N/A |
+> <details>
 
-## Overview
+<!-- sdn-diagram:id=llm_agent_dashboard_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
 
-This SPipe spec pins the web dashboard contracts that keep the agent dashboard
-reachable only through authenticated routes and keep the generated dashboard UI
-responsive on narrow screens.
+```sdn id=llm_agent_dashboard_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
 
-## Scenario Summary
+llm_agent_dashboard_spec -> std
+llm_agent_dashboard_spec -> app
+```
 
-| Metric | Count |
-|---|---:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=llm_agent_dashboard_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 5 | 5 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Llm Agent Dashboard Specification
 
 ## Scenarios
 
@@ -30,20 +41,121 @@ responsive on narrow screens.
 
 #### redirects unauthenticated /agents requests to /login
 
-```simple
-val source = _read_source(SERVER_PATH)
-expect(source).to_contain("if clean_path == \"/agents\" or clean_path.starts_with(\"/agents\"):")
-expect(source).to_contain("if session == nil:")
-expect(source).to_contain("return http_redirect(\"/login\")")
-```
+<details>
+<summary>Executable SSpec</summary>
 
-#### includes responsive layout rules for narrow screens
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val html_source = _read_source(HTML_VIEWS_PATH)
-expect(html_source).to_contain("@media (max-width: 1100px)")
-expect(html_source).to_contain("@media (max-width: 720px)")
-expect(html_source).to_contain("grid-template-columns: 1fr 1fr 1fr")
-expect(html_source).to_contain("grid-template-columns: 1fr 1fr")
-expect(html_source).to_contain("grid-template-columns: 1fr;")
+val server = DashboardServer.new_with_agent_dir(3099, ".build/llm_dashboard/agent-system-empty")
+val response = server.route_http("GET", "/agents", "", nil)
+
+expect(response).to_contain("HTTP/1.1 302 Found")
+expect(response).to_contain("Location: /login")
 ```
+
+</details>
+
+#### rejects blank sessions for /agents
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server = DashboardServer.new_with_agent_dir(3099, ".build/llm_dashboard/agent-system-empty")
+val response = server.route_http("GET", "/agents?view=live", "", "")
+
+expect(response).to_contain("HTTP/1.1 302 Found")
+expect(response).to_contain("Location: /login")
+```
+
+</details>
+
+#### renders authenticated /agents as an absence-safe dashboard
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server = DashboardServer.new_with_agent_dir(3099, ".build/llm_dashboard/agent-system-empty")
+val response = server.route_http("GET", "/agents", "", "sid")
+
+expect(response).to_contain("HTTP/1.1 200 OK")
+expect(response).to_contain("id=\"agent-dashboard\"")
+expect(response).to_contain("selected session unavailable")
+expect(response.split(internal_absence_marker()).len()).to_equal(1)
+```
+
+</details>
+
+#### does not hijack non-agents prefixes
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server = DashboardServer.new_with_agent_dir(3099, ".build/llm_dashboard/agent-system-empty")
+val response = server.route_http("GET", "/agentship", "", "sid")
+
+expect(response).to_contain("HTTP/1.1 200 OK")
+expect(response.split("id=\"agent-dashboard\"").len()).to_equal(1)
+```
+
+</details>
+
+#### keeps the dashboard shell linked to /agents
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val server_source = _read_source(SERVER_PATH)
+val html_source = _read_source(DASHBOARD_HTML_PATH)
+
+expect(server_source).to_contain("fn _is_agents_path(path: text) -> bool:")
+expect(server_source).to_contain("path == \"/agents\" or path.starts_with(\"/agents/\")")
+expect(html_source).to_contain("window.location='/agents'")
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/feature/app/web_dashboard/llm_agent_dashboard_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- LLM agent dashboard web contracts
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 5 |
+| Active scenarios | 5 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>

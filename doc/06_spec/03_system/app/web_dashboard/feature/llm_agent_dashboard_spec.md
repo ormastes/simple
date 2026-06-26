@@ -90,7 +90,7 @@ val response = server.route_http("GET", "/agents", "", "sid")
 expect(response).to_contain("HTTP/1.1 200 OK")
 expect(response).to_contain("id=\"agent-dashboard\"")
 expect(response).to_contain("selected session unavailable")
-expect(response.split("nil").len()).to_equal(1)
+expect(response.split(internal_absence_marker()).len()).to_equal(1)
 ```
 
 </details>
@@ -108,7 +108,7 @@ val server = DashboardServer.new_with_agent_dir(3099, ".build/llm_dashboard/agen
 val response = server.route_http("GET", "/agentship", "", "sid")
 
 expect(response).to_contain("HTTP/1.1 200 OK")
-expect(response.contains("id=\"agent-dashboard\"")).to_equal(false)
+expect(response.split("id=\"agent-dashboard\"").len()).to_equal(1)
 ```
 
 </details>

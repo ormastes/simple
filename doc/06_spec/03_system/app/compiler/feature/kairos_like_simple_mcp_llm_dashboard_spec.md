@@ -178,6 +178,9 @@ match loaded:
 
 #### should produce a compact brief from recent session activity
 
+- expect internal absence hidden
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -191,7 +194,7 @@ val brief = assistant_store_session_brief(root, "assistant-kairos-brief")
 expect(brief).to_contain("session: assistant-kairos-brief")
 expect(brief).to_contain("summary: coordinate agents")
 expect(brief).to_contain("timeline events: 3")
-expect(brief.contains("nil")).to_equal(false)
+expect_internal_absence_hidden(brief)
 ```
 
 </details>
@@ -287,6 +290,9 @@ expect(view.primary_action.route_target).to_equal("assistant_core")
 
 #### should expose operator-visible task tree and recent events
 
+- expect internal absence hidden
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -301,7 +307,7 @@ val digest_lines = assistant_dashboard_render_digest(assistant_dashboard_digest_
 
 expect(live_lines.join("\n")).to_contain("timeline 3 tasks 1 notifications 3")
 expect(digest_lines.join("\n")).to_contain("task_summaries 1")
-expect((live_lines + digest_lines).join("\n").contains("nil")).to_equal(false)
+expect_internal_absence_hidden((live_lines + digest_lines).join("\n"))
 ```
 
 </details>
@@ -345,7 +351,7 @@ expect(view.failure_count).to_equal(1)
    - Expected: durable.dropped_timeline_count equals `3`
    - Expected: projection.backpressure_state equals `backpressure`
    - Expected: projection.coalesced_signal_count equals `1`
-   - Expected: projection.notice does not contain `nil`
+- expect internal absence hidden
 
 
 <details>
@@ -376,14 +382,17 @@ expect(durable.status).to_equal("pruned")
 expect(durable.dropped_timeline_count).to_equal(3)
 expect(projection.backpressure_state).to_equal("backpressure")
 expect(projection.coalesced_signal_count).to_equal(1)
-expect(projection.notice.contains("nil")).to_equal(false)
+expect_internal_absence_hidden(projection.notice)
 ```
 
 </details>
 
 ### absence-safe web route contract
 
-#### should render authenticated /agents without public nil text
+#### should render authenticated /agents without internal absence markers
+
+- expect internal absence hidden
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -397,7 +406,7 @@ val response = server.route_http("GET", "/agents", "", "sid")
 
 expect(response).to_contain("HTTP/1.1 200 OK")
 expect(response).to_contain("selected session unavailable")
-expect(response.split("nil").len()).to_equal(1)
+expect_internal_absence_hidden(response)
 ```
 
 </details>
