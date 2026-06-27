@@ -27,7 +27,7 @@ renderdoc_simple_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -81,6 +81,8 @@ sh scripts/check/check-renderdoc-simple-gate.shs || true
 - Passing gate evidence also requires the probe log-derived runtime backend to
   be `vulkan`, RenderDoc availability/start markers, at least one recorded
   capture, and a positive pixel count.
+- The `.rdc` capture file must be a regular file, not a symlink to substituted
+  or stale evidence.
 
 ## Scenarios
 
@@ -148,7 +150,7 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -163,6 +165,7 @@ expect(evidence).to_contain("rdoc_simple_gate_backend=simple")
 expect(evidence).to_contain("rdoc_simple_gate_scene=vulkan-engine2d")
 expect(evidence).to_contain("rdoc_simple_gate_program=src/app/test/renderdoc_vulkan_capture.spl")
 expect(evidence).to_contain("rdoc_simple_gate_capture_magic=RDOC")
+expect(evidence).to_contain("rdoc_simple_gate_capture_file_status=pass")
 expect(evidence).to_contain("rdoc_simple_gate_capture_file_magic=RDOC")
 expect(evidence).to_contain("rdoc_simple_gate_runtime_backend=vulkan")
 expect(evidence).to_contain("rdoc_simple_gate_renderdoc_available=1")
@@ -172,6 +175,32 @@ expect(evidence).to_contain("rdoc_simple_gate_renderdoc_num_captures=1")
 expect(evidence).to_contain("rdoc_simple_gate_pixel_count=3072")
 expect(evidence).to_contain("rdoc_simple_gate_runtime_metadata_status=pass")
 expect(evidence).to_contain("rdoc_simple_gate_missing_runtime_metadata=")
+```
+
+</details>
+
+#### rejects symlinked Simple RDOC artifacts before reading magic
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-renderdoc-simple-gate-symlink-artifact"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/source && " +
+    "printf 'RDOCsynthetic simple capture\\n' > " + root + "/source/simple-real.rdc && ln -s simple-real.rdc " + root + "/source/simple.rdc && " +
+    "printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=" + root + "/source/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > " + root + "/source/evidence.env && " +
+    "RDOC_SIMPLE_EVIDENCE_ENV=" + root + "/source/evidence.env BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("rdoc_simple_gate_status=fail")
+expect(evidence).to_contain("rdoc_simple_gate_reason=rdc-file-symlink")
+expect(evidence).to_contain("rdoc_simple_gate_capture_file_status=symlink")
+expect(evidence).to_contain("rdoc_simple_gate_capture_file_magic=")
 ```
 
 </details>
@@ -266,8 +295,8 @@ expect(evidence).to_contain("rdoc_simple_gate_runtime_backend=software")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -21,6 +21,19 @@ value_of() {
     sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
 }
 
+file_exists_status() {
+    path="$1"
+    if [ -z "$path" ]; then
+        echo "missing"
+    elif [ -L "$path" ]; then
+        echo "symlink"
+    elif [ -s "$path" ]; then
+        echo "pass"
+    else
+        echo "missing"
+    fi
+}
+
 is_positive_int() {
     case "${1:-}" in
         ""|*[!0-9]*)
@@ -86,6 +99,7 @@ write_evidence() {
         echo "rdoc_simple_gate_capture_status=${capture_status:-}"
         echo "rdoc_simple_gate_capture_reason=${capture_reason:-}"
         echo "rdoc_simple_gate_capture_file=${capture_file:-}"
+        echo "rdoc_simple_gate_capture_file_status=${capture_file_status:-}"
         echo "rdoc_simple_gate_capture_magic=${capture_magic:-}"
         echo "rdoc_simple_gate_capture_file_magic=${capture_file_magic:-}"
         echo "rdoc_simple_gate_runtime_backend=${runtime_backend:-}"
@@ -149,6 +163,7 @@ if [ ! -s "$SOURCE_ENV" ]; then
     capture_status=""
     capture_reason="missing-source-evidence"
     capture_file=""
+    capture_file_status="missing"
     capture_magic=""
     capture_file_magic=""
     runtime_backend=""
@@ -173,6 +188,7 @@ program="$(value_of rdoc_program "$SOURCE_ENV")"
 capture_status="$(value_of rdoc_capture_status "$SOURCE_ENV")"
 capture_reason="$(value_of rdoc_capture_reason "$SOURCE_ENV")"
 capture_file="$(value_of rdoc_capture_file "$SOURCE_ENV")"
+capture_file_status="$(file_exists_status "$capture_file")"
 capture_magic="$(value_of rdoc_capture_magic "$SOURCE_ENV")"
 runtime_backend="$(value_of rdoc_simple_runtime_backend "$SOURCE_ENV")"
 renderdoc_available="$(value_of rdoc_simple_renderdoc_available "$SOURCE_ENV")"
@@ -186,7 +202,7 @@ widget_html_bytes="$(value_of rdoc_simple_widget_html_bytes "$SOURCE_ENV")"
 widget_width="$(value_of rdoc_simple_widget_width "$SOURCE_ENV")"
 widget_height="$(value_of rdoc_simple_widget_height "$SOURCE_ENV")"
 capture_file_magic=""
-if [ -s "$capture_file" ]; then
+if [ "$capture_file_status" = "pass" ]; then
     capture_file_magic="$(dd if="$capture_file" bs=4 count=1 2>/dev/null || true)"
 fi
 
@@ -211,7 +227,7 @@ if [ "$backend" = "simple" ] \
     && [ "$renderdoc_end" != "" ] \
     && is_positive_int "$renderdoc_num_captures" \
     && is_positive_int "$pixel_count" \
-    && [ -s "$capture_file" ]; then
+    && [ "$capture_file_status" = "pass" ]; then
     classify_runtime_metadata
     write_evidence "pass" "pass"
     exit 0
@@ -231,7 +247,9 @@ elif [ "$program_matches" != "1" ]; then
     write_evidence "fail" "unexpected-program"
 elif [ "$capture_magic" != "RDOC" ]; then
     write_evidence "fail" "missing-rdoc-magic"
-elif [ ! -s "$capture_file" ]; then
+elif [ "$capture_file_status" = "symlink" ]; then
+    write_evidence "fail" "rdc-file-symlink"
+elif [ "$capture_file_status" != "pass" ]; then
     write_evidence "fail" "missing-rdc-file"
 elif [ "$capture_file_magic" != "RDOC" ]; then
     write_evidence "fail" "missing-rdoc-file-magic"
