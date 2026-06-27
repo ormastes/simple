@@ -27,7 +27,7 @@ macos_metal_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -113,6 +113,8 @@ Browser evidence must prove Metal backing and exact pairwise ARGB comparison:
   missing source artifacts is not accepted as browser-backed Metal proof.
 - Electron and Chrome browser backing source files must also be nonempty; a
   zero-byte source artifact is reported distinctly from a missing file.
+- Electron and Chrome GPU metadata must not include explicit fallback renderers
+  such as SwiftShader, software, OpenGL, Vulkan, or D3D.
 - `macos_metal_browser_backing_status=pass`
 - `macos_metal_pixel_comparison_status=pass`
 - `macos_metal_pixel_comparison_mode=pairwise-argb-diff`
@@ -171,19 +173,21 @@ macos_metal_render_log_compare_pairwise_status=pass
 4. Reject browser fallback and non-pairwise comparisons even when native Metal
    readback exists.
 5. Reject status-only browser backing rows that omit Metal GPU metadata.
-6. Reject browser backing rows whose source artifacts are missing even when
+6. Reject mixed browser backing rows that claim Metal while reporting explicit
+   fallback GPU metadata such as SwiftShader.
+7. Reject browser backing rows whose source artifacts are missing even when
    Metal GPU metadata is otherwise complete.
-7. Reject pairwise rows whose Simple, Chrome, or Electron ARGB evidence is
+8. Reject pairwise rows whose Simple, Chrome, or Electron ARGB evidence is
    blank or uses mismatched viewport geometry.
-8. Reject pairwise rows whose ARGB checksums are missing or mismatched.
-9. Reject missing Xcode GPU capture when strict capture mode is enabled.
-10. Reject Xcode GPU capture rows whose artifact bytes do not match the native
+9. Reject pairwise rows whose ARGB checksums are missing or mismatched.
+10. Reject missing Xcode GPU capture when strict capture mode is enabled.
+11. Reject Xcode GPU capture rows whose artifact bytes do not match the native
    marker, even if the env row claims `XCODE-GPUTRACE`.
-11. Reject Xcode GPU capture rows that omit the capture artifact or native
+12. Reject Xcode GPU capture rows that omit the capture artifact or native
     artifact marker.
-12. Preserve typed unavailable evidence when required Metal input env files are
+13. Preserve typed unavailable evidence when required Metal input env files are
     missing.
-13. Reject strict Metal capture rows that use browser metadata as the capture
+14. Reject strict Metal capture rows that use browser metadata as the capture
     tool even when the `.gputrace` artifact bytes are valid.
 
 ## Scenarios
@@ -442,6 +446,37 @@ expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=browse
 
 </details>
 
+#### rejects mixed Metal browser backing rows with fallback GPU metadata
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-macos-metal-render-log-browser-fallback-metadata && mkdir -p build/test-macos-metal-render-log-browser-fallback-metadata && " +
+    "printf 'metal_generated_2d_readback_status=pass\\nmetal_generated_2d_readback_module_verified=true\\nmetal_generated_2d_readback_submit_attempted=true\\nmetal_generated_2d_readback_readback_available=true\\nmetal_generated_2d_readback_expected_checksum=7\\nmetal_generated_2d_readback_actual_checksum=7\\n' > build/test-macos-metal-render-log-browser-fallback-metadata/generated.env && " +
+    "printf 'metal_engine2d_framebuffer_readback_status=pass\\nmetal_engine2d_framebuffer_gpu_readback_available=true\\nmetal_engine2d_framebuffer_blur_or_tolerance_used=false\\n' > build/test-macos-metal-render-log-browser-fallback-metadata/framebuffer.env && " +
+    "printf 'macos_metal_electron_browser_backing_status=pass\\nmacos_metal_chrome_browser_backing_status=pass\\nmacos_metal_browser_backing_status=pass\\nmacos_metal_electron_browser_backing_reason=electron-metal-backed\\nmacos_metal_electron_browser_backing_gpu_compositing=enabled\\nmacos_metal_electron_browser_backing_display_type=Metal\\nmacos_metal_electron_browser_backing_gl_implementation_parts=metal\\nmacos_metal_electron_browser_backing_skia_backend_type=Metal\\nmacos_metal_electron_browser_backing_gl_renderer=SwiftShader Device\\nmacos_metal_electron_browser_backing_source=test/03_system/check/macos_metal_render_log_compare_spec.spl\\nmacos_metal_chrome_browser_backing_reason=chrome-metal-backed\\nmacos_metal_chrome_browser_backing_gpu_compositing=enabled\\nmacos_metal_chrome_browser_backing_display_type=Metal\\nmacos_metal_chrome_browser_backing_gl_implementation_parts=swiftshader\\nmacos_metal_chrome_browser_backing_skia_backend_type=Metal\\nmacos_metal_chrome_browser_backing_gl_renderer=SwiftShader Device\\nmacos_metal_chrome_browser_backing_source=test/03_system/check/macos_metal_render_log_compare_spec.spl\\nmacos_metal_pixel_comparison_status=pass\\nmacos_metal_pixel_comparison_mode=pairwise-argb-diff\\nmacos_metal_electron_chrome_pairwise_diff_status=pass\\nmacos_metal_electron_simple_pairwise_diff_status=pass\\nmacos_metal_chrome_simple_pairwise_diff_status=pass\\nmacos_metal_simple_argb_width=3840\\nmacos_metal_simple_argb_height=2160\\nmacos_metal_simple_argb_nonblank_pixel_count=42\\nmacos_metal_simple_argb_checksum=700\\nmacos_metal_chrome_argb_width=3840\\nmacos_metal_chrome_argb_height=2160\\nmacos_metal_chrome_argb_nonblank_pixel_count=42\\nmacos_metal_chrome_argb_checksum=700\\nmacos_metal_electron_argb_width=3840\\nmacos_metal_electron_argb_height=2160\\nmacos_metal_electron_argb_nonblank_pixel_count=42\\nmacos_metal_electron_argb_checksum=700\\n' > build/test-macos-metal-render-log-browser-fallback-metadata/browser.env && " +
+    "BUILD_DIR=build/test-macos-metal-render-log-browser-fallback-metadata/out METAL_GENERATED_2D_READBACK_ENV=build/test-macos-metal-render-log-browser-fallback-metadata/generated.env METAL_ENGINE2D_FRAMEBUFFER_READBACK_ENV=build/test-macos-metal-render-log-browser-fallback-metadata/framebuffer.env MACOS_METAL_BROWSER_ENV=build/test-macos-metal-render-log-browser-fallback-metadata/browser.env sh scripts/check/check-macos-metal-render-log-compare.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-macos-metal-render-log-browser-fallback-metadata/out/evidence.env")
+expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
+expect(evidence).to_contain("electron-metal-gpu-fallback-metadata")
+expect(evidence).to_contain("chrome-metal-gpu-fallback-metadata")
+expect(evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=fail")
+expect(evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_detail_reason=electron-metal-gpu-fallback-metadata")
+expect(evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_detail_reason=chrome-metal-gpu-fallback-metadata")
+expect(evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_gl_renderer=SwiftShader Device")
+expect(evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_gl_implementation_parts=swiftshader")
+expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=browser-metal-backing")
+```
+
+</details>
+
 #### rejects Metal pairwise rows without comparable nonblank ARGB viewports
 
 <details>
@@ -642,8 +677,8 @@ expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=xcode-
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
