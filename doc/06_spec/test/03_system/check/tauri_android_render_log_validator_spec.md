@@ -77,6 +77,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_android_render_log_val
 - Render and Vulkan markers must be coherent within one source log.
 - Passing validation binds `html_len` to the coherent Vulkan-backed render-log
   source instead of an unrelated companion render marker.
+- The direct Android renderer wrapper emits coherent render-log source actual
+  byte size plus file status/reason rows and fails closed when that artifact is
+  missing, symlinked, hardlinked, or size-mutated after validation.
 - Explicitly requested Android log source paths must exist and be nonempty; a
   valid companion log cannot hide a missing or empty render-log source artifact.
 - Explicitly requested Android log source paths must not be symlinks or
@@ -471,6 +474,13 @@ expect(direct).to_contain("android_render_log_requested_source_count")
 expect(direct).to_contain("android_render_log_html_len")
 expect(direct).to_contain("android_render_log_coherent_source_path")
 expect(direct).to_contain("android_render_log_coherent_source_size_bytes")
+expect(direct).to_contain("android_render_log_coherent_source_actual_size_bytes=$android_render_log_coherent_source_actual_size_bytes")
+expect(direct).to_contain("android_render_log_coherent_source_file_status=$android_render_log_coherent_source_file_status")
+expect(direct).to_contain("android_render_log_coherent_source_file_reason=$android_render_log_coherent_source_file_reason")
+expect(direct).to_contain("android-render-log-coherent-source-symlink")
+expect(direct).to_contain("android-render-log-coherent-source-hardlink")
+expect(direct).to_contain("android-render-log-coherent-source-size-mismatch")
+expect(direct).to_contain("android-render-log-coherent-source-artifact-missing")
 expect(direct).to_contain("android_render_log_missing_source_count")
 expect(direct).to_contain("android_render_log_empty_source_count")
 expect(direct).to_contain("android_render_log_symlink_source_count")

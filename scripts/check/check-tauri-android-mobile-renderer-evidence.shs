@@ -31,6 +31,61 @@ value_of() {
     sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
 }
 
+file_size_bytes() {
+    path="$1"
+    if [ -f "$path" ]; then
+        wc -c <"$path" | tr -d '[:space:]'
+    else
+        echo ""
+    fi
+}
+
+file_link_count() {
+    path="$1"
+    if command -v stat >/dev/null 2>&1; then
+        count="$(stat -f '%l' "$path" 2>/dev/null || stat -c '%h' "$path" 2>/dev/null || true)"
+        case "$count" in
+            ''|*[!0-9]*) echo "" ;;
+            *) echo "$count" ;;
+        esac
+    else
+        echo ""
+    fi
+}
+
+artifact_file_reason() {
+    path="$1"
+    expected_size="$2"
+    if [ -n "$path" ] && [ -L "$path" ]; then
+        echo symlink
+        return
+    fi
+    if [ -z "$path" ] || [ ! -s "$path" ]; then
+        echo missing
+        return
+    fi
+    link_count="$(file_link_count "$path")"
+    if [ -n "$link_count" ] && [ "$link_count" -gt 1 ]; then
+        echo hardlink
+        return
+    fi
+    actual_size="$(file_size_bytes "$path")"
+    if [ -n "$expected_size" ] && [ "$actual_size" != "$expected_size" ]; then
+        echo size-mismatch
+        return
+    fi
+    echo pass
+}
+
+artifact_file_status() {
+    reason="$1"
+    if [ "$reason" = "pass" ]; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
 validate_screenshot_png() {
     path="$1"
     label="$2"
@@ -206,11 +261,28 @@ android_render_log_html_len="$(value_of android_render_log_html_len "$RENDER_LOG
 android_render_log_source_coherence_status="$(value_of android_render_log_source_coherence_status "$RENDER_LOG_VALIDATION_ENV")"
 android_render_log_coherent_source_path="$(value_of android_render_log_coherent_source_path "$RENDER_LOG_VALIDATION_ENV")"
 android_render_log_coherent_source_size_bytes="$(value_of android_render_log_coherent_source_size_bytes "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_coherent_source_actual_size_bytes="$(file_size_bytes "$android_render_log_coherent_source_path")"
+android_render_log_coherent_source_file_reason="$(artifact_file_reason "$android_render_log_coherent_source_path" "$android_render_log_coherent_source_size_bytes")"
+android_render_log_coherent_source_file_status="$(artifact_file_status "$android_render_log_coherent_source_file_reason")"
 android_render_log_marker_status="$(value_of android_render_log_marker_status "$RENDER_LOG_VALIDATION_ENV")"
 android_render_log_vulkan_marker_status="$(value_of android_render_log_vulkan_marker_status "$RENDER_LOG_VALIDATION_ENV")"
 android_render_log_failure_marker_status="$(value_of android_render_log_failure_marker_status "$RENDER_LOG_VALIDATION_ENV")"
 if [ "$android_render_validation_code" -ne 0 ] || [ "$android_render_log_validation_status" != "pass" ]; then
     fail "Android render log validation failed: ${android_render_log_validation_reason:-unknown}"
+fi
+if [ "$android_render_log_coherent_source_file_status" != "pass" ]; then
+    echo "android_render_log_coherent_source_actual_size_bytes=$android_render_log_coherent_source_actual_size_bytes"
+    echo "android_render_log_coherent_source_file_status=$android_render_log_coherent_source_file_status"
+    echo "android_render_log_coherent_source_file_reason=$android_render_log_coherent_source_file_reason"
+    if [ "$android_render_log_coherent_source_file_reason" = "symlink" ]; then
+        fail "android-render-log-coherent-source-symlink"
+    elif [ "$android_render_log_coherent_source_file_reason" = "hardlink" ]; then
+        fail "android-render-log-coherent-source-hardlink"
+    elif [ "$android_render_log_coherent_source_file_reason" = "size-mismatch" ]; then
+        fail "android-render-log-coherent-source-size-mismatch"
+    else
+        fail "android-render-log-coherent-source-artifact-missing"
+    fi
 fi
 
 android_mdi_validation_code=0
@@ -291,6 +363,9 @@ echo "android_render_log_html_len=$android_render_log_html_len"
 echo "android_render_log_source_coherence_status=$android_render_log_source_coherence_status"
 echo "android_render_log_coherent_source_path=$android_render_log_coherent_source_path"
 echo "android_render_log_coherent_source_size_bytes=$android_render_log_coherent_source_size_bytes"
+echo "android_render_log_coherent_source_actual_size_bytes=$android_render_log_coherent_source_actual_size_bytes"
+echo "android_render_log_coherent_source_file_status=$android_render_log_coherent_source_file_status"
+echo "android_render_log_coherent_source_file_reason=$android_render_log_coherent_source_file_reason"
 echo "android_render_log_marker_status=$android_render_log_marker_status"
 echo "android_render_log_vulkan_marker_status=$android_render_log_vulkan_marker_status"
 echo "android_render_log_failure_marker_status=$android_render_log_failure_marker_status"
