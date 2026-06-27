@@ -12,7 +12,41 @@ FAKE_QMP_REPORT_PATH="${FAKE_QMP_REPORT_PATH:-$BUILD_DIR/fake-qmp-capture.md}"
 GTK_SCENE_REPORT_PATH="${GTK_SCENE_REPORT_PATH:-$BUILD_DIR/gtk-gl-wm-scene.md}"
 QEMU_ARCH="${QEMU_ARCH:-x86_64}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-$QEMU_ARCH}"
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in "release"/*/simple "bin/release"/*/simple "build/bootstrap/stage3/simple" "bin/simple" "./bin/simple"; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 AUTO_QMP_LAUNCH="${QEMU_AUTO_LAUNCH_SIMPLEOS_DESKTOP:-0}"
 HOST_WM_SMOKE="${QEMU_GTK_WM_HOST_SMOKE:-1}"
 FORCE_QEMU_LIVE_AND_HOST_PERF_FOR_TEST="${QEMU_GTK_WM_CAPTURE_FORCE_LIVE_HOST_PERF_FOR_TEST:-0}"
@@ -38,6 +72,36 @@ AUTO_QMP_EXIT_CODE=0
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$REPORT_PATH" "$BUILD_DIR/evidence.env" "$BUILD_DIR/qemu-display-help.txt" "$BUILD_DIR/wm.out" "$BUILD_DIR/wm-host.out" "$BUILD_DIR/fake-qmp.out" "$BUILD_DIR/gtk-gl.out" "$AUTO_QMP_OUT"
+
+emit_simple_bin_failure() {
+    reason="$1"
+    {
+        echo "qemu_gtk_wm_capture_status=fail"
+        echo "qemu_gtk_wm_capture_reason=$reason"
+        echo "qemu_gtk_wm_capture_simple_bin=$SIMPLE_BIN"
+        echo "qemu_gtk_wm_capture_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "qemu_gtk_wm_capture_simple_bin_status=$SIMPLE_BIN_STATUS"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# QEMU GTK WM Capture Evidence"
+        echo
+        echo "- status: fail"
+        echo "- reason: $reason"
+        echo "- simple bin: $SIMPLE_BIN"
+        echo "- simple bin source: $SIMPLE_BIN_SOURCE"
+        echo "- simple bin status: $SIMPLE_BIN_STATUS"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    emit_simple_bin_failure "simple-bin-forbidden"
+    exit 1
+fi
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    emit_simple_bin_failure "simple-bin-$SIMPLE_BIN_STATUS"
+    exit 1
+fi
 
 file_byte_count() {
     if [ -f "$1" ]; then
@@ -264,7 +328,8 @@ if [ -z "${QEMU_QMP_SOCKET:-}" ]; then
     BUILD_DIR="$BUILD_DIR/fake-qmp" \
     REPORT_PATH="$FAKE_QMP_REPORT_PATH" \
     SIMPLE_BIN="$SIMPLE_BIN" \
-        sh scripts/check-qemu-capture-fake-qmp-evidence.shs >"$BUILD_DIR/fake-qmp.out" 2>&1
+    SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" \
+        sh scripts/check/check-qemu-capture-fake-qmp-evidence.shs >"$BUILD_DIR/fake-qmp.out" 2>&1
     fake_qmp_exit_code=$?
     set -e
     fake_qmp_status="$(sed -n 's/^qemu_capture_fake_qmp_status=//p' "$BUILD_DIR/fake-qmp.out" | tail -n 1)"
@@ -286,6 +351,7 @@ if [ -z "${QEMU_QMP_SOCKET:-}" ]; then
 	        REPORT_PATH="$WM_HOST_REPORT_PATH" \
 	        BUILD_DIR="$BUILD_DIR/wm-host" \
 	        SIMPLE_BIN="$SIMPLE_BIN" \
+	        SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" \
 	            sh scripts/check/check-wm-launch-capture-evidence.shs >"$BUILD_DIR/wm-host.out" 2>&1
         host_wm_exit_code=$?
         set -e
@@ -311,6 +377,7 @@ elif [ -n "${QEMU_QMP_SOCKET:-}" ]; then
 	    REPORT_PATH="$WM_REPORT_PATH" \
 	    BUILD_DIR="$BUILD_DIR/wm" \
 	    SIMPLE_BIN="$SIMPLE_BIN" \
+	    SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" \
 	        sh scripts/check/check-wm-launch-capture-evidence.shs >"$BUILD_DIR/wm.out" 2>&1
     wm_exit_code=$?
     set -e
@@ -469,6 +536,9 @@ fi
 {
     echo "qemu_gtk_wm_capture_status=$status"
     echo "qemu_gtk_wm_capture_reason=$reason"
+    echo "qemu_gtk_wm_capture_simple_bin=$SIMPLE_BIN"
+    echo "qemu_gtk_wm_capture_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "qemu_gtk_wm_capture_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "qemu_gtk_wm_capture_qemu_bin=$QEMU_BIN"
     echo "qemu_gtk_wm_capture_qemu_arch=$QEMU_ARCH"
     echo "qemu_gtk_wm_capture_display_gtk_supported=$qemu_display_gtk_supported"
@@ -579,6 +649,9 @@ fi
     echo
     echo "- status: $status"
     echo "- reason: $reason"
+    echo "- simple bin: $SIMPLE_BIN"
+    echo "- simple bin source: $SIMPLE_BIN_SOURCE"
+    echo "- simple bin status: $SIMPLE_BIN_STATUS"
     echo "- qemu bin: $QEMU_BIN"
     echo "- qemu arch: $QEMU_ARCH"
     echo "- qemu display gtk supported: $qemu_display_gtk_supported"
