@@ -27,7 +27,7 @@ tauri_ios_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,6 +82,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
   `metal_layer=CAMetalLayer`; a generic Metal expectation flag is not enough.
 - The CAMetalLayer context binding alone is not enough; a separate Metal
   runtime readiness marker must be present in the same coherent source log.
+- Fallback GPU markers such as SwiftShader, software rendering, or OpenGL
+  renderer fallback text fail even when the log also contains WKWebView,
+  CAMetalLayer, and Metal markers.
 - Render, WKWebView, and CAMetalLayer markers must be coherent within one
   source log; markers split across unrelated log files fail closed.
 - Explicitly requested iOS log source paths must exist; a valid companion log
@@ -110,7 +113,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -133,6 +136,7 @@ expect(evidence).to_contain("ios_render_log_source_coherence_status=pass")
 expect(evidence).to_contain("ios_render_log_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_html_len=347702")
 expect(evidence).to_contain("ios_render_log_metal_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_fallback_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_tauri_context_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 expect(evidence).to_contain("ios_render_log_failure_marker_status=pass")
@@ -270,6 +274,38 @@ expect(evidence).to_contain("ios_render_log_metal_marker_status=fail")
 expect(evidence).to_contain("ios_render_log_tauri_context_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 expect(evidence).to_contain("ios_render_log_source_coherence_status=fail")
+```
+
+</details>
+
+#### rejects fallback GPU markers in iOS Metal render logs
+
+- Confirm fallback GPU text cannot coexist with iOS Metal proof
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-ios-render-log-validator-fallback-gpu"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\nGPU fallback renderer: SwiftShader software renderer\\n' > " + root + "/ios.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm fallback GPU text cannot coexist with iOS Metal proof")
+expect(evidence).to_contain("ios_render_log_validation_status=fail")
+expect(evidence).to_contain("ios_render_log_validation_reason=ios-render-log-fallback-gpu")
+expect(evidence).to_contain("ios_render_log_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_fallback_marker_status=fail")
+expect(evidence).to_contain("ios_render_log_tauri_context_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
 ```
 
 </details>
@@ -495,7 +531,7 @@ expect(evidence).to_contain("ios_render_log_failure_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -521,6 +557,7 @@ expect(evidence).to_contain("ios_render_log_source_coherence_status=")
 expect(evidence).to_contain("ios_render_log_marker_status=")
 expect(evidence).to_contain("ios_render_log_html_len=")
 expect(evidence).to_contain("ios_render_log_metal_marker_status=")
+expect(evidence).to_contain("ios_render_log_fallback_marker_status=")
 expect(evidence).to_contain("ios_render_log_tauri_context_status=")
 expect(evidence).to_contain("ios_render_log_metal_context_status=")
 expect(evidence).to_contain("ios_render_log_failure_marker_status=")
@@ -550,7 +587,7 @@ expect(evidence).to_contain("ios_mdi_css_animation_probe=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -568,6 +605,7 @@ expect(direct).to_contain("ios_render_log_empty_source_count=$ios_render_log_emp
 expect(direct).to_contain("ios_render_log_source_coherence_status=$ios_render_log_source_coherence_status")
 expect(direct).to_contain("ios_render_log_tauri_context_status=$ios_render_log_tauri_context_status")
 expect(direct).to_contain("ios_render_log_metal_context_status=$ios_render_log_metal_context_status")
+expect(direct).to_contain("ios_render_log_fallback_marker_status=$ios_render_log_fallback_marker_status")
 expect(direct).to_contain("value_of ios_mdi_proof_status")
 expect(direct).to_contain("ios_mdi_animation_frame_count")
 expect(direct).to_contain("ios_mdi_input_to_paint_ms")
@@ -584,11 +622,13 @@ expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_l
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_coherence_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_body_click_routed")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_taskbar_labels_visible")
 expect(aggregate).to_contain("ios-tauri-wkwebview-context-missing")
 expect(aggregate).to_contain("ios-metal-context-missing")
 expect(aggregate).to_contain("ios-render-log-source-mismatch")
+expect(aggregate).to_contain("ios-render-log-fallback-gpu")
 expect(aggregate).to_contain("ios-render-log-source-missing")
 expect(aggregate).to_contain("ios-render-log-source-empty")
 expect(tauri).to_contain("ios renderer context: backend=WKWebView")
@@ -601,8 +641,8 @@ expect(tauri).to_contain("metal_layer=CAMetalLayer")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

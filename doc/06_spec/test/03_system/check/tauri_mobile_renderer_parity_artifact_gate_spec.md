@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -75,6 +75,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 - Complete fixture iOS evidence must include a WKWebView context line bound to
   `metal_expected=true` and `metal_layer=CAMetalLayer`; generic Metal text is
   not enough for the aggregate pass path.
+- iOS evidence containing fallback GPU markers such as SwiftShader/software
+  rendering fails even when WKWebView, CAMetalLayer, and Metal markers pass.
 - Mobile screenshots must carry PNG signature bytes, IHDR dimensions, and image
   chunks; arbitrary nonempty files and signature-only files are not accepted as
   layout capture proof.
@@ -194,6 +196,33 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-tauri-wkweb
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validation_status=fail")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=fail")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_marker_status=pass")
+```
+
+</details>
+
+#### rejects an iOS pass claim with fallback GPU render-log markers
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-ios-fallback-gpu"
+val command = _run_aggregate_command_with_logs(root, "present", "present", "png", "png", "fallback", "valid")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/stdout.env")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-render-log-fallback-gpu")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validation_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validation_reason=ios-render-log-fallback-gpu")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_marker_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status=pass")
 ```
 
 </details>
@@ -604,7 +633,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -616,6 +645,7 @@ expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_failure_marker_s
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_missing_source_count")
 expect(script).to_contain("cat \"$ios_render_log_validation_env\"")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len")
+expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_source_coherence_status")
 expect(script).to_contain("cat \"$android_render_log_validation_env\"")
@@ -646,8 +676,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_timin
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

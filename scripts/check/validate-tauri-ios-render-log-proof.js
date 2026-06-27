@@ -23,6 +23,7 @@ const maxRenderHtmlLen = 10000000;
 const validRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=([1-9][0-9]*)(?:\s|$)/;
 const anyRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=/;
 const metalRuntimeMarkerPattern = /(Metal renderer ready|MetalKit\.framework|Metal\.framework|-framework Metal|\bMTL[A-Za-z0-9_]*\b|\bAGX\b|\bIOGPU\b)/i;
+const fallbackRendererPattern = /(SwiftShader|software rasterizer|software renderer|software rendering|llvmpipe|ANGLE[^\r\n]*(OpenGL|GL)|OpenGL[^\r\n]*(renderer|fallback|software)|fallback renderer)/i;
 
 function renderHtmlLen(content) {
   const match = content.match(validRenderMarkerPattern);
@@ -56,6 +57,7 @@ for (const file of files) {
 const hasAnyRenderMarker = anyRenderMarkerPattern.test(text);
 const renderMarker = renderHtmlLen(text) !== '';
 const metalMarker = metalRuntimeMarkerPattern.test(text);
+const fallbackMarker = fallbackRendererPattern.test(text);
 const tauriIosContext = /(\[tauri-shell\]\s+ios renderer context:.*WKWebView|Tauri iOS external_url|ios_mdi_probe\.html|\[tauri-shell\]\s+creating window (from|with)|mobile inline shell base)/i.test(text);
 const metalContext = /\[tauri-shell\]\s+ios renderer context:(?=.*WKWebView)(?=.*metal_expected=true)(?=.*metal_layer=CAMetalLayer)/i.test(text);
 const failureMarker = /(eval FAIL|inline shell eval FAIL|delayed inline shell eval FAIL|window 'main' not found|parse error|Fatal signal|F\/DEBUG|NSURLErrorDomain|failed provisional load|Headless UI completed|subprocess exited with code)/i.test(text);
@@ -69,6 +71,8 @@ if (requestedSourceCount === 0 || sourceCount === 0) {
   reason = 'ios-render-log-source-empty';
 } else if (failureMarker) {
   reason = 'ios-render-log-failure-marker';
+} else if (fallbackMarker) {
+  reason = 'ios-render-log-fallback-gpu';
 } else if (hasAnyRenderMarker && !renderMarker) {
   reason = 'ios-render-log-html-len-malformed';
 } else if (!renderMarker) {
@@ -93,6 +97,7 @@ emit('ios_render_log_source_coherence_status', coherentSource ? 'pass' : 'fail')
 emit('ios_render_log_marker_status', renderMarker ? 'pass' : 'fail');
 emit('ios_render_log_html_len', htmlLen);
 emit('ios_render_log_metal_marker_status', metalMarker ? 'pass' : 'fail');
+emit('ios_render_log_fallback_marker_status', fallbackMarker ? 'fail' : 'pass');
 emit('ios_render_log_tauri_context_status', tauriIosContext ? 'pass' : 'fail');
 emit('ios_render_log_metal_context_status', metalContext ? 'pass' : 'fail');
 emit('ios_render_log_failure_marker_status', failureMarker ? 'fail' : 'pass');
