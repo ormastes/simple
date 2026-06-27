@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 25 | 25 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -85,6 +85,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   substituted PNG captures.
 - Missing iOS MDI proof JSON fails even when iOS status rows claim pass.
 - Missing Android MDI proof JSON fails even when Android status rows claim pass.
+- Symlinked MDI proof JSON files fail even when the target contains valid
+  render/event/capture/performance/animation proof.
 - Malformed or contract-missing MDI proof JSON files fail even when normalized
   MDI detail rows claim pass.
 - MDI proof JSON detail values must match the normalized render/event/capture/
@@ -316,6 +318,40 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-proof-json-missing")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=fail")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason=missing")
+```
+
+</details>
+
+#### rejects mobile pass claims with symlinked MDI proof JSON
+
+- Confirm MDI proof JSON artifacts cannot be substituted through symlinks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-symlink-mdi-proof-json"
+val ios_command = _run_aggregate_command(root + "-ios", "symlink", "present", "png", "png")
+val android_command = _run_aggregate_command(root + "-android", "present", "symlink", "png", "png")
+val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val ios = file_read(root + "-ios/stdout.env")
+val android = file_read(root + "-android/stdout.env")
+step("Confirm MDI proof JSON artifacts cannot be substituted through symlinks")
+expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-proof-json-invalid")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_reason=symlink")
+expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-proof-json-invalid")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason=symlink")
 ```
 
 </details>
@@ -890,7 +926,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 49 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -902,6 +938,7 @@ expect(script).to_contain("sawIdat && sawIend")
 expect(script).to_contain("png-dimensions-too-small")
 expect(script).to_contain("png_file_reason \"$ios_screenshot\" \"$ios_mdi_capture_viewport_width\" \"$ios_mdi_capture_viewport_height\"")
 expect(script).to_contain("mdi_proof_file_reason")
+expect(script).to_contain("echo symlink")
 expect(script).to_contain("row-mismatch")
 expect(script).to_contain("\"$ios_mdi_performance_now_delta_ms\"")
 expect(script).to_contain("\"$android_mdi_animation_frame_count\"")
@@ -951,8 +988,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_timin
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 25 |
+| Active scenarios | 25 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
