@@ -27,7 +27,7 @@ production_gui_web_renderer_parity_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,6 +82,10 @@ SIMPLE_LIB=src bin/simple test/03_system/check/production_gui_web_renderer_parit
 - The wrapper promotes the event-routing validator status, exact browser event
   sequence, native payload/text rows, and titlebar/UI readback rows so the
   top-level parity proof cannot pass on shallow event counts alone.
+- A complete fixture pass must promote Chrome live-capture provenance,
+  backend-executed Metal frame/timing rows, raw Metal readback rows, font
+  readback rows, and Electron event/capture/performance/animation rows at the
+  top level.
 
 ## Operator Notes
 
@@ -558,12 +562,71 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_bl
 
 </details>
 
+#### passes with complete Electron Chrome backend Metal and event proof rows
+
+- "printf '#!/bin/sh\\nmkdir -p \"$BUILD DIR\"\\nprintf \"wm browser event routing status=pass\\\\nwm browser event routing reason=pass\\\\nwm browser event routing validation status=pass\\\\nwm browser event routing validation reason=pass\\\\nwm browser event routing ready=true\\\\nwm browser event routing wm found=true\\\\nwm browser event routing focus count=1\\\\nwm browser event routing move count=1\\\\nwm browser event routing maximize count=1\\\\nwm browser event routing title command count=1\\\\nwm browser event routing text input count=1\\\\nwm browser event routing pointer down count=1\\\\nwm browser event routing pointer up count=1\\\\nwm browser event routing performance now available=true\\\\nwm browser event routing performance now delta ms=16 7\\\\nwm browser event routing input to paint ms=18 4\\\\nwm browser event routing animation frame available=true\\\\nwm browser event routing animation frame count=2\\\\nwm browser event routing css animation probe=true\\\\nwm browser event routing event sequence=host wm pointer:down,window cmd:focus,window cmd:move,window cmd:title command,window cmd:maximize,input event:text input,input event:pointer down,input event:pointer up\\\\nwm browser event routing title text=Terminal\\\\nwm browser event routing title context text=terminal\\\\nwm browser event routing traffic button count=3\\\\nwm browser event routing title input tag=input\\\\nwm browser event routing titlebar height=34px\\\\nwm browser event routing titlebar display=flex\\\\nwm browser event routing titlebar cursor=grab\\\\nwm browser event routing titlebar background=rgb
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 42 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-production-gui-web-renderer-parity-complete-pass"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_ROOT\"\\nprintf \"electron_generated_gui_web_matrix_status=pass\\\\nelectron_generated_gui_web_matrix_reason=pass\\\\n\" > \"$BUILD_ROOT/evidence.env\"\\n' > " + root + "/fixture/matrix.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"electron_simple_web_layout_manifest_status=pass\\\\nelectron_simple_web_layout_manifest_reason=pass\\\\nelectron_simple_web_layout_manifest_case_count=3\\\\nelectron_simple_web_layout_manifest_pass_count=3\\\\nelectron_simple_web_layout_manifest_tracked_count=0\\\\nelectron_simple_web_layout_manifest_fail_count=0\\\\nelectron_simple_web_layout_manifest_dependency_status=pass\\\\nelectron_simple_web_layout_manifest_dependency_reason=pass\\\\nelectron_simple_web_layout_manifest_dependency_missing_count=0\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/layout.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"tauri_chrome_simple_web_layout_manifest_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_reason=pass\\\\ntauri_chrome_simple_web_layout_manifest_host_uname_s=Darwin\\\\ntauri_chrome_simple_web_layout_manifest_host_uname_m=arm64\\\\ntauri_chrome_simple_web_layout_manifest_electron_capture_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_reason=pass\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_backend=macos-wkwebview-snapshot\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_required_commands=swift,node\\\\ntauri_chrome_simple_web_layout_manifest_tauri_capture_missing_commands=\\\\ntauri_chrome_simple_web_layout_manifest_chrome_capture_status=pass\\\\ntauri_chrome_simple_web_layout_manifest_chrome_capture_reason=pass\\\\ntauri_chrome_simple_web_layout_manifest_chrome_capture_backend=chrome-live-bitmap\\\\ntauri_chrome_simple_web_layout_manifest_tauri_live_capture=true\\\\ntauri_chrome_simple_web_layout_manifest_chrome_live_capture=true\\\\ntauri_chrome_simple_web_layout_manifest_tauri_case_count=3\\\\ntauri_chrome_simple_web_layout_manifest_tauri_pass_count=3\\\\ntauri_chrome_simple_web_layout_manifest_tauri_tracked_count=0\\\\ntauri_chrome_simple_web_layout_manifest_tauri_fail_count=0\\\\ntauri_chrome_simple_web_layout_manifest_chrome_case_count=3\\\\ntauri_chrome_simple_web_layout_manifest_chrome_pass_count=3\\\\ntauri_chrome_simple_web_layout_manifest_chrome_tracked_count=0\\\\ntauri_chrome_simple_web_layout_manifest_chrome_fail_count=0\\\\ntauri_chrome_simple_web_layout_manifest_tauri_mismatch_count=0\\\\ntauri_chrome_simple_web_layout_manifest_chrome_mismatch_count=0\\\\ntauri_chrome_simple_web_layout_manifest_no_fake_capture=true\\\\ntauri_chrome_simple_web_layout_manifest_blur_or_tolerance_used=false\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/surface.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"production_gui_backend_status=pass\\\\nproduction_gui_backend_reason=pass\\\\nproduction_gui_backend_exact_backend_parity=true\\\\nproduction_gui_backend_cpu_simd_different_pixels=0\\\\nproduction_gui_backend_metal_resolved=metal\\\\nproduction_gui_backend_metal_different_pixels=0\\\\nproduction_gui_backend_metal_gpu_frame_complete=true\\\\nproduction_gui_backend_blur_or_tolerance_used=false\\\\nproduction_gui_backend_sample_count=3\\\\nproduction_gui_backend_total_elapsed_us_min=90\\\\nproduction_gui_backend_total_elapsed_us_avg=100\\\\nproduction_gui_backend_total_elapsed_us_max=120\\\\nproduction_gui_backend_total_pixels_per_second_min=2000000\\\\nproduction_gui_backend_total_pixels_per_second_avg=2400000\\\\nproduction_gui_backend_total_pixels_per_second_max=2800000\\\\nproduction_gui_backend_simple_bin=fixture-simple\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/backend.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"production_gui_font_offload_status=pass\\\\nproduction_gui_font_offload_reason=pass\\\\nproduction_gui_font_offload_vector_backend=metal\\\\nproduction_gui_font_offload_vector_status=pass\\\\nproduction_gui_font_offload_vector_readback_status=pass\\\\nproduction_gui_font_offload_bitmap_backend=metal\\\\nproduction_gui_font_offload_bitmap_status=pass\\\\nproduction_gui_font_offload_bitmap_readback_status=pass\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/font.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"metal_engine2d_framebuffer_readback_status=pass\\\\nmetal_engine2d_framebuffer_readback_reason=raw-metal-framebuffer-download-proven\\\\nmetal_engine2d_framebuffer_readback_spec_status=pass\\\\nmetal_engine2d_framebuffer_gpu_readback_available=true\\\\nmetal_engine2d_framebuffer_blur_or_tolerance_used=false\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/metal.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"wm_browser_event_routing_status=pass\\\\nwm_browser_event_routing_reason=pass\\\\nwm_browser_event_routing_validation_status=pass\\\\nwm_browser_event_routing_validation_reason=pass\\\\nwm_browser_event_routing_ready=true\\\\nwm_browser_event_routing_wm_found=true\\\\nwm_browser_event_routing_focus_count=1\\\\nwm_browser_event_routing_move_count=1\\\\nwm_browser_event_routing_maximize_count=1\\\\nwm_browser_event_routing_title_command_count=1\\\\nwm_browser_event_routing_text_input_count=1\\\\nwm_browser_event_routing_pointer_down_count=1\\\\nwm_browser_event_routing_pointer_up_count=1\\\\nwm_browser_event_routing_performance_now_available=true\\\\nwm_browser_event_routing_performance_now_delta_ms=16.7\\\\nwm_browser_event_routing_input_to_paint_ms=18.4\\\\nwm_browser_event_routing_animation_frame_available=true\\\\nwm_browser_event_routing_animation_frame_count=2\\\\nwm_browser_event_routing_css_animation_probe=true\\\\nwm_browser_event_routing_event_sequence=host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up\\\\nwm_browser_event_routing_title_text=Terminal\\\\nwm_browser_event_routing_title_context_text=terminal\\\\nwm_browser_event_routing_traffic_button_count=3\\\\nwm_browser_event_routing_title_input_tag=input\\\\nwm_browser_event_routing_titlebar_height=34px\\\\nwm_browser_event_routing_titlebar_display=flex\\\\nwm_browser_event_routing_titlebar_cursor=grab\\\\nwm_browser_event_routing_titlebar_background=rgb(229, 231, 235)\\\\nwm_browser_event_routing_title_color=rgb(17, 24, 39)\\\\nwm_browser_event_routing_title_font_weight=700\\\\nwm_browser_event_routing_title_input_min_width=142px\\\\nwm_browser_event_routing_title_input_width=148px\\\\nwm_browser_event_routing_title_input_width_px=148\\\\nwm_browser_event_routing_title_input_height=24px\\\\nwm_browser_event_routing_title_input_cursor=text\\\\nwm_browser_event_routing_title_input_background=rgb(241, 245, 249)\\\\nwm_browser_event_routing_close_button_background=rgb(239, 68, 68)\\\\nwm_browser_event_routing_minimize_button_background=rgb(234, 179, 8)\\\\nwm_browser_event_routing_maximize_button_background=rgb(34, 197, 94)\\\\nwm_browser_event_routing_expected_move_x=86\\\\nwm_browser_event_routing_expected_move_y=86\\\\nwm_browser_event_routing_move_payload_x=86\\\\nwm_browser_event_routing_move_payload_y=86\\\\nwm_browser_event_routing_move_payload_source=native_event\\\\nwm_browser_event_routing_move_payload_window_id_hint=win1\\\\nwm_browser_event_routing_title_command_text=/tmp/project\\\\nwm_browser_event_routing_text_input_text=Hello Simple\\\\nwm_browser_event_routing_blur_or_tolerance_used=false\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/event.sh && " +
+    "PRODUCTION_GUI_WEB_RENDERER_PARITY_MATRIX_SCRIPT=" + root + "/fixture/matrix.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_SCRIPT=" + root + "/fixture/layout.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_SCRIPT=" + root + "/fixture/surface.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_BACKEND_SCRIPT=" + root + "/fixture/backend.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_FONT_OFFLOAD_SCRIPT=" + root + "/fixture/font.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_METAL_READBACK_SCRIPT=" + root + "/fixture/metal.sh PRODUCTION_GUI_WEB_RENDERER_PARITY_EVENT_SCRIPT=" + root + "/fixture/event.sh BUILD_ROOT=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_reason=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_surface_manifest_chrome_capture_backend=chrome-live-bitmap")
+expect(evidence).to_contain("production_gui_web_renderer_parity_surface_manifest_chrome_live_capture=true")
+expect(evidence).to_contain("production_gui_web_renderer_parity_surface_manifest_no_fake_capture=true")
+expect(evidence).to_contain("production_gui_web_renderer_parity_backend_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_backend_metal_resolved=metal")
+expect(evidence).to_contain("production_gui_web_renderer_parity_backend_metal_gpu_frame_complete=true")
+expect(evidence).to_contain("production_gui_web_renderer_parity_backend_sample_count=3")
+expect(evidence).to_contain("production_gui_web_renderer_parity_backend_total_elapsed_us_avg=100")
+expect(evidence).to_contain("production_gui_web_renderer_parity_backend_total_pixels_per_second_avg=2400000")
+expect(evidence).to_contain("production_gui_web_renderer_parity_font_offload_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_font_offload_vector_readback_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_font_offload_bitmap_readback_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_metal_readback_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_metal_readback_available=true")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_validation_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_performance_now_available=true")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_performance_now_delta_ms=16.7")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_input_to_paint_ms=18.4")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_animation_frame_count=2")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_css_animation_probe=true")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_event_sequence=host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_titlebar_background=rgb(229, 231, 235)")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_title_input_background=rgb(241, 245, 249)")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_close_button_background=rgb(239, 68, 68)")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_blur_or_tolerance_used=false")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
