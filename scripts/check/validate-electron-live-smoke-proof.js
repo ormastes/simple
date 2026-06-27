@@ -24,6 +24,10 @@ function finiteNumberGreaterThan(value, min) {
   return typeof value === 'number' && Number.isFinite(value) && value > min;
 }
 
+function finiteNumberAtMost(value, max) {
+  return typeof value === 'number' && Number.isFinite(value) && value <= max;
+}
+
 function jsonIntegerTextOrBlank(value) {
   return typeof value === 'number' && Number.isInteger(value) ? String(value) : '';
 }
@@ -64,6 +68,7 @@ const expectedWidth = expectedWidthText === null ? NaN : Number(expectedWidthTex
 const expectedHeight = expectedHeightText === null ? NaN : Number(expectedHeightText);
 const expectedProofSource = 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript';
 const userAgent = textSample(proof.electron_user_agent);
+const maxEventTimingMs = 1000;
 
 let reason = 'pass';
 if (proof.target !== 'electron') {
@@ -94,7 +99,11 @@ if (proof.target !== 'electron') {
   textSample(proof.body_text_sample).length > proof.body_text_length
 ) {
   reason = 'missing-rendered-text-sample';
-} else if (proof.performance_now_available !== true || !finiteNumberGreaterThan(proof.performance_now_delta_ms, 0)) {
+} else if (
+  proof.performance_now_available !== true ||
+  !finiteNumberGreaterThan(proof.performance_now_delta_ms, 0) ||
+  !finiteNumberAtMost(proof.performance_now_delta_ms, maxEventTimingMs)
+) {
   reason = 'missing-performance-now';
 } else if (proof.animation_frame_available !== true || !integerNumberAtLeast(proof.animation_frame_count, 2)) {
   reason = 'missing-animation-frames';

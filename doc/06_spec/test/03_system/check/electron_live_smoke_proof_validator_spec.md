@@ -73,7 +73,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
   `electron_live_smoke_*` rows.
 - Missing DOM render text, missing CSS envelope, missing rendered text sample,
   missing `performance.now`, zero timing deltas, missing two animation frames,
-  missing CSS animation support, and blur/tolerance use fail closed.
+  over-budget multi-second timing deltas, missing two animation frames, missing
+  CSS animation support, and blur/tolerance use fail closed.
 - Viewport dimensions, DOM length counters, performance timing deltas, and
   animation frame counts must be live numeric JSON values; decimal strings are
   rejected as stale or hand-authored proof and are not re-emitted as normalized
@@ -301,8 +302,9 @@ expect(long_sample).to_contain("electron_live_smoke_body_text_length=4")
 
 </details>
 
-#### rejects missing browser timing and animation proof
+#### rejects missing over-budget browser timing and animation proof
 
+-  proof command
 -  proof command
 -  proof command
 -  proof command
@@ -313,7 +315,7 @@ expect(long_sample).to_contain("electron_live_smoke_body_text_length=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -323,6 +325,8 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/perf.json 1280 720 > " + root + "/perf.env; " +
     _proof_command(root + "/zero.json", "p.performance_now_delta_ms=0") +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/zero.json 1280 720 > " + root + "/zero.env; " +
+    _proof_command(root + "/slow.json", "p.performance_now_delta_ms=1001") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/slow.json 1280 720 > " + root + "/slow.env; " +
     _proof_command(root + "/frames.json", "p.animation_frame_count=1") +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/frames.json 1280 720 > " + root + "/frames.env; " +
     _proof_command(root + "/css.json", "p.css_animation_probe=false") +
@@ -332,12 +336,16 @@ expect(code).to_equal(1)
 
 val perf = file_read(root + "/perf.env")
 val zero = file_read(root + "/zero.env")
+val slow = file_read(root + "/slow.env")
 val frames = file_read(root + "/frames.env")
 val css = file_read(root + "/css.env")
 expect(perf).to_contain("electron_live_smoke_validation_reason=missing-performance-now")
 expect(zero).to_contain("electron_live_smoke_validation_reason=missing-performance-now")
 expect(zero).to_contain("electron_live_smoke_performance_now_available=true")
 expect(zero).to_contain("electron_live_smoke_performance_now_delta_ms=0")
+expect(slow).to_contain("electron_live_smoke_validation_reason=missing-performance-now")
+expect(slow).to_contain("electron_live_smoke_performance_now_available=true")
+expect(slow).to_contain("electron_live_smoke_performance_now_delta_ms=1001")
 expect(frames).to_contain("electron_live_smoke_validation_reason=missing-animation-frames")
 expect(css).to_contain("electron_live_smoke_validation_reason=missing-css-animation")
 ```
