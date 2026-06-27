@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 66 | 66 | 0 | 0 |
+| 67 | 67 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -394,6 +394,28 @@ expect(simple_web_layout_debug_layout_by_id(html, 96, 64, "card", "h")).to_equal
 expect(simple_web_layout_debug_layout_by_id(html, 96, 64, "next", "y")).to_equal("30")
 expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(60 * 30)
 expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(16 * 6)
+```
+
+</details>
+
+#### renders object-fit contain for image placeholders
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#f8fafc}img.hero{display:block;width:48px;height:16px;object-fit:contain}</style></head><body><img class='hero widget-image' alt=''></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+
+expect(pixels.len()).to_equal(64 * 32)
+expect(pixels[2 + 8 * 64]).to_equal(0xFFF8FAFCu32)
+expect(pixels[12 + 8 * 64]).to_equal(0xFF2563EBu32)
+expect(_count_color(pixels, 0xFF2563EBu32)).to_equal(280)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(56)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(48)
 ```
 
 </details>
@@ -1454,8 +1476,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 66 |
-| Active scenarios | 66 |
+| Total scenarios | 67 |
+| Active scenarios | 67 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

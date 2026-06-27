@@ -80,13 +80,13 @@ coverage.
 
 - Record the functional SSpec owner for implemented Simple Web CSS properties
 - Keep the full implemented Simple Web CSS subset tied to renderer behavior
-   - Expected: implemented.split(" ").len() equals `131`
+   - Expected: implemented.split(" ").len() equals `133`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 65 lines folded for reproduction.
+Runnable source: 67 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -95,8 +95,10 @@ val owner = _implemented_css_owner()
 expect(owner).to_contain("simple_web_generated_html_css_combinations_spec.spl")
 
 step("Keep the full implemented Simple Web CSS subset tied to renderer behavior")
-val implemented = "align-content align-items align-self animation animation-delay animation-direction animation-duration animation-fill-mode animation-iteration-count animation-name animation-play-state animation-timing-function background background-clip background-color background-origin background-image background-position background-repeat background-size border border-bottom border-bottom-color border-bottom-style border-bottom-width border-color border-left border-left-color border-left-style border-left-width border-right border-right-color border-right-style border-right-width border-style border-top border-top-color border-top-style border-width border-top-width border-radius border-bottom-left-radius border-bottom-right-radius border-top-left-radius border-top-right-radius bottom box-sizing box-shadow caret-color color column-gap cursor direction display flex flex-basis flex-direction flex-grow flex-shrink flex-wrap font font-size font-style font-weight gap height justify-content left letter-spacing line-height margin margin-bottom margin-left margin-right margin-top max-height max-width min-height min-width opacity order outline outline-color outline-offset outline-style outline-width overflow overflow-wrap overflow-x overflow-y padding padding-bottom padding-left padding-right padding-top position resize right row-gap tab-size text-align text-align-last text-decoration text-decoration-color text-decoration-line text-decoration-style text-decoration-thickness text-indent text-overflow text-shadow text-transform text-underline-offset text-underline-position top transform transform-box transform-origin transform-style transition transition-delay transition-duration transition-property transition-timing-function unicode-bidi visibility white-space width word-break word-spacing word-wrap z-index"
-expect(implemented.split(" ").len()).to_equal(131)
+val implemented = "align-content align-items align-self animation animation-delay animation-direction animation-duration animation-fill-mode animation-iteration-count animation-name animation-play-state animation-timing-function aspect-ratio background background-clip background-color background-origin background-image background-position background-repeat background-size border border-bottom border-bottom-color border-bottom-style border-bottom-width border-color border-left border-left-color border-left-style border-left-width border-right border-right-color border-right-style border-right-width border-style border-top border-top-color border-top-style border-width border-top-width border-radius border-bottom-left-radius border-bottom-right-radius border-top-left-radius border-top-right-radius bottom box-sizing box-shadow caret-color color column-gap cursor direction display flex flex-basis flex-direction flex-grow flex-shrink flex-wrap font font-size font-style font-weight gap height justify-content left letter-spacing line-height margin margin-bottom margin-left margin-right margin-top max-height max-width min-height min-width object-fit opacity order outline outline-color outline-offset outline-style outline-width overflow overflow-wrap overflow-x overflow-y padding padding-bottom padding-left padding-right padding-top position resize right row-gap tab-size text-align text-align-last text-decoration text-decoration-color text-decoration-line text-decoration-style text-decoration-thickness text-indent text-overflow text-shadow text-transform text-underline-offset text-underline-position top transform transform-box transform-origin transform-style transition transition-delay transition-duration transition-property transition-timing-function unicode-bidi visibility white-space width word-break word-spacing word-wrap z-index"
+expect(implemented.split(" ").len()).to_equal(133)
+expect(implemented).to_contain("aspect-ratio")
+expect(implemented).to_contain("object-fit")
 expect(implemented).to_contain("display")
 expect(implemented).to_contain("background-color")
 expect(implemented).to_contain("background-clip")
@@ -163,7 +165,7 @@ expect(implemented).to_contain("z-index")
 
 - Record the inventory SSpec owner for unsupported CSS properties
 - Keep the complete current unsupported W3C property inventory visible without claiming renderer support
-   - Expected: unsupported_cases.len() equals `270`
+   - Expected: unsupported_cases.len() equals `268`
 
 
 <details>
@@ -180,7 +182,7 @@ expect(owner).to_contain("simple_web_css_inventory_traceability_spec.spl")
 step("Keep the complete current unsupported W3C property inventory visible without claiming renderer support")
 val unsupported = _unsupported_css_inventory()
 val unsupported_cases = unsupported.split(" ")
-expect(unsupported_cases.len()).to_equal(270)
+expect(unsupported_cases.len()).to_equal(268)
 expect(unsupported).to_contain("accent-color")
 expect(unsupported).to_contain("border-image-source")
 expect(unsupported).to_contain("grid-template-columns")

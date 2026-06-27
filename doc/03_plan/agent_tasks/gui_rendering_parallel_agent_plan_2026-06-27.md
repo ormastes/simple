@@ -18,12 +18,11 @@ required, platform render-log comparison, and separate full-CSS closure.
 
 ## Current Baseline
 
-- `main` includes `0469771fc204 docs(gui): refresh linux vulkan aggregate
-  evidence`.
+- Baseline must be resolved from the current jj parent or `main@origin` at the
+  time an agent starts. Do not reuse stale hashes from older evidence reports.
 - 4K retained widget showcase evidence is current and passing in the retained
   evidence row used by the aggregate gate; see
-  `doc/09_report/gui_showcase_4k_8k_perf_2026-06-26_next.md` and
-  `doc/09_report/gui_renderdoc_provenance_current_4k_8k_2026-06-26.md`.
+  `doc/09_report/gui_showcase_4k_8k_perf_refresh_2026-06-27.md`.
   Final completion still requires the aggregate `GUI_SHOWCASE_REQUIRE_CURRENT_SOURCE_REVISION=1`
   check to prove source freshness.
 - 8K retained widget showcase evidence is current and passing in the retained
@@ -31,8 +30,10 @@ required, platform render-log comparison, and separate full-CSS closure.
   above and require current-source aggregate validation before final claims.
 - Browser Vulkan backing evidence is current and passing for Electron and
   Chrome on the Linux host; see
-  `doc/09_report/gui_web_2d_vulkan_browser_backing_2026-06-26_current.md`
-  for the `ANGLE_VULKAN`/`GaneshVulkan` rows and file-status proof.
+  `doc/09_report/gui_web_2d_linux_vulkan_refresh_2026-06-27.md` for the
+  current refresh and
+  `doc/09_report/gui_web_2d_linux_renderdoc_host_blocker_2026-06-27.md` for
+  the current RenderDoc host blocker.
 - Direct Electron/Chrome/Simple ARGB comparison evidence is current and passing
   from `setup-gui-web-2d-vulkan-env.shs --run`; the aggregate reports
   `gui_web_2d_vulkan_pixel_comparison_status=pass`,
@@ -53,9 +54,9 @@ required, platform render-log comparison, and separate full-CSS closure.
   accept the relevant fresh evidence rows.
 - Current full-CSS evidence keys remain incomplete:
   `html_css_full_rendering_goal_status=incomplete`,
-  `html_css_full_rendering_goal_full_css_rendered_count=132`, and
-  `html_css_full_rendering_goal_full_css_unrendered_count=262`.
-  `aspect-ratio` is only a completed narrow implemented-CSS slice.
+  `html_css_full_rendering_goal_full_css_rendered_count=133`, and
+  `html_css_full_rendering_goal_full_css_unrendered_count=261`.
+  `aspect-ratio` and `object-fit` are completed narrow implemented-CSS slices.
 
 ## Current Parallel Start Status
 
@@ -63,6 +64,16 @@ Spark was explicitly requested for this replan. The first Spark sidecar fan-out
 was attempted in this session for Lane A and Lane B, but both Spark agents
 returned a quota error: GPT-5.3-Codex-Spark usage limit reached until 5:04 AM.
 Do not mark Spark work as completed from that failed start.
+
+A later Spark restart attempt was made for the same split lanes:
+
+- `Russell` (`gpt-5.3-codex-spark` explorer): Lane A evidence gap scan.
+- `Tesla` (`gpt-5.3-codex-spark` explorer): Lane B platform runbook/key
+  matrix.
+
+Both failed at the same Spark quota gate. Treat these as start attempts only,
+not completed agent work and not evidence. The lane prompts remain valid for a
+future Spark restart after quota recovers.
 
 Fallback normal sidecars were started immediately so the lane still proceeds in
 parallel:
@@ -74,6 +85,13 @@ parallel:
   and 4K/8K perf.
 - `Ampere` (`gpt-5.4` explorer): normal review of this replanned doc and the
   fallback sidecar findings.
+- Current fallback fan-out:
+  - `Feynman` (`gpt-5.4-mini` explorer): Lane A evidence gap scan after the
+    latest Spark quota failure.
+  - `Mill` (`gpt-5.4-mini` explorer): Lane B platform runbook/key matrix after
+    the latest Spark quota failure.
+  - `Poincare` (`gpt-5.4` explorer): normal/high-capability review of the
+    updated plan and dirty-file scope.
 
 When Spark quota returns, restart the same Lane A and Lane B prompts with
 `gpt-5.3-codex-spark`. Do not mark the earlier quota-failed Spark agents as
@@ -146,7 +164,8 @@ Spark restart prompt:
 Inspect current GUI/Web/2D RenderDoc/Vulkan/Metal/D3D12 hardening and 4K/8K
 perf docs. Do not edit. Return existing plan docs, stale baseline claims,
 missing parallel lanes, recommended Spark-suitable tasks, normal-review tasks,
-and files needing update. Treat da5fa7a130f0 as the current main baseline.
+and files needing update. Treat the current `main@origin`/working-copy parent
+revision as the baseline; do not rely on stale hashes copied from older reports.
 ```
 
 ## Lane B - Spark Platform Runbook Split
@@ -306,8 +325,9 @@ This session's immediate integration target:
    keep Spark lanes queued.
 3. Collect sidecar outputs once, review them, and update only the task plan or
    narrow docs needed to prevent the next agents from repeating stale work.
-4. Do not touch renderer source or broad wrappers unless a sidecar identifies a
-   concrete, reviewed key mismatch.
+4. Treat renderer source and broad wrapper edits as separate implementation
+   work orders. This session's current dirty renderer/wrapper/spec/report files
+   belong to WO-11 object-fit, not to the Spark replan lane.
 
 ## Parallel Work Orders
 
@@ -322,6 +342,14 @@ This session's immediate integration target:
 | WO-7 Windows D3D12 host execution | Future Windows agent | Low/medium: Spark can collect command output; normal review required | Evidence dirs and reports only | Native D3D12/DXGI readback, PIX/GPU-debugger proof, and Windows render-log compare pass |
 | WO-8 4K/8K perf freshness | Main or supervised perf sidecar | Medium: Spark can check retained rows; normal review required for perf claims | Reports/metrics only | Retained rows include viewport, source revision, timing, RSS, checksum/readback, and fallback state |
 | WO-9 Stale planning cleanup | Spark scan followed by normal review | High for discovery, review required for edits | `doc/03_plan/agent_tasks/gui_web_host_gpu_queue_readback_spark_tasks.md`, `doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md`, and directly referenced stale plan docs | Older queue/readback and platform-matrix docs either point to current aggregate/runbook evidence or are explicitly marked historical/superseded |
+| WO-10 CSS aspect-ratio slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, focused unit/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `132/132`, and no full-CSS/native-platform completion is claimed |
+| WO-11 CSS object-fit slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused unit/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `133/133`, and no full-CSS/native-platform completion is claimed |
+| WO-12 Spark restart queue | Main agent or future orchestrator | High: same read-only prompts after quota recovers | None | New Spark outputs are explicitly compared against `Feynman`/`Mill` fallback results and accepted only after `Poincare`-style normal review |
+
+WO-12 rule: do not spawn Spark against source-edit scopes until the read-only
+gap/matrix lanes complete and a normal reviewer approves the intended write
+scope. Spark may draft a patch only after the main agent gives a disjoint file
+set and a fail-fast acceptance checklist.
 
 WO-8 status: refreshed on 2026-06-27 in
 `doc/09_report/gui_showcase_4k_8k_perf_refresh_2026-06-27.md`. The current
@@ -348,6 +376,15 @@ implemented CSS is `132/132`, full CSS is `132/394`, full CSS unrendered is
 `262`, and unsupported inventory ownership is `269`. This is a completed narrow
 CSS renderer slice, not completion evidence for full CSS, RenderDoc, Metal, or
 D3D12 lanes.
+
+WO-11 status, 2026-06-27: `object-fit` moved into implemented Simple Web CSS
+with focused image-placeholder pixel coverage and full-goal status coverage.
+Current evidence is recorded in
+`doc/09_report/html_css_full_rendering_goal_status_object_fit_2026-06-27.md`:
+implemented CSS is `133/133`, full CSS is `133/394`, full CSS unrendered is
+`261`, and unsupported inventory ownership is `268`. This is a completed narrow
+web-renderer slice, not completion evidence for full CSS or native platform
+capture lanes.
 
 WO-5 status: refreshed non-RenderDoc Linux evidence is passing in
 `doc/09_report/gui_web_2d_linux_vulkan_refresh_2026-06-27.md`. A fresh
@@ -386,6 +423,12 @@ platform agent must complete these gates in sequence:
 If step 3 lacks valid `.rdc` files with `RDOC` magic, step 4 remains blocked.
 Diagnostic runs with `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0` may classify
 partial state, but they are not completion evidence.
+
+Lane B matrix note: `--browser-backing` is the focused Linux command that
+satisfies the browser-backing evidence keys. `--run` is direct ARGB parity
+evidence. `--renderdoc` or the explicit `scripts/tool/renderdoc-evidence.shs`
+capture commands are required before any strict RenderDoc-backed comparison can
+pass.
 
 ## Source Coupling Audit
 
@@ -444,6 +487,10 @@ Normal-review acceptance:
 - Spark Lane B: attempted, blocked by Spark quota until 5:04 AM; queued for
   restart. Attempted again in this slice as `Pauli`; Spark quota still blocked
   it.
+- Latest Spark Lane A restart: attempted as `Russell`; Spark quota blocked it
+  before any findings were produced.
+- Latest Spark Lane B restart: attempted as `Tesla`; Spark quota blocked it
+  before any findings were produced.
 - Mini fallback Lane A: completed; planning findings integrated above.
 - Mini fallback Lane B: completed; wrapper/key matrix integrated above.
 - Current mini fallback Lane A: completed as `McClintock`; accepted anti-
@@ -451,11 +498,26 @@ Normal-review acceptance:
 - Current mini fallback Lane B: completed as `Cicero`; it found the
   `aspect-ratio` evidence keys internally consistent and no false completion
   claim in the checked files.
-- Normal review Lane C: completed in this slice as `Wegener`; accepted
-  corrections are integrated above, except historical reports are not treated as
-  current proof when a fresher host check disagrees.
+- Earlier normal review Lane C: completed as `Wegener` for pre-`Russell` and
+  pre-`Tesla` sidecar outputs only; accepted corrections are integrated above,
+  except historical reports are not treated as current proof when a fresher
+  host check disagrees.
 - Current mini fallback for the Linux RenderDoc host blocker: started as
   `Rawls` after Spark quota failed; accepted corrections are integrated above.
+- Current mini fallback Lane A after `Russell` quota failure: completed as
+  `Feynman`; accepted stale-baseline and fresher-evidence-anchor cleanup is
+  integrated in the current baseline section above. Its suggestion to update
+  older broad Vulkan plans is left as a follow-up to avoid mixing another plan
+  lane into the WO-11 object-fit commit.
+- Current mini fallback Lane B after `Tesla` quota failure: completed as
+  `Mill`; accepted command/key matrix precision is integrated in the Linux
+  sequencing note above. Platform-host-only macOS/Windows capture claims remain
+  unverified on this host.
+- Current normal review lane: completed as `Poincare`; accepted fixes are
+  integrated for WO-10/WO-11 ownership, dynamic Spark baseline wording, and
+  review-scope separation. Remaining unintegrated `Feynman`/`Mill` suggestions
+  remain advisory until the main agent or a later normal reviewer accepts
+  specific claims.
 
 ## Hard Stop Conditions
 
