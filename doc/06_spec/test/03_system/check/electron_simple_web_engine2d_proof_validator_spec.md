@@ -27,7 +27,7 @@ electron_simple_web_engine2d_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,6 +80,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
 - Malformed `frame_us`, malformed mismatch counts, blur/tolerance use, missing
   ARGB capture, missing or empty captured ARGB files, missing capture provenance,
   missing viewport proof, and capture viewport mismatches are rejected.
+- Implausibly high `frame_us` values fail closed instead of counting as valid
+  Electron Engine2D timing proof.
 - ARGB capture file-status rows distinguish `missing`, `empty`, and `pass` so
   diagnostics cannot treat a zero-byte artifact as a valid capture file.
 - ARGB capture proof paths must not resolve back to the top-level proof JSON
@@ -286,6 +288,35 @@ expect(evidence).to_contain("electron_simple_web_engine2d_electron_frame_us=")
 expect(evidence.contains("electron_simple_web_engine2d_electron_frame_us=not-a-number")).to_equal(false)
 expect(iterations).to_contain("electron_simple_web_engine2d_validation_reason=missing-performance-iterations")
 expect(iterations).to_contain("electron_simple_web_engine2d_proof_iterations=1")
+```
+
+</details>
+
+#### rejects implausibly high Electron Engine2D frame timing
+
+-  proof command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-engine2d-validator-slow-frame"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "p.frame_us=1000001") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=fail")
+expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=missing-electron-timing")
+expect(evidence).to_contain("electron_simple_web_engine2d_electron_frame_us=1000001")
+expect(evidence).to_contain("electron_simple_web_engine2d_estimated_fps_floor=0")
 ```
 
 </details>
@@ -638,12 +669,13 @@ expect(pixel).to_contain("electron_simple_web_engine2d_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-electron-simple-web-engine2d-bitmap-evidence.shs")
 val validator = file_read("scripts/check/validate-electron-simple-web-engine2d-proof.js")
+expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
 expect(script).to_contain("validate-electron-simple-web-engine2d-proof.js")
 expect(script).to_contain("cat \"$VALIDATED_ENV\"")
 expect(script).to_contain("electron_simple_web_engine2d_validation_status")
@@ -669,8 +701,8 @@ expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

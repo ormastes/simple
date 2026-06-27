@@ -27,7 +27,7 @@ electron_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -77,6 +77,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 - Malformed `frame_us`, malformed mismatch counts, blur/tolerance use, missing
   ARGB capture, missing capture provenance, missing viewport proof, and capture
   viewport mismatches are rejected.
+- Implausibly high `frame_us` values fail closed instead of counting as valid
+  Electron layout timing proof.
 - ARGB capture proof paths must resolve to nonempty files instead of relying
   on `captured_argb_written=true` alone.
 - ARGB capture file-status rows distinguish `missing`, `empty`, and `pass` so
@@ -310,6 +312,35 @@ expect(evidence).to_contain("electron_simple_web_layout_electron_frame_us=")
 expect(evidence.contains("electron_simple_web_layout_electron_frame_us=not-a-number")).to_equal(false)
 expect(iterations).to_contain("electron_simple_web_layout_validation_reason=missing-performance-iterations")
 expect(iterations).to_contain("electron_simple_web_layout_proof_iterations=1")
+```
+
+</details>
+
+#### rejects implausibly high Electron layout frame timing
+
+-  proof command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-layout-validator-slow-frame"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "p.frame_us=1000001") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+expect(evidence).to_contain("electron_simple_web_layout_validation_status=fail")
+expect(evidence).to_contain("electron_simple_web_layout_validation_reason=missing-electron-timing")
+expect(evidence).to_contain("electron_simple_web_layout_electron_frame_us=1000001")
+expect(evidence).to_contain("electron_simple_web_layout_estimated_fps_floor=0")
 ```
 
 </details>
@@ -655,12 +686,13 @@ expect(pixel).to_contain("electron_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val validator = file_read("scripts/check/validate-electron-simple-web-layout-proof.js")
 expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
+expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
 
 val script = file_read("scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs")
 expect(script).to_contain("validate-electron-simple-web-layout-proof.js")
@@ -688,8 +720,8 @@ expect(fixture).to_contain("proof_source: \"tools/electron-live-bitmap/exact_fix
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
