@@ -27,7 +27,7 @@ electron_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -73,6 +73,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
 - Complete Electron MDI proof JSON validates and emits normalized
   `electron_mdi_*` rows.
 - Event routing pass requires DOM events and Electron bridge IPC frames.
+- Event proof emits individual DOM route, traffic-button route, Electron bridge
+  IPC route, taskbar-visibility, and render image/html rows rather than only a
+  coarse event status.
 - Capture pass requires the proof screenshot path to match the captured
   screenshot artifact and the artifact file to exist with nonzero bytes.
 - Capture artifacts must carry the PNG signature bytes; an arbitrary nonempty
@@ -102,7 +105,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -125,6 +128,33 @@ expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=pass")
 expect(evidence).to_contain("electron_mdi_performance_status=pass")
 expect(evidence).to_contain("electron_mdi_interaction_latency_status=pass")
 expect(evidence).to_contain("electron_mdi_animation_status=pass")
+expect(evidence).to_contain("electron_mdi_render_image_count=1")
+expect(evidence).to_contain("electron_mdi_render_html_renderable=true")
+expect(evidence).to_contain("electron_mdi_event_has_desktop=true")
+expect(evidence).to_contain("electron_mdi_event_drag_runtime_available=true")
+expect(evidence).to_contain("electron_mdi_event_drag_events_available=true")
+expect(evidence).to_contain("electron_mdi_event_drag_moved=true")
+expect(evidence).to_contain("electron_mdi_event_window_event_runtime_available=true")
+expect(evidence).to_contain("electron_mdi_event_app_action_control_found=true")
+expect(evidence).to_contain("electron_mdi_event_app_input_control_found=true")
+expect(evidence).to_contain("electron_mdi_event_body_click_routed=true")
+expect(evidence).to_contain("electron_mdi_event_body_input_routed=true")
+expect(evidence).to_contain("electron_mdi_event_body_key_routed=true")
+expect(evidence).to_contain("electron_mdi_event_traffic_minimize_routed=true")
+expect(evidence).to_contain("electron_mdi_event_traffic_maximize_routed=true")
+expect(evidence).to_contain("electron_mdi_event_traffic_close_routed=true")
+expect(evidence).to_contain("electron_mdi_bridge_body_action_frame_routed=true")
+expect(evidence).to_contain("electron_mdi_bridge_body_input_frame_routed=true")
+expect(evidence).to_contain("electron_mdi_bridge_body_key_frame_routed=true")
+expect(evidence).to_contain("electron_mdi_bridge_mouse_down_frame_routed=true")
+expect(evidence).to_contain("electron_mdi_bridge_mouse_up_frame_routed=true")
+expect(evidence).to_contain("electron_mdi_bridge_minimize_frame_routed=true")
+expect(evidence).to_contain("electron_mdi_bridge_maximize_frame_routed=true")
+expect(evidence).to_contain("electron_mdi_bridge_close_frame_routed=true")
+expect(evidence).to_contain("electron_mdi_event_taskbar_item_count=4")
+expect(evidence).to_contain("electron_mdi_event_taskbar_icon_count=4")
+expect(evidence).to_contain("electron_mdi_event_taskbar_icons_visible=true")
+expect(evidence).to_contain("electron_mdi_event_taskbar_labels_visible=true")
 expect(evidence).to_contain("electron_mdi_performance_now_delta_ms=16.7")
 expect(evidence).to_contain("electron_mdi_input_to_paint_ms=18.4")
 expect(evidence).to_contain("electron_mdi_animation_frame_count=2")
@@ -142,7 +172,7 @@ expect(evidence).to_contain("electron_mdi_css_animation_probe=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -158,6 +188,46 @@ expect(evidence).to_contain("electron_mdi_json_proof=fail")
 expect(evidence).to_contain("electron_mdi_event_status=fail")
 expect(evidence).to_contain("event-contract-missing")
 expect(evidence).to_contain("bridgeMouseUpFrameRouted")
+expect(evidence).to_contain("electron_mdi_bridge_mouse_up_frame_routed=false")
+```
+
+</details>
+
+#### emits detailed Electron DOM event routing failures
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm detailed Electron event diagnostics survive validation
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-mdi-validator-event-detail"
+val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
+    _proof_command(root + "/body.json", "p.bodyClickRouted=false") +
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/body.json build/electron-proof/screen.png > " + root + "/body.env; " +
+    _proof_command(root + "/taskbar.json", "p.taskbarLabelsVisible=false") +
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/taskbar.json build/electron-proof/screen.png > " + root + "/taskbar.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val body = file_read(root + "/body.env")
+val taskbar = file_read(root + "/taskbar.env")
+step("Confirm detailed Electron event diagnostics survive validation")
+expect(body).to_contain("electron_mdi_json_proof=fail")
+expect(body).to_contain("electron_mdi_event_status=fail")
+expect(body).to_contain("electron_mdi_event_body_click_routed=false")
+expect(body).to_contain("electron_mdi_event_body_input_routed=true")
+expect(taskbar).to_contain("electron_mdi_json_proof=fail")
+expect(taskbar).to_contain("electron_mdi_event_status=fail")
+expect(taskbar).to_contain("electron_mdi_event_taskbar_labels_visible=false")
+expect(taskbar).to_contain("electron_mdi_event_taskbar_icons_visible=true")
 ```
 
 </details>
@@ -525,7 +595,7 @@ expect(animation.contains("electron_mdi_animation_frame_count=2")).to_equal(fals
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -536,6 +606,12 @@ expect(bridge).to_contain("inputToPaintMs")
 expect(bridge).to_contain("animationFrameCount")
 expect(bridge).to_contain("cssAnimationProbe")
 expect(wrapper).to_contain("validate-electron-mdi-proof.js")
+expect(wrapper).to_contain("node \"$VALIDATOR\" \"$PROOF_PATH\" \"$SCREENSHOT_PATH\"")
+expect(wrapper).to_contain("electron-mdi-json-proof-failed")
+val validator = file_read("scripts/check/validate-electron-mdi-proof.js")
+expect(validator).to_contain("electron_mdi_event_body_click_routed")
+expect(validator).to_contain("electron_mdi_bridge_mouse_up_frame_routed")
+expect(validator).to_contain("electron_mdi_event_taskbar_labels_visible")
 ```
 
 </details>
@@ -544,8 +620,8 @@ expect(wrapper).to_contain("validate-electron-mdi-proof.js")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

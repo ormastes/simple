@@ -42,6 +42,10 @@ function jsonDecimalTextOrBlank(value) {
   return text === null ? '' : text;
 }
 
+function boolText(value) {
+  return value === true ? 'true' : 'false';
+}
+
 const [proofPath, screenshotPath] = process.argv.slice(2);
 if (!proofPath || !screenshotPath) {
   emit('electron_mdi_json_proof', 'fail');
@@ -157,7 +161,34 @@ emit('electron_mdi_performance_status', performanceFailed.length ? 'fail' : 'pas
 emit('electron_mdi_interaction_latency_status', interactionLatencyFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_animation_status', animationFailed.length ? 'fail' : 'pass');
 emit('electron_mdi_window_count', jsonIntegerTextOrBlank(proof.count));
+emit('electron_mdi_render_image_count', jsonIntegerTextOrBlank(proof.imageCount));
+emit('electron_mdi_render_html_renderable', boolText(proof.htmlRenderable));
+emit('electron_mdi_event_has_desktop', boolText(proof.hasDesktop));
+emit('electron_mdi_event_drag_runtime_available', boolText(proof.hasDragRuntime));
+emit('electron_mdi_event_drag_events_available', boolText(proof.hasDragEvents));
+emit('electron_mdi_event_drag_moved', boolText(proof.dragMoved));
+emit('electron_mdi_event_window_event_runtime_available', boolText(proof.hasWindowEventRuntime));
+emit('electron_mdi_event_app_action_control_found', boolText(proof.appActionControlFound));
+emit('electron_mdi_event_app_input_control_found', boolText(proof.appInputControlFound));
+emit('electron_mdi_event_body_click_routed', boolText(proof.bodyClickRouted));
+emit('electron_mdi_event_body_input_routed', boolText(proof.bodyInputRouted));
+emit('electron_mdi_event_body_key_routed', boolText(proof.bodyKeyRouted));
+emit('electron_mdi_event_traffic_minimize_routed', boolText(proof.trafficMinimizeRouted));
+emit('electron_mdi_event_traffic_maximize_routed', boolText(proof.trafficMaximizeRouted));
+emit('electron_mdi_event_traffic_close_routed', boolText(proof.trafficCloseRouted));
 emit('electron_mdi_bridge_ipc_frame_count', jsonIntegerTextOrBlank(proof.bridgeIpcFrameCount));
+emit('electron_mdi_bridge_body_action_frame_routed', boolText(proof.bridgeBodyActionFrameRouted));
+emit('electron_mdi_bridge_body_input_frame_routed', boolText(proof.bridgeBodyInputFrameRouted));
+emit('electron_mdi_bridge_body_key_frame_routed', boolText(proof.bridgeBodyKeyFrameRouted));
+emit('electron_mdi_bridge_mouse_down_frame_routed', boolText(proof.bridgeMouseDownFrameRouted));
+emit('electron_mdi_bridge_mouse_up_frame_routed', boolText(proof.bridgeMouseUpFrameRouted));
+emit('electron_mdi_bridge_minimize_frame_routed', boolText(proof.bridgeMinimizeFrameRouted));
+emit('electron_mdi_bridge_maximize_frame_routed', boolText(proof.bridgeMaximizeFrameRouted));
+emit('electron_mdi_bridge_close_frame_routed', boolText(proof.bridgeCloseFrameRouted));
+emit('electron_mdi_event_taskbar_item_count', jsonIntegerTextOrBlank(proof.taskbarItemCount));
+emit('electron_mdi_event_taskbar_icon_count', jsonIntegerTextOrBlank(proof.taskbarIconCount));
+emit('electron_mdi_event_taskbar_icons_visible', boolText(proof.taskbarIconsVisible));
+emit('electron_mdi_event_taskbar_labels_visible', boolText(proof.taskbarLabelsVisible));
 emit('electron_mdi_performance_now_available', proof.performanceNowAvailable === true ? 'true' : 'false');
 emit('electron_mdi_performance_now_delta_ms', jsonDecimalTextOrBlank(proof.performanceNowDeltaMs));
 emit('electron_mdi_input_to_paint_ms', jsonDecimalTextOrBlank(proof.inputToPaintMs));
