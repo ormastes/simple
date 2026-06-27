@@ -27,7 +27,7 @@ tauri_mobile_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,6 +82,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 - The extracted proof JSON output path must not overlap any requested device
   log source path, so validation cannot overwrite the source evidence it just
   consumed.
+- The extracted proof JSON output path must also be a regular destination, not
+  a symlink to another artifact outside the requested device logs.
 - `performanceNowAvailable=true` is not enough: the proof must include an
   explicit finite positive `performanceNowDeltaMs` from distinct samples, and
   multi-second timing does not prove responsive mobile rendering.
@@ -358,6 +360,46 @@ expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
 expect(device_log).to_contain("[tauri-shell] mdi proof:")
+```
+
+</details>
+
+#### rejects symlinked proof JSON output paths before writing extracted MDI proof
+
+-  proof log command
+   - Expected: code equals `1`
+- Confirm extracted MDI proof cannot be written through a symlinked JSON path
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-symlink-output"
+val command = "rm -rf " + root + " && mkdir -p " + root + " " + root + "-external && " +
+    _proof_log_command(root + "/device.log", "") +
+    " && printf '{\"stale\":true}\\n' > " + root + "-external/proof.json && " +
+    "ln -s ../test-tauri-mobile-mdi-validator-symlink-output-external/proof.json " + root + "/proof.json && " +
+    "node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+val external = file_read(root + "-external/proof.json")
+step("Confirm extracted MDI proof cannot be written through a symlinked JSON path")
+expect(evidence).to_contain("android_mdi_proof_status=fail")
+expect(evidence).to_contain("android_mdi_proof_reason=mdi-proof-json-path-symlink")
+expect(evidence).to_contain("android_mdi_proof_json=" + root + "/proof.json")
+expect(evidence).to_contain("android_mdi_proof_requested_source_count=1")
+expect(evidence).to_contain("android_mdi_proof_source_count=1")
+expect(evidence).to_contain("android_mdi_proof_marker_source_count=1")
+expect(evidence).to_contain("android_mdi_proof_missing_source_count=0")
+expect(evidence).to_contain("android_mdi_proof_symlink_source_count=0")
+expect(evidence).to_contain("android_mdi_proof_empty_source_count=0")
+expect(external).to_contain("{\"stale\":true}")
 ```
 
 </details>
@@ -1050,8 +1092,8 @@ expect(aggregate).to_contain("android-mdi-proof-source-symlink")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

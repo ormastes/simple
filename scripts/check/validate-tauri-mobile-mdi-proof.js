@@ -189,6 +189,20 @@ if (files.some((file) => sameResolvedPath(jsonPath, file))) {
   process.exit(1);
 }
 
+let jsonPathStat = null;
+try {
+  jsonPathStat = fs.lstatSync(jsonPath);
+} catch (_err) {
+  jsonPathStat = null;
+}
+if (jsonPathStat && jsonPathStat.isSymbolicLink()) {
+  emit("mdi_proof_json", jsonPath);
+  emit("mdi_proof_status", "fail");
+  emit("mdi_proof_reason", "mdi-proof-json-path-symlink");
+  emitSourceRows();
+  process.exit(1);
+}
+
 if (!lastJson) {
   emitSourceRows();
   fail(proofMarkerParseError ? `invalid-mdi-proof-json:${proofMarkerParseError}` : "missing-mdi-proof-log");
