@@ -307,6 +307,12 @@ This session's immediate integration target:
 | WO-8 4K/8K perf freshness | Main or supervised perf sidecar | Medium: Spark can check retained rows; normal review required for perf claims | Reports/metrics only | Retained rows include viewport, source revision, timing, RSS, checksum/readback, and fallback state |
 | WO-9 Stale planning cleanup | Spark scan followed by normal review | High for discovery, review required for edits | `doc/03_plan/agent_tasks/gui_web_host_gpu_queue_readback_spark_tasks.md`, `doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md`, and directly referenced stale plan docs | Older queue/readback and platform-matrix docs either point to current aggregate/runbook evidence or are explicitly marked historical/superseded |
 
+WO-8 status: refreshed on 2026-06-27 in
+`doc/09_report/gui_showcase_4k_8k_perf_refresh_2026-06-27.md`. The current
+host produced passing retained 4K and 8K rows with source revision
+`56a1985b1d38`, current-source aggregate validation, checksum/readback proof,
+RSS under budget, and `fallback_state=none`.
+
 WO-9 status: the two explicit stale agent-task docs now carry 2026-06-27
 superseded/merged routing headers. Future cleanup may still classify deeper
 historical plan docs, but agents should no longer treat those two June 14
