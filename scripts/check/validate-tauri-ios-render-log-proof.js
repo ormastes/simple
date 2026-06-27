@@ -13,6 +13,7 @@ function emit(key, value) {
 const files = process.argv.slice(2).filter(Boolean);
 const requestedSourceCount = files.length;
 let missingSourceCount = 0;
+let emptySourceCount = 0;
 let sourceCount = 0;
 let text = '';
 let coherentSource = false;
@@ -33,7 +34,10 @@ for (const file of files) {
     continue;
   }
   const content = fs.readFileSync(file, 'utf8');
-  if (content.length === 0) continue;
+  if (content.length === 0) {
+    emptySourceCount += 1;
+    continue;
+  }
   sourceCount += 1;
   text += `\n${content}`;
   const sourceHtmlLen = renderHtmlLen(content);
@@ -59,6 +63,8 @@ if (requestedSourceCount === 0 || sourceCount === 0) {
   reason = 'missing-ios-render-log-source';
 } else if (missingSourceCount > 0) {
   reason = 'ios-render-log-source-missing';
+} else if (emptySourceCount > 0) {
+  reason = 'ios-render-log-source-empty';
 } else if (failureMarker) {
   reason = 'ios-render-log-failure-marker';
 } else if (hasAnyRenderMarker && !renderMarker) {
@@ -80,6 +86,7 @@ emit('ios_render_log_validation_reason', reason);
 emit('ios_render_log_requested_source_count', requestedSourceCount);
 emit('ios_render_log_source_count', sourceCount);
 emit('ios_render_log_missing_source_count', missingSourceCount);
+emit('ios_render_log_empty_source_count', emptySourceCount);
 emit('ios_render_log_source_coherence_status', coherentSource ? 'pass' : 'fail');
 emit('ios_render_log_marker_status', renderMarker ? 'pass' : 'fail');
 emit('ios_render_log_html_len', htmlLen);
