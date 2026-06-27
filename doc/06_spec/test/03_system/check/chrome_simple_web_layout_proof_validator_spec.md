@@ -100,8 +100,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   numeric evidence.
 - The top-level proof must carry the live Chrome capture source marker; a
   hand-authored proof object with valid-looking artifacts is not sufficient.
-- The top-level proof must carry Chrome DevTools capture mode and Chrome or
-  Chromium runtime user-agent evidence, not only a binary path.
+- The top-level proof must carry Chrome DevTools capture mode, Chrome or
+  Chromium runtime user-agent, product, and protocol version evidence, not only
+  a binary path.
 - The live Chrome wrapper emits validation and proof-source diagnostic rows
   even on early missing-artifact exits before the validator can run.
 - The live Chrome wrapper consumes the validator and still maps real pixel
@@ -208,6 +209,8 @@ expect(wrong).to_contain("chrome_simple_web_layout_proof_source=tools/manual/chr
 
 -  proof command
 -  proof command
+-  proof command
+-  proof command
    - Expected: code equals `1`
 - Confirm Chrome proof needs DevTools capture mode and runtime user agent
 
@@ -215,7 +218,7 @@ expect(wrong).to_contain("chrome_simple_web_layout_proof_source=tools/manual/chr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -224,12 +227,18 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/mode.json", "p.capture_mode=\"chrome-headless-screenshot\"") +
     " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/mode.json > " + root + "/mode.env; " +
     _proof_command(root + "/ua.json", "p.chrome_user_agent=\"Mozilla/5.0 Safari/537.36\"") +
-    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/ua.json > " + root + "/ua.env"
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/ua.json > " + root + "/ua.env; " +
+    _proof_command(root + "/product.json", "p.chrome_product=\"\"") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/product.json > " + root + "/product.env; " +
+    _proof_command(root + "/protocol.json", "p.chrome_protocol_version=\"devtools\"") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/protocol.json > " + root + "/protocol.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val mode = file_read(root + "/mode.env")
 val ua = file_read(root + "/ua.env")
+val product = file_read(root + "/product.env")
+val protocol = file_read(root + "/protocol.env")
 step("Confirm Chrome proof needs DevTools capture mode and runtime user agent")
 expect(mode).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(mode).to_contain("chrome_simple_web_layout_validation_reason=unexpected-chrome-capture-mode")
@@ -238,6 +247,12 @@ expect(ua).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(ua).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-runtime-user-agent")
 expect(ua).to_contain("chrome_simple_web_layout_capture_mode=chrome-devtools-screenshot")
 expect(ua).to_contain("chrome_simple_web_layout_chrome_user_agent=Mozilla/5.0 Safari/537.36")
+expect(product).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(product).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-product-version")
+expect(product).to_contain("chrome_simple_web_layout_chrome_product=")
+expect(protocol).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(protocol).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-protocol-version")
+expect(protocol).to_contain("chrome_simple_web_layout_chrome_protocol_version=devtools")
 ```
 
 </details>
@@ -769,7 +784,7 @@ expect(pixel).to_contain("chrome_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -782,6 +797,8 @@ expect(script).to_contain("chrome_simple_web_layout_validation_reason")
 expect(script).to_contain("chrome_simple_web_layout_proof_source")
 expect(script).to_contain("chrome_simple_web_layout_capture_mode")
 expect(script).to_contain("chrome_simple_web_layout_chrome_user_agent")
+expect(script).to_contain("chrome_simple_web_layout_chrome_product")
+expect(script).to_contain("chrome_simple_web_layout_chrome_protocol_version")
 expect(script).to_contain("capture-viewport-mismatch")
 expect(script).to_contain("chrome_simple_web_layout_capture_width")
 expect(script).to_contain("chrome_simple_web_layout_captured_argb_format")
@@ -801,6 +818,8 @@ expect(capture).to_contain("captured_argb_path: outputPath")
 expect(capture).to_contain("proof_source: \"tools/chrome-live-bitmap/capture_html_argb.js\"")
 expect(capture).to_contain("capture_mode: geometryOutputPath ? \"chrome-devtools-screenshot\" : \"chrome-headless-screenshot\"")
 expect(capture).to_contain("chrome_user_agent")
+expect(capture).to_contain("chrome_product")
+expect(capture).to_contain("chrome_protocol_version")
 expect(capture).to_contain("producer: \"chrome-headless-screenshot\"")
 expect(capture).to_contain("geometry_path: geometryOutputPath")
 ```
@@ -815,7 +834,7 @@ expect(capture).to_contain("geometry_path: geometryOutputPath")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -834,6 +853,8 @@ expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=missing-
 expect(evidence).to_contain("chrome_simple_web_layout_proof_source=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_mode=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_user_agent=")
+expect(evidence).to_contain("chrome_simple_web_layout_chrome_product=")
+expect(evidence).to_contain("chrome_simple_web_layout_chrome_protocol_version=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_width=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_height=")

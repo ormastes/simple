@@ -147,6 +147,8 @@ const geometryViewport = geometry.viewport || {};
 const geometryItems = Array.isArray(geometry.items) ? geometry.items : [];
 const expectedProofSource = 'tools/chrome-live-bitmap/capture_html_argb.js';
 const chromeUserAgent = typeof proof.chrome_user_agent === 'string' ? proof.chrome_user_agent : '';
+const chromeProduct = typeof proof.chrome_product === 'string' ? proof.chrome_product : '';
+const chromeProtocolVersion = typeof proof.chrome_protocol_version === 'string' ? proof.chrome_protocol_version : '';
 
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
@@ -157,6 +159,10 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'unexpected-chrome-capture-mode';
 } else if (!/(Chrome|Chromium)\/[0-9]/.test(chromeUserAgent)) {
   reason = 'missing-chrome-runtime-user-agent';
+} else if (!/(Chrome|Chromium|HeadlessChrome)\/[0-9]/.test(chromeProduct)) {
+  reason = 'missing-chrome-product-version';
+} else if (!/^[0-9]+(?:\.[0-9]+)*$/.test(chromeProtocolVersion)) {
+  reason = 'missing-chrome-protocol-version';
 } else if (decimalIntegerText(proof.checksum) === null || decimalIntegerText(proof.expected_checksum) === null) {
   reason = 'missing-checksum-proof';
 } else if (!sameInteger(proof.checksum, proof.expected_checksum)) {
