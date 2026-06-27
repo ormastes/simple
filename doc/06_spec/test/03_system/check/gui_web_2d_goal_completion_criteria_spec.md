@@ -1,6 +1,6 @@
 # GUI/Web/2D Goal Completion Criteria
 
-> This SSpec is the executable checklist for the active GUI/Web/2D hardening goal. It intentionally fails fast for remaining platform and completion lanes until a platform agent replaces each placeholder with a real evidence-backed assertion.
+> This SSpec is the executable checklist for the active GUI/Web/2D hardening goal. Remaining platform lanes use explicit failing expectations until a platform agent replaces each placeholder with a real evidence-backed assertion; the retained 4K/8K perf lane now runs strict aggregate assertions.
 
 <!-- sdn-diagram:id=gui_web_2d_goal_completion_criteria_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ gui_web_2d_goal_completion_criteria_spec -> std
 
 # GUI/Web/2D Goal Completion Criteria
 
-This SSpec is the executable checklist for the active GUI/Web/2D hardening goal. It intentionally fails fast for remaining platform and completion lanes until a platform agent replaces each placeholder with a real evidence-backed assertion.
+This SSpec is the executable checklist for the active GUI/Web/2D hardening goal. Remaining platform lanes use explicit failing expectations until a platform agent replaces each placeholder with a real evidence-backed assertion; the retained 4K/8K perf lane now runs strict aggregate assertions.
 
 ## At a Glance
 
@@ -53,9 +53,10 @@ This SSpec is the executable checklist for the active GUI/Web/2D hardening goal.
 ## Overview
 
 This SSpec is the executable checklist for the active GUI/Web/2D hardening
-goal. It intentionally fails fast for remaining platform and completion lanes
-until a platform agent replaces each placeholder with a real evidence-backed
-assertion.
+goal. Remaining platform lanes use explicit failing expectations until a
+platform agent replaces each placeholder with a real evidence-backed assertion.
+The retained 4K/8K perf lane now runs strict aggregate assertions against
+current-source evidence.
 
 **Plan:** doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md
 **Requirements:** N/A
@@ -64,10 +65,10 @@ assertion.
 
 ## Completion Rule
 
-The overall goal is not complete until every scenario in this spec has been
-converted from a fail-fast placeholder into assertions over current evidence.
-Passing narrow renderer slices, retained perf rows, or non-RenderDoc browser
-Vulkan rows do not complete the goal by themselves.
+The overall goal is not complete until every scenario in this spec has
+evidence-backed assertions over current evidence and passes. Passing the
+retained perf lane, narrow renderer slices, or non-RenderDoc browser Vulkan rows
+does not complete the goal by itself.
 
 ## Acceptance
 
@@ -154,17 +155,21 @@ verify_windows_d3d12_completion()
 
 - Verify current-source 4K and 8K retained rows include FPS, timing, RSS, checksum/readback, native provenance, retained mode, redraw count, and no fallback
 - verify retained 4k 8k perf completion
+- Run `check-gui-renderdoc-feature-coverage-status.shs` with `GUI_SHOWCASE_REQUIRE_CURRENT_SOURCE_REVISION=1`
+- Assert both retained rows are `pass`, current-source, self-hosted release native builds, retained static frames, one redraw, nonfallback, nonblank, checksummed, within RSS budget, and at least 200 FPS across at least 200 frames
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 key checks folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Verify current-source 4K and 8K retained rows include FPS, timing, RSS, checksum/readback, native provenance, retained mode, redraw count, and no fallback")
 verify_retained_4k_8k_perf_completion()
+assert_retained_perf_row(evidence, "gui_showcase_4k_200fps", "4k", "3840", "2160", "8294400", "262144")
+assert_retained_perf_row(evidence, "gui_showcase_8k_perf", "8k", "7680", "4320", "33177600", "750000")
 ```
 
 </details>

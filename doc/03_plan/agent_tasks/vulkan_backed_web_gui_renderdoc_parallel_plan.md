@@ -117,6 +117,12 @@ proof, pairwise pixel diff, and Simple `.rdc` passing while adding Chrome and
 Electron `.rdc` artifacts with `artifact_file_status=pass` and
 `artifact_magic=RDOC`.
 
+Completion SSpec update, 2026-06-27: the retained 4K/8K performance lane in
+`test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl` is now a
+strict evidence-backed assertion over current-source aggregate rows. The other
+goal-completion lanes remain explicit failing expectations until their platform
+evidence is available.
+
 macOS Metal render-log normalization and comparison:
 
 ```bash
