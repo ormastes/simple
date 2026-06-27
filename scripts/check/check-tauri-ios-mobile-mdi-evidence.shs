@@ -3,10 +3,44 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 TAURI_DIR="$ROOT_DIR/tools/tauri-shell"
-BUILD_DIR="$ROOT_DIR/build/tauri_ios_mdi"
+BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/tauri_ios_mdi}"
 PROBE_HELPER="$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl"
 ELECTRON_PROBE_RUNNER="$ROOT_DIR/scripts/check/ios_mdi_probe_electron_self_test.js"
-SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/src/compiler_rust/target/release/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+is_rust_seed_simple() {
+    case "$1" in
+        "$ROOT_DIR"/src/compiler_rust/*|src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in "$ROOT_DIR"/release/*/simple "$ROOT_DIR"/bin/release/*/simple "$ROOT_DIR"/build/bootstrap/stage3/simple "$ROOT_DIR"/bin/simple; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 SMOKE_SOURCE="$ROOT_DIR/examples/06_io/ui/tauri_mobile_mdi_smoke.spl"
 SCREENSHOT="${IOS_MDI_SCREENSHOT:-$BUILD_DIR/ios_simulator_mdi.png}"
 LOG_STREAM="$BUILD_DIR/ios_simulator_log_stream.txt"
@@ -30,8 +64,22 @@ TIMEOUT_SECS="${IOS_MDI_TIMEOUT_SECS:-60}"
 fail() {
     echo "status=fail"
     echo "reason=$1"
+    echo "tauri_ios_mobile_mdi_simple_bin=$SIMPLE_BIN"
+    echo "tauri_ios_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "tauri_ios_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
     exit 1
 }
+
+echo "tauri_ios_mobile_mdi_simple_bin=$SIMPLE_BIN"
+echo "tauri_ios_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "tauri_ios_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
+
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    fail "simple-bin-forbidden"
+fi
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    fail "host Simple runtime missing: $SIMPLE_BIN"
+fi
 
 capture_simple_ipc() {
     output_path="$1"
@@ -50,6 +98,9 @@ capture_simple_ipc() {
 
 if [ "${1:-}" = "--self-test" ]; then
     "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --self-test
+    echo "tauri_ios_mobile_mdi_simple_bin=$SIMPLE_BIN"
+    echo "tauri_ios_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "tauri_ios_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "status=pass"
     exit 0
 fi
@@ -100,6 +151,9 @@ if [ "${1:-}" = "--browser-self-test" ]; then
     "$SIMPLE_BIN" run "$PROBE_HELPER" --mode=interpreter --validate-probe-mdi-screenshot "$BROWSER_SCREENSHOT" ios_mdi_probe_browser_screenshot_semantic
     echo "ios_mdi_probe_browser_self_test=pass"
     echo "ios_mdi_probe_browser_screenshot=$BROWSER_SCREENSHOT"
+    echo "tauri_ios_mobile_mdi_simple_bin=$SIMPLE_BIN"
+    echo "tauri_ios_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "tauri_ios_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "status=pass"
     exit 0
 fi
@@ -183,6 +237,9 @@ if [ "${1:-}" = "--tauri-url-self-test" ]; then
     echo "ios_mdi_probe_tauri_url_self_test=pass"
     echo "ios_mdi_probe_tauri_url_log=$TAURI_URL_LOG"
     echo "ios_mdi_probe_tauri_url_screenshot=$TAURI_URL_SCREENSHOT"
+    echo "tauri_ios_mobile_mdi_simple_bin=$SIMPLE_BIN"
+    echo "tauri_ios_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "tauri_ios_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "status=pass"
     exit 0
 fi
@@ -328,4 +385,7 @@ echo "ios_screenshot=$SCREENSHOT"
 echo "ios_proof=$PROOF_JSON"
 echo "ios_log_stream=$LOG_STREAM"
 echo "ios_dev_log=$IOS_DEV_LOG"
+echo "tauri_ios_mobile_mdi_simple_bin=$SIMPLE_BIN"
+echo "tauri_ios_mobile_mdi_simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "tauri_ios_mobile_mdi_simple_bin_status=$SIMPLE_BIN_STATUS"
 echo "status=pass"
