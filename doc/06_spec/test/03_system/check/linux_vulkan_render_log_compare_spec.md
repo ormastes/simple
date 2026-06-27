@@ -27,7 +27,7 @@ linux_vulkan_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -111,8 +111,8 @@ Chrome, or Electron RenderDoc rows are reported through
 `linux_vulkan_render_log_compare_renderdoc_*_status` and make
 `linux_vulkan_render_log_compare_status=fail`. RenderDoc pass rows must point
 at regular capture artifacts whose first four bytes are `RDOC`; metadata-only
-`pass` rows and symlinked `.rdc` artifacts are diagnostics, not completion
-proof. Set
+`pass` rows plus symlinked or hardlinked `.rdc` artifacts are diagnostics, not
+completion proof. Set
 `LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0` only for diagnostic partial-log runs.
 Structured blockers are emitted through
 `linux_vulkan_render_log_compare_blocked_gate_count` and
@@ -141,7 +141,7 @@ schema.
 
 ## Test Matrix
 
-The spec covers eleven cases:
+The spec covers twelve cases:
 
 1. A combined fixture where direct-run, browser-backing, pairwise diff, and
    RenderDoc statuses all pass. This proves the pass contract and source-log
@@ -170,7 +170,9 @@ The spec covers eleven cases:
    are not `RDOC`.
 10. A symlinked RenderDoc capture row fails even when the symlink target starts
    with `RDOC`.
-11. A missing RenderDoc source env is surfaced in the top-level Linux evidence
+11. A hardlinked RenderDoc capture row fails even when the linked file starts
+    with `RDOC`.
+12. A missing RenderDoc source env is surfaced in the top-level Linux evidence
     so parallel platform agents do not need to open side logs to classify the
     blocker.
 
@@ -725,6 +727,67 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_ar
 
 </details>
 
+#### rejects hardlinked RenderDoc capture artifacts
+
+- Create passing pixel evidence with a hardlinked Chrome RenderDoc artifact
+   - Expected: code equals `0`
+- Assert hardlinked RenderDoc artifacts cannot satisfy strict native capture proof
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 43 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create passing pixel evidence with a hardlinked Chrome RenderDoc artifact")
+val command = "rm -rf build/test-linux-vulkan-render-log-rdoc-hardlink && mkdir -p build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/simple build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/html build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/electron && cat > build/test-linux-vulkan-render-log-rdoc-hardlink/gui.env <<'EOF'\n" +
+    "gui_web_2d_vulkan_simple_status=pass\n" +
+    "gui_web_2d_vulkan_simple_backend_name=vulkan\n" +
+    "gui_web_2d_vulkan_simple_argb_backend=vulkan\n" +
+    "gui_web_2d_vulkan_electron_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_chrome_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_pixel_comparison_status=pass\n" +
+    "gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff\n" +
+    "gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_simple_argb_width=3840\n" +
+    "gui_web_2d_vulkan_simple_argb_height=2160\n" +
+    "gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=42\n" +
+    "gui_web_2d_vulkan_chrome_argb_width=3840\n" +
+    "gui_web_2d_vulkan_chrome_argb_height=2160\n" +
+    "gui_web_2d_vulkan_chrome_argb_nonblank_pixel_count=42\n" +
+    "gui_web_2d_vulkan_electron_argb_width=3840\n" +
+    "gui_web_2d_vulkan_electron_argb_height=2160\n" +
+    "gui_web_2d_vulkan_electron_argb_nonblank_pixel_count=42\n" +
+    "EOF\n" +
+    "printf 'RDOCsynthetic simple capture\\n' > build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/simple/simple.rdc\n" +
+    "printf 'RDOCoriginal chrome capture\\n' > build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/html/original-chrome.rdc\n" +
+    "ln build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/html/original-chrome.rdc build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/html/chrome.rdc\n" +
+    "printf 'RDOCsynthetic electron capture\\n' > build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/electron/electron.rdc\n" +
+    "printf 'rdoc_simple_gate_status=pass\\nrdoc_simple_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\nrdoc_capture_file=build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/simple/simple.rdc\\n' > build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/simple/evidence.env\n" +
+    "printf 'rdoc_external_host_capture_gate_status=pass\\nrdoc_external_host_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\nrdoc_capture_file=build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/html/chrome.rdc\\n' > build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/html/evidence.env\n" +
+    "printf 'rdoc_electron_html_gate_status=pass\\nrdoc_electron_html_gate_reason=pass\\nrdoc_capture_status=pass\\nrdoc_capture_magic=RDOC\\nrdoc_capture_file=build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/electron/electron.rdc\\n' > build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/electron/evidence.env\n" +
+    "BUILD_DIR=build/test-linux-vulkan-render-log-rdoc-hardlink/out GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-rdoc-hardlink/gui.env RDOC_SIMPLE_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/simple/evidence.env RDOC_HTML_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/html/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/electron/evidence.env sh scripts/check/check-linux-vulkan-render-log-compare.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert hardlinked RenderDoc artifacts cannot satisfy strict native capture proof")
+val evidence = file_read("build/test-linux-vulkan-render-log-rdoc-hardlink/out/evidence.env")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_status=fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_reason=renderdoc-chrome-artifact-file-hardlink")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_blocked_gates=renderdoc-chrome-rdc")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_gate_status=fail")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_status=pass")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=hardlink")
+expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=RDOC")
+```
+
+</details>
+
 #### reports missing RenderDoc source envs and artifacts in top-level evidence
 
 - Create passing pixel evidence while omitting the Electron RenderDoc env
@@ -818,6 +881,8 @@ expect(script).to_contain("RDOC_HTML_EVIDENCE_ENV")
 expect(script).to_contain("build/renderdoc/chrome-display-helper/evidence.env")
 expect(script).to_contain("RDOC_ELECTRON_HTML_EVIDENCE_ENV")
 expect(script).to_contain("build/renderdoc/electron-display-helper/electron-html/evidence.env")
+expect(script).to_contain("file_link_count()")
+expect(script).to_contain("printf '%s\\n' \"hardlink\"")
 expect(script.contains("build/renderdoc/canonical-probe/simple/evidence.env")).to_equal(false)
 expect(script.contains("build/renderdoc/canonical-probe/html/evidence.env")).to_equal(false)
 expect(script.contains("build/renderdoc/canonical-probe/electron-html/evidence.env")).to_equal(false)
@@ -829,8 +894,8 @@ expect(script.contains("build/renderdoc/canonical-probe/electron-html/evidence.e
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
