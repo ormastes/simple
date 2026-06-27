@@ -27,7 +27,7 @@ electron_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 25 | 25 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -105,9 +105,10 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 - Proof renderer must be the live Electron capture page, the proof must carry
   the live Electron capture source marker, and scenes must stay within the
   Simple Web layout scene family.
-- The Electron capture source marker must resolve to a regular nonempty
-  producer source file so stale JSON cannot be paired with a missing offscreen
-  capture script.
+- The Electron capture source marker must resolve to a single-link regular
+  nonempty producer source file with expected offscreen capture markers so
+  stale JSON cannot be paired with a missing, substituted, or aliased capture
+  script.
 - Complete proofs must identify the Electron offscreen capture backend,
   compositor mode, Electron/Chromium runtime identity, Chromium GPU
   feature-status diagnostics, and at least two measured capture iterations.
@@ -296,6 +297,48 @@ expect(evidence).to_contain("electron_simple_web_layout_validation_reason=unexpe
 expect(evidence).to_contain("electron_simple_web_layout_proof_source=tools/electron-live-bitmap/exact_fixture.js")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source_file_status=missing")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source_size_bytes=")
+```
+
+</details>
+
+#### rejects substituted Electron layout capture source artifacts
+
+- Confirm Electron layout proof source evidence cannot be hardlinked, non-regular, or markerless
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-layout-validator-source-artifact-substituted"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/hardlink/tools/electron-live-bitmap " + root + "/directory/tools/electron-live-bitmap " + root + "/markerless/tools/electron-live-bitmap && " +
+    _proof_command(root + "/proof.json", "") +
+    " && cp " + root + "/proof.json " + root + "/hardlink/proof.json && cp " + root + "/captured.json " + root + "/hardlink/captured.json && cp " + root + "/geometry.json " + root + "/hardlink/geometry.json && cp tools/electron-live-bitmap/exact_fixture.js " + root + "/hardlink/original-exact-fixture.js && ln " + root + "/hardlink/original-exact-fixture.js " + root + "/hardlink/tools/electron-live-bitmap/exact_fixture.js && " +
+    "cd " + root + "/hardlink && node ../../../scripts/check/validate-electron-simple-web-layout-proof.js proof.json > hardlink.env; hardlink_code=$?; cd ../../.. && " +
+    "cp " + root + "/proof.json " + root + "/directory/proof.json && cp " + root + "/captured.json " + root + "/directory/captured.json && cp " + root + "/geometry.json " + root + "/directory/geometry.json && mkdir -p " + root + "/directory/tools/electron-live-bitmap/exact_fixture.js && " +
+    "cd " + root + "/directory && node ../../../scripts/check/validate-electron-simple-web-layout-proof.js proof.json > directory.env; directory_code=$?; cd ../../.. && " +
+    "cp " + root + "/proof.json " + root + "/markerless/proof.json && cp " + root + "/captured.json " + root + "/markerless/captured.json && cp " + root + "/geometry.json " + root + "/markerless/geometry.json && printf 'module.exports = {};\\n' > " + root + "/markerless/tools/electron-live-bitmap/exact_fixture.js && " +
+    "cd " + root + "/markerless && node ../../../scripts/check/validate-electron-simple-web-layout-proof.js proof.json > markerless.env; markerless_code=$?; cd ../../.. && " +
+    "[ \"$hardlink_code\" -eq 1 ] && [ \"$directory_code\" -eq 1 ] && [ \"$markerless_code\" -eq 1 ]"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val hardlink = file_read(root + "/hardlink/hardlink.env")
+val directory = file_read(root + "/directory/directory.env")
+val markerless = file_read(root + "/markerless/markerless.env")
+step("Confirm Electron layout proof source evidence cannot be hardlinked, non-regular, or markerless")
+expect(hardlink).to_contain("electron_simple_web_layout_validation_status=fail")
+expect(hardlink).to_contain("electron_simple_web_layout_validation_reason=unexpected-electron-proof-source-file-hardlink")
+expect(hardlink).to_contain("electron_simple_web_layout_proof_source_file_status=hardlink")
+expect(directory).to_contain("electron_simple_web_layout_validation_status=fail")
+expect(directory).to_contain("electron_simple_web_layout_validation_reason=unexpected-electron-proof-source-file-not-regular")
+expect(directory).to_contain("electron_simple_web_layout_proof_source_file_status=not-regular")
+expect(markerless).to_contain("electron_simple_web_layout_validation_status=fail")
+expect(markerless).to_contain("electron_simple_web_layout_validation_reason=unexpected-electron-proof-source-file-marker-missing")
+expect(markerless).to_contain("electron_simple_web_layout_proof_source_file_status=marker-missing")
 ```
 
 </details>
@@ -1119,6 +1162,8 @@ expect(validator).to_contain("electron_simple_web_layout_captured_argb_checksum"
 expect(validator).to_contain("electron_simple_web_layout_captured_argb_weighted_checksum")
 expect(validator).to_contain("captured-argb-checksum-mismatch")
 expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
+expect(validator).to_contain("proofSourceArtifact")
+expect(validator).to_contain("marker-missing")
 expect(script).to_contain("electron_simple_web_layout_proof_renderer")
 expect(script).to_contain("electron_simple_web_layout_proof_source")
 expect(script).to_contain("electron_simple_web_layout_proof_source_file_status")
