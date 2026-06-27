@@ -116,6 +116,11 @@ function artifactStat(value, proofPath) {
   return null;
 }
 
+function artifactFileStatus(artifact) {
+  if (artifact === null) return 'missing';
+  return artifact.stat.size <= 0 ? 'empty' : 'pass';
+}
+
 const proofPath = process.argv[2];
 if (!proofPath) {
   emit('tauri_simple_web_layout_validation_status', 'fail');
@@ -197,7 +202,7 @@ emit('tauri_simple_web_layout_expected_overlay_pixel_count', jsonIntegerTextOrCl
 emit('tauri_simple_web_layout_tauri_frame_us', jsonIntegerTextOrClean(proof.frame_us));
 emit('tauri_simple_web_layout_captured_argb_path', proof.captured_argb_path);
 emit('tauri_simple_web_layout_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
-emit('tauri_simple_web_layout_captured_argb_file_status', capturedArgbStat === null ? 'fail' : 'pass');
+emit('tauri_simple_web_layout_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
 emit('tauri_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
 emit('tauri_simple_web_layout_captured_argb_format', capturedArgb === null ? '' : capturedArgb.format);
 emit('tauri_simple_web_layout_captured_argb_producer', capturedArgb === null ? '' : capturedArgb.producer);

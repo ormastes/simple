@@ -106,6 +106,11 @@ function readJsonArtifact(artifact) {
   }
 }
 
+function artifactFileStatus(artifact) {
+  if (artifact === null) return 'missing';
+  return artifact.stat.size <= 0 ? 'empty' : 'pass';
+}
+
 function pixelCountMatches(pixels, width, height) {
   const w = jsonIntegerText(width);
   const h = jsonIntegerText(height);
@@ -250,7 +255,7 @@ emit('electron_simple_web_engine2d_capture_native_height', jsonIntegerTextOrBlan
 emit('electron_simple_web_engine2d_capture_downsampled', booleanString(proof.capture_downsampled));
 emit('electron_simple_web_engine2d_captured_argb_path', proof.captured_argb_path);
 emit('electron_simple_web_engine2d_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
-emit('electron_simple_web_engine2d_captured_argb_file_status', capturedArgbStat === null ? 'fail' : 'pass');
+emit('electron_simple_web_engine2d_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
 emit('electron_simple_web_engine2d_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
 emit('electron_simple_web_engine2d_captured_argb_format', capturedArgb.format);
 emit('electron_simple_web_engine2d_captured_argb_producer', capturedArgb.producer);

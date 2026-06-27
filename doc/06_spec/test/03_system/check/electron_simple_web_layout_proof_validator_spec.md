@@ -79,6 +79,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
   viewport mismatches are rejected.
 - ARGB capture proof paths must resolve to nonempty files instead of relying
   on `captured_argb_written=true` alone.
+- ARGB capture file-status rows distinguish `missing`, `empty`, and `pass` so
+  diagnostics cannot treat a zero-byte artifact as a valid capture file.
 - ARGB capture proof paths must not resolve back to the top-level proof JSON
   even if the proof contains artifact-shaped fields.
 - Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
@@ -373,11 +375,11 @@ val empty = file_read(root + "/empty.env")
 step("Confirm boolean ARGB capture flags are not enough without file evidence")
 expect(missing).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(missing).to_contain("electron_simple_web_layout_validation_reason=missing-captured-argb-file")
-expect(missing).to_contain("electron_simple_web_layout_captured_argb_file_status=fail")
+expect(missing).to_contain("electron_simple_web_layout_captured_argb_file_status=missing")
 expect(missing).to_contain("electron_simple_web_layout_captured_argb_size_bytes=")
 expect(empty).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(empty).to_contain("electron_simple_web_layout_validation_reason=empty-captured-argb-file")
-expect(empty).to_contain("electron_simple_web_layout_captured_argb_file_status=pass")
+expect(empty).to_contain("electron_simple_web_layout_captured_argb_file_status=empty")
 expect(empty).to_contain("electron_simple_web_layout_captured_argb_size_bytes=0")
 ```
 
@@ -409,7 +411,7 @@ step("Confirm the proof JSON cannot be reused as its own ARGB artifact")
 expect(evidence).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(evidence).to_contain("electron_simple_web_layout_validation_reason=missing-captured-argb-file")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_path=proof.json")
-expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_status=fail")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_status=missing")
 expect(evidence).to_contain("electron_simple_web_layout_captured_argb_size_bytes=")
 ```
 
