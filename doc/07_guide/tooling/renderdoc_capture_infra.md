@@ -575,6 +575,8 @@ debugger capture is required. Strict mode requires either
 Status-only debugger rows are diagnostic and do not prove native D3D12 capture.
 PIX and GPU debugger artifacts must be regular, non-symlink, non-hardlink
 files so strict evidence cannot be substituted through shared capture aliases.
+Relative PIX/GPU-debugger artifact names resolve beside `WINDOWS_D3D12_PIX_ENV`
+so stale working-directory files cannot satisfy strict Windows capture proof.
 Completion keys:
 
 ```text

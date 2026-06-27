@@ -27,7 +27,7 @@ windows_d3d12_render_log_compare_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,9 +78,10 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/windows_d3d12_render_log_com
    `WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1`.
    Strict mode requires either a PIX capture artifact with
    `windows_d3d12_pix_capture_artifact_magic=PIX` whose artifact bytes also
-   begin with `PIX`, or a concrete regular GPU debugger log artifact;
-   status-only debugger rows, symlinked artifacts, and hardlinked artifacts are
-   diagnostic, not native proof.
+   begin with `PIX`, or a concrete regular GPU debugger log artifact. Relative
+   artifact names resolve beside the PIX evidence env, not from the working
+   directory. Status-only debugger rows, symlinked artifacts, and hardlinked
+   artifacts are diagnostic, not native proof.
 4. Run `scripts/check/check-windows-d3d12-render-log-compare.shs` and consume
    the normalized `windows_d3d12_render_log_compare_*` keys from the output env.
 5. Treat legacy DirectX/D3D11 evidence as diagnostic only unless it explicitly
@@ -119,6 +120,8 @@ The accepted row must also name the native debugger output:
 
 Native debugger artifacts must be regular files, not symlinks or hardlinks to
 capture outputs outside the evidence boundary.
+Relative native debugger artifact names must resolve beside the PIX/debugger
+env so stale working-directory files cannot satisfy the proof.
 
 ## Failure Semantics
 
@@ -176,6 +179,8 @@ windows_d3d12_render_log_compare_pairwise_status=pass
    `PIX`.
 10. Reject hardlinked PIX artifacts even when the shared file begins with
     `PIX`.
+11. Reject relative PIX artifact names that would otherwise be satisfied by
+    stale working-directory files outside the PIX evidence directory.
 
 ## Scenarios
 
@@ -404,6 +409,35 @@ expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_
 
 </details>
 
+#### resolves relative PIX artifacts beside the PIX evidence env
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-windows-d3d12-render-log-pix-relative && mkdir -p build/test-windows-d3d12-render-log-pix-relative && " +
+    "printf 'PIX stale working directory capture\\n' > frame.wpix && " +
+    "printf 'windows_d3d12_native_readback_status=pass\\nwindows_d3d12_native_readback_api=d3d12\\nwindows_d3d12_native_readback_source=device_readback\\nwindows_d3d12_native_readback_backend_handle=44\\nwindows_d3d12_native_readback_expected_checksum=9\\nwindows_d3d12_native_readback_actual_checksum=9\\n' > build/test-windows-d3d12-render-log-pix-relative/native.env && " +
+    "printf 'windows_d3d12_electron_browser_backing_status=pass\\nwindows_d3d12_chrome_browser_backing_status=pass\\nwindows_d3d12_browser_backing_status=pass\\nwindows_d3d12_pixel_comparison_status=pass\\nwindows_d3d12_pixel_comparison_mode=pairwise-argb-diff\\nwindows_d3d12_electron_chrome_pairwise_diff_status=pass\\nwindows_d3d12_electron_simple_pairwise_diff_status=pass\\nwindows_d3d12_chrome_simple_pairwise_diff_status=pass\\nwindows_d3d12_simple_argb_width=3840\\nwindows_d3d12_simple_argb_height=2160\\nwindows_d3d12_simple_argb_nonblank_pixel_count=42\\nwindows_d3d12_simple_argb_checksum=900\\nwindows_d3d12_chrome_argb_width=3840\\nwindows_d3d12_chrome_argb_height=2160\\nwindows_d3d12_chrome_argb_nonblank_pixel_count=42\\nwindows_d3d12_chrome_argb_checksum=900\\nwindows_d3d12_electron_argb_width=3840\\nwindows_d3d12_electron_argb_height=2160\\nwindows_d3d12_electron_argb_nonblank_pixel_count=42\\nwindows_d3d12_electron_argb_checksum=900\\n' > build/test-windows-d3d12-render-log-pix-relative/browser.env && " +
+    "printf 'windows_d3d12_pix_capture_status=pass\\nwindows_d3d12_pix_capture_artifact=frame.wpix\\nwindows_d3d12_pix_capture_artifact_magic=PIX\\n' > build/test-windows-d3d12-render-log-pix-relative/pix.env && " +
+    "BUILD_DIR=build/test-windows-d3d12-render-log-pix-relative/out WINDOWS_D3D12_NATIVE_READBACK_ENV=build/test-windows-d3d12-render-log-pix-relative/native.env WINDOWS_D3D12_BROWSER_ENV=build/test-windows-d3d12-render-log-pix-relative/browser.env WINDOWS_D3D12_PIX_ENV=build/test-windows-d3d12-render-log-pix-relative/pix.env WINDOWS_D3D12_RENDER_LOG_REQUIRE_PIX=1 sh scripts/check/check-windows-d3d12-render-log-compare.shs || true; rm -f frame.wpix"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-windows-d3d12-render-log-pix-relative/out/evidence.env")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_status=fail")
+expect(evidence).to_contain("windows-d3d12-pix-artifact-file-missing")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact=frame.wpix")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_resolved=build/test-windows-d3d12-render-log-pix-relative/frame.wpix")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_status=missing")
+expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_magic=missing")
+```
+
+</details>
+
 #### rejects symlinked PIX capture artifacts in strict D3D12 mode
 
 <details>
@@ -466,8 +500,8 @@ expect(evidence).to_contain("windows_d3d12_render_log_compare_pix_artifact_file_
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
