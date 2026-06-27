@@ -830,6 +830,10 @@ async function main() {
   const gpuFeatureStatus = app.getGPUFeatureStatus();
   const gpuCompositing = typeof gpuFeatureStatus.gpu_compositing === "string" ? gpuFeatureStatus.gpu_compositing : "";
   const gpuRasterization = typeof gpuFeatureStatus.rasterization === "string" ? gpuFeatureStatus.rasterization : "";
+  const electronUserAgent = await win.webContents.executeJavaScript("navigator.userAgent").catch(() => "");
+  const browserEngine = /Chrome\/|Chromium\//.test(electronUserAgent) ? "chromium" : "";
+  const electronProcessVersion = process.versions && process.versions.electron ? process.versions.electron : "";
+  const chromeProcessVersion = process.versions && process.versions.chrome ? process.versions.chrome : "";
   let last = { sum: 0n, weighted: 0n, mismatches: width * height };
   let capture = { nativeWidth: width, nativeHeight: height, downsampled: false };
   const start = process.hrtime.bigint();
@@ -845,6 +849,10 @@ async function main() {
   emit("renderer", "electron-live-capture-page");
   emit("capture_backend", captureBackend);
   emit("compositor_mode", compositorMode);
+  emit("browser_engine", browserEngine);
+  emit("electron_user_agent", electronUserAgent);
+  emit("electron_process_version", electronProcessVersion);
+  emit("chrome_process_version", chromeProcessVersion);
   emit("gpu_compositing", gpuCompositing);
   emit("gpu_rasterization", gpuRasterization);
   emit("scene", scene);
@@ -870,6 +878,10 @@ async function main() {
       proof_source: "tools/electron-live-bitmap/exact_fixture.js",
       capture_backend: captureBackend,
       compositor_mode: compositorMode,
+      browser_engine: browserEngine,
+      electron_user_agent: electronUserAgent,
+      electron_process_version: electronProcessVersion,
+      chrome_process_version: chromeProcessVersion,
       gpu_feature_status: gpuFeatureStatus,
       gpu_compositing: gpuCompositing,
       gpu_rasterization: gpuRasterization,

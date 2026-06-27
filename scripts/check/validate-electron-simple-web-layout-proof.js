@@ -168,6 +168,10 @@ const capturedArgbNonzeroPixels = nonzeroPixelCount(capturedArgbPixels);
 const expectedProofSource = 'tools/electron-live-bitmap/exact_fixture.js';
 const expectedCaptureBackend = 'electron-offscreen-capture-page';
 const expectedCompositorMode = 'offscreen-osr-exact-srgb';
+const browserEngine = textField(proof.browser_engine);
+const electronUserAgent = textField(proof.electron_user_agent);
+const electronProcessVersion = textField(proof.electron_process_version);
+const chromeProcessVersion = textField(proof.chrome_process_version);
 const proofGpuFeatureStatus = plainObject(proof.gpu_feature_status) ? proof.gpu_feature_status : null;
 const proofGpuCompositing = textField(proof.gpu_compositing);
 const proofGpuRasterization = textField(proof.gpu_rasterization);
@@ -189,6 +193,14 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'unexpected-capture-backend';
 } else if (proof.compositor_mode !== expectedCompositorMode) {
   reason = 'unexpected-compositor-mode';
+} else if (
+  browserEngine !== 'chromium' ||
+  !/Electron\/[0-9]/.test(electronUserAgent) ||
+  !/(Chrome|Chromium)\/[0-9]/.test(electronUserAgent) ||
+  !/^[0-9]+(?:\.[0-9]+)*$/.test(electronProcessVersion) ||
+  !/^[0-9]+(?:\.[0-9]+)*$/.test(chromeProcessVersion)
+) {
+  reason = 'missing-electron-runtime-identity';
 } else if (
   proofGpuFeatureStatus === null ||
   proofGpuCompositing.trim() === '' ||
@@ -243,6 +255,10 @@ emit('electron_simple_web_layout_renderer', proof.renderer);
 emit('electron_simple_web_layout_proof_source', proof.proof_source);
 emit('electron_simple_web_layout_capture_backend', proof.capture_backend);
 emit('electron_simple_web_layout_compositor_mode', proof.compositor_mode);
+emit('electron_simple_web_layout_browser_engine', browserEngine);
+emit('electron_simple_web_layout_electron_user_agent', electronUserAgent);
+emit('electron_simple_web_layout_electron_process_version', electronProcessVersion);
+emit('electron_simple_web_layout_chrome_process_version', chromeProcessVersion);
 emit('electron_simple_web_layout_gpu_compositing', proofGpuCompositing);
 emit('electron_simple_web_layout_gpu_rasterization', proofGpuRasterization);
 emit('electron_simple_web_layout_scene', proof.scene);
