@@ -16,6 +16,7 @@ export GUI_RENDERDOC_AGGREGATE_BUILD_DIR="$BUILD_DIR"
 python3 - <<'PY' >"$OUT_ENV"
 from pathlib import Path
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -68,6 +69,33 @@ def file_exists_status(value: str) -> str:
     if not value:
         return "unavailable"
     return "pass" if path_from_text(value).is_file() else "missing"
+
+def chrome_argb_proof_json_status_reason(value: str):
+    if not value:
+        return ("unavailable", "missing-path")
+    path = path_from_text(value)
+    if not path.is_file():
+        return ("missing", "missing-file")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ("fail", "invalid-json")
+    aux = (((data.get("gpu_info") or {}).get("gpu") or {}).get("auxAttributes") or {})
+    missing = []
+    if aux.get("hardwareSupportsVulkan") is not True:
+        missing.append("hardwareSupportsVulkan")
+    marker = " ".join(
+        str(aux.get(key) or "")
+        for key in [
+            "displayType",
+            "glImplementationParts",
+            "glRenderer",
+            "skiaBackendType",
+        ]
+    ).lower()
+    if "vulkan" not in marker:
+        missing.append("vulkan-marker")
+    return ("pass", "pass") if not missing else ("fail", "missing-" + ",".join(missing))
 
 def file_executable_status(value: str) -> str:
     if not value:
@@ -925,6 +953,7 @@ gui_web_2d_vulkan_chrome_stdout_file_status = file_exists_status(gui_web_2d_vulk
 gui_web_2d_vulkan_chrome_log_file_status = file_exists_status(gui_web_2d_vulkan_chrome_log)
 gui_web_2d_vulkan_chrome_argb_stdout_file_status = file_exists_status(gui_web_2d_vulkan_chrome_argb_stdout)
 gui_web_2d_vulkan_chrome_argb_proof_file_status = file_exists_status(gui_web_2d_vulkan_chrome_argb_proof)
+gui_web_2d_vulkan_chrome_argb_proof_json_status, gui_web_2d_vulkan_chrome_argb_proof_json_reason = chrome_argb_proof_json_status_reason(gui_web_2d_vulkan_chrome_argb_proof)
 gui_web_2d_vulkan_chrome_argb_viewport_match_status = viewport_match_status(
     gui_web_2d_vulkan_chrome_argb_path,
     gui_web_2d_vulkan_chrome_argb_width,
@@ -1027,7 +1056,7 @@ if gui_web_2d_vulkan_electron_argb_viewport_match_status != "pass":
     comparison_artifact_reasons.append("electron-argb-viewport-" + gui_web_2d_vulkan_electron_argb_viewport_match_status)
 if gui_web_2d_vulkan_electron_argb_nonblank_status != "pass":
     comparison_artifact_reasons.append("electron-argb-nonblank-" + gui_web_2d_vulkan_electron_argb_nonblank_status)
-chrome_argb_artifact_status = (
+chrome_argb_pixels_status = (
     "pass"
     if (
         gui_web_2d_vulkan_chrome_argb_file_status == "pass"
@@ -1036,11 +1065,18 @@ chrome_argb_artifact_status = (
     )
     else "incomplete"
 )
-if chrome_argb_artifact_status != "pass":
+chrome_argb_artifact_status = (
+    "pass"
+    if chrome_argb_pixels_status == "pass" and gui_web_2d_vulkan_chrome_argb_proof_json_status == "pass"
+    else "incomplete"
+)
+if chrome_argb_pixels_status != "pass":
     if gui_web_2d_vulkan_chrome_screenshot_file_status != "pass":
         comparison_artifact_reasons.append("chrome-screenshot-" + gui_web_2d_vulkan_chrome_screenshot_file_status)
     if gui_web_2d_vulkan_chrome_screenshot_png_status != "pass":
         comparison_artifact_reasons.append("chrome-screenshot-png-" + gui_web_2d_vulkan_chrome_screenshot_png_status)
+if gui_web_2d_vulkan_chrome_argb_proof_json_status != "pass":
+    comparison_artifact_reasons.append("chrome-argb-proof-" + gui_web_2d_vulkan_chrome_argb_proof_json_status)
 if gui_web_2d_vulkan_simple_evidence_file_status != "pass":
     comparison_artifact_reasons.append("simple-evidence-" + gui_web_2d_vulkan_simple_evidence_file_status)
 if vulkan_engine2d_readback_validation_status != "pass":
@@ -1056,6 +1092,8 @@ if gui_web_2d_vulkan_comparison_artifact_status != "pass":
     pixel_comparison_reasons.append("comparison-artifacts-" + gui_web_2d_vulkan_comparison_artifact_status)
 if gui_web_2d_vulkan_chrome_argb_file_status != "pass":
     pixel_comparison_reasons.append("chrome-argb-file-" + gui_web_2d_vulkan_chrome_argb_file_status)
+if gui_web_2d_vulkan_chrome_argb_proof_json_status != "pass":
+    pixel_comparison_reasons.append("chrome-argb-proof-" + gui_web_2d_vulkan_chrome_argb_proof_json_status)
 if gui_web_2d_vulkan_chrome_argb_viewport_match_status != "pass":
     pixel_comparison_reasons.append("chrome-argb-viewport-" + gui_web_2d_vulkan_chrome_argb_viewport_match_status)
 if gui_web_2d_vulkan_chrome_argb_nonblank_status != "pass":
@@ -2843,6 +2881,8 @@ emit("gui_web_2d_vulkan_chrome_argb_stdout", rel_text_path(gui_web_2d_vulkan_chr
 emit("gui_web_2d_vulkan_chrome_argb_stdout_file_status", gui_web_2d_vulkan_chrome_argb_stdout_file_status)
 emit("gui_web_2d_vulkan_chrome_argb_proof", rel_text_path(gui_web_2d_vulkan_chrome_argb_proof))
 emit("gui_web_2d_vulkan_chrome_argb_proof_file_status", gui_web_2d_vulkan_chrome_argb_proof_file_status)
+emit("gui_web_2d_vulkan_chrome_argb_proof_json_status", gui_web_2d_vulkan_chrome_argb_proof_json_status)
+emit("gui_web_2d_vulkan_chrome_argb_proof_json_reason", gui_web_2d_vulkan_chrome_argb_proof_json_reason)
 emit("gui_web_2d_vulkan_chrome_argb_width", gui_web_2d_vulkan_chrome_argb_width)
 emit("gui_web_2d_vulkan_chrome_argb_height", gui_web_2d_vulkan_chrome_argb_height)
 emit("gui_web_2d_vulkan_chrome_argb_viewport_match_status", gui_web_2d_vulkan_chrome_argb_viewport_match_status)

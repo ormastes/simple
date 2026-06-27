@@ -276,12 +276,12 @@ checksum, and exact geometry is downgraded to `fail`.
    - Expected: rendering_manifest_tag_covered equals `105`
    - Expected: rendering_manifest_tag_covered_names.split(",").len() equals `105`
    - Expected: rendering_manifest_tag_missing equals ``
-   - Expected: rendering_manifest_css_count equals `134`
+   - Expected: rendering_manifest_css_count equals `135`
    - Expected: rendering_manifest_css_source equals `scripts/check/check-html-css-sspec-traceability.shs`
    - Expected: rendering_manifest_css_source_status equals `pass`
    - Expected: rendering_manifest_css_source_count equals `rendering_manifest_css_count`
-   - Expected: rendering_manifest_css_covered equals `134`
-   - Expected: rendering_manifest_css_covered_names.split(",").len() equals `131`
+   - Expected: rendering_manifest_css_covered equals `135`
+   - Expected: rendering_manifest_css_covered_names.split(",").len() equals `132`
    - Expected: rendering_manifest_css_missing equals ``
    - Expected: rendering_manifest_css_scope equals `implemented-simple-web-css`
    - Expected: rendering_manifest_total_css_count equals `traceability_css_count`
@@ -295,11 +295,11 @@ checksum, and exact geometry is downgraded to `fail`.
    - Expected: full_rendering_goal_html_total equals `105`
    - Expected: full_rendering_goal_html_rendered equals `105`
    - Expected: full_rendering_goal_implemented_css_status equals `pass`
-   - Expected: full_rendering_goal_implemented_css_total equals `134`
-   - Expected: full_rendering_goal_implemented_css_rendered equals `134`
+   - Expected: full_rendering_goal_implemented_css_total equals `135`
+   - Expected: full_rendering_goal_implemented_css_rendered equals `135`
    - Expected: full_rendering_goal_full_css_status equals `incomplete`
    - Expected: full_rendering_goal_full_css_total equals `traceability_css_count`
-   - Expected: full_rendering_goal_full_css_rendered equals `134`
+   - Expected: full_rendering_goal_full_css_rendered equals `135`
    - Expected: full_rendering_goal_full_css_unrendered equals `rendering_manifest_unrendered_css_count`
    - Expected: full_rendering_goal_full_css_unrendered_properties equals `rendering_manifest_unrendered_css_properties`
    - Expected: html_css_implemented_surface_status equals `pass`
@@ -320,7 +320,7 @@ checksum, and exact geometry is downgraded to `fail`.
    - Expected: windows_d3d12_render_log_required_api equals `d3d12`
    - Expected: traceability_status equals `pass`
    - Expected: traceability_html_count equals `105`
-   - Expected: traceability_implemented_css_count equals `134`
+   - Expected: traceability_implemented_css_count equals `135`
    - Expected: traceability_unsupported_css_missing_count equals `0`
    - Expected: comparison_fixture_status equals `pass`
    - Expected: comparison_artifact_reason equals `pass`
@@ -385,7 +385,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 952 lines folded for reproduction.
+Runnable source: 954 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -407,12 +407,12 @@ expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest=t
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_fixture=scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source=scripts/check/check-html-css-sspec-traceability.shs")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_status=pass")
-expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_count=134")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_count=135")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_count=105")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_covered_count=105")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_covered=")
-expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_count=134")
-expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_covered_count=134")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_count=135")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_covered_count=135")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_covered=")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_scope=implemented-simple-web-css")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_total_css_property_count=")
@@ -427,10 +427,10 @@ expect(evidence).to_contain("html_css_full_rendering_goal_html_tag_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_html_tag_total_count=105")
 expect(evidence).to_contain("html_css_full_rendering_goal_html_tag_rendered_count=105")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_status=pass")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=134")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=134")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=135")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=135")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_status=incomplete")
-expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=134")
+expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=135")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_unrendered_count=")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_command=sh scripts/check/check-web-wm-modern-shell-evidence.shs")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_source=existing-evidence")
@@ -459,11 +459,11 @@ expect(evidence).to_contain("html_css_implemented_surface_status=pass")
 expect(evidence).to_contain("html_css_implemented_surface_reason=all-implemented-html-and-css-rendered")
 expect(evidence).to_contain("html_css_implemented_surface_html_total_count=105")
 expect(evidence).to_contain("html_css_implemented_surface_html_rendered_count=105")
-expect(evidence).to_contain("html_css_implemented_surface_css_total_count=134")
-expect(evidence).to_contain("html_css_implemented_surface_css_rendered_count=134")
+expect(evidence).to_contain("html_css_implemented_surface_css_total_count=135")
+expect(evidence).to_contain("html_css_implemented_surface_css_rendered_count=135")
 expect(evidence).to_contain("html_css_full_css_completion_status=incomplete")
 expect(evidence).to_contain("html_css_full_css_completion_reason=css-spec-properties-unrendered")
-expect(evidence).to_contain("html_css_full_css_completion_rendered_count=134")
+expect(evidence).to_contain("html_css_full_css_completion_rendered_count=135")
 expect(evidence).to_contain("html_css_full_css_completion_unrendered_count=")
 expect(evidence).to_contain("html_css_readiness_answer=implemented-html-css-ready-full-css-incomplete")
 expect(evidence).to_contain("native_render_log_platform_matrix_status=")
@@ -507,7 +507,7 @@ expect(evidence).to_contain("html_css_traceability_exit_code=0")
 expect(evidence).to_contain("html_css_traceability_evidence_env=build/test-gui-renderdoc-feature-coverage-status/sspec-traceability/evidence.env")
 expect(evidence).to_contain("html_css_traceability_required_html_tag_count=105")
 expect(evidence).to_contain("html_css_traceability_required_css_property_min_count=390")
-expect(evidence).to_contain("html_css_traceability_implemented_css_property_count=134")
+expect(evidence).to_contain("html_css_traceability_implemented_css_property_count=135")
 expect(evidence).to_contain("html_css_traceability_implemented_css_property_indexed_count=")
 expect(evidence).to_contain("html_css_traceability_unsupported_css_property_count=")
 expect(evidence).to_contain("html_css_traceability_unsupported_css_properties=")
@@ -681,6 +681,8 @@ expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_stdout=build/gui-web-
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_stdout_file_status=missing")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof=build/gui-web-2d-vulkan-env-run-auto/chrome_argb_proof.json")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof_file_status=missing")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof_json_status=missing")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof_json_reason=missing-file")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_viewport_match_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_nonblank_status=")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_evidence_env=build/gui-web-2d-vulkan-env-run-auto/simple-vulkan-readback/evidence.env")
@@ -1098,22 +1100,22 @@ expect(rendering_manifest_tag_covered_names).to_contain("article")
 expect(rendering_manifest_tag_covered_names).to_contain("video")
 expect(rendering_manifest_tag_covered_names.split(",").len()).to_equal(105)
 expect(rendering_manifest_tag_missing).to_equal("")
-expect(rendering_manifest_css_count).to_equal("134")
+expect(rendering_manifest_css_count).to_equal("135")
 expect(rendering_manifest_css_source).to_equal("scripts/check/check-html-css-sspec-traceability.shs")
 expect(rendering_manifest_css_source_status).to_equal("pass")
 expect(rendering_manifest_css_source_count).to_equal(rendering_manifest_css_count)
-expect(rendering_manifest_css_covered).to_equal("134")
+expect(rendering_manifest_css_covered).to_equal("135")
 expect(rendering_manifest_css_covered_names).to_contain("align-content")
 expect(rendering_manifest_css_covered_names).to_contain("align-items")
 expect(rendering_manifest_css_covered_names).to_contain("align-self")
 expect(rendering_manifest_css_covered_names).to_contain("display")
 expect(rendering_manifest_css_covered_names).to_contain("justify-content")
 expect(rendering_manifest_css_covered_names).to_contain("border-style")
-expect(rendering_manifest_css_covered_names.split(",").len()).to_equal(131)
+expect(rendering_manifest_css_covered_names.split(",").len()).to_equal(132)
 expect(rendering_manifest_css_missing).to_equal("")
 expect(rendering_manifest_css_scope).to_equal("implemented-simple-web-css")
 expect(rendering_manifest_total_css_count).to_equal(traceability_css_count)
-expect(rendering_manifest_unrendered_css_count.to_i64()).to_be_greater_than(260)
+expect(rendering_manifest_unrendered_css_count.to_i64()).to_be_greater_than(258)
 expect(rendering_manifest_unrendered_css_properties).to_equal(traceability_unsupported_css_properties)
 expect(rendering_manifest_unrendered_css_properties).to_contain("accent-color")
 expect(rendering_manifest_case_count).to_equal("50")
@@ -1126,11 +1128,11 @@ expect(full_rendering_goal_html_status).to_equal("pass")
 expect(full_rendering_goal_html_total).to_equal("105")
 expect(full_rendering_goal_html_rendered).to_equal("105")
 expect(full_rendering_goal_implemented_css_status).to_equal("pass")
-expect(full_rendering_goal_implemented_css_total).to_equal("134")
-expect(full_rendering_goal_implemented_css_rendered).to_equal("134")
+expect(full_rendering_goal_implemented_css_total).to_equal("135")
+expect(full_rendering_goal_implemented_css_rendered).to_equal("135")
 expect(full_rendering_goal_full_css_status).to_equal("incomplete")
 expect(full_rendering_goal_full_css_total).to_equal(traceability_css_count)
-expect(full_rendering_goal_full_css_rendered).to_equal("134")
+expect(full_rendering_goal_full_css_rendered).to_equal("135")
 expect(full_rendering_goal_full_css_unrendered).to_equal(rendering_manifest_unrendered_css_count)
 expect(full_rendering_goal_full_css_unrendered_properties).to_equal(rendering_manifest_unrendered_css_properties)
 expect(html_css_implemented_surface_status).to_equal("pass")
@@ -1160,9 +1162,9 @@ expect(windows_d3d12_render_log_required_api).to_equal("d3d12")
 expect(traceability_status).to_equal("pass")
 expect(traceability_html_count).to_equal("105")
 expect(traceability_css_count.to_i64()).to_be_greater_than(389)
-expect(traceability_implemented_css_count).to_equal("134")
+expect(traceability_implemented_css_count).to_equal("135")
 expect(traceability_implemented_css_indexed_count.to_i64()).to_be_greater_than(50)
-expect(traceability_unsupported_css_count.to_i64()).to_be_greater_than(269)
+expect(traceability_unsupported_css_count.to_i64()).to_be_greater_than(265)
 expect(traceability_unsupported_css_properties.len()).to_be_greater_than(1000)
 expect(traceability_unsupported_css_missing_count).to_equal("0")
 expect(comparison_fixture_status).to_equal("pass")
@@ -1406,7 +1408,7 @@ expect(evidence).to_contain("gui_web_2d_vulkan_electron_simple_pairwise_diff_sta
 expect(evidence).to_contain("gui_web_2d_vulkan_comparison_artifact_status=incomplete")
 expect(evidence).to_contain("gui_web_2d_vulkan_pixel_comparison_status=incomplete")
 expect(evidence).to_contain("gui_web_2d_vulkan_pixel_comparison_mode=artifact-only-no-pairwise-diff")
-expect(evidence).to_contain("gui_web_2d_vulkan_pixel_comparison_reason=comparison-artifacts-incomplete;electron-chrome-diff-unavailable;electron-simple-diff-unavailable")
+expect(evidence).to_contain("gui_web_2d_vulkan_pixel_comparison_reason=comparison-artifacts-incomplete;chrome-argb-proof-missing;electron-chrome-diff-unavailable;electron-simple-diff-unavailable")
 ```
 
 </details>
@@ -1766,9 +1768,9 @@ expect(code).to_equal(0)
 
 step("Assert keyed cache misses stale unkeyed rows and reports current CSS state")
 val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-stale-cache/out/evidence.env")
-expect(evidence).to_contain("html_css_traceability_implemented_css_property_count=134")
-expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_count=134")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=134")
+expect(evidence).to_contain("html_css_traceability_implemented_css_property_count=135")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_count=135")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=135")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_status=pass")
 ```
 
@@ -2410,6 +2412,8 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 - Reject browser backing source-file pass claims when referenced proof files are missing
    - Expected: bad_readback_code equals `0`
 - Reject Simple Vulkan evidence when Engine2D readback mismatches are present
+   - Expected: bad_chrome_proof_code equals `0`
+- Reject existing Chrome ARGB proof files that do not prove Vulkan-backed Chrome
    - Expected: code equals `0`
 - Assert the aggregate audit stays incomplete until production parity evidence passes
 
@@ -2417,7 +2421,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 279 lines folded for reproduction.
+Runnable source: 296 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2457,6 +2461,8 @@ expect(aggregate_script).to_contain("path_fingerprint(os.environ.get(\"RDOC_ELEC
 expect(aggregate_script).to_contain("\"RDOC_ELECTRON_HTML_EVIDENCE_ENV\": os.environ.get(\"RDOC_ELECTRON_HTML_EVIDENCE_ENV\", default_electron_renderdoc_env)")
 expect(aggregate_script).to_contain("macos_metal_render_log_compare_electron_browser_backing_status")
 expect(aggregate_script).to_contain("macos-metal-pixel-comparison-mode-not-pairwise-argb-diff")
+expect(aggregate_script).to_contain("chrome_argb_proof_json_status_reason")
+expect(aggregate_script).to_contain("hardwareSupportsVulkan")
 val renderdoc_common = file_read("scripts/lib/renderdoc-evidence-common.shs")
 expect(renderdoc_common).to_contain("rdoc_capture_reason=missing-rdc")
 expect(renderdoc_common).to_contain("rdoc_capture_reason=bad-rdc-magic")
@@ -2489,7 +2495,7 @@ expect(stale_evidence).to_contain("chrome_hardware")
 expect(stale_evidence).to_contain("chrome_gpu_compositing")
 expect(stale_evidence).to_contain("chrome_vulkan")
 val command_with_stale_electron_browser_env = command_with_pixel_env.replace("GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env", "printf 'gui_web_2d_vulkan_mode=--browser-backing\\ngui_web_2d_vulkan_browser_backing_status=pass\\ngui_web_2d_vulkan_browser_backing_reason=pass\\ngui_web_2d_vulkan_browser_backing_mode=gpu-feature-status\\ngui_web_2d_vulkan_electron_browser_backing_status=pass\\ngui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed\\ngui_web_2d_vulkan_electron_browser_backing_vulkan=enabled\\ngui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=false\\ngui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_electron_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron_argb.json\\ngui_web_2d_vulkan_chrome_browser_backing_status=pass\\ngui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed\\ngui_web_2d_vulkan_chrome_browser_backing_display_type=vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_gpu_compositing=enabled\\ngui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_chrome_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env && WEB_WM_MODERN_SHELL_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/evidence.env LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/windows.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/evidence.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env")
-val command_with_stale_electron_pixel_files = command_with_stale_electron_browser_env.replace("electron/electron_argb.json && printf 'rdoc_backend=simple", "electron/electron_argb.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"chrome-vulkan-capture\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb.json && printf '{\"gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"vulkan\",\"glImplementationParts\":\"angle-vulkan\"}}}}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"simple-vulkan-web2d\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/simple_argb.json && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_chrome_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_simple_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_simple_diff.env && printf 'rdoc_backend=simple")
+val command_with_stale_electron_pixel_files = command_with_stale_electron_browser_env.replace("electron/electron_argb.json && printf 'rdoc_backend=simple", "electron/electron_argb.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"chrome-vulkan-capture\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb.json && printf '{\"gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"vulkan\",\"glImplementationParts\":\"angle-vulkan\"}}}}}}}}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"simple-vulkan-web2d\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/simple_argb.json && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_chrome_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_simple_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_simple_diff.env && printf 'rdoc_backend=simple")
 val (_stale_electron_stdout, _stale_electron_stderr, stale_electron_code) = process_run("/bin/sh", ["-c", command_with_stale_electron_pixel_files])
 expect(stale_electron_code).to_equal(0)
 
@@ -2500,7 +2506,7 @@ expect(stale_electron_evidence).to_contain("gui_web_2d_vulkan_electron_browser_b
 expect(stale_electron_evidence).to_contain("electron_gpu_compositing")
 expect(stale_electron_evidence).to_contain("electron_hardware")
 val command_with_spoofed_browser_source_env = command_with_pixel_env.replace("GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env", "printf 'gui_web_2d_vulkan_mode=--browser-backing\\ngui_web_2d_vulkan_browser_backing_status=pass\\ngui_web_2d_vulkan_browser_backing_reason=pass\\ngui_web_2d_vulkan_browser_backing_mode=gpu-feature-status\\ngui_web_2d_vulkan_electron_browser_backing_status=pass\\ngui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed\\ngui_web_2d_vulkan_electron_browser_backing_vulkan=enabled\\ngui_web_2d_vulkan_electron_browser_backing_gpu_compositing=enabled\\ngui_web_2d_vulkan_electron_browser_backing_display_type=vulkan\\ngui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_electron_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/missing_electron_browser_source.json\\ngui_web_2d_vulkan_electron_browser_backing_source_file_status=pass\\ngui_web_2d_vulkan_chrome_browser_backing_status=pass\\ngui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed\\ngui_web_2d_vulkan_chrome_browser_backing_display_type=vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_gpu_compositing=enabled\\ngui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_chrome_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/missing_chrome_browser_source.json\\ngui_web_2d_vulkan_chrome_browser_backing_source_file_status=pass\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env && WEB_WM_MODERN_SHELL_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/evidence.env LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/windows.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/evidence.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env")
-val command_with_spoofed_browser_source_files = command_with_spoofed_browser_source_env.replace("electron/electron_argb.json && printf 'rdoc_backend=simple", "electron/electron_argb.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"chrome-vulkan-capture\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb.json && printf '{\"gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"vulkan\",\"glImplementationParts\":\"angle-vulkan\"}}}}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"simple-vulkan-web2d\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/simple_argb.json && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_chrome_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_simple_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_simple_diff.env && printf 'rdoc_backend=simple")
+val command_with_spoofed_browser_source_files = command_with_spoofed_browser_source_env.replace("electron/electron_argb.json && printf 'rdoc_backend=simple", "electron/electron_argb.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"chrome-vulkan-capture\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb.json && printf '{\"gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"vulkan\",\"glImplementationParts\":\"angle-vulkan\"}}}}}}}}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"simple-vulkan-web2d\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/simple_argb.json && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_chrome_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_simple_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_simple_diff.env && printf 'rdoc_backend=simple")
 val (_spoofed_source_stdout, _spoofed_source_stderr, spoofed_source_code) = process_run("/bin/sh", ["-c", command_with_spoofed_browser_source_files])
 expect(spoofed_source_code).to_equal(0)
 
@@ -2515,7 +2521,7 @@ expect(spoofed_source_evidence).to_contain("gui_web_2d_vulkan_electron_browser_b
 expect(spoofed_source_evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_status=fail")
 expect(spoofed_source_evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_source_file_status=missing")
 val command_with_browser_env = command_with_pixel_env.replace("GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env", "printf 'gui_web_2d_vulkan_mode=--browser-backing\\ngui_web_2d_vulkan_browser_backing_status=pass\\ngui_web_2d_vulkan_browser_backing_reason=pass\\ngui_web_2d_vulkan_browser_backing_mode=gpu-feature-status\\ngui_web_2d_vulkan_electron_browser_backing_status=pass\\ngui_web_2d_vulkan_electron_browser_backing_reason=electron-vulkan-backed\\ngui_web_2d_vulkan_electron_browser_backing_vulkan=enabled\\ngui_web_2d_vulkan_electron_browser_backing_gpu_compositing=enabled\\ngui_web_2d_vulkan_electron_browser_backing_display_type=vulkan\\ngui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_electron_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_electron_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron_argb.json\\ngui_web_2d_vulkan_chrome_browser_backing_status=pass\\ngui_web_2d_vulkan_chrome_browser_backing_reason=chrome-vulkan-backed\\ngui_web_2d_vulkan_chrome_browser_backing_display_type=vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_gpu_compositing=enabled\\ngui_web_2d_vulkan_chrome_browser_backing_gl_implementation_parts=angle-vulkan\\ngui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan=true\\ngui_web_2d_vulkan_chrome_browser_backing_source=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env && WEB_WM_MODERN_SHELL_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/evidence.env LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/windows.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/evidence.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/browser.env GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env")
-val command_with_pixel_files = command_with_browser_env.replace("electron/electron_argb.json && printf 'rdoc_backend=simple", "electron/electron_argb.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"chrome-vulkan-capture\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb.json && printf '{\"gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"vulkan\",\"glImplementationParts\":\"angle-vulkan\"}}}}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"simple-vulkan-web2d\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/simple_argb.json && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_chrome_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_simple_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_simple_diff.env && printf 'rdoc_backend=simple")
+val command_with_pixel_files = command_with_browser_env.replace("electron/electron_argb.json && printf 'rdoc_backend=simple", "electron/electron_argb.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"chrome-vulkan-capture\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb.json && printf '{\"gpu_info\":{\"gpu\":{\"auxAttributes\":{\"hardwareSupportsVulkan\":true,\"displayType\":\"vulkan\",\"glImplementationParts\":\"angle-vulkan\"}}}}}}}}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json && printf '{\"width\":1024,\"height\":768,\"format\":\"argb-u32\",\"producer\":\"simple-vulkan-web2d\",\"pixels\":[4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/simple_argb.json && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_chrome_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_simple_diff.env && printf 'mismatch_count=0\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_simple_diff.env && printf 'rdoc_backend=simple")
 val command_with_bad_readback = command_with_pixel_files.replace("GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs", "perl -0pi -e 's/vulkan_engine2d_readback_rect_mismatches=0/vulkan_engine2d_readback_rect_mismatches=7/' build/test-gui-renderdoc-feature-coverage-status-production-required/widget-simple/evidence.env && GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
 val (_bad_readback_stdout, _bad_readback_stderr, bad_readback_code) = process_run("/bin/sh", ["-c", command_with_bad_readback])
 expect(bad_readback_code).to_equal(0)
@@ -2527,6 +2533,18 @@ expect(bad_readback_evidence).to_contain("vulkan_engine2d_readback_validation_re
 expect(bad_readback_evidence).to_contain("gui_web_2d_vulkan_simple_backend_status=fail")
 expect(bad_readback_evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_status=blocked")
 expect(bad_readback_evidence).to_contain("Simple Vulkan Engine2D clear/rect readback parity evidence")
+val command_with_bad_chrome_argb_proof = command_with_pixel_files.replace("GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs", "printf '{}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json && GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
+val (_bad_chrome_proof_stdout, _bad_chrome_proof_stderr, bad_chrome_proof_code) = process_run("/bin/sh", ["-c", command_with_bad_chrome_argb_proof])
+expect(bad_chrome_proof_code).to_equal(0)
+
+step("Reject existing Chrome ARGB proof files that do not prove Vulkan-backed Chrome")
+val bad_chrome_proof_evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-production-required/out/evidence.env")
+expect(bad_chrome_proof_evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof_file_status=pass")
+expect(bad_chrome_proof_evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof_json_status=fail")
+expect(bad_chrome_proof_evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof_json_reason=missing-hardwareSupportsVulkan,vulkan-marker")
+expect(bad_chrome_proof_evidence).to_contain("gui_web_2d_vulkan_comparison_artifact_status=incomplete")
+expect(bad_chrome_proof_evidence).to_contain("gui_web_2d_vulkan_comparison_artifact_reason=chrome-argb-proof-fail")
+expect(bad_chrome_proof_evidence).to_contain("gui_web_2d_vulkan_pixel_comparison_reason=comparison-artifacts-incomplete;chrome-argb-proof-fail")
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command_with_pixel_files])
 expect(code).to_equal(0)
 
@@ -2635,6 +2653,9 @@ expect(evidence).to_contain("gui_web_2d_vulkan_pixel_comparison_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_pixel_comparison_reason=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_file_status=pass")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof_file_status=pass")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof_json_status=pass")
+expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof_json_reason=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_viewport_match_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_chrome_argb_nonblank_status=pass")
 expect(evidence).to_contain("gui_web_2d_vulkan_simple_argb_file_status=pass")
