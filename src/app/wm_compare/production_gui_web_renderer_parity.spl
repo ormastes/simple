@@ -77,6 +77,12 @@ struct BackendExecutedGuiSceneReport:
     metal_gpu_frame_complete: bool
     metal_gpu_readback_pixel_count: i32
     metal_gpu_readback_checksum: i64
+    metal_command_queue_handle: i64
+    software_checksum: i64
+    cpu_simd_checksum: i64
+    metal_checksum: i64
+    backend_checksum_match: bool
+    same_frame_backend_readback: bool
     software_first_pixel: u32
     cpu_simd_first_pixel: u32
     metal_first_pixel: u32
@@ -104,6 +110,7 @@ struct MetalReducedSceneResult:
     pixels: [u32]
     gpu_frame_complete: bool
     gpu_pixels: [u32]
+    command_queue_handle: i64
 
 struct ExactPixelComparison:
     different_pixels: i64
@@ -244,10 +251,11 @@ fn render_reduced_gui_widget_scene_cpu_simd(width: i32, height: i32) -> [u32]:
 
 fn render_reduced_gui_widget_scene_metal(width: i32, height: i32) -> MetalReducedSceneResult:
     if not is_macos():
-        return MetalReducedSceneResult(resolved_backend: "software", pixels: render_reduced_gui_widget_scene_software(width, height), gpu_frame_complete: false, gpu_pixels: [])
+        return MetalReducedSceneResult(resolved_backend: "software", pixels: render_reduced_gui_widget_scene_software(width, height), gpu_frame_complete: false, gpu_pixels: [], command_queue_handle: 0)
     var metal = MetalBackend.create()
     if not metal.init(width, height):
-        return MetalReducedSceneResult(resolved_backend: "metal-unavailable", pixels: render_reduced_gui_widget_scene_software(width, height), gpu_frame_complete: false, gpu_pixels: [])
+        return MetalReducedSceneResult(resolved_backend: "metal-unavailable", pixels: render_reduced_gui_widget_scene_software(width, height), gpu_frame_complete: false, gpu_pixels: [], command_queue_handle: 0)
+    val command_queue_handle = metal.command_queue
     metal.clear(0xFF102030u32)
     metal.draw_rect_filled(4, 4, 4, 4, 0xFF010204u32)
     metal.present()
@@ -255,7 +263,7 @@ fn render_reduced_gui_widget_scene_metal(width: i32, height: i32) -> MetalReduce
     val gpu_pixels = if complete: metal.read_pixels_gpu_only() else: []
     val pixels = metal.read_pixels()
     metal.shutdown()
-    MetalReducedSceneResult(resolved_backend: "metal", pixels: pixels, gpu_frame_complete: complete, gpu_pixels: gpu_pixels)
+    MetalReducedSceneResult(resolved_backend: "metal", pixels: pixels, gpu_frame_complete: complete, gpu_pixels: gpu_pixels, command_queue_handle: command_queue_handle)
 
 fn run_backend_executed_gui_widget_scene_parity(width: i32, height: i32) -> BackendExecutedGuiSceneReport:
     val total_start_us = time_now_micros()
@@ -274,8 +282,14 @@ fn run_backend_executed_gui_widget_scene_parity(width: i32, height: i32) -> Back
     val metal_pixels = metal_result.pixels
     val metal_complete = metal_result.gpu_frame_complete
     val metal_gpu_pixels = metal_result.gpu_pixels
+    val software_checksum = checksum_pixels(software)
+    val cpu_simd_checksum = checksum_pixels(cpu_simd)
+    val metal_checksum = checksum_pixels(metal_pixels)
+    val metal_gpu_checksum = checksum_pixels(metal_gpu_pixels)
     val cpu_cmp = compare_exact_pixels(software, cpu_simd, width, height)
     val metal_cmp = if metal_backend == "software": exact_pixel_comparison_match() else: compare_exact_pixels(software, metal_pixels, width, height)
+    val backend_checksum_match = software_checksum == cpu_simd_checksum and (metal_backend == "software" or software_checksum == metal_checksum) and (metal_backend != "metal" or software_checksum == metal_gpu_checksum)
+    val same_frame_backend_readback = if metal_backend == "metal": metal_complete and metal_gpu_pixels.len() == width * height and metal_gpu_checksum == metal_checksum and metal_gpu_checksum == software_checksum else: true
     val total_hits = hits.fill_hits + hits.copy_hits + hits.alpha_hits + hits.blit_hits + hits.scroll_hits
     val rect_idx = 4 + (4 * width)
     val total_elapsed_us = positive_elapsed_us(total_start_us)
@@ -302,7 +316,13 @@ fn run_backend_executed_gui_widget_scene_parity(width: i32, height: i32) -> Back
         cpu_simd_total_hits: total_hits,
         metal_gpu_frame_complete: metal_complete,
         metal_gpu_readback_pixel_count: metal_gpu_pixels.len(),
-        metal_gpu_readback_checksum: checksum_pixels(metal_gpu_pixels),
+        metal_gpu_readback_checksum: metal_gpu_checksum,
+        metal_command_queue_handle: metal_result.command_queue_handle,
+        software_checksum: software_checksum,
+        cpu_simd_checksum: cpu_simd_checksum,
+        metal_checksum: metal_checksum,
+        backend_checksum_match: backend_checksum_match,
+        same_frame_backend_readback: same_frame_backend_readback,
         software_first_pixel: sample_pixel(software, 0),
         cpu_simd_first_pixel: sample_pixel(cpu_simd, 0),
         metal_first_pixel: sample_pixel(metal_pixels, 0),

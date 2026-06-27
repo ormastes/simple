@@ -164,6 +164,13 @@ write_evidence() {
         echo "production_gui_web_renderer_parity_gate_backend_metal_resolved=${backend_metal_resolved:-}"
         echo "production_gui_web_renderer_parity_gate_backend_metal_different_pixels=${backend_metal_diff:-}"
         echo "production_gui_web_renderer_parity_gate_backend_metal_gpu_frame_complete=${backend_metal_frame:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_metal_command_queue_handle=${backend_metal_command_queue_handle:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_software_checksum=${backend_software_checksum:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_cpu_simd_checksum=${backend_cpu_simd_checksum:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_metal_checksum=${backend_metal_checksum:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_metal_gpu_readback_checksum=${backend_metal_gpu_checksum:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_checksum_match=${backend_checksum_match:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_same_frame_readback=${backend_same_frame_readback:-}"
         echo "production_gui_web_renderer_parity_gate_backend_blur_or_tolerance_used=${backend_tolerance:-}"
         echo "production_gui_web_renderer_parity_gate_backend_sample_count=${backend_sample_count:-}"
         echo "production_gui_web_renderer_parity_gate_backend_total_elapsed_us_min=${backend_elapsed_min:-}"
@@ -275,6 +282,11 @@ write_evidence() {
         echo "production_gui_web_renderer_parity_gate_required_backend_cpu_simd_different_pixels=0"
         echo "production_gui_web_renderer_parity_gate_required_backend_metal_different_pixels=0"
         echo "production_gui_web_renderer_parity_gate_required_backend_metal_gpu_frame_complete=true when metal_resolved=metal"
+        echo "production_gui_web_renderer_parity_gate_required_backend_metal_command_queue_handle_gt=0 when metal_resolved=metal"
+        echo "production_gui_web_renderer_parity_gate_required_backend_checksums_positive=true"
+        echo "production_gui_web_renderer_parity_gate_required_backend_checksums_equal=true"
+        echo "production_gui_web_renderer_parity_gate_required_backend_checksum_match=true"
+        echo "production_gui_web_renderer_parity_gate_required_backend_same_frame_readback=true"
         echo "production_gui_web_renderer_parity_gate_required_backend_blur_or_tolerance_used=false"
         echo "production_gui_web_renderer_parity_gate_required_backend_timing_status=pass"
         echo "production_gui_web_renderer_parity_gate_required_backend_min_sample_count=1"
@@ -419,6 +431,13 @@ if [ ! -s "$SOURCE_ENV" ]; then
     backend_metal_resolved=""
     backend_metal_diff=""
     backend_metal_frame=""
+    backend_metal_command_queue_handle=""
+    backend_software_checksum=""
+    backend_cpu_simd_checksum=""
+    backend_metal_checksum=""
+    backend_metal_gpu_checksum=""
+    backend_checksum_match=""
+    backend_same_frame_readback=""
     backend_tolerance=""
     backend_sample_count=""
     backend_elapsed_min=""
@@ -578,6 +597,13 @@ backend_cpu_diff="$(value_of production_gui_web_renderer_parity_backend_cpu_simd
 backend_metal_resolved="$(value_of production_gui_web_renderer_parity_backend_metal_resolved "$SOURCE_ENV")"
 backend_metal_diff="$(value_of production_gui_web_renderer_parity_backend_metal_different_pixels "$SOURCE_ENV")"
 backend_metal_frame="$(value_of production_gui_web_renderer_parity_backend_metal_gpu_frame_complete "$SOURCE_ENV")"
+backend_metal_command_queue_handle="$(value_of production_gui_web_renderer_parity_backend_metal_command_queue_handle "$SOURCE_ENV")"
+backend_software_checksum="$(value_of production_gui_web_renderer_parity_backend_software_checksum "$SOURCE_ENV")"
+backend_cpu_simd_checksum="$(value_of production_gui_web_renderer_parity_backend_cpu_simd_checksum "$SOURCE_ENV")"
+backend_metal_checksum="$(value_of production_gui_web_renderer_parity_backend_metal_checksum "$SOURCE_ENV")"
+backend_metal_gpu_checksum="$(value_of production_gui_web_renderer_parity_backend_metal_gpu_readback_checksum "$SOURCE_ENV")"
+backend_checksum_match="$(value_of production_gui_web_renderer_parity_backend_checksum_match "$SOURCE_ENV")"
+backend_same_frame_readback="$(value_of production_gui_web_renderer_parity_backend_same_frame_readback "$SOURCE_ENV")"
 backend_tolerance="$(value_of production_gui_web_renderer_parity_backend_blur_or_tolerance_used "$SOURCE_ENV")"
 backend_sample_count="$(value_of production_gui_web_renderer_parity_backend_sample_count "$SOURCE_ENV")"
 backend_elapsed_min="$(value_of production_gui_web_renderer_parity_backend_total_elapsed_us_min "$SOURCE_ENV")"
@@ -699,7 +725,13 @@ elif [ "$surface_no_fake" != "true" ] || [ "$surface_tolerance" != "false" ]; th
 elif [ "$backend_status" != "pass" ]; then
     write_evidence "fail" "backend-parity-not-pass"
 elif [ "$backend_exact" != "true" ] || [ "$backend_cpu_diff" != "0" ] || [ "$backend_metal_diff" != "0" ] || \
-    { [ "$backend_metal_resolved" = "metal" ] && [ "$backend_metal_frame" != "true" ]; } || [ "$backend_tolerance" != "false" ]; then
+    [ "$backend_checksum_match" != "true" ] || [ "$backend_same_frame_readback" != "true" ] || \
+    ! num_positive "$backend_software_checksum" || ! num_positive "$backend_cpu_simd_checksum" || ! num_positive "$backend_metal_checksum" || \
+    [ "$backend_software_checksum" != "$backend_cpu_simd_checksum" ] || [ "$backend_software_checksum" != "$backend_metal_checksum" ] || \
+    { [ "$backend_metal_resolved" = "metal" ] && { [ "$backend_metal_frame" != "true" ] || ! num_at_least "$backend_metal_command_queue_handle" 1; }; } || \
+    [ "$backend_tolerance" != "false" ]; then
+    write_evidence "fail" "backend-parity-contract-missing"
+elif [ "$backend_metal_resolved" = "metal" ] && { ! num_positive "$backend_metal_gpu_checksum" || [ "$backend_software_checksum" != "$backend_metal_gpu_checksum" ]; }; then
     write_evidence "fail" "backend-parity-contract-missing"
 elif [ "$backend_timing_status" != "pass" ] || ! num_at_least "$backend_sample_count" 1 || \
     ! num_positive "$backend_elapsed_min" || ! num_positive "$backend_elapsed_avg" || ! num_positive "$backend_elapsed_max" || \
