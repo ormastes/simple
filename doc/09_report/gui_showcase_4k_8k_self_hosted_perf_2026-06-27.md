@@ -3,10 +3,12 @@
 ## Summary
 
 Fresh retained widget-showcase performance rows pass for the current source
-revision `27e4c0690486` using the repo self-hosted release binary
+revision using the repo self-hosted release binary
 `release/x86_64-unknown-linux-gnu/simple`. Both rows build a native ELF alias,
 run with `fallback_state=none`, scan the full readback buffer, and pass RSS
-budgets.
+budgets. A 4K row was refreshed after narrowing the generated alias to retained
+perf code and changing default binary discovery to prefer release/self-hosted
+binaries before `bin/simple`.
 
 This proves the current retained 4K/8K showcase perf contract for this host. It
 does not prove RenderDoc `.rdc`, Chrome/Electron Vulkan backing, macOS Metal,
@@ -38,15 +40,27 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 
 | Row | Status | FPS x1000 | RSS KiB | Binary Source | Native Format | Fallback | Source Status |
 | --- | --- | ---: | --- | --- | --- | --- | --- |
+| 4K 200fps refreshed | pass (`met-200fps`) | 61766522 | 131328 / 262144 | self-hosted-release | pass | none | current (`7ff296568c26`) |
 | 4K 200fps | pass (`met-200fps`) | 53763440 | 131328 / 262144 | self-hosted-release | pass | none | current |
 | 8K perf | pass (`met-target-fps`) | 15281173 | 519680 / 750000 | self-hosted-release | pass | none | current |
 
 Readback proof:
 
-- 4K: `3840x2160`, `8294400` pixels, `5458` nonzero pixels, checksum
+- 4K refreshed: `3840x2160`, `8294400` pixels, `5458` nonzero pixels, checksum
+  `23357114226484`, retained static frame, redraw frames `1`, frame average
+  `16190` ns.
+- 4K prior: `3840x2160`, `8294400` pixels, `5458` nonzero pixels, checksum
   `23357114226484`, retained static frame, redraw frames `1`.
 - 8K: `7680x4320`, `33177600` pixels, `203` nonzero pixels, checksum
   `869060580878`, retained static frame, redraw frames `1`.
+
+## Current Blocker
+
+The repo `bin/simple` launcher path still fails this native-build lane on this
+host with `semantic: invalid assignment: unsupported assignment target`. The
+perf wrapper now avoids that stale/slow path by defaulting to the release
+self-hosted binary first; the underlying compiler/runtime bug is tracked in
+`doc/08_tracking/bug/gui_showcase_4k_bin_simple_native_assignment_target_2026-06-27.md`.
 
 ## Aggregate Boundary
 

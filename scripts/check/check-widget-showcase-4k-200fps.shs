@@ -6,8 +6,6 @@ cd "$ROOT_DIR"
 
 if [ "${SIMPLE_BIN:-}" = "" ]; then
     for candidate in \
-        bin/simple \
-        ./bin/simple \
         release/x86_64-unknown-linux-gnu/simple \
         release/aarch64-unknown-linux-gnu/simple \
         release/aarch64-apple-darwin/simple \
@@ -15,7 +13,9 @@ if [ "${SIMPLE_BIN:-}" = "" ]; then
         bin/release/x86_64-unknown-linux-gnu/simple \
         bin/release/aarch64-unknown-linux-gnu/simple \
         bin/release/aarch64-apple-darwin/simple \
-        bin/release/x86_64-apple-darwin/simple
+        bin/release/x86_64-apple-darwin/simple \
+        bin/simple \
+        ./bin/simple
     do
         if [ -x "$candidate" ]; then
             SIMPLE_BIN="$candidate"
@@ -290,14 +290,23 @@ emit_unmeasured_perf_fields() {
 }
 
 write_alias_source() {
-    awk '
-        /^fn main\(\) -> i64:/ { stop=1 }
-        !stop { print }
-        END {
-            print "fn main() -> i64:"
-            print "    '"$PROBE_FN"'()"
-        }
-    ' "$APP" >"$ALIAS_SRC"
+    {
+        echo "# Generated retained-perf alias for $APP."
+        echo "# Keep live-window/Winit helpers out of this native closure."
+        echo "use std.gpu.engine2d.backend_software.{SoftwareBackend}"
+        echo "use std.nogc_sync_mut.io.time_ops.{time_now_micros}"
+        echo
+        awk '
+            /^val W:/ { emit_draw=1 }
+            /^fn showcase_ppm_scale\(\)/ { emit_draw=0 }
+            emit_draw { print }
+            /^fn pixel_stats\(/ { emit_perf=1 }
+            /^fn pack\(/ { emit_perf=0 }
+            emit_perf { print }
+        ' "$APP"
+        echo "fn main() -> i64:"
+        echo "    $PROBE_FN()"
+    } >"$ALIAS_SRC"
 }
 
 case "$SIMPLE_BIN" in
