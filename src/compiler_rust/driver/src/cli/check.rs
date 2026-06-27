@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use simple_common::target::Target;
+use simple_compiler::interpreter::is_interrupted;
 use simple_compiler::module_resolver::ModuleResolver;
 use simple_compiler::short_grammar::collect_short_grammar_suggestions;
 use simple_compiler::{LintChecker, LintConfig, LintLevel, LintName};
@@ -93,9 +94,15 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
     let files = expand_check_inputs(files);
     let mut all_results = Vec::new();
     let mut has_errors = false;
+    let mut interrupted = false;
     let deny_gc_boundary_crossings = should_deny_gc_boundary_crossings(&options);
 
     for file in &files {
+        if is_interrupted() {
+            interrupted = true;
+            break;
+        }
+
         if !options.quiet && options.verbose {
             println!("Checking {}...", file.display());
         }
@@ -121,11 +128,31 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
         }
 
         all_results.push(result);
+
+        if is_interrupted() {
+            interrupted = true;
+            break;
+        }
     }
 
     // Output results
     if options.json {
         output_json(&all_results);
+        if interrupted {
+            eprintln!(
+                "check interrupted after {} of {} file(s)",
+                all_results.len(),
+                files.len()
+            );
+        }
+    } else if interrupted {
+        if !options.quiet {
+            eprintln!(
+                "check interrupted after {} of {} file(s)",
+                all_results.len(),
+                files.len()
+            );
+        }
     } else if !options.quiet {
         println!();
         let error_count: usize = all_results
@@ -151,6 +178,10 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
         } else {
             println!("\x1b[32m✓ All checks passed ({} file(s))\x1b[0m", files.len());
         }
+    }
+
+    if interrupted {
+        return 130;
     }
 
     if has_errors {
