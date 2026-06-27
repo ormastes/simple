@@ -27,7 +27,7 @@ wm_browser_event_routing_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -96,8 +96,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 - Live numeric UI readback rows such as title font weight and title input width
   must be real JSON numbers; stringified CSS measurements are not valid browser
   style proof.
-- The proof must carry the live WM browser event-check source marker; a
-  hand-authored JSON object with matching counters is not sufficient.
+- The proof must carry the live WM browser event-check surface identity and
+  source marker; a hand-authored JSON object with matching counters is not
+  sufficient.
 - The proof must carry live Electron/Chromium runtime identity, including browser
   engine, Electron user-agent, Electron process version, and Chrome process
   version.
@@ -120,7 +121,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -133,6 +134,8 @@ expect(code).to_equal(0)
 val evidence = file_read("build/test-wm-browser-event-validator-pass/evidence.env")
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=pass")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=pass")
+expect(evidence).to_contain("wm_browser_event_routing_target=electron")
+expect(evidence).to_contain("wm_browser_event_routing_surface_id=wm-browser-event-routing")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source=tools/web-render-backend/wm_event_check.js")
 expect(evidence).to_contain("wm_browser_event_routing_browser_engine=chromium")
 expect(evidence).to_contain("wm_browser_event_routing_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36")
@@ -194,6 +197,48 @@ expect(window_count).to_contain("wm_browser_event_routing_window_cmd_count=3")
 expect(input_count).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(input_count).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
 expect(input_count).to_contain("wm_browser_event_routing_input_event_count=4")
+```
+
+</details>
+
+#### rejects pass true proof without the live event surface identity
+
+-  fixture command
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm WM event proof is tied to the Electron event-routing surface
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-surface"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/missing-target.json", "delete p.target") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/missing-target.json > " + root + "/missing-target.env; " +
+    _fixture_command(root + "/wrong-target.json", "p.target=\"browser\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/wrong-target.json > " + root + "/wrong-target.env; " +
+    _fixture_command(root + "/wrong-surface.json", "p.surface_id=\"electron-live-smoke\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/wrong-surface.json > " + root + "/wrong-surface.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing_target = file_read(root + "/missing-target.env")
+val wrong_target = file_read(root + "/wrong-target.env")
+val wrong_surface = file_read(root + "/wrong-surface.env")
+step("Confirm WM event proof is tied to the Electron event-routing surface")
+expect(missing_target).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(missing_target).to_contain("wm_browser_event_routing_validation_reason=event-routing-surface-identity-missing")
+expect(missing_target).to_contain("wm_browser_event_routing_target=")
+expect(wrong_target).to_contain("wm_browser_event_routing_validation_reason=event-routing-surface-identity-missing")
+expect(wrong_target).to_contain("wm_browser_event_routing_target=browser")
+expect(wrong_surface).to_contain("wm_browser_event_routing_validation_reason=event-routing-surface-identity-missing")
+expect(wrong_surface).to_contain("wm_browser_event_routing_surface_id=electron-live-smoke")
 ```
 
 </details>
@@ -674,7 +719,7 @@ expect(payload.contains("wm_browser_event_routing_move_payload_x=86.5")).to_equa
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -683,6 +728,8 @@ expect(script).to_contain("validate-wm-browser-event-routing-proof.js")
 expect(script).to_contain("validator_code")
 expect(script).to_contain("wm_browser_event_routing_validation_status")
 expect(script).to_contain("wm_browser_event_routing_validation_reason")
+expect(script).to_contain("wm_browser_event_routing_target")
+expect(script).to_contain("wm_browser_event_routing_surface_id")
 expect(script).to_contain("wm_browser_event_routing_proof_source")
 expect(script).to_contain("wm_browser_event_routing_browser_engine")
 expect(script).to_contain("wm_browser_event_routing_electron_user_agent")
@@ -695,6 +742,8 @@ expect(script).to_contain("wm_browser_event_routing_move_payload_source")
 expect(script).to_contain("wm_browser_event_routing_title_input_width_px")
 expect(script).to_contain("wm_browser_event_routing_close_button_background")
 val producer = file_read("tools/web-render-backend/wm_event_check.js")
+expect(producer).to_contain("target: 'electron'")
+expect(producer).to_contain("surface_id: 'wm-browser-event-routing'")
 expect(producer).to_contain("browser_engine: 'chromium'")
 expect(producer).to_contain("electron_user_agent: navigator.userAgent")
 expect(producer).to_contain("result.electron_process_version = process.versions.electron")
@@ -713,7 +762,7 @@ expect(producer.contains("out.title_font_weight = titleStyle.fontWeight")).to_eq
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -729,6 +778,8 @@ expect(evidence).to_contain("wm_browser_event_routing_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_reason=missing-command:node")
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=missing-command:node")
+expect(evidence).to_contain("wm_browser_event_routing_target=")
+expect(evidence).to_contain("wm_browser_event_routing_surface_id=")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source=")
 expect(evidence).to_contain("wm_browser_event_routing_browser_engine=")
 expect(evidence).to_contain("wm_browser_event_routing_electron_user_agent=")
@@ -761,8 +812,8 @@ expect(evidence).to_contain("wm_browser_event_routing_text_input_text=")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

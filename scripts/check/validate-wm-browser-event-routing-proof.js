@@ -82,6 +82,8 @@ const expectedEventSequence = [
   'input_event:pointer_up',
 ];
 const expectedProofSource = 'tools/web-render-backend/wm_event_check.js';
+const expectedTarget = 'electron';
+const expectedSurfaceId = 'wm-browser-event-routing';
 const maxEventTimingMs = 1000;
 
 function eventSequenceText(value) {
@@ -116,6 +118,8 @@ const title = proof.title_payload || {};
 const text = proof.text_payload || {};
 
 const rows = {
+  target: proof.target,
+  surface_id: proof.surface_id,
   proof_source: proof.proof_source,
   browser_engine: proof.browser_engine,
   electron_user_agent: proof.electron_user_agent,
@@ -171,6 +175,8 @@ const rows = {
 let reason = 'pass';
 if (!boolTrue(proof.pass)) {
   reason = 'probe-reported-fail';
+} else if (proof.target !== expectedTarget || proof.surface_id !== expectedSurfaceId) {
+  reason = 'event-routing-surface-identity-missing';
 } else if (proof.proof_source !== expectedProofSource) {
   reason = 'event-routing-proof-source-missing';
 } else if (

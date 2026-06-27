@@ -94,6 +94,8 @@ async function main() {
 
   const result = await win.webContents.executeJavaScript(`(async function(){
     const out = {
+      target: 'electron',
+      surface_id: 'wm-browser-event-routing',
       proof_source: 'tools/web-render-backend/wm_event_check.js',
       browser_engine: 'chromium',
       electron_user_agent: navigator.userAgent,
