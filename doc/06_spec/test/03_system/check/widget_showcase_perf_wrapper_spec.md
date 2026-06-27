@@ -27,7 +27,7 @@ widget_showcase_perf_wrapper_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates the retained GUI showcase performance wrapper without requiring a live
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/widget_showcase_perf_wrapper_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -104,6 +104,9 @@ PLAN_ONLY=1 RESOLUTION=8k sh scripts/check/check-widget-showcase-4k-200fps.shs
   selected probe function directly.
 - The wrapper resolves a usable Simple launcher before the legacy Rust target
   when `SIMPLE_BIN` is not explicit, and records the resolution source.
+- Plan-only evidence still reports `simple_bin_status=missing` when an
+  explicit `SIMPLE_BIN` path is not executable; routing-only output must not
+  overstate binary validity.
 - The GUI showcase app routes `SHOWCASE_8K_PERF=1` through the env facade to
   `run_8k_perf_probe()` before normal GUI startup, and does not reintroduce a
   raw `rt_env_get` shortcut.
@@ -387,7 +390,7 @@ expect(script).to_contain("_frame_distribution_status=$frame_distribution_status
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -395,10 +398,45 @@ step("Read the wrapper source")
 val script = file_read("scripts/check/check-widget-showcase-4k-200fps.shs")
 
 step("Assert resolver order and provenance evidence")
-expect(script).to_contain("for candidate in bin/simple ./bin/simple src/compiler_rust/target/release/simple")
-expect(script.index_of("bin/simple")).to_be_less_than(script.index_of("src/compiler_rust/target/release/simple"))
-expect(script).to_contain("SIMPLE_BIN_SOURCE=\"${SIMPLE_BIN_SOURCE:-default-missing}\"")
+expect(script).to_contain("for candidate in \\\n        release/x86_64-unknown-linux-gnu/simple")
+expect(script.index_of("release/x86_64-unknown-linux-gnu/simple")).to_be_less_than(script.index_of("bin/simple"))
+expect(script).to_contain("SIMPLE_BIN_SOURCE=\"${SIMPLE_BIN_SOURCE:-missing-self-hosted}\"")
+expect(script).to_contain("SIMPLE_BIN_STATUS=missing")
 expect(script).to_contain("_simple_bin_source=$SIMPLE_BIN_SOURCE")
+expect(script).to_contain("_simple_bin_status=$SIMPLE_BIN_STATUS")
+```
+
+</details>
+
+#### marks explicit missing Simple binary as missing in plan-only evidence
+
+- Run the wrapper in plan-only mode with an explicit missing Simple binary
+   - Expected: code equals `0`
+- Assert routing evidence does not overstate binary validity
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_status") equals `plan-only`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_simple_bin") equals `build/test-widget-showcase-plan-only-missing-simple/no-simple`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_simple_bin_source") equals `explicit-env`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_simple_bin_status") equals `missing`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the wrapper in plan-only mode with an explicit missing Simple binary")
+val command = "rm -rf build/test-widget-showcase-plan-only-missing-simple && PLAN_ONLY=1 RESOLUTION=4k SIMPLE_BIN=build/test-widget-showcase-plan-only-missing-simple/no-simple BUILD_DIR=build/test-widget-showcase-plan-only-missing-simple sh scripts/check/check-widget-showcase-4k-200fps.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert routing evidence does not overstate binary validity")
+val evidence = file_read("build/test-widget-showcase-plan-only-missing-simple/status.env")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_status")).to_equal("plan-only")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_simple_bin")).to_equal("build/test-widget-showcase-plan-only-missing-simple/no-simple")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_simple_bin_source")).to_equal("explicit-env")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_simple_bin_status")).to_equal("missing")
 ```
 
 </details>
@@ -502,8 +540,8 @@ expect(showcase.contains("rt_env_get(")).to_equal(false)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
