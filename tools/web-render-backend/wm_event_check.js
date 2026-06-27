@@ -199,7 +199,7 @@ async function main() {
     out.titlebar_cursor = titlebarStyle.cursor;
     out.titlebar_background = titlebarStyle.backgroundColor;
     out.title_color = titleStyle.color;
-    out.title_font_weight = titleStyle.fontWeight;
+    out.title_font_weight = Number.parseFloat(titleStyle.fontWeight);
     out.title_input_min_width = titleInputStyle.minWidth;
     out.title_input_width = titleInputStyle.width;
     out.title_input_width_px = Number.parseFloat(titleInputStyle.width);

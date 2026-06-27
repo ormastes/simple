@@ -84,10 +84,12 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
   sampled after a dispatched DOM interaction and a following animation frame;
   multi-second latency fails the event contract.
 - Boolean readiness, timing, animation, and CSS probe fields must be real JSON
-  booleans; string values like `"true"` are not structured event proof.
+  booleans; string values like `"true"` are not structured event proof and are
+  not re-emitted as normalized boolean rows.
 - Event counts, animation frame counts, traffic button counts, timing deltas,
   and dispatched move coordinates must be real JSON numbers; stringified or
-  fractional values are not valid DOM event-routing proof.
+  fractional values are not valid DOM event-routing proof and are not re-emitted
+  as normalized numeric rows.
 - Live numeric UI readback rows such as title font weight and title input width
   must be real JSON numbers; stringified CSS measurements are not valid browser
   style proof.
@@ -245,12 +247,13 @@ expect(string_sequence).to_contain("wm_browser_event_routing_event_sequence=")
 
 -  fixture command
    - Expected: code equals `1`
+   - Expected: evidence does not contain `wm_browser_event_routing_performance_now_delta_ms=not-a-number`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -263,7 +266,8 @@ expect(code).to_equal(1)
 val evidence = file_read("build/test-wm-browser-event-validator-animation/evidence.env")
 expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
-expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=not-a-number")
+expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=")
+expect(evidence.contains("wm_browser_event_routing_performance_now_delta_ms=not-a-number")).to_equal(false)
 expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=1")
 ```
 
@@ -312,12 +316,13 @@ expect(slow).to_contain("wm_browser_event_routing_performance_now_delta_ms=1001"
 -  fixture command
    - Expected: code equals `1`
 - Confirm event routing proof requires structured input-to-paint timing
+   - Expected: string_latency does not contain `wm_browser_event_routing_input_to_paint_ms=18.4`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -346,7 +351,8 @@ expect(zero).to_contain("wm_browser_event_routing_validation_reason=event-routin
 expect(zero).to_contain("wm_browser_event_routing_input_to_paint_ms=0")
 expect(string_latency).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(string_latency).to_contain("wm_browser_event_routing_validation_reason=event-routing-interaction-latency-contract-missing")
-expect(string_latency).to_contain("wm_browser_event_routing_input_to_paint_ms=18.4")
+expect(string_latency).to_contain("wm_browser_event_routing_input_to_paint_ms=")
+expect(string_latency.contains("wm_browser_event_routing_input_to_paint_ms=18.4")).to_equal(false)
 expect(slow).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(slow).to_contain("wm_browser_event_routing_validation_reason=event-routing-interaction-latency-contract-missing")
 expect(slow).to_contain("wm_browser_event_routing_input_to_paint_ms=1001")
@@ -360,12 +366,16 @@ expect(slow).to_contain("wm_browser_event_routing_input_to_paint_ms=1001")
 -  fixture command
    - Expected: code equals `1`
 - Confirm string booleans do not satisfy structured Electron event proof
+   - Expected: ready does not contain `wm_browser_event_routing_ready=true`
+   - Expected: perf does not contain `wm_browser_event_routing_performance_now_available=true`
+   - Expected: perf does not contain `wm_browser_event_routing_animation_frame_available=true`
+   - Expected: perf does not contain `wm_browser_event_routing_css_animation_probe=true`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -382,12 +392,16 @@ val perf = file_read("build/test-wm-browser-event-validator-string-booleans/perf
 step("Confirm string booleans do not satisfy structured Electron event proof")
 expect(ready).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(ready).to_contain("wm_browser_event_routing_validation_reason=event-routing-ready-missing")
-expect(ready).to_contain("wm_browser_event_routing_ready=true")
+expect(ready).to_contain("wm_browser_event_routing_ready=")
+expect(ready.contains("wm_browser_event_routing_ready=true")).to_equal(false)
 expect(perf).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(perf).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
-expect(perf).to_contain("wm_browser_event_routing_performance_now_available=true")
-expect(perf).to_contain("wm_browser_event_routing_animation_frame_available=true")
-expect(perf).to_contain("wm_browser_event_routing_css_animation_probe=true")
+expect(perf).to_contain("wm_browser_event_routing_performance_now_available=")
+expect(perf).to_contain("wm_browser_event_routing_animation_frame_available=")
+expect(perf).to_contain("wm_browser_event_routing_css_animation_probe=")
+expect(perf.contains("wm_browser_event_routing_performance_now_available=true")).to_equal(false)
+expect(perf.contains("wm_browser_event_routing_animation_frame_available=true")).to_equal(false)
+expect(perf.contains("wm_browser_event_routing_css_animation_probe=true")).to_equal(false)
 ```
 
 </details>
@@ -404,6 +418,7 @@ expect(perf).to_contain("wm_browser_event_routing_css_animation_probe=true")
    - Expected: code equals `1`
 - Confirm stringified numeric evidence is not accepted as live browser proof
    - Expected: count does not contain `wm_browser_event_routing_focus_count=1`
+   - Expected: perf does not contain `wm_browser_event_routing_performance_now_delta_ms=16.7`
    - Expected: frame does not contain `wm_browser_event_routing_animation_frame_count=2`
    - Expected: ui does not contain `wm_browser_event_routing_traffic_button_count=3`
    - Expected: font does not contain `wm_browser_event_routing_title_font_weight=700`
@@ -414,7 +429,7 @@ expect(perf).to_contain("wm_browser_event_routing_css_animation_probe=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -450,7 +465,8 @@ expect(count).to_contain("wm_browser_event_routing_focus_count=")
 expect(count.contains("wm_browser_event_routing_focus_count=1")).to_equal(false)
 expect(perf).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(perf).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
-expect(perf).to_contain("wm_browser_event_routing_performance_now_delta_ms=16.7")
+expect(perf).to_contain("wm_browser_event_routing_performance_now_delta_ms=")
+expect(perf.contains("wm_browser_event_routing_performance_now_delta_ms=16.7")).to_equal(false)
 expect(frame).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(frame).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
 expect(frame).to_contain("wm_browser_event_routing_animation_frame_count=")
@@ -574,7 +590,7 @@ expect(payload.contains("wm_browser_event_routing_move_payload_x=86.5")).to_equa
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -590,6 +606,9 @@ expect(script).to_contain("wm_browser_event_routing_input_to_paint_ms")
 expect(script).to_contain("wm_browser_event_routing_move_payload_source")
 expect(script).to_contain("wm_browser_event_routing_title_input_width_px")
 expect(script).to_contain("wm_browser_event_routing_close_button_background")
+val producer = file_read("tools/web-render-backend/wm_event_check.js")
+expect(producer).to_contain("out.title_font_weight = Number.parseFloat(titleStyle.fontWeight)")
+expect(producer.contains("out.title_font_weight = titleStyle.fontWeight")).to_equal(false)
 ```
 
 </details>

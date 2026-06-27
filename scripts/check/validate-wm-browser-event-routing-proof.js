@@ -61,9 +61,10 @@ function jsonDecimalTextOrBlank(value) {
   return text === null ? '' : text;
 }
 
-function jsonDecimalTextOrClean(value) {
-  const text = jsonNumberText(value);
-  return text === null ? clean(value) : text;
+function jsonBoolTextOrBlank(value) {
+  if (value === true) return 'true';
+  if (value === false) return 'false';
+  return '';
 }
 
 function row(key, value) {
@@ -116,8 +117,8 @@ const text = proof.text_payload || {};
 
 const rows = {
   proof_source: proof.proof_source,
-  ready: proof.ready,
-  wm_found: proof.wm_found,
+  ready: jsonBoolTextOrBlank(proof.ready),
+  wm_found: jsonBoolTextOrBlank(proof.wm_found),
   window_cmd_count: jsonIntegerTextOrBlank(proof.window_cmd_count),
   input_event_count: jsonIntegerTextOrBlank(proof.input_event_count),
   focus_count: jsonIntegerTextOrBlank(proof.focus_count),
@@ -128,12 +129,12 @@ const rows = {
   pointer_down_count: jsonIntegerTextOrBlank(proof.pointer_down_count),
   pointer_up_count: jsonIntegerTextOrBlank(proof.pointer_up_count),
   event_sequence: eventSequenceText(proof.event_sequence),
-  performance_now_available: proof.performance_now_available,
-  performance_now_delta_ms: jsonDecimalTextOrClean(proof.performance_now_delta_ms),
-  input_to_paint_ms: jsonDecimalTextOrClean(proof.input_to_paint_ms),
-  animation_frame_available: proof.animation_frame_available,
+  performance_now_available: jsonBoolTextOrBlank(proof.performance_now_available),
+  performance_now_delta_ms: jsonDecimalTextOrBlank(proof.performance_now_delta_ms),
+  input_to_paint_ms: jsonDecimalTextOrBlank(proof.input_to_paint_ms),
+  animation_frame_available: jsonBoolTextOrBlank(proof.animation_frame_available),
   animation_frame_count: jsonIntegerTextOrBlank(proof.animation_frame_count),
-  css_animation_probe: proof.css_animation_probe,
+  css_animation_probe: jsonBoolTextOrBlank(proof.css_animation_probe),
   title_text: proof.title_text,
   title_context_text: proof.title_context_text,
   traffic_button_count: jsonIntegerTextOrBlank(proof.traffic_button_count),
