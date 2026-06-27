@@ -8,7 +8,41 @@ BUILD_DIR="${BUILD_DIR:-build/gui_wasm_host_wm_launch_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_wasm_host_wm_launch_evidence_$(date -u +%F).md}"
 TARGET_PACKAGE_BUILD_DIR="${GUI_WASM_TARGET_PACKAGE_BUILD_DIR:-build/gui_wasm_target_package_evidence}"
 TARGET_PACKAGE_REPORT_PATH="${GUI_WASM_TARGET_PACKAGE_REPORT_PATH:-doc/09_report/gui_wasm_target_package_evidence_$(date -u +%F).md}"
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in "release"/*/simple "bin/release"/*/simple "build/bootstrap/stage3/simple" "bin/simple" "./bin/simple"; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 TIMEOUT_SECS="${GUI_WASM_HOST_WM_TIMEOUT_SECS:-45}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
@@ -23,16 +57,30 @@ emit_unavailable() {
     {
         echo "gui_wasm_host_wm_launch_status=unavailable"
         echo "gui_wasm_host_wm_launch_reason=$reason"
+        echo "gui_wasm_host_wm_launch_simple_bin=$SIMPLE_BIN"
+        echo "gui_wasm_host_wm_launch_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "gui_wasm_host_wm_launch_simple_bin_status=$SIMPLE_BIN_STATUS"
     } >"$BUILD_DIR/evidence.env"
     {
         echo "# GUI WASM Host WM Launch Evidence"
         echo
         echo "- status: unavailable"
         echo "- reason: $reason"
+        echo "- simple bin: $SIMPLE_BIN"
+        echo "- simple bin source: $SIMPLE_BIN_SOURCE"
+        echo "- simple bin status: $SIMPLE_BIN_STATUS"
     } >"$REPORT_PATH"
     cat "$BUILD_DIR/evidence.env"
 }
 
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    emit_unavailable "simple-bin-forbidden"
+    exit 1
+fi
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    emit_unavailable "simple-bin-$SIMPLE_BIN_STATUS"
+    exit 1
+fi
 if [ ! -x "$SIMPLE_BIN" ]; then
     emit_unavailable "missing-simple-bin"
     exit 1
@@ -44,7 +92,9 @@ fi
 
 BUILD_DIR="$TARGET_PACKAGE_BUILD_DIR" \
 REPORT_PATH="$TARGET_PACKAGE_REPORT_PATH" \
-    sh scripts/check-gui-wasm-target-package-evidence.shs >"$BUILD_DIR/target-package.out" 2>"$BUILD_DIR/target-package.err"
+SIMPLE_BIN="$SIMPLE_BIN" \
+SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" \
+    sh scripts/check/check-gui-wasm-target-package-evidence.shs >"$BUILD_DIR/target-package.out" 2>"$BUILD_DIR/target-package.err"
 
 HOST_BRIDGE_DIR="$BUILD_DIR/host-wm-bridge"
 CLIENT_SRC="$BUILD_DIR/gui_wasm_host_wm_launch_client.spl"
@@ -258,6 +308,9 @@ fi
 {
     echo "gui_wasm_host_wm_launch_status=$status"
     echo "gui_wasm_host_wm_launch_reason=$reason"
+    echo "gui_wasm_host_wm_launch_simple_bin=$SIMPLE_BIN"
+    echo "gui_wasm_host_wm_launch_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "gui_wasm_host_wm_launch_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "gui_wasm_host_wm_launch_client_exit_code=$client_code"
     echo "gui_wasm_host_wm_launch_server_exit_code=$server_code"
     echo "gui_wasm_host_wm_launch_request_count=$request_count"
@@ -273,6 +326,9 @@ fi
     echo
     echo "- status: $status"
     echo "- reason: $reason"
+    echo "- simple bin: $SIMPLE_BIN"
+    echo "- simple bin source: $SIMPLE_BIN_SOURCE"
+    echo "- simple bin status: $SIMPLE_BIN_STATUS"
     echo "- request count: $request_count"
     echo "- create/update/destroy: $create_count/$update_count/$destroy_count"
     echo "- per-app WASM content lifecycle proof: $per_app_pass"

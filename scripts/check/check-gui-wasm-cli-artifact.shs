@@ -6,7 +6,41 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/gui_wasm_cli_artifact}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_wasm_cli_artifact_$(date -u +%F).md}"
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in "release"/*/simple "bin/release"/*/simple "build/bootstrap/stage3/simple" "bin/simple" "./bin/simple"; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 HELLO_SOURCE="${GUI_WASM_HELLO_SOURCE:-examples/06_io/ui/hello_wasm_gui.spl}"
 HELLO_OUTPUT="${GUI_WASM_HELLO_OUTPUT:-$BUILD_DIR/hello_wasm_gui.wasm}"
 WIDGET_SOURCE="${GUI_WASM_WIDGET_SOURCE:-examples/06_io/ui/widget_matrix_wasm_gui.spl}"
@@ -249,7 +283,10 @@ NODE
 "
 }
 
-if [ ! -x "$SIMPLE_BIN" ]; then
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    status=unavailable
+    reason=simple-bin-forbidden
+elif [ "$SIMPLE_BIN_STATUS" != "pass" ] || [ ! -x "$SIMPLE_BIN" ]; then
     status=unavailable
     reason=missing-simple-bin
 else
@@ -261,6 +298,9 @@ fi
 {
     echo "gui_wasm_cli_status=$status"
     echo "gui_wasm_cli_reason=$reason"
+    echo "gui_wasm_cli_simple_bin=$SIMPLE_BIN"
+    echo "gui_wasm_cli_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "gui_wasm_cli_simple_bin_status=$SIMPLE_BIN_STATUS"
     printf '%s' "$results" | while IFS='|' read -r name item_status item_reason source output size magic version import_count imports; do
         [ -n "$name" ] || continue
         echo "gui_wasm_cli_${name}_status=$item_status"
@@ -280,6 +320,9 @@ fi
     echo
     echo "- status: $status"
     echo "- reason: $reason"
+    echo "- simple bin: $SIMPLE_BIN"
+    echo "- simple bin source: $SIMPLE_BIN_SOURCE"
+    echo "- simple bin status: $SIMPLE_BIN_STATUS"
     echo
     echo "## Artifacts"
     printf '%s' "$results" | while IFS='|' read -r name item_status item_reason source output size magic version import_count imports; do
