@@ -1107,6 +1107,14 @@ The current canonical evidence contract is:
   `production_gui_backend_simple_bin_source`, and
   `production_gui_backend_simple_bin_status`, and the parent parity evidence
   forwards those as `production_gui_web_renderer_parity_backend_simple_bin*`.
+  The nested Metal Engine2D framebuffer readback subcheck rejects the Rust seed
+  the same way and records `metal_engine2d_framebuffer_readback_simple_bin`,
+  `metal_engine2d_framebuffer_readback_simple_bin_source`, and
+  `metal_engine2d_framebuffer_readback_simple_bin_status`; the parent parity
+  evidence forwards those as
+  `production_gui_web_renderer_parity_metal_readback_simple_bin*`, and the gate
+  re-emits them under
+  `production_gui_web_renderer_parity_gate_metal_readback_simple_bin*`.
   Font offload
   `unavailable` is recorded but does not satisfy the production parity wrapper.
   The Tauri/Chrome surface manifest must prove live Electron, Tauri, and Chrome

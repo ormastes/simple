@@ -10,14 +10,43 @@ ENV_PATH="$BUILD_DIR/evidence.env"
 BACKEND_PATH="src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl"
 SFFI_PATH="src/lib/nogc_sync_mut/io/metal_sffi.spl"
 SPEC_PATH="test/02_integration/rendering/metal_engine2d_readback_spec.spl"
-# Prefer the cargo-built release binary (CI convention); fall back to the
-# deployed bin/simple symlink on dev machines that did not build it.
-if [ -z "${SIMPLE_BIN:-}" ]; then
-    for _cand in src/compiler_rust/target/release/simple bin/simple; do
-        if [ -x "$_cand" ]; then SIMPLE_BIN="$_cand"; break; fi
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -z "${SIMPLE_BIN+x}" ]; then
+    SIMPLE_BIN_SOURCE="default-missing"
+    for candidate in \
+        "bin/simple" \
+        "./bin/simple" \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple"; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
     done
 fi
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+if [ -z "${SIMPLE_BIN+x}" ] || [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN=""
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$ENV_PATH" "$REPORT_PATH"
@@ -44,6 +73,13 @@ status=unavailable
 reason=metal-requires-macos
 exit_code=0
 
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    status=unavailable
+    reason="simple-bin-$SIMPLE_BIN_STATUS"
+    spec_status=
+    exit_code=1
+else
+
 if [ "$platform" = "Darwin" ]; then
     if [ ! -x "$SIMPLE_BIN" ]; then
         spec_status=fail
@@ -63,8 +99,9 @@ if [ "$platform" = "Darwin" ]; then
         exit_code=1
     fi
 fi
+fi
 
-if [ "$read_pixels_gpu_download" != "true" ]; then
+if [ "$read_pixels_gpu_download" != "true" ] && [ "$SIMPLE_BIN_STATUS" = "pass" ]; then
     status=fail
     reason=metal-engine2d-read-pixels-contract-changed-review-required
     exit_code=1
@@ -78,6 +115,9 @@ fi
     echo "metal_engine2d_framebuffer_readback_sffi=$SFFI_PATH"
     echo "metal_engine2d_framebuffer_readback_spec=$SPEC_PATH"
     echo "metal_engine2d_framebuffer_readback_spec_status=$spec_status"
+    echo "metal_engine2d_framebuffer_readback_simple_bin=$SIMPLE_BIN"
+    echo "metal_engine2d_framebuffer_readback_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "metal_engine2d_framebuffer_readback_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "metal_engine2d_framebuffer_gpu_download_path_present=$read_pixels_gpu_download"
     echo "metal_engine2d_framebuffer_gpu_completeness_guard_present=$gpu_completeness_guard"
     echo "metal_engine2d_framebuffer_gpu_download_binding_present=$download_binding"
@@ -99,6 +139,9 @@ fi
     echo "- sffi: $SFFI_PATH"
     echo "- spec: $SPEC_PATH"
     echo "- spec_status: $spec_status"
+    echo "- simple_bin: $SIMPLE_BIN"
+    echo "- simple_bin_source: $SIMPLE_BIN_SOURCE"
+    echo "- simple_bin_status: $SIMPLE_BIN_STATUS"
     echo "- gpu_download_path_present: $read_pixels_gpu_download"
     echo "- gpu_completeness_guard_present: $gpu_completeness_guard"
     echo "- gpu_download_binding_present: $download_binding"
