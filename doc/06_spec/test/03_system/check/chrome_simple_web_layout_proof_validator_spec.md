@@ -133,7 +133,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -153,6 +153,7 @@ expect(evidence).to_contain("chrome_simple_web_layout_capture_mode=chrome-devtoo
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_product=Chrome/142.0.0.0")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_protocol_version=1.3")
+expect(evidence).to_contain("chrome_simple_web_layout_chrome_bin=/usr/bin/google-chrome")
 expect(evidence).to_contain("chrome_simple_web_layout_simple_checksum=26388279060480")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_checksum=26388279060480")
 expect(evidence).to_contain("chrome_simple_web_layout_simple_weighted_checksum=81077987413324800")
@@ -229,6 +230,8 @@ expect(wrong).to_contain("chrome_simple_web_layout_proof_source=tools/manual/chr
 -  proof command
 -  proof command
 -  proof command
+-  proof command
+-  proof command
    - Expected: code equals `1`
 - Confirm Chrome proof needs DevTools capture mode and runtime user agent
 
@@ -236,7 +239,7 @@ expect(wrong).to_contain("chrome_simple_web_layout_proof_source=tools/manual/chr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -249,7 +252,11 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/product.json", "p.chrome_product=\"\"") +
     " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/product.json > " + root + "/product.env; " +
     _proof_command(root + "/protocol.json", "p.chrome_protocol_version=\"devtools\"") +
-    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/protocol.json > " + root + "/protocol.env"
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/protocol.json > " + root + "/protocol.env; " +
+    _proof_command(root + "/missing-bin.json", "delete p.chrome_bin") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/missing-bin.json > " + root + "/missing-bin.env; " +
+    _proof_command(root + "/blank-bin.json", "p.chrome_bin=\"   \"") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/blank-bin.json > " + root + "/blank-bin.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
@@ -257,6 +264,8 @@ val mode = file_read(root + "/mode.env")
 val ua = file_read(root + "/ua.env")
 val product = file_read(root + "/product.env")
 val protocol = file_read(root + "/protocol.env")
+val missing_bin = file_read(root + "/missing-bin.env")
+val blank_bin = file_read(root + "/blank-bin.env")
 step("Confirm Chrome proof needs DevTools capture mode and runtime user agent")
 expect(mode).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(mode).to_contain("chrome_simple_web_layout_validation_reason=unexpected-chrome-capture-mode")
@@ -271,6 +280,12 @@ expect(product).to_contain("chrome_simple_web_layout_chrome_product=")
 expect(protocol).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(protocol).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-protocol-version")
 expect(protocol).to_contain("chrome_simple_web_layout_chrome_protocol_version=devtools")
+expect(missing_bin).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(missing_bin).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-bin")
+expect(missing_bin).to_contain("chrome_simple_web_layout_chrome_bin=")
+expect(blank_bin).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(blank_bin).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-bin")
+expect(blank_bin).to_contain("chrome_simple_web_layout_chrome_bin=   ")
 ```
 
 </details>
@@ -938,7 +953,7 @@ expect(pixel).to_contain("chrome_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -953,6 +968,8 @@ expect(script).to_contain("chrome_simple_web_layout_capture_mode")
 expect(script).to_contain("chrome_simple_web_layout_chrome_user_agent")
 expect(script).to_contain("chrome_simple_web_layout_chrome_product")
 expect(script).to_contain("chrome_simple_web_layout_chrome_protocol_version")
+expect(script).to_contain("chrome_simple_web_layout_chrome_bin")
+expect(script).to_contain("Chrome binary: $chrome_bin")
 expect(script).to_contain("capture-viewport-mismatch")
 expect(script).to_contain("chrome_simple_web_layout_capture_width")
 expect(script).to_contain("chrome_simple_web_layout_captured_argb_format")
@@ -971,6 +988,7 @@ expect(validator).to_contain("measuredGeometryItemCount")
 expect(validator).to_contain("missing-chrome-geometry-measured-items")
 expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
 expect(validator).to_contain("jsonBoolTextOrBlank")
+expect(validator).to_contain("missing-chrome-bin")
 expect(validator).to_contain("captured-argb-checksum-mismatch")
 expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
@@ -983,6 +1001,7 @@ expect(capture).to_contain("capture_mode: geometryOutputPath ? \"chrome-devtools
 expect(capture).to_contain("chrome_user_agent")
 expect(capture).to_contain("chrome_product")
 expect(capture).to_contain("chrome_protocol_version")
+expect(capture).to_contain("chrome_bin: chromeBin")
 expect(capture).to_contain("producer: \"chrome-headless-screenshot\"")
 expect(capture).to_contain("geometry_path: geometryOutputPath")
 ```
@@ -997,7 +1016,7 @@ expect(capture).to_contain("geometry_path: geometryOutputPath")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1018,6 +1037,7 @@ expect(evidence).to_contain("chrome_simple_web_layout_capture_mode=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_user_agent=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_product=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_protocol_version=")
+expect(evidence).to_contain("chrome_simple_web_layout_chrome_bin=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_width=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_height=")

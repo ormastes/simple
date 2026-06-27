@@ -251,6 +251,7 @@ const expectedProofSource = 'tools/chrome-live-bitmap/capture_html_argb.js';
 const chromeUserAgent = typeof proof.chrome_user_agent === 'string' ? proof.chrome_user_agent : '';
 const chromeProduct = typeof proof.chrome_product === 'string' ? proof.chrome_product : '';
 const chromeProtocolVersion = typeof proof.chrome_protocol_version === 'string' ? proof.chrome_protocol_version : '';
+const chromeBin = typeof proof.chrome_bin === 'string' ? proof.chrome_bin.trim() : '';
 
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
@@ -265,6 +266,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-chrome-product-version';
 } else if (!/^[0-9]+(?:\.[0-9]+)*$/.test(chromeProtocolVersion)) {
   reason = 'missing-chrome-protocol-version';
+} else if (chromeBin === '') {
+  reason = 'missing-chrome-bin';
 } else if (decimalIntegerText(proof.checksum) === null || decimalIntegerText(proof.expected_checksum) === null) {
   reason = 'missing-checksum-proof';
 } else if (!sameInteger(proof.checksum, proof.expected_checksum)) {
