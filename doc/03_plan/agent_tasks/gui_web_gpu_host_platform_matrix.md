@@ -1,6 +1,29 @@
 # GUI/Web Host-GPU Platform Evidence Matrix
 
 Date: 2026-06-14
+Status: superseded/merged into
+`doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md`
+for active parallel-agent routing, and into
+`doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md`
+for current Linux Vulkan, macOS Metal, and Windows D3D12 RenderDoc/render-log
+execution. Keep this file as a historical host-GPU queue/readback matrix and
+as detailed background for platform-specific device-readback semantics.
+
+Current routing update, 2026-06-27:
+
+- Spark agents may collect platform logs and readiness/provenance rows from
+  this matrix, but they do not promote a backend to production proof.
+- Normal/high-capability review must accept native device-readback, RenderDoc
+  or GPU-debugger artifacts, native render-log comparison, and no raw `rt_*` or
+  direct backend-poke source changes before any platform is marked complete.
+- Linux Vulkan strict render-log comparison is sequenced after browser backing,
+  direct Electron/Chrome/Simple ARGB comparison, and valid Chrome/Electron/Simple
+  `.rdc` artifacts with `RDOC` magic.
+- macOS Metal and Windows D3D12 completion claims must use the current
+  platform runbook and evidence keys; this matrix alone is not acceptance
+  evidence.
+- Retained 4K/8K showcase performance is tracked in the 2026-06-27 parallel
+  plan as its own lane and must not be inferred from queue/readback rows.
 
 ## Scope
 

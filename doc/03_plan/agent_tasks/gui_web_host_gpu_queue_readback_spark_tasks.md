@@ -2,7 +2,28 @@
 
 Owner: normal-LLM/Spark lane
 Date: 2026-06-14
-Status: current local focused specs pass, and the production wrapper now reports
+Status: superseded/merged into
+`doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md`
+for broad GUI/Web/2D rendering delegation. Keep this file as the queue/readback
+technical task packet only; do not use it as the current top-level platform
+plan or completion evidence.
+
+Current routing update, 2026-06-27:
+
+- Use `doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md`
+  WO-9 for stale-doc cleanup and the active Spark/normal-review split.
+- Use `doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md`
+  for Linux Vulkan, macOS Metal, and Windows D3D12 RenderDoc/render-log
+  platform execution.
+- This file remains useful for BrowserBackend queue/readback metadata and
+  fail-closed device-readback semantics.
+- Spark output from this packet is advisory until a normal/high-capability
+  reviewer accepts no raw `rt_*` additions, no direct backend-poke pass states,
+  and no promotion of provenance-only rows to production proof.
+- Retained 4K/8K showcase performance is now tracked as a dedicated lane in the
+  2026-06-27 parallel plan, not in this queue/readback packet.
+
+Historical status: current local focused specs pass, and the production wrapper now reports
 the platform matrix explicitly as partial unless Metal/ROCm/DirectX/WebGPU
 same-frame device-readback proof is present. WebGPU `surface_upload` is
 provenance-only and WebGPU real device readback is currently unavailable. The
