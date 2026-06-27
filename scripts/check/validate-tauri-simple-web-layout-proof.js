@@ -73,7 +73,7 @@ function jsonBoolTextOrBlank(value) {
 }
 
 function readJsonArtifact(info) {
-  if (info === null) return null;
+  if (info === null || info.symlink) return null;
   try {
     return JSON.parse(fs.readFileSync(info.path, 'utf8'));
   } catch (_err) {
@@ -134,6 +134,10 @@ function artifactStat(value, proofPath) {
       continue;
     }
     try {
+      const linkStat = fs.lstatSync(resolvedCandidate);
+      if (linkStat.isSymbolicLink()) {
+        return { stat: linkStat, path: resolvedCandidate, symlink: true };
+      }
       const realCandidate = fs.realpathSync(candidate);
       if (
         realCandidate === realProofPath ||
@@ -143,7 +147,7 @@ function artifactStat(value, proofPath) {
       }
       const stat = fs.statSync(realCandidate);
       if (stat.isFile()) {
-        return { stat, path: realCandidate };
+        return { stat, path: realCandidate, symlink: false };
       }
     } catch (_err) {
       // Try the next candidate.
@@ -154,7 +158,13 @@ function artifactStat(value, proofPath) {
 
 function artifactFileStatus(artifact) {
   if (artifact === null) return 'missing';
+  if (artifact.symlink) return 'symlink';
   return artifact.stat.size <= 0 ? 'empty' : 'pass';
+}
+
+function artifactSymlinkStatus(artifact) {
+  if (artifact === null) return '';
+  return artifact.symlink ? 'fail' : 'pass';
 }
 
 const proofPath = process.argv[2];
@@ -164,12 +174,29 @@ if (!proofPath) {
   process.exit(1);
 }
 
+let proofStat;
+try {
+  proofStat = fs.lstatSync(proofPath);
+} catch (_err) {
+  proofStat = null;
+}
+
+if (proofStat && proofStat.isSymbolicLink()) {
+  emit('tauri_simple_web_layout_validation_status', 'fail');
+  emit('tauri_simple_web_layout_validation_reason', 'proof-json-symlink');
+  emit('tauri_simple_web_layout_proof_symlink_status', 'fail');
+  emit('tauri_simple_web_layout_captured_argb_symlink_status', '');
+  process.exit(1);
+}
+
 let proof;
 try {
   proof = JSON.parse(fs.readFileSync(proofPath, 'utf8'));
 } catch (err) {
   emit('tauri_simple_web_layout_validation_status', 'fail');
   emit('tauri_simple_web_layout_validation_reason', `invalid-json:${err && err.message ? err.message : err}`);
+  emit('tauri_simple_web_layout_proof_symlink_status', proofStat ? 'pass' : '');
+  emit('tauri_simple_web_layout_captured_argb_symlink_status', '');
   process.exit(1);
 }
 
@@ -199,6 +226,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-captured-argb';
 } else if (capturedArgbStat === null) {
   reason = 'missing-captured-argb-file';
+} else if (capturedArgbStat.symlink) {
+  reason = 'captured-argb-symlink';
 } else if (capturedArgbStat.stat.size <= 0) {
   reason = 'empty-captured-argb-file';
 } else if (capturedArgb === null || !Array.isArray(capturedArgb.pixels)) {
@@ -225,6 +254,7 @@ if (proof.blur_or_tolerance_used !== false) {
 
 emit('tauri_simple_web_layout_validation_status', reason === 'pass' ? 'pass' : 'fail');
 emit('tauri_simple_web_layout_validation_reason', reason);
+emit('tauri_simple_web_layout_proof_symlink_status', 'pass');
 emit('tauri_simple_web_layout_simple_checksum', integerTextOrClean(proof.expected_checksum));
 emit('tauri_simple_web_layout_tauri_checksum', integerTextOrClean(proof.checksum));
 emit('tauri_simple_web_layout_simple_weighted_checksum', integerTextOrClean(proof.expected_weighted_checksum));
@@ -239,6 +269,7 @@ emit('tauri_simple_web_layout_tauri_frame_us', jsonIntegerTextOrBlank(proof.fram
 emit('tauri_simple_web_layout_captured_argb_path', proof.captured_argb_path);
 emit('tauri_simple_web_layout_captured_argb_written', jsonBoolTextOrBlank(proof.captured_argb_written));
 emit('tauri_simple_web_layout_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
+emit('tauri_simple_web_layout_captured_argb_symlink_status', artifactSymlinkStatus(capturedArgbStat));
 emit('tauri_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
 emit('tauri_simple_web_layout_captured_argb_format', capturedArgb === null ? '' : capturedArgb.format);
 emit('tauri_simple_web_layout_captured_argb_producer', capturedArgb === null ? '' : capturedArgb.producer);

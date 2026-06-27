@@ -27,7 +27,7 @@ tauri_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,6 +82,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   on `captured_argb_written=true` alone.
 - ARGB capture file-status rows distinguish `missing`, `empty`, and `pass` so
   diagnostics cannot treat a zero-byte artifact as a valid capture file.
+- Tauri layout proof JSON and captured ARGB artifacts must be regular files,
+  not symlinks to mutable or substituted evidence.
 - ARGB capture proof paths must not resolve back to the top-level proof JSON
   even if the proof contains artifact-shaped fields.
 - ARGB capture files must parse as `argb-u32` artifacts from the Tauri window
@@ -111,7 +113,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -132,7 +134,9 @@ expect(evidence).to_contain("tauri_simple_web_layout_requested_height=64")
 expect(evidence).to_contain("tauri_simple_web_layout_tauri_frame_us=1250")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_path=captured.json")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_written=true")
+expect(evidence).to_contain("tauri_simple_web_layout_proof_symlink_status=pass")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_file_status=pass")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_symlink_status=pass")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_format=argb-u32")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_producer=tauri-x11-window-screenshot")
@@ -321,6 +325,46 @@ expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=missing-c
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_path=proof.json")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_file_status=missing")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
+```
+
+</details>
+
+#### rejects symlinked Tauri layout proof and captured ARGB artifacts
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Tauri layout evidence cannot be substituted through symlinks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-layout-validator-symlinks"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof-real.json", "") + " && " +
+    "ln -s proof-real.json " + root + "/proof-link.json && " +
+    "node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof-link.json > " + root + "/proof.env; " +
+    _proof_command(root + "/argb.json", "fs.renameSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),path.join(path.dirname(process.argv[1]),\"captured-real.json\"));fs.symlinkSync(\"captured-real.json\",path.join(path.dirname(process.argv[1]),\"captured.json\"))") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/argb.json > " + root + "/argb.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val proof = file_read(root + "/proof.env")
+val argb = file_read(root + "/argb.env")
+step("Confirm Tauri layout evidence cannot be substituted through symlinks")
+expect(proof).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(proof).to_contain("tauri_simple_web_layout_validation_reason=proof-json-symlink")
+expect(proof).to_contain("tauri_simple_web_layout_proof_symlink_status=fail")
+expect(argb).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(argb).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-symlink")
+expect(argb).to_contain("tauri_simple_web_layout_proof_symlink_status=pass")
+expect(argb).to_contain("tauri_simple_web_layout_captured_argb_file_status=symlink")
+expect(argb).to_contain("tauri_simple_web_layout_captured_argb_symlink_status=fail")
 ```
 
 </details>
@@ -629,7 +673,7 @@ expect(pixel).to_contain("tauri_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -637,7 +681,9 @@ val script = file_read("scripts/check/check-tauri-simple-web-layout-bitmap-evide
 val validator = file_read("scripts/check/validate-tauri-simple-web-layout-proof.js")
 expect(script).to_contain("validate-tauri-simple-web-layout-proof.js")
 expect(script).to_contain("tauri_simple_web_layout_validation_status")
+expect(script).to_contain("tauri_simple_web_layout_proof_symlink_status")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_file_status")
+expect(script).to_contain("tauri_simple_web_layout_captured_argb_symlink_status")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_size_bytes")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_format")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_nonzero_pixel_count")
@@ -645,6 +691,8 @@ expect(script).to_contain("tauri_simple_web_layout_requested_width")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
 expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
+expect(validator).to_contain("proof-json-symlink")
+expect(validator).to_contain("captured-argb-symlink")
 expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
 expect(validator).to_contain("jsonBoolTextOrBlank")
 val converter = file_read("tools/tauri-live-bitmap/raw_rgba_to_argb.js")
@@ -657,8 +705,8 @@ expect(converter).to_contain("captured_argb_path: outputPath")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
