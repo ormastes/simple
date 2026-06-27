@@ -668,6 +668,43 @@ png_file_status_from_reason() {
     fi
 }
 
+png_dimension_value() {
+    path="$1"
+    offset="$2"
+    if [ -z "$path" ] || [ ! -f "$path" ]; then
+        echo ""
+        return
+    fi
+    if ! command -v node >/dev/null 2>&1; then
+        echo ""
+        return
+    fi
+    node - "$path" "$offset" <<'NODE'
+const fs = require('fs');
+const path = process.argv[2];
+const offset = Number(process.argv[3]);
+try {
+  const data = fs.readFileSync(path);
+  if (data.length < offset + 4) {
+    console.log('');
+  } else {
+    const value = data.readUInt32BE(offset);
+    console.log(value > 0 ? String(value) : '');
+  }
+} catch (_err) {
+  console.log('');
+}
+NODE
+}
+
+png_width_value() {
+    png_dimension_value "$1" 16
+}
+
+png_height_value() {
+    png_dimension_value "$1" 20
+}
+
 png_distinct_color_count_from_reason() {
     reason="$1"
     case "$reason" in
@@ -684,6 +721,17 @@ png_pixel_diversity_status() {
     else
         echo fail
     fi
+}
+
+screenshot_artifact_detail_pass() {
+    actual_size="$1"
+    width="$2"
+    height="$3"
+    min_width="$4"
+    min_height="$5"
+    num_at_least "$actual_size" 1 &&
+        num_at_least "$width" "$min_width" &&
+        num_at_least "$height" "$min_height"
 }
 
 run_lane() {
@@ -874,6 +922,9 @@ ios_mdi_animation_frame_count=""
 ios_mdi_css_animation_probe=""
 ios_screenshot_file_status=unavailable
 ios_screenshot_file_reason=not-run
+ios_screenshot_actual_size_bytes=""
+ios_screenshot_width=""
+ios_screenshot_height=""
 ios_screenshot_distinct_color_count=""
 ios_screenshot_distinct_color_min="$PNG_MIN_DISTINCT_COLORS"
 ios_screenshot_pixel_diversity_status=unavailable
@@ -947,6 +998,9 @@ if [ -x "$IOS_SCRIPT" ] || [ -f "$IOS_SCRIPT" ]; then
     ios_mdi_css_animation_probe="$(value_of ios_mdi_css_animation_probe "$BUILD_DIR/ios.out")"
     ios_screenshot_file_reason="$(png_file_reason "$ios_screenshot" "$ios_mdi_capture_viewport_width" "$ios_mdi_capture_viewport_height")"
     ios_screenshot_file_status="$(png_file_status_from_reason "$ios_screenshot_file_reason")"
+    ios_screenshot_actual_size_bytes="$(file_size_bytes "$ios_screenshot")"
+    ios_screenshot_width="$(png_width_value "$ios_screenshot")"
+    ios_screenshot_height="$(png_height_value "$ios_screenshot")"
     ios_screenshot_distinct_color_count="$(png_distinct_color_count_from_reason "$ios_screenshot_file_reason")"
     ios_screenshot_pixel_diversity_status="$(png_pixel_diversity_status "$ios_screenshot_distinct_color_count")"
     ios_mdi_proof_file_reason="$(mdi_proof_file_reason "$ios_mdi_proof_json" \
@@ -1135,6 +1189,9 @@ android_mdi_animation_frame_count=""
 android_mdi_css_animation_probe=""
 android_screenshot_file_status=unavailable
 android_screenshot_file_reason=not-run
+android_screenshot_actual_size_bytes=""
+android_screenshot_width=""
+android_screenshot_height=""
 android_screenshot_distinct_color_count=""
 android_screenshot_distinct_color_min="$PNG_MIN_DISTINCT_COLORS"
 android_screenshot_pixel_diversity_status=unavailable
@@ -1228,6 +1285,9 @@ if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
     android_mdi_css_animation_probe="$(value_of android_mdi_css_animation_probe "$BUILD_DIR/android.out")"
     android_screenshot_file_reason="$(png_file_reason "$android_screenshot" "$android_mdi_capture_viewport_width" "$android_mdi_capture_viewport_height")"
     android_screenshot_file_status="$(png_file_status_from_reason "$android_screenshot_file_reason")"
+    android_screenshot_actual_size_bytes="$(file_size_bytes "$android_screenshot")"
+    android_screenshot_width="$(png_width_value "$android_screenshot")"
+    android_screenshot_height="$(png_height_value "$android_screenshot")"
     android_screenshot_distinct_color_count="$(png_distinct_color_count_from_reason "$android_screenshot_file_reason")"
     android_screenshot_pixel_diversity_status="$(png_pixel_diversity_status "$android_screenshot_distinct_color_count")"
     android_mdi_proof_file_reason="$(mdi_proof_file_reason "$android_mdi_proof_json" \
@@ -1359,6 +1419,9 @@ elif [ "$ios_lane_output_env_file_status" != "pass" ]; then
 elif [ "$android_lane_output_env_file_status" != "pass" ]; then
     status=fail
     reason=android-lane-output-env-$android_lane_output_env_file_reason
+elif [ "$ios_screenshot_file_status" = "pass" ] && ! screenshot_artifact_detail_pass "$ios_screenshot_actual_size_bytes" "$ios_screenshot_width" "$ios_screenshot_height" "$ios_mdi_capture_viewport_width" "$ios_mdi_capture_viewport_height"; then
+    status=fail
+    reason=ios-screenshot-artifact-proof-missing
 elif [ "$ios_screenshot_file_status" = "pass" ] && { [ "$ios_screenshot_pixel_diversity_status" != "pass" ] || ! num_at_least "$ios_screenshot_distinct_color_count" "$PNG_MIN_DISTINCT_COLORS"; }; then
     status=fail
     reason=ios-screenshot-pixel-diversity-missing
@@ -1456,6 +1519,9 @@ elif ! mobile_mdi_event_detail_pass "$ios_mdi_event_has_desktop" "$ios_mdi_event
 elif ! mobile_mdi_detail_pass "$ios_mdi_proof_window_count" "$ios_mdi_render_image_count" "$ios_mdi_render_html_renderable" "$ios_mdi_event_taskbar_item_count" "$ios_mdi_event_taskbar_icon_count" "$ios_mdi_capture_viewport_width" "$ios_mdi_capture_viewport_height" "$ios_mdi_capture_device_pixel_ratio" "$ios_mdi_capture_screen_orientation" "$ios_mdi_performance_now_available" "$ios_mdi_performance_now_delta_ms" "$ios_mdi_input_to_paint_ms" "$ios_mdi_animation_frame_available" "$ios_mdi_animation_frame_count" "$ios_mdi_css_animation_probe"; then
     status=fail
     reason=ios-mdi-render-event-capture-performance-animation-proof-incomplete
+elif [ "$android_screenshot_file_status" = "pass" ] && ! screenshot_artifact_detail_pass "$android_screenshot_actual_size_bytes" "$android_screenshot_width" "$android_screenshot_height" "$android_mdi_capture_viewport_width" "$android_mdi_capture_viewport_height"; then
+    status=fail
+    reason=android-screenshot-artifact-proof-missing
 elif [ "$android_screenshot_file_status" = "pass" ] && { [ "$android_screenshot_pixel_diversity_status" != "pass" ] || ! num_at_least "$android_screenshot_distinct_color_count" "$PNG_MIN_DISTINCT_COLORS"; }; then
     status=fail
     reason=android-screenshot-pixel-diversity-missing
@@ -1682,6 +1748,9 @@ fi
     echo "tauri_mobile_renderer_parity_ios_screenshot=$ios_screenshot"
     echo "tauri_mobile_renderer_parity_ios_screenshot_file_status=$ios_screenshot_file_status"
     echo "tauri_mobile_renderer_parity_ios_screenshot_file_reason=$ios_screenshot_file_reason"
+    echo "tauri_mobile_renderer_parity_ios_screenshot_actual_size_bytes=$ios_screenshot_actual_size_bytes"
+    echo "tauri_mobile_renderer_parity_ios_screenshot_width=$ios_screenshot_width"
+    echo "tauri_mobile_renderer_parity_ios_screenshot_height=$ios_screenshot_height"
     echo "tauri_mobile_renderer_parity_ios_screenshot_distinct_color_count=$ios_screenshot_distinct_color_count"
     echo "tauri_mobile_renderer_parity_ios_screenshot_distinct_color_min=$ios_screenshot_distinct_color_min"
     echo "tauri_mobile_renderer_parity_ios_screenshot_pixel_diversity_status=$ios_screenshot_pixel_diversity_status"
@@ -1773,6 +1842,9 @@ fi
     echo "tauri_mobile_renderer_parity_android_screenshot=$android_screenshot"
     echo "tauri_mobile_renderer_parity_android_screenshot_file_status=$android_screenshot_file_status"
     echo "tauri_mobile_renderer_parity_android_screenshot_file_reason=$android_screenshot_file_reason"
+    echo "tauri_mobile_renderer_parity_android_screenshot_actual_size_bytes=$android_screenshot_actual_size_bytes"
+    echo "tauri_mobile_renderer_parity_android_screenshot_width=$android_screenshot_width"
+    echo "tauri_mobile_renderer_parity_android_screenshot_height=$android_screenshot_height"
     echo "tauri_mobile_renderer_parity_android_screenshot_distinct_color_count=$android_screenshot_distinct_color_count"
     echo "tauri_mobile_renderer_parity_android_screenshot_distinct_color_min=$android_screenshot_distinct_color_min"
     echo "tauri_mobile_renderer_parity_android_screenshot_pixel_diversity_status=$android_screenshot_pixel_diversity_status"
