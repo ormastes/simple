@@ -115,6 +115,12 @@ context such as `CAMetalLayer`, and no render failure markers. On 2026-06-26
 this passed on iPhone 17 Pro with `ios_render_log_status=pass`,
 `ios_layout_status=pass`, and `ios_metal_log_status=pass`.
 
+The same wrapper persists normalized MDI proof rows in
+`build/tauri_ios_mobile_renderer/ios_mdi_proof.validation.env` and re-emits
+the validator-derived event/capture/performance/input-to-paint/animation rows.
+`ios_mdi_interaction_latency_status=pass` and
+`ios_mdi_input_to_paint_ms>0` are required for the mobile parity aggregate.
+
 ## 5. Architecture Notes
 
 ```

@@ -86,6 +86,12 @@ as supporting Vulkan evidence. Override `ANDROID_RENDERER_HWUI_RENDERER`,
 `ANDROID_EMULATOR_GPU_MODE`, or `ANDROID_RENDERER_GPU_LOG` when testing another
 device/emulator lane.
 
+The wrapper persists normalized MDI proof rows in
+`build/tauri_android_mobile_renderer/android_mdi_proof.validation.env` and
+re-emits the validator-derived event, capture, performance, input-to-paint, and
+animation rows. `android_mdi_interaction_latency_status=pass` and
+`android_mdi_input_to_paint_ms>0` are required by the mobile parity aggregate.
+
 On 2026-06-26 the arm64 runtime, APK packaging, and host Vulkan emulator lane
 passed:
 - `status=pass`

@@ -202,6 +202,9 @@ those fields prove MDI event routing, live viewport capture dimensions,
 `performance.now()` availability with a positive timing delta, a positive
 input-to-paint sample after routed MDI input, `requestAnimationFrame`
 availability with at least two animation frames, and CSS animation support.
+The direct iOS and Android wrappers also persist the raw normalized MDI
+validator output as `ios_mdi_proof.validation.env` and
+`android_mdi_proof.validation.env` before the aggregate consumes those rows.
 Evidence is written to
 `doc/09_report/tauri_mobile_renderer_parity_evidence_<date>.md`.
 
