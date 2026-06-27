@@ -206,6 +206,7 @@ function electronLiveSmokeProofScript() {
             var eventDispatchObservedType = '';
             var eventDispatchObservedDetail = '';
             var eventDispatchError = '';
+            var eventDispatchStartMs = null;
             function eventProbeHandler(event) {
                 eventDispatchCount += 1;
                 eventDispatchObservedType = event.type || '';
@@ -223,6 +224,7 @@ function electronLiveSmokeProofScript() {
                         eventProbe = document.createEvent('CustomEvent');
                         eventProbe.initCustomEvent(eventProbeType, false, false, { kind: eventProbeDetail });
                     }
+                    eventDispatchStartMs = performanceNowAvailable ? window.performance.now() : null;
                     document.dispatchEvent(eventProbe);
                 }
             } catch (eventProbeErr) {
@@ -245,6 +247,9 @@ function electronLiveSmokeProofScript() {
                 var runtimeVersions = window.simpleElectron && typeof window.simpleElectron.runtimeVersions === 'function'
                     ? window.simpleElectron.runtimeVersions()
                     : {};
+                var eventDispatchToPaintMs = performanceNowAvailable && eventDispatchStartMs !== null
+                    ? Math.max(0, window.performance.now() - eventDispatchStartMs)
+                    : null;
                 var proof = Object.assign({}, envelope, {
                     proof_source: 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript',
                     browser_engine: new RegExp('Chrome/|Chromium/').test(userAgent) ? 'chromium' : '',
@@ -264,6 +269,7 @@ function electronLiveSmokeProofScript() {
                     event_dispatch_type: eventDispatchObservedType,
                     event_dispatch_detail: eventDispatchObservedDetail,
                     event_dispatch_error: eventDispatchError,
+                    event_dispatch_to_paint_ms: eventDispatchToPaintMs,
                     blur_or_tolerance_used: false
                 });
                 animationProbe.remove();

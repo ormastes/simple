@@ -90,6 +90,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 - Renderer-side event dispatch proof must not carry a nonempty dispatch error;
   event counts, types, and details are not enough if the bridge recorded an
   event error.
+- Renderer-side event dispatch proof must include a live bounded
+  event-to-paint timing row.
 - The rendered text sample must include the live-smoke entry text and must not
   exceed the reported rendered text length.
 - Requested capture viewport dimensions must be explicit decimal integers; the
@@ -170,6 +172,7 @@ expect(evidence).to_contain("electron_live_smoke_event_dispatch_count=1")
 expect(evidence).to_contain("electron_live_smoke_event_dispatch_type=simple-electron-live-smoke-event")
 expect(evidence).to_contain("electron_live_smoke_event_dispatch_detail=live-smoke-input")
 expect(evidence).to_contain("electron_live_smoke_event_dispatch_error=")
+expect(evidence).to_contain("electron_live_smoke_event_dispatch_to_paint_ms=1.5")
 expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=false")
 ```
 
@@ -471,6 +474,8 @@ expect(css).to_contain("electron_live_smoke_validation_reason=missing-css-animat
 -  proof command
 -  proof command
 -  proof command
+-  proof command
+-  proof command
    - Expected: code equals `1`
 - Confirm Electron live smoke needs renderer event dispatch evidence
 
@@ -478,7 +483,7 @@ expect(css).to_contain("electron_live_smoke_validation_reason=missing-css-animat
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -493,7 +498,11 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/detail.json", "p.event_dispatch_detail=\"stale\"") +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/detail.json 1280 720 > " + root + "/detail.env; " +
     _proof_command(root + "/error.json", "p.event_dispatch_error=\"dispatch failed\"") +
-    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/error.json 1280 720 > " + root + "/error.env"
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/error.json 1280 720 > " + root + "/error.env; " +
+    _proof_command(root + "/paint-zero.json", "p.event_dispatch_to_paint_ms=0") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/paint-zero.json 1280 720 > " + root + "/paint-zero.env; " +
+    _proof_command(root + "/paint-slow.json", "p.event_dispatch_to_paint_ms=1001") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/paint-slow.json 1280 720 > " + root + "/paint-slow.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
@@ -502,6 +511,8 @@ val count = file_read(root + "/count.env")
 val type = file_read(root + "/type.env")
 val detail = file_read(root + "/detail.env")
 val error = file_read(root + "/error.env")
+val paint_zero = file_read(root + "/paint-zero.env")
+val paint_slow = file_read(root + "/paint-slow.env")
 step("Confirm Electron live smoke needs renderer event dispatch evidence")
 expect(available).to_contain("electron_live_smoke_validation_status=fail")
 expect(available).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch")
@@ -518,6 +529,10 @@ expect(error).to_contain("electron_live_smoke_event_dispatch_count=1")
 expect(error).to_contain("electron_live_smoke_event_dispatch_type=simple-electron-live-smoke-event")
 expect(error).to_contain("electron_live_smoke_event_dispatch_detail=live-smoke-input")
 expect(error).to_contain("electron_live_smoke_event_dispatch_error=dispatch failed")
+expect(paint_zero).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch-to-paint")
+expect(paint_zero).to_contain("electron_live_smoke_event_dispatch_to_paint_ms=0")
+expect(paint_slow).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch-to-paint")
+expect(paint_slow).to_contain("electron_live_smoke_event_dispatch_to_paint_ms=1001")
 ```
 
 </details>
@@ -637,7 +652,9 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/frames.json", "p.animation_frame_count=\"2\"") +
     " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/frames.json 1280 720 > " + root + "/frames.env; " +
     _proof_command(root + "/event.json", "p.event_dispatch_count=\"1\"") +
-    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/event.json 1280 720 > " + root + "/event.env"
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/event.json 1280 720 > " + root + "/event.env; " +
+    _proof_command(root + "/event-paint.json", "p.event_dispatch_to_paint_ms=\"1.5\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/event-paint.json 1280 720 > " + root + "/event-paint.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
@@ -647,6 +664,7 @@ val text = file_read(root + "/text.env")
 val perf = file_read(root + "/perf.env")
 val frames = file_read(root + "/frames.env")
 val event = file_read(root + "/event.env")
+val event_paint = file_read(root + "/event-paint.env")
 step("Confirm numeric-looking text is not accepted as live Chromium counters")
 expect(width).to_contain("electron_live_smoke_validation_status=fail")
 expect(width).to_contain("electron_live_smoke_validation_reason=unexpected-width")
@@ -672,6 +690,10 @@ expect(event).to_contain("electron_live_smoke_validation_status=fail")
 expect(event).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch")
 expect(event).to_contain("electron_live_smoke_event_dispatch_count=")
 expect(event.contains("electron_live_smoke_event_dispatch_count=1")).to_equal(false)
+expect(event_paint).to_contain("electron_live_smoke_validation_status=fail")
+expect(event_paint).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch-to-paint")
+expect(event_paint).to_contain("electron_live_smoke_event_dispatch_to_paint_ms=")
+expect(event_paint.contains("electron_live_smoke_event_dispatch_to_paint_ms=1.5")).to_equal(false)
 ```
 
 </details>
@@ -849,6 +871,7 @@ expect(wrapper).to_contain("electron_live_smoke_event_dispatch_count")
 expect(wrapper).to_contain("electron_live_smoke_event_dispatch_type")
 expect(wrapper).to_contain("electron_live_smoke_event_dispatch_detail")
 expect(wrapper).to_contain("electron_live_smoke_event_dispatch_error")
+expect(wrapper).to_contain("electron_live_smoke_event_dispatch_to_paint_ms")
 expect(wrapper).to_contain("electron_live_smoke_blur_or_tolerance_used")
 expect(package_json).to_contain("--simple-bin ${SIMPLE_BIN:-../../src/compiler_rust/target/debug/simple}")
 expect(package_json.contains("--simple-bin bin/simple")).to_equal(false)
@@ -864,6 +887,9 @@ expect(bridge).to_contain("animation_frame_count")
 expect(bridge).to_contain("css_animation_probe")
 expect(bridge).to_contain("event_dispatch_available")
 expect(bridge).to_contain("event_dispatch_count")
+expect(bridge).to_contain("event_dispatch_to_paint_ms")
+expect(bridge).to_contain("eventDispatchStartMs")
+expect(bridge).to_contain("eventDispatchToPaintMs")
 expect(bridge).to_contain("simple-electron-live-smoke-event")
 expect(bridge).to_contain("document.createEvent('CustomEvent')")
 expect(bridge).to_contain("new RegExp('Chrome/|Chromium/')")
@@ -928,6 +954,7 @@ expect(evidence).to_contain("electron_live_smoke_event_dispatch_count=")
 expect(evidence).to_contain("electron_live_smoke_event_dispatch_type=")
 expect(evidence).to_contain("electron_live_smoke_event_dispatch_detail=")
 expect(evidence).to_contain("electron_live_smoke_event_dispatch_error=")
+expect(evidence).to_contain("electron_live_smoke_event_dispatch_to_paint_ms=")
 expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=")
 ```
 

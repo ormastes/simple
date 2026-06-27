@@ -121,6 +121,7 @@ const expectedProofSource = 'src/app/ui.electron/bridge.js:electronLiveSmokeProo
 const proofSource = proofSourceArtifact(expectedProofSource);
 const userAgent = textSample(proof.electron_user_agent);
 const maxEventTimingMs = 1000;
+const maxEventDispatchToPaintMs = 1000;
 
 let reason = 'pass';
 if (proof.target !== 'electron') {
@@ -173,6 +174,11 @@ if (proof.target !== 'electron') {
   textSample(proof.event_dispatch_error).length > 0
 ) {
   reason = 'missing-event-dispatch';
+} else if (
+  !finiteNumberGreaterThan(proof.event_dispatch_to_paint_ms, 0) ||
+  !finiteNumberAtMost(proof.event_dispatch_to_paint_ms, maxEventDispatchToPaintMs)
+) {
+  reason = 'missing-event-dispatch-to-paint';
 } else if (proof.blur_or_tolerance_used !== false) {
   reason = 'blur-or-tolerance-not-allowed';
 }
@@ -206,6 +212,7 @@ emit('electron_live_smoke_event_dispatch_count', jsonIntegerTextOrBlank(proof.ev
 emit('electron_live_smoke_event_dispatch_type', proof.event_dispatch_type);
 emit('electron_live_smoke_event_dispatch_detail', proof.event_dispatch_detail);
 emit('electron_live_smoke_event_dispatch_error', proof.event_dispatch_error);
+emit('electron_live_smoke_event_dispatch_to_paint_ms', jsonNumberTextOrBlank(proof.event_dispatch_to_paint_ms));
 emit('electron_live_smoke_blur_or_tolerance_used', jsonBoolTextOrBlank(proof.blur_or_tolerance_used));
 
 if (reason !== 'pass') {
