@@ -27,7 +27,7 @@ electron_simple_web_engine2d_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -77,6 +77,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
   GPU compositing/rasterization feature-status diagnostics.
 - Large integer checksum values compare exactly, without JavaScript number
   rounding.
+- Checksum proof rows must match the recomputed captured ARGB artifact
+  checksum, not only each other.
 - Malformed `frame_us`, malformed mismatch counts, blur/tolerance use, missing
   ARGB capture, missing or empty captured ARGB files, missing capture provenance,
   missing viewport proof, and capture viewport mismatches are rejected.
@@ -125,7 +127,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -152,8 +154,8 @@ expect(evidence).to_contain("electron_simple_web_engine2d_chrome_process_version
 expect(evidence).to_contain("electron_simple_web_engine2d_gpu_compositing=disabled_software")
 expect(evidence).to_contain("electron_simple_web_engine2d_gpu_rasterization=disabled_software")
 expect(evidence).to_contain("electron_simple_web_engine2d_scene=simple-web-engine2d-image-taskbar-command")
-expect(evidence).to_contain("electron_simple_web_engine2d_simple_checksum=18446744073709551610")
-expect(evidence).to_contain("electron_simple_web_engine2d_electron_weighted_checksum=18446744073709551611")
+expect(evidence).to_contain("electron_simple_web_engine2d_simple_checksum=26388279060480")
+expect(evidence).to_contain("electron_simple_web_engine2d_electron_weighted_checksum=81077987413324800")
 expect(evidence).to_contain("electron_simple_web_engine2d_mismatch_count=0")
 expect(evidence).to_contain("electron_simple_web_engine2d_proof_iterations=5")
 expect(evidence).to_contain("electron_simple_web_engine2d_electron_frame_us=1250")
@@ -173,6 +175,8 @@ expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_width=96
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_height=64")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_pixel_count=6144")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_nonzero_pixel_count=6144")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_checksum=26388279060480")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_weighted_checksum=81077987413324800")
 ```
 
 </details>
@@ -832,9 +836,9 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val root = "build/test-electron-engine2d-validator-divergent"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-    _proof_command(root + "/checksum.json", "p.checksum=\"18446744073709551609\"") +
+    _proof_command(root + "/checksum.json", "p.checksum=\"26388279060479\"") +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/checksum.json > " + root + "/checksum.env; " +
-    _proof_command(root + "/weighted.json", "p.weighted_checksum=\"18446744073709551612\"") +
+    _proof_command(root + "/weighted.json", "p.weighted_checksum=\"81077987413324801\"") +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/weighted.json > " + root + "/weighted.env; " +
     _proof_command(root + "/pixel.json", "p.mismatch_count=4") +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/pixel.json > " + root + "/pixel.env"
@@ -852,12 +856,52 @@ expect(pixel).to_contain("electron_simple_web_engine2d_mismatch_count=4")
 
 </details>
 
+#### rejects checksum rows that do not match captured Engine2D ARGB
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm internally matching proof checksums must still match captured Engine2D ARGB
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-engine2d-validator-artifact-checksum"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/checksum.json", "const artifactPath=path.join(path.dirname(process.argv[1]),\"captured.json\");const artifact=JSON.parse(fs.readFileSync(artifactPath,\"utf8\"));artifact.pixels[0]=4294967294;fs.writeFileSync(artifactPath,JSON.stringify(artifact))") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/checksum.json > " + root + "/checksum.env; " +
+    _proof_command(root + "/weighted.json", "const artifactPath=path.join(path.dirname(process.argv[1]),\"captured.json\");const artifact={width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(1)};artifact.pixels[0]=2;artifact.pixels[1]=0;fs.writeFileSync(artifactPath,JSON.stringify(artifact));p.checksum=\"6144\";p.expected_checksum=\"6144\";p.weighted_checksum=\"18877440\";p.expected_weighted_checksum=\"18877440\"") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/weighted.json > " + root + "/weighted.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val checksum = file_read(root + "/checksum.env")
+val weighted = file_read(root + "/weighted.env")
+step("Confirm internally matching proof checksums must still match captured Engine2D ARGB")
+expect(checksum).to_contain("electron_simple_web_engine2d_validation_status=fail")
+expect(checksum).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-checksum-mismatch")
+expect(checksum).to_contain("electron_simple_web_engine2d_electron_checksum=26388279060480")
+expect(checksum).to_contain("electron_simple_web_engine2d_captured_argb_checksum=26388279060479")
+expect(weighted).to_contain("electron_simple_web_engine2d_validation_status=fail")
+expect(weighted).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-weighted-checksum-mismatch")
+expect(weighted).to_contain("electron_simple_web_engine2d_electron_weighted_checksum=18877440")
+expect(weighted).to_contain("electron_simple_web_engine2d_captured_argb_checksum=6144")
+expect(weighted).to_contain("electron_simple_web_engine2d_captured_argb_weighted_checksum=18877439")
+```
+
+</details>
+
 #### keeps the live Electron Engine2D wrapper wired to validator
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -883,6 +927,10 @@ expect(script).to_contain("electron_simple_web_engine2d_estimated_fps_floor")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_file_status")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_format")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_nonzero_pixel_count")
+expect(validator).to_contain("electron_simple_web_engine2d_captured_argb_checksum")
+expect(validator).to_contain("electron_simple_web_engine2d_captured_argb_weighted_checksum")
+expect(validator).to_contain("captured-argb-checksum-mismatch")
+expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("electron_simple_web_engine2d_proof_renderer")
 expect(script).to_contain("electron-proof.validation.env")
 expect(validator).to_contain("startsWith")
@@ -903,8 +951,8 @@ expect(fixture).to_contain("chrome_process_version")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
