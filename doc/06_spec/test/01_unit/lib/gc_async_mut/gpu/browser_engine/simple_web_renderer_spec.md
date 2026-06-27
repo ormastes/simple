@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 72 | 72 | 0 | 0 |
+| 73 | 73 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -397,6 +397,33 @@ expect(card.content_rect.width).to_equal(16)
 expect(card.content_rect.height).to_equal(11)
 expect(pixels[0]).to_equal(0xFF1D4ED8u32)
 expect(pixels[16]).to_equal(0xFFFFFFFFu32)
+```
+
+</details>
+
+#### maps logical inset offsets to physical absolute positioning
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}#panel{position:relative;background-color:#e5e7eb;width:40px;height:24px}#card{position:absolute;background-color:#1d4ed8;width:8px;height:6px;inset:1px 2px 3px 4px;inset-block:5px 6px;inset-inline:7px 8px;inset-block-start:9px;inset-inline-end:10px}</style></head><body><section id='panel'><div id='card'></div></section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 48, 32)
+val batch = composition.batches[0]
+val card = _draw_ir_command_by_id(batch.commands, "card")
+val pixels = simple_web_render_html_to_pixels(html, 48, 32)
+
+expect(_draw_ir_style_value(card, "left")).to_equal("7")
+expect(_draw_ir_style_value(card, "top")).to_equal("9")
+expect(_draw_ir_style_value(card, "right")).to_equal("10")
+expect(_draw_ir_style_value(card, "bottom")).to_equal("6")
+expect(card.x).to_equal(22)
+expect(card.y).to_equal(12)
+expect(pixels[598]).to_equal(0xFF1D4ED8u32)
+expect(pixels[597]).to_equal(0xFFE5E7EBu32)
 ```
 
 </details>
@@ -1618,8 +1645,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 72 |
-| Active scenarios | 72 |
+| Total scenarios | 73 |
+| Active scenarios | 73 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
