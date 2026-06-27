@@ -26,9 +26,9 @@ proof.
    a content hash of the retained perf wrapper, measured showcase source, and
    Simple Web renderer implementation, not a docs-only commit hash.
 4. Read the aggregate `evidence.env` rows before claiming a 4K or 8K pass:
-   source revision status, current source revision, binary path, native build
-   mode, fallback state, FPS, checksum, frame timing, and RSS status must all be
-   compatible with the claim.
+   source revision status, current source revision, source revision files,
+   binary path, native build mode, fallback state, FPS, checksum, frame timing,
+   and RSS status must all be compatible with the claim.
 
 ## Evidence Contract
 
@@ -71,9 +71,10 @@ The report summary must also expose `source_status` and `current_source` so a
 human reviewer can identify stale performance rows without opening the raw env
 file.
 
-The default source file list must include
-`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl` so
-renderer hardening changes invalidate stale retained 4K/8K perf evidence.
+The default source file list must include the Simple Web renderer, the retained
+8K showcase entrypoint, and the shared scroll/dirty-region render cores so
+renderer or retained 8K hardening changes invalidate stale retained 4K/8K perf
+evidence.
 
 Explicit producer artifact statuses are claims, not authority. When a retained
 row says `*_native_bin_file_status=pass`,
@@ -122,25 +123,37 @@ describe "GUI retained performance source freshness":
         expect(report).to_contain("`gui_showcase_8k_perf_status=pass`")
         expect(report).to_contain("`blocked_completion_gate_count=")
 
-    it "includes Simple Web renderer source in retained perf freshness fingerprints":
+    it "includes Simple Web and retained 8K render sources in perf freshness fingerprints":
         step("Read the producer and aggregate scripts")
         val producer = file_read("scripts/check/check-widget-showcase-4k-200fps.shs")
         val aggregate = file_read("scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
         val renderer_path = "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl"
+        val scroll_showcase_path = "examples/06_io/ui/showcase_8k_scroll_gui.spl"
+        val scroll_surface_path = "src/lib/common/ui/scroll_surface.spl"
+        val dirty_region_path = "src/lib/common/ui/dirty_region.spl"
 
-        step("Assert both defaults include the renderer implementation")
+        step("Assert both defaults include the renderer and retained 8K sources")
         expect(producer).to_contain(renderer_path)
         expect(aggregate).to_contain(renderer_path)
+        expect(producer).to_contain(scroll_showcase_path)
+        expect(aggregate).to_contain(scroll_showcase_path)
+        expect(producer).to_contain(scroll_surface_path)
+        expect(aggregate).to_contain(scroll_surface_path)
+        expect(producer).to_contain(dirty_region_path)
+        expect(aggregate).to_contain(dirty_region_path)
 
         step("Run the producer in plan-only mode to inspect emitted provenance")
         val command = "rm -rf build/test-gui-retained-perf-source-files && PLAN_ONLY=1 BUILD_DIR=build/test-gui-retained-perf-source-files sh scripts/check/check-widget-showcase-4k-200fps.shs"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
         expect(code).to_equal(0)
 
-        step("Assert the emitted source revision file list includes the renderer")
+        step("Assert the emitted source revision file list includes all retained render sources")
         val evidence = file_read("build/test-gui-retained-perf-source-files/status.env")
         expect(evidence).to_contain("gui_showcase_4k_200fps_source_revision_files=")
         expect(evidence).to_contain(renderer_path)
+        expect(evidence).to_contain(scroll_showcase_path)
+        expect(evidence).to_contain(scroll_surface_path)
+        expect(evidence).to_contain(dirty_region_path)
 
     it "rejects retained perf rows that point at missing native artifacts":
         step("Create a retained 4K performance row with missing native artifacts")
