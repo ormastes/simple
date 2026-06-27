@@ -113,9 +113,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 - Runtime failure markers in any requested device log fail the MDI proof even
   when the JSON counters otherwise prove render, event, capture, performance,
   and animation detail.
-- Passing MDI proof emits the exact marker source path and byte size so mobile
-  event/capture/performance/animation evidence is bound to a concrete log
-  artifact.
+- Passing MDI proof emits the exact marker source path, recorded byte size,
+  actual byte size, and file status so mobile event/capture/performance/
+  animation evidence is bound to a concrete log artifact.
 - Unsupported platform prefixes fail closed with neutral diagnostics instead
   of minting misleading `ios_mdi_*` or `android_mdi_*` evidence rows.
 
@@ -157,6 +157,9 @@ expect(evidence).to_contain("ios_mdi_proof_hardlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_marker_source_path=" + root + "/device.log")
 expect(evidence).to_contain("ios_mdi_proof_marker_source_size_bytes=656")
+expect(evidence).to_contain("ios_mdi_proof_marker_source_actual_size_bytes=656")
+expect(evidence).to_contain("ios_mdi_proof_marker_source_file_status=pass")
+expect(evidence).to_contain("ios_mdi_proof_marker_source_file_reason=pass")
 expect(evidence).to_contain("ios_mdi_proof_window_count=4")
 expect(evidence).to_contain("ios_mdi_render_status=pass")
 expect(evidence).to_contain("ios_mdi_render_image_count=1")
@@ -1371,6 +1374,9 @@ expect(ios).to_contain("ios_mdi_proof_nonregular_source_count")
 expect(ios).to_contain("ios_mdi_proof_marker_source_count")
 expect(ios).to_contain("ios_mdi_proof_marker_source_path")
 expect(ios).to_contain("ios_mdi_proof_marker_source_size_bytes")
+expect(ios).to_contain("ios_mdi_proof_marker_source_actual_size_bytes")
+expect(ios).to_contain("ios_mdi_proof_marker_source_file_status")
+expect(ios).to_contain("ios_mdi_proof_marker_source_file_reason")
 expect(android).to_contain("android_mdi_proof_empty_source_count")
 expect(android).to_contain("android_mdi_proof_symlink_source_count")
 expect(android).to_contain("android_mdi_proof_hardlink_source_count")
@@ -1379,6 +1385,9 @@ expect(android).to_contain("android_mdi_proof_nonregular_source_count")
 expect(android).to_contain("android_mdi_proof_marker_source_count")
 expect(android).to_contain("android_mdi_proof_marker_source_path")
 expect(android).to_contain("android_mdi_proof_marker_source_size_bytes")
+expect(android).to_contain("android_mdi_proof_marker_source_actual_size_bytes")
+expect(android).to_contain("android_mdi_proof_marker_source_file_status")
+expect(android).to_contain("android_mdi_proof_marker_source_file_reason")
 expect(ios).to_contain("ios_mdi_capture_device_pixel_ratio")
 expect(android).to_contain("android_mdi_capture_device_pixel_ratio")
 expect(shell).to_contain("devicePixelRatio")

@@ -97,6 +97,9 @@ let proofMarkerParseError = "";
 let failureMarker = false;
 let proofMarkerSourcePath = "";
 let proofMarkerSourceSizeBytes = "";
+let proofMarkerSourceActualSizeBytes = "";
+let proofMarkerSourceFileStatus = "unavailable";
+let proofMarkerSourceFileReason = "not-run";
 const sourceFileIdentities = new Set();
 const failureMarkerPattern =
   /(eval FAIL|inline shell eval FAIL|delayed inline shell eval FAIL|Fatal signal|F\/DEBUG|F\/libc|NSURLErrorDomain|failed provisional load|Headless UI completed|subprocess exited with code|Simple subprocess stdout closed before a valid render arrived|parse error|Requested GL implementation .* not found|Exiting GPU process due to errors during initialization)/i;
@@ -159,6 +162,11 @@ for (const file of files) {
   if (matches.length > 0) {
     const sourceLastJson = matches[matches.length - 1][1];
     proofMarkerSourceCount += 1;
+    proofMarkerSourcePath = file;
+    proofMarkerSourceSizeBytes = String(stat.size);
+    proofMarkerSourceActualSizeBytes = String(stat.size);
+    proofMarkerSourceFileStatus = "pass";
+    proofMarkerSourceFileReason = "pass";
     try {
       const normalized = JSON.stringify(JSON.parse(sourceLastJson));
       if (canonicalProofJson && canonicalProofJson !== normalized) {
@@ -167,8 +175,6 @@ for (const file of files) {
         canonicalProofJson = normalized;
       }
       lastJson = sourceLastJson;
-      proofMarkerSourcePath = file;
-      proofMarkerSourceSizeBytes = String(stat.size);
     } catch (err) {
       if (!proofMarkerParseError) {
         proofMarkerParseError = String(err && err.message ? err.message : err);
@@ -193,6 +199,9 @@ function emitSourceRows() {
   emit("mdi_proof_nonregular_source_count", nonregularSourceCount);
   emit("mdi_proof_marker_source_path", proofMarkerSourcePath);
   emit("mdi_proof_marker_source_size_bytes", proofMarkerSourceSizeBytes);
+  emit("mdi_proof_marker_source_actual_size_bytes", proofMarkerSourceActualSizeBytes);
+  emit("mdi_proof_marker_source_file_status", proofMarkerSourceFileStatus);
+  emit("mdi_proof_marker_source_file_reason", proofMarkerSourceFileReason);
 }
 
 if (missingSourceCount > 0) {
