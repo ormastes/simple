@@ -27,7 +27,7 @@ tauri_mobile_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,6 +74,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
   `{prefix}_mdi_*` rows.
 - Explicitly requested mobile MDI proof source paths must exist; a valid
   companion device log cannot hide a missing requested source artifact.
+- The extracted proof JSON output path must not overlap any requested device
+  log source path, so validation cannot overwrite the source evidence it just
+  consumed.
 - `performanceNowAvailable=true` is not enough: the proof must include an
   explicit finite positive `performanceNowDeltaMs` from distinct samples.
 - Mobile interaction latency must include an explicit positive
@@ -189,6 +192,41 @@ expect(evidence).to_contain("ios_mdi_proof_reason=missing-mdi-proof-source")
 expect(evidence).to_contain("ios_mdi_proof_requested_source_count=2")
 expect(evidence).to_contain("ios_mdi_proof_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=1")
+```
+
+</details>
+
+#### rejects proof JSON output paths that overlap requested mobile MDI logs
+
+-  proof log command
+   - Expected: code equals `1`
+- Confirm extracted proof JSON cannot overwrite its source device log
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-overlap-output"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_log_command(root + "/device.log", "") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/device.log " + root + "/device.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+val device_log = file_read(root + "/device.log")
+step("Confirm extracted proof JSON cannot overwrite its source device log")
+expect(evidence).to_contain("ios_mdi_proof_status=fail")
+expect(evidence).to_contain("ios_mdi_proof_reason=mdi-proof-json-path-overlaps-source")
+expect(evidence).to_contain("ios_mdi_proof_json=" + root + "/device.log")
+expect(evidence).to_contain("ios_mdi_proof_requested_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
+expect(device_log).to_contain("[tauri-shell] mdi proof:")
 ```
 
 </details>
@@ -691,8 +729,8 @@ expect(evidence).to_contain("ios_mdi_animation_status=pass")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

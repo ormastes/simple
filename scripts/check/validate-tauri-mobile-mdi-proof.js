@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const fs = require("fs");
+const path = require("path");
 
 const [prefix, jsonPath, ...files] = process.argv.slice(2);
 
@@ -82,6 +83,10 @@ for (const file of files) {
   }
 }
 
+function sameResolvedPath(left, right) {
+  return path.resolve(left) === path.resolve(right);
+}
+
 function emitSourceRows() {
   emit("mdi_proof_requested_source_count", requestedSourceCount);
   emit("mdi_proof_source_count", sourceCount);
@@ -92,6 +97,14 @@ if (missingSourceCount > 0) {
   emit("mdi_proof_json", jsonPath);
   emit("mdi_proof_status", "fail");
   emit("mdi_proof_reason", "missing-mdi-proof-source");
+  emitSourceRows();
+  process.exit(1);
+}
+
+if (files.some((file) => sameResolvedPath(jsonPath, file))) {
+  emit("mdi_proof_json", jsonPath);
+  emit("mdi_proof_status", "fail");
+  emit("mdi_proof_reason", "mdi-proof-json-path-overlaps-source");
   emitSourceRows();
   process.exit(1);
 }
