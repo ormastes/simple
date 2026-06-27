@@ -322,6 +322,12 @@ superseded/merged routing headers. Future cleanup may still classify deeper
 historical plan docs, but agents should no longer treat those two June 14
 matrix/handoff files as the active top-level plan.
 
+WO-9 follow-up, 2026-06-27: the queue/readback Spark packet, the 2026-06-26
+GUI RenderDoc feature-coverage snapshot, and the GUI/web/2D Vulkan RenderDoc
+bug tracker now explicitly distinguish historical RenderDoc availability from
+current host proof. Agents must use fresh `--check` discovery and `.rdc` magic,
+not stale `ready` rows, for current completion claims.
+
 WO-5 status: refreshed non-RenderDoc Linux evidence is passing in
 `doc/09_report/gui_web_2d_linux_vulkan_refresh_2026-06-27.md`. A fresh
 RenderDoc host check is recorded in

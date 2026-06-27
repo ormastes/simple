@@ -23,11 +23,13 @@ Current routing update, 2026-06-27:
 - Retained 4K/8K showcase performance is now tracked as a dedicated lane in the
   2026-06-27 parallel plan, not in this queue/readback packet.
 
-Historical status: current local focused specs pass, and the production wrapper now reports
-the platform matrix explicitly as partial unless Metal/ROCm/DirectX/WebGPU
-same-frame device-readback proof is present. WebGPU `surface_upload` is
-provenance-only and WebGPU real device readback is currently unavailable. The
-Linux joined GUI/web frame proof is Vulkan-backed; CUDA/OpenCL are child
+Historical status: current local focused specs passed when this packet was
+written, and the production wrapper reported the platform matrix explicitly as
+partial unless Metal/ROCm/DirectX/WebGPU same-frame device-readback proof was
+present. Treat the rows below as last-known historical routing notes, not as a
+prediction that a fresh run will pass. WebGPU `surface_upload` is
+provenance-only and WebGPU real device readback was unavailable in that slice.
+The Linux joined GUI/web frame proof was Vulkan-backed; CUDA/OpenCL were child
 backend readback fixtures. Synthetic handles remain isolated probe evidence.
 
 ## Context
@@ -35,7 +37,10 @@ backend readback fixtures. Synthetic handles remain isolated probe evidence.
 - This lane owns the final chain from 2D draw scheduling -> host/GPU queue emit/drain ->
   BrowserBackend frame evidence -> same-frame GPU readback receipt.
 - Canonical source of truth: `sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`.
-- Latest report (`doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md`) is expected to pass on this Linux host when regenerated:
+- Latest report at the time of this packet
+  (`doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md`)
+  was the last-known evidence source. Regenerate the wrapper before reuse; do
+  not treat these historical rows as an expected current pass:
   `browser_frame_queue_status=pass`, `same_frame_gpu_backend_readback_status=pass`,
   `readback_vulkan_verdict=pass`, `readback_cuda_verdict=pass`,
   `readback_opencl_verdict=pass`,

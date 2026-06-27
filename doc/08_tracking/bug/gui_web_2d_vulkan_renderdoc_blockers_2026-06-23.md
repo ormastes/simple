@@ -43,6 +43,15 @@ Aggregate evidence may report compatibility check commands such as
 
 ## Current Linux Simple Capture State
 
+Current routing note, 2026-06-27: the passing 2026-06-26 Simple capture rows
+below are historical evidence from a host/session where RenderDoc resolved.
+Fresh host discovery for the active Linux lane is recorded in
+`doc/09_report/gui_web_2d_linux_renderdoc_host_blocker_2026-06-27.md` and
+currently reports `missing-renderdoccmd-in-search-paths`. Do not reuse the
+historical `qrenderdoc` or `renderdoccmd` availability as current proof; rerun
+the canonical capture entrypoints on a prepared host with `renderdoccmd`
+available on `PATH` or under `RDOC_HOME`.
+
 2026-06-26 focused passing evidence:
 `build/gui-web-2d-vulkan-env-renderdoc-simple-explicit-layer-owner-env/renderdoc/simple/evidence.env`.
 

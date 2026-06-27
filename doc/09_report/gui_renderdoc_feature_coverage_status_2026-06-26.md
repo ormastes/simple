@@ -1,5 +1,15 @@
 # GUI RenderDoc Feature Coverage Status
 
+Historical evidence snapshot: this 2026-06-26 report preserves the state of the
+aggregate inputs from that run. Do not use the `GUI/web/2D Vulkan RenderDoc:
+ready` row below as current host proof. Fresh 2026-06-27 host discovery in
+`doc/09_report/gui_web_2d_linux_renderdoc_host_blocker_2026-06-27.md` reports
+`missing-renderdoccmd-in-search-paths`, while
+`doc/09_report/gui_web_2d_linux_vulkan_refresh_2026-06-27.md` is the current
+baseline for browser backing, ARGB parity, Web WM evidence, and 4K/8K retained
+performance. Current completion still requires real `.rdc` artifacts with
+`RDOC` magic for the Chrome/Electron/Simple lanes named by the active plan.
+
 - status: incomplete
 - reason: missing-electron-widget-renderdoc
 - widget HTML renderer dispatch: 43/43
