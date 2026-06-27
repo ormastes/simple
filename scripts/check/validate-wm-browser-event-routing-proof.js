@@ -91,18 +91,23 @@ function proofSourceArtifact() {
   try {
     stat = fs.lstatSync(expectedProofSource);
   } catch (_err) {
-    return { status: 'missing', size: '' };
+    return { status: 'missing', size: '', actualSize: '' };
   }
-  if (stat.isSymbolicLink()) return { status: 'symlink', size: '' };
-  if (!stat.isFile()) return { status: 'not-regular', size: '' };
-  if (stat.nlink > 1) return { status: 'hardlink', size: String(stat.size) };
-  if (stat.size <= 0) return { status: 'empty', size: '0' };
-  let source = '';
+  if (stat.isSymbolicLink()) return { status: 'symlink', size: '', actualSize: '' };
+  if (!stat.isFile()) return { status: 'not-regular', size: '', actualSize: '' };
+  if (stat.nlink > 1) return { status: 'hardlink', size: String(stat.size), actualSize: '' };
+  if (stat.size <= 0) return { status: 'empty', size: '0', actualSize: '' };
+  let bytes;
   try {
-    source = fs.readFileSync(expectedProofSource, 'utf8');
+    bytes = fs.readFileSync(expectedProofSource);
   } catch (_err) {
-    return { status: 'missing', size: '' };
+    return { status: 'missing', size: '', actualSize: '' };
   }
+  const actualSize = String(bytes.length);
+  if (actualSize !== String(stat.size)) {
+    return { status: 'size-mismatch', size: String(stat.size), actualSize };
+  }
+  const source = bytes.toString('utf8');
   if (
     !source.includes("surface_id: 'wm-browser-event-routing'") ||
     !source.includes("proof_source: 'tools/web-render-backend/wm_event_check.js'") ||
@@ -110,9 +115,9 @@ function proofSourceArtifact() {
     !source.includes("out.input_to_paint_ms = inputToPaintMs") ||
     !source.includes("out.css_animation_probe = animationProbeStyle.animationName === 'simple-wm-proof-pulse'")
   ) {
-    return { status: 'marker-missing', size: String(stat.size) };
+    return { status: 'marker-missing', size: String(stat.size), actualSize };
   }
-  return { status: 'pass', size: String(stat.size) };
+  return { status: 'pass', size: String(stat.size), actualSize };
 }
 
 function eventSequenceText(value) {
@@ -183,6 +188,7 @@ const rows = {
   proof_source: proof.proof_source,
   proof_source_file_status: proofSource.status,
   proof_source_size_bytes: proofSource.size,
+  proof_source_actual_size_bytes: proofSource.actualSize,
   browser_engine: proof.browser_engine,
   electron_user_agent: proof.electron_user_agent,
   electron_process_version: proof.electron_process_version,

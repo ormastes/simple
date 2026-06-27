@@ -103,6 +103,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
   producer source file with expected event, timing, and animation markers so
   stale JSON cannot be paired with a missing, substituted, or aliased
   event-check script.
+- The proof source validator must report both the expected producer `lstat`
+  size and the actual bytes read from that producer, and fail closed if those
+  sizes diverge.
 - The proof must carry live Electron/Chromium runtime identity, including browser
   engine, Electron user-agent, Electron process version, and Chrome process
   version.
@@ -147,6 +150,7 @@ expect(evidence).to_contain("wm_browser_event_routing_surface_id=wm-browser-even
 expect(evidence).to_contain("wm_browser_event_routing_proof_source=tools/web-render-backend/wm_event_check.js")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source_file_status=pass")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source_size_bytes=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_actual_size_bytes=")
 expect(evidence).to_contain("wm_browser_event_routing_browser_engine=chromium")
 expect(evidence).to_contain("wm_browser_event_routing_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36")
 expect(evidence).to_contain("wm_browser_event_routing_electron_process_version=42.5.0")
@@ -315,6 +319,7 @@ expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-ro
 expect(evidence).to_contain("wm_browser_event_routing_proof_source=tools/web-render-backend/wm_event_check.js")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source_file_status=missing")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source_size_bytes=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_actual_size_bytes=")
 ```
 
 </details>
@@ -944,6 +949,7 @@ expect(script).to_contain("proof-json-hardlink-status-not-pass")
 expect(script).to_contain("wm_browser_event_routing_target")
 expect(script).to_contain("wm_browser_event_routing_surface_id")
 expect(script).to_contain("wm_browser_event_routing_proof_source")
+expect(script).to_contain("wm_browser_event_routing_proof_source_actual_size_bytes")
 expect(script).to_contain("wm_browser_event_routing_browser_engine")
 expect(script).to_contain("wm_browser_event_routing_electron_user_agent")
 expect(script).to_contain("wm_browser_event_routing_electron_process_version")
@@ -956,6 +962,7 @@ expect(script).to_contain("wm_browser_event_routing_title_input_width_px")
 expect(script).to_contain("wm_browser_event_routing_close_button_background")
 expect(validator).to_contain("proof-json-hardlink")
 expect(validator).to_contain("event-routing-proof-source-marker-missing")
+expect(validator).to_contain("event-routing-proof-source-size-mismatch")
 expect(validator).to_contain("out.input_to_paint_ms = inputToPaintMs")
 val producer = file_read("tools/web-render-backend/wm_event_check.js")
 expect(producer).to_contain("target: 'electron'")
@@ -1001,6 +1008,7 @@ expect(evidence).to_contain("wm_browser_event_routing_surface_id=")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source=")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source_file_status=")
 expect(evidence).to_contain("wm_browser_event_routing_proof_source_size_bytes=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_actual_size_bytes=")
 expect(evidence).to_contain("wm_browser_event_routing_browser_engine=")
 expect(evidence).to_contain("wm_browser_event_routing_electron_user_agent=")
 expect(evidence).to_contain("wm_browser_event_routing_electron_process_version=")
