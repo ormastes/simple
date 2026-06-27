@@ -90,6 +90,7 @@ function pathInfo(filePath) {
   return {
     lstat,
     isSymlink: lstat !== null && lstat.isSymbolicLink(),
+    hasMultipleLinks: lstat !== null && lstat.isFile() && lstat.nlink > 1,
   };
 }
 
@@ -121,7 +122,7 @@ function artifactStat(value, proofPath) {
     try {
       const lstat = fs.lstatSync(candidate);
       if (lstat.isSymbolicLink()) {
-        return { stat: null, path: resolvedCandidate, symlink: true };
+        return { stat: null, path: resolvedCandidate, symlink: true, hardlink: false };
       }
       const realCandidate = fs.realpathSync(candidate);
       if (
@@ -132,7 +133,7 @@ function artifactStat(value, proofPath) {
       }
       const stat = fs.statSync(realCandidate);
       if (stat.isFile()) {
-        return { stat, path: realCandidate, symlink: false };
+        return { stat, path: realCandidate, symlink: false, hardlink: stat.nlink > 1 };
       }
     } catch (_err) {
       // Try the next candidate.
@@ -142,7 +143,7 @@ function artifactStat(value, proofPath) {
 }
 
 function readJsonArtifact(artifact) {
-  if (!artifact || artifact.symlink) return { ok: false, value: null };
+  if (!artifact || artifact.symlink || artifact.hardlink) return { ok: false, value: null };
   try {
     return { ok: true, value: JSON.parse(fs.readFileSync(artifact.path, 'utf8')) };
   } catch (_err) {
@@ -153,12 +154,18 @@ function readJsonArtifact(artifact) {
 function artifactFileStatus(artifact) {
   if (artifact === null) return 'missing';
   if (artifact.symlink) return 'symlink';
+  if (artifact.hardlink) return 'hardlink';
   return artifact.stat.size <= 0 ? 'empty' : 'pass';
 }
 
 function artifactSymlinkStatus(artifact) {
   if (artifact === null) return 'missing';
   return artifact.symlink ? 'fail' : 'pass';
+}
+
+function artifactHardlinkStatus(artifact) {
+  if (artifact === null) return 'missing';
+  return artifact.hardlink ? 'fail' : 'pass';
 }
 
 function pixelCountMatches(pixels, width, height) {
@@ -234,6 +241,19 @@ if (proofInfo.isSymlink) {
   emit('electron_simple_web_engine2d_validation_status', 'fail');
   emit('electron_simple_web_engine2d_validation_reason', 'proof-json-symlink');
   emit('electron_simple_web_engine2d_proof_symlink_status', 'fail');
+  emit('electron_simple_web_engine2d_proof_hardlink_status', 'unknown');
+  emit('electron_simple_web_engine2d_captured_argb_symlink_status', '');
+  emit('electron_simple_web_engine2d_captured_argb_hardlink_status', '');
+  process.exit(1);
+}
+
+if (proofInfo.hasMultipleLinks) {
+  emit('electron_simple_web_engine2d_validation_status', 'fail');
+  emit('electron_simple_web_engine2d_validation_reason', 'proof-json-hardlink');
+  emit('electron_simple_web_engine2d_proof_symlink_status', 'pass');
+  emit('electron_simple_web_engine2d_proof_hardlink_status', 'fail');
+  emit('electron_simple_web_engine2d_captured_argb_symlink_status', '');
+  emit('electron_simple_web_engine2d_captured_argb_hardlink_status', '');
   process.exit(1);
 }
 
@@ -243,6 +263,10 @@ try {
 } catch (err) {
   emit('electron_simple_web_engine2d_validation_status', 'fail');
   emit('electron_simple_web_engine2d_validation_reason', `invalid-json:${err && err.message ? err.message : err}`);
+  emit('electron_simple_web_engine2d_proof_symlink_status', proofInfo.lstat ? 'pass' : '');
+  emit('electron_simple_web_engine2d_proof_hardlink_status', proofInfo.lstat ? 'pass' : '');
+  emit('electron_simple_web_engine2d_captured_argb_symlink_status', '');
+  emit('electron_simple_web_engine2d_captured_argb_hardlink_status', '');
   process.exit(1);
 }
 
@@ -330,6 +354,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-captured-argb';
 } else if (capturedArgbStat !== null && capturedArgbStat.symlink) {
   reason = 'captured-argb-symlink';
+} else if (capturedArgbStat !== null && capturedArgbStat.hardlink) {
+  reason = 'captured-argb-hardlink';
 } else if (capturedArgbStat === null) {
   reason = 'missing-captured-argb-file';
 } else if (capturedArgbStat.stat.size <= 0) {
@@ -361,6 +387,7 @@ if (proof.blur_or_tolerance_used !== false) {
 emit('electron_simple_web_engine2d_validation_status', reason === 'pass' ? 'pass' : 'fail');
 emit('electron_simple_web_engine2d_validation_reason', reason);
 emit('electron_simple_web_engine2d_proof_symlink_status', proofInfo.isSymlink ? 'fail' : 'pass');
+emit('electron_simple_web_engine2d_proof_hardlink_status', proofInfo.hasMultipleLinks ? 'fail' : 'pass');
 emit('electron_simple_web_engine2d_renderer', proof.renderer);
 emit('electron_simple_web_engine2d_proof_source', proof.proof_source);
 emit('electron_simple_web_engine2d_proof_source_file_status', proofSourceFileStatus);
@@ -392,7 +419,8 @@ emit('electron_simple_web_engine2d_captured_argb_path', proof.captured_argb_path
 emit('electron_simple_web_engine2d_captured_argb_written', jsonBoolTextOrBlank(proof.captured_argb_written));
 emit('electron_simple_web_engine2d_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
 emit('electron_simple_web_engine2d_captured_argb_symlink_status', artifactSymlinkStatus(capturedArgbStat));
-emit('electron_simple_web_engine2d_captured_argb_size_bytes', capturedArgbStat === null || capturedArgbStat.symlink ? '' : String(capturedArgbStat.stat.size));
+emit('electron_simple_web_engine2d_captured_argb_hardlink_status', artifactHardlinkStatus(capturedArgbStat));
+emit('electron_simple_web_engine2d_captured_argb_size_bytes', capturedArgbStat === null || capturedArgbStat.symlink || capturedArgbStat.hardlink ? '' : String(capturedArgbStat.stat.size));
 emit('electron_simple_web_engine2d_captured_argb_format', capturedArgb.format);
 emit('electron_simple_web_engine2d_captured_argb_producer', capturedArgb.producer);
 emit('electron_simple_web_engine2d_captured_argb_width', jsonIntegerTextOrBlank(capturedArgb.width));

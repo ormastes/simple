@@ -27,7 +27,7 @@ electron_simple_web_engine2d_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -111,11 +111,11 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
 - The proof source marker must resolve to a regular nonempty exact fixture
   producer source file so stale JSON cannot be paired with a missing Electron
   capture script.
-- The proof JSON and captured ARGB artifact must be regular files, not
-  symlinks to mutable or substituted evidence.
-- The live Electron wrapper must promote and require proof symlink status,
-  proof source file status/size, and captured ARGB symlink status before
-  claiming pass.
+- The proof JSON and captured ARGB artifact must be single regular files, not
+  symlinks or hardlinks to mutable or substituted evidence.
+- The live Electron wrapper must promote and require proof symlink/hardlink
+  status, proof source file status/size, and captured ARGB symlink/hardlink
+  status before claiming pass.
 - The live Electron wrapper consumes the validator instead of raw shell JSON
   parsing or shell integer timing checks.
 
@@ -149,6 +149,7 @@ step("Inspect normalized Electron Engine2D proof rows")
 expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_proof_symlink_status=pass")
+expect(evidence).to_contain("electron_simple_web_engine2d_proof_hardlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_renderer=electron-live-capture-page")
 expect(evidence).to_contain("electron_simple_web_engine2d_proof_source=tools/electron-live-bitmap/exact_fixture.js")
 expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_file_status=pass")
@@ -177,6 +178,7 @@ expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_path=cap
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_written=true")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_file_status=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_symlink_status=pass")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_hardlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_format=argb-u32")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_producer=electron-live-capture-page")
 expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_width=96")
@@ -387,7 +389,7 @@ val iterations = file_read(root + "/iterations.env")
 expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=missing-electron-timing")
 expect(evidence).to_contain("electron_simple_web_engine2d_electron_frame_us=")
-expect(evidence.contains("electron_simple_web_engine2d_electron_frame_us=not-a-number")).to_equal(false)
+expect_not(evidence.contains("electron_simple_web_engine2d_electron_frame_us=not-a-number"))
 expect(iterations).to_contain("electron_simple_web_engine2d_validation_reason=missing-performance-iterations")
 expect(iterations).to_contain("electron_simple_web_engine2d_proof_iterations=1")
 ```
@@ -590,11 +592,58 @@ step("Confirm Electron Engine2D evidence cannot be substituted through symlinks"
 expect(proof).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(proof).to_contain("electron_simple_web_engine2d_validation_reason=proof-json-symlink")
 expect(proof).to_contain("electron_simple_web_engine2d_proof_symlink_status=fail")
+expect(proof).to_contain("electron_simple_web_engine2d_proof_hardlink_status=unknown")
 expect(argb).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(argb).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-symlink")
 expect(argb).to_contain("electron_simple_web_engine2d_proof_symlink_status=pass")
+expect(argb).to_contain("electron_simple_web_engine2d_proof_hardlink_status=pass")
 expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_file_status=symlink")
 expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_symlink_status=fail")
+expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_hardlink_status=pass")
+```
+
+</details>
+
+#### rejects hardlinked Electron Engine2D proof and ARGB artifact files
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Electron Engine2D evidence cannot be substituted through hardlinks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-engine2d-validator-hardlinks"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof-real.json", "") +
+    " && ln " + root + "/proof-real.json " + root + "/proof.json" +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/proof.env; " +
+    _proof_command(root + "/argb.json", "fs.renameSync(path.join(dir,\"captured.json\"),path.join(dir,\"captured-real.json\"));fs.linkSync(path.join(dir,\"captured-real.json\"),path.join(dir,\"captured.json\"))") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/argb.json > " + root + "/argb.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val proof = file_read(root + "/proof.env")
+val argb = file_read(root + "/argb.env")
+step("Confirm Electron Engine2D evidence cannot be substituted through hardlinks")
+expect(proof).to_contain("electron_simple_web_engine2d_validation_status=fail")
+expect(proof).to_contain("electron_simple_web_engine2d_validation_reason=proof-json-hardlink")
+expect(proof).to_contain("electron_simple_web_engine2d_proof_symlink_status=pass")
+expect(proof).to_contain("electron_simple_web_engine2d_proof_hardlink_status=fail")
+expect(argb).to_contain("electron_simple_web_engine2d_validation_status=fail")
+expect(argb).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-hardlink")
+expect(argb).to_contain("electron_simple_web_engine2d_proof_symlink_status=pass")
+expect(argb).to_contain("electron_simple_web_engine2d_proof_hardlink_status=pass")
+expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_file_status=hardlink")
+expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_symlink_status=pass")
+expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_hardlink_status=fail")
+expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=")
 ```
 
 </details>
@@ -741,23 +790,23 @@ step("Confirm live Electron Engine2D numeric proof cannot be stringified")
 expect(requested).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(requested).to_contain("electron_simple_web_engine2d_validation_reason=missing-viewport-proof")
 expect(requested).to_contain("electron_simple_web_engine2d_requested_height=")
-expect(requested.contains("electron_simple_web_engine2d_requested_height=64")).to_equal(false)
+expect_not(requested.contains("electron_simple_web_engine2d_requested_height=64"))
 expect(argb).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(argb).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-viewport-mismatch")
 expect(argb).to_contain("electron_simple_web_engine2d_captured_argb_height=")
-expect(argb.contains("electron_simple_web_engine2d_captured_argb_height=64")).to_equal(false)
+expect_not(argb.contains("electron_simple_web_engine2d_captured_argb_height=64"))
 expect(native).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(native).to_contain("electron_simple_web_engine2d_validation_reason=missing-capture-provenance")
 expect(native).to_contain("electron_simple_web_engine2d_capture_native_height=")
-expect(native.contains("electron_simple_web_engine2d_capture_native_height=64")).to_equal(false)
+expect_not(native.contains("electron_simple_web_engine2d_capture_native_height=64"))
 expect(iterations).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(iterations).to_contain("electron_simple_web_engine2d_validation_reason=missing-performance-iterations")
 expect(iterations).to_contain("electron_simple_web_engine2d_proof_iterations=")
-expect(iterations.contains("electron_simple_web_engine2d_proof_iterations=5")).to_equal(false)
+expect_not(iterations.contains("electron_simple_web_engine2d_proof_iterations=5"))
 expect(timing).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(timing).to_contain("electron_simple_web_engine2d_validation_reason=missing-electron-timing")
 expect(timing).to_contain("electron_simple_web_engine2d_electron_frame_us=")
-expect(timing.contains("electron_simple_web_engine2d_electron_frame_us=1250")).to_equal(false)
+expect_not(timing.contains("electron_simple_web_engine2d_electron_frame_us=1250"))
 ```
 
 </details>
@@ -800,16 +849,16 @@ step("Confirm string booleans remain malformed Electron Engine2D diagnostics")
 expect(capture).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(capture).to_contain("electron_simple_web_engine2d_validation_reason=missing-captured-argb")
 expect(capture).to_contain("electron_simple_web_engine2d_captured_argb_written=")
-expect(capture.contains("electron_simple_web_engine2d_captured_argb_written=true")).to_equal(false)
-expect(capture.contains("electron_simple_web_engine2d_captured_argb_written=false")).to_equal(false)
+expect_not(capture.contains("electron_simple_web_engine2d_captured_argb_written=true"))
+expect_not(capture.contains("electron_simple_web_engine2d_captured_argb_written=false"))
 expect(downsampled).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(downsampled).to_contain("electron_simple_web_engine2d_validation_reason=missing-capture-provenance")
 expect(downsampled).to_contain("electron_simple_web_engine2d_capture_downsampled=")
-expect(downsampled.contains("electron_simple_web_engine2d_capture_downsampled=false")).to_equal(false)
+expect_not(downsampled.contains("electron_simple_web_engine2d_capture_downsampled=false"))
 expect(blur).to_contain("electron_simple_web_engine2d_validation_status=fail")
 expect(blur).to_contain("electron_simple_web_engine2d_validation_reason=blur-or-tolerance-not-allowed")
 expect(blur).to_contain("electron_simple_web_engine2d_blur_or_tolerance_used=")
-expect(blur.contains("electron_simple_web_engine2d_blur_or_tolerance_used=false")).to_equal(false)
+expect_not(blur.contains("electron_simple_web_engine2d_blur_or_tolerance_used=false"))
 ```
 
 </details>
@@ -849,10 +898,10 @@ expect(blur).to_contain("electron_simple_web_engine2d_validation_reason=blur-or-
 expect(blur).to_contain("electron_simple_web_engine2d_blur_or_tolerance_used=true")
 expect(mismatch).to_contain("electron_simple_web_engine2d_validation_reason=malformed-mismatch-count")
 expect(mismatch).to_contain("electron_simple_web_engine2d_mismatch_count=")
-expect(mismatch.contains("electron_simple_web_engine2d_mismatch_count=bad")).to_equal(false)
+expect_not(mismatch.contains("electron_simple_web_engine2d_mismatch_count=bad"))
 expect(string_zero).to_contain("electron_simple_web_engine2d_validation_reason=malformed-mismatch-count")
 expect(string_zero).to_contain("electron_simple_web_engine2d_mismatch_count=")
-expect(string_zero.contains("electron_simple_web_engine2d_mismatch_count=0")).to_equal(false)
+expect_not(string_zero.contains("electron_simple_web_engine2d_mismatch_count=0"))
 ```
 
 </details>
@@ -960,17 +1009,21 @@ expect(script).to_contain("electron_simple_web_engine2d_chrome_process_version")
 expect(script).to_contain("electron_simple_web_engine2d_gpu_compositing")
 expect(script).to_contain("electron_simple_web_engine2d_gpu_rasterization")
 expect(script).to_contain("electron_simple_web_engine2d_proof_symlink_status")
+expect(script).to_contain("electron_simple_web_engine2d_proof_hardlink_status")
 expect(script).to_contain("electron_simple_web_engine2d_proof_source")
 expect(script).to_contain("electron_simple_web_engine2d_proof_source_file_status")
 expect(script).to_contain("electron_simple_web_engine2d_proof_source_size_bytes")
 expect(script).to_contain("num_at_least \"$proof_source_size_bytes\" 1")
 expect(script).to_contain("proof-json-symlink-status-not-pass")
+expect(script).to_contain("proof-json-hardlink-status-not-pass")
 expect(script).to_contain("proof-source-file-status-not-pass")
 expect(script).to_contain("electron_simple_web_engine2d_proof_iterations")
 expect(script).to_contain("electron_simple_web_engine2d_estimated_fps_floor")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_file_status")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_symlink_status")
+expect(script).to_contain("electron_simple_web_engine2d_captured_argb_hardlink_status")
 expect(script).to_contain("captured-argb-symlink-status-not-pass")
+expect(script).to_contain("captured-argb-hardlink-status-not-pass")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_format")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_nonzero_pixel_count")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_checksum")
@@ -989,7 +1042,11 @@ expect(validator).to_contain("proofDir")
 expect(validator).to_contain("path.sep")
 expect(validator).to_contain("resolvedCandidate === path.resolve(proofPath)")
 expect(validator).to_contain("electron_simple_web_engine2d_proof_symlink_status")
+expect(validator).to_contain("electron_simple_web_engine2d_proof_hardlink_status")
 expect(validator).to_contain("electron_simple_web_engine2d_captured_argb_symlink_status")
+expect(validator).to_contain("electron_simple_web_engine2d_captured_argb_hardlink_status")
+expect(validator).to_contain("proof-json-hardlink")
+expect(validator).to_contain("captured-argb-hardlink")
 val fixture = file_read("tools/electron-live-bitmap/exact_fixture.js")
 expect(fixture).to_contain("electron_user_agent")
 expect(fixture).to_contain("electron_process_version")
@@ -1002,8 +1059,8 @@ expect(fixture).to_contain("chrome_process_version")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
