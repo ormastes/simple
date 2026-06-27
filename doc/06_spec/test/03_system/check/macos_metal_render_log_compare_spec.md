@@ -111,6 +111,8 @@ Browser evidence must prove Metal backing and exact pairwise ARGB comparison:
 - Chrome GPU compositing is enabled and browser GPU metadata names Metal.
 - Electron and Chrome browser backing source files exist; a producer claim with
   missing source artifacts is not accepted as browser-backed Metal proof.
+- Electron and Chrome browser backing source files must also be nonempty; a
+  zero-byte source artifact is reported distinctly from a missing file.
 - `macos_metal_browser_backing_status=pass`
 - `macos_metal_pixel_comparison_status=pass`
 - `macos_metal_pixel_comparison_mode=pairwise-argb-diff`
@@ -193,7 +195,7 @@ macos_metal_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 83 lines folded for reproduction.
+Runnable source: 96 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -267,6 +269,19 @@ expect(missing_source_evidence).to_contain("electron-metal-source-missing")
 expect(missing_source_evidence).to_contain("chrome-metal-source-missing")
 expect(missing_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_status=missing")
 expect(missing_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_status=missing")
+
+val empty_source_base_command = command.replace("rm -rf build/test-macos-metal-render-log-pass && mkdir -p build/test-macos-metal-render-log-pass && ", "rm -rf build/test-macos-metal-render-log-pass && mkdir -p build/test-macos-metal-render-log-pass && : > build/test-macos-metal-render-log-pass/empty-electron-source.json && : > build/test-macos-metal-render-log-pass/empty-chrome-source.json && ")
+val empty_electron_source_command = empty_source_base_command.replace("macos_metal_electron_browser_backing_source=test/03_system/check/macos_metal_render_log_compare_spec.spl", "macos_metal_electron_browser_backing_source=build/test-macos-metal-render-log-pass/empty-electron-source.json")
+val empty_source_command = empty_electron_source_command.replace("macos_metal_chrome_browser_backing_source=test/03_system/check/macos_metal_render_log_compare_spec.spl", "macos_metal_chrome_browser_backing_source=build/test-macos-metal-render-log-pass/empty-chrome-source.json") + " || true"
+val (_empty_source_stdout, _empty_source_stderr, empty_source_code) = process_run("/bin/sh", ["-c", empty_source_command])
+expect(empty_source_code).to_equal(0)
+
+val empty_source_evidence = file_read("build/test-macos-metal-render-log-pass/out/evidence.env")
+expect(empty_source_evidence).to_contain("macos_metal_render_log_compare_status=fail")
+expect(empty_source_evidence).to_contain("electron-metal-source-empty")
+expect(empty_source_evidence).to_contain("chrome-metal-source-empty")
+expect(empty_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_status=empty")
+expect(empty_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_status=empty")
 
 val missing_claimed_magic_command = command.replace("macos_metal_gpu_capture_artifact_magic=XCODE-GPUTRACE\\n", "") + " || true"
 val (_missing_magic_stdout, _missing_magic_stderr, missing_magic_code) = process_run("/bin/sh", ["-c", missing_claimed_magic_command])
