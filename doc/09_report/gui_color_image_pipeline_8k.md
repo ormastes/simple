@@ -15,7 +15,9 @@ The dated reports under `doc/09_report/gui_color_image_pipeline_8k_evidence_*.md
 Current evidence must also include self-hosted Simple binary provenance:
 `gui_color_image_pipeline_8k_simple_bin`,
 `gui_color_image_pipeline_8k_simple_bin_source`, and
-`gui_color_image_pipeline_8k_simple_bin_status=pass`. Any
+`gui_color_image_pipeline_8k_simple_bin_status=pass`. Interpreter evidence must
+also record `gui_color_image_pipeline_8k_simple_execution_mode=interpret` and
+must not emit the previous `rt_len` JIT fallback log. Any
 `src/compiler_rust/**` override fails before the generated 8K probe or focused
 specs run with `gui_color_image_pipeline_8k_reason=simple-bin-forbidden`; that
 is blocked evidence, not a valid 8K GUI pipeline pass.

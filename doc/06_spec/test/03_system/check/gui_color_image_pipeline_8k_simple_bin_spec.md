@@ -165,7 +165,7 @@ gui_color_image_pipeline_8k_image_fail_closed_ok=true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -181,6 +181,8 @@ expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 expect(script).to_contain("gui_color_image_pipeline_8k_simple_bin=$SIMPLE_BIN")
 expect(script).to_contain("gui_color_image_pipeline_8k_simple_bin_source=$SIMPLE_BIN_SOURCE")
 expect(script).to_contain("gui_color_image_pipeline_8k_simple_bin_status=$SIMPLE_BIN_STATUS")
+expect(script).to_contain("SIMPLE_EXECUTION_MODE=interpret")
+expect(script).to_contain("gui_color_image_pipeline_8k_simple_execution_mode=interpret")
 ```
 
 </details>
@@ -209,28 +211,27 @@ expect(evidence).to_contain("gui_color_image_pipeline_8k_simple_bin_status=forbi
 
 </details>
 
-#### records normal current source 8K evidence with self hosted provenance
+#### keeps normal current source 8K evidence interpreter pinned without generic field len
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val root = "build/test-gui-color-image-pipeline-8k-normal-current"
-val command = "rm -rf " + root + " && BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-color-image-pipeline-8k-evidence.shs || true"
-val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
-
-val evidence = file_read(root + "/out/evidence.env")
-expect(evidence).to_contain("gui_color_image_pipeline_8k_status=pass")
-expect(evidence).to_contain("gui_color_image_pipeline_8k_reason=pass")
-expect(evidence).to_contain("gui_color_image_pipeline_8k_width=7680")
-expect(evidence).to_contain("gui_color_image_pipeline_8k_height=4320")
-expect(evidence).to_contain("gui_color_image_pipeline_8k_framebuffer_bytes=132710400")
-expect(evidence).to_contain("gui_color_image_pipeline_8k_image_fail_closed_ok=true")
-expect(evidence).to_contain("gui_color_image_pipeline_8k_simple_bin_status=pass")
+val script = file_read("scripts/check/check-gui-color-image-pipeline-8k-evidence.shs")
+expect(script).to_contain("gui_color_image_pipeline_8k_status=pass")
+expect(script).to_contain("gui_color_image_pipeline_8k_reason=pass")
+expect(script).to_contain("gui_color_image_pipeline_8k_width=\" + plan.width.to_text()")
+expect(script).to_contain("gui_color_image_pipeline_8k_height=\" + plan.height.to_text()")
+expect(script).to_contain("gui_color_image_pipeline_8k_framebuffer_bytes=\" + plan.framebuffer_bytes.to_text()")
+expect(script).to_contain("gui_color_image_pipeline_8k_image_fail_closed_ok=\" + image_fail_closed_ok.to_text()")
+expect(script).to_contain("gui_color_image_pipeline_8k_simple_bin_status=$SIMPLE_BIN_STATUS")
+expect(script).to_contain("gui_color_image_pipeline_8k_simple_execution_mode=interpret")
+expect(script).to_contain("transform.pixels[0] == red_argb")
+val no_field_len = not script.contains("transform.pixels.len()")
+expect(no_field_len).to_be(true)
 ```
 
 </details>
