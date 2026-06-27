@@ -43,6 +43,22 @@ file_size_bytes() {
     fi
 }
 
+same_file_identity() {
+    left="$1"
+    right="$2"
+    [ -n "$left" ] && [ -n "$right" ] || return 1
+    [ -e "$left" ] && [ -e "$right" ] || return 1
+    if [ "$left" = "$right" ]; then
+        return 0
+    fi
+    if command -v stat >/dev/null 2>&1; then
+        left_id="$(stat -f '%d:%i' "$left" 2>/dev/null || stat -c '%d:%i' "$left" 2>/dev/null || true)"
+        right_id="$(stat -f '%d:%i' "$right" 2>/dev/null || stat -c '%d:%i' "$right" 2>/dev/null || true)"
+        [ -n "$left_id" ] && [ "$left_id" = "$right_id" ] && return 0
+    fi
+    return 1
+}
+
 artifact_file_reason() {
     path="$1"
     expected_size="$2"
@@ -707,6 +723,7 @@ ios_mdi_proof_marker_source_size_bytes=""
 ios_mdi_proof_marker_source_actual_size_bytes=""
 ios_mdi_proof_marker_source_file_reason=not-run
 ios_mdi_proof_marker_source_file_status=unavailable
+ios_mdi_proof_marker_source_alias_reason=not-run
 ios_mdi_render_status=unavailable
 ios_mdi_event_status=unavailable
 ios_mdi_capture_status=unavailable
@@ -823,6 +840,10 @@ if [ -x "$IOS_SCRIPT" ] || [ -f "$IOS_SCRIPT" ]; then
         "$ios_mdi_input_to_paint_ms" "$ios_mdi_animation_frame_available" "$ios_mdi_animation_frame_count" \
         "$ios_mdi_css_animation_probe")"
     ios_mdi_proof_file_status="$(mdi_proof_file_status "$ios_mdi_proof_file_reason")"
+    ios_mdi_proof_marker_source_alias_reason=pass
+    if [ "$ios_mdi_proof_file_status" = "pass" ] && [ "$ios_mdi_proof_marker_source_file_status" = "pass" ] && same_file_identity "$ios_mdi_proof_json" "$ios_mdi_proof_marker_source_path"; then
+        ios_mdi_proof_marker_source_alias_reason=proof-json-overlaps-marker-source
+    fi
     ios_render_log_validation_env="$BUILD_DIR/ios_render_log.validation.env"
     if [ -f "$IOS_RENDER_LOG_VALIDATOR" ]; then
         ios_render_validation_code=0
@@ -940,6 +961,7 @@ android_mdi_proof_marker_source_size_bytes=""
 android_mdi_proof_marker_source_actual_size_bytes=""
 android_mdi_proof_marker_source_file_reason=not-run
 android_mdi_proof_marker_source_file_status=unavailable
+android_mdi_proof_marker_source_alias_reason=not-run
 android_mdi_render_status=unavailable
 android_mdi_event_status=unavailable
 android_mdi_capture_status=unavailable
@@ -1072,6 +1094,10 @@ if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
         "$android_mdi_input_to_paint_ms" "$android_mdi_animation_frame_available" "$android_mdi_animation_frame_count" \
         "$android_mdi_css_animation_probe")"
     android_mdi_proof_file_status="$(mdi_proof_file_status "$android_mdi_proof_file_reason")"
+    android_mdi_proof_marker_source_alias_reason=pass
+    if [ "$android_mdi_proof_file_status" = "pass" ] && [ "$android_mdi_proof_marker_source_file_status" = "pass" ] && same_file_identity "$android_mdi_proof_json" "$android_mdi_proof_marker_source_path"; then
+        android_mdi_proof_marker_source_alias_reason=proof-json-overlaps-marker-source
+    fi
     android_render_log_validation_env="$BUILD_DIR/android_render_log.validation.env"
     if [ -f "$ANDROID_RENDER_LOG_VALIDATOR" ]; then
         android_render_validation_code=0
@@ -1235,6 +1261,9 @@ elif [ "$ios_mdi_proof_marker_source_file_status" != "pass" ]; then
     else
         reason=ios-mdi-proof-marker-source-artifact-missing
     fi
+elif [ "$ios_mdi_proof_marker_source_alias_reason" != "pass" ]; then
+    status=fail
+    reason=ios-mdi-proof-marker-source-overlap
 elif [ "$ios_mdi_proof_missing_source_count" != "0" ] || ! num_at_least "$ios_mdi_proof_source_count" 1; then
     status=fail
     reason=ios-mdi-proof-source-missing
@@ -1319,6 +1348,9 @@ elif [ "$android_mdi_proof_marker_source_file_status" != "pass" ]; then
     else
         reason=android-mdi-proof-marker-source-artifact-missing
     fi
+elif [ "$android_mdi_proof_marker_source_alias_reason" != "pass" ]; then
+    status=fail
+    reason=android-mdi-proof-marker-source-overlap
 elif [ "$android_mdi_proof_missing_source_count" != "0" ] || ! num_at_least "$android_mdi_proof_source_count" 1; then
     status=fail
     reason=android-mdi-proof-source-missing
@@ -1422,6 +1454,7 @@ fi
     echo "tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_actual_size_bytes=$ios_mdi_proof_marker_source_actual_size_bytes"
     echo "tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_file_status=$ios_mdi_proof_marker_source_file_status"
     echo "tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_file_reason=$ios_mdi_proof_marker_source_file_reason"
+    echo "tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_alias_reason=$ios_mdi_proof_marker_source_alias_reason"
     echo "tauri_mobile_renderer_parity_ios_mdi_render_status=$ios_mdi_render_status"
     echo "tauri_mobile_renderer_parity_ios_mdi_render_image_count=$ios_mdi_render_image_count"
     echo "tauri_mobile_renderer_parity_ios_mdi_render_html_renderable=$ios_mdi_render_html_renderable"
@@ -1505,6 +1538,7 @@ fi
     echo "tauri_mobile_renderer_parity_android_mdi_proof_marker_source_actual_size_bytes=$android_mdi_proof_marker_source_actual_size_bytes"
     echo "tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_status=$android_mdi_proof_marker_source_file_status"
     echo "tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_reason=$android_mdi_proof_marker_source_file_reason"
+    echo "tauri_mobile_renderer_parity_android_mdi_proof_marker_source_alias_reason=$android_mdi_proof_marker_source_alias_reason"
     echo "tauri_mobile_renderer_parity_android_mdi_render_status=$android_mdi_render_status"
     echo "tauri_mobile_renderer_parity_android_mdi_render_image_count=$android_mdi_render_image_count"
     echo "tauri_mobile_renderer_parity_android_mdi_render_html_renderable=$android_mdi_render_html_renderable"

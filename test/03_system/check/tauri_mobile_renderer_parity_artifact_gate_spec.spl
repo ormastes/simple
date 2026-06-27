@@ -53,6 +53,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   rows, and proof JSON files claim pass.
 - MDI proof marker source rows must identify real, regular source artifacts
   whose current byte size matches the validator-reported byte size.
+- MDI proof JSON artifacts must not be hard-linked aliases of their marker
+  source rows; proof/source identity overlap fails even when JSON content and
+  size rows are otherwise valid.
 - Malformed mobile MDI performance and animation detail rows fail even when
   the high-level performance and animation statuses claim pass.
 - Malformed mobile MDI input-to-paint detail rows fail even when the high-level
@@ -107,7 +110,8 @@ fn _mobile_script_command(path: text, root: text, platform: text, proof_mode: te
     val prefix = if platform == "ios": "ios" else: "android"
     val log_key = if platform == "ios": "ios_log_stream" else: "android_logcat"
     val dev_log_key = if platform == "ios": "ios_dev_log" else: "android_gpu_log"
-    val marker_source_size = if platform == "ios": "223" else: "49"
+    val marker_source_path = if proof_mode == "hardlink-source": root + "/artifacts/" + platform + "_mdi-marker-source.log" else: log_path
+    val marker_source_size = if proof_mode == "hardlink-source": "631" else: if platform == "ios": "223" else: "49"
     val tooling_row = if platform == "ios": "ios_tooling=fixture\\n" else: ""
     val proof_base64 = "eyJjb3VudCI6NCwiaW1hZ2VDb3VudCI6MSwidGFza2Jhckl0ZW1Db3VudCI6NCwidGFza2Jhckljb25Db3VudCI6NCwidmlld3BvcnRXaWR0aCI6MzkwLCJ2aWV3cG9ydEhlaWdodCI6ODQ0LCJkZXZpY2VQaXhlbFJhdGlvIjozLCJzY3JlZW5PcmllbnRhdGlvbiI6InBvcnRyYWl0IiwicGVyZm9ybWFuY2VOb3dBdmFpbGFibGUiOnRydWUsInBlcmZvcm1hbmNlTm93RGVsdGFNcyI6MS4yNSwiaW5wdXRUb1BhaW50TXMiOjIuNSwiYW5pbWF0aW9uRnJhbWVBdmFpbGFibGUiOnRydWUsImFuaW1hdGlvbkZyYW1lQ291bnQiOjIsImNzc0FuaW1hdGlvblByb2JlIjp0cnVlLCJoYXNEZXNrdG9wIjp0cnVlLCJoYXNEcmFnUnVudGltZSI6dHJ1ZSwiaGFzRHJhZ0V2ZW50cyI6dHJ1ZSwiZHJhZ01vdmVkIjp0cnVlLCJoYXNXaW5kb3dFdmVudFJ1bnRpbWUiOnRydWUsImFwcEFjdGlvbkNvbnRyb2xGb3VuZCI6dHJ1ZSwiYXBwSW5wdXRDb250cm9sRm91bmQiOnRydWUsImJvZHlDbGlja1JvdXRlZCI6dHJ1ZSwiYm9keUlucHV0Um91dGVkIjp0cnVlLCJib2R5S2V5Um91dGVkIjp0cnVlLCJ0YXNrYmFySWNvbnNWaXNpYmxlIjp0cnVlLCJ0YXNrYmFyTGFiZWxzVmlzaWJsZSI6dHJ1ZSwiaHRtbFJlbmRlcmFibGUiOnRydWV9Cg=="
     val bad_proof_base64 = "e25vdC1qc29ufQo="
@@ -116,7 +120,8 @@ fn _mobile_script_command(path: text, root: text, platform: text, proof_mode: te
     val write_symlink_proof = "node -e \"process.stdout.write(Buffer.from(process.argv[1], process.argv[2]))\" " + proof_base64 + " base64 > " + root + "/artifacts/" + platform + "_mdi-real.json\\nln -s " + platform + "_mdi-real.json " + proof_path + "\\n"
     val write_bad_proof = "node -e \"process.stdout.write(Buffer.from(process.argv[1], process.argv[2]))\" " + bad_proof_base64 + " base64 > " + proof_path + "\\n"
     val write_incomplete_proof = "node -e \"process.stdout.write(Buffer.from(process.argv[1], process.argv[2]))\" " + incomplete_proof_base64 + " base64 > " + proof_path + "\\n"
-    val write_proof = if proof_mode == "present": write_valid_proof else: if proof_mode == "symlink": write_symlink_proof else: if proof_mode == "bad-json": write_bad_proof else: if proof_mode == "contract-missing": write_incomplete_proof else: ""
+    val write_hardlinked_source_proof = write_valid_proof + "ln " + proof_path + " " + marker_source_path + "\\n"
+    val write_proof = if proof_mode == "present": write_valid_proof else: if proof_mode == "symlink": write_symlink_proof else: if proof_mode == "bad-json": write_bad_proof else: if proof_mode == "contract-missing": write_incomplete_proof else: if proof_mode == "hardlink-source": write_hardlinked_source_proof else: ""
     val png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAYYAAANMCAYAAABYbAoeAAAJSElEQVR42u3VIQEAAAjAMGIQgAD0LweKDJiJFbh5ZPUAwAkRADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwAAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjEAIAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIxBBACMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAABjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGADAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMQAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjEEEAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGADAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYhADAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMQAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwAAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBhEAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYxABAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAABjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGIQAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBhEAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGADAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYRADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGEQAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAMAYAjAEAYwDAGAAwBgCMAQBjAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAAwBgCMAQBjAMAYAMAYADAGAIwBAGMAwBgAMAYAjAEAYwDAGAD4s4HfnWpx8mwTAAAAAElFTkSuQmCC"
     val tiny_png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
     val forged_png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAYYAAANMCAIAAAAAAAAASURBVElFTkQ="
@@ -142,7 +147,7 @@ fn _mobile_script_command(path: text, root: text, platform: text, proof_mode: te
         prefix + "_mdi_proof_missing_source_count=0\\\\n" +
         prefix + "_mdi_proof_empty_source_count=0\\\\n" +
         prefix + "_mdi_proof_symlink_source_count=0\\\\n" +
-        prefix + "_mdi_proof_marker_source_path=" + log_path + "\\\\n" +
+        prefix + "_mdi_proof_marker_source_path=" + marker_source_path + "\\\\n" +
         prefix + "_mdi_proof_marker_source_size_bytes=" + marker_source_size + "\\\\n" +
         prefix + "_mdi_render_status=pass\\\\n" +
         prefix + "_mdi_render_image_count=1\\\\n" +
@@ -245,6 +250,7 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_actual_size_bytes=223")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_file_status=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_file_reason=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_alias_reason=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_source_count=1")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_count=1")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_missing_source_count=0")
@@ -253,6 +259,7 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_actual_size_bytes=49")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_status=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_reason=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_alias_reason=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_body_click_routed=true")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_drag_moved=true")
@@ -566,6 +573,28 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_actual_size_bytes=49")
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_status=fail")
         expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_reason=size-mismatch")
+
+    it "rejects MDI proof artifacts hard-linked to marker source rows":
+        val root = "build/test-tauri-mobile-artifact-gate-hardlinked-mdi-marker-source"
+        val ios_command = _run_aggregate_command(root + "-ios", "hardlink-source", "present", "png", "png")
+        val android_command = _run_aggregate_command(root + "-android", "present", "hardlink-source", "png", "png")
+        val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val ios = file_read(root + "-ios/stdout.env")
+        val android = file_read(root + "-android/stdout.env")
+        step("Confirm valid MDI JSON cannot double as the claimed marker source artifact")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-proof-marker-source-overlap")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=pass")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_file_status=pass")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_alias_reason=proof-json-overlaps-marker-source")
+        expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
+        expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-proof-marker-source-overlap")
+        expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=pass")
+        expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_status=pass")
+        expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_alias_reason=proof-json-overlaps-marker-source")
 
     it "rejects mobile pass claims with MDI failure markers":
         val root = "build/test-tauri-mobile-artifact-gate-mdi-failure-marker"
@@ -886,8 +915,11 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_count")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_actual_size_bytes")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_file_status")
+        expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_alias_reason")
+        expect(script).to_contain("same_file_identity")
         expect(script).to_contain("ios-mdi-proof-marker-source-size-mismatch")
         expect(script).to_contain("ios-mdi-proof-marker-source-missing")
+        expect(script).to_contain("ios-mdi-proof-marker-source-overlap")
         expect(script).to_contain("cat \"$ios_render_log_validation_env\"")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path")
@@ -915,8 +947,10 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_source_count")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_count")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_reason")
+        expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_alias_reason")
         expect(script).to_contain("android-mdi-proof-marker-source-artifact-missing")
         expect(script).to_contain("android-mdi-proof-marker-source-missing")
+        expect(script).to_contain("android-mdi-proof-marker-source-overlap")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_body_click_routed")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_render_image_count")

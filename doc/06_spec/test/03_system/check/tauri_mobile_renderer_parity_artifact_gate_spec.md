@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 27 | 27 | 0 | 0 |
+| 33 | 33 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -102,6 +102,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   rows, and proof JSON files claim pass.
 - MDI proof marker source rows must identify real, regular source artifacts
   whose current byte size matches the validator-reported byte size.
+- MDI proof JSON artifacts must not be hard-linked aliases of their marker
+  source rows; proof/source identity overlap fails even when JSON content and
+  size rows are otherwise valid.
 - Malformed mobile MDI performance and animation detail rows fail even when
   the high-level performance and animation statuses claim pass.
 - Malformed mobile MDI input-to-paint detail rows fail even when the high-level
@@ -142,7 +145,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 56 lines folded for reproduction.
+Runnable source: 58 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -196,6 +199,7 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_s
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_actual_size_bytes=223")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_file_reason=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_alias_reason=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_source_count=1")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_count=1")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_missing_source_count=0")
@@ -204,6 +208,7 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_mark
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_actual_size_bytes=49")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_reason=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_alias_reason=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_body_click_routed=true")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_drag_moved=true")
@@ -631,6 +636,42 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marke
 expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_actual_size_bytes=49")
 expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_status=fail")
 expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_reason=size-mismatch")
+```
+
+</details>
+
+#### rejects MDI proof artifacts hard-linked to marker source rows
+
+- Confirm valid MDI JSON cannot double as the claimed marker source artifact
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-hardlinked-mdi-marker-source"
+val ios_command = _run_aggregate_command(root + "-ios", "hardlink-source", "present", "png", "png")
+val android_command = _run_aggregate_command(root + "-android", "present", "hardlink-source", "png", "png")
+val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val ios = file_read(root + "-ios/stdout.env")
+val android = file_read(root + "-android/stdout.env")
+step("Confirm valid MDI JSON cannot double as the claimed marker source artifact")
+expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-proof-marker-source-overlap")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=pass")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_file_status=pass")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_alias_reason=proof-json-overlaps-marker-source")
+expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-proof-marker-source-overlap")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=pass")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_status=pass")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_alias_reason=proof-json-overlaps-marker-source")
 ```
 
 </details>
@@ -1158,8 +1199,11 @@ expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_missing_so
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_count")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_actual_size_bytes")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_file_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_alias_reason")
+expect(script).to_contain("same_file_identity")
 expect(script).to_contain("ios-mdi-proof-marker-source-size-mismatch")
 expect(script).to_contain("ios-mdi-proof-marker-source-missing")
+expect(script).to_contain("ios-mdi-proof-marker-source-overlap")
 expect(script).to_contain("cat \"$ios_render_log_validation_env\"")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path")
@@ -1187,8 +1231,10 @@ expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_failure_mark
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_source_count")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_count")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_file_reason")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_alias_reason")
 expect(script).to_contain("android-mdi-proof-marker-source-artifact-missing")
 expect(script).to_contain("android-mdi-proof-marker-source-missing")
+expect(script).to_contain("android-mdi-proof-marker-source-overlap")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_body_click_routed")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_render_image_count")
@@ -1223,8 +1269,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_timin
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 27 |
-| Active scenarios | 27 |
+| Total scenarios | 33 |
+| Active scenarios | 33 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
