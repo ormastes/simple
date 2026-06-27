@@ -186,6 +186,9 @@ checksum, and exact geometry is downgraded to `fail`.
   available.
 - `gui_web_2d_vulkan_pixel_comparison_status=pass` requires Electron, Chrome,
   and Simple ARGB artifacts plus zero-mismatch pairwise diffs.
+- GUI/web/2D Vulkan Electron, Chrome, Simple ARGB artifacts, Chrome proof JSON,
+  and pairwise diff artifacts must be regular files, not symlinks to substituted
+  capture evidence.
 - `gui_web_2d_vulkan_browser_backing_status=pass` requires focused
   Vulkan-backed browser GPU evidence, not fallback screenshots. Completion also
   requires the separate RenderDoc blocker gates to pass. Explicit browser
@@ -2549,6 +2552,24 @@ expect(bad_chrome_proof_evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proo
 expect(bad_chrome_proof_evidence).to_contain("gui_web_2d_vulkan_comparison_artifact_status=incomplete")
 expect(bad_chrome_proof_evidence).to_contain("gui_web_2d_vulkan_comparison_artifact_reason=chrome-argb-proof-fail")
 expect(bad_chrome_proof_evidence).to_contain("gui_web_2d_vulkan_pixel_comparison_reason=comparison-artifacts-incomplete;chrome-argb-proof-fail")
+val command_with_symlinked_argb_artifacts = command_with_pixel_files.replace("GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs", "mkdir -p build/test-gui-renderdoc-feature-coverage-status-production-required/gui/real && mv build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron_argb.json build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron_argb-real.json && ln -s electron_argb-real.json build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron_argb.json && mv build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb.json build/test-gui-renderdoc-feature-coverage-status-production-required/gui/real/chrome_argb.json && ln -s real/chrome_argb.json build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb.json && mv build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json build/test-gui-renderdoc-feature-coverage-status-production-required/gui/real/chrome_argb_proof.json && ln -s real/chrome_argb_proof.json build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_argb_proof.json && mv build/test-gui-renderdoc-feature-coverage-status-production-required/gui/simple_argb.json build/test-gui-renderdoc-feature-coverage-status-production-required/gui/real/simple_argb.json && ln -s real/simple_argb.json build/test-gui-renderdoc-feature-coverage-status-production-required/gui/simple_argb.json && mv build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_chrome_diff.env build/test-gui-renderdoc-feature-coverage-status-production-required/gui/real/electron_chrome_diff.env && ln -s real/electron_chrome_diff.env build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_chrome_diff.env && mv build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_simple_diff.env build/test-gui-renderdoc-feature-coverage-status-production-required/gui/real/electron_simple_diff.env && ln -s real/electron_simple_diff.env build/test-gui-renderdoc-feature-coverage-status-production-required/gui/electron_simple_diff.env && mv build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_simple_diff.env build/test-gui-renderdoc-feature-coverage-status-production-required/gui/real/chrome_simple_diff.env && ln -s real/chrome_simple_diff.env build/test-gui-renderdoc-feature-coverage-status-production-required/gui/chrome_simple_diff.env && GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
+val (_symlink_argb_stdout, _symlink_argb_stderr, symlink_argb_code) = process_run("/bin/sh", ["-c", command_with_symlinked_argb_artifacts])
+expect(symlink_argb_code).to_equal(0)
+
+step("Reject symlinked GUI/web/2D ARGB proof and pairwise diff artifacts")
+val symlink_argb_evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-production-required/out/evidence.env")
+expect(symlink_argb_evidence).to_contain("gui_web_2d_vulkan_electron_argb_file_status=symlink")
+expect(symlink_argb_evidence).to_contain("gui_web_2d_vulkan_chrome_argb_file_status=symlink")
+expect(symlink_argb_evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof_file_status=symlink")
+expect(symlink_argb_evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof_json_status=fail")
+expect(symlink_argb_evidence).to_contain("gui_web_2d_vulkan_chrome_argb_proof_json_reason=symlink")
+expect(symlink_argb_evidence).to_contain("gui_web_2d_vulkan_simple_argb_file_status=symlink")
+expect(symlink_argb_evidence).to_contain("gui_web_2d_vulkan_electron_chrome_diff_file_status=symlink")
+expect(symlink_argb_evidence).to_contain("gui_web_2d_vulkan_electron_simple_diff_file_status=symlink")
+expect(symlink_argb_evidence).to_contain("gui_web_2d_vulkan_chrome_simple_diff_file_status=symlink")
+expect(symlink_argb_evidence).to_contain("gui_web_2d_vulkan_comparison_artifact_status=incomplete")
+expect(symlink_argb_evidence).to_contain("chrome-argb-file-symlink")
+expect(symlink_argb_evidence).to_contain("chrome-argb-proof-fail")
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command_with_pixel_files])
 expect(code).to_equal(0)
 
