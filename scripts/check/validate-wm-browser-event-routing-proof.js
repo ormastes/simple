@@ -10,21 +10,8 @@ function boolTrue(value) {
   return value === true;
 }
 
-function decimalIntegerText(value) {
-  if (typeof value === 'number' && Number.isInteger(value)) return String(value);
-  if (typeof value === 'bigint') return value.toString();
-  if (typeof value === 'string' && /^-?[0-9]+$/.test(value.trim())) return value.trim();
-  return null;
-}
-
 function jsonIntegerText(value) {
   if (typeof value === 'number' && Number.isInteger(value)) return String(value);
-  return null;
-}
-
-function decimalNumberText(value) {
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  if (typeof value === 'string' && /^-?(?:[0-9]+)(?:\.[0-9]+)?$/.test(value.trim())) return value.trim();
   return null;
 }
 
@@ -33,28 +20,22 @@ function jsonNumberText(value) {
   return null;
 }
 
-function integerAtLeast(value, required) {
-  const text = decimalIntegerText(value);
-  if (text === null) return false;
-  return BigInt(text) >= BigInt(required);
-}
-
 function jsonIntegerAtLeast(value, required) {
   const text = jsonIntegerText(value);
   if (text === null) return false;
   return BigInt(text) >= BigInt(required);
 }
 
-function decimalAtLeast(value, required) {
-  const text = decimalNumberText(value);
-  if (text === null) return false;
-  return Number(text) >= required;
-}
-
 function jsonDecimalGreaterThan(value, required) {
   const text = jsonNumberText(value);
   if (text === null) return false;
   return Number(text) > required;
+}
+
+function jsonDecimalAtLeast(value, required) {
+  const text = jsonNumberText(value);
+  if (text === null) return false;
+  return Number(text) >= required;
 }
 
 function sameJsonInteger(actual, expected) {
@@ -64,18 +45,13 @@ function sameJsonInteger(actual, expected) {
   return BigInt(a) === BigInt(e);
 }
 
-function integerTextOrBlank(value) {
-  const text = decimalIntegerText(value);
+function jsonIntegerTextOrBlank(value) {
+  const text = jsonIntegerText(value);
   return text === null ? '' : text;
 }
 
-function decimalTextOrClean(value) {
-  const text = decimalNumberText(value);
-  return text === null ? clean(value) : text;
-}
-
-function jsonIntegerTextOrBlank(value) {
-  const text = jsonIntegerText(value);
+function jsonDecimalTextOrBlank(value) {
+  const text = jsonNumberText(value);
   return text === null ? '' : text;
 }
 
@@ -160,10 +136,10 @@ const rows = {
   titlebar_cursor: proof.titlebar_cursor,
   titlebar_background: proof.titlebar_background,
   title_color: proof.title_color,
-  title_font_weight: integerTextOrBlank(proof.title_font_weight),
+  title_font_weight: jsonIntegerTextOrBlank(proof.title_font_weight),
   title_input_min_width: proof.title_input_min_width,
   title_input_width: proof.title_input_width,
-  title_input_width_px: decimalTextOrClean(proof.title_input_width_px),
+  title_input_width_px: jsonDecimalTextOrBlank(proof.title_input_width_px),
   title_input_height: proof.title_input_height,
   title_input_cursor: proof.title_input_cursor,
   title_input_background: proof.title_input_background,
@@ -229,9 +205,9 @@ if (!boolTrue(proof.pass)) {
   proof.titlebar_cursor !== 'grab' ||
   proof.titlebar_background !== 'rgb(229, 231, 235)' ||
   proof.title_color !== 'rgb(17, 24, 39)' ||
-  !integerAtLeast(proof.title_font_weight, 700) ||
+  !jsonIntegerAtLeast(proof.title_font_weight, 700) ||
   proof.title_input_min_width !== '142px' ||
-  !decimalAtLeast(proof.title_input_width_px, 142) ||
+  !jsonDecimalAtLeast(proof.title_input_width_px, 142) ||
   proof.title_input_height !== '24px' ||
   proof.title_input_cursor !== 'text' ||
   proof.title_input_background !== 'rgb(241, 245, 249)' ||

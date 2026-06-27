@@ -86,6 +86,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 - Event counts, animation frame counts, traffic button counts, timing deltas,
   and dispatched move coordinates must be real JSON numbers; stringified or
   fractional values are not valid DOM event-routing proof.
+- Live numeric UI readback rows such as title font weight and title input width
+  must be real JSON numbers; stringified CSS measurements are not valid browser
+  style proof.
 - The proof must carry the live WM browser event-check source marker; a
   hand-authored JSON object with matching counters is not sufficient.
 - The live shell evidence wrapper consumes the standalone validator instead of
@@ -107,7 +110,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -129,6 +132,8 @@ expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=2")
 expect(evidence).to_contain("wm_browser_event_routing_css_animation_probe=true")
 expect(evidence).to_contain("wm_browser_event_routing_event_sequence=host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up")
 expect(evidence).to_contain("wm_browser_event_routing_move_payload_source=native_event")
+expect(evidence).to_contain("wm_browser_event_routing_title_font_weight=700")
+expect(evidence).to_contain("wm_browser_event_routing_title_input_width_px=158")
 expect(evidence).to_contain("wm_browser_event_routing_title_command_text=/tmp/project")
 expect(evidence).to_contain("wm_browser_event_routing_text_input_text=Hello Simple")
 ```
@@ -378,18 +383,22 @@ expect(perf).to_contain("wm_browser_event_routing_css_animation_probe=true")
 -  fixture command
 -  fixture command
 -  fixture command
+-  fixture command
+-  fixture command
    - Expected: code equals `1`
 - Confirm stringified numeric evidence is not accepted as live browser proof
    - Expected: count does not contain `wm_browser_event_routing_focus_count=1`
    - Expected: frame does not contain `wm_browser_event_routing_animation_frame_count=2`
    - Expected: ui does not contain `wm_browser_event_routing_traffic_button_count=3`
+   - Expected: font does not contain `wm_browser_event_routing_title_font_weight=700`
+   - Expected: width does not contain `wm_browser_event_routing_title_input_width_px=158`
    - Expected: payload does not contain `wm_browser_event_routing_move_payload_x=86`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -402,6 +411,10 @@ val command = "rm -rf build/test-wm-browser-event-validator-string-numbers && mk
     " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/frame.json > build/test-wm-browser-event-validator-string-numbers/frame.env; " +
     _fixture_command("build/test-wm-browser-event-validator-string-numbers/ui.json", "p.traffic_button_count=\"3\"") +
     " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/ui.json > build/test-wm-browser-event-validator-string-numbers/ui.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/font.json", "p.title_font_weight=\"700\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/font.json > build/test-wm-browser-event-validator-string-numbers/font.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/width.json", "p.title_input_width_px=\"158\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/width.json > build/test-wm-browser-event-validator-string-numbers/width.env; " +
     _fixture_command("build/test-wm-browser-event-validator-string-numbers/payload.json", "p.move_payload.x=\"86\"") +
     " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/payload.json > build/test-wm-browser-event-validator-string-numbers/payload.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -411,6 +424,8 @@ val count = file_read("build/test-wm-browser-event-validator-string-numbers/coun
 val perf = file_read("build/test-wm-browser-event-validator-string-numbers/perf.env")
 val frame = file_read("build/test-wm-browser-event-validator-string-numbers/frame.env")
 val ui = file_read("build/test-wm-browser-event-validator-string-numbers/ui.env")
+val font = file_read("build/test-wm-browser-event-validator-string-numbers/font.env")
+val width = file_read("build/test-wm-browser-event-validator-string-numbers/width.env")
 val payload = file_read("build/test-wm-browser-event-validator-string-numbers/payload.env")
 step("Confirm stringified numeric evidence is not accepted as live browser proof")
 expect(count).to_contain("wm_browser_event_routing_validation_status=fail")
@@ -428,6 +443,14 @@ expect(ui).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(ui).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
 expect(ui).to_contain("wm_browser_event_routing_traffic_button_count=")
 expect(ui.contains("wm_browser_event_routing_traffic_button_count=3")).to_equal(false)
+expect(font).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(font).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
+expect(font).to_contain("wm_browser_event_routing_title_font_weight=")
+expect(font.contains("wm_browser_event_routing_title_font_weight=700")).to_equal(false)
+expect(width).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(width).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
+expect(width).to_contain("wm_browser_event_routing_title_input_width_px=")
+expect(width.contains("wm_browser_event_routing_title_input_width_px=158")).to_equal(false)
 expect(payload).to_contain("wm_browser_event_routing_validation_status=fail")
 expect(payload).to_contain("wm_browser_event_routing_validation_reason=event-routing-payload-contract-missing")
 expect(payload).to_contain("wm_browser_event_routing_move_payload_x=")
