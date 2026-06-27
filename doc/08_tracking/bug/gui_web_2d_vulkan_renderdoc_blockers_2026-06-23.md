@@ -341,3 +341,40 @@ Current 2026-06-26 browser capture findings:
 - The executable contract is covered by
   `test/03_system/check/renderdoc_chrome_target_control_spec.spl` and mirrored
   in `doc/06_spec/test/03_system/check/renderdoc_chrome_target_control_spec.md`.
+
+2026-06-27 current aggregate state after browser-backing and perf refresh:
+- Browser Vulkan backing is no longer the Linux blocker on the current NVIDIA
+  host. The focused browser-backing lane reports:
+  `gui_web_2d_vulkan_browser_backing_status=pass`,
+  `gui_web_2d_vulkan_electron_browser_backing_status=pass`, and
+  `gui_web_2d_vulkan_chrome_browser_backing_status=pass`.
+- Retained GUI showcase performance is current after the wrapper provenance
+  fix. Strict aggregate freshness reports
+  `gui_showcase_4k_200fps_source_revision_status=current` and
+  `gui_showcase_8k_perf_source_revision_status=current` for source revision
+  `74744b04ae2d`.
+- Linux normalized render-log comparison still fails only on browser RenderDoc
+  artifacts after Simple `.rdc` proof:
+  `linux_vulkan_render_log_compare_renderdoc_simple_status=pass`,
+  `linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=RDOC`,
+  `linux_vulkan_render_log_compare_renderdoc_chrome_status=fail`,
+  `linux_vulkan_render_log_compare_renderdoc_chrome_reason=chromium-gpu-process-crashed-under-renderdoc`,
+  `linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=missing`,
+  `linux_vulkan_render_log_compare_renderdoc_electron_status=fail`, and
+  `linux_vulkan_render_log_compare_renderdoc_electron_reason=missing-rdc`.
+- The aggregate blocker count remains eight because Linux browser `.rdc`
+  capture, Electron widget `.rdc`, cross-platform native render-log comparison,
+  production GUI/web parity/readback, and full CSS rendering coverage are still
+  incomplete.
+
+Next Linux verification criteria:
+- Do not rerun broad diagnostics unless a new capture mechanism is being tested.
+  A successful Linux unblock must produce Chrome and Electron `.rdc` artifacts
+  whose top-level Linux evidence has
+  `linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass`,
+  `linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=RDOC`,
+  `linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=pass`,
+  and `linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=RDOC`.
+- Browser backing, ARGB source, pairwise diff, and Simple RenderDoc gates must
+  remain passing in the same aggregate run; do not treat a browser `.rdc` as a
+  full Linux pass if it breaks Vulkan backing or pixel comparison.

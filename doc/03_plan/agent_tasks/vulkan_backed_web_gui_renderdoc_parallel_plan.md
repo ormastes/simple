@@ -107,6 +107,16 @@ GUI_WEB_2D_VULKAN_ENV=build/gui-web-2d-vulkan-env/evidence.env \
 sh scripts/check/check-linux-vulkan-render-log-compare.shs
 ```
 
+Current Linux blocker update, 2026-06-27: browser Vulkan backing and retained
+4K/8K showcase performance are passing with current source evidence. The
+remaining Linux render-log blocker is Chrome/Electron RenderDoc `.rdc`
+production: Simple RenderDoc passes with `RDOC` magic, while Chrome reports
+`chromium-gpu-process-crashed-under-renderdoc` and Electron reports
+`missing-rdc`. A Linux completion run must keep browser backing, ARGB source
+proof, pairwise pixel diff, and Simple `.rdc` passing while adding Chrome and
+Electron `.rdc` artifacts with `artifact_file_status=pass` and
+`artifact_magic=RDOC`.
+
 macOS Metal render-log normalization and comparison:
 
 ```bash
