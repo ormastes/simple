@@ -27,7 +27,7 @@ electron_live_smoke_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -100,6 +100,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
   probe.
 - The proof must include Chromium/Electron runtime evidence from the renderer
   user agent, not only a hand-authored source marker.
+- The proof target and surface must identify the live Electron main surface,
+  and early wrapper diagnostics must preserve those identity rows.
 - The live smoke shell wrapper delegates JSON validation to the proof validator.
 - The package live smoke script must launch the built local Simple compiler, or
   a caller-provided `SIMPLE_BIN`, instead of a non-existent package-local
@@ -124,7 +126,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -140,6 +142,7 @@ step("Inspect normalized Electron live smoke proof rows")
 expect(evidence).to_contain("electron_live_smoke_validation_status=pass")
 expect(evidence).to_contain("electron_live_smoke_validation_reason=pass")
 expect(evidence).to_contain("electron_live_smoke_target=electron")
+expect(evidence).to_contain("electron_live_smoke_surface_id=main")
 expect(evidence).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
 expect(evidence).to_contain("electron_live_smoke_browser_engine=chromium")
 expect(evidence).to_contain("electron_live_smoke_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36")
@@ -195,6 +198,45 @@ expect(html).to_contain("electron_live_smoke_validation_reason=missing-render-ht
 expect(css).to_contain("electron_live_smoke_validation_reason=missing-render-css")
 expect(css).to_contain("electron_live_smoke_css_length=0")
 expect(text).to_contain("electron_live_smoke_validation_reason=missing-rendered-text")
+```
+
+</details>
+
+#### rejects proof for the wrong target or surface
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Electron live smoke proof is tied to the main Electron surface
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-live-smoke-validator-identity"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/target.json", "p.target=\"chrome\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/target.json 1280 720 > " + root + "/target.env; " +
+    _proof_command(root + "/surface.json", "p.surface_id=\"secondary\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/surface.json 1280 720 > " + root + "/surface.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val target = file_read(root + "/target.env")
+val surface = file_read(root + "/surface.env")
+step("Confirm Electron live smoke proof is tied to the main Electron surface")
+expect(target).to_contain("electron_live_smoke_validation_status=fail")
+expect(target).to_contain("electron_live_smoke_validation_reason=unexpected-target")
+expect(target).to_contain("electron_live_smoke_target=chrome")
+expect(target).to_contain("electron_live_smoke_surface_id=main")
+expect(surface).to_contain("electron_live_smoke_validation_status=fail")
+expect(surface).to_contain("electron_live_smoke_validation_reason=unexpected-surface")
+expect(surface).to_contain("electron_live_smoke_target=electron")
+expect(surface).to_contain("electron_live_smoke_surface_id=secondary")
 ```
 
 </details>
@@ -653,7 +695,7 @@ expect(fractional).to_contain("electron_live_smoke_height=720")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -669,6 +711,8 @@ expect(wrapper).to_contain("cat \"$VALIDATION_ENV\"")
 expect(wrapper).to_contain("electron_live_smoke=fail proof=$PROOF_PATH validation=$VALIDATION_ENV")
 expect(wrapper).to_contain("emit_blank_validation_rows")
 expect(wrapper).to_contain("electron_live_smoke_validation_status")
+expect(wrapper).to_contain("electron_live_smoke_target")
+expect(wrapper).to_contain("electron_live_smoke_surface_id")
 expect(wrapper).to_contain("electron_live_smoke_proof_source")
 expect(wrapper).to_contain("electron_live_smoke_browser_engine")
 expect(wrapper).to_contain("electron_live_smoke_electron_user_agent")
@@ -712,7 +756,7 @@ expect(envelopes).to_contain("css_length")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -728,6 +772,8 @@ expect(evidence).to_contain("electron_live_smoke=unavailable")
 expect(evidence).to_contain("error=missing_command:node")
 expect(evidence).to_contain("electron_live_smoke_validation_status=unavailable")
 expect(evidence).to_contain("electron_live_smoke_validation_reason=missing_command:node")
+expect(evidence).to_contain("electron_live_smoke_target=")
+expect(evidence).to_contain("electron_live_smoke_surface_id=")
 expect(evidence).to_contain("electron_live_smoke_proof_source=")
 expect(evidence).to_contain("electron_live_smoke_browser_engine=")
 expect(evidence).to_contain("electron_live_smoke_electron_user_agent=")
@@ -757,8 +803,8 @@ expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
