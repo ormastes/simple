@@ -122,6 +122,10 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   Metal-backed WKWebView render-log source path and byte size.
 - The aggregate re-checks the coherent iOS render-log source as a regular file
   artifact and rejects missing, symlinked, or byte-size-mismatched paths.
+- The aggregate requires Android render-log validator rows to identify the
+  coherent Vulkan-backed WebView render-log source path and byte size.
+- The aggregate re-checks the coherent Android render-log source as a regular
+  file artifact and rejects missing, symlinked, or byte-size-mismatched paths.
 
 ## Scenarios
 
@@ -172,6 +176,11 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coheren
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_validation_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len=347702")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_path=" + root + "/artifacts/android.log")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_size_bytes=49")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_actual_size_bytes=49")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_failure_marker_status=pass")
@@ -1109,6 +1118,14 @@ expect(script).to_contain("ios-render-log-coherent-source-missing")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_source_coherence_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_path")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_size_bytes")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_actual_size_bytes")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason")
+expect(script).to_contain("android-render-log-coherent-source-artifact-missing")
+expect(script).to_contain("android-render-log-coherent-source-size-mismatch")
+expect(script).to_contain("android-render-log-coherent-source-missing")
 expect(script).to_contain("cat \"$android_render_log_validation_env\"")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason")

@@ -18,6 +18,8 @@ let symlinkSourceCount = 0;
 let sourceCount = 0;
 let text = '';
 let coherentSource = false;
+let coherentSourcePath = '';
+let coherentSourceSizeBytes = '';
 let htmlLen = '';
 let coherentSourceHtmlLen = '';
 const maxRenderHtmlLen = 10000000;
@@ -63,7 +65,11 @@ for (const file of files) {
   if (htmlLen === '' && sourceHtmlLen !== '') htmlLen = sourceHtmlLen;
   if (sourceHtmlLen !== '' && vulkanMarkerPattern.test(content)) {
     coherentSource = true;
-    if (coherentSourceHtmlLen === '') coherentSourceHtmlLen = sourceHtmlLen;
+    if (coherentSourcePath === '') {
+      coherentSourcePath = file;
+      coherentSourceSizeBytes = String(stat.size);
+      coherentSourceHtmlLen = sourceHtmlLen;
+    }
   }
 }
 
@@ -106,6 +112,8 @@ emit('android_render_log_empty_source_count', emptySourceCount);
 emit('android_render_log_symlink_source_count', symlinkSourceCount);
 emit('android_render_log_html_len', htmlLen);
 emit('android_render_log_source_coherence_status', coherentSource ? 'pass' : 'fail');
+emit('android_render_log_coherent_source_path', coherentSourcePath);
+emit('android_render_log_coherent_source_size_bytes', coherentSourceSizeBytes);
 emit('android_render_log_marker_status', renderMarker ? 'pass' : 'fail');
 emit('android_render_log_vulkan_marker_status', vulkanMarker ? 'pass' : 'fail');
 emit('android_render_log_failure_marker_status', failureMarker ? 'fail' : 'pass');

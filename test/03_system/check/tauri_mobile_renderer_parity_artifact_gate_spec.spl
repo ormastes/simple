@@ -73,6 +73,10 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   Metal-backed WKWebView render-log source path and byte size.
 - The aggregate re-checks the coherent iOS render-log source as a regular file
   artifact and rejects missing, symlinked, or byte-size-mismatched paths.
+- The aggregate requires Android render-log validator rows to identify the
+  coherent Vulkan-backed WebView render-log source path and byte size.
+- The aggregate re-checks the coherent Android render-log source as a regular
+  file artifact and rejects missing, symlinked, or byte-size-mismatched paths.
 """
 
 # @tag: system, gui, tauri, mobile, ios, android, evidence
@@ -220,6 +224,11 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_validation_status=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len=347702")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_path=" + root + "/artifacts/android.log")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_size_bytes=49")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_actual_size_bytes=49")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_failure_marker_status=pass")
@@ -321,6 +330,62 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_actual_size_bytes=223")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status=fail")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=size-mismatch")
+
+    it "rejects Android render-log validator pass claims without coherent source artifact rows":
+        val root = "build/test-tauri-mobile-artifact-gate-missing-android-coherent-source"
+        val validator = root + "/fake-android-render-validator.js"
+        val inject_validator = "printf 'process.stdout.write(\"android_render_log_validation_status=pass\\\\nandroid_render_log_validation_reason=pass\\\\nandroid_render_log_requested_source_count=2\\\\nandroid_render_log_source_count=2\\\\nandroid_render_log_missing_source_count=0\\\\nandroid_render_log_empty_source_count=0\\\\nandroid_render_log_symlink_source_count=0\\\\nandroid_render_log_html_len=347702\\\\nandroid_render_log_source_coherence_status=pass\\\\nandroid_render_log_coherent_source_path=\\\\nandroid_render_log_coherent_source_size_bytes=\\\\nandroid_render_log_marker_status=pass\\\\nandroid_render_log_vulkan_marker_status=pass\\\\nandroid_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
+        val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_ANDROID_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/stdout.env")
+        step("Confirm Android render-log pass claims are bound to a coherent source artifact")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-render-log-coherent-source-missing")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_validation_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_source_coherence_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_path=")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_size_bytes=")
+
+    it "rejects Android render-log validator pass claims with stale coherent source paths":
+        val root = "build/test-tauri-mobile-artifact-gate-stale-android-coherent-source"
+        val validator = root + "/fake-android-render-validator.js"
+        val stale_path = root + "/artifacts/stale-android.log"
+        val inject_validator = "printf 'process.stdout.write(\"android_render_log_validation_status=pass\\\\nandroid_render_log_validation_reason=pass\\\\nandroid_render_log_requested_source_count=2\\\\nandroid_render_log_source_count=2\\\\nandroid_render_log_missing_source_count=0\\\\nandroid_render_log_empty_source_count=0\\\\nandroid_render_log_symlink_source_count=0\\\\nandroid_render_log_html_len=347702\\\\nandroid_render_log_source_coherence_status=pass\\\\nandroid_render_log_coherent_source_path=" + stale_path + "\\\\nandroid_render_log_coherent_source_size_bytes=123\\\\nandroid_render_log_marker_status=pass\\\\nandroid_render_log_vulkan_marker_status=pass\\\\nandroid_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
+        val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_ANDROID_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/stdout.env")
+        step("Confirm coherent Android render-log source rows are rechecked as current artifacts")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-render-log-coherent-source-artifact-missing")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_validation_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_path=" + stale_path)
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_size_bytes=123")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_status=fail")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason=missing")
+
+    it "rejects Android render-log validator pass claims with mismatched coherent source byte size":
+        val root = "build/test-tauri-mobile-artifact-gate-mismatch-android-coherent-source-size"
+        val validator = root + "/fake-android-render-validator.js"
+        val coherent_path = root + "/artifacts/android.log"
+        val inject_validator = "printf 'process.stdout.write(\"android_render_log_validation_status=pass\\\\nandroid_render_log_validation_reason=pass\\\\nandroid_render_log_requested_source_count=2\\\\nandroid_render_log_source_count=2\\\\nandroid_render_log_missing_source_count=0\\\\nandroid_render_log_empty_source_count=0\\\\nandroid_render_log_symlink_source_count=0\\\\nandroid_render_log_html_len=347702\\\\nandroid_render_log_source_coherence_status=pass\\\\nandroid_render_log_coherent_source_path=" + coherent_path + "\\\\nandroid_render_log_coherent_source_size_bytes=1\\\\nandroid_render_log_marker_status=pass\\\\nandroid_render_log_vulkan_marker_status=pass\\\\nandroid_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
+        val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_ANDROID_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/stdout.env")
+        step("Confirm coherent Android render-log byte-size rows match the artifact")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=android-render-log-coherent-source-size-mismatch")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_validation_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_path=" + coherent_path)
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_size_bytes=1")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_actual_size_bytes=49")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_status=fail")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason=size-mismatch")
 
     it "rejects an iOS pass claim with fallback GPU render-log markers":
         val root = "build/test-tauri-mobile-artifact-gate-ios-fallback-gpu"
@@ -794,6 +859,14 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_source_coherence_status")
+        expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_path")
+        expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_size_bytes")
+        expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_actual_size_bytes")
+        expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_status")
+        expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason")
+        expect(script).to_contain("android-render-log-coherent-source-artifact-missing")
+        expect(script).to_contain("android-render-log-coherent-source-size-mismatch")
+        expect(script).to_contain("android-render-log-coherent-source-missing")
         expect(script).to_contain("cat \"$android_render_log_validation_env\"")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_status")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_reason")
