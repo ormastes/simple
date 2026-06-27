@@ -1,0 +1,47 @@
+#!/bin/sh
+# Self-check for kill_simple_monitor.shs decision logic.
+# Transforms the real script (one pass, all real kills neutralized) and feeds
+# synthetic `ps` rows, asserting the kill/spare matrix. No real process is
+# signalled. Run: sh scripts/resource/kill_simple_monitor_test.shs
+set -eu
+
+DIR=$(dirname "$0")
+SRC="$DIR/kill_simple_monitor.shs"
+TMP=$(mktemp)
+ROWS=$(mktemp)
+trap 'rm -f "$TMP" "$ROWS"' EXIT
+
+# Neutralize real kills + side effects, source mock rows, run a single pass.
+sed -e 's#ps -eo pid,pcpu,rss,etimes,args --no-headers 2>/dev/null#cat "$MOCK_PS_FILE"#' \
+    -e 's#^while true; do#for _one in 1; do#' \
+    -e '/sleep "\$CHECK_INTERVAL"/d' \
+    -e '/^[[:space:]]*sleep 1$/d' \
+    -e 's#kill "\$_pid" 2>/dev/null || true#:#' \
+    -e 's#kill -0 "\$_p".*#:#' \
+    -e '/^set -eu*$/d;/^set -e$/d' \
+    -e 's#echo \$\$ > "\$PIDFILE"#:#' \
+    -e 's#trap cleanup INT TERM HUP EXIT#:#' \
+    "$SRC" > "$TMP"
+
+# pid pcpu rss(KB) etimes args  (threshold 24576MB = 25165824KB; 30GB row trips it)
+cat > "$ROWS" <<'EOF'
+1001 5.0 31457280 5 bin/simple test mem_runaway
+1002 99.0 1048576 120 bin/simple run cpu_spin
+1003 10.0 524288 300 bin/simple test healthy
+1004 99.0 31457280 300 bin/simple test claude session
+2002 99.0 1048576 5 bin/simple run cpu_young
+3003 99.0 1048576 120 some_other_program busy
+EOF
+
+OUT=$(MOCK_PS_FILE="$ROWS" sh "$TMP" 2>&1 || true)
+KILLED=$(printf '%s\n' "$OUT" | sed -n 's/.*Killing.*pid=\([0-9]*\).*/\1/p' | sort -u | tr '\n' ' ')
+KILLED=$(echo $KILLED)  # trim
+
+EXPECT="1001 1002"
+if [ "$KILLED" = "$EXPECT" ]; then
+    echo "PASS kill_simple_monitor: killed [$KILLED] (mem-runaway + cpu-spin), spared healthy/protected/young/non-simple"
+    exit 0
+fi
+echo "FAIL kill_simple_monitor: killed [$KILLED], expected [$EXPECT]" >&2
+printf '%s\n' "$OUT" >&2
+exit 1

@@ -9,9 +9,14 @@
 set -e
 
 PIDFILE="/tmp/kill_simple_monitor.pid"
-CHECK_INTERVAL=30
+CHECK_INTERVAL="${KILL_SIMPLE_INTERVAL:-10}"
 CPU_THRESHOLD=95
 MIN_AGE_SECS=60
+# RSS guard: kill a bin/simple run/test proc this big regardless of CPU/age.
+# A no-GC simple balloon doesn't peg CPU, so the CPU guard alone misses the
+# host-OOM crash class (simple_runaway_oom_host_crash_2026-06-14). earlyoom is
+# the kernel backstop; this kills a single proc long before the host degrades.
+MEM_THRESHOLD_MB="${KILL_SIMPLE_MEM_MB:-24000}"
 
 cleanup() {
     rm -f "$PIDFILE"
@@ -50,10 +55,20 @@ safe_kill() {
     kill "$_pid" 2>/dev/null || true
 }
 
+kill_hard() {
+    _pid="$1"
+    _why="$2"
+    echo "[kill_monitor] Killing runaway simple process pid=$_pid ($_why)" >&2
+    safe_kill "$_pid"
+    sleep 1
+    kill -0 "$_pid" 2>/dev/null && [ "$_pid" -gt 1 ] 2>/dev/null && kill -9 "$_pid" 2>/dev/null || true
+}
+
 while true; do
     sleep "$CHECK_INTERVAL"
 
-    ps -eo pid,pcpu,etimes,args --no-headers 2>/dev/null | while read pid cpu etime cmdline; do
+    # rss is in KB; etimes in seconds.
+    ps -eo pid,pcpu,rss,etimes,args --no-headers 2>/dev/null | while read pid cpu rss etime cmdline; do
         case "$cmdline" in
             *bin/simple*run*|*bin/simple*test*)
                 ;;
@@ -62,22 +77,26 @@ while true; do
                 ;;
         esac
 
-        cpu_int=$(printf '%.0f' "$cpu" 2>/dev/null || echo 0)
-        if [ "$cpu_int" -lt "$CPU_THRESHOLD" ] 2>/dev/null; then
-            continue
-        fi
-
-        if [ "$etime" -lt "$MIN_AGE_SECS" ] 2>/dev/null; then
-            continue
-        fi
-
         if is_protected "$cmdline"; then
             continue
         fi
 
-        echo "[kill_monitor] Killing runaway simple process pid=$pid cpu=${cpu}% age=${etime}s: $cmdline" >&2
-        safe_kill "$pid"
-        sleep 1
-        kill -0 "$pid" 2>/dev/null && [ "$pid" -gt 1 ] 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+        # RSS guard — fires regardless of CPU/age (catches the OOM balloon).
+        rss_mb=$(( rss / 1024 ))
+        if [ "$rss_mb" -ge "$MEM_THRESHOLD_MB" ] 2>/dev/null; then
+            kill_hard "$pid" "rss=${rss_mb}MB>=${MEM_THRESHOLD_MB}MB: $cmdline"
+            continue
+        fi
+
+        # CPU guard — runaway spin.
+        cpu_int=$(printf '%.0f' "$cpu" 2>/dev/null || echo 0)
+        if [ "$cpu_int" -lt "$CPU_THRESHOLD" ] 2>/dev/null; then
+            continue
+        fi
+        if [ "$etime" -lt "$MIN_AGE_SECS" ] 2>/dev/null; then
+            continue
+        fi
+
+        kill_hard "$pid" "cpu=${cpu}% age=${etime}s: $cmdline"
     done
 done
