@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 73 | 73 | 0 | 0 |
+| 74 | 74 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -222,6 +222,35 @@ expect(pixels.len()).to_equal(40 * 32)
 expect(_count_color(pixels, 0xFFEF4444u32)).to_be_greater_than(0)
 expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(0)
 expect(_count_color(pixels, 0xFFF59E0Bu32)).to_be_greater_than(0)
+```
+
+</details>
+
+#### maps logical border block and inline properties to physical edges
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}#card{display:block;width:10px;height:8px;background-color:#111827;border-block:1px solid #64748b;border-inline:1px solid #64748b;border-block-width:3px 5px;border-inline-width:2px 4px;border-block-color:#94a3b8;border-inline-color:#94a3b8;border-block-style:solid;border-inline-style:solid;border-block-start:3px solid #ef4444;border-block-start-width:3px;border-block-start-color:#ef4444;border-block-start-style:solid;border-block-end:5px solid #1d4ed8;border-block-end-width:5px;border-block-end-color:#1d4ed8;border-block-end-style:solid;border-inline-start:2px solid #f59e0b;border-inline-start-width:2px;border-inline-start-color:#f59e0b;border-inline-start-style:solid;border-inline-end:4px solid #22c55e;border-inline-end-width:4px;border-inline-end-color:#22c55e;border-inline-end-style:solid}#none{display:block;width:8px;height:6px;margin-top:4px;background-color:#e5e7eb;border-block:2px solid #7c3aed;border-inline:2px solid #7c3aed;border-block-style:none;border-inline-style:none;border-block-start-style:none;border-block-end-style:none;border-inline-start-style:none;border-inline-end-style:none}</style></head><body><div id='card'></div><div id='none'></div></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 40, 40)
+val batch = composition.batches[0]
+val card = _draw_ir_command_by_id(batch.commands, "card")
+val pixels = simple_web_render_html_to_pixels(html, 40, 40)
+
+expect(_draw_ir_style_value(card, "border-left-width")).to_equal("2")
+expect(_draw_ir_style_value(card, "border-top-width")).to_equal("3")
+expect(_draw_ir_style_value(card, "border-right-width")).to_equal("4")
+expect(_draw_ir_style_value(card, "border-bottom-width")).to_equal("5")
+expect(pixels[3]).to_equal(0xFFEF4444u32)
+expect(pixels[160]).to_equal(0xFFF59E0Bu32)
+expect(pixels[175]).to_equal(0xFF22C55Eu32)
+expect(pixels[603]).to_equal(0xFF1D4ED8u32)
+expect(pixels[122]).to_equal(0xFF111827u32)
+expect(_count_color(pixels, 0xFF7C3AEDu32)).to_equal(0)
 ```
 
 </details>
@@ -1645,8 +1674,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 73 |
-| Active scenarios | 73 |
+| Total scenarios | 74 |
+| Active scenarios | 74 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
