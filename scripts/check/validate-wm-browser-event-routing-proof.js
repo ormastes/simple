@@ -181,6 +181,13 @@ const move = proof.move_payload || {};
 const title = proof.title_payload || {};
 const text = proof.text_payload || {};
 const proofSource = proofSourceArtifact();
+const proofSourceArtifactStatus =
+  proofSource.status === 'pass' &&
+  proofSource.size !== '' &&
+  proofSource.actualSize !== '' &&
+  proofSource.size === proofSource.actualSize
+    ? 'pass'
+    : 'fail';
 
 const rows = {
   target: proof.target,
@@ -189,6 +196,8 @@ const rows = {
   proof_source_file_status: proofSource.status,
   proof_source_size_bytes: proofSource.size,
   proof_source_actual_size_bytes: proofSource.actualSize,
+  proof_source_file_reason: proofSource.status,
+  proof_source_artifact_status: proofSourceArtifactStatus,
   browser_engine: proof.browser_engine,
   electron_user_agent: proof.electron_user_agent,
   electron_process_version: proof.electron_process_version,
