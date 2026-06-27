@@ -136,6 +136,32 @@ function nonzeroPixelCount(pixels) {
   return String(count);
 }
 
+function measuredGeometryItemCount(items, viewport) {
+  if (!Array.isArray(items)) return 0;
+  const viewportWidth = jsonIntegerText(viewport.width);
+  const viewportHeight = jsonIntegerText(viewport.height);
+  if (viewportWidth === null || viewportHeight === null) return 0;
+  const maxWidth = BigInt(viewportWidth);
+  const maxHeight = BigInt(viewportHeight);
+  let count = 0;
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const x = jsonIntegerText(item.x);
+    const y = jsonIntegerText(item.y);
+    const width = jsonIntegerText(item.width);
+    const height = jsonIntegerText(item.height);
+    if (x === null || y === null || width === null || height === null) continue;
+    const left = BigInt(x);
+    const top = BigInt(y);
+    const right = left + BigInt(width);
+    const bottom = top + BigInt(height);
+    if (BigInt(width) < 1n || BigInt(height) < 1n) continue;
+    if (right <= 0n || bottom <= 0n || left >= maxWidth || top >= maxHeight) continue;
+    count += 1;
+  }
+  return count;
+}
+
 const proofPath = process.argv[2];
 if (!proofPath) {
   emit('chrome_simple_web_layout_validation_status', 'fail');
@@ -162,6 +188,7 @@ const geometryJson = readJsonArtifact(geometryStat, {});
 const geometry = geometryJson.value || {};
 const geometryViewport = geometry.viewport || {};
 const geometryItems = Array.isArray(geometry.items) ? geometry.items : [];
+const geometryMeasuredItemCount = measuredGeometryItemCount(geometryItems, geometryViewport);
 const expectedProofSource = 'tools/chrome-live-bitmap/capture_html_argb.js';
 const chromeUserAgent = typeof proof.chrome_user_agent === 'string' ? proof.chrome_user_agent : '';
 const chromeProduct = typeof proof.chrome_product === 'string' ? proof.chrome_product : '';
@@ -226,6 +253,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'chrome-geometry-viewport-mismatch';
 } else if (geometryItems.length < 1) {
   reason = 'missing-chrome-geometry-items';
+} else if (geometryMeasuredItemCount < 1) {
+  reason = 'missing-chrome-geometry-measured-items';
 } else if (!jsonIntegerBetween(proof.frame_us, 1, 1000000)) {
   reason = 'missing-chrome-timing';
 }
@@ -264,6 +293,7 @@ emit('chrome_simple_web_layout_geometry_producer', geometry.producer);
 emit('chrome_simple_web_layout_geometry_viewport_width', jsonIntegerTextOrBlank(geometryViewport.width));
 emit('chrome_simple_web_layout_geometry_viewport_height', jsonIntegerTextOrBlank(geometryViewport.height));
 emit('chrome_simple_web_layout_geometry_item_count', String(geometryItems.length));
+emit('chrome_simple_web_layout_geometry_measured_item_count', String(geometryMeasuredItemCount));
 emit('chrome_simple_web_layout_chrome_bin', proof.chrome_bin);
 
 if (reason !== 'pass') {

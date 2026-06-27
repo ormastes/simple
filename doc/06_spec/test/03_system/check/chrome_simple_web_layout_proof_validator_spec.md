@@ -91,7 +91,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   count, include nonzero pixels, and encode pixels as numeric uint32 JSON
   values rather than strings or fractional numbers.
 - Chrome geometry proof must parse as Chrome geometry, match the captured
-  viewport, and include at least one measured layout item.
+  viewport, and include at least one measured layout item with numeric bounds
+  intersecting the captured viewport.
 - Capture viewport dimensions must be explicit positive decimal integers and
   are emitted as normalized rows for the live wrapper to compare against the
   requested Chrome viewport.
@@ -127,7 +128,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -168,6 +169,7 @@ expect(evidence).to_contain("chrome_simple_web_layout_geometry_producer=chrome-h
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_width=96")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_height=64")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_item_count=1")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_measured_item_count=1")
 expect(evidence).to_contain("chrome_simple_web_layout_blur_or_tolerance_used=false")
 ```
 
@@ -574,6 +576,8 @@ expect(empty).to_contain("chrome_simple_web_layout_geometry_size_bytes=0")
 
 -  proof command
 -  proof command
+-  proof command
+-  proof command
    - Expected: code equals `1`
 - Confirm nonempty files must still contain Chrome layout readback shape
 
@@ -581,7 +585,7 @@ expect(empty).to_contain("chrome_simple_web_layout_geometry_size_bytes=0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -590,20 +594,36 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/malformed.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),\"{}\")") +
     " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/malformed.json > " + root + "/malformed.env; " +
     _proof_command(root + "/empty-items.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),JSON.stringify({producer:\"chrome-headless-geometry\",viewport:{width:96,height:64},items:[]}))") +
-    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/empty-items.json > " + root + "/empty-items.env"
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/empty-items.json > " + root + "/empty-items.env; " +
+    _proof_command(root + "/placeholder-item.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),JSON.stringify({producer:\"chrome-headless-geometry\",viewport:{width:96,height:64},items:[{label:\"root\",tag:\"div\"}]}))") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/placeholder-item.json > " + root + "/placeholder-item.env; " +
+    _proof_command(root + "/offscreen-item.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),JSON.stringify({producer:\"chrome-headless-geometry\",viewport:{width:96,height:64},items:[{label:\"root\",tag:\"div\",x:200,y:200,width:20,height:20}]}))") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/offscreen-item.json > " + root + "/offscreen-item.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val malformed = file_read(root + "/malformed.env")
 val empty_items = file_read(root + "/empty-items.env")
+val placeholder_item = file_read(root + "/placeholder-item.env")
+val offscreen_item = file_read(root + "/offscreen-item.env")
 step("Confirm nonempty files must still contain Chrome layout readback shape")
 expect(malformed).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(malformed).to_contain("chrome_simple_web_layout_validation_reason=malformed-chrome-geometry")
 expect(malformed).to_contain("chrome_simple_web_layout_geometry_item_count=0")
+expect(malformed).to_contain("chrome_simple_web_layout_geometry_measured_item_count=0")
 expect(empty_items).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(empty_items).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-geometry-items")
 expect(empty_items).to_contain("chrome_simple_web_layout_geometry_producer=chrome-headless-geometry")
 expect(empty_items).to_contain("chrome_simple_web_layout_geometry_item_count=0")
+expect(empty_items).to_contain("chrome_simple_web_layout_geometry_measured_item_count=0")
+expect(placeholder_item).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(placeholder_item).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-geometry-measured-items")
+expect(placeholder_item).to_contain("chrome_simple_web_layout_geometry_item_count=1")
+expect(placeholder_item).to_contain("chrome_simple_web_layout_geometry_measured_item_count=0")
+expect(offscreen_item).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(offscreen_item).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-geometry-measured-items")
+expect(offscreen_item).to_contain("chrome_simple_web_layout_geometry_item_count=1")
+expect(offscreen_item).to_contain("chrome_simple_web_layout_geometry_measured_item_count=0")
 ```
 
 </details>
@@ -817,7 +837,7 @@ expect(pixel).to_contain("chrome_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -842,7 +862,10 @@ expect(script).to_contain("chrome_simple_web_layout_geometry_producer")
 expect(script).to_contain("chrome_simple_web_layout_geometry_viewport_width")
 expect(script).to_contain("chrome_simple_web_layout_geometry_viewport_height")
 expect(script).to_contain("chrome_simple_web_layout_geometry_item_count")
+expect(script).to_contain("chrome_simple_web_layout_geometry_measured_item_count")
 expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
+expect(validator).to_contain("measuredGeometryItemCount")
+expect(validator).to_contain("missing-chrome-geometry-measured-items")
 expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
