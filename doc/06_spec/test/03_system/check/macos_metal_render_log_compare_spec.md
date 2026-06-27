@@ -118,8 +118,8 @@ Browser evidence must prove Metal backing and exact pairwise ARGB comparison:
 - Electron and Chrome browser backing source files must also be nonempty; a
   zero-byte source artifact is reported distinctly from a missing file.
 - Electron and Chrome browser backing source files must be single regular proof
-  files, not symlinks or hardlinks to browser metadata outside the evidence
-  boundary.
+  files, not symlinks, hardlinks, directories, or other non-regular artifacts
+  outside the evidence boundary.
 - Electron and Chrome browser backing source files must contain structured
   Metal GPU metadata scoped to the expected Electron or Chrome backing prefix,
   not arbitrary nonempty text or generic renderer rows.
@@ -198,7 +198,8 @@ macos_metal_render_log_compare_pairwise_status=pass
    Metal GPU metadata is otherwise complete.
 8. Reject browser backing rows whose source artifacts are arbitrary non-proof
    text even when normalized Metal rows claim pass.
-9. Reject symlinked or hardlinked browser backing source artifacts.
+9. Reject symlinked, hardlinked, or non-regular browser backing source
+   artifacts.
 10. Reject browser backing source artifacts that only contain generic GPU
    metadata rather than Electron/Chrome-scoped backing rows.
 11. Reject pairwise rows whose Simple, Chrome, or Electron ARGB evidence is
@@ -247,7 +248,7 @@ macos_metal_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 176 lines folded for reproduction.
+Runnable source: 190 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -376,6 +377,20 @@ expect(hardlink_source_evidence).to_contain("chrome-metal-source-hardlink")
 expect(hardlink_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_status=hardlink")
 expect(hardlink_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_status=hardlink")
 expect(hardlink_source_evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=fail")
+
+val nonregular_source_base_command = command.replace("rm -rf build/test-macos-metal-render-log-pass && mkdir -p build/test-macos-metal-render-log-pass && " + _argb_artifacts_command("build/test-macos-metal-render-log-pass") + " && ", "rm -rf build/test-macos-metal-render-log-pass && mkdir -p build/test-macos-metal-render-log-pass/electron-source.env build/test-macos-metal-render-log-pass/chrome-source.env && " + _argb_artifacts_command("build/test-macos-metal-render-log-pass") + " && ")
+val nonregular_electron_source_command = nonregular_source_base_command.replace("macos_metal_electron_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env", "macos_metal_electron_browser_backing_source=build/test-macos-metal-render-log-pass/electron-source.env")
+val nonregular_source_command = nonregular_electron_source_command.replace("macos_metal_chrome_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env", "macos_metal_chrome_browser_backing_source=build/test-macos-metal-render-log-pass/chrome-source.env") + " || true"
+val (_nonregular_source_stdout, _nonregular_source_stderr, nonregular_source_code) = process_run("/bin/sh", ["-c", nonregular_source_command])
+expect(nonregular_source_code).to_equal(0)
+
+val nonregular_source_evidence = file_read("build/test-macos-metal-render-log-pass/out/evidence.env")
+expect(nonregular_source_evidence).to_contain("macos_metal_render_log_compare_status=fail")
+expect(nonregular_source_evidence).to_contain("electron-metal-source-not-regular")
+expect(nonregular_source_evidence).to_contain("chrome-metal-source-not-regular")
+expect(nonregular_source_evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_status=not-regular")
+expect(nonregular_source_evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_status=not-regular")
+expect(nonregular_source_evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=fail")
 
 val invalid_source_base_command = command.replace("rm -rf build/test-macos-metal-render-log-pass && mkdir -p build/test-macos-metal-render-log-pass && " + _argb_artifacts_command("build/test-macos-metal-render-log-pass") + " && ", "rm -rf build/test-macos-metal-render-log-pass && mkdir -p build/test-macos-metal-render-log-pass && " + _argb_artifacts_command("build/test-macos-metal-render-log-pass") + " && printf 'not structured metal gpu proof\\n' > build/test-macos-metal-render-log-pass/invalid-source.txt && ")
 val invalid_electron_source_command = invalid_source_base_command.replace("macos_metal_electron_browser_backing_source=test/fixtures/render_log/macos_metal_browser_backing_source.env", "macos_metal_electron_browser_backing_source=build/test-macos-metal-render-log-pass/invalid-source.txt")
