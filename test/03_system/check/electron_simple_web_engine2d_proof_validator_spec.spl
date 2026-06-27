@@ -33,6 +33,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
   missing viewport proof, and capture viewport mismatches are rejected.
 - ARGB capture file-status rows distinguish `missing`, `empty`, and `pass` so
   diagnostics cannot treat a zero-byte artifact as a valid capture file.
+- ARGB capture proof paths must not resolve back to the top-level proof JSON
+  even if the proof contains artifact-shaped fields.
 - Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
   match the proof viewport, include the expected pixel count, and contain
   nonzero pixels with numeric uint32 JSON pixel values.
@@ -212,6 +214,22 @@ describe "Electron Simple Web Engine2D proof validator":
         expect(empty).to_contain("electron_simple_web_engine2d_captured_argb_file_status=empty")
         expect(empty).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=0")
 
+    it "rejects captured ARGB paths that point back at the proof JSON":
+        val root = "build/test-electron-engine2d-validator-self-artifact"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/proof.json", "p.captured_argb_path=path.basename(process.argv[1]);p.width=2;p.height=2;p.capture_native_width=2;p.capture_native_height=2;p.format=\"argb-u32\";p.producer=\"electron-live-capture-page\";p.pixels=Array(4).fill(4294967295)") +
+            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/evidence.env")
+        step("Confirm the proof JSON cannot be reused as its own Engine2D ARGB artifact")
+        expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=fail")
+        expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=missing-captured-argb-file")
+        expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_path=proof.json")
+        expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_file_status=missing")
+        expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=")
+
     it "rejects malformed captured ARGB shape and pixel data":
         val root = "build/test-electron-engine2d-validator-argb-shape"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
@@ -357,6 +375,7 @@ describe "Electron Simple Web Engine2D proof validator":
 
     it "keeps the live Electron Engine2D wrapper wired to validator":
         val script = file_read("scripts/check/check-electron-simple-web-engine2d-bitmap-evidence.shs")
+        val validator = file_read("scripts/check/validate-electron-simple-web-engine2d-proof.js")
         expect(script).to_contain("validate-electron-simple-web-engine2d-proof.js")
         expect(script).to_contain("cat \"$VALIDATED_ENV\"")
         expect(script).to_contain("electron_simple_web_engine2d_validation_status")
@@ -373,3 +392,4 @@ describe "Electron Simple Web Engine2D proof validator":
         expect(script).to_contain("electron_simple_web_engine2d_captured_argb_nonzero_pixel_count")
         expect(script).to_contain("electron_simple_web_engine2d_proof_renderer")
         expect(script).to_contain("electron-proof.validation.env")
+        expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")

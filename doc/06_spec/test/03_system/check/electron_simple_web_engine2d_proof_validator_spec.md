@@ -27,7 +27,7 @@ electron_simple_web_engine2d_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,6 +82,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
   missing viewport proof, and capture viewport mismatches are rejected.
 - ARGB capture file-status rows distinguish `missing`, `empty`, and `pass` so
   diagnostics cannot treat a zero-byte artifact as a valid capture file.
+- ARGB capture proof paths must not resolve back to the top-level proof JSON
+  even if the proof contains artifact-shaped fields.
 - Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
   match the proof viewport, include the expected pixel count, and contain
   nonzero pixels with numeric uint32 JSON pixel values.
@@ -357,6 +359,38 @@ expect(empty).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=
 
 </details>
 
+#### rejects captured ARGB paths that point back at the proof JSON
+
+-  proof command
+   - Expected: code equals `1`
+- Confirm the proof JSON cannot be reused as its own Engine2D ARGB artifact
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-engine2d-validator-self-artifact"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "p.captured_argb_path=path.basename(process.argv[1]);p.width=2;p.height=2;p.capture_native_width=2;p.capture_native_height=2;p.format=\"argb-u32\";p.producer=\"electron-live-capture-page\";p.pixels=Array(4).fill(4294967295)") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm the proof JSON cannot be reused as its own Engine2D ARGB artifact")
+expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=fail")
+expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=missing-captured-argb-file")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_path=proof.json")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_file_status=missing")
+expect(evidence).to_contain("electron_simple_web_engine2d_captured_argb_size_bytes=")
+```
+
+</details>
+
 #### rejects malformed captured ARGB shape and pixel data
 
 -  proof command
@@ -604,11 +638,12 @@ expect(pixel).to_contain("electron_simple_web_engine2d_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-electron-simple-web-engine2d-bitmap-evidence.shs")
+val validator = file_read("scripts/check/validate-electron-simple-web-engine2d-proof.js")
 expect(script).to_contain("validate-electron-simple-web-engine2d-proof.js")
 expect(script).to_contain("cat \"$VALIDATED_ENV\"")
 expect(script).to_contain("electron_simple_web_engine2d_validation_status")
@@ -625,6 +660,7 @@ expect(script).to_contain("electron_simple_web_engine2d_captured_argb_format")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_nonzero_pixel_count")
 expect(script).to_contain("electron_simple_web_engine2d_proof_renderer")
 expect(script).to_contain("electron-proof.validation.env")
+expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
 ```
 
 </details>
@@ -633,8 +669,8 @@ expect(script).to_contain("electron-proof.validation.env")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
