@@ -100,8 +100,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 - The proof must carry the Electron bridge live-smoke source marker so a
   generic hand-authored JSON object cannot stand in for the renderer bridge
   probe.
-- The bridge source marker must resolve to a regular nonempty bridge source
-  file that still contains the live smoke proof producer and marker.
+- The bridge source marker must resolve to a single-link regular nonempty
+  bridge source file that still contains the live smoke proof producer and
+  marker.
 - The proof must include Chromium/Electron runtime evidence from the renderer
   user agent and Electron/Chrome process versions, not only a hand-authored
   source marker.
@@ -293,7 +294,7 @@ expect(wrong).to_contain("electron_live_smoke_proof_source=tools/manual/proof.js
 
 </details>
 
-#### rejects proof when the live Electron bridge source artifact is missing
+#### rejects proof when the live Electron bridge source artifact is missing or hardlinked
 
 - Confirm live smoke proof source marker is bound to the bridge producer source file
 
@@ -301,24 +302,31 @@ expect(wrong).to_contain("electron_live_smoke_proof_source=tools/manual/proof.js
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-live-smoke-validator-source-artifact"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/proof.json", "") +
-    " && cd " + root + " && node ../../scripts/check/validate-electron-live-smoke-proof.js proof.json 1280 720 > evidence.env"
+    " && cd " + root + " && node ../../scripts/check/validate-electron-live-smoke-proof.js proof.json 1280 720 > missing.env; missing_code=$?; cd ../.. && " +
+    "mkdir -p " + root + "/hardlink/src/app/ui.electron && cp src/app/ui.electron/bridge.js " + root + "/hardlink/original-bridge.js && ln " + root + "/hardlink/original-bridge.js " + root + "/hardlink/src/app/ui.electron/bridge.js && cp " + root + "/proof.json " + root + "/hardlink/proof.json && " +
+    "cd " + root + "/hardlink && node ../../../scripts/check/validate-electron-live-smoke-proof.js proof.json 1280 720 > hardlink.env; hardlink_code=$?; [ \"$missing_code\" -eq 1 ] && [ \"$hardlink_code\" -eq 1 ]"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(1)
+expect(code).to_equal(0)
 
-val evidence = file_read(root + "/evidence.env")
+val missing = file_read(root + "/missing.env")
+val hardlink = file_read(root + "/hardlink/hardlink.env")
 step("Confirm live smoke proof source marker is bound to the bridge producer source file")
-expect(evidence).to_contain("electron_live_smoke_validation_status=fail")
-expect(evidence).to_contain("electron_live_smoke_validation_reason=unexpected-proof-source-file-missing")
-expect(evidence).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
-expect(evidence).to_contain("electron_live_smoke_proof_source_file_status=missing")
-expect(evidence).to_contain("electron_live_smoke_proof_source_size_bytes=")
+expect(missing).to_contain("electron_live_smoke_validation_status=fail")
+expect(missing).to_contain("electron_live_smoke_validation_reason=unexpected-proof-source-file-missing")
+expect(missing).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
+expect(missing).to_contain("electron_live_smoke_proof_source_file_status=missing")
+expect(missing).to_contain("electron_live_smoke_proof_source_size_bytes=")
+expect(hardlink).to_contain("electron_live_smoke_validation_status=fail")
+expect(hardlink).to_contain("electron_live_smoke_validation_reason=unexpected-proof-source-file-hardlink")
+expect(hardlink).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
+expect(hardlink).to_contain("electron_live_smoke_proof_source_file_status=hardlink")
 ```
 
 </details>
@@ -591,27 +599,27 @@ step("Confirm string booleans are not normalized as live Chromium proof")
 expect(app).to_contain("electron_live_smoke_validation_status=fail")
 expect(app).to_contain("electron_live_smoke_validation_reason=missing-app-element")
 expect(app).to_contain("electron_live_smoke_app_element_present=")
-expect(app.contains("electron_live_smoke_app_element_present=true")).to_equal(false)
+expect_not(app.contains("electron_live_smoke_app_element_present=true"))
 expect(perf).to_contain("electron_live_smoke_validation_status=fail")
 expect(perf).to_contain("electron_live_smoke_validation_reason=missing-performance-now")
 expect(perf).to_contain("electron_live_smoke_performance_now_available=")
-expect(perf.contains("electron_live_smoke_performance_now_available=true")).to_equal(false)
+expect_not(perf.contains("electron_live_smoke_performance_now_available=true"))
 expect(frames).to_contain("electron_live_smoke_validation_status=fail")
 expect(frames).to_contain("electron_live_smoke_validation_reason=missing-animation-frames")
 expect(frames).to_contain("electron_live_smoke_animation_frame_available=")
-expect(frames.contains("electron_live_smoke_animation_frame_available=true")).to_equal(false)
+expect_not(frames.contains("electron_live_smoke_animation_frame_available=true"))
 expect(css).to_contain("electron_live_smoke_validation_status=fail")
 expect(css).to_contain("electron_live_smoke_validation_reason=missing-css-animation")
 expect(css).to_contain("electron_live_smoke_css_animation_probe=")
-expect(css.contains("electron_live_smoke_css_animation_probe=true")).to_equal(false)
+expect_not(css.contains("electron_live_smoke_css_animation_probe=true"))
 expect(event).to_contain("electron_live_smoke_validation_status=fail")
 expect(event).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch")
 expect(event).to_contain("electron_live_smoke_event_dispatch_available=")
-expect(event.contains("electron_live_smoke_event_dispatch_available=true")).to_equal(false)
+expect_not(event.contains("electron_live_smoke_event_dispatch_available=true"))
 expect(blur).to_contain("electron_live_smoke_validation_status=fail")
 expect(blur).to_contain("electron_live_smoke_validation_reason=blur-or-tolerance-not-allowed")
 expect(blur).to_contain("electron_live_smoke_blur_or_tolerance_used=")
-expect(blur.contains("electron_live_smoke_blur_or_tolerance_used=false")).to_equal(false)
+expect_not(blur.contains("electron_live_smoke_blur_or_tolerance_used=false"))
 ```
 
 </details>
@@ -671,31 +679,31 @@ step("Confirm numeric-looking text is not accepted as live Chromium counters")
 expect(width).to_contain("electron_live_smoke_validation_status=fail")
 expect(width).to_contain("electron_live_smoke_validation_reason=unexpected-width")
 expect(width).to_contain("electron_live_smoke_width=")
-expect(width.contains("electron_live_smoke_width=1280")).to_equal(false)
+expect_not(width.contains("electron_live_smoke_width=1280"))
 expect(html).to_contain("electron_live_smoke_validation_status=fail")
 expect(html).to_contain("electron_live_smoke_validation_reason=missing-render-html")
 expect(html).to_contain("electron_live_smoke_body_html_length=")
-expect(html.contains("electron_live_smoke_body_html_length=64")).to_equal(false)
+expect_not(html.contains("electron_live_smoke_body_html_length=64"))
 expect(text).to_contain("electron_live_smoke_validation_status=fail")
 expect(text).to_contain("electron_live_smoke_validation_reason=missing-rendered-text")
 expect(text).to_contain("electron_live_smoke_body_text_length=")
-expect(text.contains("electron_live_smoke_body_text_length=23")).to_equal(false)
+expect_not(text.contains("electron_live_smoke_body_text_length=23"))
 expect(perf).to_contain("electron_live_smoke_validation_status=fail")
 expect(perf).to_contain("electron_live_smoke_validation_reason=missing-performance-now")
 expect(perf).to_contain("electron_live_smoke_performance_now_delta_ms=")
-expect(perf.contains("electron_live_smoke_performance_now_delta_ms=1.25")).to_equal(false)
+expect_not(perf.contains("electron_live_smoke_performance_now_delta_ms=1.25"))
 expect(frames).to_contain("electron_live_smoke_validation_status=fail")
 expect(frames).to_contain("electron_live_smoke_validation_reason=missing-animation-frames")
 expect(frames).to_contain("electron_live_smoke_animation_frame_count=")
-expect(frames.contains("electron_live_smoke_animation_frame_count=2")).to_equal(false)
+expect_not(frames.contains("electron_live_smoke_animation_frame_count=2"))
 expect(event).to_contain("electron_live_smoke_validation_status=fail")
 expect(event).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch")
 expect(event).to_contain("electron_live_smoke_event_dispatch_count=")
-expect(event.contains("electron_live_smoke_event_dispatch_count=1")).to_equal(false)
+expect_not(event.contains("electron_live_smoke_event_dispatch_count=1"))
 expect(event_paint).to_contain("electron_live_smoke_validation_status=fail")
 expect(event_paint).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch-to-paint")
 expect(event_paint).to_contain("electron_live_smoke_event_dispatch_to_paint_ms=")
-expect(event_paint.contains("electron_live_smoke_event_dispatch_to_paint_ms=1.5")).to_equal(false)
+expect_not(event_paint.contains("electron_live_smoke_event_dispatch_to_paint_ms=1.5"))
 ```
 
 </details>
@@ -797,7 +805,7 @@ expect(evidence).to_contain("electron_live_smoke_validation_status=fail")
 expect(evidence).to_contain("electron_live_smoke_validation_reason=proof-json-symlink")
 expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=fail")
 expect(evidence).to_contain("electron_live_smoke_proof_hardlink_status=unknown")
-expect(evidence.contains("electron_live_smoke_target=electron")).to_equal(false)
+expect_not(evidence.contains("electron_live_smoke_target=electron"))
 ```
 
 </details>
@@ -831,7 +839,7 @@ expect(evidence).to_contain("electron_live_smoke_validation_status=fail")
 expect(evidence).to_contain("electron_live_smoke_validation_reason=proof-json-hardlink")
 expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=pass")
 expect(evidence).to_contain("electron_live_smoke_proof_hardlink_status=fail")
-expect(evidence.contains("electron_live_smoke_target=electron")).to_equal(false)
+expect_not(evidence.contains("electron_live_smoke_target=electron"))
 ```
 
 </details>
@@ -862,7 +870,7 @@ expect(evidence).to_contain("electron_live_smoke_validation_status=fail")
 expect(evidence).to_contain("electron_live_smoke_validation_reason=proof-json-not-regular")
 expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=pass")
 expect(evidence).to_contain("electron_live_smoke_proof_hardlink_status=pass")
-expect(evidence.contains("electron_live_smoke_target=electron")).to_equal(false)
+expect_not(evidence.contains("electron_live_smoke_target=electron"))
 ```
 
 </details>
@@ -913,7 +921,7 @@ expect(wrapper).to_contain("electron_live_smoke_event_dispatch_error")
 expect(wrapper).to_contain("electron_live_smoke_event_dispatch_to_paint_ms")
 expect(wrapper).to_contain("electron_live_smoke_blur_or_tolerance_used")
 expect(package_json).to_contain("--simple-bin ${SIMPLE_BIN:-../../src/compiler_rust/target/debug/simple}")
-expect(package_json.contains("--simple-bin bin/simple")).to_equal(false)
+expect_not(package_json.contains("--simple-bin bin/simple"))
 expect(bridge).to_contain("electronLiveSmokeProofScript")
 expect(bridge).to_contain("proof_source: 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript'")
 expect(bridge).to_contain("browser_engine")

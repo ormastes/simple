@@ -60,6 +60,7 @@ function proofSourceArtifact(marker) {
   }
   if (stat.isSymbolicLink()) return { status: 'symlink', size: '' };
   if (!stat.isFile()) return { status: 'missing', size: '' };
+  if (stat.nlink > 1) return { status: 'hardlink', size: String(stat.size) };
   if (stat.size <= 0) return { status: 'empty', size: '0' };
   let source = '';
   try {
