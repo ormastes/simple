@@ -180,7 +180,9 @@ if (proof.blur_or_tolerance_used !== false) {
 } else if (
   proofGpuFeatureStatus === null ||
   proofGpuCompositing.trim() === '' ||
-  proofGpuFeatureStatus.gpu_compositing !== proofGpuCompositing
+  proofGpuRasterization.trim() === '' ||
+  proofGpuFeatureStatus.gpu_compositing !== proofGpuCompositing ||
+  proofGpuFeatureStatus.rasterization !== proofGpuRasterization
 ) {
   reason = 'missing-gpu-feature-status';
 } else if (decimalIntegerText(proof.checksum) === null || decimalIntegerText(proof.expected_checksum) === null) {

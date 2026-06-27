@@ -73,7 +73,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
 - Complete Electron Simple Web Engine2D proof JSON validates and emits
   normalized `electron_simple_web_engine2d_*` rows.
 - Complete proofs must identify the Electron offscreen capture backend,
-  compositor mode, and Chromium GPU feature-status diagnostics.
+  compositor mode, and matching Chromium GPU compositing/rasterization
+  feature-status diagnostics.
 - Large integer checksum values compare exactly, without JavaScript number
   rounding.
 - Malformed `frame_us`, malformed mismatch counts, blur/tolerance use, missing
@@ -202,6 +203,7 @@ expect(scene).to_contain("electron_simple_web_engine2d_validation_reason=unexpec
 -  proof command
 -  proof command
 -  proof command
+-  proof command
    - Expected: code equals `1`
 - Confirm Engine2D proof carries capture backend and GPU diagnostics
 
@@ -209,7 +211,7 @@ expect(scene).to_contain("electron_simple_web_engine2d_validation_reason=unexpec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -222,7 +224,9 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/gpu.json", "delete p.gpu_feature_status") +
     " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/gpu.json > " + root + "/gpu.env; " +
     _proof_command(root + "/gpu-mismatch.json", "p.gpu_feature_status.gpu_compositing=\"enabled\"") +
-    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/gpu-mismatch.json > " + root + "/gpu-mismatch.env"
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/gpu-mismatch.json > " + root + "/gpu-mismatch.env; " +
+    _proof_command(root + "/gpu-raster-mismatch.json", "p.gpu_feature_status.rasterization=\"enabled\"") +
+    " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/gpu-raster-mismatch.json > " + root + "/gpu-raster-mismatch.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
@@ -230,6 +234,7 @@ val backend = file_read(root + "/backend.env")
 val mode = file_read(root + "/mode.env")
 val gpu_env = file_read(root + "/gpu.env")
 val gpu_mismatch = file_read(root + "/gpu-mismatch.env")
+val gpu_raster_mismatch = file_read(root + "/gpu-raster-mismatch.env")
 step("Confirm Engine2D proof carries capture backend and GPU diagnostics")
 expect(backend).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-capture-backend")
 expect(backend).to_contain("electron_simple_web_engine2d_capture_backend=manual-json")
@@ -239,6 +244,8 @@ expect(gpu_env).to_contain("electron_simple_web_engine2d_validation_reason=missi
 expect(gpu_env).to_contain("electron_simple_web_engine2d_gpu_compositing=disabled_software")
 expect(gpu_mismatch).to_contain("electron_simple_web_engine2d_validation_reason=missing-gpu-feature-status")
 expect(gpu_mismatch).to_contain("electron_simple_web_engine2d_gpu_compositing=disabled_software")
+expect(gpu_raster_mismatch).to_contain("electron_simple_web_engine2d_validation_reason=missing-gpu-feature-status")
+expect(gpu_raster_mismatch).to_contain("electron_simple_web_engine2d_gpu_rasterization=disabled_software")
 ```
 
 </details>
