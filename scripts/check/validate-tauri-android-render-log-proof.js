@@ -11,6 +11,9 @@ function emit(key, value) {
 }
 
 const files = process.argv.slice(2).filter(Boolean);
+const requestedSourceCount = files.length;
+let missingSourceCount = 0;
+let emptySourceCount = 0;
 let sourceCount = 0;
 let text = '';
 let coherentSource = false;
@@ -27,9 +30,15 @@ function renderHtmlLen(content) {
 }
 
 for (const file of files) {
-  if (!file || !fs.existsSync(file) || !fs.statSync(file).isFile()) continue;
+  if (!file || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
+    missingSourceCount += 1;
+    continue;
+  }
   const content = fs.readFileSync(file, 'utf8');
-  if (content.length === 0) continue;
+  if (content.length === 0) {
+    emptySourceCount += 1;
+    continue;
+  }
   sourceCount += 1;
   text += `\n${content}`;
   const sourceHtmlLen = renderHtmlLen(content);
@@ -45,8 +54,12 @@ const vulkanMarker = vulkanMarkerPattern.test(text);
 const failureMarker = failureMarkerPattern.test(text);
 
 let reason = 'pass';
-if (sourceCount === 0) {
+if (requestedSourceCount === 0 || sourceCount === 0) {
   reason = 'missing-android-render-log-source';
+} else if (missingSourceCount > 0) {
+  reason = 'android-render-log-source-missing';
+} else if (emptySourceCount > 0) {
+  reason = 'android-render-log-source-empty';
 } else if (failureMarker) {
   reason = 'android-render-log-failure-marker';
 } else if (hasAnyRenderMarker && !renderMarker) {
@@ -61,7 +74,10 @@ if (sourceCount === 0) {
 
 emit('android_render_log_validation_status', reason === 'pass' ? 'pass' : 'fail');
 emit('android_render_log_validation_reason', reason);
+emit('android_render_log_requested_source_count', requestedSourceCount);
 emit('android_render_log_source_count', sourceCount);
+emit('android_render_log_missing_source_count', missingSourceCount);
+emit('android_render_log_empty_source_count', emptySourceCount);
 emit('android_render_log_html_len', htmlLen);
 emit('android_render_log_source_coherence_status', coherentSource ? 'pass' : 'fail');
 emit('android_render_log_marker_status', renderMarker ? 'pass' : 'fail');
