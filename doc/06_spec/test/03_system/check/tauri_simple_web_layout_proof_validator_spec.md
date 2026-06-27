@@ -27,7 +27,7 @@ tauri_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,8 +82,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_simple_web_layout_proo
   on `captured_argb_written=true` alone.
 - ARGB capture file-status rows distinguish `missing`, `empty`, and `pass` so
   diagnostics cannot treat a zero-byte artifact as a valid capture file.
-- Tauri layout proof JSON and captured ARGB artifacts must be regular files,
-  not symlinks to mutable or substituted evidence.
+- Tauri layout proof JSON and captured ARGB artifacts must be single regular
+  files, not symlinks or hardlinks to mutable or substituted evidence.
 - ARGB capture proof paths must not resolve back to the top-level proof JSON
   even if the proof contains artifact-shaped fields.
 - ARGB capture files must parse as `argb-u32` artifacts from the Tauri window
@@ -137,8 +137,10 @@ expect(evidence).to_contain("tauri_simple_web_layout_tauri_frame_us=1250")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_path=captured.json")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_written=true")
 expect(evidence).to_contain("tauri_simple_web_layout_proof_symlink_status=pass")
+expect(evidence).to_contain("tauri_simple_web_layout_proof_hardlink_status=pass")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_file_status=pass")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_symlink_status=pass")
+expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_hardlink_status=pass")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_format=argb-u32")
 expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_producer=tauri-x11-window-screenshot")
@@ -219,7 +221,7 @@ val high = file_read(root + "/high.env")
 expect(evidence).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=missing-tauri-timing")
 expect(evidence).to_contain("tauri_simple_web_layout_tauri_frame_us=")
-expect(evidence.contains("tauri_simple_web_layout_tauri_frame_us=not-a-number")).to_equal(false)
+expect_not(evidence.contains("tauri_simple_web_layout_tauri_frame_us=not-a-number"))
 expect(high).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(high).to_contain("tauri_simple_web_layout_validation_reason=missing-tauri-timing")
 expect(high).to_contain("tauri_simple_web_layout_tauri_frame_us=1000001")
@@ -366,11 +368,58 @@ step("Confirm Tauri layout evidence cannot be substituted through symlinks")
 expect(proof).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(proof).to_contain("tauri_simple_web_layout_validation_reason=proof-json-symlink")
 expect(proof).to_contain("tauri_simple_web_layout_proof_symlink_status=fail")
+expect(proof).to_contain("tauri_simple_web_layout_proof_hardlink_status=unknown")
 expect(argb).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(argb).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-symlink")
 expect(argb).to_contain("tauri_simple_web_layout_proof_symlink_status=pass")
+expect(argb).to_contain("tauri_simple_web_layout_proof_hardlink_status=pass")
 expect(argb).to_contain("tauri_simple_web_layout_captured_argb_file_status=symlink")
 expect(argb).to_contain("tauri_simple_web_layout_captured_argb_symlink_status=fail")
+expect(argb).to_contain("tauri_simple_web_layout_captured_argb_hardlink_status=pass")
+```
+
+</details>
+
+#### rejects hardlinked Tauri layout proof and captured ARGB artifacts
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Tauri layout evidence cannot be substituted through hardlinks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-layout-validator-hardlinks"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof-real.json", "") + " && " +
+    "ln " + root + "/proof-real.json " + root + "/proof-link.json && " +
+    "node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/proof-link.json > " + root + "/proof.env; " +
+    _proof_command(root + "/argb.json", "fs.renameSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),path.join(path.dirname(process.argv[1]),\"captured-real.json\"));fs.linkSync(path.join(path.dirname(process.argv[1]),\"captured-real.json\"),path.join(path.dirname(process.argv[1]),\"captured.json\"))") +
+    " && node scripts/check/validate-tauri-simple-web-layout-proof.js " + root + "/argb.json > " + root + "/argb.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val proof = file_read(root + "/proof.env")
+val argb = file_read(root + "/argb.env")
+step("Confirm Tauri layout evidence cannot be substituted through hardlinks")
+expect(proof).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(proof).to_contain("tauri_simple_web_layout_validation_reason=proof-json-hardlink")
+expect(proof).to_contain("tauri_simple_web_layout_proof_symlink_status=pass")
+expect(proof).to_contain("tauri_simple_web_layout_proof_hardlink_status=fail")
+expect(argb).to_contain("tauri_simple_web_layout_validation_status=fail")
+expect(argb).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-hardlink")
+expect(argb).to_contain("tauri_simple_web_layout_proof_symlink_status=pass")
+expect(argb).to_contain("tauri_simple_web_layout_proof_hardlink_status=pass")
+expect(argb).to_contain("tauri_simple_web_layout_captured_argb_file_status=hardlink")
+expect(argb).to_contain("tauri_simple_web_layout_captured_argb_symlink_status=pass")
+expect(argb).to_contain("tauri_simple_web_layout_captured_argb_hardlink_status=fail")
+expect(argb).to_contain("tauri_simple_web_layout_captured_argb_size_bytes=")
 ```
 
 </details>
@@ -486,7 +535,7 @@ val evidence = file_read(root + "/missing.env")
 expect(evidence).to_contain("tauri_simple_web_layout_validation_reason=missing-viewport-proof")
 expect(evidence).to_contain("tauri_simple_web_layout_requested_width=")
 expect(evidence).to_contain("tauri_simple_web_layout_requested_height=")
-expect(evidence.contains("tauri_simple_web_layout_requested_height=64.5")).to_equal(false)
+expect_not(evidence.contains("tauri_simple_web_layout_requested_height=64.5"))
 ```
 
 </details>
@@ -538,23 +587,23 @@ step("Confirm live Tauri layout numeric proof cannot be stringified")
 expect(requested).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(requested).to_contain("tauri_simple_web_layout_validation_reason=missing-viewport-proof")
 expect(requested).to_contain("tauri_simple_web_layout_requested_width=")
-expect(requested.contains("tauri_simple_web_layout_requested_width=96")).to_equal(false)
+expect_not(requested.contains("tauri_simple_web_layout_requested_width=96"))
 expect(argb).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(argb).to_contain("tauri_simple_web_layout_validation_reason=captured-argb-viewport-mismatch")
 expect(argb).to_contain("tauri_simple_web_layout_captured_argb_width=")
-expect(argb.contains("tauri_simple_web_layout_captured_argb_width=96")).to_equal(false)
+expect_not(argb.contains("tauri_simple_web_layout_captured_argb_width=96"))
 expect(timing).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(timing).to_contain("tauri_simple_web_layout_validation_reason=missing-tauri-timing")
 expect(timing).to_contain("tauri_simple_web_layout_tauri_frame_us=")
-expect(timing.contains("tauri_simple_web_layout_tauri_frame_us=1250")).to_equal(false)
+expect_not(timing.contains("tauri_simple_web_layout_tauri_frame_us=1250"))
 expect(overlay).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(overlay).to_contain("tauri_simple_web_layout_validation_reason=malformed-expected-overlay-pixel-count")
 expect(overlay).to_contain("tauri_simple_web_layout_expected_overlay_pixel_count=")
-expect(overlay.contains("tauri_simple_web_layout_expected_overlay_pixel_count=12")).to_equal(false)
+expect_not(overlay.contains("tauri_simple_web_layout_expected_overlay_pixel_count=12"))
 expect(mismatch).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(mismatch).to_contain("tauri_simple_web_layout_validation_reason=malformed-mismatch-count")
 expect(mismatch).to_contain("tauri_simple_web_layout_mismatch_count=")
-expect(mismatch.contains("tauri_simple_web_layout_mismatch_count=0")).to_equal(false)
+expect_not(mismatch.contains("tauri_simple_web_layout_mismatch_count=0"))
 ```
 
 </details>
@@ -592,12 +641,12 @@ step("Confirm string booleans remain malformed Tauri proof diagnostics")
 expect(capture).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(capture).to_contain("tauri_simple_web_layout_validation_reason=missing-captured-argb")
 expect(capture).to_contain("tauri_simple_web_layout_captured_argb_written=")
-expect(capture.contains("tauri_simple_web_layout_captured_argb_written=true")).to_equal(false)
-expect(capture.contains("tauri_simple_web_layout_captured_argb_written=false")).to_equal(false)
+expect_not(capture.contains("tauri_simple_web_layout_captured_argb_written=true"))
+expect_not(capture.contains("tauri_simple_web_layout_captured_argb_written=false"))
 expect(blur).to_contain("tauri_simple_web_layout_validation_status=fail")
 expect(blur).to_contain("tauri_simple_web_layout_validation_reason=blur-or-tolerance-not-allowed")
 expect(blur).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=")
-expect(blur.contains("tauri_simple_web_layout_blur_or_tolerance_used=false")).to_equal(false)
+expect_not(blur.contains("tauri_simple_web_layout_blur_or_tolerance_used=false"))
 ```
 
 </details>
@@ -632,7 +681,7 @@ expect(blur).to_contain("tauri_simple_web_layout_validation_reason=blur-or-toler
 expect(blur).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=true")
 expect(mismatch).to_contain("tauri_simple_web_layout_validation_reason=malformed-mismatch-count")
 expect(mismatch).to_contain("tauri_simple_web_layout_mismatch_count=")
-expect(mismatch.contains("tauri_simple_web_layout_mismatch_count=bad")).to_equal(false)
+expect_not(mismatch.contains("tauri_simple_web_layout_mismatch_count=bad"))
 ```
 
 </details>
@@ -727,8 +776,10 @@ val validator = file_read("scripts/check/validate-tauri-simple-web-layout-proof.
 expect(script).to_contain("validate-tauri-simple-web-layout-proof.js")
 expect(script).to_contain("tauri_simple_web_layout_validation_status")
 expect(script).to_contain("tauri_simple_web_layout_proof_symlink_status")
+expect(script).to_contain("tauri_simple_web_layout_proof_hardlink_status")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_file_status")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_symlink_status")
+expect(script).to_contain("tauri_simple_web_layout_captured_argb_hardlink_status")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_size_bytes")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_format")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_nonzero_pixel_count")
@@ -737,10 +788,14 @@ expect(script).to_contain("tauri_simple_web_layout_captured_argb_weighted_checks
 expect(script).to_contain("tauri_simple_web_layout_requested_width")
 expect(script).to_contain("captured-argb-checksum-mismatch")
 expect(script).to_contain("captured-argb-weighted-checksum-mismatch")
+expect(script).to_contain("proof-json-hardlink-status-not-pass")
+expect(script).to_contain("captured-argb-hardlink-status-not-pass")
 expect(script).to_contain("status=divergent")
 expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
 expect(validator).to_contain("proof-json-symlink")
 expect(validator).to_contain("captured-argb-symlink")
+expect(validator).to_contain("proof-json-hardlink")
+expect(validator).to_contain("captured-argb-hardlink")
 expect(validator).to_contain("captured-argb-checksum-mismatch")
 expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
@@ -755,8 +810,8 @@ expect(converter).to_contain("captured_argb_path: outputPath")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
