@@ -27,7 +27,7 @@ electron_generated_gui_web_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -92,6 +92,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   mismatch counts, frame timing, and text-normalization pixel counts must be
   real JSON numbers, not stringified rows, and malformed live numeric rows must
   not be re-emitted as normalized numeric evidence.
+- Capture provenance, ARGB-written, and blur/tolerance proof rows must be real
+  JSON booleans; string booleans are rejected and not re-emitted as normalized
+  boolean evidence.
 - The live Electron wrapper must print validator env rows before deriving
   wrapper status, preserving exact failure diagnostics in check output.
 - Proof renderer, source marker, and scene identity must match the live
@@ -705,6 +708,58 @@ expect(evidence).to_contain("electron_generated_gui_web_text_normalization_pixel
 
 </details>
 
+#### rejects string booleans without normalizing them as valid diagnostics
+
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm string booleans remain malformed Electron generated-GUI diagnostics
+   - Expected: capture does not contain `electron_generated_gui_web_captured_argb_written=true`
+   - Expected: capture does not contain `electron_generated_gui_web_captured_argb_written=false`
+   - Expected: downsampled does not contain `electron_generated_gui_web_capture_downsampled=false`
+   - Expected: blur does not contain `electron_generated_gui_web_blur_or_tolerance_used=false`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-generated-gui-web-validator-string-booleans"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/capture.json", "p.captured_argb_written=\"true\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/capture.json > " + root + "/capture.env; " +
+    _proof_command(root + "/downsampled.json", "p.capture_downsampled=\"false\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/downsampled.json > " + root + "/downsampled.env; " +
+    _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=\"false\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/blur.json > " + root + "/blur.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val capture = file_read(root + "/capture.env")
+val downsampled = file_read(root + "/downsampled.env")
+val blur = file_read(root + "/blur.env")
+step("Confirm string booleans remain malformed Electron generated-GUI diagnostics")
+expect(capture).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(capture).to_contain("electron_generated_gui_web_validation_reason=missing-captured-argb")
+expect(capture).to_contain("electron_generated_gui_web_captured_argb_written=")
+expect(capture.contains("electron_generated_gui_web_captured_argb_written=true")).to_equal(false)
+expect(capture.contains("electron_generated_gui_web_captured_argb_written=false")).to_equal(false)
+expect(downsampled).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(downsampled).to_contain("electron_generated_gui_web_validation_reason=missing-capture-provenance")
+expect(downsampled).to_contain("electron_generated_gui_web_capture_downsampled=")
+expect(downsampled.contains("electron_generated_gui_web_capture_downsampled=false")).to_equal(false)
+expect(blur).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(blur).to_contain("electron_generated_gui_web_validation_reason=blur-or-tolerance-not-allowed")
+expect(blur).to_contain("electron_generated_gui_web_blur_or_tolerance_used=")
+expect(blur.contains("electron_generated_gui_web_blur_or_tolerance_used=false")).to_equal(false)
+```
+
+</details>
+
 #### rejects blur tolerance and malformed mismatch counts
 
 -  proof command
@@ -718,7 +773,7 @@ expect(evidence).to_contain("electron_generated_gui_web_text_normalization_pixel
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -737,6 +792,7 @@ val blur = file_read(root + "/blur.env")
 val mismatch = file_read(root + "/mismatch.env")
 val string_zero = file_read(root + "/string-zero.env")
 expect(blur).to_contain("electron_generated_gui_web_validation_reason=blur-or-tolerance-not-allowed")
+expect(blur).to_contain("electron_generated_gui_web_blur_or_tolerance_used=true")
 expect(mismatch).to_contain("electron_generated_gui_web_validation_reason=malformed-mismatch-count")
 expect(mismatch).to_contain("electron_generated_gui_web_mismatch_count=")
 expect(mismatch.contains("electron_generated_gui_web_mismatch_count=bad")).to_equal(false)
@@ -784,13 +840,14 @@ expect(pixel).to_contain("electron_generated_gui_web_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val validator = file_read("scripts/check/validate-electron-generated-gui-web-proof.js")
 expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
 expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
+expect(validator).to_contain("jsonBoolTextOrBlank")
 
 val script = file_read("scripts/check/check-electron-generated-gui-web-parity-evidence.shs")
 expect(script).to_contain("validate-electron-generated-gui-web-proof.js")
@@ -825,8 +882,8 @@ expect(fixture).to_contain("chrome_process_version")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

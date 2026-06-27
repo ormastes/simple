@@ -66,10 +66,10 @@ function jsonIntegerTextOrBlank(value) {
   return text === null ? '' : text;
 }
 
-function booleanString(value) {
+function jsonBoolTextOrBlank(value) {
   if (value === true) return 'true';
   if (value === false) return 'false';
-  return clean(value);
+  return '';
 }
 
 function textField(value) {
@@ -274,7 +274,7 @@ emit('electron_generated_gui_web_electron_checksum', integerTextOrClean(proof.ch
 emit('electron_generated_gui_web_simple_weighted_checksum', integerTextOrClean(proof.expected_weighted_checksum));
 emit('electron_generated_gui_web_electron_weighted_checksum', integerTextOrClean(proof.weighted_checksum));
 emit('electron_generated_gui_web_mismatch_count', jsonIntegerTextOrBlank(proof.mismatch_count));
-emit('electron_generated_gui_web_blur_or_tolerance_used', proof.blur_or_tolerance_used === false ? 'false' : clean(proof.blur_or_tolerance_used));
+emit('electron_generated_gui_web_blur_or_tolerance_used', jsonBoolTextOrBlank(proof.blur_or_tolerance_used));
 emit('electron_generated_gui_web_proof_iterations', jsonIntegerTextOrBlank(proof.iterations));
 emit('electron_generated_gui_web_electron_frame_us', jsonIntegerTextOrBlank(proof.frame_us));
 emit('electron_generated_gui_web_estimated_fps_floor', estimatedFpsFloor);
@@ -282,9 +282,9 @@ emit('electron_generated_gui_web_requested_width', jsonIntegerTextOrBlank(proof.
 emit('electron_generated_gui_web_requested_height', jsonIntegerTextOrBlank(proof.height));
 emit('electron_generated_gui_web_capture_native_width', jsonIntegerTextOrBlank(proof.capture_native_width));
 emit('electron_generated_gui_web_capture_native_height', jsonIntegerTextOrBlank(proof.capture_native_height));
-emit('electron_generated_gui_web_capture_downsampled', booleanString(proof.capture_downsampled));
+emit('electron_generated_gui_web_capture_downsampled', jsonBoolTextOrBlank(proof.capture_downsampled));
 emit('electron_generated_gui_web_captured_argb_path', proof.captured_argb_path);
-emit('electron_generated_gui_web_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
+emit('electron_generated_gui_web_captured_argb_written', jsonBoolTextOrBlank(proof.captured_argb_written));
 emit('electron_generated_gui_web_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
 emit('electron_generated_gui_web_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
 emit('electron_generated_gui_web_captured_argb_format', capturedArgb.format);
