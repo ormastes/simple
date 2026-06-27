@@ -85,6 +85,7 @@ const requestedSourceCount = files.length;
 let missingSourceCount = 0;
 let emptySourceCount = 0;
 let symlinkSourceCount = 0;
+let hardlinkSourceCount = 0;
 let nonregularSourceCount = 0;
 let sourceCount = 0;
 let lastJson = "";
@@ -121,6 +122,10 @@ for (const file of files) {
   }
   if (!stat.isFile()) {
     nonregularSourceCount += 1;
+    continue;
+  }
+  if (stat.nlink > 1) {
+    hardlinkSourceCount += 1;
     continue;
   }
   const identity = fileIdentity(stat);
@@ -168,6 +173,7 @@ function emitSourceRows() {
   emit("mdi_proof_marker_source_count", proofMarkerSourceCount);
   emit("mdi_proof_missing_source_count", missingSourceCount);
   emit("mdi_proof_symlink_source_count", symlinkSourceCount);
+  emit("mdi_proof_hardlink_source_count", hardlinkSourceCount);
   emit("mdi_proof_empty_source_count", emptySourceCount);
   emit("mdi_proof_nonregular_source_count", nonregularSourceCount);
   emit("mdi_proof_marker_source_path", proofMarkerSourcePath);
@@ -186,6 +192,14 @@ if (symlinkSourceCount > 0) {
   emit("mdi_proof_json", jsonPath);
   emit("mdi_proof_status", "fail");
   emit("mdi_proof_reason", "symlink-mdi-proof-source");
+  emitSourceRows();
+  process.exit(1);
+}
+
+if (hardlinkSourceCount > 0) {
+  emit("mdi_proof_json", jsonPath);
+  emit("mdi_proof_status", "fail");
+  emit("mdi_proof_reason", "hardlink-mdi-proof-source");
   emitSourceRows();
   process.exit(1);
 }
