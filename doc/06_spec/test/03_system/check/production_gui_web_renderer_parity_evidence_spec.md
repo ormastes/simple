@@ -175,7 +175,7 @@ the produced `evidence.env` to validate the final release-blocking contract.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -198,22 +198,35 @@ expect(script).to_contain("production_gui_web_renderer_parity_event_routing_css_
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_validation_status")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_proof_source")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_event_sequence")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_expected_move_x")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_move_payload_x")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_move_payload_source")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_title_command_text")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_text_input_text")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_title_text")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_title_context_text")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_traffic_button_count")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_titlebar_display")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_titlebar_background")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_title_input_width_px")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_title_input_background")
 expect(script).to_contain("production_gui_web_renderer_parity_event_routing_close_button_background")
+expect(script).to_contain("production_gui_web_renderer_parity_event_routing_blur_or_tolerance_used")
 expect(script).to_contain("[ \"$validation_status\" = \"pass\" ]")
 expect(script).to_contain("host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up")
+expect(script).to_contain("[ \"$expected_move_x\" = \"$move_payload_x\" ]")
 expect(script).to_contain("[ \"$move_payload_source\" = \"native_event\" ]")
 expect(script).to_contain("[ \"$title_command_text\" = \"/tmp/project\" ]")
 expect(script).to_contain("[ \"$text_input_text\" = \"Hello Simple\" ]")
 expect(script).to_contain("[ \"$title_text\" = \"Terminal\" ]")
+expect(script).to_contain("[ \"$title_context_text\" = \"terminal\" ]")
+expect(script).to_contain("[ \"$titlebar_display\" = \"flex\" ]")
+expect(script).to_contain("[ \"$titlebar_background\" = \"rgb(229, 231, 235)\" ]")
 expect(script).to_contain("num_at_least \"$traffic_button_count\" 3")
 expect(script).to_contain("num_at_least_decimal \"$title_input_width_px\" 142")
+expect(script).to_contain("[ \"$title_input_background\" = \"rgb(241, 245, 249)\" ]")
 expect(script).to_contain("[ \"$close_button_background\" = \"rgb(239, 68, 68)\" ]")
+expect(script).to_contain("[ \"$tolerance\" = \"false\" ]")
 expect(script).to_contain("num_positive \"$performance_now_delta_ms\"")
 expect(script).to_contain("num_at_least \"$animation_frame_count\" 2")
 expect(script).to_contain("PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS:-180")
@@ -503,7 +516,7 @@ expect(evidence).to_contain("tauri_chrome_simple_web_layout_manifest_chrome_capt
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -529,8 +542,18 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_fo
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_pointer_down_count=1")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_performance_now_delta_ms=16.7")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_input_to_paint_ms=18.4")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_event_sequence=host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_move_payload_source=native_event")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_title_command_text=/tmp/project")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_text_input_text=Hello Simple")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_title_text=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_title_context_text=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_traffic_button_count=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_titlebar_display=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_titlebar_background=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_title_input_background=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_close_button_background=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_event_routing_blur_or_tolerance_used=false")
 ```
 
 </details>
