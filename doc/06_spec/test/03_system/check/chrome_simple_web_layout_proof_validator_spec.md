@@ -27,7 +27,7 @@ chrome_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -114,6 +114,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 - The top-level proof must carry Chrome DevTools capture mode, Chrome or
   Chromium runtime user-agent, product, and protocol version evidence, not only
   a binary path.
+- The proof JSON, captured ARGB artifact, and geometry artifact must be regular
+  files, not symlinks to mutable or substituted evidence.
 - The live Chrome wrapper emits validation and proof-source diagnostic rows
   even on early missing-artifact exits before the validator can run.
 - The live Chrome wrapper consumes the validator and still maps real pixel
@@ -133,7 +135,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -148,6 +150,7 @@ val evidence = file_read(root + "/evidence.env")
 step("Inspect normalized Chrome layout proof rows")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=pass")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_symlink_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_proof_source=tools/chrome-live-bitmap/capture_html_argb.js")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_mode=chrome-devtools-screenshot")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36")
@@ -165,6 +168,7 @@ expect(evidence).to_contain("chrome_simple_web_layout_capture_height=64")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_path=captured.json")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_written=true")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_file_status=pass")
+expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_symlink_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_size_bytes=")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_format=argb-u32")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_producer=chrome-headless-screenshot")
@@ -177,6 +181,7 @@ expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_weighted_che
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_path=geometry.json")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_written=true")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_file_status=pass")
+expect(evidence).to_contain("chrome_simple_web_layout_geometry_symlink_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_producer=chrome-headless-geometry")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_width=96")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_viewport_height=64")
@@ -581,6 +586,55 @@ expect(geometry_self).to_contain("chrome_simple_web_layout_geometry_file_status=
 
 </details>
 
+#### rejects symlinked Chrome proof and artifact files
+
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Chrome layout evidence cannot be substituted through symlinks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 29 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-validator-symlinks"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof-real.json", "") +
+    " && ln -s proof-real.json " + root + "/proof.json" +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/proof.env; " +
+    _proof_command(root + "/argb.json", "fs.renameSync(path.join(dir,\"captured.json\"),path.join(dir,\"captured-real.json\"));fs.symlinkSync(\"captured-real.json\",path.join(dir,\"captured.json\"))") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/argb.json > " + root + "/argb.env; " +
+    _proof_command(root + "/geometry-proof.json", "fs.renameSync(path.join(dir,\"geometry.json\"),path.join(dir,\"geometry-real.json\"));fs.symlinkSync(\"geometry-real.json\",path.join(dir,\"geometry.json\"))") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/geometry-proof.json > " + root + "/geometry.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val proof = file_read(root + "/proof.env")
+val argb = file_read(root + "/argb.env")
+val geometry = file_read(root + "/geometry.env")
+step("Confirm Chrome layout evidence cannot be substituted through symlinks")
+expect(proof).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(proof).to_contain("chrome_simple_web_layout_validation_reason=proof-json-symlink")
+expect(proof).to_contain("chrome_simple_web_layout_proof_symlink_status=fail")
+expect(argb).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(argb).to_contain("chrome_simple_web_layout_validation_reason=captured-argb-symlink")
+expect(argb).to_contain("chrome_simple_web_layout_proof_symlink_status=pass")
+expect(argb).to_contain("chrome_simple_web_layout_captured_argb_file_status=symlink")
+expect(argb).to_contain("chrome_simple_web_layout_captured_argb_symlink_status=fail")
+expect(geometry).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(geometry).to_contain("chrome_simple_web_layout_validation_reason=chrome-geometry-symlink")
+expect(geometry).to_contain("chrome_simple_web_layout_proof_symlink_status=pass")
+expect(geometry).to_contain("chrome_simple_web_layout_geometry_file_status=symlink")
+expect(geometry).to_contain("chrome_simple_web_layout_geometry_symlink_status=fail")
+```
+
+</details>
+
 #### rejects malformed captured Chrome ARGB shape and pixel data
 
 -  proof command
@@ -953,7 +1007,7 @@ expect(pixel).to_contain("chrome_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 47 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -969,6 +1023,7 @@ expect(script).to_contain("chrome_simple_web_layout_chrome_user_agent")
 expect(script).to_contain("chrome_simple_web_layout_chrome_product")
 expect(script).to_contain("chrome_simple_web_layout_chrome_protocol_version")
 expect(script).to_contain("chrome_simple_web_layout_chrome_bin")
+expect(validator).to_contain("chrome_simple_web_layout_proof_symlink_status")
 expect(script).to_contain("Chrome binary: $chrome_bin")
 expect(script).to_contain("capture-viewport-mismatch")
 expect(script).to_contain("chrome_simple_web_layout_capture_width")
@@ -977,6 +1032,8 @@ expect(script).to_contain("chrome_simple_web_layout_captured_argb_nonzero_pixel_
 expect(script).to_contain("chrome_simple_web_layout_captured_argb_checksum")
 expect(script).to_contain("chrome_simple_web_layout_captured_argb_weighted_checksum")
 expect(script).to_contain("chrome_simple_web_layout_geometry_file_status")
+expect(validator).to_contain("chrome_simple_web_layout_captured_argb_symlink_status")
+expect(validator).to_contain("chrome_simple_web_layout_geometry_symlink_status")
 expect(script).to_contain("chrome_simple_web_layout_geometry_size_bytes")
 expect(script).to_contain("chrome_simple_web_layout_geometry_producer")
 expect(script).to_contain("chrome_simple_web_layout_geometry_viewport_width")
@@ -1057,8 +1114,8 @@ expect(evidence).to_contain("chrome_simple_web_layout_geometry_item_count=0")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

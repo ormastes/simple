@@ -72,6 +72,26 @@ function jsonBoolTextOrBlank(value) {
   return '';
 }
 
+function pathInfo(filePath) {
+  let lstat = null;
+  let stat = null;
+  try {
+    lstat = fs.lstatSync(filePath);
+  } catch (_err) {
+    lstat = null;
+  }
+  try {
+    stat = fs.statSync(filePath);
+  } catch (_err) {
+    stat = null;
+  }
+  return {
+    lstat,
+    stat,
+    isSymlink: lstat !== null && lstat.isSymbolicLink(),
+  };
+}
+
 function artifactStat(value, proofPath) {
   if (typeof value !== 'string' || value.trim() === '') {
     return null;
@@ -98,6 +118,10 @@ function artifactStat(value, proofPath) {
       continue;
     }
     try {
+      const lstat = fs.lstatSync(candidate);
+      if (lstat.isSymbolicLink()) {
+        return { stat: null, path: resolvedCandidate, symlink: true };
+      }
       const realCandidate = fs.realpathSync(candidate);
       if (
         realCandidate === realProofPath ||
@@ -107,7 +131,7 @@ function artifactStat(value, proofPath) {
       }
       const stat = fs.statSync(realCandidate);
       if (stat.isFile()) {
-        return { stat, path: realCandidate };
+        return { stat, path: realCandidate, symlink: false };
       }
     } catch (_err) {
       // Try the next candidate.
@@ -117,7 +141,7 @@ function artifactStat(value, proofPath) {
 }
 
 function readJsonArtifact(artifact, fallback) {
-  if (!artifact) return { ok: false, value: null };
+  if (!artifact || artifact.symlink) return { ok: false, value: null };
   try {
     return { ok: true, value: JSON.parse(fs.readFileSync(artifact.path, 'utf8')) };
   } catch (_err) {
@@ -127,7 +151,13 @@ function readJsonArtifact(artifact, fallback) {
 
 function artifactFileStatus(artifact) {
   if (artifact === null) return 'missing';
+  if (artifact.symlink) return 'symlink';
   return artifact.stat.size <= 0 ? 'empty' : 'pass';
+}
+
+function artifactSymlinkStatus(artifact) {
+  if (artifact === null) return 'missing';
+  return artifact.symlink ? 'fail' : 'pass';
 }
 
 function pixelCountMatches(pixels, width, height) {
@@ -225,6 +255,14 @@ if (!proofPath) {
   process.exit(1);
 }
 
+const proofInfo = pathInfo(proofPath);
+if (proofInfo.isSymlink) {
+  emit('chrome_simple_web_layout_validation_status', 'fail');
+  emit('chrome_simple_web_layout_validation_reason', 'proof-json-symlink');
+  emit('chrome_simple_web_layout_proof_symlink_status', 'fail');
+  process.exit(1);
+}
+
 let proof;
 try {
   proof = JSON.parse(fs.readFileSync(proofPath, 'utf8'));
@@ -284,6 +322,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-capture-viewport';
 } else if (proof.captured_argb_written !== true) {
   reason = 'missing-captured-argb';
+} else if (capturedArgbStat !== null && capturedArgbStat.symlink) {
+  reason = 'captured-argb-symlink';
 } else if (capturedArgbStat === null) {
   reason = 'missing-captured-argb-file';
 } else if (capturedArgbStat.stat.size <= 0) {
@@ -308,6 +348,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'captured-argb-weighted-checksum-mismatch';
 } else if (proof.geometry_written !== true) {
   reason = 'missing-chrome-geometry';
+} else if (geometryStat !== null && geometryStat.symlink) {
+  reason = 'chrome-geometry-symlink';
 } else if (geometryStat === null) {
   reason = 'missing-chrome-geometry-file';
 } else if (geometryStat.stat.size <= 0) {
@@ -326,6 +368,7 @@ if (proof.blur_or_tolerance_used !== false) {
 
 emit('chrome_simple_web_layout_validation_status', reason === 'pass' ? 'pass' : 'fail');
 emit('chrome_simple_web_layout_validation_reason', reason);
+emit('chrome_simple_web_layout_proof_symlink_status', proofInfo.isSymlink ? 'fail' : 'pass');
 emit('chrome_simple_web_layout_proof_source', proof.proof_source);
 emit('chrome_simple_web_layout_capture_mode', proof.capture_mode);
 emit('chrome_simple_web_layout_chrome_user_agent', proof.chrome_user_agent);
@@ -343,7 +386,8 @@ emit('chrome_simple_web_layout_capture_height', jsonIntegerTextOrBlank(proof.hei
 emit('chrome_simple_web_layout_captured_argb_path', proof.captured_argb_path);
 emit('chrome_simple_web_layout_captured_argb_written', jsonBoolTextOrBlank(proof.captured_argb_written));
 emit('chrome_simple_web_layout_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
-emit('chrome_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
+emit('chrome_simple_web_layout_captured_argb_symlink_status', artifactSymlinkStatus(capturedArgbStat));
+emit('chrome_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null || capturedArgbStat.symlink ? '' : String(capturedArgbStat.stat.size));
 emit('chrome_simple_web_layout_captured_argb_format', capturedArgb.format);
 emit('chrome_simple_web_layout_captured_argb_producer', capturedArgb.producer);
 emit('chrome_simple_web_layout_captured_argb_width', jsonIntegerTextOrBlank(capturedArgb.width));
@@ -355,7 +399,8 @@ emit('chrome_simple_web_layout_captured_argb_weighted_checksum', capturedArgbWei
 emit('chrome_simple_web_layout_geometry_path', proof.geometry_path);
 emit('chrome_simple_web_layout_geometry_written', jsonBoolTextOrBlank(proof.geometry_written));
 emit('chrome_simple_web_layout_geometry_file_status', artifactFileStatus(geometryStat));
-emit('chrome_simple_web_layout_geometry_size_bytes', geometryStat === null ? '' : String(geometryStat.stat.size));
+emit('chrome_simple_web_layout_geometry_symlink_status', artifactSymlinkStatus(geometryStat));
+emit('chrome_simple_web_layout_geometry_size_bytes', geometryStat === null || geometryStat.symlink ? '' : String(geometryStat.stat.size));
 emit('chrome_simple_web_layout_geometry_producer', geometry.producer);
 emit('chrome_simple_web_layout_geometry_viewport_width', jsonIntegerTextOrBlank(geometryViewport.width));
 emit('chrome_simple_web_layout_geometry_viewport_height', jsonIntegerTextOrBlank(geometryViewport.height));
