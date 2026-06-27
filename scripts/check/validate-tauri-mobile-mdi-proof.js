@@ -62,6 +62,7 @@ if (!prefix || !jsonPath || files.length === 0) {
 
 const requestedSourceCount = files.length;
 let missingSourceCount = 0;
+let emptySourceCount = 0;
 let sourceCount = 0;
 let lastJson = "";
 let failureMarker = false;
@@ -72,8 +73,12 @@ for (const file of files) {
     missingSourceCount += 1;
     continue;
   }
-  sourceCount += 1;
   const text = fs.readFileSync(file, "utf8");
+  if (text.length === 0) {
+    emptySourceCount += 1;
+    continue;
+  }
+  sourceCount += 1;
   if (failureMarkerPattern.test(text)) {
     failureMarker = true;
   }
@@ -91,12 +96,21 @@ function emitSourceRows() {
   emit("mdi_proof_requested_source_count", requestedSourceCount);
   emit("mdi_proof_source_count", sourceCount);
   emit("mdi_proof_missing_source_count", missingSourceCount);
+  emit("mdi_proof_empty_source_count", emptySourceCount);
 }
 
 if (missingSourceCount > 0) {
   emit("mdi_proof_json", jsonPath);
   emit("mdi_proof_status", "fail");
   emit("mdi_proof_reason", "missing-mdi-proof-source");
+  emitSourceRows();
+  process.exit(1);
+}
+
+if (emptySourceCount > 0) {
+  emit("mdi_proof_json", jsonPath);
+  emit("mdi_proof_status", "fail");
+  emit("mdi_proof_reason", "empty-mdi-proof-source");
   emitSourceRows();
   process.exit(1);
 }
