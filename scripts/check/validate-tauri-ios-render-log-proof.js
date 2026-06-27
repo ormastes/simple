@@ -16,6 +16,7 @@ let missingSourceCount = 0;
 let emptySourceCount = 0;
 let symlinkSourceCount = 0;
 let hardlinkSourceCount = 0;
+let duplicateSourceCount = 0;
 let nonregularSourceCount = 0;
 let sourceCount = 0;
 let text = '';
@@ -30,6 +31,7 @@ const validRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=([1-9][0-
 const anyRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=/;
 const metalRuntimeMarkerPattern = /(CAMetalLayer\s+Metal renderer ready|MetalKit\.framework|Metal\.framework|-framework Metal|\bMTL[A-Za-z0-9_]*\b|\bAGX\b|\bIOGPU\b)/i;
 const fallbackRendererPattern = /(SwiftShader|software rasterizer|software renderer|software rendering|llvmpipe|ANGLE[^\r\n]*(OpenGL|GL)|OpenGL[^\r\n]*(renderer|fallback|software)|fallback renderer)/i;
+const seenSourceRealpaths = new Set();
 
 function renderHtmlLen(content) {
   const match = content.match(validRenderMarkerPattern);
@@ -60,6 +62,18 @@ for (const file of files) {
     hardlinkSourceCount += 1;
     continue;
   }
+  let realpath = '';
+  try {
+    realpath = fs.realpathSync(file);
+  } catch (_err) {
+    missingSourceCount += 1;
+    continue;
+  }
+  if (seenSourceRealpaths.has(realpath)) {
+    duplicateSourceCount += 1;
+    continue;
+  }
+  seenSourceRealpaths.add(realpath);
   const content = fs.readFileSync(file, 'utf8');
   if (content.length === 0) {
     emptySourceCount += 1;
@@ -104,6 +118,8 @@ if (requestedSourceCount === 0 || sourceCount === 0) {
   reason = 'ios-render-log-source-symlink';
 } else if (hardlinkSourceCount > 0) {
   reason = 'ios-render-log-source-hardlink';
+} else if (duplicateSourceCount > 0) {
+  reason = 'ios-render-log-source-duplicate';
 } else if (nonregularSourceCount > 0) {
   reason = 'ios-render-log-source-not-regular';
 } else if (emptySourceCount > 0) {
@@ -134,6 +150,7 @@ emit('ios_render_log_missing_source_count', missingSourceCount);
 emit('ios_render_log_empty_source_count', emptySourceCount);
 emit('ios_render_log_symlink_source_count', symlinkSourceCount);
 emit('ios_render_log_hardlink_source_count', hardlinkSourceCount);
+emit('ios_render_log_duplicate_source_count', duplicateSourceCount);
 emit('ios_render_log_nonregular_source_count', nonregularSourceCount);
 emit('ios_render_log_source_coherence_status', coherentSource ? 'pass' : 'fail');
 emit('ios_render_log_coherent_source_path', coherentSourcePath);

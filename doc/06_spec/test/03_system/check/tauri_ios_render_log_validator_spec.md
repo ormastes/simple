@@ -27,7 +27,7 @@ tauri_ios_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -101,6 +101,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
   symlinks to other render-log artifacts.
 - Explicitly requested iOS log source paths must not be hardlinked aliases of
   other render-log artifacts.
+- Explicitly requested iOS log source paths must not duplicate the same
+  canonical render-log artifact.
 - Explicitly requested iOS log source paths must not be directories or other
   non-regular artifacts.
 - Failure markers such as eval failures fail closed even when render and Metal
@@ -148,6 +150,7 @@ expect(evidence).to_contain("ios_render_log_missing_source_count=0")
 expect(evidence).to_contain("ios_render_log_empty_source_count=0")
 expect(evidence).to_contain("ios_render_log_symlink_source_count=0")
 expect(evidence).to_contain("ios_render_log_hardlink_source_count=0")
+expect(evidence).to_contain("ios_render_log_duplicate_source_count=0")
 expect(evidence).to_contain("ios_render_log_source_coherence_status=pass")
 expect(evidence).to_contain("ios_render_log_coherent_source_path=" + root + "/ios.log")
 expect(evidence).to_contain("ios_render_log_coherent_source_size_bytes=223")
@@ -188,10 +191,11 @@ step("Confirm html_len is emitted from the coherent WKWebView/CAMetalLayer sourc
 expect(evidence).to_contain("ios_render_log_validation_status=pass")
 expect(evidence).to_contain("ios_render_log_requested_source_count=2")
 expect(evidence).to_contain("ios_render_log_source_count=2")
+expect(evidence).to_contain("ios_render_log_duplicate_source_count=0")
 expect(evidence).to_contain("ios_render_log_source_coherence_status=pass")
 expect(evidence).to_contain("ios_render_log_coherent_source_path=" + root + "/ios.log")
 expect(evidence).to_contain("ios_render_log_html_len=347702")
-expect(evidence.contains("ios_render_log_html_len=999")).to_equal(false)
+expect_not(evidence.contains("ios_render_log_html_len=999"))
 ```
 
 </details>
@@ -236,7 +240,7 @@ expect(huge).to_contain("ios_render_log_validation_status=fail")
 expect(huge).to_contain("ios_render_log_validation_reason=ios-render-log-html-len-malformed")
 expect(huge).to_contain("ios_render_log_marker_status=fail")
 expect(huge).to_contain("ios_render_log_html_len=")
-expect(huge.contains("ios_render_log_html_len=10000001")).to_equal(false)
+expect_not(huge.contains("ios_render_log_html_len=10000001"))
 ```
 
 </details>
@@ -567,6 +571,44 @@ expect(evidence).to_contain("ios_render_log_missing_source_count=0")
 expect(evidence).to_contain("ios_render_log_empty_source_count=0")
 expect(evidence).to_contain("ios_render_log_symlink_source_count=0")
 expect(evidence).to_contain("ios_render_log_hardlink_source_count=1")
+expect(evidence).to_contain("ios_render_log_duplicate_source_count=0")
+expect(evidence).to_contain("ios_render_log_nonregular_source_count=0")
+expect(evidence).to_contain("ios_render_log_marker_status=pass")
+expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
+```
+
+</details>
+
+#### rejects duplicate requested iOS log source paths
+
+- Confirm one iOS render log cannot satisfy two requested source channels
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-ios-render-log-validator-duplicate-source"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/ios.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/ios.log " + root + "/ios.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm one iOS render log cannot satisfy two requested source channels")
+expect(evidence).to_contain("ios_render_log_validation_status=fail")
+expect(evidence).to_contain("ios_render_log_validation_reason=ios-render-log-source-duplicate")
+expect(evidence).to_contain("ios_render_log_requested_source_count=2")
+expect(evidence).to_contain("ios_render_log_source_count=1")
+expect(evidence).to_contain("ios_render_log_missing_source_count=0")
+expect(evidence).to_contain("ios_render_log_empty_source_count=0")
+expect(evidence).to_contain("ios_render_log_symlink_source_count=0")
+expect(evidence).to_contain("ios_render_log_hardlink_source_count=0")
+expect(evidence).to_contain("ios_render_log_duplicate_source_count=1")
 expect(evidence).to_contain("ios_render_log_nonregular_source_count=0")
 expect(evidence).to_contain("ios_render_log_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
@@ -603,6 +645,7 @@ expect(evidence).to_contain("ios_render_log_missing_source_count=0")
 expect(evidence).to_contain("ios_render_log_empty_source_count=0")
 expect(evidence).to_contain("ios_render_log_symlink_source_count=0")
 expect(evidence).to_contain("ios_render_log_hardlink_source_count=0")
+expect(evidence).to_contain("ios_render_log_duplicate_source_count=0")
 expect(evidence).to_contain("ios_render_log_nonregular_source_count=1")
 expect(evidence).to_contain("ios_render_log_marker_status=pass")
 expect(evidence).to_contain("ios_render_log_metal_context_status=pass")
@@ -754,6 +797,7 @@ expect(evidence).to_contain("ios_render_log_missing_source_count=0")
 expect(evidence).to_contain("ios_render_log_empty_source_count=0")
 expect(evidence).to_contain("ios_render_log_symlink_source_count=0")
 expect(evidence).to_contain("ios_render_log_hardlink_source_count=0")
+expect(evidence).to_contain("ios_render_log_duplicate_source_count=0")
 expect(evidence).to_contain("ios_render_log_nonregular_source_count=0")
 expect(evidence).to_contain("ios_render_log_source_coherence_status=")
 expect(evidence).to_contain("ios_render_log_coherent_source_path=")
@@ -811,6 +855,7 @@ expect(direct).to_contain("emit_existing_or_default ios_render_log_coherent_sour
 expect(direct).to_contain("emit_existing_or_default ios_render_log_coherent_source_size_bytes \"\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_symlink_source_count 0 \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_hardlink_source_count 0 \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_render_log_duplicate_source_count 0 \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_nonregular_source_count 0 \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_tauri_context_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_metal_context_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
@@ -840,6 +885,8 @@ val tauri = file_read("tools/tauri-shell/src-tauri/src/lib.rs")
 val validator = file_read("scripts/check/validate-tauri-ios-render-log-proof.js")
 expect(validator).to_contain("const maxRenderHtmlLen = 10000000")
 expect(validator).to_contain("coherentSourceHtmlLen")
+expect(validator).to_contain("duplicateSourceCount")
+expect(validator).to_contain("ios-render-log-source-duplicate")
 expect(validator).to_contain("CAMetalLayer\\\\s+Metal renderer ready")
 expect(direct).to_contain("validate-tauri-ios-render-log-proof.js")
 expect(direct).to_contain("ios_render_log.validation.env")
@@ -849,6 +896,7 @@ expect(direct).to_contain("value_of ios_render_log_validation_status")
 expect(direct).to_contain("ios_render_log_empty_source_count=$ios_render_log_empty_source_count")
 expect(direct).to_contain("ios_render_log_symlink_source_count=$ios_render_log_symlink_source_count")
 expect(direct).to_contain("ios_render_log_hardlink_source_count=$ios_render_log_hardlink_source_count")
+expect(direct).to_contain("ios_render_log_duplicate_source_count=$ios_render_log_duplicate_source_count")
 expect(direct).to_contain("ios_render_log_nonregular_source_count=$ios_render_log_nonregular_source_count")
 expect(direct).to_contain("ios_render_log_source_coherence_status=$ios_render_log_source_coherence_status")
 expect(direct).to_contain("ios_render_log_coherent_source_path=$ios_render_log_coherent_source_path")
@@ -872,6 +920,7 @@ expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_missin
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_empty_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_symlink_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_hardlink_source_count")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_duplicate_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_nonregular_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_coherence_status")
@@ -893,6 +942,7 @@ expect(aggregate).to_contain("ios-render-log-source-missing")
 expect(aggregate).to_contain("ios-render-log-source-empty")
 expect(aggregate).to_contain("ios-render-log-source-symlink")
 expect(aggregate).to_contain("ios-render-log-source-hardlink")
+expect(aggregate).to_contain("ios-render-log-source-duplicate")
 expect(aggregate).to_contain("ios-render-log-source-not-regular")
 expect(tauri).to_contain("ios renderer context: backend=WKWebView")
 expect(tauri).to_contain("metal_layer=CAMetalLayer")
@@ -904,8 +954,8 @@ expect(tauri).to_contain("metal_layer=CAMetalLayer")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
