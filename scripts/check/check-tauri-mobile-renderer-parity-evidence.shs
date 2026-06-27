@@ -381,7 +381,115 @@ while (offset + 12 <= data.length) {
 console.log(sawIdat && sawIend ? 'pass' : 'png-image-chunks-missing');
 NODE
 )"
-    echo "$chunk_reason"
+    if [ "$chunk_reason" != "pass" ]; then
+        echo "$chunk_reason"
+        return
+    fi
+    content_reason="$(node - "$path" <<'NODE'
+const fs = require('fs');
+const zlib = require('zlib');
+const path = process.argv[2];
+
+function finish(reason) {
+  console.log(reason);
+  process.exit(0);
+}
+
+let data;
+try {
+  data = fs.readFileSync(path);
+} catch (_err) {
+  finish('png-content-unreadable');
+}
+
+let offset = 8;
+let width = 0;
+let height = 0;
+let bitDepth = 0;
+let colorType = -1;
+let interlace = 0;
+const idat = [];
+while (offset + 12 <= data.length) {
+  const length = data.readUInt32BE(offset);
+  const type = data.toString('ascii', offset + 4, offset + 8);
+  const start = offset + 8;
+  const end = start + length;
+  const next = end + 4;
+  if (next > data.length) finish('png-image-chunks-missing');
+  if (type === 'IHDR') {
+    width = data.readUInt32BE(start);
+    height = data.readUInt32BE(start + 4);
+    bitDepth = data[start + 8];
+    colorType = data[start + 9];
+    interlace = data[start + 12];
+  } else if (type === 'IDAT') {
+    idat.push(data.subarray(start, end));
+  } else if (type === 'IEND') {
+    break;
+  }
+  offset = next;
+}
+
+if (width <= 0 || height <= 0 || idat.length === 0) finish('png-content-missing');
+if (bitDepth !== 8 || interlace !== 0 || ![0, 2, 6].includes(colorType)) {
+  finish('png-content-unsupported-format');
+}
+
+const channels = colorType === 6 ? 4 : colorType === 2 ? 3 : 1;
+const stride = width * channels;
+let inflated;
+try {
+  inflated = zlib.inflateSync(Buffer.concat(idat));
+} catch (_err) {
+  finish('png-content-invalid-deflate');
+}
+if (inflated.length < (stride + 1) * height) finish('png-content-truncated');
+
+function paeth(a, b, c) {
+  const p = a + b - c;
+  const pa = Math.abs(p - a);
+  const pb = Math.abs(p - b);
+  const pc = Math.abs(p - c);
+  if (pa <= pb && pa <= pc) return a;
+  if (pb <= pc) return b;
+  return c;
+}
+
+const previous = Buffer.alloc(stride);
+const current = Buffer.alloc(stride);
+const unique = new Set();
+let inputOffset = 0;
+for (let y = 0; y < height; y += 1) {
+  const filter = inflated[inputOffset];
+  inputOffset += 1;
+  inflated.copy(current, 0, inputOffset, inputOffset + stride);
+  inputOffset += stride;
+  for (let x = 0; x < stride; x += 1) {
+    const left = x >= channels ? current[x - channels] : 0;
+    const up = previous[x];
+    const upLeft = x >= channels ? previous[x - channels] : 0;
+    if (filter === 1) current[x] = (current[x] + left) & 255;
+    else if (filter === 2) current[x] = (current[x] + up) & 255;
+    else if (filter === 3) current[x] = (current[x] + Math.floor((left + up) / 2)) & 255;
+    else if (filter === 4) current[x] = (current[x] + paeth(left, up, upLeft)) & 255;
+    else if (filter !== 0) finish('png-content-invalid-filter');
+  }
+  for (let x = 0; x < stride; x += channels) {
+    if (channels === 4) {
+      unique.add(`${current[x]},${current[x + 1]},${current[x + 2]},${current[x + 3]}`);
+    } else if (channels === 3) {
+      unique.add(`${current[x]},${current[x + 1]},${current[x + 2]},255`);
+    } else {
+      unique.add(`${current[x]},${current[x]},${current[x]},255`);
+    }
+    if (unique.size >= 16) finish('pass');
+  }
+  current.copy(previous);
+}
+finish(`png-content-too-flat:${unique.size}`);
+NODE
+)"
+    echo "$content_reason"
 }
 
 png_file_status() {

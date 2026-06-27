@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 25 | 25 | 0 | 0 |
+| 26 | 26 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates the Tauri mobile renderer parity aggregate artifact gates. The aggrega
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/tauri_mobile_renderer_parity_artifact_gate_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -78,8 +78,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 - iOS evidence containing fallback GPU markers such as SwiftShader/software
   rendering fails even when WKWebView, CAMetalLayer, and Metal markers pass.
 - Mobile screenshots must carry PNG signature bytes, IHDR dimensions, real PNG
-  IDAT/IEND chunk structure, and dimensions at least as large as the captured
-  viewport; arbitrary nonempty files, signature-only files, forged chunk text,
+  IDAT/IEND chunk structure, dimensions at least as large as the captured
+  viewport, and enough decoded pixel diversity to rule out blank placeholders;
+  arbitrary nonempty files, signature-only files, forged chunk text, flat PNGs,
   and 1x1 placeholders are not accepted as layout capture proof.
 - Mobile screenshots must be regular artifact files, not symlinks to mutable or
   substituted PNG captures.
@@ -921,6 +922,40 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 
 </details>
 
+#### rejects pass claims with flat placeholder mobile screenshot PNGs
+
+- Confirm screenshot capture proof needs decoded pixel diversity, not a blank PNG
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-flat-screenshot"
+val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "flat-png", "png")
+val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "flat-png")
+val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val ios = file_read(root + "-ios/stdout.env")
+val android = file_read(root + "-android/stdout.env")
+step("Confirm screenshot capture proof needs decoded pixel diversity, not a blank PNG")
+expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-screenshot-png-missing")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reason=png-content-too-flat:1")
+expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-screenshot-png-missing")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=png-content-too-flat:1")
+```
+
+</details>
+
 #### keeps aggregate source wired to mobile proof and screenshot artifact rows
 
 <details>
@@ -936,6 +971,8 @@ expect(script).to_contain("png_file_reason")
 expect(script).to_contain("png-symlink")
 expect(script).to_contain("sawIdat && sawIend")
 expect(script).to_contain("png-dimensions-too-small")
+expect(script).to_contain("zlib.inflateSync")
+expect(script).to_contain("png-content-too-flat")
 expect(script).to_contain("png_file_reason \"$ios_screenshot\" \"$ios_mdi_capture_viewport_width\" \"$ios_mdi_capture_viewport_height\"")
 expect(script).to_contain("mdi_proof_file_reason")
 expect(script).to_contain("echo symlink")
@@ -988,8 +1025,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_timin
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
