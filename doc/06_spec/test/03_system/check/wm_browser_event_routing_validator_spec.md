@@ -27,7 +27,7 @@ wm_browser_event_routing_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -90,9 +90,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_val
   booleans; string values like `"true"` are not structured event proof and are
   not re-emitted as normalized boolean rows.
 - Event counts, animation frame counts, traffic button counts, timing deltas,
-  and dispatched move coordinates must be real JSON numbers; stringified or
-  fractional values are not valid DOM event-routing proof and are not re-emitted
-  as normalized numeric rows.
+  and dispatched move coordinates must be real JSON numbers; stringified,
+  fractional, unsafe, or exponential integer values are not valid DOM
+  event-routing proof and are not re-emitted as normalized numeric rows.
 - Live numeric UI readback rows such as title font weight and title input width
   must be real JSON numbers; stringified CSS measurements are not valid browser
   style proof.
@@ -751,6 +751,65 @@ expect(payload.contains("wm_browser_event_routing_move_payload_x=86.5")).to_equa
 
 </details>
 
+#### rejects unsafe exponential integer event animation UI and payload proof without crashing
+
+-  fixture command
+-  fixture command
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm unsafe exponential integers fail as structured evidence, not BigInt crashes
+   - Expected: count does not contain `Cannot convert`
+   - Expected: frame does not contain `Cannot convert`
+   - Expected: ui does not contain `Cannot convert`
+   - Expected: payload does not contain `Cannot convert`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 38 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-unsafe-integers"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/count.json", "p.focus_count=1e21") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/count.json > " + root + "/count.env 2>&1; " +
+    _fixture_command(root + "/frame.json", "p.animation_frame_count=1e21") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/frame.json > " + root + "/frame.env 2>&1; " +
+    _fixture_command(root + "/ui.json", "p.traffic_button_count=1e21") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/ui.json > " + root + "/ui.env 2>&1; " +
+    _fixture_command(root + "/payload.json", "p.move_payload.x=1e21") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/payload.json > " + root + "/payload.env 2>&1"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val count = file_read(root + "/count.env")
+val frame = file_read(root + "/frame.env")
+val ui = file_read(root + "/ui.env")
+val payload = file_read(root + "/payload.env")
+step("Confirm unsafe exponential integers fail as structured evidence, not BigInt crashes")
+expect(count).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(count).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+expect(count).to_contain("wm_browser_event_routing_focus_count=")
+expect(count.contains("Cannot convert")).to_equal(false)
+expect(frame).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(frame).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+expect(frame).to_contain("wm_browser_event_routing_animation_frame_count=")
+expect(frame.contains("Cannot convert")).to_equal(false)
+expect(ui).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(ui).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
+expect(ui).to_contain("wm_browser_event_routing_traffic_button_count=")
+expect(ui.contains("Cannot convert")).to_equal(false)
+expect(payload).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(payload).to_contain("wm_browser_event_routing_validation_reason=event-routing-payload-contract-missing")
+expect(payload).to_contain("wm_browser_event_routing_move_payload_x=")
+expect(payload.contains("Cannot convert")).to_equal(false)
+```
+
+</details>
+
 #### rejects symlinked WM event-routing proof JSON before reading event evidence
 
 -  fixture command
@@ -886,8 +945,8 @@ expect(evidence).to_contain("wm_browser_event_routing_text_input_text=")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
