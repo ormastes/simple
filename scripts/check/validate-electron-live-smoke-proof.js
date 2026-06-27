@@ -32,10 +32,10 @@ function jsonNumberTextOrBlank(value) {
   return typeof value === 'number' && Number.isFinite(value) ? String(value) : '';
 }
 
-function boolText(value) {
+function jsonBoolTextOrBlank(value) {
   if (value === true) return 'true';
   if (value === false) return 'false';
-  return clean(value);
+  return '';
 }
 
 function textSample(value) {
@@ -115,15 +115,15 @@ emit('electron_live_smoke_width', jsonIntegerTextOrBlank(proof.width));
 emit('electron_live_smoke_height', jsonIntegerTextOrBlank(proof.height));
 emit('electron_live_smoke_body_html_length', jsonIntegerTextOrBlank(proof.body_html_length));
 emit('electron_live_smoke_css_length', jsonIntegerTextOrBlank(proof.css_length));
-emit('electron_live_smoke_app_element_present', boolText(proof.app_element_present));
+emit('electron_live_smoke_app_element_present', jsonBoolTextOrBlank(proof.app_element_present));
 emit('electron_live_smoke_body_text_length', jsonIntegerTextOrBlank(proof.body_text_length));
 emit('electron_live_smoke_body_text_sample', proof.body_text_sample);
-emit('electron_live_smoke_performance_now_available', boolText(proof.performance_now_available));
+emit('electron_live_smoke_performance_now_available', jsonBoolTextOrBlank(proof.performance_now_available));
 emit('electron_live_smoke_performance_now_delta_ms', jsonNumberTextOrBlank(proof.performance_now_delta_ms));
-emit('electron_live_smoke_animation_frame_available', boolText(proof.animation_frame_available));
+emit('electron_live_smoke_animation_frame_available', jsonBoolTextOrBlank(proof.animation_frame_available));
 emit('electron_live_smoke_animation_frame_count', jsonIntegerTextOrBlank(proof.animation_frame_count));
-emit('electron_live_smoke_css_animation_probe', boolText(proof.css_animation_probe));
-emit('electron_live_smoke_blur_or_tolerance_used', boolText(proof.blur_or_tolerance_used));
+emit('electron_live_smoke_css_animation_probe', jsonBoolTextOrBlank(proof.css_animation_probe));
+emit('electron_live_smoke_blur_or_tolerance_used', jsonBoolTextOrBlank(proof.blur_or_tolerance_used));
 
 if (reason !== 'pass') {
   process.exit(1);

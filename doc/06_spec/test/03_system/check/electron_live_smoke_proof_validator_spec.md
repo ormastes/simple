@@ -27,7 +27,7 @@ electron_live_smoke_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,6 +78,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
   animation frame counts must be live numeric JSON values; decimal strings are
   rejected as stale or hand-authored proof and are not re-emitted as normalized
   numeric rows.
+- DOM presence, performance availability, animation availability, CSS animation,
+  and tolerance flags must be real JSON booleans; string booleans are rejected
+  and are not re-emitted as normalized boolean rows.
 - The rendered text sample must include the live-smoke entry text and must not
   exceed the reported rendered text length.
 - Requested capture viewport dimensions must be explicit decimal integers; the
@@ -341,6 +344,74 @@ expect(css).to_contain("electron_live_smoke_validation_reason=missing-css-animat
 
 </details>
 
+#### rejects string booleans for DOM performance animation CSS and tolerance proof
+
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm string booleans are not normalized as live Chromium proof
+   - Expected: app does not contain `electron_live_smoke_app_element_present=true`
+   - Expected: perf does not contain `electron_live_smoke_performance_now_available=true`
+   - Expected: frames does not contain `electron_live_smoke_animation_frame_available=true`
+   - Expected: css does not contain `electron_live_smoke_css_animation_probe=true`
+   - Expected: blur does not contain `electron_live_smoke_blur_or_tolerance_used=false`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 41 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-live-smoke-validator-string-booleans"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/app.json", "p.app_element_present=\"true\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/app.json 1280 720 > " + root + "/app.env; " +
+    _proof_command(root + "/perf.json", "p.performance_now_available=\"true\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/perf.json 1280 720 > " + root + "/perf.env; " +
+    _proof_command(root + "/frames.json", "p.animation_frame_available=\"true\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/frames.json 1280 720 > " + root + "/frames.env; " +
+    _proof_command(root + "/css.json", "p.css_animation_probe=\"true\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/css.json 1280 720 > " + root + "/css.env; " +
+    _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=\"false\"") +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/blur.json 1280 720 > " + root + "/blur.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val app = file_read(root + "/app.env")
+val perf = file_read(root + "/perf.env")
+val frames = file_read(root + "/frames.env")
+val css = file_read(root + "/css.env")
+val blur = file_read(root + "/blur.env")
+step("Confirm string booleans are not normalized as live Chromium proof")
+expect(app).to_contain("electron_live_smoke_validation_status=fail")
+expect(app).to_contain("electron_live_smoke_validation_reason=missing-app-element")
+expect(app).to_contain("electron_live_smoke_app_element_present=")
+expect(app.contains("electron_live_smoke_app_element_present=true")).to_equal(false)
+expect(perf).to_contain("electron_live_smoke_validation_status=fail")
+expect(perf).to_contain("electron_live_smoke_validation_reason=missing-performance-now")
+expect(perf).to_contain("electron_live_smoke_performance_now_available=")
+expect(perf.contains("electron_live_smoke_performance_now_available=true")).to_equal(false)
+expect(frames).to_contain("electron_live_smoke_validation_status=fail")
+expect(frames).to_contain("electron_live_smoke_validation_reason=missing-animation-frames")
+expect(frames).to_contain("electron_live_smoke_animation_frame_available=")
+expect(frames.contains("electron_live_smoke_animation_frame_available=true")).to_equal(false)
+expect(css).to_contain("electron_live_smoke_validation_status=fail")
+expect(css).to_contain("electron_live_smoke_validation_reason=missing-css-animation")
+expect(css).to_contain("electron_live_smoke_css_animation_probe=")
+expect(css.contains("electron_live_smoke_css_animation_probe=true")).to_equal(false)
+expect(blur).to_contain("electron_live_smoke_validation_status=fail")
+expect(blur).to_contain("electron_live_smoke_validation_reason=blur-or-tolerance-not-allowed")
+expect(blur).to_contain("electron_live_smoke_blur_or_tolerance_used=")
+expect(blur.contains("electron_live_smoke_blur_or_tolerance_used=false")).to_equal(false)
+```
+
+</details>
+
 #### rejects decimal strings for live DOM performance animation and viewport counters
 
 -  proof command
@@ -568,8 +639,8 @@ expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
