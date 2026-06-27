@@ -27,7 +27,7 @@ production_gui_web_renderer_parity_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates the non-launching gate for production GUI/web renderer parity evidence
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/production_gui_web_renderer_parity_gate_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -77,7 +77,11 @@ sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true
 - Missing or failed production parity evidence produces typed non-pass gate
   evidence.
 - Passing gate evidence requires the top-level production parity status and all
-  component statuses to pass.
+  component statuses to pass, including detailed backend parity rows for exact
+  CPU/SIMD/Metal agreement, Metal frame completion, and no tolerance use.
+- Passing gate evidence also requires self-hosted Simple binary provenance:
+  `production_gui_web_renderer_parity_simple_bin_status=pass` and a nonempty
+  `production_gui_web_renderer_parity_simple_bin`.
 - The layout manifest count contract remains 50 total cases, 36 pass cases,
   14 tracked divergence cases, and 0 fail cases.
 - The surface manifest contract requires live Electron/Tauri/Chrome evidence,
@@ -85,6 +89,8 @@ sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true
   0 fail cases, 0 mismatch counts, explicit Tauri/Chrome capture provenance,
   no missing required Tauri capture commands, no fake capture, and no
   blur/tolerance.
+- Fully passing source evidence without self-hosted Simple binary provenance
+  must fail closed instead of allowing stale or seed-derived rows to pass.
 
 ## Scenarios
 

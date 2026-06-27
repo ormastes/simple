@@ -47,7 +47,7 @@ Validates the non-launching gate for production GUI/web renderer parity evidence
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/production_gui_web_renderer_parity_gate_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -79,6 +79,9 @@ sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true
 - Passing gate evidence requires the top-level production parity status and all
   component statuses to pass, including detailed backend parity rows for exact
   CPU/SIMD/Metal agreement, Metal frame completion, and no tolerance use.
+- Passing gate evidence also requires self-hosted Simple binary provenance:
+  `production_gui_web_renderer_parity_simple_bin_status=pass` and a nonempty
+  `production_gui_web_renderer_parity_simple_bin`.
 - Raw Metal readback requires more than a pass status: the gate also requires
   the Metal readback spec pass row, GPU readback availability, and no
   blur/tolerance.
@@ -137,6 +140,8 @@ routing rows.
 - Timeout metadata from controlled subchecks must be preserved for triage.
 - Missing surface-manifest provenance, required Tauri capture commands, raw
   Metal readback, or event-loop timing evidence must fail closed.
+- Fully passing source evidence without self-hosted Simple binary provenance
+  must fail closed instead of allowing stale or seed-derived rows to pass.
 - Layout-manifest host dependency diagnostics must be promoted so aggregate
   reports can separate unavailable Electron setup from renderer mismatches.
 
@@ -184,7 +189,7 @@ Negative contract fixtures:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 109 lines folded for reproduction.
+Runnable source: 112 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -213,6 +218,8 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_mani
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_dependency_reason=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_dependency_missing_count=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_source_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_simple_bin_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_simple_bin_nonempty=true")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_matrix_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_case_count=50")
@@ -383,7 +390,7 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_matrix_time
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 159 lines folded for reproduction.
+Runnable source: 238 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -396,6 +403,11 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=pass
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_simple_bin=bin/release/x86_64-unknown-linux-gnu/simple")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_simple_bin_source=repo-self-hosted-fallback")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_simple_bin_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_simple_bin_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_simple_bin_nonempty=true")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_case_count=50")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_pass_count=36")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_tracked_count=14")
@@ -610,6 +622,16 @@ expect(missing_backend_timing_evidence).to_contain("production_gui_web_renderer_
 expect(missing_backend_timing_evidence).to_contain("production_gui_web_renderer_parity_gate_reason=backend-timing-evidence-failed")
 expect(missing_backend_timing_evidence).to_contain("production_gui_web_renderer_parity_gate_backend_timing_status=missing")
 expect(missing_backend_timing_evidence).to_contain("production_gui_web_renderer_parity_gate_required_backend_timing_status=pass")
+
+val missing_simple_bin_command = command.replace("production_gui_web_renderer_parity_simple_bin=bin/release/x86_64-unknown-linux-gnu/simple\\nproduction_gui_web_renderer_parity_simple_bin_source=repo-self-hosted-fallback\\nproduction_gui_web_renderer_parity_simple_bin_status=pass\\n", "") + " || true"
+val (_missing_simple_bin_stdout, _missing_simple_bin_stderr, missing_simple_bin_code) = process_run("/bin/sh", ["-c", missing_simple_bin_command])
+expect(missing_simple_bin_code).to_equal(0)
+
+val missing_simple_bin_evidence = file_read("build/test-production-gui-web-renderer-parity-gate-pass/out/evidence.env")
+expect(missing_simple_bin_evidence).to_contain("production_gui_web_renderer_parity_gate_status=fail")
+expect(missing_simple_bin_evidence).to_contain("production_gui_web_renderer_parity_gate_reason=simple-bin-provenance-missing")
+expect(missing_simple_bin_evidence).to_contain("production_gui_web_renderer_parity_gate_simple_bin_status=missing")
+expect(missing_simple_bin_evidence).to_contain("production_gui_web_renderer_parity_gate_required_simple_bin_status=pass")
 ```
 
 </details>
