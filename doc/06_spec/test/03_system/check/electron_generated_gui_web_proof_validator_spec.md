@@ -88,6 +88,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   mismatch counts, frame timing, and text-normalization pixel counts must be
   real JSON numbers, not stringified rows, and malformed live numeric rows must
   not be re-emitted as normalized numeric evidence.
+- The live Electron wrapper must print validator env rows before deriving
+  wrapper status, preserving exact failure diagnostics in check output.
 - Proof renderer, source marker, and scene identity must match the live
   generated-GUI Electron capture path.
 - The live Electron wrapper consumes the validator and still maps real pixel
@@ -624,12 +626,13 @@ expect(pixel).to_contain("electron_generated_gui_web_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-electron-generated-gui-web-parity-evidence.shs")
 expect(script).to_contain("validate-electron-generated-gui-web-proof.js")
+expect(script).to_contain("cat \"$VALIDATED_ENV\"")
 expect(script).to_contain("electron_generated_gui_web_validation_status")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_file_status")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_size_bytes")

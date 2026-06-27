@@ -86,6 +86,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
   mismatch counts, and frame timing values must be real JSON numbers, not
   stringified rows, and malformed live numeric rows must not be re-emitted as
   normalized numeric evidence.
+- The live Electron layout wrapper must print validator env rows before
+  deriving wrapper status, preserving exact failure diagnostics in check output.
 - Proof renderer must be the live Electron capture page, the proof must carry
   the live Electron capture source marker, and scenes must stay within the
   Simple Web layout scene family.
@@ -555,12 +557,13 @@ expect(pixel).to_contain("electron_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs")
 expect(script).to_contain("validate-electron-simple-web-layout-proof.js")
+expect(script).to_contain("cat \"$VALIDATED_ENV\"")
 expect(script).to_contain("electron_simple_web_layout_validation_status")
 expect(script).to_contain("electron_simple_web_layout_captured_argb_file_status")
 expect(script).to_contain("electron_simple_web_layout_captured_argb_size_bytes")

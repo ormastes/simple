@@ -86,6 +86,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
   normalized numeric evidence.
 - Performance proof must include at least two live capture iterations and a
   derived FPS floor from the measured frame time, not only a single timing row.
+- The live Electron Engine2D wrapper must print validator env rows before
+  deriving wrapper status, preserving exact failure diagnostics in check output.
 - Proof renderer must be the live Electron capture page and scenes must stay
   within the Simple Web Engine2D scene family.
 - Proof source must identify the live exact fixture producer, not a generic
@@ -540,12 +542,13 @@ expect(pixel).to_contain("electron_simple_web_engine2d_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-electron-simple-web-engine2d-bitmap-evidence.shs")
 expect(script).to_contain("validate-electron-simple-web-engine2d-proof.js")
+expect(script).to_contain("cat \"$VALIDATED_ENV\"")
 expect(script).to_contain("electron_simple_web_engine2d_validation_status")
 expect(script).to_contain("electron_simple_web_engine2d_capture_native_width")
 expect(script).to_contain("electron_simple_web_engine2d_proof_source")
