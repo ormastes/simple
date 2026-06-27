@@ -104,8 +104,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
 - Proof renderer, source marker, and scene identity must match the live
   generated-GUI Electron capture path.
 - The source marker must resolve to a regular nonempty exact fixture producer
-  source file so stale generated-GUI JSON cannot be paired with a missing
-  Electron capture script.
+  source file with reported and actual size evidence so stale generated-GUI JSON
+  cannot be paired with a missing or substituted Electron capture script.
 - Complete proofs must identify Chromium as the Electron browser engine and
   include Electron/Chrome runtime version evidence from the live process.
 - Complete proofs must identify the Electron offscreen capture backend,
@@ -247,6 +247,7 @@ expect(evidence).to_contain("electron_generated_gui_web_renderer=electron-live-c
 expect(evidence).to_contain("electron_generated_gui_web_proof_source=tools/electron-live-bitmap/exact_fixture.js")
 expect(evidence).to_contain("electron_generated_gui_web_proof_source_file_status=pass")
 expect(evidence).to_contain("electron_generated_gui_web_proof_source_size_bytes=")
+expect(evidence).to_contain("electron_generated_gui_web_proof_source_actual_size_bytes=")
 expect(evidence).to_contain("electron_generated_gui_web_capture_backend=electron-offscreen-capture-page")
 expect(evidence).to_contain("electron_generated_gui_web_compositor_mode=offscreen-osr-exact-srgb")
 expect(evidence).to_contain("electron_generated_gui_web_browser_engine=chromium")
@@ -388,6 +389,7 @@ expect(evidence).to_contain("electron_generated_gui_web_validation_reason=unexpe
 expect(evidence).to_contain("electron_generated_gui_web_proof_source=tools/electron-live-bitmap/exact_fixture.js")
 expect(evidence).to_contain("electron_generated_gui_web_proof_source_file_status=missing")
 expect(evidence).to_contain("electron_generated_gui_web_proof_source_size_bytes=")
+expect(evidence).to_contain("electron_generated_gui_web_proof_source_actual_size_bytes=")
 ```
 
 </details>
@@ -1159,6 +1161,9 @@ expect(script).to_contain("electron_generated_gui_web_proof_renderer")
 expect(script).to_contain("electron_generated_gui_web_proof_source")
 expect(script).to_contain("electron_generated_gui_web_proof_source_file_status")
 expect(script).to_contain("electron_generated_gui_web_proof_source_size_bytes")
+expect(script).to_contain("electron_generated_gui_web_proof_source_actual_size_bytes")
+expect(script).to_contain("num_at_least \"$proof_source_actual_size_bytes\" 1")
+expect(script).to_contain("proof-source-size-mismatch")
 expect(script).to_contain("captured-argb-checksum-mismatch")
 expect(script).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("status=divergent")

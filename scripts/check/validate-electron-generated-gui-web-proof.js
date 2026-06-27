@@ -94,6 +94,29 @@ function pathInfo(filePath) {
   };
 }
 
+function proofSourceArtifact(filePath) {
+  const info = pathInfo(filePath);
+  if (info.isSymlink) return { status: 'symlink', size: '', actualSize: '' };
+  if (info.lstat === null) return { status: 'missing', size: '', actualSize: '' };
+  if (!info.lstat.isFile()) return { status: 'not-regular', size: '', actualSize: '' };
+  const actualSize = String(info.lstat.size);
+  if (info.hasMultipleLinks) return { status: 'hardlink', size: actualSize, actualSize };
+  if (info.lstat.size <= 0) return { status: 'empty', size: '0', actualSize: '0' };
+  let source = '';
+  try {
+    source = fs.readFileSync(filePath, 'utf8');
+  } catch (_err) {
+    return { status: 'missing', size: '', actualSize: '' };
+  }
+  if (
+    !source.includes('renderer: "electron-live-capture-page"') ||
+    !source.includes('proof_source: "tools/electron-live-bitmap/exact_fixture.js"')
+  ) {
+    return { status: 'marker-missing', size: actualSize, actualSize };
+  }
+  return { status: 'pass', size: actualSize, actualSize };
+}
+
 function artifactStat(value, proofPath) {
   if (typeof value !== 'string' || value.trim() === '') {
     return null;
@@ -284,19 +307,10 @@ const capturedArgbNonzeroPixels = nonzeroPixelCount(capturedArgbPixels);
 const capturedArgbChecksum = checksum(capturedArgbPixels);
 const capturedArgbWeightedChecksum = weightedChecksum(capturedArgbPixels);
 const expectedProofSource = 'tools/electron-live-bitmap/exact_fixture.js';
-const proofSourceStat = pathInfo(expectedProofSource);
-const proofSourceFileStatus = proofSourceStat.isSymlink
-  ? 'symlink'
-  : proofSourceStat.lstat === null || !proofSourceStat.lstat.isFile()
-    ? 'missing'
-    : proofSourceStat.lstat.size <= 0
-      ? 'empty'
-      : 'pass';
-const proofSourceSizeBytes = proofSourceFileStatus === 'empty'
-  ? '0'
-  : proofSourceFileStatus === 'pass'
-    ? String(proofSourceStat.lstat.size)
-    : '';
+const proofSource = proofSourceArtifact(expectedProofSource);
+const proofSourceFileStatus = proofSource.status;
+const proofSourceSizeBytes = proofSource.size;
+const proofSourceActualSizeBytes = proofSource.actualSize;
 const expectedCaptureBackend = 'electron-offscreen-capture-page';
 const expectedCompositorMode = 'offscreen-osr-exact-srgb';
 const browserEngine = textField(proof.browser_engine);
@@ -400,6 +414,7 @@ emit('electron_generated_gui_web_renderer', proof.renderer);
 emit('electron_generated_gui_web_proof_source', proof.proof_source);
 emit('electron_generated_gui_web_proof_source_file_status', proofSourceFileStatus);
 emit('electron_generated_gui_web_proof_source_size_bytes', proofSourceSizeBytes);
+emit('electron_generated_gui_web_proof_source_actual_size_bytes', proofSourceActualSizeBytes);
 emit('electron_generated_gui_web_capture_backend', proof.capture_backend);
 emit('electron_generated_gui_web_compositor_mode', proof.compositor_mode);
 emit('electron_generated_gui_web_browser_engine', browserEngine);
