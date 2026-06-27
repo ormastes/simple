@@ -34,15 +34,14 @@ should not be `PASS`, and the process exit code should be nonzero.
 
 ## Impact
 
-Completion-check SSpecs can look green in shell automation even when the manual
-example summary reports failures. Until fixed, scripts that consume this spec
-must grep for `examples, 0 failures` or inspect the example failure count
-directly instead of trusting only the process exit code.
+Before the fix, completion-check SSpecs could look green in shell automation
+even when the manual example summary reported failures.
 
-## Current Workaround
+## Historical Workaround
 
-For the GUI/Web/2D completion criteria spec, treat this as passing only when the
-output contains:
+Before `test_runner_single.spl` parsed child example summaries directly, the
+GUI/Web/2D completion criteria spec had to be treated as passing only when the
+output contained:
 
 ```text
 7 examples, 0 failures
@@ -63,3 +62,16 @@ to record the current incomplete count without failing the shell command.
 The retained 4K/8K performance scenario is currently the only scenario converted
 to evidence-backed assertions; the other six scenarios intentionally fail until
 their platform evidence exists.
+
+## Fix
+
+The minimal child runner `src/app/test_runner_new/test_runner_single.spl` now
+parses child output lines such as `N examples, M failures` before printing its
+own file summary. If the child reports any example failures, the wrapper prints
+`FAIL` and returns nonzero even when the child process itself exits `0`.
+
+Regression coverage:
+
+```sh
+bin/simple test test/03_system/check/test_runner_single_example_failure_contract_spec.spl --mode=interpreter
+```

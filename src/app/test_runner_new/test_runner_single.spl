@@ -92,6 +92,45 @@ fn print_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i6
         print ""
         print "FAIL {path}"
 
+fn extract_number_before(s: text, keyword: text) -> i64:
+    val idx_opt = s.index_of(keyword)
+    val idx = idx_opt ?? -1
+    if idx < 0:
+        return -1
+    val prefix = s[0:idx]
+    var current = ""
+    var last = ""
+    var i = 0
+    while i < prefix.len():
+        val ch = prefix[i:i + 1]
+        if ch >= "0" and ch <= "9":
+            current = current + ch
+        else:
+            if current != "":
+                last = current
+                current = ""
+        i = i + 1
+    if current != "":
+        last = current
+    if last == "":
+        return -1
+    to_int(last)
+
+fn parse_child_example_summary(output: text) -> (i64, i64, i64):
+    var examples = -1
+    var failures = -1
+    val lines = output.split("\n")
+    for line in lines:
+        if line.contains("example") and line.contains("failure"):
+            val parsed_examples = extract_number_before(line, "example")
+            val parsed_failures = extract_number_before(line, "failure")
+            if parsed_examples >= 0 and parsed_failures >= 0:
+                examples = parsed_examples
+                failures = parsed_failures
+    if examples >= 0 and failures >= 0:
+        return (examples - failures, failures, 1)
+    (0, 0, 0)
+
 fn main() -> i64:
     val run = parse_child_run(clean_args())
     if not run.valid:
@@ -118,9 +157,16 @@ fn main() -> i64:
         print stdout
     if stderr != "":
         print stderr
-    val failed = if code == 0: 0 else: 1
-    val passed = if code == 0: 1 else: 0
+    val (summary_passed, summary_failed, has_summary) = parse_child_example_summary(stdout + "\n" + stderr)
+    var failed = if code == 0: 0 else: 1
+    var passed = if code == 0: 1 else: 0
+    if has_summary == 1:
+        passed = summary_passed
+        failed = summary_failed
+        if code != 0 and failed == 0:
+            passed = 0
+            failed = 1
     print_summary(run.path, passed, failed, 0, 0, duration_ms)
-    if code == 0:
+    if code == 0 and failed == 0:
         return 0
     1
