@@ -27,7 +27,7 @@ electron_live_smoke_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -102,7 +102,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
   probe.
 - The bridge source marker must resolve to a single-link regular nonempty
   bridge source file that still contains the live smoke proof producer and
-  marker.
+  marker. Symlinked, hardlinked, empty, non-regular, or markerless bridge source
+  artifacts fail closed.
 - The proof must include Chromium/Electron runtime evidence from the renderer
   user agent and Electron/Chrome process versions, not only a hand-authored
   source marker.
@@ -1012,8 +1013,8 @@ expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
