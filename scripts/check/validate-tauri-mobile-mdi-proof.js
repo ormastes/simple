@@ -45,6 +45,10 @@ function jsonDecimalTextOrBlank(value) {
   return text === null ? "" : text;
 }
 
+function boolText(value) {
+  return value === true ? "true" : "false";
+}
+
 function fail(reason) {
   emit("mdi_proof_status", "fail");
   emit("mdi_proof_reason", reason);
@@ -156,6 +160,18 @@ emit("mdi_render_image_count", jsonIntegerTextOrBlank(proof.imageCount));
 emit("mdi_render_html_renderable", proof.htmlRenderable === true ? "true" : "false");
 emit("mdi_event_taskbar_item_count", jsonIntegerTextOrBlank(proof.taskbarItemCount));
 emit("mdi_event_taskbar_icon_count", jsonIntegerTextOrBlank(proof.taskbarIconCount));
+emit("mdi_event_has_desktop", boolText(proof.hasDesktop));
+emit("mdi_event_drag_runtime_available", boolText(proof.hasDragRuntime));
+emit("mdi_event_drag_events_available", boolText(proof.hasDragEvents));
+emit("mdi_event_drag_moved", boolText(proof.dragMoved));
+emit("mdi_event_window_event_runtime_available", boolText(proof.hasWindowEventRuntime));
+emit("mdi_event_app_action_control_found", boolText(proof.appActionControlFound));
+emit("mdi_event_app_input_control_found", boolText(proof.appInputControlFound));
+emit("mdi_event_body_click_routed", boolText(proof.bodyClickRouted));
+emit("mdi_event_body_input_routed", boolText(proof.bodyInputRouted));
+emit("mdi_event_body_key_routed", boolText(proof.bodyKeyRouted));
+emit("mdi_event_taskbar_icons_visible", boolText(proof.taskbarIconsVisible));
+emit("mdi_event_taskbar_labels_visible", boolText(proof.taskbarLabelsVisible));
 emit("mdi_event_status", eventPass ? "pass" : "fail");
 emit("mdi_capture_status", capturePass ? "pass" : "fail");
 emit("mdi_capture_viewport_width", jsonIntegerTextOrBlank(proof.viewportWidth));

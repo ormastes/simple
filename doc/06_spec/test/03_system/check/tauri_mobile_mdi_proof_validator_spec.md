@@ -27,7 +27,7 @@ tauri_mobile_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -83,6 +83,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 - Render proof must include an explicit rendered image count and HTML render
   marker; event routing alone is not enough to prove the mobile MDI surface
   actually rendered.
+- Event proof emits individual routed click/input/key, drag, window-runtime,
+  control-discovery, and taskbar-visibility rows rather than only a coarse
+  event status.
 - Render counts, event counts, viewport dimensions, performance timing deltas,
   and animation-frame counts must be real JSON numbers; stringified or
   fractional values do not prove routed events, capture, performance, or full
@@ -105,7 +108,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -130,6 +133,18 @@ expect(evidence).to_contain("ios_mdi_render_html_renderable=true")
 expect(evidence).to_contain("ios_mdi_event_status=pass")
 expect(evidence).to_contain("ios_mdi_event_taskbar_item_count=4")
 expect(evidence).to_contain("ios_mdi_event_taskbar_icon_count=4")
+expect(evidence).to_contain("ios_mdi_event_has_desktop=true")
+expect(evidence).to_contain("ios_mdi_event_drag_runtime_available=true")
+expect(evidence).to_contain("ios_mdi_event_drag_events_available=true")
+expect(evidence).to_contain("ios_mdi_event_drag_moved=true")
+expect(evidence).to_contain("ios_mdi_event_window_event_runtime_available=true")
+expect(evidence).to_contain("ios_mdi_event_app_action_control_found=true")
+expect(evidence).to_contain("ios_mdi_event_app_input_control_found=true")
+expect(evidence).to_contain("ios_mdi_event_body_click_routed=true")
+expect(evidence).to_contain("ios_mdi_event_body_input_routed=true")
+expect(evidence).to_contain("ios_mdi_event_body_key_routed=true")
+expect(evidence).to_contain("ios_mdi_event_taskbar_icons_visible=true")
+expect(evidence).to_contain("ios_mdi_event_taskbar_labels_visible=true")
 expect(evidence).to_contain("ios_mdi_capture_status=pass")
 expect(evidence).to_contain("ios_mdi_capture_viewport_width=390")
 expect(evidence).to_contain("ios_mdi_capture_viewport_height=844")
@@ -402,6 +417,45 @@ expect(taskbar.contains("android_mdi_event_taskbar_item_count=4.5")).to_equal(fa
 
 </details>
 
+#### emits detailed mobile event routing failures
+
+-  proof log command
+-  proof log command
+   - Expected: code equals `1`
+- Confirm individual event-route diagnostics survive validation
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-event-detail"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_log_command(root + "/body.log", "p.bodyClickRouted=false") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/body.json " + root + "/body.log > " + root + "/body.env; " +
+    _proof_log_command(root + "/taskbar.log", "p.taskbarLabelsVisible=false") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/taskbar.json " + root + "/taskbar.log > " + root + "/taskbar.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val body = file_read(root + "/body.env")
+val taskbar = file_read(root + "/taskbar.env")
+step("Confirm individual event-route diagnostics survive validation")
+expect(body).to_contain("ios_mdi_proof_status=fail")
+expect(body).to_contain("ios_mdi_event_status=fail")
+expect(body).to_contain("ios_mdi_event_body_click_routed=false")
+expect(body).to_contain("ios_mdi_event_body_input_routed=true")
+expect(taskbar).to_contain("android_mdi_proof_status=fail")
+expect(taskbar).to_contain("android_mdi_event_status=fail")
+expect(taskbar).to_contain("android_mdi_event_taskbar_labels_visible=false")
+expect(taskbar).to_contain("android_mdi_event_taskbar_icons_visible=true")
+```
+
+</details>
+
 #### rejects fractional viewport and animation frame proof values
 
 -  proof log command
@@ -637,8 +691,8 @@ expect(evidence).to_contain("ios_mdi_animation_status=pass")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

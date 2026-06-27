@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -85,6 +85,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   the high-level performance and animation statuses claim pass.
 - Malformed mobile MDI input-to-paint detail rows fail even when the high-level
   interaction-latency status claims pass.
+- Malformed mobile MDI routed-event detail rows fail even when the high-level
+  event status claims pass.
 - Mobile MDI failure-marker rows fail even when the high-level MDI status and
   detailed render/event/capture/performance/animation rows claim pass.
 - The aggregate requires detailed desktop production backend parity rows before
@@ -105,7 +107,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -138,8 +140,12 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_missing_
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_source_count=1")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_body_click_routed=true")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_drag_moved=true")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_input_to_paint_ms=2.5")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_render_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_body_key_routed=true")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_taskbar_labels_visible=true")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_input_to_paint_ms=2.5")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=pass")
@@ -345,6 +351,40 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_interaction
 
 </details>
 
+#### rejects mobile pass claims with incomplete routed-event detail rows
+
+- Confirm aggregate pass claims require detailed routed-event rows
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-bad-event-details"
+val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "png", "png").replace("ios_mdi_event_body_click_routed=true", "ios_mdi_event_body_click_routed=false")
+val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "png").replace("android_mdi_event_taskbar_labels_visible=true", "android_mdi_event_taskbar_labels_visible=false")
+val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val ios = file_read(root + "-ios/stdout.env")
+val android = file_read(root + "-android/stdout.env")
+step("Confirm aggregate pass claims require detailed routed-event rows")
+expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-render-event-capture-performance-animation-proof-incomplete")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_status=pass")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_body_click_routed=false")
+expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-render-event-capture-performance-animation-proof-incomplete")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_event_status=pass")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_event_taskbar_labels_visible=false")
+```
+
+</details>
+
 #### rejects mobile pass claims with incomplete desktop backend parity details
 
 - Confirm mobile aggregate pass claims require desktop backend parity details
@@ -412,7 +452,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -430,7 +470,9 @@ expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_file_s
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_failure_marker_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_source_count")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_render_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_body_click_routed")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_render_image_count")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_event_taskbar_labels_visible")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_now_available")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_frame_available")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status")
@@ -445,8 +487,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

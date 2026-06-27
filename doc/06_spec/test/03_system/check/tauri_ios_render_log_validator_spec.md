@@ -412,7 +412,7 @@ expect(evidence).to_contain("ios_render_log_failure_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -447,6 +447,8 @@ expect(evidence).to_contain("ios_mdi_proof_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("ios_mdi_render_status=")
 expect(evidence).to_contain("ios_mdi_event_status=")
+expect(evidence).to_contain("ios_mdi_event_body_click_routed=")
+expect(evidence).to_contain("ios_mdi_event_taskbar_labels_visible=")
 expect(evidence).to_contain("ios_mdi_capture_status=")
 expect(evidence).to_contain("ios_mdi_performance_status=")
 expect(evidence).to_contain("ios_mdi_performance_now_delta_ms=")
@@ -464,7 +466,7 @@ expect(evidence).to_contain("ios_mdi_css_animation_probe=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -484,6 +486,8 @@ expect(direct).to_contain("ios_mdi_animation_frame_count")
 expect(direct).to_contain("ios_mdi_input_to_paint_ms")
 expect(direct).to_contain("ios_mdi_interaction_latency_status")
 expect(direct).to_contain("ios_mdi_failure_marker_status")
+expect(direct).to_contain("ios_mdi_event_body_click_routed")
+expect(direct).to_contain("ios_mdi_event_taskbar_labels_visible")
 expect(aggregate).to_contain("TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_requested_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_count")
@@ -492,6 +496,8 @@ expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_l
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_coherence_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_body_click_routed")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_taskbar_labels_visible")
 expect(aggregate).to_contain("ios-tauri-wkwebview-context-missing")
 expect(aggregate).to_contain("ios-metal-context-missing")
 expect(aggregate).to_contain("ios-render-log-source-mismatch")
