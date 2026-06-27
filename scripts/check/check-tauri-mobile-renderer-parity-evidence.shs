@@ -285,11 +285,42 @@ NODE
         echo "$dimension_reason"
         return
     fi
-    printable_chunks="$(LC_ALL=C tr -cd '[:print:]' <"$path" 2>/dev/null || true)"
-    case "$printable_chunks" in
-        *IDAT*IEND*) echo pass ;;
-        *) echo png-image-chunks-missing ;;
-    esac
+    chunk_reason="$(node - "$path" <<'NODE'
+const fs = require('fs');
+const path = process.argv[2];
+let data;
+try {
+  data = fs.readFileSync(path);
+} catch (_err) {
+  console.log('png-image-chunks-missing');
+  process.exit(0);
+}
+let offset = 8;
+let sawIdat = false;
+let sawIend = false;
+while (offset + 12 <= data.length) {
+  const length = data.readUInt32BE(offset);
+  const type = data.toString('ascii', offset + 4, offset + 8);
+  const dataStart = offset + 8;
+  const crcStart = dataStart + length;
+  const next = crcStart + 4;
+  if (next > data.length) {
+    console.log('png-image-chunks-missing');
+    process.exit(0);
+  }
+  if (type === 'IDAT' && length > 0) {
+    sawIdat = true;
+  }
+  if (type === 'IEND') {
+    sawIend = true;
+    break;
+  }
+  offset = next;
+}
+console.log(sawIdat && sawIend ? 'pass' : 'png-image-chunks-missing');
+NODE
+)"
+    echo "$chunk_reason"
 }
 
 png_file_status() {

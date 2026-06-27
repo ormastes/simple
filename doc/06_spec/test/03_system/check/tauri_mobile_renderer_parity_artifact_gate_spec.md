@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -77,10 +77,10 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   not enough for the aggregate pass path.
 - iOS evidence containing fallback GPU markers such as SwiftShader/software
   rendering fails even when WKWebView, CAMetalLayer, and Metal markers pass.
-- Mobile screenshots must carry PNG signature bytes, IHDR dimensions, image
-  chunks, and dimensions at least as large as the captured viewport; arbitrary
-  nonempty files, signature-only files, and 1x1 placeholders are not accepted
-  as layout capture proof.
+- Mobile screenshots must carry PNG signature bytes, IHDR dimensions, real PNG
+  IDAT/IEND chunk structure, and dimensions at least as large as the captured
+  viewport; arbitrary nonempty files, signature-only files, forged chunk text,
+  and 1x1 placeholders are not accepted as layout capture proof.
 - Missing iOS MDI proof JSON fails even when iOS status rows claim pass.
 - Missing Android MDI proof JSON fails even when Android status rows claim pass.
 - Malformed or contract-missing MDI proof JSON files fail even when normalized
@@ -669,6 +669,40 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 
 </details>
 
+#### rejects pass claims with forged PNG chunk text in mobile screenshots
+
+- Confirm screenshot capture proof needs structured PNG chunks, not bare IDAT/IEND text
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-forged-chunk-screenshot"
+val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "forged-chunks", "png")
+val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "forged-chunks")
+val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val ios = file_read(root + "-ios/stdout.env")
+val android = file_read(root + "-android/stdout.env")
+step("Confirm screenshot capture proof needs structured PNG chunks, not bare IDAT/IEND text")
+expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-screenshot-png-missing")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reason=png-image-chunks-missing")
+expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-screenshot-png-missing")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=png-image-chunks-missing")
+```
+
+</details>
+
 #### rejects pass claims with structurally valid but undersized mobile screenshots
 
 - Confirm screenshot dimensions must cover the captured mobile viewport
@@ -708,13 +742,14 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
 expect(script).to_contain("png_file_status")
 expect(script).to_contain("png_file_reason")
+expect(script).to_contain("sawIdat && sawIend")
 expect(script).to_contain("png-dimensions-too-small")
 expect(script).to_contain("png_file_reason \"$ios_screenshot\" \"$ios_mdi_capture_viewport_width\" \"$ios_mdi_capture_viewport_height\"")
 expect(script).to_contain("mdi_proof_file_reason")
@@ -757,8 +792,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_timin
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
