@@ -91,6 +91,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 - The live smoke shell wrapper delegates JSON validation to the proof validator.
 - The live smoke shell wrapper keeps validation, proof-source, viewport,
   performance, and animation diagnostic rows on early unavailable/fail exits.
+- The live smoke shell wrapper prints validator-derived failure rows before
+  exiting nonzero when a produced proof fails validation.
 
 ## Scenarios
 
@@ -479,7 +481,7 @@ expect(fractional).to_contain("electron_live_smoke_height=720")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -488,6 +490,10 @@ val bridge = file_read("src/app/ui.electron/bridge.js")
 val envelopes = file_read("src/app/ui.electron/bridge_envelopes.js")
 expect(wrapper).to_contain("validate-electron-live-smoke-proof.js")
 expect(wrapper).to_contain("electron_live_smoke=pass proof=$PROOF_PATH validation=$VALIDATION_ENV")
+expect(wrapper).to_contain("set +e")
+expect(wrapper).to_contain("validator_code=$?")
+expect(wrapper).to_contain("cat \"$VALIDATION_ENV\"")
+expect(wrapper).to_contain("electron_live_smoke=fail proof=$PROOF_PATH validation=$VALIDATION_ENV")
 expect(wrapper).to_contain("electron_live_smoke_validation_status")
 expect(wrapper).to_contain("electron_live_smoke_proof_source")
 expect(wrapper).to_contain("electron_live_smoke_browser_engine")
