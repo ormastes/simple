@@ -164,6 +164,11 @@ fail-closed as `missing-simple-bin`. The wrappers emit
 `*_simple_bin` and `*_simple_bin_source` so reports can distinguish
 `explicit-env`, `in-tree-release`, `repo-bin`, `path-opt-in`, and
 `default-missing` evidence.
+The Node/Web bitmap parity wrapper follows the same fail-closed contract under
+`js_web_render_bitmap_simple_bin*`: it selects only self-hosted Simple binaries
+from the repository by default, records missing binaries as `simple-bin-missing`,
+and records any `src/compiler_rust/**` override as `simple-bin-forbidden`
+without executing the seed.
 
 The renderer parity wrapper also runs the Electron/Chromium event-routing probe
 before a top-level pass. Saved evidence must include

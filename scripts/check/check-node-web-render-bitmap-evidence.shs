@@ -6,7 +6,8 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/node_web_render_bitmap_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/node_web_render_bitmap_evidence_$(date -u +%F).md}"
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
 JS_RENDER_RUNTIME="${JS_RENDER_RUNTIME:-node}"
 JS_RENDER_RUNTIME_BIN="${JS_RENDER_RUNTIME_BIN:-$JS_RENDER_RUNTIME}"
 ITERATIONS="${NODE_BITMAP_ITERATIONS:-5}"
@@ -16,6 +17,41 @@ HEIGHT="${NODE_BITMAP_HEIGHT:-64}"
 SIMPLE_SRC="$BUILD_DIR/simple_exact_bitmap_fixture.spl"
 SIMPLE_OUT="$BUILD_DIR/simple.out"
 JS_OUT="$BUILD_DIR/${JS_RENDER_RUNTIME}.out"
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -z "${SIMPLE_BIN+x}" ]; then
+    SIMPLE_BIN_SOURCE="default-missing"
+    for candidate in \
+        "bin/simple" \
+        "./bin/simple" \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple"; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+fi
+if [ -z "${SIMPLE_BIN+x}" ] || [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN=""
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$JS_OUT" "$REPORT_PATH"
@@ -36,6 +72,9 @@ emit_unavailable() {
         echo "js_web_render_bitmap_height=$HEIGHT"
         echo "js_web_render_bitmap_iterations=$ITERATIONS"
         echo "js_web_render_bitmap_trials=$TRIALS"
+        echo "js_web_render_bitmap_simple_bin=$SIMPLE_BIN"
+        echo "js_web_render_bitmap_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "js_web_render_bitmap_simple_bin_status=$SIMPLE_BIN_STATUS"
     } >"$BUILD_DIR/evidence.env"
     {
         echo "# JS Web Render Bitmap Evidence"
@@ -135,8 +174,8 @@ if ! command -v "$JS_RENDER_RUNTIME_BIN" >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ ! -x "$SIMPLE_BIN" ]; then
-    emit_unavailable "missing-simple-bin"
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    emit_unavailable "simple-bin-$SIMPLE_BIN_STATUS"
     exit 1
 fi
 
@@ -262,6 +301,9 @@ js_frame_us="${js_frame_us:-0}"
     echo "js_web_render_bitmap_simple_frame_us=$simple_frame_us"
     echo "js_web_render_bitmap_baseline_frame_us=$js_frame_us"
     echo "js_web_render_bitmap_min_trial_count=$TRIALS"
+    echo "js_web_render_bitmap_simple_bin=$SIMPLE_BIN"
+    echo "js_web_render_bitmap_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "js_web_render_bitmap_simple_bin_status=$SIMPLE_BIN_STATUS"
 } >"$BUILD_DIR/evidence.env"
 
 {
@@ -280,6 +322,7 @@ js_frame_us="${js_frame_us:-0}"
     echo "- blur/tolerance used: false"
     echo "- best simple frame us: $simple_frame_us"
     echo "- best baseline frame us: $js_frame_us"
+    echo "- simple binary: $SIMPLE_BIN ($SIMPLE_BIN_SOURCE, $SIMPLE_BIN_STATUS)"
     echo
     echo "## Simple Output"
     sed 's/^/- /' "$SIMPLE_OUT" 2>/dev/null || true
