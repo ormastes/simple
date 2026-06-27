@@ -27,7 +27,7 @@ electron_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,8 +78,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
   coarse event status.
 - Capture pass requires the proof screenshot path to match the captured
   screenshot artifact and the artifact file to exist with nonzero bytes.
-- Capture artifacts must carry the PNG signature bytes; an arbitrary nonempty
-  file is not accepted as Electron screenshot proof.
+- Capture artifacts must carry PNG signature bytes, IHDR dimensions, and image
+  chunks; arbitrary nonempty files and signature-only files are not accepted as
+  Electron screenshot proof.
 - Performance, interaction latency, and animation pass require
   `performance.now()`, an explicit positive timing delta, a positive
   `inputToPaintMs` sample after routed MDI input, at least two animation
@@ -105,7 +106,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -123,8 +124,9 @@ expect(evidence).to_contain("electron_mdi_json_proof=pass")
 expect(evidence).to_contain("electron_mdi_event_status=pass")
 expect(evidence).to_contain("electron_mdi_capture_status=pass")
 expect(evidence).to_contain("electron_mdi_screenshot_file_status=pass")
-expect(evidence).to_contain("electron_mdi_screenshot_size_bytes=13")
+expect(evidence).to_contain("electron_mdi_screenshot_size_bytes=68")
 expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=pass")
+expect(evidence).to_contain("electron_mdi_screenshot_png_structure_status=pass")
 expect(evidence).to_contain("electron_mdi_performance_status=pass")
 expect(evidence).to_contain("electron_mdi_interaction_latency_status=pass")
 expect(evidence).to_contain("electron_mdi_animation_status=pass")
@@ -272,7 +274,7 @@ expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -289,19 +291,21 @@ expect(code).to_equal(1)
 val missing = file_read(root + "/missing.env")
 val empty = file_read(root + "/empty.env")
 expect(missing).to_contain("electron_mdi_json_proof=fail")
-expect(missing).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotFileExists,screenshotFileNonempty,screenshotPngMagic")
+expect(missing).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotFileExists,screenshotFileNonempty,screenshotPngMagic,screenshotPngStructure")
 expect(missing).to_contain("electron_mdi_capture_status=fail")
 expect(missing).to_contain("electron_mdi_screenshot_path_matches=true")
 expect(missing).to_contain("electron_mdi_screenshot_file_status=fail")
 expect(missing).to_contain("electron_mdi_screenshot_size_bytes=")
 expect(missing).to_contain("electron_mdi_screenshot_png_magic_status=fail")
+expect(missing).to_contain("electron_mdi_screenshot_png_structure_status=fail")
 expect(empty).to_contain("electron_mdi_json_proof=fail")
-expect(empty).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotFileNonempty,screenshotPngMagic")
+expect(empty).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotFileNonempty,screenshotPngMagic,screenshotPngStructure")
 expect(empty).to_contain("electron_mdi_capture_status=fail")
 expect(empty).to_contain("electron_mdi_screenshot_path_matches=true")
 expect(empty).to_contain("electron_mdi_screenshot_file_status=pass")
 expect(empty).to_contain("electron_mdi_screenshot_size_bytes=0")
 expect(empty).to_contain("electron_mdi_screenshot_png_magic_status=fail")
+expect(empty).to_contain("electron_mdi_screenshot_png_structure_status=fail")
 ```
 
 </details>
@@ -316,7 +320,7 @@ expect(empty).to_contain("electron_mdi_screenshot_png_magic_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -335,6 +339,42 @@ expect(evidence).to_contain("electron_mdi_json_proof_reason=capture-contract-mis
 expect(evidence).to_contain("electron_mdi_capture_status=fail")
 expect(evidence).to_contain("electron_mdi_screenshot_file_status=pass")
 expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=fail")
+expect(evidence).to_contain("electron_mdi_screenshot_png_structure_status=fail")
+```
+
+</details>
+
+#### rejects PNG-signature-only Electron screenshot artifacts
+
+-  proof command
+   - Expected: code equals `1`
+- Confirm screenshot capture proof requires PNG structure beyond the magic bytes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-mdi-validator-capture-signature-only"
+val command = "rm -rf " + root + " build/electron-proof && mkdir -p " + root + " build/electron-proof && " +
+    "printf '\\211PNG\\r\\n\\032\\nproof' > build/electron-proof/screen.png && " +
+    _proof_command(root + "/proof.json", "") +
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm screenshot capture proof requires PNG structure beyond the magic bytes")
+expect(evidence).to_contain("electron_mdi_json_proof=fail")
+expect(evidence).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotPngStructure")
+expect(evidence).to_contain("electron_mdi_capture_status=fail")
+expect(evidence).to_contain("electron_mdi_screenshot_file_status=pass")
+expect(evidence).to_contain("electron_mdi_screenshot_size_bytes=13")
+expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=pass")
+expect(evidence).to_contain("electron_mdi_screenshot_png_structure_status=fail")
 ```
 
 </details>
@@ -620,8 +660,8 @@ expect(validator).to_contain("electron_mdi_event_taskbar_labels_visible")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

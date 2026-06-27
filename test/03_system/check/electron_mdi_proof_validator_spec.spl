@@ -29,8 +29,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
   coarse event status.
 - Capture pass requires the proof screenshot path to match the captured
   screenshot artifact and the artifact file to exist with nonzero bytes.
-- Capture artifacts must carry the PNG signature bytes; an arbitrary nonempty
-  file is not accepted as Electron screenshot proof.
+- Capture artifacts must carry PNG signature bytes, IHDR dimensions, and image
+  chunks; arbitrary nonempty files and signature-only files are not accepted as
+  Electron screenshot proof.
 - Performance, interaction latency, and animation pass require
   `performance.now()`, an explicit positive timing delta, a positive
   `inputToPaintMs` sample after routed MDI input, at least two animation
@@ -51,7 +52,7 @@ fn _proof_command(path: text, mutation: text) -> text:
     "node -e 'const fs=require(\"fs\");const p={count:4,hasDesktop:true,imageCount:1,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,appActionControlFound:true,appInputControlFound:true,bodyClickRouted:true,bodyInputRouted:true,bodyKeyRouted:true,trafficMinimizeRouted:true,trafficMaximizeRouted:true,trafficCloseRouted:true,bridgeIpcFrameCount:8,bridgeBodyActionFrameRouted:true,bridgeBodyInputFrameRouted:true,bridgeBodyKeyFrameRouted:true,bridgeMouseDownFrameRouted:true,bridgeMouseUpFrameRouted:true,bridgeMinimizeFrameRouted:true,bridgeMaximizeFrameRouted:true,bridgeCloseFrameRouted:true,taskbarItemCount:4,taskbarIconCount:4,taskbarIconsVisible:true,taskbarLabelsVisible:true,htmlRenderable:true,screenshotPath:\"build/electron-proof/screen.png\",performanceNowAvailable:true,performanceNowDeltaMs:16.7,inputToPaintMs:18.4,animationFrameAvailable:true,animationFrameCount:2,cssAnimationProbe:true};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 fn _png_capture_command() -> text:
-    "printf '\\211PNG\\r\\n\\032\\nproof' > build/electron-proof/screen.png"
+    "node -e \"process.stdout.write(Buffer.from(process.argv[1], process.argv[2]))\" iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII= base64 > build/electron-proof/screen.png"
 
 describe "Electron MDI proof validator":
 
@@ -70,8 +71,9 @@ describe "Electron MDI proof validator":
         expect(evidence).to_contain("electron_mdi_event_status=pass")
         expect(evidence).to_contain("electron_mdi_capture_status=pass")
         expect(evidence).to_contain("electron_mdi_screenshot_file_status=pass")
-        expect(evidence).to_contain("electron_mdi_screenshot_size_bytes=13")
+        expect(evidence).to_contain("electron_mdi_screenshot_size_bytes=68")
         expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=pass")
+        expect(evidence).to_contain("electron_mdi_screenshot_png_structure_status=pass")
         expect(evidence).to_contain("electron_mdi_performance_status=pass")
         expect(evidence).to_contain("electron_mdi_interaction_latency_status=pass")
         expect(evidence).to_contain("electron_mdi_animation_status=pass")
@@ -173,19 +175,21 @@ describe "Electron MDI proof validator":
         val missing = file_read(root + "/missing.env")
         val empty = file_read(root + "/empty.env")
         expect(missing).to_contain("electron_mdi_json_proof=fail")
-        expect(missing).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotFileExists,screenshotFileNonempty,screenshotPngMagic")
+        expect(missing).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotFileExists,screenshotFileNonempty,screenshotPngMagic,screenshotPngStructure")
         expect(missing).to_contain("electron_mdi_capture_status=fail")
         expect(missing).to_contain("electron_mdi_screenshot_path_matches=true")
         expect(missing).to_contain("electron_mdi_screenshot_file_status=fail")
         expect(missing).to_contain("electron_mdi_screenshot_size_bytes=")
         expect(missing).to_contain("electron_mdi_screenshot_png_magic_status=fail")
+        expect(missing).to_contain("electron_mdi_screenshot_png_structure_status=fail")
         expect(empty).to_contain("electron_mdi_json_proof=fail")
-        expect(empty).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotFileNonempty,screenshotPngMagic")
+        expect(empty).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotFileNonempty,screenshotPngMagic,screenshotPngStructure")
         expect(empty).to_contain("electron_mdi_capture_status=fail")
         expect(empty).to_contain("electron_mdi_screenshot_path_matches=true")
         expect(empty).to_contain("electron_mdi_screenshot_file_status=pass")
         expect(empty).to_contain("electron_mdi_screenshot_size_bytes=0")
         expect(empty).to_contain("electron_mdi_screenshot_png_magic_status=fail")
+        expect(empty).to_contain("electron_mdi_screenshot_png_structure_status=fail")
 
     it "rejects non-PNG screenshot artifacts even when they are nonempty":
         val root = "build/test-electron-mdi-validator-capture-magic"
@@ -203,6 +207,26 @@ describe "Electron MDI proof validator":
         expect(evidence).to_contain("electron_mdi_capture_status=fail")
         expect(evidence).to_contain("electron_mdi_screenshot_file_status=pass")
         expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=fail")
+        expect(evidence).to_contain("electron_mdi_screenshot_png_structure_status=fail")
+
+    it "rejects PNG-signature-only Electron screenshot artifacts":
+        val root = "build/test-electron-mdi-validator-capture-signature-only"
+        val command = "rm -rf " + root + " build/electron-proof && mkdir -p " + root + " build/electron-proof && " +
+            "printf '\\211PNG\\r\\n\\032\\nproof' > build/electron-proof/screen.png && " +
+            _proof_command(root + "/proof.json", "") +
+            " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/evidence.env")
+        step("Confirm screenshot capture proof requires PNG structure beyond the magic bytes")
+        expect(evidence).to_contain("electron_mdi_json_proof=fail")
+        expect(evidence).to_contain("electron_mdi_json_proof_reason=capture-contract-missing:screenshotPngStructure")
+        expect(evidence).to_contain("electron_mdi_capture_status=fail")
+        expect(evidence).to_contain("electron_mdi_screenshot_file_status=pass")
+        expect(evidence).to_contain("electron_mdi_screenshot_size_bytes=13")
+        expect(evidence).to_contain("electron_mdi_screenshot_png_magic_status=pass")
+        expect(evidence).to_contain("electron_mdi_screenshot_png_structure_status=fail")
 
     it "rejects performance availability without explicit timing delta":
         val root = "build/test-electron-mdi-validator-performance"

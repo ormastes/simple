@@ -100,15 +100,25 @@ try {
   screenshotStat = null;
 }
 let screenshotMagicOk = false;
+let screenshotStructureOk = false;
 if (screenshotStat !== null && screenshotStat.isFile() && screenshotStat.size >= 8) {
   try {
-    const fd = fs.openSync(screenshotPath, 'r');
-    const header = Buffer.alloc(8);
-    fs.readSync(fd, header, 0, 8, 0);
-    fs.closeSync(fd);
-    screenshotMagicOk = header.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const bytes = fs.readFileSync(screenshotPath);
+    screenshotMagicOk = bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const ihdrOk =
+      bytes.length >= 33 &&
+      bytes.readUInt32BE(8) === 13 &&
+      bytes.subarray(12, 16).toString('ascii') === 'IHDR' &&
+      bytes.readUInt32BE(16) > 0 &&
+      bytes.readUInt32BE(20) > 0;
+    screenshotStructureOk =
+      screenshotMagicOk &&
+      ihdrOk &&
+      bytes.indexOf(Buffer.from('IDAT', 'ascii')) >= 0 &&
+      bytes.indexOf(Buffer.from('IEND', 'ascii')) >= 0;
   } catch (_err) {
     screenshotMagicOk = false;
+    screenshotStructureOk = false;
   }
 }
 const captureChecks = {
@@ -116,6 +126,7 @@ const captureChecks = {
   screenshotFileExists: screenshotStat !== null && screenshotStat.isFile(),
   screenshotFileNonempty: screenshotStat !== null && screenshotStat.isFile() && screenshotStat.size > 0,
   screenshotPngMagic: screenshotMagicOk,
+  screenshotPngStructure: screenshotStructureOk,
 };
 const performanceChecks = {
   performanceNowAvailable: proof.performanceNowAvailable === true,
@@ -199,6 +210,7 @@ emit('electron_mdi_screenshot_path_matches', proof.screenshotPath === screenshot
 emit('electron_mdi_screenshot_file_status', screenshotStat !== null && screenshotStat.isFile() ? 'pass' : 'fail');
 emit('electron_mdi_screenshot_size_bytes', screenshotStat !== null && screenshotStat.isFile() ? String(screenshotStat.size) : '');
 emit('electron_mdi_screenshot_png_magic_status', screenshotMagicOk ? 'pass' : 'fail');
+emit('electron_mdi_screenshot_png_structure_status', screenshotStructureOk ? 'pass' : 'fail');
 if (reason !== 'pass') {
   emit('reason', reason);
   process.exit(1);
