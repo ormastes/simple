@@ -22,6 +22,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_android_render_log_val
 
 - Complete Android Tauri WebView/Vulkan logs validate and emit normalized rows.
 - The Tauri render marker must include a clean positive decimal `html_len`.
+- Implausibly high Android render `html_len` values fail closed instead of
+  counting as valid rendered-surface proof.
 - Render-only or generic Vulkan-only logs fail closed.
 - Render and Vulkan markers must be coherent within one source log.
 - Explicitly requested Android log source paths must exist and be nonempty; a
@@ -69,18 +71,25 @@ describe "Tauri Android render-log validator":
             "printf '[tauri-shell] render, html_len=4096px\\nHWUI Vulkan renderer ready\\n' > " + root + "/suffix.log && " +
             "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/suffix.log > " + root + "/suffix.env; " +
             "printf '[tauri-shell] render, html_len=0\\nHWUI Vulkan renderer ready\\n' > " + root + "/zero.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/zero.log > " + root + "/zero.env"
+            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/zero.log > " + root + "/zero.env; " +
+            "printf '[tauri-shell] render, html_len=10000001\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/huge.log && " +
+            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/huge.log > " + root + "/huge.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
         expect(code).to_equal(1)
 
         val suffix = file_read(root + "/suffix.env")
         val zero = file_read(root + "/zero.env")
+        val huge = file_read(root + "/huge.env")
         expect(suffix).to_contain("android_render_log_validation_reason=android-render-log-html-len-malformed")
         expect(suffix).to_contain("android_render_log_marker_status=fail")
         expect(suffix).to_contain("android_render_log_html_len=")
         expect(zero).to_contain("android_render_log_validation_reason=android-render-log-html-len-malformed")
         expect(zero).to_contain("android_render_log_marker_status=fail")
         expect(zero).to_contain("android_render_log_html_len=")
+        expect(huge).to_contain("android_render_log_validation_reason=android-render-log-html-len-malformed")
+        expect(huge).to_contain("android_render_log_marker_status=fail")
+        expect(huge).to_contain("android_render_log_html_len=")
+        expect(huge.contains("android_render_log_html_len=10000001")).to_equal(false)
 
     it "rejects missing Vulkan render backing markers":
         val root = "build/test-tauri-android-render-log-validator-missing-vulkan"
@@ -163,6 +172,8 @@ describe "Tauri Android render-log validator":
     it "keeps the Android renderer wrapper and mobile aggregate wired to the validator":
         val direct = file_read("scripts/check/check-tauri-android-mobile-renderer-evidence.shs")
         val aggregate = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
+        val validator = file_read("scripts/check/validate-tauri-android-render-log-proof.js")
+        expect(validator).to_contain("const maxRenderHtmlLen = 10000000")
         expect(direct).to_contain("validate-tauri-android-render-log-proof.js")
         expect(direct).to_contain("android_render_log.validation.env")
         expect(direct).to_contain("cat \"$RENDER_LOG_VALIDATION_ENV\"")

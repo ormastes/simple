@@ -71,6 +71,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 
 - Complete iOS Tauri/WKWebView/Metal logs validate and emit normalized rows.
 - The Tauri render marker must include a clean positive decimal `html_len`.
+- Implausibly high iOS render `html_len` values fail closed instead of
+  counting as valid rendered-surface proof.
 - Render-only or generic Metal-only logs fail closed.
 - Bare `WKWebView` text is not enough; the context marker must be tied to the
   Tauri shell or the mobile MDI probe source.
@@ -141,12 +143,13 @@ expect(evidence).to_contain("ios_render_log_failure_marker_status=pass")
 #### rejects malformed iOS render html length markers
 
 - Confirm iOS render html_len must be a clean positive decimal row
+   - Expected: huge does not contain `ios_render_log_html_len=10000001`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -155,12 +158,15 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=347702px\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/suffix.log && " +
     "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/suffix.log > " + root + "/suffix.env; " +
     "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=0\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/zero.log && " +
-    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/zero.log > " + root + "/zero.env"
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/zero.log > " + root + "/zero.env; " +
+    "printf '[tauri-shell] creating window from app://index.html\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\n[tauri-shell] render, html_len=10000001\\nCAMetalLayer Metal renderer ready\\n' > " + root + "/huge.log && " +
+    "node scripts/check/validate-tauri-ios-render-log-proof.js " + root + "/huge.log > " + root + "/huge.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val suffix = file_read(root + "/suffix.env")
 val zero = file_read(root + "/zero.env")
+val huge = file_read(root + "/huge.env")
 step("Confirm iOS render html_len must be a clean positive decimal row")
 expect(suffix).to_contain("ios_render_log_validation_status=fail")
 expect(suffix).to_contain("ios_render_log_validation_reason=ios-render-log-html-len-malformed")
@@ -170,6 +176,11 @@ expect(zero).to_contain("ios_render_log_validation_status=fail")
 expect(zero).to_contain("ios_render_log_validation_reason=ios-render-log-html-len-malformed")
 expect(zero).to_contain("ios_render_log_marker_status=fail")
 expect(zero).to_contain("ios_render_log_html_len=")
+expect(huge).to_contain("ios_render_log_validation_status=fail")
+expect(huge).to_contain("ios_render_log_validation_reason=ios-render-log-html-len-malformed")
+expect(huge).to_contain("ios_render_log_marker_status=fail")
+expect(huge).to_contain("ios_render_log_html_len=")
+expect(huge.contains("ios_render_log_html_len=10000001")).to_equal(false)
 ```
 
 </details>
@@ -539,13 +550,15 @@ expect(evidence).to_contain("ios_mdi_css_animation_probe=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val direct = file_read("scripts/check/check-tauri-ios-mobile-renderer-evidence.shs")
 val aggregate = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
 val tauri = file_read("tools/tauri-shell/src-tauri/src/lib.rs")
+val validator = file_read("scripts/check/validate-tauri-ios-render-log-proof.js")
+expect(validator).to_contain("const maxRenderHtmlLen = 10000000")
 expect(direct).to_contain("validate-tauri-ios-render-log-proof.js")
 expect(direct).to_contain("ios_render_log.validation.env")
 expect(direct).to_contain("ios_mdi_proof.validation.env")

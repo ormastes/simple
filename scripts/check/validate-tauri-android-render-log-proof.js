@@ -18,6 +18,7 @@ let sourceCount = 0;
 let text = '';
 let coherentSource = false;
 let htmlLen = '';
+const maxRenderHtmlLen = 10000000;
 
 const validRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=([1-9][0-9]*)(?:\s|$)/;
 const anyRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=/;
@@ -26,7 +27,8 @@ const failureMarkerPattern = /(F\/DEBUG|Fatal signal|F\/libc|F\/VulkanManager|Si
 
 function renderHtmlLen(content) {
   const match = content.match(validRenderMarkerPattern);
-  return match ? match[1] : '';
+  if (!match) return '';
+  return BigInt(match[1]) <= BigInt(maxRenderHtmlLen) ? match[1] : '';
 }
 
 for (const file of files) {
