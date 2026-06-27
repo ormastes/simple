@@ -27,7 +27,7 @@ tauri_android_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -77,6 +77,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_android_render_log_val
 - Render and Vulkan markers must be coherent within one source log.
 - Explicitly requested Android log source paths must exist and be nonempty; a
   valid companion log cannot hide a missing or empty render-log source artifact.
+- Explicitly requested Android log source paths must not be symlinks to stale
+  or attacker-controlled render-log artifacts.
 - Failure markers fail closed even when render and Vulkan markers are present.
 - The Android renderer wrapper and mobile aggregate are wired to the validator
   contract.
@@ -96,7 +98,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_android_render_log_val
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -115,6 +117,7 @@ expect(evidence).to_contain("android_render_log_requested_source_count=1")
 expect(evidence).to_contain("android_render_log_source_count=1")
 expect(evidence).to_contain("android_render_log_missing_source_count=0")
 expect(evidence).to_contain("android_render_log_empty_source_count=0")
+expect(evidence).to_contain("android_render_log_symlink_source_count=0")
 expect(evidence).to_contain("android_render_log_html_len=4096")
 expect(evidence).to_contain("android_render_log_source_coherence_status=pass")
 expect(evidence).to_contain("android_render_log_marker_status=pass")
@@ -246,7 +249,7 @@ expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -265,6 +268,40 @@ expect(evidence).to_contain("android_render_log_requested_source_count=2")
 expect(evidence).to_contain("android_render_log_source_count=1")
 expect(evidence).to_contain("android_render_log_missing_source_count=0")
 expect(evidence).to_contain("android_render_log_empty_source_count=1")
+expect(evidence).to_contain("android_render_log_symlink_source_count=0")
+expect(evidence).to_contain("android_render_log_marker_status=pass")
+expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
+```
+
+</details>
+
+#### rejects symlinked requested Android log source paths
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-android-render-log-validator-symlink-source"
+val external = "build/test-tauri-android-render-log-validator-symlink-source-external"
+val command = "rm -rf " + root + " " + external + " && mkdir -p " + root + " " + external + " && " +
+    "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/android.log && " +
+    "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + external + "/android.log && " +
+    "ln -s ../test-tauri-android-render-log-validator-symlink-source-external/android.log " + root + "/linked.log && " +
+    "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log " + root + "/linked.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+expect(evidence).to_contain("android_render_log_validation_status=fail")
+expect(evidence).to_contain("android_render_log_validation_reason=android-render-log-source-symlink")
+expect(evidence).to_contain("android_render_log_requested_source_count=2")
+expect(evidence).to_contain("android_render_log_source_count=1")
+expect(evidence).to_contain("android_render_log_missing_source_count=0")
+expect(evidence).to_contain("android_render_log_empty_source_count=0")
+expect(evidence).to_contain("android_render_log_symlink_source_count=1")
 expect(evidence).to_contain("android_render_log_marker_status=pass")
 expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
 ```
@@ -299,7 +336,7 @@ expect(evidence).to_contain("android_render_log_failure_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -315,6 +352,7 @@ expect(direct).to_contain("android_render_log_requested_source_count")
 expect(direct).to_contain("android_render_log_html_len")
 expect(direct).to_contain("android_render_log_missing_source_count")
 expect(direct).to_contain("android_render_log_empty_source_count")
+expect(direct).to_contain("android_render_log_symlink_source_count")
 expect(direct).to_contain("value_of android_mdi_proof_status")
 expect(direct).to_contain("android_mdi_interaction_latency_status")
 expect(direct).to_contain("android_mdi_input_to_paint_ms")
@@ -326,6 +364,7 @@ expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_va
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_requested_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_missing_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_empty_source_count")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_symlink_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_source_coherence_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_event_body_key_routed")
@@ -333,6 +372,7 @@ expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_event_tas
 expect(aggregate).to_contain("android-render-log-html-len-malformed")
 expect(aggregate).to_contain("android-render-log-source-mismatch")
 expect(aggregate).to_contain("android-render-log-source-missing")
+expect(aggregate).to_contain("android-render-log-source-symlink")
 expect(aggregate).to_contain("android-render-log-source-empty")
 ```
 
@@ -342,8 +382,8 @@ expect(aggregate).to_contain("android-render-log-source-empty")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
