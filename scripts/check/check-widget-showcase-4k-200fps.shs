@@ -5,11 +5,22 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 if [ "${SIMPLE_BIN:-}" = "" ]; then
-    for candidate in bin/simple ./bin/simple src/compiler_rust/target/release/simple; do
+    for candidate in \
+        bin/simple \
+        ./bin/simple \
+        release/x86_64-unknown-linux-gnu/simple \
+        release/aarch64-unknown-linux-gnu/simple \
+        release/aarch64-apple-darwin/simple \
+        release/x86_64-apple-darwin/simple \
+        bin/release/x86_64-unknown-linux-gnu/simple \
+        bin/release/aarch64-unknown-linux-gnu/simple \
+        bin/release/aarch64-apple-darwin/simple \
+        bin/release/x86_64-apple-darwin/simple
+    do
         if [ -x "$candidate" ]; then
             SIMPLE_BIN="$candidate"
             case "$candidate" in
-                src/compiler_rust/target/release/simple) SIMPLE_BIN_SOURCE="in-tree-release" ;;
+                release/*|bin/release/*) SIMPLE_BIN_SOURCE="self-hosted-release" ;;
                 *) SIMPLE_BIN_SOURCE="repo-bin" ;;
             esac
             break
@@ -22,8 +33,8 @@ if [ "${SIMPLE_BIN:-}" = "" ]; then
 else
     SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 fi
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
-SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-default-missing}"
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-missing-self-hosted}"
 APP="examples/06_io/ui/widget_showcase_gui.spl"
 SOURCE_REVISION_FILES="${SOURCE_REVISION_FILES:-scripts/check/check-widget-showcase-4k-200fps.shs $APP}"
 compute_source_revision() {
@@ -289,6 +300,21 @@ write_alias_source() {
     ' "$APP" >"$ALIAS_SRC"
 }
 
+case "$SIMPLE_BIN" in
+    src/compiler_rust/*|*/src/compiler_rust/*)
+        {
+            echo "${STATUS_PREFIX}_status=fail"
+            echo "${STATUS_PREFIX}_reason=rust-seed-simple-binary-forbidden"
+            emit_common_fields
+            emit_unmeasured_perf_fields
+            echo "${STATUS_PREFIX}_max_rss_budget_kb=$MAX_RSS_KB"
+            emit_log_fields
+        } >"$STATUS_ENV"
+        echo "FAIL: Rust seed Simple binary is forbidden for perf evidence: $SIMPLE_BIN"
+        exit 1
+        ;;
+esac
+
 if [ "$PLAN_ONLY" = "1" ]; then
     if [ "$USE_NATIVE" = "1" ]; then
         write_alias_source
@@ -314,10 +340,13 @@ fi
 if [ ! -x "$SIMPLE_BIN" ]; then
     {
         echo "${STATUS_PREFIX}_status=fail"
-        echo "${STATUS_PREFIX}_reason=missing-simple-binary"
+        echo "${STATUS_PREFIX}_reason=missing-self-hosted-simple-binary"
         emit_common_fields
+        emit_unmeasured_perf_fields
+        echo "${STATUS_PREFIX}_max_rss_budget_kb=$MAX_RSS_KB"
+        emit_log_fields
     } >"$STATUS_ENV"
-    echo "FAIL: $SIMPLE_BIN not executable"
+    echo "FAIL: self-hosted Simple binary not executable: ${SIMPLE_BIN:-<unset>}"
     exit 1
 fi
 
