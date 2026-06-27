@@ -31,6 +31,8 @@ bin/simple test test/03_system/check/gui_showcase_perf_artifact_provenance_contr
 - The retained perf producer prefers release/self-hosted binaries before
   repo-bin shims so native perf evidence does not depend on a slower or stale
   launcher.
+- Complete retained showcase rows must include `*_simple_bin_status=pass`; the
+  aggregate must not infer binary validity from path/source text alone.
 """
 
 # @tag: system, gui, renderdoc, evidence, perf
@@ -84,6 +86,7 @@ fn _fixture_command(root: text, lane: text, native_path: text, alias_path: text,
         prefix + "_source_revision_files=scripts/check/check-widget-showcase-4k-200fps.shs examples/06_io/ui/widget_showcase_gui.spl\\n" +
         prefix + "_simple_bin=bin/simple\\n" +
         prefix + "_simple_bin_source=self-hosted-release\\n" +
+        prefix + "_simple_bin_status=pass\\n" +
         prefix + "_native_bin=" + native_path + "\\n" +
         prefix + "_native_bin_file_status=pass\\n" +
         prefix + "_native_bin_executable_status=pass\\n" +
@@ -146,6 +149,10 @@ describe "GUI showcase perf artifact provenance contract":
         expect(script).to_contain("showcase_8k_time_log_file_status = regular_file_status(showcase_8k_time_log)")
         expect(script).to_contain("showcase_4k_native_bin_file_status = evidence_regular_file_status")
         expect(script).to_contain("showcase_8k_native_bin_executable_status = evidence_regular_executable_status")
+        expect(script).to_contain("showcase_4k_simple_bin_status = value_of")
+        expect(script).to_contain("showcase_8k_simple_bin_status = value_of")
+        expect(script).to_contain("simple_bin_status=<missing>")
+        expect(script).to_contain("simple_bin_status=\" + simple_bin_status")
 
     it "prefers release self-hosted binaries before repo-bin shims for retained perf producer evidence":
         val script = file_read("scripts/check/check-widget-showcase-4k-200fps.shs")
@@ -156,3 +163,24 @@ describe "GUI showcase perf artifact provenance contract":
         step("Assert release paths are labelled as self-hosted perf evidence")
         expect(script).to_contain("release/*|bin/release/*) SIMPLE_BIN_SOURCE=\"self-hosted-release\"")
         expect(script).to_contain("*) SIMPLE_BIN_SOURCE=\"repo-bin\"")
+        expect(script).to_contain("SIMPLE_BIN_STATUS=\"${SIMPLE_BIN_STATUS:-pass}\"")
+        expect(script).to_contain("_simple_bin_status=$SIMPLE_BIN_STATUS")
+
+    it "rejects complete retained rows missing simple binary status":
+        val root = "build/test-gui-showcase-perf-simple-bin-status"
+        val setup = "rm -rf " + root + " && mkdir -p " + root + "/4k && " +
+            "printf '%b' '\\177ELFsynthetic-native\\n' > " + root + "/4k/native.bin && chmod +x " + root + "/4k/native.bin && " +
+            "printf 'fn main() -> i64:\\n    0\\n' > " + root + "/4k/showcase.spl && " +
+            "printf 'native build log\\n' > " + root + "/4k/build.log && " +
+            "printf 'showcase retained log\\n' > " + root + "/4k/showcase.log && " +
+            "printf 'elapsed_ms=597\\n' > " + root + "/4k/time.log && "
+        val write_4k = _fixture_command(root, "4k", root + "/4k/native.bin", root + "/4k/showcase.spl", root + "/4k/build.log", root + "/4k/showcase.log", root + "/4k/time.log")
+        val command = setup + write_4k + " && sed -i '/gui_showcase_4k_200fps_simple_bin_status=/d' " + root + "/4k/status.env && " +
+            "GUI_SHOWCASE_4K_PERF_ENV=" + root + "/4k/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = file_read(root + "/out/evidence.env")
+        expect(_value_of(evidence, "gui_showcase_4k_200fps_status")).to_equal("fail")
+        expect(_value_of(evidence, "gui_showcase_4k_200fps_reason")).to_equal("missing-4k-perf-provenance:simple_bin_status")
+        expect(_value_of(evidence, "gui_showcase_4k_200fps_simple_bin_status")).to_equal("")

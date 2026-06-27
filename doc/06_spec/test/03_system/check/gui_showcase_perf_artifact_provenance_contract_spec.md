@@ -27,7 +27,7 @@ gui_showcase_perf_artifact_provenance_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates that retained 4K/8K GUI showcase performance completion evidence is bo
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/gui_showcase_perf_artifact_provenance_contract_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -80,6 +80,8 @@ bin/simple test test/03_system/check/gui_showcase_perf_artifact_provenance_contr
 - The retained perf producer prefers release/self-hosted binaries before
   repo-bin shims so native perf evidence does not depend on a slower or stale
   launcher.
+- Complete retained showcase rows must include `*_simple_bin_status=pass`; the
+  aggregate must not infer binary validity from path/source text alone.
 
 ## Scenarios
 
@@ -151,7 +153,7 @@ expect(_value_of(eight_k, "gui_showcase_8k_perf_reason")).to_equal("missing-8k-n
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -164,6 +166,10 @@ expect(script).to_contain("showcase_4k_log_file_status = regular_file_status(sho
 expect(script).to_contain("showcase_8k_time_log_file_status = regular_file_status(showcase_8k_time_log)")
 expect(script).to_contain("showcase_4k_native_bin_file_status = evidence_regular_file_status")
 expect(script).to_contain("showcase_8k_native_bin_executable_status = evidence_regular_executable_status")
+expect(script).to_contain("showcase_4k_simple_bin_status = value_of")
+expect(script).to_contain("showcase_8k_simple_bin_status = value_of")
+expect(script).to_contain("simple_bin_status=<missing>")
+expect(script).to_contain("simple_bin_status=\" + simple_bin_status")
 ```
 
 </details>
@@ -177,7 +183,7 @@ expect(script).to_contain("showcase_8k_native_bin_executable_status = evidence_r
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -189,6 +195,45 @@ expect(script).to_contain("bin/release/x86_64-apple-darwin/simple \\\n        bi
 step("Assert release paths are labelled as self-hosted perf evidence")
 expect(script).to_contain("release/*|bin/release/*) SIMPLE_BIN_SOURCE=\"self-hosted-release\"")
 expect(script).to_contain("*) SIMPLE_BIN_SOURCE=\"repo-bin\"")
+expect(script).to_contain("SIMPLE_BIN_STATUS=\"${SIMPLE_BIN_STATUS:-pass}\"")
+expect(script).to_contain("_simple_bin_status=$SIMPLE_BIN_STATUS")
+```
+
+</details>
+
+#### rejects complete retained rows missing simple binary status
+
+- "printf 'fn main
+   - Expected: code equals `0`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_status") equals `fail`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_reason") equals `missing-4k-perf-provenance:simple_bin_status`
+   - Expected: _value_of(evidence, "gui_showcase_4k_200fps_simple_bin_status") equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-gui-showcase-perf-simple-bin-status"
+val setup = "rm -rf " + root + " && mkdir -p " + root + "/4k && " +
+    "printf '%b' '\\177ELFsynthetic-native\\n' > " + root + "/4k/native.bin && chmod +x " + root + "/4k/native.bin && " +
+    "printf 'fn main() -> i64:\\n    0\\n' > " + root + "/4k/showcase.spl && " +
+    "printf 'native build log\\n' > " + root + "/4k/build.log && " +
+    "printf 'showcase retained log\\n' > " + root + "/4k/showcase.log && " +
+    "printf 'elapsed_ms=597\\n' > " + root + "/4k/time.log && "
+val write_4k = _fixture_command(root, "4k", root + "/4k/native.bin", root + "/4k/showcase.spl", root + "/4k/build.log", root + "/4k/showcase.log", root + "/4k/time.log")
+val command = setup + write_4k + " && sed -i '/gui_showcase_4k_200fps_simple_bin_status=/d' " + root + "/4k/status.env && " +
+    "GUI_SHOWCASE_4K_PERF_ENV=" + root + "/4k/status.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/out/evidence.env")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_status")).to_equal("fail")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_reason")).to_equal("missing-4k-perf-provenance:simple_bin_status")
+expect(_value_of(evidence, "gui_showcase_4k_200fps_simple_bin_status")).to_equal("")
 ```
 
 </details>
@@ -197,8 +242,8 @@ expect(script).to_contain("*) SIMPLE_BIN_SOURCE=\"repo-bin\"")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
