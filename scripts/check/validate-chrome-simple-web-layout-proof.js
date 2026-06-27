@@ -66,6 +66,12 @@ function jsonIntegerTextOrBlank(value) {
   return text === null ? '' : text;
 }
 
+function jsonBoolTextOrBlank(value) {
+  if (value === true) return 'true';
+  if (value === false) return 'false';
+  return '';
+}
+
 function artifactStat(value, proofPath) {
   if (typeof value !== 'string' || value.trim() === '') {
     return null;
@@ -271,12 +277,12 @@ emit('chrome_simple_web_layout_chrome_checksum', integerTextOrClean(proof.checks
 emit('chrome_simple_web_layout_simple_weighted_checksum', integerTextOrClean(proof.expected_weighted_checksum));
 emit('chrome_simple_web_layout_chrome_weighted_checksum', integerTextOrClean(proof.weighted_checksum));
 emit('chrome_simple_web_layout_mismatch_count', jsonIntegerTextOrBlank(proof.mismatch_count));
-emit('chrome_simple_web_layout_blur_or_tolerance_used', proof.blur_or_tolerance_used === false ? 'false' : clean(proof.blur_or_tolerance_used));
+emit('chrome_simple_web_layout_blur_or_tolerance_used', jsonBoolTextOrBlank(proof.blur_or_tolerance_used));
 emit('chrome_simple_web_layout_chrome_frame_us', jsonIntegerTextOrBlank(proof.frame_us));
 emit('chrome_simple_web_layout_capture_width', jsonIntegerTextOrBlank(proof.width));
 emit('chrome_simple_web_layout_capture_height', jsonIntegerTextOrBlank(proof.height));
 emit('chrome_simple_web_layout_captured_argb_path', proof.captured_argb_path);
-emit('chrome_simple_web_layout_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
+emit('chrome_simple_web_layout_captured_argb_written', jsonBoolTextOrBlank(proof.captured_argb_written));
 emit('chrome_simple_web_layout_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
 emit('chrome_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
 emit('chrome_simple_web_layout_captured_argb_format', capturedArgb.format);
@@ -286,7 +292,7 @@ emit('chrome_simple_web_layout_captured_argb_height', jsonIntegerTextOrBlank(cap
 emit('chrome_simple_web_layout_captured_argb_pixel_count', capturedArgbPixels === null ? '' : String(capturedArgbPixels.length));
 emit('chrome_simple_web_layout_captured_argb_nonzero_pixel_count', capturedArgbNonzeroPixelCount);
 emit('chrome_simple_web_layout_geometry_path', proof.geometry_path);
-emit('chrome_simple_web_layout_geometry_written', proof.geometry_written === true ? 'true' : 'false');
+emit('chrome_simple_web_layout_geometry_written', jsonBoolTextOrBlank(proof.geometry_written));
 emit('chrome_simple_web_layout_geometry_file_status', artifactFileStatus(geometryStat));
 emit('chrome_simple_web_layout_geometry_size_bytes', geometryStat === null ? '' : String(geometryStat.stat.size));
 emit('chrome_simple_web_layout_geometry_producer', geometry.producer);

@@ -27,7 +27,7 @@ chrome_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -104,6 +104,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   counts, and frame timing values must be real JSON numbers, not stringified
   rows, and malformed live numeric rows must not be re-emitted as normalized
   numeric evidence.
+- Capture-written, geometry-written, and blur/tolerance proof rows must be real
+  JSON booleans; string booleans are rejected and not normalized as valid
+  `true` or `false` diagnostics.
 - The top-level proof must carry the live Chrome capture source marker; a
   hand-authored proof object with valid-looking artifacts is not sufficient.
 - The top-level proof must carry Chrome DevTools capture mode, Chrome or
@@ -384,6 +387,56 @@ expect(evidence).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=missing-captured-argb")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_written=false")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_written=false")
+```
+
+</details>
+
+#### rejects string booleans without normalizing them as valid diagnostics
+
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm Chrome boolean proof rows must be structured JSON booleans
+   - Expected: capture does not contain `chrome_simple_web_layout_captured_argb_written=false`
+   - Expected: geometry does not contain `chrome_simple_web_layout_geometry_written=false`
+   - Expected: blur does not contain `chrome_simple_web_layout_blur_or_tolerance_used=false`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-validator-string-booleans"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/capture.json", "p.captured_argb_written=\"true\"") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/capture.json > " + root + "/capture.env; " +
+    _proof_command(root + "/geometry.json", "p.geometry_written=\"true\"") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/geometry.json > " + root + "/geometry.env; " +
+    _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=\"false\"") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/blur.json > " + root + "/blur.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val capture = file_read(root + "/capture.env")
+val geometry = file_read(root + "/geometry.env")
+val blur = file_read(root + "/blur.env")
+step("Confirm Chrome boolean proof rows must be structured JSON booleans")
+expect(capture).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(capture).to_contain("chrome_simple_web_layout_validation_reason=missing-captured-argb")
+expect(capture).to_contain("chrome_simple_web_layout_captured_argb_written=")
+expect(capture.contains("chrome_simple_web_layout_captured_argb_written=false")).to_equal(false)
+expect(geometry).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(geometry).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-geometry")
+expect(geometry).to_contain("chrome_simple_web_layout_geometry_written=")
+expect(geometry.contains("chrome_simple_web_layout_geometry_written=false")).to_equal(false)
+expect(blur).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(blur).to_contain("chrome_simple_web_layout_validation_reason=blur-or-tolerance-not-allowed")
+expect(blur).to_contain("chrome_simple_web_layout_blur_or_tolerance_used=")
+expect(blur.contains("chrome_simple_web_layout_blur_or_tolerance_used=false")).to_equal(false)
 ```
 
 </details>
@@ -837,7 +890,7 @@ expect(pixel).to_contain("chrome_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -867,6 +920,7 @@ expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath
 expect(validator).to_contain("measuredGeometryItemCount")
 expect(validator).to_contain("missing-chrome-geometry-measured-items")
 expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
+expect(validator).to_contain("jsonBoolTextOrBlank")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
 val capture = file_read("tools/chrome-live-bitmap/capture_html_argb.js")
@@ -929,8 +983,8 @@ expect(evidence).to_contain("chrome_simple_web_layout_geometry_item_count=0")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
