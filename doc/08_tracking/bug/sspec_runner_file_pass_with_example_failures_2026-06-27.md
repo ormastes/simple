@@ -48,6 +48,18 @@ output contains:
 7 examples, 0 failures
 ```
 
+Automation can also run:
+
+```sh
+scripts/check/check-gui-web-2d-completion-criteria-placeholders.shs
+```
+
+That check fails while any `TODO(gui-web-2d-completion)` placeholder remains in
+the executable completion criteria spec and emits
+`gui_web_2d_completion_criteria_todo_count` evidence. Use
+`GUI_WEB_2D_COMPLETION_ALLOW_INCOMPLETE=1` only for status dashboards that need
+to record the current incomplete count without failing the shell command.
+
 The retained 4K/8K performance scenario is currently the only scenario converted
 to evidence-backed assertions; the other six scenarios intentionally fail until
 their platform evidence exists.

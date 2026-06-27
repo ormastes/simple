@@ -70,6 +70,12 @@ evidence-backed assertions over current evidence and passes. Passing the
 retained perf lane, narrow renderer slices, or non-RenderDoc browser Vulkan rows
 does not complete the goal by itself.
 
+Until the SSpec runner failure-summary bug is fixed, automation must also run
+`scripts/check/check-gui-web-2d-completion-criteria-placeholders.shs`. The
+script fails while any `TODO(gui-web-2d-completion)` placeholder remains and
+emits `gui_web_2d_completion_criteria_todo_count` evidence, so a file-level
+runner `PASS` cannot be mistaken for broad GUI/Web/2D completion.
+
 ## Acceptance
 
 - Linux Vulkan completion proves Chrome, Electron, and Simple Vulkan backing,
