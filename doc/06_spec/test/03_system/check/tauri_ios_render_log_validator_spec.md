@@ -86,6 +86,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 - Passing validation emits the exact coherent iOS render-log source path and
   byte size so aggregate evidence can bind Metal-backed rendering to a real log
   artifact.
+- The direct iOS renderer wrapper emits the coherent render-log source actual
+  byte size plus file status/reason rows so standalone evidence detects source
+  mutation, symlink, hardlink, and missing-artifact failures.
 - Passing validation binds `html_len` to the coherent WKWebView/CAMetalLayer
   render-log source instead of an unrelated companion render marker.
 - Fallback GPU markers such as SwiftShader, software rendering, or OpenGL
@@ -854,6 +857,10 @@ expect(direct).to_contain("emit_existing_or_default ios_render_log_validation_re
 expect(direct).to_contain("emit_existing_or_default ios_render_log_source_coherence_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_coherent_source_path \"\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_coherent_source_size_bytes \"\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_ios_render_log_coherent_source_artifact_rows")
+expect(direct).to_contain("ios_render_log_coherent_source_actual_size_bytes=")
+expect(direct).to_contain("file_status=\"unavailable\"")
+expect(direct).to_contain("file_reason=\"not-run\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_symlink_source_count 0 \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_hardlink_source_count 0 \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_render_log_duplicate_source_count 0 \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
@@ -903,6 +910,13 @@ expect(direct).to_contain("ios_render_log_nonregular_source_count=$ios_render_lo
 expect(direct).to_contain("ios_render_log_source_coherence_status=$ios_render_log_source_coherence_status")
 expect(direct).to_contain("ios_render_log_coherent_source_path=$ios_render_log_coherent_source_path")
 expect(direct).to_contain("ios_render_log_coherent_source_size_bytes=$ios_render_log_coherent_source_size_bytes")
+expect(direct).to_contain("ios_render_log_coherent_source_actual_size_bytes=$ios_render_log_coherent_source_actual_size_bytes")
+expect(direct).to_contain("ios_render_log_coherent_source_file_status=$ios_render_log_coherent_source_file_status")
+expect(direct).to_contain("ios_render_log_coherent_source_file_reason=$ios_render_log_coherent_source_file_reason")
+expect(direct).to_contain("ios-render-log-coherent-source-symlink")
+expect(direct).to_contain("ios-render-log-coherent-source-hardlink")
+expect(direct).to_contain("ios-render-log-coherent-source-size-mismatch")
+expect(direct).to_contain("ios-render-log-coherent-source-artifact-missing")
 expect(direct).to_contain("ios_render_log_tauri_context_status=$ios_render_log_tauri_context_status")
 expect(direct).to_contain("ios_render_log_metal_context_status=$ios_render_log_metal_context_status")
 expect(direct).to_contain("ios_render_log_fallback_marker_status=$ios_render_log_fallback_marker_status")
@@ -929,7 +943,11 @@ expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_l
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_coherence_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_actual_size_bytes")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason")
 expect(aggregate).to_contain("ios-render-log-coherent-source-missing")
+expect(aggregate).to_contain("ios-render-log-coherent-source-size-mismatch")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status")
