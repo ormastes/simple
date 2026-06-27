@@ -86,6 +86,19 @@ const expectedTarget = 'electron';
 const expectedSurfaceId = 'wm-browser-event-routing';
 const maxEventTimingMs = 1000;
 
+function proofSourceArtifact() {
+  let stat;
+  try {
+    stat = fs.lstatSync(expectedProofSource);
+  } catch (_err) {
+    return { status: 'missing', size: '' };
+  }
+  if (stat.isSymbolicLink()) return { status: 'symlink', size: '' };
+  if (!stat.isFile()) return { status: 'missing', size: '' };
+  if (stat.size <= 0) return { status: 'empty', size: '0' };
+  return { status: 'pass', size: String(stat.size) };
+}
+
 function eventSequenceText(value) {
   if (!Array.isArray(value)) return '';
   return value.map(clean).join(',');
@@ -135,11 +148,14 @@ try {
 const move = proof.move_payload || {};
 const title = proof.title_payload || {};
 const text = proof.text_payload || {};
+const proofSource = proofSourceArtifact();
 
 const rows = {
   target: proof.target,
   surface_id: proof.surface_id,
   proof_source: proof.proof_source,
+  proof_source_file_status: proofSource.status,
+  proof_source_size_bytes: proofSource.size,
   browser_engine: proof.browser_engine,
   electron_user_agent: proof.electron_user_agent,
   electron_process_version: proof.electron_process_version,
@@ -198,6 +214,8 @@ if (!boolTrue(proof.pass)) {
   reason = 'event-routing-surface-identity-missing';
 } else if (proof.proof_source !== expectedProofSource) {
   reason = 'event-routing-proof-source-missing';
+} else if (proofSource.status !== 'pass') {
+  reason = `event-routing-proof-source-${proofSource.status}`;
 } else if (
   proof.browser_engine !== 'chromium' ||
   typeof proof.electron_user_agent !== 'string' ||
