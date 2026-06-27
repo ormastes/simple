@@ -8,7 +8,9 @@ revision using the repo self-hosted release binary
 run with `fallback_state=none`, scan the full readback buffer, and pass RSS
 budgets. A 4K row was refreshed after narrowing the generated alias to retained
 perf code and changing default binary discovery to prefer release/self-hosted
-binaries before `bin/simple`.
+binaries before `bin/simple`. The canonical 8K build directory was refreshed
+after that wrapper fix so the aggregate no longer reads stale Rust-seed 8K
+evidence.
 
 This proves the current retained 4K/8K showcase perf contract for this host. It
 does not prove RenderDoc `.rdc`, Chrome/Electron Vulkan backing, macOS Metal,
@@ -23,6 +25,11 @@ sh scripts/check/check-widget-showcase-4k-200fps.shs
 
 RESOLUTION=8k \
 BUILD_DIR=build/widget-showcase-8k-perf-current-2026-06-27-self-hosted \
+TIMEOUT_SECS=90 \
+sh scripts/check/check-widget-showcase-4k-200fps.shs
+
+RESOLUTION=8k \
+BUILD_DIR=build/widget-showcase-8k-perf \
 TIMEOUT_SECS=90 \
 sh scripts/check/check-widget-showcase-4k-200fps.shs
 
@@ -42,6 +49,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 | --- | --- | ---: | --- | --- | --- | --- | --- |
 | 4K 200fps refreshed | pass (`met-200fps`) | 61766522 | 131328 / 262144 | self-hosted-release | pass | none | current (`7ff296568c26`) |
 | 4K 200fps | pass (`met-200fps`) | 53763440 | 131328 / 262144 | self-hosted-release | pass | none | current |
+| 8K perf refreshed | pass (`met-target-fps`) | 15291688 | 519680 / 750000 | self-hosted-release | pass | none | current (`7ff296568c26`) |
 | 8K perf | pass (`met-target-fps`) | 15281173 | 519680 / 750000 | self-hosted-release | pass | none | current |
 
 Readback proof:
@@ -52,7 +60,25 @@ Readback proof:
 - 4K prior: `3840x2160`, `8294400` pixels, `5458` nonzero pixels, checksum
   `23357114226484`, retained static frame, redraw frames `1`.
 - 8K: `7680x4320`, `33177600` pixels, `203` nonzero pixels, checksum
-  `869060580878`, retained static frame, redraw frames `1`.
+  `869060580878`, retained static frame, redraw frames `1`, frame average
+  `65395` ns.
+
+## Aggregate Status After Refresh
+
+After refreshing `build/widget-showcase-8k-perf/status.env`, the aggregate
+reports:
+
+- `gui_showcase_8k_perf_status=pass`
+- `gui_showcase_8k_perf_source_revision_status=current`
+- `gui_showcase_8k_perf_simple_bin=release/x86_64-unknown-linux-gnu/simple`
+- `gui_showcase_8k_perf_simple_bin_source=self-hosted-release`
+- `gui_showcase_8k_perf_frame_elapsed_ns_status=pass`
+- `blocked_completion_gate_count=8`
+
+The remaining aggregate blockers are Chrome/Electron RenderDoc `.rdc` capture,
+Electron widget RenderDoc `.rdc`, native render-log comparison across Linux
+Vulkan/macOS Metal/Windows D3D12, production GUI/web readback/parity gates, and
+full CSS rendering coverage beyond the implemented subset.
 
 ## Current Blocker
 
