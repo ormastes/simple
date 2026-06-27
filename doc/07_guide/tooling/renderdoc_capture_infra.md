@@ -536,6 +536,12 @@ The macOS row also emits structured blockers:
 instead of parsing the reason string when assigning a macOS blocker to native
 Metal readback, browser Metal backing, pairwise pixels, ARGB source evidence,
 or Xcode GPU Frame Capture.
+For auditing the underlying Chrome/Electron/browser decision, the same env also
+emits `macos_metal_render_log_compare_electron_browser_backing_status`,
+`macos_metal_render_log_compare_chrome_browser_backing_status`,
+`macos_metal_render_log_compare_browser_backing_status`, the three pairwise
+diff lane statuses, and the Simple/Chrome/Electron ARGB source plus viewport
+reasons.
 
 ### Windows D3D12/PIX Render-Log Compare
 

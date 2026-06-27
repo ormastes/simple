@@ -129,6 +129,8 @@ Structured blockers are emitted through
 `macos_metal_render_log_compare_blocked_gates`, with separate gate statuses for
 generated Metal readback, Engine2D framebuffer readback, browser Metal backing,
 pairwise ARGB diff, ARGB source evidence, and Xcode GPU capture.
+The compare output also emits the raw Electron/Chrome/browser backing statuses,
+pairwise diff lane statuses, and ARGB source reasons used to make the decision.
 
 ## Host Notes
 
@@ -189,7 +191,7 @@ macos_metal_render_log_compare_pairwise_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 70 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -219,15 +221,27 @@ expect(evidence).to_contain("macos_metal_render_log_compare_generated_readback_g
 expect(evidence).to_contain("macos_metal_render_log_compare_generated_checksum_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_framebuffer_readback_gate_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_browser_backing_gate_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_detail_reason=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_detail_reason=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_browser_backing_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_gpu_compositing=enabled")
 expect(evidence).to_contain("macos_metal_render_log_compare_electron_browser_backing_source_file_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_source_file_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_chrome_browser_backing_gl_implementation_parts=metal")
+expect(evidence).to_contain("macos_metal_render_log_compare_pixel_comparison_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_pixel_comparison_mode=pairwise-argb-diff")
+expect(evidence).to_contain("macos_metal_render_log_compare_electron_chrome_pairwise_diff_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_electron_simple_pairwise_diff_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_chrome_simple_pairwise_diff_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_pairwise_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_pairwise_gate_status=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_argb_source_gate_status=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_simple_argb_reason=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_chrome_argb_reason=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_electron_argb_reason=pass")
+expect(evidence).to_contain("macos_metal_render_log_compare_argb_viewport_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_argb_checksum_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_gpu_capture_gate_status=pass")
 val simple_log = file_read("build/test-macos-metal-render-log-pass/out/simple.srl.env")
@@ -403,7 +417,7 @@ expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=browse
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -419,6 +433,8 @@ val evidence = file_read("build/test-macos-metal-render-log-argb-geometry/out/ev
 expect(evidence).to_contain("macos_metal_render_log_compare_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_argb_source_gate_status=fail")
 expect(evidence).to_contain("macos_metal_render_log_compare_blocked_gates=argb-source-evidence")
+expect(evidence).to_contain("macos_metal_render_log_compare_chrome_argb_reason=chrome-argb-blank")
+expect(evidence).to_contain("macos_metal_render_log_compare_argb_viewport_reason=argb-viewport-mismatch")
 expect(evidence).to_contain("chrome-argb-blank")
 expect(evidence).to_contain("argb-viewport-mismatch")
 val chrome_log = file_read("build/test-macos-metal-render-log-argb-geometry/out/chrome.srl.env")
