@@ -530,6 +530,10 @@ reasons, and a passing ARGB viewport reason.
 
 The gate rejects missing Metal submit/readback, missing raw framebuffer
 download, checksum mismatch, browser fallback, and non-pairwise comparisons.
+It also rejects reused proof inputs: Chrome and Electron browser-backing
+metadata must resolve to distinct source files, and the Simple, Chrome, and
+Electron ARGB artifacts must resolve to distinct files rather than the same
+capture copied under multiple evidence keys.
 The macOS row also emits structured blockers:
 `macos_metal_render_log_compare_blocked_gate_count`,
 `macos_metal_render_log_compare_blocked_gates`,
@@ -546,8 +550,9 @@ For auditing the underlying Chrome/Electron/browser decision, the same env also
 emits `macos_metal_render_log_compare_electron_browser_backing_status`,
 `macos_metal_render_log_compare_chrome_browser_backing_status`,
 `macos_metal_render_log_compare_browser_backing_status`, the three pairwise
-diff lane statuses, and the Simple/Chrome/Electron ARGB source plus viewport
-reasons.
+diff lane statuses, the Simple/Chrome/Electron ARGB source plus viewport
+reasons, `macos_metal_render_log_compare_browser_backing_source_duplicate_reason`,
+and `macos_metal_render_log_compare_argb_artifact_duplicate_reason`.
 
 ### Windows D3D12/PIX Render-Log Compare
 

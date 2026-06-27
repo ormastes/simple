@@ -536,10 +536,40 @@ if (!/enabled/i.test(gpuCompositing)) {
 NODE
 }
 
+canonical_regular_file_path() {
+    path="$1"
+    if [ -z "$path" ] || [ -L "$path" ] || [ ! -f "$path" ]; then
+        printf '%s\n' ""
+        return
+    fi
+    dir="$(dirname -- "$path")"
+    base="$(basename -- "$path")"
+    real_dir="$(cd "$dir" 2>/dev/null && pwd -P || true)"
+    if [ -n "$real_dir" ]; then
+        printf '%s/%s\n' "$real_dir" "$base"
+    else
+        printf '%s\n' ""
+    fi
+}
+
+duplicate_regular_file_pair_reason() {
+    label="$1"
+    left_path="$2"
+    right_path="$3"
+    left_real="$(canonical_regular_file_path "$left_path")"
+    right_real="$(canonical_regular_file_path "$right_path")"
+    if [ -n "$left_real" ] && [ -n "$right_real" ] && [ "$left_real" = "$right_real" ]; then
+        printf '%s\n' "$label-duplicate"
+    else
+        printf '%s\n' "pass"
+    fi
+}
+
 electron_backing_detail_reason="$(browser_metal_detail_reason electron "$electron_backing_reason" "$electron_backing_gpu_compositing" "$electron_backing_display_type" "$electron_backing_gl_implementation_parts" "$electron_backing_skia_backend_type" "$electron_backing_gl_renderer" "$electron_backing_source_file_status")"
 chrome_backing_detail_reason="$(browser_metal_detail_reason chrome "$chrome_backing_reason" "$chrome_backing_gpu_compositing" "$chrome_backing_display_type" "$chrome_backing_gl_implementation_parts" "$chrome_backing_skia_backend_type" "$chrome_backing_gl_renderer" "$chrome_backing_source_file_status")"
 electron_backing_source_reason="$(browser_metal_source_reason electron "$electron_backing_source")"
 chrome_backing_source_reason="$(browser_metal_source_reason chrome "$chrome_backing_source")"
+browser_backing_source_duplicate_reason="$(duplicate_regular_file_pair_reason browser-metal-source "$electron_backing_source" "$chrome_backing_source")"
 
 if [ "$metal_status" != "pass" ] || [ "$metal_module" != "true" ] || [ "$metal_submit" != "true" ] || [ "$metal_readback" != "true" ]; then
     [ "$compare_status" = "unavailable" ] || compare_status="fail"
@@ -569,6 +599,7 @@ if [ "$electron_backing" = "pass" ] && [ "$electron_backing_detail_reason" != "p
 if [ "$chrome_backing" = "pass" ] && [ "$chrome_backing_detail_reason" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "$chrome_backing_detail_reason"; fi
 if [ "$electron_backing" = "pass" ] && [ "$electron_backing_source_reason" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "$electron_backing_source_reason"; fi
 if [ "$chrome_backing" = "pass" ] && [ "$chrome_backing_source_reason" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "$chrome_backing_source_reason"; fi
+if [ "$electron_backing" = "pass" ] && [ "$chrome_backing" = "pass" ] && [ "$browser_backing_source_duplicate_reason" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "$browser_backing_source_duplicate_reason"; fi
 if [ "$pixel_status" != "pass" ] || [ "$pixel_mode" != "pairwise-argb-diff" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "pixel-comparison-${pixel_status:-missing}"; fi
 if [ "$ec_diff" != "pass" ] || [ "$es_diff" != "pass" ] || [ "$cs_diff" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "pairwise-diff-incomplete-or-fail"; fi
 simple_argb_reason="$(render_log_argb_source_reason macos_metal simple "$MACOS_METAL_BROWSER_ENV")"
@@ -583,6 +614,22 @@ argb_artifact_probe macos_metal electron "$MACOS_METAL_BROWSER_ENV" >"$ELECTRON_
 simple_argb_artifact_reason="$(render_log_value_of reason "$SIMPLE_ARGB_ARTIFACT_ENV")"
 chrome_argb_artifact_reason="$(render_log_value_of reason "$CHROME_ARGB_ARTIFACT_ENV")"
 electron_argb_artifact_reason="$(render_log_value_of reason "$ELECTRON_ARGB_ARTIFACT_ENV")"
+simple_argb_artifact_resolved_path="$(render_log_value_of resolved_path "$SIMPLE_ARGB_ARTIFACT_ENV")"
+chrome_argb_artifact_resolved_path="$(render_log_value_of resolved_path "$CHROME_ARGB_ARTIFACT_ENV")"
+electron_argb_artifact_resolved_path="$(render_log_value_of resolved_path "$ELECTRON_ARGB_ARTIFACT_ENV")"
+simple_chrome_argb_artifact_duplicate_reason="$(duplicate_regular_file_pair_reason simple-chrome-argb-artifact "$simple_argb_artifact_resolved_path" "$chrome_argb_artifact_resolved_path")"
+simple_electron_argb_artifact_duplicate_reason="$(duplicate_regular_file_pair_reason simple-electron-argb-artifact "$simple_argb_artifact_resolved_path" "$electron_argb_artifact_resolved_path")"
+chrome_electron_argb_artifact_duplicate_reason="$(duplicate_regular_file_pair_reason chrome-electron-argb-artifact "$chrome_argb_artifact_resolved_path" "$electron_argb_artifact_resolved_path")"
+argb_artifact_duplicate_reason="pass"
+for duplicate_reason in "$simple_chrome_argb_artifact_duplicate_reason" "$simple_electron_argb_artifact_duplicate_reason" "$chrome_electron_argb_artifact_duplicate_reason"; do
+    if [ "$duplicate_reason" != "pass" ]; then
+        if [ "$argb_artifact_duplicate_reason" = "pass" ]; then
+            argb_artifact_duplicate_reason="$duplicate_reason"
+        else
+            argb_artifact_duplicate_reason="$argb_artifact_duplicate_reason,$duplicate_reason"
+        fi
+    fi
+done
 for argb_reason in "$simple_argb_reason" "$chrome_argb_reason" "$electron_argb_reason"; do
     if [ "$argb_reason" != "pass" ]; then
         [ "$compare_status" = "unavailable" ] || compare_status="fail"
@@ -595,6 +642,11 @@ for argb_artifact_reason in "$simple_argb_artifact_reason" "$chrome_argb_artifac
         add_reason "$argb_artifact_reason"
     fi
 done
+if [ "$simple_argb_artifact_reason" = "pass" ] && [ "$chrome_argb_artifact_reason" = "pass" ] &&
+    [ "$electron_argb_artifact_reason" = "pass" ] && [ "$argb_artifact_duplicate_reason" != "pass" ]; then
+    [ "$compare_status" = "unavailable" ] || compare_status="fail"
+    add_reason "$argb_artifact_duplicate_reason"
+fi
 argb_viewport_reason="$(render_log_argb_viewport_match_reason macos_metal "$MACOS_METAL_BROWSER_ENV")"
 if [ "$argb_viewport_reason" != "pass" ]; then
     [ "$compare_status" = "unavailable" ] || compare_status="fail"
@@ -672,7 +724,8 @@ if [ "$electron_backing" != "pass" ] || [ "$chrome_backing" != "pass" ] ||
     [ "$electron_backing_detail_reason" != "pass" ] ||
     [ "$chrome_backing_detail_reason" != "pass" ] ||
     [ "$electron_backing_source_reason" != "pass" ] ||
-    [ "$chrome_backing_source_reason" != "pass" ]; then
+    [ "$chrome_backing_source_reason" != "pass" ] ||
+    [ "$browser_backing_source_duplicate_reason" != "pass" ]; then
     browser_backing_gate_status="fail"
 fi
 if [ "$browser_env_file_status" != "pass" ]; then
@@ -691,7 +744,8 @@ if [ "$simple_argb_reason" != "pass" ] || [ "$chrome_argb_reason" != "pass" ] ||
     [ "$argb_checksum_reason" != "pass" ] ||
     [ "$simple_argb_artifact_reason" != "pass" ] ||
     [ "$chrome_argb_artifact_reason" != "pass" ] ||
-    [ "$electron_argb_artifact_reason" != "pass" ]; then
+    [ "$electron_argb_artifact_reason" != "pass" ] ||
+    [ "$argb_artifact_duplicate_reason" != "pass" ]; then
     argb_source_gate_status="fail"
 fi
 
@@ -781,6 +835,7 @@ render_log_write_native_log "$ELECTRON_LOG" "macos" "metal" "electron" "browser-
     render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_reason" "$electron_backing_reason"
     render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_detail_reason" "$electron_backing_detail_reason"
     render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_source_reason" "$electron_backing_source_reason"
+    render_log_append_kv "macos_metal_render_log_compare_browser_backing_source_duplicate_reason" "$browser_backing_source_duplicate_reason"
     render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_gpu_compositing" "$electron_backing_gpu_compositing"
     render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_display_type" "$electron_backing_display_type"
     render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_gl_implementation_parts" "$electron_backing_gl_implementation_parts"
@@ -812,6 +867,7 @@ render_log_write_native_log "$ELECTRON_LOG" "macos" "metal" "electron" "browser-
     render_log_append_kv "macos_metal_render_log_compare_electron_argb_reason" "$electron_argb_reason"
     render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_reason" "$simple_argb_artifact_reason"
     render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_path" "$(render_log_value_of path "$SIMPLE_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_resolved_path" "$simple_argb_artifact_resolved_path"
     render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_file_status" "$(render_log_value_of file_status "$SIMPLE_ARGB_ARTIFACT_ENV")"
     render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_format" "$(render_log_value_of format "$SIMPLE_ARGB_ARTIFACT_ENV")"
     render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_width" "$(render_log_value_of width "$SIMPLE_ARGB_ARTIFACT_ENV")"
@@ -821,6 +877,7 @@ render_log_write_native_log "$ELECTRON_LOG" "macos" "metal" "electron" "browser-
     render_log_append_kv "macos_metal_render_log_compare_simple_argb_artifact_checksum" "$(render_log_value_of checksum "$SIMPLE_ARGB_ARTIFACT_ENV")"
     render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_reason" "$chrome_argb_artifact_reason"
     render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_path" "$(render_log_value_of path "$CHROME_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_resolved_path" "$chrome_argb_artifact_resolved_path"
     render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_file_status" "$(render_log_value_of file_status "$CHROME_ARGB_ARTIFACT_ENV")"
     render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_format" "$(render_log_value_of format "$CHROME_ARGB_ARTIFACT_ENV")"
     render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_width" "$(render_log_value_of width "$CHROME_ARGB_ARTIFACT_ENV")"
@@ -830,6 +887,7 @@ render_log_write_native_log "$ELECTRON_LOG" "macos" "metal" "electron" "browser-
     render_log_append_kv "macos_metal_render_log_compare_chrome_argb_artifact_checksum" "$(render_log_value_of checksum "$CHROME_ARGB_ARTIFACT_ENV")"
     render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_reason" "$electron_argb_artifact_reason"
     render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_path" "$(render_log_value_of path "$ELECTRON_ARGB_ARTIFACT_ENV")"
+    render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_resolved_path" "$electron_argb_artifact_resolved_path"
     render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_file_status" "$(render_log_value_of file_status "$ELECTRON_ARGB_ARTIFACT_ENV")"
     render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_format" "$(render_log_value_of format "$ELECTRON_ARGB_ARTIFACT_ENV")"
     render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_width" "$(render_log_value_of width "$ELECTRON_ARGB_ARTIFACT_ENV")"
@@ -839,6 +897,7 @@ render_log_write_native_log "$ELECTRON_LOG" "macos" "metal" "electron" "browser-
     render_log_append_kv "macos_metal_render_log_compare_electron_argb_artifact_checksum" "$(render_log_value_of checksum "$ELECTRON_ARGB_ARTIFACT_ENV")"
     render_log_append_kv "macos_metal_render_log_compare_argb_viewport_reason" "$argb_viewport_reason"
     render_log_append_kv "macos_metal_render_log_compare_argb_checksum_reason" "$argb_checksum_reason"
+    render_log_append_kv "macos_metal_render_log_compare_argb_artifact_duplicate_reason" "$argb_artifact_duplicate_reason"
     render_log_append_kv "macos_metal_render_log_compare_gpu_capture_gate_status" "$gpu_capture_gate_status"
     render_log_append_kv "macos_metal_render_log_compare_required_api" "metal"
     render_log_append_kv "macos_metal_render_log_compare_simple_log" "$SIMPLE_LOG"
