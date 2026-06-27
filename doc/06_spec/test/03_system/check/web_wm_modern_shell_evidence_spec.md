@@ -27,7 +27,7 @@ web_wm_modern_shell_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,6 +76,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/web_wm_modern_shell_evidence
 - The aggregate nested Web WM run enables the opt-in fallback.
 - The aggregate refreshes the default stale `simple-runtime-unavailable` Web WM
   env instead of reusing it forever.
+- The aggregate treats Web WM modern shell artifacts as regular files, not
+  symlinks or directories.
 
 ## Scenarios
 
@@ -150,12 +152,41 @@ expect(aggregate).to_contain("allow_path_simple=1")
 
 </details>
 
+#### keeps aggregate Web WM artifact integrity wired to regular file checks
+
+- Inspect aggregate artifact integrity wiring
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val aggregate = file_read("scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
+
+step("Inspect aggregate artifact integrity wiring")
+expect(aggregate).to_contain("def regular_file_reason(value: str) -> str:")
+expect(aggregate).to_contain("web_wm_modern_shell_log_path = value_of(\"web_wm_modern_shell_evidence_log_path\"")
+expect(aggregate).to_contain("web_wm_modern_shell_log_file_status = regular_file_reason(web_wm_modern_shell_log_path)")
+expect(aggregate).to_contain("web_wm_modern_shell_artifact_statuses = {")
+expect(aggregate).to_contain("\"interaction-log\": web_wm_modern_shell_interaction_log_file_status")
+expect(aggregate).to_contain("web_wm_modern_shell_artifact_integrity_status = \"pass\"")
+expect(aggregate).to_contain("web_wm_modern_shell_artifact_integrity_reason = f\"web-wm-modern-shell-{artifact_name}-{artifact_status}\"")
+expect(aggregate).to_contain("coverage_reason = web_wm_modern_shell_artifact_integrity_reason")
+expect(aggregate).to_contain("web_wm_modern_shell_evidence_artifact_integrity_status")
+expect(aggregate).to_contain("web_wm_modern_shell_evidence_artifact_integrity_reason")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
