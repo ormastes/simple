@@ -26,8 +26,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 - Complete fixture iOS evidence must include a WKWebView context line bound to
   `metal_expected=true` and `metal_layer=CAMetalLayer`; generic Metal text is
   not enough for the aggregate pass path.
-- Mobile screenshots must carry PNG signature bytes; arbitrary nonempty files
-  are not accepted as layout capture proof.
+- Mobile screenshots must carry PNG signature bytes, IHDR dimensions, and image
+  chunks; arbitrary nonempty files and signature-only files are not accepted as
+  layout capture proof.
 - Missing iOS MDI proof JSON fails even when iOS status rows claim pass.
 - Missing Android MDI proof JSON fails even when Android status rows claim pass.
 - Missing MDI proof source rows fail even when mobile status rows and proof JSON
@@ -64,7 +65,8 @@ fn _mobile_script_command(path: text, root: text, platform: text, proof_mode: te
     val dev_log_key = if platform == "ios": "ios_dev_log" else: "android_gpu_log"
     val tooling_row = if platform == "ios": "ios_tooling=fixture\\n" else: ""
     val write_proof = if proof_mode == "present": "printf '{\"ok\":true}\\n' > " + proof_path + "\\n" else: ""
-    val write_screenshot = if screenshot_mode == "png": "printf \"\\211PNG\\r\\n\\032\\nmobile\" > " + screenshot_path + "\\n" else: "printf not-a-png > " + screenshot_path + "\\n"
+    val png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    val write_screenshot = if screenshot_mode == "png": "node -e \"process.stdout.write(Buffer.from(process.argv[1], process.argv[2]))\" " + png_base64 + " base64 > " + screenshot_path + "\\n" else: if screenshot_mode == "signature": "printf \"\\211PNG\\r\\n\\032\\nmobile\" > " + screenshot_path + "\\n" else: "printf not-a-png > " + screenshot_path + "\\n"
     val valid_ios_log = "[tauri-shell] creating window from app://index.html\\\\n[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer\\\\n[tauri-shell] render, html_len=347702\\\\nCAMetalLayer Metal renderer ready\\\\n"
     val generic_ios_log = "[tauri-shell] render, html_len=347702 Metal CAMetalLayer\\\\n"
     val android_log = "[tauri-shell] render, html_len=347702 Vulkan VK_\\\\n"
@@ -168,7 +170,9 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_taskbar_labels_visible=true")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_input_to_paint_ms=2.5")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reason=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=pass")
 
     it "rejects an iOS pass claim with generic Metal text instead of WKWebView context":
         val root = "build/test-tauri-mobile-artifact-gate-generic-ios-metal"
@@ -328,14 +332,37 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-screenshot-png-missing")
         expect(ios).to_contain("tauri_mobile_renderer_parity_ios_layout_status=fail")
         expect(ios).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=fail")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reason=png-signature-missing")
         expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
         expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-screenshot-png-missing")
         expect(android).to_contain("tauri_mobile_renderer_parity_android_layout_status=fail")
         expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=fail")
+        expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=png-signature-missing")
+
+    it "rejects pass claims with PNG-signature-only mobile screenshots":
+        val root = "build/test-tauri-mobile-artifact-gate-signature-only-screenshot"
+        val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "signature", "png")
+        val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "signature")
+        val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val ios = file_read(root + "-ios/stdout.env")
+        val android = file_read(root + "-android/stdout.env")
+        step("Confirm screenshot capture proof requires PNG structure beyond the magic bytes")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-screenshot-png-missing")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=fail")
+        expect(ios).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reason=png-ihdr-missing")
+        expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
+        expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-screenshot-png-missing")
+        expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=fail")
+        expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=png-ihdr-missing")
 
     it "keeps aggregate source wired to mobile proof and screenshot artifact rows":
         val script = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
         expect(script).to_contain("png_file_status")
+        expect(script).to_contain("png_file_reason")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_failure_marker_status")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_missing_source_count")
@@ -354,6 +381,8 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_now_available")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_frame_available")
         expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status")
+        expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reason")
         expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status")
+        expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason")
         expect(script).to_contain("production_backend_detail_pass")
         expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal_gpu_frame_complete")

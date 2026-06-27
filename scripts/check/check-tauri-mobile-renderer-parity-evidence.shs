@@ -134,14 +134,38 @@ artifact_file_status() {
     fi
 }
 
-png_file_status() {
+png_file_reason() {
     path="$1"
     if [ -z "$path" ] || [ ! -s "$path" ]; then
-        echo fail
+        echo missing
         return
     fi
     magic="$(od -An -tx1 -N8 "$path" 2>/dev/null | tr -d ' \n')"
-    if [ "$magic" = "89504e470d0a1a0a" ]; then
+    if [ "$magic" != "89504e470d0a1a0a" ]; then
+        echo png-signature-missing
+        return
+    fi
+    ihdr_length="$(od -An -tx1 -j8 -N4 "$path" 2>/dev/null | tr -d ' \n')"
+    ihdr_type="$(od -An -tx1 -j12 -N4 "$path" 2>/dev/null | tr -d ' \n')"
+    if [ "$ihdr_length" != "0000000d" ] || [ "$ihdr_type" != "49484452" ]; then
+        echo png-ihdr-missing
+        return
+    fi
+    width_hex="$(od -An -tx1 -j16 -N4 "$path" 2>/dev/null | tr -d ' \n')"
+    height_hex="$(od -An -tx1 -j20 -N4 "$path" 2>/dev/null | tr -d ' \n')"
+    if [ -z "$width_hex" ] || [ -z "$height_hex" ] || [ "$width_hex" = "00000000" ] || [ "$height_hex" = "00000000" ]; then
+        echo png-dimensions-missing
+        return
+    fi
+    printable_chunks="$(LC_ALL=C tr -cd '[:print:]' <"$path" 2>/dev/null || true)"
+    case "$printable_chunks" in
+        *IDAT*IEND*) echo pass ;;
+        *) echo png-image-chunks-missing ;;
+    esac
+}
+
+png_file_status() {
+    if [ "$(png_file_reason "$1")" = "pass" ]; then
         echo pass
     else
         echo fail
@@ -276,6 +300,7 @@ ios_mdi_animation_frame_available=""
 ios_mdi_animation_frame_count=""
 ios_mdi_css_animation_probe=""
 ios_screenshot_file_status=unavailable
+ios_screenshot_file_reason=not-run
 ios_mdi_proof_file_status=unavailable
 ios_expected_gpu_backend=metal
 if [ -x "$IOS_SCRIPT" ] || [ -f "$IOS_SCRIPT" ]; then
@@ -325,6 +350,7 @@ if [ -x "$IOS_SCRIPT" ] || [ -f "$IOS_SCRIPT" ]; then
     ios_mdi_animation_frame_available="$(value_of ios_mdi_animation_frame_available "$BUILD_DIR/ios.out")"
     ios_mdi_animation_frame_count="$(value_of ios_mdi_animation_frame_count "$BUILD_DIR/ios.out")"
     ios_mdi_css_animation_probe="$(value_of ios_mdi_css_animation_probe "$BUILD_DIR/ios.out")"
+    ios_screenshot_file_reason="$(png_file_reason "$ios_screenshot")"
     ios_screenshot_file_status="$(png_file_status "$ios_screenshot")"
     ios_mdi_proof_file_status="$(artifact_file_status "$ios_mdi_proof_json")"
     ios_render_log_validation_env="$BUILD_DIR/ios_render_log.validation.env"
@@ -441,6 +467,7 @@ android_mdi_animation_frame_available=""
 android_mdi_animation_frame_count=""
 android_mdi_css_animation_probe=""
 android_screenshot_file_status=unavailable
+android_screenshot_file_reason=not-run
 android_mdi_proof_file_status=unavailable
 android_expected_gpu_backend=vulkan
 if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
@@ -497,6 +524,7 @@ if [ -x "$ANDROID_SCRIPT" ] || [ -f "$ANDROID_SCRIPT" ]; then
     android_mdi_animation_frame_available="$(value_of android_mdi_animation_frame_available "$BUILD_DIR/android.out")"
     android_mdi_animation_frame_count="$(value_of android_mdi_animation_frame_count "$BUILD_DIR/android.out")"
     android_mdi_css_animation_probe="$(value_of android_mdi_css_animation_probe "$BUILD_DIR/android.out")"
+    android_screenshot_file_reason="$(png_file_reason "$android_screenshot")"
     android_screenshot_file_status="$(png_file_status "$android_screenshot")"
     android_mdi_proof_file_status="$(artifact_file_status "$android_mdi_proof_json")"
     android_render_log_validation_env="$BUILD_DIR/android_render_log.validation.env"
@@ -733,6 +761,7 @@ fi
     echo "tauri_mobile_renderer_parity_ios_mdi_css_animation_probe=$ios_mdi_css_animation_probe"
     echo "tauri_mobile_renderer_parity_ios_screenshot=$ios_screenshot"
     echo "tauri_mobile_renderer_parity_ios_screenshot_file_status=$ios_screenshot_file_status"
+    echo "tauri_mobile_renderer_parity_ios_screenshot_file_reason=$ios_screenshot_file_reason"
     echo "tauri_mobile_renderer_parity_ios_log_stream=$ios_log_stream"
     echo "tauri_mobile_renderer_parity_ios_dev_log=$ios_dev_log"
     echo "tauri_mobile_renderer_parity_android_exit_code=$android_exit_code"
@@ -791,6 +820,7 @@ fi
     echo "tauri_mobile_renderer_parity_android_mdi_css_animation_probe=$android_mdi_css_animation_probe"
     echo "tauri_mobile_renderer_parity_android_screenshot=$android_screenshot"
     echo "tauri_mobile_renderer_parity_android_screenshot_file_status=$android_screenshot_file_status"
+    echo "tauri_mobile_renderer_parity_android_screenshot_file_reason=$android_screenshot_file_reason"
     echo "tauri_mobile_renderer_parity_android_logcat=$android_logcat"
     echo "tauri_mobile_renderer_parity_android_gpu_log=$android_gpu_log"
 } >"$OUT_ENV"

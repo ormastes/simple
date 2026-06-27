@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -75,8 +75,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 - Complete fixture iOS evidence must include a WKWebView context line bound to
   `metal_expected=true` and `metal_layer=CAMetalLayer`; generic Metal text is
   not enough for the aggregate pass path.
-- Mobile screenshots must carry PNG signature bytes; arbitrary nonempty files
-  are not accepted as layout capture proof.
+- Mobile screenshots must carry PNG signature bytes, IHDR dimensions, and image
+  chunks; arbitrary nonempty files and signature-only files are not accepted as
+  layout capture proof.
 - Missing iOS MDI proof JSON fails even when iOS status rows claim pass.
 - Missing Android MDI proof JSON fails even when Android status rows claim pass.
 - Missing MDI proof source rows fail even when mobile status rows and proof JSON
@@ -107,7 +108,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -148,7 +149,9 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_body
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_event_taskbar_labels_visible=true")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_mdi_input_to_paint_ms=2.5")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reason=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=pass")
 ```
 
 </details>
@@ -421,7 +424,7 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_met
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -439,10 +442,46 @@ expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
 expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-screenshot-png-missing")
 expect(ios).to_contain("tauri_mobile_renderer_parity_ios_layout_status=fail")
 expect(ios).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reason=png-signature-missing")
 expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
 expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-screenshot-png-missing")
 expect(android).to_contain("tauri_mobile_renderer_parity_android_layout_status=fail")
 expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=png-signature-missing")
+```
+
+</details>
+
+#### rejects pass claims with PNG-signature-only mobile screenshots
+
+- Confirm screenshot capture proof requires PNG structure beyond the magic bytes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-signature-only-screenshot"
+val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "signature", "png")
+val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "signature")
+val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val ios = file_read(root + "-ios/stdout.env")
+val android = file_read(root + "-android/stdout.env")
+step("Confirm screenshot capture proof requires PNG structure beyond the magic bytes")
+expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-screenshot-png-missing")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reason=png-ihdr-missing")
+expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-screenshot-png-missing")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=png-ihdr-missing")
 ```
 
 </details>
@@ -452,12 +491,13 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidence.shs")
 expect(script).to_contain("png_file_status")
+expect(script).to_contain("png_file_reason")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_failure_marker_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_missing_source_count")
@@ -476,7 +516,9 @@ expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_event_taskba
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_now_available")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_frame_available")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reason")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason")
 expect(script).to_contain("production_backend_detail_pass")
 expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal_gpu_frame_complete")
 ```
@@ -487,8 +529,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
