@@ -799,6 +799,25 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=desktop-product
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_metal_resolved=metal")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_metal_gpu_frame_complete=false")
+
+val bad_checksum_command = _run_aggregate_command(root + "-checksum", "present", "present", "png", "png").replace("production_gui_web_renderer_parity_backend_cpu_simd_checksum=900", "production_gui_web_renderer_parity_backend_cpu_simd_checksum=901")
+val (_bad_checksum_stdout, _bad_checksum_stderr, bad_checksum_code) = process_run("/bin/sh", ["-c", bad_checksum_command])
+expect(bad_checksum_code).to_equal(1)
+
+val bad_checksum = file_read(root + "-checksum/stdout.env")
+expect(bad_checksum).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(bad_checksum).to_contain("tauri_mobile_renderer_parity_reason=desktop-production-backend-parity-contract-missing")
+expect(bad_checksum).to_contain("tauri_mobile_renderer_parity_production_backend_software_checksum=900")
+expect(bad_checksum).to_contain("tauri_mobile_renderer_parity_production_backend_cpu_simd_checksum=901")
+
+val missing_handle_command = _run_aggregate_command(root + "-handle", "present", "present", "png", "png").replace("production_gui_web_renderer_parity_backend_metal_command_queue_handle=42", "production_gui_web_renderer_parity_backend_metal_command_queue_handle=0")
+val (_missing_handle_stdout, _missing_handle_stderr, missing_handle_code) = process_run("/bin/sh", ["-c", missing_handle_command])
+expect(missing_handle_code).to_equal(1)
+
+val missing_handle = file_read(root + "-handle/stdout.env")
+expect(missing_handle).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(missing_handle).to_contain("tauri_mobile_renderer_parity_reason=desktop-production-backend-parity-contract-missing")
+expect(missing_handle).to_contain("tauri_mobile_renderer_parity_production_backend_metal_command_queue_handle=0")
 ```
 
 </details>
@@ -1113,6 +1132,15 @@ expect(script).to_contain("png_file_reason \"$android_screenshot\" \"$android_md
 expect(script).to_contain("production_backend_detail_pass")
 expect(script).to_contain("production_backend_timing_pass")
 expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal_gpu_frame_complete")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal_command_queue_handle")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_software_checksum")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_cpu_simd_checksum")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal_checksum")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal_gpu_readback_checksum")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_checksum_match")
+expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_same_frame_readback")
+expect(script).to_contain("[ \"$backend_software_checksum\" = \"$backend_cpu_simd_checksum\" ]")
+expect(script).to_contain("num_at_least \"$backend_metal_command_queue_handle\" 1")
 expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_timing_status")
 ```
 
