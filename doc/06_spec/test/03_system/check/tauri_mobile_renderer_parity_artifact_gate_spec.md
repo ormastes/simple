@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 33 | 33 | 0 | 0 |
+| 34 | 34 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -84,8 +84,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   and 1x1 placeholders are not accepted as layout capture proof.
 - Mobile screenshot evidence must expose decoded distinct-color count, minimum
   threshold, and pixel-diversity status rows for both iOS and Android.
-- Mobile screenshots must be regular artifact files, not symlinks to mutable or
-  substituted PNG captures.
+- Mobile screenshots must be regular single-link artifact files, not symlinks
+  or hardlinks to mutable or substituted PNG captures.
 - Missing iOS MDI proof JSON fails even when iOS status rows claim pass.
 - Missing Android MDI proof JSON fails even when Android status rows claim pass.
 - Symlinked MDI proof JSON files fail with typed top-level symlink reasons even
@@ -1054,6 +1054,40 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 
 </details>
 
+#### rejects pass claims with hardlinked mobile screenshots
+
+- Confirm screenshot capture artifacts cannot be substituted through hardlinks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-hardlink-screenshot"
+val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "hardlink-png", "png")
+val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "hardlink-png")
+val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val ios = file_read(root + "-ios/stdout.env")
+val android = file_read(root + "-android/stdout.env")
+step("Confirm screenshot capture artifacts cannot be substituted through hardlinks")
+expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-screenshot-png-missing")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reason=png-hardlink")
+expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-screenshot-png-missing")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_reason=png-hardlink")
+```
+
+</details>
+
 #### rejects pass claims with forged PNG chunk text in mobile screenshots
 
 - Confirm screenshot capture proof needs structured PNG chunks, not bare IDAT/IEND text
@@ -1175,6 +1209,8 @@ val script = file_read("scripts/check/check-tauri-mobile-renderer-parity-evidenc
 expect(script).to_contain("png_file_status")
 expect(script).to_contain("png_file_reason")
 expect(script).to_contain("png-symlink")
+expect(script).to_contain("png-hardlink")
+expect(script).to_contain("file_link_count")
 expect(script).to_contain("sawIdat && sawIend")
 expect(script).to_contain("png-dimensions-too-small")
 expect(script).to_contain("zlib.inflateSync")
@@ -1269,8 +1305,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_timin
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 33 |
-| Active scenarios | 33 |
+| Total scenarios | 34 |
+| Active scenarios | 34 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
