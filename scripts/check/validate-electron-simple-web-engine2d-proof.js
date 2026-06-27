@@ -66,10 +66,10 @@ function jsonIntegerTextOrBlank(value) {
   return text === null ? '' : text;
 }
 
-function booleanString(value) {
+function jsonBoolTextOrBlank(value) {
   if (value === true) return 'true';
   if (value === false) return 'false';
-  return clean(value);
+  return '';
 }
 
 function plainObject(value) {
@@ -272,7 +272,7 @@ emit('electron_simple_web_engine2d_electron_checksum', integerTextOrClean(proof.
 emit('electron_simple_web_engine2d_simple_weighted_checksum', integerTextOrClean(proof.expected_weighted_checksum));
 emit('electron_simple_web_engine2d_electron_weighted_checksum', integerTextOrClean(proof.weighted_checksum));
 emit('electron_simple_web_engine2d_mismatch_count', jsonIntegerTextOrBlank(proof.mismatch_count));
-emit('electron_simple_web_engine2d_blur_or_tolerance_used', proof.blur_or_tolerance_used === false ? 'false' : clean(proof.blur_or_tolerance_used));
+emit('electron_simple_web_engine2d_blur_or_tolerance_used', jsonBoolTextOrBlank(proof.blur_or_tolerance_used));
 emit('electron_simple_web_engine2d_proof_iterations', jsonIntegerTextOrBlank(proof.iterations));
 emit('electron_simple_web_engine2d_electron_frame_us', jsonIntegerTextOrBlank(proof.frame_us));
 emit('electron_simple_web_engine2d_estimated_fps_floor', estimatedFpsFloor);
@@ -280,9 +280,9 @@ emit('electron_simple_web_engine2d_requested_width', jsonIntegerTextOrBlank(proo
 emit('electron_simple_web_engine2d_requested_height', jsonIntegerTextOrBlank(proof.height));
 emit('electron_simple_web_engine2d_capture_native_width', jsonIntegerTextOrBlank(proof.capture_native_width));
 emit('electron_simple_web_engine2d_capture_native_height', jsonIntegerTextOrBlank(proof.capture_native_height));
-emit('electron_simple_web_engine2d_capture_downsampled', booleanString(proof.capture_downsampled));
+emit('electron_simple_web_engine2d_capture_downsampled', jsonBoolTextOrBlank(proof.capture_downsampled));
 emit('electron_simple_web_engine2d_captured_argb_path', proof.captured_argb_path);
-emit('electron_simple_web_engine2d_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
+emit('electron_simple_web_engine2d_captured_argb_written', jsonBoolTextOrBlank(proof.captured_argb_written));
 emit('electron_simple_web_engine2d_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
 emit('electron_simple_web_engine2d_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
 emit('electron_simple_web_engine2d_captured_argb_format', capturedArgb.format);

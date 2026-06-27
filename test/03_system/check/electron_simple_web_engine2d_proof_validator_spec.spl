@@ -46,6 +46,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
   mismatch counts, and frame timing values must be real JSON numbers, not
   stringified rows, and malformed live numeric rows must not be re-emitted as
   normalized numeric evidence.
+- Capture provenance, ARGB-written, and blur/tolerance proof rows must be real
+  JSON booleans; string booleans are rejected and not re-emitted as normalized
+  boolean evidence.
 - Performance proof must include at least two live capture iterations and a
   derived FPS floor from the measured frame time, not only a single timing row.
 - The live Electron Engine2D wrapper must print validator env rows before
@@ -398,6 +401,36 @@ describe "Electron Simple Web Engine2D proof validator":
         expect(timing).to_contain("electron_simple_web_engine2d_electron_frame_us=")
         expect(timing.contains("electron_simple_web_engine2d_electron_frame_us=1250")).to_equal(false)
 
+    it "rejects string booleans without normalizing them as valid diagnostics":
+        val root = "build/test-electron-engine2d-validator-string-booleans"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/capture.json", "p.captured_argb_written=\"true\"") +
+            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/capture.json > " + root + "/capture.env; " +
+            _proof_command(root + "/downsampled.json", "p.capture_downsampled=\"false\"") +
+            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/downsampled.json > " + root + "/downsampled.env; " +
+            _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=\"false\"") +
+            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/blur.json > " + root + "/blur.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val capture = file_read(root + "/capture.env")
+        val downsampled = file_read(root + "/downsampled.env")
+        val blur = file_read(root + "/blur.env")
+        step("Confirm string booleans remain malformed Electron Engine2D diagnostics")
+        expect(capture).to_contain("electron_simple_web_engine2d_validation_status=fail")
+        expect(capture).to_contain("electron_simple_web_engine2d_validation_reason=missing-captured-argb")
+        expect(capture).to_contain("electron_simple_web_engine2d_captured_argb_written=")
+        expect(capture.contains("electron_simple_web_engine2d_captured_argb_written=true")).to_equal(false)
+        expect(capture.contains("electron_simple_web_engine2d_captured_argb_written=false")).to_equal(false)
+        expect(downsampled).to_contain("electron_simple_web_engine2d_validation_status=fail")
+        expect(downsampled).to_contain("electron_simple_web_engine2d_validation_reason=missing-capture-provenance")
+        expect(downsampled).to_contain("electron_simple_web_engine2d_capture_downsampled=")
+        expect(downsampled.contains("electron_simple_web_engine2d_capture_downsampled=false")).to_equal(false)
+        expect(blur).to_contain("electron_simple_web_engine2d_validation_status=fail")
+        expect(blur).to_contain("electron_simple_web_engine2d_validation_reason=blur-or-tolerance-not-allowed")
+        expect(blur).to_contain("electron_simple_web_engine2d_blur_or_tolerance_used=")
+        expect(blur.contains("electron_simple_web_engine2d_blur_or_tolerance_used=false")).to_equal(false)
+
     it "rejects blur tolerance and malformed mismatch counts":
         val root = "build/test-electron-engine2d-validator-blur-mismatch"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
@@ -414,6 +447,7 @@ describe "Electron Simple Web Engine2D proof validator":
         val mismatch = file_read(root + "/mismatch.env")
         val string_zero = file_read(root + "/string-zero.env")
         expect(blur).to_contain("electron_simple_web_engine2d_validation_reason=blur-or-tolerance-not-allowed")
+        expect(blur).to_contain("electron_simple_web_engine2d_blur_or_tolerance_used=true")
         expect(mismatch).to_contain("electron_simple_web_engine2d_validation_reason=malformed-mismatch-count")
         expect(mismatch).to_contain("electron_simple_web_engine2d_mismatch_count=")
         expect(mismatch.contains("electron_simple_web_engine2d_mismatch_count=bad")).to_equal(false)
@@ -445,6 +479,7 @@ describe "Electron Simple Web Engine2D proof validator":
         val script = file_read("scripts/check/check-electron-simple-web-engine2d-bitmap-evidence.shs")
         val validator = file_read("scripts/check/validate-electron-simple-web-engine2d-proof.js")
         expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
+        expect(validator).to_contain("jsonBoolTextOrBlank")
         expect(script).to_contain("validate-electron-simple-web-engine2d-proof.js")
         expect(script).to_contain("cat \"$VALIDATED_ENV\"")
         expect(script).to_contain("electron_simple_web_engine2d_validation_status")
