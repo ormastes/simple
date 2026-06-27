@@ -86,6 +86,10 @@ let missingSourceCount = 0;
 let emptySourceCount = 0;
 let sourceCount = 0;
 let lastJson = "";
+let proofMarkerSourceCount = 0;
+let canonicalProofJson = "";
+let conflictingProofLog = false;
+let proofMarkerParseError = "";
 let failureMarker = false;
 const failureMarkerPattern =
   /(eval FAIL|inline shell eval FAIL|delayed inline shell eval FAIL|Fatal signal|F\/DEBUG|F\/libc|NSURLErrorDomain|failed provisional load|Headless UI completed|subprocess exited with code|Simple subprocess stdout closed before a valid render arrived|parse error|Requested GL implementation .* not found|Exiting GPU process due to errors during initialization)/i;
@@ -105,7 +109,21 @@ for (const file of files) {
   }
   const matches = [...text.matchAll(/\[tauri-shell\] mdi proof:\s*(\{[^\r\n]*\})/g)];
   if (matches.length > 0) {
-    lastJson = matches[matches.length - 1][1];
+    const sourceLastJson = matches[matches.length - 1][1];
+    proofMarkerSourceCount += 1;
+    try {
+      const normalized = JSON.stringify(JSON.parse(sourceLastJson));
+      if (canonicalProofJson && canonicalProofJson !== normalized) {
+        conflictingProofLog = true;
+      } else if (!canonicalProofJson) {
+        canonicalProofJson = normalized;
+      }
+      lastJson = sourceLastJson;
+    } catch (err) {
+      if (!proofMarkerParseError) {
+        proofMarkerParseError = String(err && err.message ? err.message : err);
+      }
+    }
   }
 }
 
@@ -116,6 +134,7 @@ function sameResolvedPath(left, right) {
 function emitSourceRows() {
   emit("mdi_proof_requested_source_count", requestedSourceCount);
   emit("mdi_proof_source_count", sourceCount);
+  emit("mdi_proof_marker_source_count", proofMarkerSourceCount);
   emit("mdi_proof_missing_source_count", missingSourceCount);
   emit("mdi_proof_empty_source_count", emptySourceCount);
 }
@@ -146,7 +165,17 @@ if (files.some((file) => sameResolvedPath(jsonPath, file))) {
 
 if (!lastJson) {
   emitSourceRows();
-  fail("missing-mdi-proof-log");
+  fail(proofMarkerParseError ? `invalid-mdi-proof-json:${proofMarkerParseError}` : "missing-mdi-proof-log");
+}
+
+if (proofMarkerParseError) {
+  emitSourceRows();
+  fail(`invalid-mdi-proof-json:${proofMarkerParseError}`);
+}
+
+if (conflictingProofLog) {
+  emitSourceRows();
+  fail("conflicting-mdi-proof-log");
 }
 
 let proof;
