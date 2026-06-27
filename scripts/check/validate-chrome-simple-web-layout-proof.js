@@ -92,6 +92,11 @@ function readJsonArtifact(artifact, fallback) {
   }
 }
 
+function artifactFileStatus(artifact) {
+  if (artifact === null) return 'missing';
+  return artifact.stat.size <= 0 ? 'empty' : 'pass';
+}
+
 function pixelCountMatches(pixels, width, height) {
   if (!Array.isArray(pixels)) return false;
   const w = jsonIntegerText(width);
@@ -231,7 +236,7 @@ emit('chrome_simple_web_layout_capture_width', jsonIntegerTextOrBlank(proof.widt
 emit('chrome_simple_web_layout_capture_height', jsonIntegerTextOrBlank(proof.height));
 emit('chrome_simple_web_layout_captured_argb_path', proof.captured_argb_path);
 emit('chrome_simple_web_layout_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
-emit('chrome_simple_web_layout_captured_argb_file_status', capturedArgbStat === null ? 'fail' : 'pass');
+emit('chrome_simple_web_layout_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
 emit('chrome_simple_web_layout_captured_argb_size_bytes', capturedArgbStat === null ? '' : String(capturedArgbStat.stat.size));
 emit('chrome_simple_web_layout_captured_argb_format', capturedArgb.format);
 emit('chrome_simple_web_layout_captured_argb_producer', capturedArgb.producer);
@@ -241,7 +246,7 @@ emit('chrome_simple_web_layout_captured_argb_pixel_count', capturedArgbPixels ==
 emit('chrome_simple_web_layout_captured_argb_nonzero_pixel_count', capturedArgbNonzeroPixelCount);
 emit('chrome_simple_web_layout_geometry_path', proof.geometry_path);
 emit('chrome_simple_web_layout_geometry_written', proof.geometry_written === true ? 'true' : 'false');
-emit('chrome_simple_web_layout_geometry_file_status', geometryStat === null ? 'fail' : 'pass');
+emit('chrome_simple_web_layout_geometry_file_status', artifactFileStatus(geometryStat));
 emit('chrome_simple_web_layout_geometry_size_bytes', geometryStat === null ? '' : String(geometryStat.stat.size));
 emit('chrome_simple_web_layout_geometry_producer', geometry.producer);
 emit('chrome_simple_web_layout_geometry_viewport_width', jsonIntegerTextOrBlank(geometryViewport.width));

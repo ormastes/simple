@@ -81,6 +81,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 - ARGB capture and Chrome geometry proof paths must resolve to nonempty files
   instead of relying on boolean flags alone, and they must not resolve back to
   the top-level proof JSON itself.
+- ARGB capture and Chrome geometry file-status rows distinguish `missing`,
+  `empty`, and `pass` so diagnostics cannot treat a zero-byte artifact as a
+  valid file.
 - ARGB capture files must parse as `argb-u32` artifacts from the Chrome
   screenshot producer, match the captured viewport, contain the exact pixel
   count, include nonzero pixels, and encode pixels as numeric uint32 JSON
@@ -382,10 +385,10 @@ val empty = file_read(root + "/empty.env")
 step("Confirm boolean capture flags are not enough without file evidence")
 expect(missing).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(missing).to_contain("chrome_simple_web_layout_validation_reason=missing-captured-argb-file")
-expect(missing).to_contain("chrome_simple_web_layout_captured_argb_file_status=fail")
+expect(missing).to_contain("chrome_simple_web_layout_captured_argb_file_status=missing")
 expect(empty).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(empty).to_contain("chrome_simple_web_layout_validation_reason=empty-captured-argb-file")
-expect(empty).to_contain("chrome_simple_web_layout_captured_argb_file_status=pass")
+expect(empty).to_contain("chrome_simple_web_layout_captured_argb_file_status=empty")
 expect(empty).to_contain("chrome_simple_web_layout_captured_argb_size_bytes=0")
 ```
 
@@ -421,11 +424,11 @@ step("Confirm Chrome proof cannot use its own JSON as capture or geometry artifa
 expect(argb_self).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(argb_self).to_contain("chrome_simple_web_layout_validation_reason=missing-captured-argb-file")
 expect(argb_self).to_contain("chrome_simple_web_layout_captured_argb_path=argb-self.json")
-expect(argb_self).to_contain("chrome_simple_web_layout_captured_argb_file_status=fail")
+expect(argb_self).to_contain("chrome_simple_web_layout_captured_argb_file_status=missing")
 expect(geometry_self).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(geometry_self).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-geometry-file")
 expect(geometry_self).to_contain("chrome_simple_web_layout_geometry_path=geometry-self.json")
-expect(geometry_self).to_contain("chrome_simple_web_layout_geometry_file_status=fail")
+expect(geometry_self).to_contain("chrome_simple_web_layout_geometry_file_status=missing")
 ```
 
 </details>
@@ -528,10 +531,10 @@ val empty = file_read(root + "/empty.env")
 step("Confirm geometry evidence requires a nonempty file")
 expect(missing).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(missing).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-geometry-file")
-expect(missing).to_contain("chrome_simple_web_layout_geometry_file_status=fail")
+expect(missing).to_contain("chrome_simple_web_layout_geometry_file_status=missing")
 expect(empty).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(empty).to_contain("chrome_simple_web_layout_validation_reason=empty-chrome-geometry-file")
-expect(empty).to_contain("chrome_simple_web_layout_geometry_file_status=pass")
+expect(empty).to_contain("chrome_simple_web_layout_geometry_file_status=empty")
 expect(empty).to_contain("chrome_simple_web_layout_geometry_size_bytes=0")
 ```
 
