@@ -142,6 +142,41 @@ function nonzeroPixelCount(pixels) {
   return String(count);
 }
 
+function checksum(pixels) {
+  if (!Array.isArray(pixels)) return '';
+  let sum = 0n;
+  for (const pixel of pixels) {
+    if (
+      typeof pixel !== 'number' ||
+      !Number.isInteger(pixel) ||
+      pixel < 0 ||
+      pixel > 0xffffffff
+    ) {
+      return '';
+    }
+    sum += BigInt(pixel);
+  }
+  return sum.toString();
+}
+
+function weightedChecksum(pixels) {
+  if (!Array.isArray(pixels)) return '';
+  let sum = 0n;
+  for (let i = 0; i < pixels.length; i += 1) {
+    const pixel = pixels[i];
+    if (
+      typeof pixel !== 'number' ||
+      !Number.isInteger(pixel) ||
+      pixel < 0 ||
+      pixel > 0xffffffff
+    ) {
+      return '';
+    }
+    sum += BigInt(pixel) * BigInt(i + 1);
+  }
+  return sum.toString();
+}
+
 function measuredGeometryItemCount(items, viewport) {
   if (!Array.isArray(items)) return 0;
   const viewportWidth = jsonIntegerText(viewport.width);
@@ -189,6 +224,8 @@ const capturedArgbJson = readJsonArtifact(capturedArgbStat, {});
 const capturedArgb = capturedArgbJson.value || {};
 const capturedArgbPixels = Array.isArray(capturedArgb.pixels) ? capturedArgb.pixels : null;
 const capturedArgbNonzeroPixelCount = nonzeroPixelCount(capturedArgbPixels);
+const capturedArgbChecksum = checksum(capturedArgbPixels);
+const capturedArgbWeightedChecksum = weightedChecksum(capturedArgbPixels);
 const geometryStat = artifactStat(proof.geometry_path, proofPath);
 const geometryJson = readJsonArtifact(geometryStat, {});
 const geometry = geometryJson.value || {};
@@ -247,6 +284,10 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'captured-argb-pixel-count-mismatch';
 } else if (!integerAtLeast(capturedArgbNonzeroPixelCount, 1)) {
   reason = 'blank-captured-argb';
+} else if (!sameInteger(proof.checksum, capturedArgbChecksum)) {
+  reason = 'captured-argb-checksum-mismatch';
+} else if (!sameInteger(proof.weighted_checksum, capturedArgbWeightedChecksum)) {
+  reason = 'captured-argb-weighted-checksum-mismatch';
 } else if (proof.geometry_written !== true) {
   reason = 'missing-chrome-geometry';
 } else if (geometryStat === null) {
@@ -291,6 +332,8 @@ emit('chrome_simple_web_layout_captured_argb_width', jsonIntegerTextOrBlank(capt
 emit('chrome_simple_web_layout_captured_argb_height', jsonIntegerTextOrBlank(capturedArgb.height));
 emit('chrome_simple_web_layout_captured_argb_pixel_count', capturedArgbPixels === null ? '' : String(capturedArgbPixels.length));
 emit('chrome_simple_web_layout_captured_argb_nonzero_pixel_count', capturedArgbNonzeroPixelCount);
+emit('chrome_simple_web_layout_captured_argb_checksum', capturedArgbChecksum);
+emit('chrome_simple_web_layout_captured_argb_weighted_checksum', capturedArgbWeightedChecksum);
 emit('chrome_simple_web_layout_geometry_path', proof.geometry_path);
 emit('chrome_simple_web_layout_geometry_written', jsonBoolTextOrBlank(proof.geometry_written));
 emit('chrome_simple_web_layout_geometry_file_status', artifactFileStatus(geometryStat));

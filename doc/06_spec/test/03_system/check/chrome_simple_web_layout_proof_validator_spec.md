@@ -27,7 +27,7 @@ chrome_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,6 +74,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   `chrome_simple_web_layout_*` rows.
 - Large integer checksum values compare exactly, without JavaScript number
   rounding.
+- Checksum proof rows must match the recomputed captured ARGB artifact
+  checksum, not only each other.
 - Malformed `frame_us` fails closed instead of relying on shell integer
   comparison behavior.
 - Implausibly high `frame_us` values fail closed instead of counting as valid
@@ -131,7 +133,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -151,6 +153,10 @@ expect(evidence).to_contain("chrome_simple_web_layout_capture_mode=chrome-devtoo
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_product=Chrome/142.0.0.0")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_protocol_version=1.3")
+expect(evidence).to_contain("chrome_simple_web_layout_simple_checksum=26388279060480")
+expect(evidence).to_contain("chrome_simple_web_layout_chrome_checksum=26388279060480")
+expect(evidence).to_contain("chrome_simple_web_layout_simple_weighted_checksum=81077987413324800")
+expect(evidence).to_contain("chrome_simple_web_layout_chrome_weighted_checksum=81077987413324800")
 expect(evidence).to_contain("chrome_simple_web_layout_mismatch_count=0")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=1250")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_width=96")
@@ -165,6 +171,8 @@ expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_width=96")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_height=64")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_pixel_count=6144")
 expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_nonzero_pixel_count=6144")
+expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_checksum=26388279060480")
+expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_weighted_checksum=81077987413324800")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_path=geometry.json")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_written=true")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_file_status=pass")
@@ -278,7 +286,7 @@ expect(protocol).to_contain("chrome_simple_web_layout_chrome_protocol_version=de
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -286,7 +294,7 @@ val root = "build/test-chrome-layout-validator-large-integers"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _large_proof_command(root + "/pass.json", "") +
     " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/pass.json > " + root + "/pass.env; " +
-    _large_proof_command(root + "/fail.json", "p.checksum=\"18446744073709551609\"") +
+    _large_proof_command(root + "/fail.json", "p.weighted_checksum=\"81077987413324799\"") +
     " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/fail.json > " + root + "/fail.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
@@ -295,11 +303,51 @@ val pass_evidence = file_read(root + "/pass.env")
 val fail_evidence = file_read(root + "/fail.env")
 step("Inspect exact decimal checksum rows")
 expect(pass_evidence).to_contain("chrome_simple_web_layout_validation_status=pass")
-expect(pass_evidence).to_contain("chrome_simple_web_layout_simple_checksum=18446744073709551610")
-expect(pass_evidence).to_contain("chrome_simple_web_layout_chrome_weighted_checksum=18446744073709551611")
+expect(pass_evidence).to_contain("chrome_simple_web_layout_simple_checksum=26388279060480")
+expect(pass_evidence).to_contain("chrome_simple_web_layout_chrome_weighted_checksum=81077987413324800")
+expect(pass_evidence).to_contain("chrome_simple_web_layout_captured_argb_weighted_checksum=81077987413324800")
 expect(fail_evidence).to_contain("chrome_simple_web_layout_validation_status=fail")
-expect(fail_evidence).to_contain("chrome_simple_web_layout_validation_reason=checksum-mismatch")
-expect(fail_evidence).to_contain("chrome_simple_web_layout_chrome_checksum=18446744073709551609")
+expect(fail_evidence).to_contain("chrome_simple_web_layout_validation_reason=weighted-checksum-mismatch")
+expect(fail_evidence).to_contain("chrome_simple_web_layout_chrome_weighted_checksum=81077987413324799")
+```
+
+</details>
+
+#### rejects checksum rows that do not match captured Chrome ARGB
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm internally matching proof checksums must still match captured ARGB
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-validator-artifact-checksum"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/checksum.json", "p.checksum=\"100\";p.expected_checksum=\"100\"") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/checksum.json > " + root + "/checksum.env; " +
+    _proof_command(root + "/weighted.json", "p.weighted_checksum=\"500\";p.expected_weighted_checksum=\"500\"") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/weighted.json > " + root + "/weighted.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val checksum = file_read(root + "/checksum.env")
+val weighted = file_read(root + "/weighted.env")
+step("Confirm internally matching proof checksums must still match captured ARGB")
+expect(checksum).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(checksum).to_contain("chrome_simple_web_layout_validation_reason=captured-argb-checksum-mismatch")
+expect(checksum).to_contain("chrome_simple_web_layout_chrome_checksum=100")
+expect(checksum).to_contain("chrome_simple_web_layout_captured_argb_checksum=26388279060480")
+expect(weighted).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(weighted).to_contain("chrome_simple_web_layout_validation_reason=captured-argb-weighted-checksum-mismatch")
+expect(weighted).to_contain("chrome_simple_web_layout_chrome_weighted_checksum=500")
+expect(weighted).to_contain("chrome_simple_web_layout_captured_argb_weighted_checksum=81077987413324800")
 ```
 
 </details>
@@ -890,7 +938,7 @@ expect(pixel).to_contain("chrome_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -909,6 +957,8 @@ expect(script).to_contain("capture-viewport-mismatch")
 expect(script).to_contain("chrome_simple_web_layout_capture_width")
 expect(script).to_contain("chrome_simple_web_layout_captured_argb_format")
 expect(script).to_contain("chrome_simple_web_layout_captured_argb_nonzero_pixel_count")
+expect(script).to_contain("chrome_simple_web_layout_captured_argb_checksum")
+expect(script).to_contain("chrome_simple_web_layout_captured_argb_weighted_checksum")
 expect(script).to_contain("chrome_simple_web_layout_geometry_file_status")
 expect(script).to_contain("chrome_simple_web_layout_geometry_size_bytes")
 expect(script).to_contain("chrome_simple_web_layout_geometry_producer")
@@ -921,6 +971,8 @@ expect(validator).to_contain("measuredGeometryItemCount")
 expect(validator).to_contain("missing-chrome-geometry-measured-items")
 expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
 expect(validator).to_contain("jsonBoolTextOrBlank")
+expect(validator).to_contain("captured-argb-checksum-mismatch")
+expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
 val capture = file_read("tools/chrome-live-bitmap/capture_html_argb.js")
@@ -945,7 +997,7 @@ expect(capture).to_contain("geometry_path: geometryOutputPath")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -969,6 +1021,8 @@ expect(evidence).to_contain("chrome_simple_web_layout_chrome_protocol_version=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_width=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_height=")
+expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_checksum=")
+expect(evidence).to_contain("chrome_simple_web_layout_captured_argb_weighted_checksum=")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_file_status=fail")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_size_bytes=")
 expect(evidence).to_contain("chrome_simple_web_layout_geometry_producer=")
@@ -983,8 +1037,8 @@ expect(evidence).to_contain("chrome_simple_web_layout_geometry_item_count=0")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
