@@ -27,7 +27,7 @@ chrome_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates the Chrome live-bitmap layout proof validator. The Chrome wrapper capt
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/chrome_simple_web_layout_proof_validator_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -111,6 +111,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   `true` or `false` diagnostics.
 - The top-level proof must carry the live Chrome capture source marker; a
   hand-authored proof object with valid-looking artifacts is not sufficient.
+- The top-level proof source marker must resolve to a regular nonempty Chrome
+  capture producer source file so stale JSON cannot be paired with a missing
+  DevTools capture script.
 - The top-level proof must carry Chrome DevTools capture mode, Chrome or
   Chromium runtime user-agent, product, and protocol version evidence, not only
   a binary path.
@@ -152,6 +155,8 @@ expect(evidence).to_contain("chrome_simple_web_layout_validation_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_proof_symlink_status=pass")
 expect(evidence).to_contain("chrome_simple_web_layout_proof_source=tools/chrome-live-bitmap/capture_html_argb.js")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_source_file_status=pass")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_source_size_bytes=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_mode=chrome-devtools-screenshot")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_product=Chrome/142.0.0.0")
@@ -225,6 +230,36 @@ expect(missing).to_contain("chrome_simple_web_layout_proof_source=")
 expect(wrong).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(wrong).to_contain("chrome_simple_web_layout_validation_reason=unexpected-chrome-proof-source")
 expect(wrong).to_contain("chrome_simple_web_layout_proof_source=tools/manual/chrome-proof.json")
+```
+
+</details>
+
+#### rejects proof when the live Chrome capture source artifact is missing
+
+- Confirm Chrome proof source marker is bound to the producer source file
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-validator-source-artifact"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "") +
+    " && cd " + root + " && node ../../scripts/check/validate-chrome-simple-web-layout-proof.js proof.json > evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm Chrome proof source marker is bound to the producer source file")
+expect(evidence).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=unexpected-chrome-proof-source-file-missing")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_source=tools/chrome-live-bitmap/capture_html_argb.js")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_source_file_status=missing")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_source_size_bytes=")
 ```
 
 </details>
@@ -1018,6 +1053,8 @@ expect(script).to_contain("cat \"$VALIDATED_ENV\"")
 expect(script).to_contain("chrome_simple_web_layout_validation_status")
 expect(script).to_contain("chrome_simple_web_layout_validation_reason")
 expect(script).to_contain("chrome_simple_web_layout_proof_source")
+expect(script).to_contain("chrome_simple_web_layout_proof_source_file_status")
+expect(script).to_contain("chrome_simple_web_layout_proof_source_size_bytes")
 expect(script).to_contain("chrome_simple_web_layout_capture_mode")
 expect(script).to_contain("chrome_simple_web_layout_chrome_user_agent")
 expect(script).to_contain("chrome_simple_web_layout_chrome_product")
@@ -1091,6 +1128,8 @@ expect(evidence).to_contain("chrome_simple_web_layout_reason=missing-layout-html
 expect(evidence).to_contain("chrome_simple_web_layout_validation_status=unavailable")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=missing-layout-html")
 expect(evidence).to_contain("chrome_simple_web_layout_proof_source=")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_source_file_status=")
+expect(evidence).to_contain("chrome_simple_web_layout_proof_source_size_bytes=")
 expect(evidence).to_contain("chrome_simple_web_layout_capture_mode=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_user_agent=")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_product=")
@@ -1115,8 +1154,8 @@ expect(evidence).to_contain("chrome_simple_web_layout_geometry_item_count=0")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

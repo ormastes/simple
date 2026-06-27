@@ -27,7 +27,7 @@ electron_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Validates the Electron Simple Web layout proof validator. The layout wrapper cap
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/electron_simple_web_layout_proof_validator_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -105,6 +105,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 - Proof renderer must be the live Electron capture page, the proof must carry
   the live Electron capture source marker, and scenes must stay within the
   Simple Web layout scene family.
+- The Electron capture source marker must resolve to a regular nonempty
+  producer source file so stale JSON cannot be paired with a missing offscreen
+  capture script.
 - Complete proofs must identify the Electron offscreen capture backend,
   compositor mode, Electron/Chromium runtime identity, Chromium GPU
   feature-status diagnostics, and at least two measured capture iterations.
@@ -145,6 +148,8 @@ expect(evidence).to_contain("electron_simple_web_layout_validation_reason=pass")
 expect(evidence).to_contain("electron_simple_web_layout_proof_symlink_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_renderer=electron-live-capture-page")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source=tools/electron-live-bitmap/exact_fixture.js")
+expect(evidence).to_contain("electron_simple_web_layout_proof_source_file_status=pass")
+expect(evidence).to_contain("electron_simple_web_layout_proof_source_size_bytes=")
 expect(evidence).to_contain("electron_simple_web_layout_capture_backend=electron-offscreen-capture-page")
 expect(evidence).to_contain("electron_simple_web_layout_compositor_mode=offscreen-osr-exact-srgb")
 expect(evidence).to_contain("electron_simple_web_layout_browser_engine=chromium")
@@ -256,6 +261,36 @@ expect(missing).to_contain("electron_simple_web_layout_proof_source=")
 expect(wrong).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(wrong).to_contain("electron_simple_web_layout_validation_reason=unexpected-electron-proof-source")
 expect(wrong).to_contain("electron_simple_web_layout_proof_source=tools/manual/electron-proof.json")
+```
+
+</details>
+
+#### rejects proof when the live Electron capture source artifact is missing
+
+- Confirm Electron proof source marker is bound to the producer source file
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-layout-validator-source-artifact"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "") +
+    " && cd " + root + " && node ../../scripts/check/validate-electron-simple-web-layout-proof.js proof.json > evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm Electron proof source marker is bound to the producer source file")
+expect(evidence).to_contain("electron_simple_web_layout_validation_status=fail")
+expect(evidence).to_contain("electron_simple_web_layout_validation_reason=unexpected-electron-proof-source-file-missing")
+expect(evidence).to_contain("electron_simple_web_layout_proof_source=tools/electron-live-bitmap/exact_fixture.js")
+expect(evidence).to_contain("electron_simple_web_layout_proof_source_file_status=missing")
+expect(evidence).to_contain("electron_simple_web_layout_proof_source_size_bytes=")
 ```
 
 </details>
@@ -1013,6 +1048,8 @@ expect(validator).to_contain("captured-argb-checksum-mismatch")
 expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("electron_simple_web_layout_proof_renderer")
 expect(script).to_contain("electron_simple_web_layout_proof_source")
+expect(script).to_contain("electron_simple_web_layout_proof_source_file_status")
+expect(script).to_contain("electron_simple_web_layout_proof_source_size_bytes")
 expect(script).to_contain("captured-argb-checksum-mismatch")
 expect(script).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("status=divergent")
@@ -1032,8 +1069,8 @@ expect(fixture).to_contain("chrome_process_version")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

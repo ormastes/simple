@@ -286,6 +286,19 @@ const geometryViewport = geometry.viewport || {};
 const geometryItems = Array.isArray(geometry.items) ? geometry.items : [];
 const geometryMeasuredItemCount = measuredGeometryItemCount(geometryItems, geometryViewport);
 const expectedProofSource = 'tools/electron-live-bitmap/exact_fixture.js';
+const proofSourceStat = pathInfo(expectedProofSource);
+const proofSourceFileStatus = proofSourceStat.isSymlink
+  ? 'symlink'
+  : proofSourceStat.lstat === null || !proofSourceStat.lstat.isFile()
+    ? 'missing'
+    : proofSourceStat.lstat.size <= 0
+      ? 'empty'
+      : 'pass';
+const proofSourceSizeBytes = proofSourceFileStatus === 'empty'
+  ? '0'
+  : proofSourceFileStatus === 'pass'
+    ? String(proofSourceStat.lstat.size)
+    : '';
 const expectedCaptureBackend = 'electron-offscreen-capture-page';
 const expectedCompositorMode = 'offscreen-osr-exact-srgb';
 const browserEngine = textField(proof.browser_engine);
@@ -307,6 +320,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'unexpected-electron-renderer';
 } else if (proof.proof_source !== expectedProofSource) {
   reason = 'unexpected-electron-proof-source';
+} else if (proofSourceFileStatus !== 'pass') {
+  reason = `unexpected-electron-proof-source-file-${proofSourceFileStatus}`;
 } else if (typeof proof.scene !== 'string' || !proof.scene.startsWith('simple-web-layout-')) {
   reason = 'unexpected-electron-scene';
 } else if (proof.capture_backend !== expectedCaptureBackend) {
@@ -396,6 +411,8 @@ emit('electron_simple_web_layout_validation_reason', reason);
 emit('electron_simple_web_layout_proof_symlink_status', proofInfo.isSymlink ? 'fail' : 'pass');
 emit('electron_simple_web_layout_renderer', proof.renderer);
 emit('electron_simple_web_layout_proof_source', proof.proof_source);
+emit('electron_simple_web_layout_proof_source_file_status', proofSourceFileStatus);
+emit('electron_simple_web_layout_proof_source_size_bytes', proofSourceSizeBytes);
 emit('electron_simple_web_layout_capture_backend', proof.capture_backend);
 emit('electron_simple_web_layout_compositor_mode', proof.compositor_mode);
 emit('electron_simple_web_layout_browser_engine', browserEngine);

@@ -286,6 +286,19 @@ const geometryViewport = geometry.viewport || {};
 const geometryItems = Array.isArray(geometry.items) ? geometry.items : [];
 const geometryMeasuredItemCount = measuredGeometryItemCount(geometryItems, geometryViewport);
 const expectedProofSource = 'tools/chrome-live-bitmap/capture_html_argb.js';
+const proofSourceStat = pathInfo(expectedProofSource);
+const proofSourceFileStatus = proofSourceStat.isSymlink
+  ? 'symlink'
+  : proofSourceStat.lstat === null || !proofSourceStat.lstat.isFile()
+    ? 'missing'
+    : proofSourceStat.lstat.size <= 0
+      ? 'empty'
+      : 'pass';
+const proofSourceSizeBytes = proofSourceFileStatus === 'empty'
+  ? '0'
+  : proofSourceFileStatus === 'pass'
+    ? String(proofSourceStat.lstat.size)
+    : '';
 const chromeUserAgent = typeof proof.chrome_user_agent === 'string' ? proof.chrome_user_agent : '';
 const chromeProduct = typeof proof.chrome_product === 'string' ? proof.chrome_product : '';
 const chromeProtocolVersion = typeof proof.chrome_protocol_version === 'string' ? proof.chrome_protocol_version : '';
@@ -296,6 +309,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'blur-or-tolerance-not-allowed';
 } else if (proof.proof_source !== expectedProofSource) {
   reason = 'unexpected-chrome-proof-source';
+} else if (proofSourceFileStatus !== 'pass') {
+  reason = `unexpected-chrome-proof-source-file-${proofSourceFileStatus}`;
 } else if (proof.capture_mode !== 'chrome-devtools-screenshot') {
   reason = 'unexpected-chrome-capture-mode';
 } else if (!/(Chrome|Chromium)\/[0-9]/.test(chromeUserAgent)) {
@@ -370,6 +385,8 @@ emit('chrome_simple_web_layout_validation_status', reason === 'pass' ? 'pass' : 
 emit('chrome_simple_web_layout_validation_reason', reason);
 emit('chrome_simple_web_layout_proof_symlink_status', proofInfo.isSymlink ? 'fail' : 'pass');
 emit('chrome_simple_web_layout_proof_source', proof.proof_source);
+emit('chrome_simple_web_layout_proof_source_file_status', proofSourceFileStatus);
+emit('chrome_simple_web_layout_proof_source_size_bytes', proofSourceSizeBytes);
 emit('chrome_simple_web_layout_capture_mode', proof.capture_mode);
 emit('chrome_simple_web_layout_chrome_user_agent', proof.chrome_user_agent);
 emit('chrome_simple_web_layout_chrome_product', proof.chrome_product);
