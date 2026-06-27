@@ -34,6 +34,43 @@ num_at_least() {
     [ "$value" -ge "$min" ]
 }
 
+file_size_bytes() {
+    path="$1"
+    if [ -f "$path" ]; then
+        wc -c <"$path" | tr -d '[:space:]'
+    else
+        echo ""
+    fi
+}
+
+artifact_file_reason() {
+    path="$1"
+    expected_size="$2"
+    if [ -n "$path" ] && [ -L "$path" ]; then
+        echo symlink
+        return
+    fi
+    if [ -z "$path" ] || [ ! -s "$path" ]; then
+        echo missing
+        return
+    fi
+    actual_size="$(file_size_bytes "$path")"
+    if [ -n "$expected_size" ] && [ "$actual_size" != "$expected_size" ]; then
+        echo size-mismatch
+        return
+    fi
+    echo pass
+}
+
+artifact_file_status() {
+    reason="$1"
+    if [ "$reason" = "pass" ]; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
 num_positive() {
     value="$1"
     awk -v value="$value" 'BEGIN {
@@ -622,6 +659,9 @@ ios_render_log_html_len=""
 ios_render_log_source_coherence_status=unavailable
 ios_render_log_coherent_source_path=""
 ios_render_log_coherent_source_size_bytes=""
+ios_render_log_coherent_source_actual_size_bytes=""
+ios_render_log_coherent_source_file_reason=not-run
+ios_render_log_coherent_source_file_status=unavailable
 ios_render_log_marker_status=unavailable
 ios_render_log_metal_marker_status=unavailable
 ios_render_log_fallback_marker_status=unavailable
@@ -770,6 +810,9 @@ if [ -x "$IOS_SCRIPT" ] || [ -f "$IOS_SCRIPT" ]; then
         ios_render_log_source_coherence_status="$(value_of ios_render_log_source_coherence_status "$ios_render_log_validation_env")"
         ios_render_log_coherent_source_path="$(value_of ios_render_log_coherent_source_path "$ios_render_log_validation_env")"
         ios_render_log_coherent_source_size_bytes="$(value_of ios_render_log_coherent_source_size_bytes "$ios_render_log_validation_env")"
+        ios_render_log_coherent_source_actual_size_bytes="$(file_size_bytes "$ios_render_log_coherent_source_path")"
+        ios_render_log_coherent_source_file_reason="$(artifact_file_reason "$ios_render_log_coherent_source_path" "$ios_render_log_coherent_source_size_bytes")"
+        ios_render_log_coherent_source_file_status="$(artifact_file_status "$ios_render_log_coherent_source_file_reason")"
         ios_render_log_marker_status="$(value_of ios_render_log_marker_status "$ios_render_log_validation_env")"
         ios_render_log_metal_marker_status="$(value_of ios_render_log_metal_marker_status "$ios_render_log_validation_env")"
         ios_render_log_fallback_marker_status="$(value_of ios_render_log_fallback_marker_status "$ios_render_log_validation_env")"
@@ -1088,6 +1131,15 @@ elif [ "$ios_render_log_validation_status" != "pass" ]; then
 elif [ -z "$ios_render_log_coherent_source_path" ] || ! num_at_least "$ios_render_log_coherent_source_size_bytes" 1; then
     status=fail
     reason=ios-render-log-coherent-source-missing
+elif [ "$ios_render_log_coherent_source_file_status" != "pass" ]; then
+    status=fail
+    if [ "$ios_render_log_coherent_source_file_reason" = "symlink" ]; then
+        reason=ios-render-log-coherent-source-symlink
+    elif [ "$ios_render_log_coherent_source_file_reason" = "size-mismatch" ]; then
+        reason=ios-render-log-coherent-source-size-mismatch
+    else
+        reason=ios-render-log-coherent-source-artifact-missing
+    fi
 elif [ "$ios_layout_status" != "pass" ]; then
     status=fail
     reason="$ios_reason"
@@ -1238,6 +1290,9 @@ fi
     echo "tauri_mobile_renderer_parity_ios_render_log_source_coherence_status=$ios_render_log_source_coherence_status"
     echo "tauri_mobile_renderer_parity_ios_render_log_coherent_source_path=$ios_render_log_coherent_source_path"
     echo "tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes=$ios_render_log_coherent_source_size_bytes"
+    echo "tauri_mobile_renderer_parity_ios_render_log_coherent_source_actual_size_bytes=$ios_render_log_coherent_source_actual_size_bytes"
+    echo "tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status=$ios_render_log_coherent_source_file_status"
+    echo "tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=$ios_render_log_coherent_source_file_reason"
     echo "tauri_mobile_renderer_parity_ios_render_log_marker_status=$ios_render_log_marker_status"
     echo "tauri_mobile_renderer_parity_ios_render_log_metal_marker_status=$ios_render_log_metal_marker_status"
     echo "tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status=$ios_render_log_fallback_marker_status"

@@ -120,6 +120,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   deriving mobile parity status.
 - The aggregate requires iOS render-log validator rows to identify the coherent
   Metal-backed WKWebView render-log source path and byte size.
+- The aggregate re-checks the coherent iOS render-log source as a regular file
+  artifact and rejects missing, symlinked, or byte-size-mismatched paths.
 
 ## Scenarios
 
@@ -165,6 +167,9 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_c
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path=" + root + "/artifacts/ios.log")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes=223")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_actual_size_bytes=223")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_validation_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len=347702")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_file_status=pass")
@@ -241,7 +246,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val root = "build/test-tauri-mobile-artifact-gate-missing-ios-coherent-source"
 val validator = root + "/fake-ios-render-validator.sh"
-val inject_validator = "printf '#!/bin/sh\\nprintf \"ios_render_log_validation_status=pass\\\\nios_render_log_validation_reason=pass\\\\nios_render_log_requested_source_count=2\\\\nios_render_log_source_count=2\\\\nios_render_log_missing_source_count=0\\\\nios_render_log_empty_source_count=0\\\\nios_render_log_symlink_source_count=0\\\\nios_render_log_source_coherence_status=pass\\\\nios_render_log_coherent_source_path=\\\\nios_render_log_coherent_source_size_bytes=\\\\nios_render_log_marker_status=pass\\\\nios_render_log_html_len=347702\\\\nios_render_log_metal_marker_status=pass\\\\nios_render_log_fallback_marker_status=pass\\\\nios_render_log_tauri_context_status=pass\\\\nios_render_log_metal_context_status=pass\\\\nios_render_log_failure_marker_status=pass\\\\n\"\\n' > " + validator + " && chmod +x " + validator
+val inject_validator = "printf 'process.stdout.write(\"ios_render_log_validation_status=pass\\\\nios_render_log_validation_reason=pass\\\\nios_render_log_requested_source_count=2\\\\nios_render_log_source_count=2\\\\nios_render_log_missing_source_count=0\\\\nios_render_log_empty_source_count=0\\\\nios_render_log_symlink_source_count=0\\\\nios_render_log_source_coherence_status=pass\\\\nios_render_log_coherent_source_path=\\\\nios_render_log_coherent_source_size_bytes=\\\\nios_render_log_marker_status=pass\\\\nios_render_log_html_len=347702\\\\nios_render_log_metal_marker_status=pass\\\\nios_render_log_fallback_marker_status=pass\\\\nios_render_log_tauri_context_status=pass\\\\nios_render_log_metal_context_status=pass\\\\nios_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
 val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
@@ -254,6 +259,73 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validat
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_coherence_status=pass")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path=")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes=")
+```
+
+</details>
+
+#### rejects iOS render-log validator pass claims with stale coherent source paths
+
+- Confirm coherent iOS render-log source rows are rechecked as current artifacts
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-stale-ios-coherent-source"
+val validator = root + "/fake-ios-render-validator.sh"
+val stale_path = root + "/artifacts/stale-ios.log"
+val inject_validator = "printf 'process.stdout.write(\"ios_render_log_validation_status=pass\\\\nios_render_log_validation_reason=pass\\\\nios_render_log_requested_source_count=2\\\\nios_render_log_source_count=2\\\\nios_render_log_missing_source_count=0\\\\nios_render_log_empty_source_count=0\\\\nios_render_log_symlink_source_count=0\\\\nios_render_log_source_coherence_status=pass\\\\nios_render_log_coherent_source_path=" + stale_path + "\\\\nios_render_log_coherent_source_size_bytes=123\\\\nios_render_log_marker_status=pass\\\\nios_render_log_html_len=347702\\\\nios_render_log_metal_marker_status=pass\\\\nios_render_log_fallback_marker_status=pass\\\\nios_render_log_tauri_context_status=pass\\\\nios_render_log_metal_context_status=pass\\\\nios_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
+val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm coherent iOS render-log source rows are rechecked as current artifacts")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-render-log-coherent-source-artifact-missing")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validation_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path=" + stale_path)
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes=123")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=missing")
+```
+
+</details>
+
+#### rejects iOS render-log validator pass claims with mismatched coherent source byte size
+
+- Confirm coherent iOS render-log byte-size rows match the artifact
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-mismatch-ios-coherent-source-size"
+val validator = root + "/fake-ios-render-validator.sh"
+val coherent_path = root + "/artifacts/ios.log"
+val inject_validator = "printf 'process.stdout.write(\"ios_render_log_validation_status=pass\\\\nios_render_log_validation_reason=pass\\\\nios_render_log_requested_source_count=2\\\\nios_render_log_source_count=2\\\\nios_render_log_missing_source_count=0\\\\nios_render_log_empty_source_count=0\\\\nios_render_log_symlink_source_count=0\\\\nios_render_log_source_coherence_status=pass\\\\nios_render_log_coherent_source_path=" + coherent_path + "\\\\nios_render_log_coherent_source_size_bytes=1\\\\nios_render_log_marker_status=pass\\\\nios_render_log_html_len=347702\\\\nios_render_log_metal_marker_status=pass\\\\nios_render_log_fallback_marker_status=pass\\\\nios_render_log_tauri_context_status=pass\\\\nios_render_log_metal_context_status=pass\\\\nios_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
+val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm coherent iOS render-log byte-size rows match the artifact")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-render-log-coherent-source-size-mismatch")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validation_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path=" + coherent_path)
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes=1")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_actual_size_bytes=223")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=size-mismatch")
 ```
 
 </details>
@@ -1010,6 +1082,10 @@ expect(script).to_contain("cat \"$ios_render_log_validation_env\"")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes")
+expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status")
+expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason")
+expect(script).to_contain("ios-render-log-coherent-source-artifact-missing")
+expect(script).to_contain("ios-render-log-coherent-source-size-mismatch")
 expect(script).to_contain("ios-render-log-coherent-source-missing")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_render_log_html_len")
