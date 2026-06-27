@@ -579,6 +579,7 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                 var bodyClickRouted = false;
                 var bodyInputRouted = false;
                 var bodyKeyRouted = false;
+                var eventSequence = [];
                 var appActionControlFound = false;
                 var appInputControlFound = false;
                 var performanceNowAvailable = !!(window.performance && typeof window.performance.now === 'function');
@@ -639,6 +640,9 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                     var afterLeft = parseInt(terminal.style.left || '0', 10) || 0;
                     var afterTop = parseInt(terminal.style.top || '0', 10) || 0;
                     dragMoved = afterLeft > beforeLeft && afterTop > beforeTop;
+                    if (dragMoved) {
+                        eventSequence.push('window_drag:move');
+                    }
                     if (body) {
                         if (!body.querySelector('[data-action]')) {
                             var proofButton = document.createElement('button');
@@ -657,6 +661,9 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             var actionName = appButton.getAttribute('data-action') || '';
                             appButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
                             bodyClickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === actionName);
+                            if (bodyClickRouted) {
+                                eventSequence.push('app_action:body_click');
+                            }
                         }
 
                         var appInput = body.querySelector('input[data-target-id], textarea[data-target-id], select[data-target-id], [contenteditable][data-target-id]');
@@ -670,9 +677,15 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             }
                             appInput.dispatchEvent(new Event('input', { bubbles: true }));
                             bodyInputRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'input' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.targetId === targetId && wm.lastEvent.value === 'ok');
+                            if (bodyInputRouted) {
+                                eventSequence.push('app_input:body_input');
+                            }
                         }
                         body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
                         bodyKeyRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'key' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.key === 'Enter');
+                        if (bodyKeyRouted) {
+                            eventSequence.push('app_key:body_key');
+                        }
                     }
                 }
                 var invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
@@ -696,6 +709,7 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             bodyClickRouted: bodyClickRouted,
                             bodyInputRouted: bodyInputRouted,
                             bodyKeyRouted: bodyKeyRouted,
+                            eventSequence: eventSequence,
                             taskbarItemCount: taskbarItems.length,
                             taskbarIconCount: taskbarIcons.length,
                             taskbarIconsVisible: taskbarIconsVisible,

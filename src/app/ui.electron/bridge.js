@@ -657,6 +657,7 @@ function maybeWriteMdiProof(win) {
                 var trafficMinimizeRouted = false;
                 var trafficMaximizeRouted = false;
                 var trafficCloseRouted = false;
+                var eventSequence = [];
                 var appActionControlFound = false;
                 var appInputControlFound = false;
                 var dragBefore = null;
@@ -695,6 +696,9 @@ function maybeWriteMdiProof(win) {
                         dragAfter = { left: parseInt(terminal.style.left || '0', 10) || 0, top: parseInt(terminal.style.top || '0', 10) || 0 };
                         dragMoved = dragAfter.left > dragBefore.left && dragAfter.top > dragBefore.top;
                     }
+                    if (dragMoved) {
+                        eventSequence.push('window_drag:move');
+                    }
                     if (body) {
                         var appButton = body.querySelector('[data-action]');
                         appActionControlFound = !!appButton;
@@ -706,6 +710,9 @@ function maybeWriteMdiProof(win) {
                             }
                             appButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
                             bodyClickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === actionName);
+                            if (bodyClickRouted) {
+                                eventSequence.push('app_action:body_click');
+                            }
                         }
 
                         var appInput = body.querySelector('input[data-target-id]:not([data-simple-titlebar-widget]), textarea[data-target-id]:not([data-simple-titlebar-widget]), select[data-target-id]:not([data-simple-titlebar-widget]), [contenteditable][data-target-id]:not([data-simple-titlebar-widget])');
@@ -719,9 +726,15 @@ function maybeWriteMdiProof(win) {
                             }
                             appInput.dispatchEvent(new Event('input', { bubbles: true }));
                             bodyInputRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'input' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.targetId === targetId && wm.lastEvent.value === 'ok');
+                            if (bodyInputRouted) {
+                                eventSequence.push('app_input:body_input');
+                            }
                         }
                         body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
                         bodyKeyRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'key' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.key === 'Enter');
+                        if (bodyKeyRouted) {
+                            eventSequence.push('app_key:body_key');
+                        }
                     }
                     var minimizeButton = terminal.querySelector('.wm-traffic-lights [data-action="minimize"]');
                     var maximizeButton = terminal.querySelector('.wm-traffic-lights [data-action="maximize"]');
@@ -773,6 +786,7 @@ function maybeWriteMdiProof(win) {
             bodyClickRouted: bodyClickRouted,
             bodyInputRouted: bodyInputRouted,
             bodyKeyRouted: bodyKeyRouted,
+            eventSequence: eventSequence,
             trafficMinimizeRouted: trafficMinimizeRouted,
             trafficMaximizeRouted: trafficMaximizeRouted,
             trafficCloseRouted: trafficCloseRouted,

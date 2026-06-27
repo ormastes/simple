@@ -5,6 +5,12 @@ const path = require("path");
 
 const [prefix, jsonPath, ...files] = process.argv.slice(2);
 const maxEventTimingMs = 1000;
+const expectedEventSequence = [
+  "window_drag:move",
+  "app_action:body_click",
+  "app_input:body_input",
+  "app_key:body_key",
+];
 
 function clean(value) {
   if (value === undefined || value === null) return "";
@@ -62,6 +68,17 @@ function jsonBoolTextOrBlank(value) {
   if (value === true) return "true";
   if (value === false) return "false";
   return "";
+}
+
+function eventSequenceText(value) {
+  if (!Array.isArray(value)) return "";
+  return value.map(clean).join(",");
+}
+
+function eventSequenceMatches(value) {
+  return Array.isArray(value) &&
+    value.length === expectedEventSequence.length &&
+    expectedEventSequence.every((entry, index) => value[index] === entry);
 }
 
 function fail(reason) {
@@ -328,6 +345,7 @@ const eventPass =
   proof.bodyClickRouted === true &&
   proof.bodyInputRouted === true &&
   proof.bodyKeyRouted === true &&
+  eventSequenceMatches(proof.eventSequence) &&
   jsonIntegerAtLeast(proof.taskbarItemCount, 4) &&
   jsonIntegerAtLeast(proof.taskbarIconCount, 4) &&
   proof.taskbarIconsVisible === true &&
@@ -381,6 +399,7 @@ emit("mdi_event_app_input_control_found", jsonBoolTextOrBlank(proof.appInputCont
 emit("mdi_event_body_click_routed", jsonBoolTextOrBlank(proof.bodyClickRouted));
 emit("mdi_event_body_input_routed", jsonBoolTextOrBlank(proof.bodyInputRouted));
 emit("mdi_event_body_key_routed", jsonBoolTextOrBlank(proof.bodyKeyRouted));
+emit("mdi_event_sequence", eventSequenceText(proof.eventSequence));
 emit("mdi_event_taskbar_icons_visible", jsonBoolTextOrBlank(proof.taskbarIconsVisible));
 emit("mdi_event_taskbar_labels_visible", jsonBoolTextOrBlank(proof.taskbarLabelsVisible));
 emit("mdi_event_status", eventPass ? "pass" : "fail");

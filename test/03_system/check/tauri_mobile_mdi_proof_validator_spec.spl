@@ -51,9 +51,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 - Render proof must include an explicit rendered image count and HTML render
   marker; event routing alone is not enough to prove the mobile MDI surface
   actually rendered.
-- Event proof emits individual routed click/input/key, drag, window-runtime,
-  control-discovery, and taskbar-visibility rows rather than only a coarse
-  event status.
+- Event proof emits an ordered routed-event sequence plus individual routed
+  click/input/key, drag, window-runtime, control-discovery, and
+  taskbar-visibility rows rather than only a coarse event status.
 - Render counts, event counts, viewport dimensions, device pixel ratio,
   performance timing deltas, and animation-frame counts must be real JSON
   numbers; stringified, fractional, unsafe, or exponential integer values do not
@@ -77,7 +77,7 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_log_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={count:4,imageCount:1,taskbarItemCount:4,taskbarIconCount:4,viewportWidth:390,viewportHeight:844,devicePixelRatio:3,screenOrientation:\"portrait\",performanceNowAvailable:true,performanceNowDeltaMs:1.25,inputToPaintMs:2.5,animationFrameAvailable:true,animationFrameCount:2,cssAnimationProbe:true,hasDesktop:true,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,appActionControlFound:true,appInputControlFound:true,bodyClickRouted:true,bodyInputRouted:true,bodyKeyRouted:true,taskbarIconsVisible:true,taskbarLabelsVisible:true,htmlRenderable:true};" + mutation + ";fs.writeFileSync(process.argv[1],\"[tauri-shell] mdi proof: \"+JSON.stringify(p)+\"\\n\");' " + path
+    "node -e 'const fs=require(\"fs\");const p={count:4,imageCount:1,taskbarItemCount:4,taskbarIconCount:4,viewportWidth:390,viewportHeight:844,devicePixelRatio:3,screenOrientation:\"portrait\",performanceNowAvailable:true,performanceNowDeltaMs:1.25,inputToPaintMs:2.5,animationFrameAvailable:true,animationFrameCount:2,cssAnimationProbe:true,hasDesktop:true,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,appActionControlFound:true,appInputControlFound:true,bodyClickRouted:true,bodyInputRouted:true,bodyKeyRouted:true,eventSequence:[\"window_drag:move\",\"app_action:body_click\",\"app_input:body_input\",\"app_key:body_key\"],taskbarIconsVisible:true,taskbarLabelsVisible:true,htmlRenderable:true};" + mutation + ";fs.writeFileSync(process.argv[1],\"[tauri-shell] mdi proof: \"+JSON.stringify(p)+\"\\n\");' " + path
 
 describe "Tauri mobile MDI proof validator":
 
@@ -103,8 +103,8 @@ describe "Tauri mobile MDI proof validator":
         expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
         expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
         expect(evidence).to_contain("ios_mdi_proof_marker_source_path=" + root + "/device.log")
-        expect(evidence).to_contain("ios_mdi_proof_marker_source_size_bytes=656")
-        expect(evidence).to_contain("ios_mdi_proof_marker_source_actual_size_bytes=656")
+        expect(evidence).to_contain("ios_mdi_proof_marker_source_size_bytes=759")
+        expect(evidence).to_contain("ios_mdi_proof_marker_source_actual_size_bytes=759")
         expect(evidence).to_contain("ios_mdi_proof_marker_source_file_status=pass")
         expect(evidence).to_contain("ios_mdi_proof_marker_source_file_reason=pass")
         expect(evidence).to_contain("ios_mdi_proof_window_count=4")
@@ -124,6 +124,7 @@ describe "Tauri mobile MDI proof validator":
         expect(evidence).to_contain("ios_mdi_event_body_click_routed=true")
         expect(evidence).to_contain("ios_mdi_event_body_input_routed=true")
         expect(evidence).to_contain("ios_mdi_event_body_key_routed=true")
+        expect(evidence).to_contain("ios_mdi_event_sequence=window_drag:move,app_action:body_click,app_input:body_input,app_key:body_key")
         expect(evidence).to_contain("ios_mdi_event_taskbar_icons_visible=true")
         expect(evidence).to_contain("ios_mdi_event_taskbar_labels_visible=true")
         expect(evidence).to_contain("ios_mdi_capture_status=pass")
@@ -590,21 +591,28 @@ describe "Tauri mobile MDI proof validator":
             _proof_log_command(root + "/body.log", "p.bodyClickRouted=false") +
             " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/body.json " + root + "/body.log > " + root + "/body.env; " +
             _proof_log_command(root + "/taskbar.log", "p.taskbarLabelsVisible=false") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/taskbar.json " + root + "/taskbar.log > " + root + "/taskbar.env"
+            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/taskbar.json " + root + "/taskbar.log > " + root + "/taskbar.env; " +
+            _proof_log_command(root + "/sequence.log", "p.eventSequence=[\"app_action:body_click\",\"window_drag:move\",\"app_input:body_input\",\"app_key:body_key\"]") +
+            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/sequence.json " + root + "/sequence.log > " + root + "/sequence.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
         expect(code).to_equal(1)
 
         val body = file_read(root + "/body.env")
         val taskbar = file_read(root + "/taskbar.env")
+        val sequence = file_read(root + "/sequence.env")
         step("Confirm individual event-route diagnostics survive validation")
         expect(body).to_contain("ios_mdi_proof_status=fail")
         expect(body).to_contain("ios_mdi_event_status=fail")
         expect(body).to_contain("ios_mdi_event_body_click_routed=false")
         expect(body).to_contain("ios_mdi_event_body_input_routed=true")
+        expect(body).to_contain("ios_mdi_event_sequence=window_drag:move,app_action:body_click,app_input:body_input,app_key:body_key")
         expect(taskbar).to_contain("android_mdi_proof_status=fail")
         expect(taskbar).to_contain("android_mdi_event_status=fail")
         expect(taskbar).to_contain("android_mdi_event_taskbar_labels_visible=false")
         expect(taskbar).to_contain("android_mdi_event_taskbar_icons_visible=true")
+        expect(sequence).to_contain("ios_mdi_proof_status=fail")
+        expect(sequence).to_contain("ios_mdi_event_status=fail")
+        expect(sequence).to_contain("ios_mdi_event_sequence=app_action:body_click,window_drag:move,app_input:body_input,app_key:body_key")
 
     it "rejects string booleans without normalizing them as false diagnostics":
         val root = "build/test-tauri-mobile-mdi-validator-string-booleans"
