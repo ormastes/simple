@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 
 const [prefix, jsonPath, ...files] = process.argv.slice(2);
+const maxEventTimingMs = 1000;
 
 function clean(value) {
   if (value === undefined || value === null) return "";
@@ -34,6 +35,12 @@ function jsonDecimalGreaterThan(value, min) {
   const text = jsonNumberText(value);
   if (text === null) return false;
   return Number(text) > min;
+}
+
+function jsonDecimalAtMost(value, max) {
+  const text = jsonNumberText(value);
+  if (text === null) return false;
+  return Number(text) <= max;
 }
 
 function jsonIntegerTextOrBlank(value) {
@@ -162,8 +169,11 @@ const capturePass =
   jsonIntegerAtLeast(proof.viewportHeight, 300);
 const performancePass =
   proof.performanceNowAvailable === true &&
-  jsonDecimalGreaterThan(proof.performanceNowDeltaMs, 0);
-const interactionLatencyPass = jsonDecimalGreaterThan(proof.inputToPaintMs, 0);
+  jsonDecimalGreaterThan(proof.performanceNowDeltaMs, 0) &&
+  jsonDecimalAtMost(proof.performanceNowDeltaMs, maxEventTimingMs);
+const interactionLatencyPass =
+  jsonDecimalGreaterThan(proof.inputToPaintMs, 0) &&
+  jsonDecimalAtMost(proof.inputToPaintMs, maxEventTimingMs);
 const animationPass =
   proof.animationFrameAvailable === true &&
   jsonIntegerAtLeast(proof.animationFrameCount, 2) &&

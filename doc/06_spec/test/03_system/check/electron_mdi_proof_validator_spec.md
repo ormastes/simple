@@ -85,7 +85,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_mdi_proof_validator
   `performance.now()`, an explicit positive timing delta, a positive
   `inputToPaintMs` sample after routed MDI input, at least two animation
   frames, and a CSS animation probe. A zero delta does not prove distinct
-  timing samples.
+  timing samples, and multi-second timing does not prove responsive rendering.
 - Event counts, bridge frame counts, taskbar counts, image counts, animation
   frame counts, performance timing deltas, and input-to-paint latency must be
   real JSON numbers; stringified or fractional values are not valid
@@ -409,8 +409,9 @@ expect(evidence.contains("electron_mdi_performance_now_delta_ms=0")).to_equal(fa
 
 </details>
 
-#### rejects performance timing that does not advance
+#### rejects performance timing that does not advance or exceeds budget
 
+-  proof command
 -  proof command
    - Expected: code equals `1`
 
@@ -418,29 +419,37 @@ expect(evidence.contains("electron_mdi_performance_now_delta_ms=0")).to_equal(fa
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-mdi-validator-zero-performance"
 val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof && " + _png_capture_command() + " && " +
     _proof_command(root + "/proof.json", "p.performanceNowDeltaMs=0") +
-    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env"
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/proof.json build/electron-proof/screen.png > " + root + "/evidence.env; " +
+    _proof_command(root + "/slow.json", "p.performanceNowDeltaMs=1001") +
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/slow.json build/electron-proof/screen.png > " + root + "/slow.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val evidence = file_read(root + "/evidence.env")
+val slow = file_read(root + "/slow.env")
 expect(evidence).to_contain("electron_mdi_json_proof=fail")
 expect(evidence).to_contain("electron_mdi_json_proof_reason=performance-contract-missing:performanceNowDeltaMs")
 expect(evidence).to_contain("electron_mdi_performance_status=fail")
 expect(evidence).to_contain("electron_mdi_performance_now_available=true")
 expect(evidence).to_contain("electron_mdi_performance_now_delta_ms=0")
+expect(slow).to_contain("electron_mdi_json_proof=fail")
+expect(slow).to_contain("electron_mdi_json_proof_reason=performance-contract-missing:performanceNowDeltaMsWithinBudget")
+expect(slow).to_contain("electron_mdi_performance_status=fail")
+expect(slow).to_contain("electron_mdi_performance_now_delta_ms=1001")
 ```
 
 </details>
 
-#### rejects missing zero or stringified input-to-paint latency
+#### rejects missing zero over-budget or stringified input-to-paint latency
 
+-  proof command
 -  proof command
 -  proof command
 -  proof command
@@ -451,7 +460,7 @@ expect(evidence).to_contain("electron_mdi_performance_now_delta_ms=0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -462,13 +471,16 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " build/electron-proof
     _proof_command(root + "/zero.json", "p.inputToPaintMs=0") +
     " && node scripts/check/validate-electron-mdi-proof.js " + root + "/zero.json build/electron-proof/screen.png > " + root + "/zero.env; " +
     _proof_command(root + "/string.json", "p.inputToPaintMs=\"18.4\"") +
-    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/string.json build/electron-proof/screen.png > " + root + "/string.env"
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/string.json build/electron-proof/screen.png > " + root + "/string.env; " +
+    _proof_command(root + "/slow.json", "p.inputToPaintMs=1001") +
+    " && node scripts/check/validate-electron-mdi-proof.js " + root + "/slow.json build/electron-proof/screen.png > " + root + "/slow.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val missing = file_read(root + "/missing.env")
 val zero = file_read(root + "/zero.env")
 val string_latency = file_read(root + "/string.env")
+val slow = file_read(root + "/slow.env")
 expect(missing).to_contain("electron_mdi_json_proof=fail")
 expect(missing).to_contain("electron_mdi_json_proof_reason=interaction-latency-contract-missing:inputToPaintMs")
 expect(missing).to_contain("electron_mdi_interaction_latency_status=fail")
@@ -480,6 +492,10 @@ expect(string_latency).to_contain("electron_mdi_json_proof=fail")
 expect(string_latency).to_contain("electron_mdi_interaction_latency_status=fail")
 expect(string_latency).to_contain("electron_mdi_input_to_paint_ms=")
 expect(string_latency.contains("electron_mdi_input_to_paint_ms=18.4")).to_equal(false)
+expect(slow).to_contain("electron_mdi_json_proof=fail")
+expect(slow).to_contain("electron_mdi_json_proof_reason=interaction-latency-contract-missing:inputToPaintMsWithinBudget")
+expect(slow).to_contain("electron_mdi_interaction_latency_status=fail")
+expect(slow).to_contain("electron_mdi_input_to_paint_ms=1001")
 ```
 
 </details>

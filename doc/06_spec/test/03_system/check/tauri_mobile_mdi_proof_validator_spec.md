@@ -79,9 +79,11 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
   log source path, so validation cannot overwrite the source evidence it just
   consumed.
 - `performanceNowAvailable=true` is not enough: the proof must include an
-  explicit finite positive `performanceNowDeltaMs` from distinct samples.
+  explicit finite positive `performanceNowDeltaMs` from distinct samples, and
+  multi-second timing does not prove responsive mobile rendering.
 - Mobile interaction latency must include an explicit positive
-  `inputToPaintMs` sample after routed MDI input and a following paint.
+  `inputToPaintMs` sample after routed MDI input and a following paint; an
+  over-budget multi-second latency sample fails the contract.
 - Capture viewport and animation-frame details must also be explicit finite
   numeric proof values, not defaulted placeholder values.
 - Render proof must include an explicit rendered image count and HTML render
@@ -340,8 +342,9 @@ expect(evidence.contains("ios_mdi_performance_now_delta_ms=0")).to_equal(false)
 
 </details>
 
-#### rejects zero malformed or negative timing deltas
+#### rejects zero malformed negative or over-budget timing deltas
 
+-  proof log command
 -  proof log command
 -  proof log command
    - Expected: code equals `1`
@@ -350,7 +353,7 @@ expect(evidence.contains("ios_mdi_performance_now_delta_ms=0")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -359,12 +362,15 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_log_command(root + "/zero.log", "p.performanceNowDeltaMs=0") +
     " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/zero.json " + root + "/zero.log > " + root + "/zero.env; " +
     _proof_log_command(root + "/negative.log", "p.performanceNowDeltaMs=-1") +
-    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/negative.json " + root + "/negative.log > " + root + "/negative.env"
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/negative.json " + root + "/negative.log > " + root + "/negative.env; " +
+    _proof_log_command(root + "/slow.log", "p.performanceNowDeltaMs=1001") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/slow.json " + root + "/slow.log > " + root + "/slow.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val zero = file_read(root + "/zero.env")
 val negative = file_read(root + "/negative.env")
+val slow = file_read(root + "/slow.env")
 expect(zero).to_contain("android_mdi_proof_status=fail")
 expect(zero).to_contain("android_mdi_performance_status=fail")
 expect(zero).to_contain("android_mdi_performance_now_available=true")
@@ -372,12 +378,16 @@ expect(zero).to_contain("android_mdi_performance_now_delta_ms=0")
 expect(negative).to_contain("android_mdi_proof_status=fail")
 expect(negative).to_contain("android_mdi_performance_status=fail")
 expect(negative).to_contain("android_mdi_performance_now_delta_ms=-1")
+expect(slow).to_contain("ios_mdi_proof_status=fail")
+expect(slow).to_contain("ios_mdi_performance_status=fail")
+expect(slow).to_contain("ios_mdi_performance_now_delta_ms=1001")
 ```
 
 </details>
 
-#### rejects missing zero or stringified input-to-paint latency
+#### rejects missing zero over-budget or stringified input-to-paint latency
 
+-  proof log command
 -  proof log command
 -  proof log command
 -  proof log command
@@ -389,7 +399,7 @@ expect(negative).to_contain("android_mdi_performance_now_delta_ms=-1")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -400,13 +410,16 @@ val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_log_command(root + "/zero.log", "p.inputToPaintMs=0") +
     " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/zero.json " + root + "/zero.log > " + root + "/zero.env; " +
     _proof_log_command(root + "/string.log", "p.inputToPaintMs=\"2.5\"") +
-    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/string.json " + root + "/string.log > " + root + "/string.env"
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/string.json " + root + "/string.log > " + root + "/string.env; " +
+    _proof_log_command(root + "/slow.log", "p.inputToPaintMs=1001") +
+    " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/slow.json " + root + "/slow.log > " + root + "/slow.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val missing = file_read(root + "/missing.env")
 val zero = file_read(root + "/zero.env")
 val string_latency = file_read(root + "/string.env")
+val slow = file_read(root + "/slow.env")
 step("Confirm mobile MDI proof requires structured input-to-paint timing")
 expect(missing).to_contain("ios_mdi_proof_status=fail")
 expect(missing).to_contain("ios_mdi_interaction_latency_status=fail")
@@ -418,6 +431,9 @@ expect(string_latency).to_contain("ios_mdi_proof_status=fail")
 expect(string_latency).to_contain("ios_mdi_interaction_latency_status=fail")
 expect(string_latency).to_contain("ios_mdi_input_to_paint_ms=")
 expect(string_latency.contains("ios_mdi_input_to_paint_ms=2.5")).to_equal(false)
+expect(slow).to_contain("android_mdi_proof_status=fail")
+expect(slow).to_contain("android_mdi_interaction_latency_status=fail")
+expect(slow).to_contain("android_mdi_input_to_paint_ms=1001")
 ```
 
 </details>

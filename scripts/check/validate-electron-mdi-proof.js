@@ -32,6 +32,12 @@ function jsonDecimalGreaterThan(value, required) {
   return Number(text) > required;
 }
 
+function jsonDecimalAtMost(value, required) {
+  const text = jsonNumberText(value);
+  if (text === null) return false;
+  return Number(text) <= required;
+}
+
 function jsonIntegerTextOrBlank(value) {
   const text = jsonIntegerText(value);
   return text === null ? '' : text;
@@ -47,6 +53,7 @@ function boolText(value) {
 }
 
 const [proofPath, screenshotPath] = process.argv.slice(2);
+const maxEventTimingMs = 1000;
 if (!proofPath || !screenshotPath) {
   emit('electron_mdi_json_proof', 'fail');
   emit('reason', 'usage-proof-screenshot');
@@ -131,9 +138,15 @@ const captureChecks = {
 const performanceChecks = {
   performanceNowAvailable: proof.performanceNowAvailable === true,
   performanceNowDeltaMs: jsonDecimalGreaterThan(proof.performanceNowDeltaMs, 0),
+  performanceNowDeltaMsWithinBudget:
+    !jsonDecimalGreaterThan(proof.performanceNowDeltaMs, 0) ||
+    jsonDecimalAtMost(proof.performanceNowDeltaMs, maxEventTimingMs),
 };
 const interactionLatencyChecks = {
   inputToPaintMs: jsonDecimalGreaterThan(proof.inputToPaintMs, 0),
+  inputToPaintMsWithinBudget:
+    !jsonDecimalGreaterThan(proof.inputToPaintMs, 0) ||
+    jsonDecimalAtMost(proof.inputToPaintMs, maxEventTimingMs),
 };
 const animationChecks = {
   animationFrameAvailable: proof.animationFrameAvailable === true,
