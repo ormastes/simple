@@ -3,11 +3,45 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 TAURI_DIR="$ROOT_DIR/tools/tauri-shell"
-BUILD_DIR="$ROOT_DIR/build/tauri_ios_mobile_renderer"
+BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/tauri_ios_mobile_renderer}"
 PROBE_HELPER="$ROOT_DIR/scripts/check/ios_mdi_probe_server.spl"
 MDI_PROOF_VALIDATOR="$ROOT_DIR/scripts/check/validate-tauri-mobile-mdi-proof.js"
 IOS_RENDER_LOG_VALIDATOR="$ROOT_DIR/scripts/check/validate-tauri-ios-render-log-proof.js"
-SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/src/compiler_rust/target/release/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+is_rust_seed_simple() {
+    case "$1" in
+        "$ROOT_DIR"/src/compiler_rust/*|src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in "$ROOT_DIR"/release/*/simple "$ROOT_DIR"/bin/release/*/simple "$ROOT_DIR"/build/bootstrap/stage3/simple "$ROOT_DIR"/bin/simple; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BIN="$(command -v simple)"
+        SIMPLE_BIN_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 SCREENSHOT="${IOS_RENDERER_SCREENSHOT:-$BUILD_DIR/ios_renderer.png}"
 LOG_STREAM="$BUILD_DIR/ios_renderer_log_stream.txt"
 IOS_DEV_LOG="$BUILD_DIR/ios_renderer_tauri_dev.log"
@@ -36,6 +70,9 @@ emit_existing_or_default() {
 emit_unavailable_ios_diagnostics() {
     diagnostic_status="$1"
     diagnostic_reason="$2"
+    echo "tauri_ios_mobile_renderer_simple_bin=$SIMPLE_BIN"
+    echo "tauri_ios_mobile_renderer_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "tauri_ios_mobile_renderer_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "ios_screenshot=$SCREENSHOT"
     echo "ios_log_stream=$LOG_STREAM"
     echo "ios_dev_log=$IOS_DEV_LOG"
@@ -157,6 +194,10 @@ PY
 }
 
 mkdir -p "$BUILD_DIR"
+
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    fail "simple-bin-forbidden"
+fi
 
 if [ "$(uname -s)" != "Darwin" ]; then
     echo "ios_tooling=unavailable"
@@ -362,6 +403,9 @@ ios_mdi_animation_frame_count="$(value_of ios_mdi_animation_frame_count "$MDI_PR
 ios_mdi_css_animation_probe="$(value_of ios_mdi_css_animation_probe "$MDI_PROOF_VALIDATION_ENV")"
 
 echo "ios_tooling=available"
+echo "tauri_ios_mobile_renderer_simple_bin=$SIMPLE_BIN"
+echo "tauri_ios_mobile_renderer_simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "tauri_ios_mobile_renderer_simple_bin_status=$SIMPLE_BIN_STATUS"
 echo "ios_simulator=$SIM_UDID"
 echo "ios_simulator_name=$SIM_NAME"
 echo "ios_screenshot=$SCREENSHOT"
