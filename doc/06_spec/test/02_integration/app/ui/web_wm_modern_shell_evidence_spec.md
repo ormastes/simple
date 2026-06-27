@@ -1,6 +1,6 @@
 # Web WM Modern Shell Evidence Integration
 
-> Runs the modern Web WM preview evidence wrapper and records the preview HTML, ARGB bitmap JSON, PNG bitmap, DOM audit JSON, and report paths when host GUI dependencies are available. Hosts without Electron, display support, or a working Simple runtime must report `environment-unavailable` explicitly. When Electron is available, the wrapper also opens the preview and verifies real browser focus, keyboard, pointer, and click delivery on visible WM controls.
+> Runs the modern Web WM preview evidence wrapper and records the preview HTML, ARGB bitmap JSON, PNG bitmap, DOM audit JSON, and report paths when host GUI dependencies are available. Hosts without Electron, display support, or a working Simple runtime must report `environment-unavailable` explicitly. When Electron is available, the wrapper also opens the preview and verifies real browser focus, keyboard, pointer, and click delivery on visible WM controls. The preview generator must use a self-hosted Simple runtime; explicit Rust seed overrides are rejected before preview or Electron artifacts are created.
 
 <!-- sdn-diagram:id=web_wm_modern_shell_evidence_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ web_wm_modern_shell_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Web WM Modern Shell Evidence Integration
 
-Runs the modern Web WM preview evidence wrapper and records the preview HTML, ARGB bitmap JSON, PNG bitmap, DOM audit JSON, and report paths when host GUI dependencies are available. Hosts without Electron, display support, or a working Simple runtime must report `environment-unavailable` explicitly. When Electron is available, the wrapper also opens the preview and verifies real browser focus, keyboard, pointer, and click delivery on visible WM controls.
+Runs the modern Web WM preview evidence wrapper and records the preview HTML, ARGB bitmap JSON, PNG bitmap, DOM audit JSON, and report paths when host GUI dependencies are available. Hosts without Electron, display support, or a working Simple runtime must report `environment-unavailable` explicitly. When Electron is available, the wrapper also opens the preview and verifies real browser focus, keyboard, pointer, and click delivery on visible WM controls. The preview generator must use a self-hosted Simple runtime; explicit Rust seed overrides are rejected before preview or Electron artifacts are created.
 
 ## At a Glance
 
@@ -47,7 +47,7 @@ Runs the modern Web WM preview evidence wrapper and records the preview HTML, AR
 | Design | doc/07_guide/app/ui/web_wm_modern_shell.md |
 | Research | doc/01_research/ui/wm/simple_wm_modernization.md |
 | Source | `test/02_integration/app/ui/web_wm_modern_shell_evidence_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -58,7 +58,9 @@ dependencies are available. Hosts without Electron, display support, or a
 working Simple runtime must report `environment-unavailable` explicitly.
 When Electron is available, the wrapper also opens the preview and verifies
 real browser focus, keyboard, pointer, and click delivery on visible WM
-controls.
+controls. The preview generator must use a self-hosted Simple runtime; explicit
+Rust seed overrides are rejected before preview or Electron artifacts are
+created.
 
 **Requirements:** N/A
 **Plan:** doc/03_plan/ui/modernization/ui_modernization_plan_2026-06-25.md
@@ -111,7 +113,7 @@ sh scripts/check/check-web-wm-modern-shell-evidence.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -132,6 +134,9 @@ expect(evidence).to_contain("web_wm_modern_shell_evidence_interaction_png=" + BU
 expect(evidence).to_contain("web_wm_modern_shell_evidence_contrast_min_x100=450")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_touch_min_px=44")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_media_features=prefers-contrast=more,prefers-reduced-motion=reduce")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_simple_runtime=")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_simple_runtime_source=")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_simple_runtime_status=")
 
 step("Accept only real pass or explicit host-unavailable status")
 val status = _value_of(evidence, "web_wm_modern_shell_evidence_status")
@@ -163,6 +168,52 @@ expect(report).to_contain("- PNG: `" + BUILD_DIR + "/simple_wm_modern_preview.pn
 expect(report).to_contain("- audit: `" + BUILD_DIR + "/simple_wm_modern_preview_audit.json`")
 expect(report).to_contain("- interaction: `" + BUILD_DIR + "/simple_wm_modern_preview_interaction.json`")
 expect(report).to_contain("- interaction PNG: `" + BUILD_DIR + "/simple_wm_modern_preview_after_interaction.png`")
+expect(report).to_contain("- simple runtime: `")
+expect(report).to_contain("- simple runtime source: `")
+```
+
+</details>
+
+#### rejects explicit Rust seed runtime before preview generation
+
+- Run the wrapper with an explicit Rust seed runtime
+   - Expected: code equals `0`
+- Read the forbidden-runtime evidence
+- Confirm preview and Electron artifacts were not created
+   - Expected: html_code equals `0`
+   - Expected: argb_code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the wrapper with an explicit Rust seed runtime")
+val root = "build/test-web-wm-modern-shell-seed-forbidden"
+val evidence_path = root + "/evidence.env"
+val report_path = root + "/report.md"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && SIMPLE_CMD=src/compiler_rust/target/release/simple BUILD_DIR=" + root + " EVIDENCE_ENV=" + evidence_path + " REPORT_PATH=" + report_path + " sh scripts/check/check-web-wm-modern-shell-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Read the forbidden-runtime evidence")
+val evidence = file_read(evidence_path)
+expect(evidence).to_contain("web_wm_modern_shell_evidence_status=fail")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_reason=simple-runtime-forbidden")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_simple_runtime=src/compiler_rust/target/release/simple")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_simple_runtime_source=explicit-env-rust-seed-forbidden")
+expect(evidence).to_contain("web_wm_modern_shell_evidence_simple_runtime_status=forbidden")
+
+step("Confirm preview and Electron artifacts were not created")
+val report = file_read(report_path)
+expect(report).to_contain("- reason: `simple-runtime-forbidden`")
+val (_html_out, _html_err, html_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/simple_wm_modern_preview.html"])
+expect(html_code).to_equal(0)
+val (_argb_out, _argb_err, argb_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/simple_wm_modern_preview_argb.json"])
+expect(argb_code).to_equal(0)
 ```
 
 </details>
@@ -171,8 +222,8 @@ expect(report).to_contain("- interaction PNG: `" + BUILD_DIR + "/simple_wm_moder
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

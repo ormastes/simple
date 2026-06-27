@@ -19,6 +19,8 @@ WIDTH=${WIDTH:-1360}
 HEIGHT=${HEIGHT:-840}
 ELECTRON_BIN=${ELECTRON_BIN:-tools/electron-shell/node_modules/electron/dist/electron}
 SIMPLE_CMD=${SIMPLE_CMD:-}
+SIMPLE_CMD_SOURCE=${SIMPLE_CMD_SOURCE:-explicit-env}
+SIMPLE_CMD_STATUS=pass
 SIMPLE_RUNTIME_FAILURES=${SIMPLE_RUNTIME_FAILURES:-}
 
 mkdir -p "$BUILD_DIR" "$(dirname "$EVIDENCE_ENV")" "$(dirname "$REPORT_PATH")"
@@ -52,6 +54,8 @@ write_evidence() {
     printf 'web_wm_modern_shell_evidence_touch_min_px=44\n'
     printf 'web_wm_modern_shell_evidence_media_features=%s\n' 'prefers-contrast=more,prefers-reduced-motion=reduce'
     printf 'web_wm_modern_shell_evidence_simple_runtime=%s\n' "${SIMPLE_CMD:-unavailable}"
+    printf 'web_wm_modern_shell_evidence_simple_runtime_source=%s\n' "${SIMPLE_CMD_SOURCE:-unavailable}"
+    printf 'web_wm_modern_shell_evidence_simple_runtime_status=%s\n' "${SIMPLE_CMD_STATUS:-unavailable}"
     printf 'web_wm_modern_shell_evidence_simple_runtime_failures=%s\n' "${SIMPLE_RUNTIME_FAILURES:-none}"
     printf 'web_wm_modern_shell_evidence_bitmap_nonblank_status=%s\n' "${BITMAP_NONBLANK_STATUS:-not-run}"
     printf 'web_wm_modern_shell_evidence_audit_pass=%s\n' "${AUDIT_PASS:-not-run}"
@@ -82,8 +86,30 @@ write_report() {
     printf '%s\n' "- interaction PNG: \`$INTERACTION_PNG_PATH\`"
     printf '%s\n' "- log: \`$LOG_PATH\`"
     printf '%s\n' "- interaction log: \`$INTERACTION_LOG_PATH\`"
+    printf '%s\n' "- simple runtime: \`${SIMPLE_CMD:-unavailable}\`"
+    printf '%s\n' "- simple runtime source: \`${SIMPLE_CMD_SOURCE:-unavailable}\`"
+    printf '%s\n' "- simple runtime status: \`${SIMPLE_CMD_STATUS:-unavailable}\`"
   } > "$REPORT_PATH"
 }
+
+is_rust_seed_simple() {
+  case "$1" in
+    src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if [ -n "$SIMPLE_CMD" ] && is_rust_seed_simple "$SIMPLE_CMD"; then
+  SIMPLE_CMD_SOURCE=explicit-env-rust-seed-forbidden
+  SIMPLE_CMD_STATUS=forbidden
+  write_evidence fail simple-runtime-forbidden
+  write_report fail simple-runtime-forbidden
+  exit 1
+fi
 
 TMP_SPL="$BUILD_DIR/write_preview.spl"
 cat > "$TMP_SPL" <<SIMPLE_PREVIEW_EOF
@@ -98,19 +124,25 @@ fn main():
 SIMPLE_PREVIEW_EOF
 
 if [ -z "$SIMPLE_CMD" ]; then
+  SIMPLE_CMD_SOURCE=missing
   for candidate in \
+    bin/release/*/simple \
+    release/*/simple \
+    build/bootstrap/stage3/simple \
     bin/simple \
-    bin/release/simple \
-    bin/release/x86_64-unknown-linux-gnu/simple \
-    bin/release/linux-x86_64/simple \
-    src/compiler_rust/target/release/simple \
     bin/simple_native
   do
     if [ -x "$candidate" ]; then
+      if is_rust_seed_simple "$candidate"; then
+        SIMPLE_RUNTIME_FAILURES="${SIMPLE_RUNTIME_FAILURES}${candidate}:rust-seed-forbidden,"
+        continue
+      fi
       "$candidate" --version >/dev/null 2>&1
       candidate_code=$?
       if [ $candidate_code -eq 0 ]; then
         SIMPLE_CMD=$candidate
+        SIMPLE_CMD_SOURCE="self-hosted:$candidate"
+        SIMPLE_CMD_STATUS=pass
         break
       fi
       SIMPLE_RUNTIME_FAILURES="${SIMPLE_RUNTIME_FAILURES}${candidate}:${candidate_code},"
@@ -121,18 +153,25 @@ if [ -z "$SIMPLE_CMD" ]; then
   if [ -z "$SIMPLE_CMD" ] && [ "${ALLOW_PATH_SIMPLE_CMD:-0}" = "1" ]; then
     path_simple_candidate="$(command -v simple 2>/dev/null || true)"
     if [ -n "$path_simple_candidate" ] && [ -x "$path_simple_candidate" ]; then
-      "$path_simple_candidate" --version >/dev/null 2>&1
-      candidate_code=$?
-      if [ $candidate_code -eq 0 ]; then
-        SIMPLE_CMD="$path_simple_candidate"
+      if is_rust_seed_simple "$path_simple_candidate"; then
+        SIMPLE_RUNTIME_FAILURES="${SIMPLE_RUNTIME_FAILURES}${path_simple_candidate}:rust-seed-forbidden,"
       else
-        SIMPLE_RUNTIME_FAILURES="${SIMPLE_RUNTIME_FAILURES}${path_simple_candidate}:${candidate_code},"
+        "$path_simple_candidate" --version >/dev/null 2>&1
+        candidate_code=$?
+        if [ $candidate_code -eq 0 ]; then
+          SIMPLE_CMD="$path_simple_candidate"
+          SIMPLE_CMD_SOURCE="path:$path_simple_candidate"
+          SIMPLE_CMD_STATUS=pass
+        else
+          SIMPLE_RUNTIME_FAILURES="${SIMPLE_RUNTIME_FAILURES}${path_simple_candidate}:${candidate_code},"
+        fi
       fi
     else
       SIMPLE_RUNTIME_FAILURES="${SIMPLE_RUNTIME_FAILURES}simple:path-missing,"
     fi
   fi
   if [ -z "$SIMPLE_CMD" ]; then
+    SIMPLE_CMD_STATUS=missing
     write_evidence environment-unavailable simple-runtime-unavailable
     write_report environment-unavailable simple-runtime-unavailable
     exit 0
