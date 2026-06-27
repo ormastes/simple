@@ -6,7 +6,8 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/simpleos_wm_qmp_drag_delta_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/simpleos_wm_qmp_drag_delta_evidence_$(date -u +%F).md}"
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
 LAUNCH_OUT="$BUILD_DIR/launch.out"
 DRAG_OUT="$BUILD_DIR/drag.out"
 BEFORE_PPM="$BUILD_DIR/before-drag.ppm"
@@ -15,6 +16,41 @@ PID=""
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$LAUNCH_OUT" "$DRAG_OUT" "$BEFORE_PPM" "$AFTER_PPM" "$BEFORE_PPM.raw" "$AFTER_PPM.raw" "$BUILD_DIR/evidence.env"
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+if [ -n "${SIMPLE_BIN:-}" ]; then
+    if is_rust_seed_simple "$SIMPLE_BIN"; then
+        SIMPLE_BIN_SOURCE="explicit-env-rust-seed-forbidden"
+        SIMPLE_BIN_STATUS=forbidden
+    fi
+else
+    SIMPLE_BIN=""
+    SIMPLE_BIN_SOURCE=missing
+    for candidate in \
+        "$ROOT_DIR"/bin/release/*/simple \
+        "$ROOT_DIR"/release/*/simple \
+        "$ROOT_DIR"/build/bootstrap/stage3/simple \
+        "$ROOT_DIR"/bin/simple
+    do
+        if [ -f "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="self-hosted:$candidate"
+            SIMPLE_BIN_STATUS=pass
+            break
+        fi
+    done
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 
 cleanup() {
     if [ -n "$PID" ]; then
@@ -43,6 +79,40 @@ source_region_changed=0
 target_region_changed=0
 before_sha256=
 after_sha256=
+
+emit_simple_bin_failure() {
+    reason="$1"
+    {
+        echo "qemu_wm_drag_delta_status=fail"
+        echo "qemu_wm_drag_delta_reason=$reason"
+        echo "qemu_wm_drag_delta_simple_bin=$SIMPLE_BIN"
+        echo "qemu_wm_drag_delta_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "qemu_wm_drag_delta_simple_bin_status=$SIMPLE_BIN_STATUS"
+        echo "qemu_wm_drag_delta_launch_out=$LAUNCH_OUT"
+        echo "qemu_wm_drag_delta_drag_out=$DRAG_OUT"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# SimpleOS WM QMP Drag Delta Evidence"
+        echo
+        echo "- status: fail"
+        echo "- reason: $reason"
+        echo "- simple bin: $SIMPLE_BIN"
+        echo "- simple bin source: $SIMPLE_BIN_SOURCE"
+        echo "- simple bin status: $SIMPLE_BIN_STATUS"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+}
+
+if [ "$SIMPLE_BIN_STATUS" = forbidden ]; then
+    emit_simple_bin_failure "simple-bin-forbidden"
+    exit 1
+fi
+
+if [ ! -f "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    emit_simple_bin_failure "simple-bin-missing"
+    exit 1
+fi
 
 set +e
 SIMPLE_LIB="${SIMPLE_LIB:-src}" \
@@ -167,6 +237,9 @@ fi
 {
     echo "qemu_wm_drag_delta_status=$status"
     echo "qemu_wm_drag_delta_reason=$reason"
+    echo "qemu_wm_drag_delta_simple_bin=$SIMPLE_BIN"
+    echo "qemu_wm_drag_delta_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "qemu_wm_drag_delta_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "qemu_wm_drag_delta_launcher_status=${launcher_status:-}"
     echo "qemu_wm_drag_delta_launcher_reason=${launcher_reason:-}"
     echo "qemu_wm_drag_delta_launcher_target=${launcher_target:-}"
@@ -196,6 +269,9 @@ fi
     echo
     echo "- status: $status"
     echo "- reason: $reason"
+    echo "- simple bin: $SIMPLE_BIN"
+    echo "- simple bin source: $SIMPLE_BIN_SOURCE"
+    echo "- simple bin status: $SIMPLE_BIN_STATUS"
     echo "- launcher status: ${launcher_status:-}"
     echo "- launcher reason: ${launcher_reason:-}"
     echo "- launcher target: ${launcher_target:-}"
