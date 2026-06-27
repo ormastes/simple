@@ -27,7 +27,7 @@ generated_2d_native_readback_wrappers_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +47,7 @@ Runs the Metal and ROCm/HIP generated-2D readback wrappers into isolated build-l
 | Design | doc/05_design/host_gpu_lane.md |
 | Research | doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md |
 | Source | `test/03_system/check/generated_2d_native_readback_wrappers_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -103,7 +103,8 @@ A native pass must report `status=pass`, `submit_attempted=true`, and
 - ROCm/HIP evidence includes loader, probe, module, submit, readback, checksum,
   and operation keys.
 - Unavailable evidence must report `readback_available=false`.
-- Pass evidence must prove submit/readback and matching checksums.
+- Pass evidence must prove submit/readback, matching nonzero per-operation
+  checksums, and matching aggregate expected/actual checksum rows.
 
 ## Scenarios
 
@@ -145,6 +146,56 @@ else:
     expect(status).to_equal("unavailable")
     expect(readback).to_equal("false")
     expect(reason.len()).to_be_greater_than(0)
+```
+
+</details>
+
+#### rejects forged Metal harness pass with mismatched per-op checksums
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val rows = "status=pass\\nfill_checksum=1\\nfill_expected=1\\ncopy_checksum=2\\ncopy_expected=2\\nalpha_checksum=3\\nalpha_expected=999\\nscroll_checksum=4\\nscroll_expected=4\\nsubmit_attempted=true\\nreadback_available=true\\n"
+val command = _fake_metal_harness_command("build/test-metal-generated-2d-readback-forged", rows)
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = rt_file_read_text("build/test-metal-generated-2d-readback-forged/evidence.env")
+expect(evidence).to_contain("metal_generated_2d_readback_status=fail")
+expect(evidence).to_contain("metal_generated_2d_readback_reason=alpha-checksum-mismatch")
+expect(evidence).to_contain("metal_generated_2d_readback_expected_checksum=1006")
+expect(evidence).to_contain("metal_generated_2d_readback_actual_checksum=10")
+expect(evidence).to_contain("metal_generated_2d_readback_alpha_checksum=3")
+expect(evidence).to_contain("metal_generated_2d_readback_alpha_expected=999")
+```
+
+</details>
+
+#### accepts Metal harness pass only after matching nonzero per-op checksums
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val rows = "status=pass\\nfill_checksum=1\\nfill_expected=1\\ncopy_checksum=2\\ncopy_expected=2\\nalpha_checksum=3\\nalpha_expected=3\\nscroll_checksum=4\\nscroll_expected=4\\nsubmit_attempted=true\\nreadback_available=true\\n"
+val command = _fake_metal_harness_command("build/test-metal-generated-2d-readback-harness-pass", rows)
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = rt_file_read_text("build/test-metal-generated-2d-readback-harness-pass/evidence.env")
+expect(evidence).to_contain("metal_generated_2d_readback_status=pass")
+expect(evidence).to_contain("metal_generated_2d_readback_reason=gpu-readback-verified")
+expect(evidence).to_contain("metal_generated_2d_readback_expected_checksum=10")
+expect(evidence).to_contain("metal_generated_2d_readback_actual_checksum=10")
+expect(evidence).to_contain("metal_generated_2d_readback_submit_attempted=true")
+expect(evidence).to_contain("metal_generated_2d_readback_readback_available=true")
 ```
 
 </details>
@@ -192,8 +243,8 @@ else:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

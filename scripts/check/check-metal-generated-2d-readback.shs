@@ -63,6 +63,25 @@ emit_env() {
     } >"$BUILD_DIR/evidence.env"
 }
 
+readback_unsigned_decimal() {
+    printf '%s\n' "$1" | grep -Eq '^[0-9]+$'
+}
+
+readback_positive_decimal() {
+    readback_unsigned_decimal "$1" || return 1
+    printf '%s\n' "$1" | grep -Eq '[1-9]'
+}
+
+readback_checksum_sum() {
+    awk 'BEGIN {
+        sum = 0
+        for (i = 1; i < ARGC; i++) {
+            sum += ARGV[i]
+        }
+        printf "%.0f\n", sum
+    }' "$@"
+}
+
 emit_env_harness() {
     # Emit evidence.env from harness output file $1
     harness_out="$1"
@@ -90,9 +109,46 @@ emit_env_harness() {
     h_copy_ex="${h_copy_ex:-0}"
     h_alpha_ex="${h_alpha_ex:-0}"
     h_scroll_ex="${h_scroll_ex:-0}"
+    h_actual="$(readback_checksum_sum "$h_fill_ck" "$h_copy_ck" "$h_alpha_ck" "$h_scroll_ck")"
+    h_expected="$(readback_checksum_sum "$h_fill_ex" "$h_copy_ex" "$h_alpha_ex" "$h_scroll_ex")"
     reason="harness-executed"
     if [ "$h_status" = "pass" ]; then
-        reason="gpu-readback-verified"
+        if [ "$h_submit" != "true" ]; then
+            h_status="fail"
+            reason="missing-submit-attempt"
+        elif [ "$h_readback" != "true" ]; then
+            h_status="fail"
+            reason="missing-readback"
+        elif ! readback_positive_decimal "$h_fill_ck" || ! readback_positive_decimal "$h_fill_ex"; then
+            h_status="fail"
+            reason="fill-checksum-missing-or-zero"
+        elif ! readback_positive_decimal "$h_copy_ck" || ! readback_positive_decimal "$h_copy_ex"; then
+            h_status="fail"
+            reason="copy-checksum-missing-or-zero"
+        elif ! readback_positive_decimal "$h_alpha_ck" || ! readback_positive_decimal "$h_alpha_ex"; then
+            h_status="fail"
+            reason="alpha-checksum-missing-or-zero"
+        elif ! readback_positive_decimal "$h_scroll_ck" || ! readback_positive_decimal "$h_scroll_ex"; then
+            h_status="fail"
+            reason="scroll-checksum-missing-or-zero"
+        elif [ "$h_fill_ck" != "$h_fill_ex" ]; then
+            h_status="fail"
+            reason="fill-checksum-mismatch"
+        elif [ "$h_copy_ck" != "$h_copy_ex" ]; then
+            h_status="fail"
+            reason="copy-checksum-mismatch"
+        elif [ "$h_alpha_ck" != "$h_alpha_ex" ]; then
+            h_status="fail"
+            reason="alpha-checksum-mismatch"
+        elif [ "$h_scroll_ck" != "$h_scroll_ex" ]; then
+            h_status="fail"
+            reason="scroll-checksum-mismatch"
+        elif [ "$h_actual" != "$h_expected" ]; then
+            h_status="fail"
+            reason="aggregate-checksum-mismatch"
+        else
+            reason="gpu-readback-verified"
+        fi
     fi
     {
         echo "metal_generated_2d_readback_status=$h_status"
@@ -105,6 +161,8 @@ emit_env_harness() {
         echo "metal_generated_2d_readback_module_verified=$module_verified"
         echo "metal_generated_2d_readback_submit_attempted=$h_submit"
         echo "metal_generated_2d_readback_readback_available=$h_readback"
+        echo "metal_generated_2d_readback_expected_checksum=$h_expected"
+        echo "metal_generated_2d_readback_actual_checksum=$h_actual"
         echo "metal_generated_2d_readback_fill_checksum=$h_fill_ck"
         echo "metal_generated_2d_readback_fill_expected=$h_fill_ex"
         echo "metal_generated_2d_readback_copy_checksum=$h_copy_ck"
