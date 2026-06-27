@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 68 | 68 | 0 | 0 |
+| 69 | 69 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -278,6 +278,41 @@ expect(_draw_ir_style_value(panel, "overflow-wrap")).to_equal("break-word")
 expect(_draw_ir_style_value(panel, "word-wrap")).to_equal("break-word")
 expect(_draw_ir_style_value(panel, "word-break")).to_equal("break-all")
 ```
+
+</details>
+
+#### expands flex-flow shorthand into computed flex direction and wrap
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}#stack{display:flex;flex-flow:column wrap;width:32px;height:24px;gap:2px}.item{width:10px;height:6px;background-color:#22c55e}</style></head><body><section id='stack'><div class='item'></div><div class='item'></div></section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 80, 48)
+val batch = composition.batches[0]
+val stack = _draw_ir_command_by_id(batch.commands, "stack")
+
+expect(_draw_ir_style_value(stack, "display")).to_equal("flex")
+expect(_draw_ir_style_value(stack, "flex-direction")).to_equal("column")
+expect(_draw_ir_style_value(stack, "flex-wrap")).to_equal("wrap")
+```
+
+<details>
+<summary>Rendered scenario source</summary>
+
+> val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}#stack{display:flex;flex-flow:column wrap;width:32px;height:24px;gap:2px}.ite$width$</style></head><body><section id='stack'><div class='item'></div><div class='item'></div></section></body></html>"<br>
+> val composition = simple_web_layout_render_html_draw_ir(html, 80, 48)<br>
+> val batch = composition.batches[0]<br>
+> val stack = _draw_ir_command_by_id(batch.commands, "stack")<br>
+> <br>
+> expect(_draw_ir_style_value(stack, "display")).to_equal("flex")<br>
+> expect(_draw_ir_style_value(stack, "flex-direction")).to_equal("column")<br>
+> expect(_draw_ir_style_value(stack, "flex-wrap")).to_equal("wrap")
+
+</details>
 
 </details>
 
@@ -1498,8 +1533,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 68 |
-| Active scenarios | 68 |
+| Total scenarios | 69 |
+| Active scenarios | 69 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

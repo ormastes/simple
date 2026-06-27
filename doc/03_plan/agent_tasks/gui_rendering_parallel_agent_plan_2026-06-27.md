@@ -54,10 +54,10 @@ required, platform render-log comparison, and separate full-CSS closure.
   accept the relevant fresh evidence rows.
 - Current full-CSS evidence keys remain incomplete:
   `html_css_full_rendering_goal_status=incomplete`,
-  `html_css_full_rendering_goal_full_css_rendered_count=134`, and
-  `html_css_full_rendering_goal_full_css_unrendered_count=260`.
-  `aspect-ratio`, `object-fit`, and `object-position` are completed narrow
-  implemented-CSS slices.
+  `html_css_full_rendering_goal_full_css_rendered_count=135`, and
+  `html_css_full_rendering_goal_full_css_unrendered_count=259`.
+  `aspect-ratio`, `object-fit`, `object-position`, and `flex-flow` are
+  completed narrow implemented-CSS slices.
 
 ## Current Parallel Start Status
 
@@ -348,6 +348,7 @@ This session's immediate integration target:
 | WO-12 Spark restart queue | Main agent or future orchestrator | High: same read-only prompts after quota recovers | None | New Spark outputs are explicitly compared against `Feynman`/`Mill` fallback results and accepted only after `Poincare`-style normal review |
 | WO-13 CSS object-position slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused unit/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `134/134`, and no full-CSS/native-platform completion is claimed |
 | WO-14 Aggregate current-evidence autodiscovery | Main agent | Low: Spark may inspect output only | Aggregate checker, focused autodiscovery SSpec/manual doc | Default aggregate discovers current 4K, 8K, browser-backing, and direct ARGB evidence rows without explicit env overrides; blocker count drops from 16 to 10 on this host |
+| WO-15 CSS flex-flow slice | Main agent | Low: Spark may only inspect evidence after implementation | CSS traceability wrapper, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `135/135`, and no full-CSS/native-platform completion is claimed |
 
 WO-12 rule: do not spawn Spark against source-edit scopes until the read-only
 gap/matrix lanes complete and a normal reviewer approves the intended write
@@ -411,6 +412,15 @@ A quiet default aggregate run with current-source checking now reports
 `pass`, and `blocked_completion_gate_count=10`. Remaining blockers are still
 RenderDoc `.rdc`, platform render-log comparison, production parity/font/Metal,
 and full CSS completion.
+
+WO-15 status, 2026-06-27: `flex-flow` moved into implemented Simple Web CSS
+as a parser-expanded shorthand that feeds the existing `flex-direction` and
+`flex-wrap` renderer paths. Current evidence is recorded in
+`doc/09_report/html_css_full_rendering_goal_status_flex_flow_2026-06-27.md`:
+implemented CSS is `135/135`, full CSS is `135/394`, full CSS unrendered is
+`259`, and unsupported inventory ownership is `266`. This is a completed
+narrow web-renderer slice, not completion evidence for full CSS or native
+platform capture lanes.
 
 WO-5 status: refreshed non-RenderDoc Linux evidence is passing in
 `doc/09_report/gui_web_2d_linux_vulkan_refresh_2026-06-27.md`. A fresh
