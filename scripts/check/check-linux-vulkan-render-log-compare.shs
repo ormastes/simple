@@ -53,10 +53,16 @@ add_reason() {
 
 file_status() {
     path="$1"
-    if [ -s "$path" ]; then
-        printf '%s\n' "pass"
-    else
+    if [ -z "$path" ]; then
         printf '%s\n' "missing"
+    elif [ -L "$path" ]; then
+        printf '%s\n' "symlink"
+    elif [ ! -f "$path" ]; then
+        printf '%s\n' "missing"
+    elif [ ! -s "$path" ]; then
+        printf '%s\n' "empty"
+    else
+        printf '%s\n' "pass"
     fi
 }
 
@@ -176,18 +182,36 @@ if [ "$require_renderdoc" = "1" ]; then
     fi
 fi
 
-[ -n "$reason_parts" ] || reason_parts="pass"
-
 simple_artifact="$(render_log_value_of rdoc_capture_file "$RDOC_SIMPLE_EVIDENCE_ENV")"
 simple_magic="$(render_log_rdoc_artifact_magic "$RDOC_SIMPLE_EVIDENCE_ENV" "$simple_artifact")"
 simple_artifact_path="$(render_log_rdoc_artifact_path "$RDOC_SIMPLE_EVIDENCE_ENV" "$simple_artifact" || true)"
+simple_artifact_file_status="$(file_status "$simple_artifact_path")"
 chrome_artifact="$(render_log_value_of rdoc_capture_file "$RDOC_HTML_EVIDENCE_ENV")"
 [ -n "$chrome_artifact" ] || chrome_artifact="$(render_log_value_of rdoc_external_host_capture_file "$RDOC_HTML_EVIDENCE_ENV")"
 chrome_magic="$(render_log_rdoc_artifact_magic "$RDOC_HTML_EVIDENCE_ENV" "$chrome_artifact")"
 chrome_artifact_path="$(render_log_rdoc_artifact_path "$RDOC_HTML_EVIDENCE_ENV" "$chrome_artifact" || true)"
+chrome_artifact_file_status="$(file_status "$chrome_artifact_path")"
 electron_artifact="$(render_log_value_of rdoc_capture_file "$RDOC_ELECTRON_HTML_EVIDENCE_ENV")"
 electron_magic="$(render_log_rdoc_artifact_magic "$RDOC_ELECTRON_HTML_EVIDENCE_ENV" "$electron_artifact")"
 electron_artifact_path="$(render_log_rdoc_artifact_path "$RDOC_ELECTRON_HTML_EVIDENCE_ENV" "$electron_artifact" || true)"
+electron_artifact_file_status="$(file_status "$electron_artifact_path")"
+
+if [ "$require_renderdoc" = "1" ]; then
+    if [ "$simple_rdoc_status" = "pass" ] && [ "$simple_artifact_file_status" != "pass" ]; then
+        compare_status="fail"
+        add_reason "renderdoc-simple-artifact-file-${simple_artifact_file_status:-missing}"
+    fi
+    if [ "$chrome_rdoc_status" = "pass" ] && [ "$chrome_artifact_file_status" != "pass" ]; then
+        compare_status="fail"
+        add_reason "renderdoc-chrome-artifact-file-${chrome_artifact_file_status:-missing}"
+    fi
+    if [ "$electron_rdoc_status" = "pass" ] && [ "$electron_artifact_file_status" != "pass" ]; then
+        compare_status="fail"
+        add_reason "renderdoc-electron-artifact-file-${electron_artifact_file_status:-missing}"
+    fi
+fi
+
+[ -n "$reason_parts" ] || reason_parts="pass"
 
 pixel_gate_status="pass"
 if [ "$pixel_status" != "pass" ] || [ "$pixel_mode" != "pairwise-argb-diff" ] ||
@@ -216,7 +240,9 @@ renderdoc_gate_status="pass"
 if [ "$require_renderdoc" != "1" ]; then
     renderdoc_gate_status="diagnostic-disabled"
 elif [ "$simple_rdoc_status" != "pass" ] || [ "$chrome_rdoc_status" != "pass" ] ||
-    [ "$electron_rdoc_status" != "pass" ]; then
+    [ "$electron_rdoc_status" != "pass" ] ||
+    [ "$simple_artifact_file_status" != "pass" ] || [ "$chrome_artifact_file_status" != "pass" ] ||
+    [ "$electron_artifact_file_status" != "pass" ]; then
     renderdoc_gate_status="fail"
 fi
 
@@ -243,9 +269,9 @@ fi
 [ "$pixel_gate_status" = "pass" ] || add_blocked_gate "pairwise-argb-diff"
 [ "$argb_source_gate_status" = "pass" ] || add_blocked_gate "argb-source-evidence"
 if [ "$require_renderdoc" = "1" ]; then
-    [ "$simple_rdoc_status" = "pass" ] || add_blocked_gate "renderdoc-simple-rdc"
-    [ "$chrome_rdoc_status" = "pass" ] || add_blocked_gate "renderdoc-chrome-rdc"
-    [ "$electron_rdoc_status" = "pass" ] || add_blocked_gate "renderdoc-electron-rdc"
+    { [ "$simple_rdoc_status" = "pass" ] && [ "$simple_artifact_file_status" = "pass" ]; } || add_blocked_gate "renderdoc-simple-rdc"
+    { [ "$chrome_rdoc_status" = "pass" ] && [ "$chrome_artifact_file_status" = "pass" ]; } || add_blocked_gate "renderdoc-chrome-rdc"
+    { [ "$electron_rdoc_status" = "pass" ] && [ "$electron_artifact_file_status" = "pass" ]; } || add_blocked_gate "renderdoc-electron-rdc"
 fi
 
 render_log_write_source_log "$SIMPLE_LOG" "simple" "simple-renderdoc" "$RDOC_SIMPLE_EVIDENCE_ENV" "$GUI_WEB_2D_VULKAN_ENV" "$simple_rdoc_status" "$simple_artifact" "$simple_magic" "simple-backend=${simple_backend:-};simple-argb-backend=${simple_argb_backend:-}" "$simple_rdoc_reason"
@@ -292,21 +318,21 @@ render_log_write_source_log "$ELECTRON_LOG" "electron" "renderdoc" "$RDOC_ELECTR
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_simple_env" "$RDOC_SIMPLE_EVIDENCE_ENV"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_simple_env_file_status" "$(file_status "$RDOC_SIMPLE_EVIDENCE_ENV")"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_simple_artifact" "$simple_artifact"
-    render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status" "$(file_status "$simple_artifact_path")"
+    render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status" "$simple_artifact_file_status"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_simple_artifact_magic" "$(artifact_magic_status "$simple_magic" "$simple_artifact_path")"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_simple_status" "$simple_rdoc_status"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_simple_reason" "$simple_rdoc_reason"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_chrome_env" "$RDOC_HTML_EVIDENCE_ENV"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_chrome_env_file_status" "$(file_status "$RDOC_HTML_EVIDENCE_ENV")"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_chrome_artifact" "$chrome_artifact"
-    render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status" "$(file_status "$chrome_artifact_path")"
+    render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status" "$chrome_artifact_file_status"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic" "$(artifact_magic_status "$chrome_magic" "$chrome_artifact_path")"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_chrome_status" "$chrome_rdoc_status"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_chrome_reason" "$chrome_rdoc_reason"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_electron_env" "$RDOC_ELECTRON_HTML_EVIDENCE_ENV"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_electron_env_file_status" "$(file_status "$RDOC_ELECTRON_HTML_EVIDENCE_ENV")"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_electron_artifact" "$electron_artifact"
-    render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status" "$(file_status "$electron_artifact_path")"
+    render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status" "$electron_artifact_file_status"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_electron_artifact_magic" "$(artifact_magic_status "$electron_magic" "$electron_artifact_path")"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_electron_status" "$electron_rdoc_status"
     render_log_append_kv "linux_vulkan_render_log_compare_renderdoc_electron_reason" "$electron_rdoc_reason"
