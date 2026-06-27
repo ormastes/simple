@@ -21,7 +21,11 @@ value_of() {
 
 file_exists_status() {
     path="$1"
-    if [ -n "$path" ] && [ -s "$path" ]; then
+    if [ -z "$path" ]; then
+        echo "missing"
+    elif [ -L "$path" ]; then
+        echo "symlink"
+    elif [ -s "$path" ]; then
         echo "pass"
     else
         echo "missing"
@@ -33,6 +37,25 @@ write_argb_gate_env() {
     expected_width="$2"
     expected_height="$3"
     out_path="$4"
+
+    if [ -n "$argb_path" ] && [ -L "$argb_path" ]; then
+        {
+            echo "rdoc_electron_html_gate_argb_status=fail"
+            echo "rdoc_electron_html_gate_argb_reason=electron-argb-symlink"
+            echo "rdoc_electron_html_gate_argb_path=$argb_path"
+            echo "rdoc_electron_html_gate_argb_width="
+            echo "rdoc_electron_html_gate_argb_height="
+            echo "rdoc_electron_html_gate_argb_format="
+            echo "rdoc_electron_html_gate_argb_producer="
+            echo "rdoc_electron_html_gate_argb_native_width="
+            echo "rdoc_electron_html_gate_argb_native_height="
+            echo "rdoc_electron_html_gate_argb_pixel_count=0"
+            echo "rdoc_electron_html_gate_argb_nonblank_pixel_count=0"
+            echo "rdoc_electron_html_gate_argb_expected_width=$expected_width"
+            echo "rdoc_electron_html_gate_argb_expected_height=$expected_height"
+        } >"$out_path"
+        return 0
+    fi
 
     if [ ! -s "$argb_path" ]; then
         {
@@ -208,6 +231,7 @@ write_evidence() {
         echo "rdoc_electron_html_gate_electron=${electron_bin:-}"
         echo "rdoc_electron_html_gate_capture_script=${capture_script:-}"
         echo "rdoc_electron_html_gate_argb_path=${argb_path:-}"
+        echo "rdoc_electron_html_gate_argb_file_status=${argb_file_status:-}"
         echo "rdoc_electron_html_gate_argb_status=${argb_status:-}"
         echo "rdoc_electron_html_gate_argb_reason=${argb_reason:-}"
         echo "rdoc_electron_html_gate_argb_width=${argb_width:-}"
@@ -293,6 +317,7 @@ if [ ! -s "$SOURCE_ENV" ]; then
     requested_features=""
     launch_flags=""
     argb_path=""
+    argb_file_status=""
     argb_status=""
     argb_reason=""
     argb_width=""
@@ -320,13 +345,14 @@ capture_file="$(value_of rdoc_capture_file "$SOURCE_ENV")"
 capture_magic="$(value_of rdoc_capture_magic "$SOURCE_ENV")"
 capture_file_status="$(file_exists_status "$capture_file")"
 capture_file_magic=""
-if [ -s "$capture_file" ]; then
+if [ "$capture_file_status" = "pass" ]; then
     capture_file_magic="$(dd if="$capture_file" bs=4 count=1 2>/dev/null || true)"
 fi
 html_path="$(value_of rdoc_html_path "$SOURCE_ENV")"
 electron_bin="$(value_of rdoc_electron "$SOURCE_ENV")"
 capture_script="$(value_of rdoc_electron_capture_script "$SOURCE_ENV")"
 argb_path="$(value_of rdoc_electron_argb "$SOURCE_ENV")"
+argb_file_status="$(file_exists_status "$argb_path")"
 electron_width="$(value_of rdoc_electron_width "$SOURCE_ENV")"
 electron_height="$(value_of rdoc_electron_height "$SOURCE_ENV")"
 requested_api="$(value_of rdoc_chromium_requested_api "$SOURCE_ENV")"
@@ -414,7 +440,7 @@ if [ "$backend" = "electron" ] \
     && [ "$capture_status" = "pass" ] \
     && [ "$capture_magic" = "RDOC" ] \
     && [ "$capture_file_magic" = "RDOC" ] \
-    && [ -s "$capture_file" ] \
+    && [ "$capture_file_status" = "pass" ] \
     && [ "$requested_api" = "vulkan" ] \
     && [ "$requested_angle" = "vulkan" ] \
     && [ "$requested_features_vulkan" = "1" ] \
@@ -439,7 +465,9 @@ elif [ "$capture_status" != "pass" ]; then
     write_evidence "fail" "${capture_reason:-capture-not-pass}"
 elif [ "$capture_magic" != "RDOC" ]; then
     write_evidence "fail" "missing-rdoc-magic"
-elif [ ! -s "$capture_file" ]; then
+elif [ "$capture_file_status" = "symlink" ]; then
+    write_evidence "fail" "rdc-file-symlink"
+elif [ "$capture_file_status" != "pass" ]; then
     write_evidence "fail" "missing-rdc-file"
 elif [ "$capture_file_magic" != "RDOC" ]; then
     write_evidence "fail" "missing-rdoc-file-magic"

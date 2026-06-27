@@ -225,7 +225,7 @@ expect(report).to_contain("- blocked gates: 0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -240,8 +240,9 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_status=incomplete")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_reason=missing-simple-widget-renderdoc")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_status=pass")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_simple_gate_capture_file_status=symlink")
-expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_status=pass")
-expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_failure_class=capture-file-symlink")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_status=fail")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_reason=rdc-file-symlink")
+expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_failure_class=electron-gate-rdc-file-symlink")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_capture_file_status=symlink")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_file_status=symlink")
 expect(evidence).to_contain("gui_widget_renderdoc_goal_electron_gate_argb_status=pass")
