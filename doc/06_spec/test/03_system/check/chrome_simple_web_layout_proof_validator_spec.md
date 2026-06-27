@@ -1007,7 +1007,7 @@ expect(pixel).to_contain("chrome_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1048,7 +1048,8 @@ expect(validator).to_contain("jsonBoolTextOrBlank")
 expect(validator).to_contain("missing-chrome-bin")
 expect(validator).to_contain("captured-argb-checksum-mismatch")
 expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
-expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
+expect(script).to_contain("captured-argb-checksum-mismatch")
+expect(script).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("status=divergent")
 val capture = file_read("tools/chrome-live-bitmap/capture_html_argb.js")
 expect(capture).to_contain("return sum.toString()")

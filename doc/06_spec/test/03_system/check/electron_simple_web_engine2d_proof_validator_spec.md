@@ -901,7 +901,7 @@ expect(weighted).to_contain("electron_simple_web_engine2d_captured_argb_weighted
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -927,10 +927,15 @@ expect(script).to_contain("electron_simple_web_engine2d_estimated_fps_floor")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_file_status")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_format")
 expect(script).to_contain("electron_simple_web_engine2d_captured_argb_nonzero_pixel_count")
+expect(script).to_contain("electron_simple_web_engine2d_captured_argb_checksum")
+expect(script).to_contain("electron_simple_web_engine2d_captured_argb_weighted_checksum")
 expect(validator).to_contain("electron_simple_web_engine2d_captured_argb_checksum")
 expect(validator).to_contain("electron_simple_web_engine2d_captured_argb_weighted_checksum")
 expect(validator).to_contain("captured-argb-checksum-mismatch")
 expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
+expect(script).to_contain("captured-argb-checksum-mismatch")
+expect(script).to_contain("captured-argb-weighted-checksum-mismatch")
+expect(script).to_contain("status=divergent")
 expect(script).to_contain("electron_simple_web_engine2d_proof_renderer")
 expect(script).to_contain("electron-proof.validation.env")
 expect(validator).to_contain("startsWith")

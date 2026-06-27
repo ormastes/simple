@@ -718,7 +718,7 @@ expect(weighted).to_contain("tauri_simple_web_layout_captured_argb_weighted_chec
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -735,7 +735,8 @@ expect(script).to_contain("tauri_simple_web_layout_captured_argb_nonzero_pixel_c
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_checksum")
 expect(script).to_contain("tauri_simple_web_layout_captured_argb_weighted_checksum")
 expect(script).to_contain("tauri_simple_web_layout_requested_width")
-expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
+expect(script).to_contain("captured-argb-checksum-mismatch")
+expect(script).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("status=divergent")
 expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
 expect(validator).to_contain("proof-json-symlink")

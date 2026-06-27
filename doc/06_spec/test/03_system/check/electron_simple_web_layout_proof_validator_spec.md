@@ -972,7 +972,7 @@ expect(weighted).to_contain("electron_simple_web_layout_captured_argb_weighted_c
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1005,13 +1005,16 @@ expect(script).to_contain("electron_simple_web_layout_captured_argb_file_status"
 expect(script).to_contain("electron_simple_web_layout_captured_argb_size_bytes")
 expect(script).to_contain("electron_simple_web_layout_captured_argb_format")
 expect(script).to_contain("electron_simple_web_layout_captured_argb_nonzero_pixel_count")
+expect(script).to_contain("electron_simple_web_layout_captured_argb_checksum")
+expect(script).to_contain("electron_simple_web_layout_captured_argb_weighted_checksum")
 expect(validator).to_contain("electron_simple_web_layout_captured_argb_checksum")
 expect(validator).to_contain("electron_simple_web_layout_captured_argb_weighted_checksum")
 expect(validator).to_contain("captured-argb-checksum-mismatch")
 expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("electron_simple_web_layout_proof_renderer")
 expect(script).to_contain("electron_simple_web_layout_proof_source")
-expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
+expect(script).to_contain("captured-argb-checksum-mismatch")
+expect(script).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("status=divergent")
 
 val fixture = file_read("tools/electron-live-bitmap/exact_fixture.js")

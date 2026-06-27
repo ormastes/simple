@@ -932,7 +932,7 @@ expect(weighted).to_contain("electron_generated_gui_web_captured_argb_weighted_c
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -960,13 +960,16 @@ expect(script).to_contain("electron_generated_gui_web_captured_argb_symlink_stat
 expect(script).to_contain("electron_generated_gui_web_captured_argb_size_bytes")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_format")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_nonzero_pixel_count")
+expect(script).to_contain("electron_generated_gui_web_captured_argb_checksum")
+expect(script).to_contain("electron_generated_gui_web_captured_argb_weighted_checksum")
 expect(validator).to_contain("electron_generated_gui_web_captured_argb_checksum")
 expect(validator).to_contain("electron_generated_gui_web_captured_argb_weighted_checksum")
 expect(validator).to_contain("captured-argb-checksum-mismatch")
 expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("electron_generated_gui_web_proof_renderer")
 expect(script).to_contain("electron_generated_gui_web_proof_source")
-expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
+expect(script).to_contain("captured-argb-checksum-mismatch")
+expect(script).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("status=divergent")
 expect(validator).to_contain("proof-json-symlink")
 expect(validator).to_contain("captured-argb-symlink")
