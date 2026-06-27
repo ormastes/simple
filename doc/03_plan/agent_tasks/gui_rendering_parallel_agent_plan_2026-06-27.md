@@ -54,10 +54,10 @@ required, platform render-log comparison, and separate full-CSS closure.
   accept the relevant fresh evidence rows.
 - Current full-CSS evidence keys remain incomplete:
   `html_css_full_rendering_goal_status=incomplete`,
-  `html_css_full_rendering_goal_full_css_rendered_count=141`, and
-  `html_css_full_rendering_goal_full_css_unrendered_count=253`.
+  `html_css_full_rendering_goal_full_css_rendered_count=147`, and
+  `html_css_full_rendering_goal_full_css_unrendered_count=247`.
   `aspect-ratio`, `object-fit`, `object-position`, `flex-flow`, and logical
-  inline spacing are completed narrow implemented-CSS slices.
+  inline/block spacing are completed narrow implemented-CSS slices.
 
 ## Current Parallel Start Status
 
@@ -300,7 +300,7 @@ Each scenario maps to one completion gate:
 | macOS Metal | Native Metal readback; browser/gui backing; pairwise equivalence; macOS render-log compare; Xcode GPU Capture proof when required | Darwin GUI host | Not run on this Linux host |
 | Windows D3D12 | Native D3D12/DXGI readback; browser/gui backing; pairwise equivalence; D3D12 render-log compare; verified PIX artifact files and GPU-debugger artifact files | Windows GUI host | Not run on this Linux host |
 | 4K/8K retained perf | Current-source 4K and 8K rows at 200 FPS with viewport, p50/p95 or equivalent timing, RSS, checksum/readback, native binary provenance, retained mode, redraw count, source revision, and `fallback_state=none` | Main/perf agent | Prior retained rows pass; keep source freshness required |
-| Full HTML/CSS | All HTML tags and all CSS inventory properties render; strict full CSS gate passes | Main/web-renderer agents | Incomplete: implemented CSS subset is `141/141`, full CSS is `141/394` |
+| Full HTML/CSS | All HTML tags and all CSS inventory properties render; strict full CSS gate passes | Main/web-renderer agents | Incomplete: implemented CSS subset is `147/147`, full CSS is `147/394` |
 | Production GUI/Web parity | Same-frame backend readback, positive backend handles, matching checksums, and no CPU-mirror-only pass | Platform/main agents | Still separate from Linux direct ARGB diagnostics |
 | Parallel-agent review | Spark or fallback sidecar output plus normal/high-capability review before broad findings or done marks are accepted | Main + review agent | Spark may be quota-blocked; fallback output remains advisory until reviewed |
 
@@ -377,6 +377,7 @@ This session's immediate integration target:
 | WO-15 CSS flex-flow slice | Main agent | Low: Spark may only inspect evidence after implementation | CSS traceability wrapper, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `135/135`, and no full-CSS/native-platform completion is claimed |
 | WO-16 CSS logical inline spacing slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `141/141`, and no full-CSS/native-platform completion is claimed |
 | WO-17 Goal completion checklist SSpec | Main agent defines, Spark/fallback may inspect, normal/high-capability agent reviews | High for read-only review, low for source edits | `test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl`, generated/manual doc, this plan | The SSpec lists all final gates as fail-fast scenario helpers; goal completion requires replacing every placeholder with evidence assertions and making the spec pass |
+| WO-18 CSS logical block spacing slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `147/147`, and no full-CSS/native-platform completion is claimed |
 
 WO-12 rule: do not spawn Spark against source-edit scopes until the read-only
 gap/matrix lanes complete and a normal reviewer approves the intended write
@@ -465,6 +466,16 @@ fail-fast helper per final gate. It is expected to fail until platform agents
 replace placeholders with assertions over fresh evidence. Generated/manual
 SSpec output should be used as the operator-facing checklist for future
 Linux/macOS/Windows/perf/full-CSS completion reviews.
+
+WO-18 status, 2026-06-27: `margin-block`, `margin-block-start`,
+`margin-block-end`, `padding-block`, `padding-block-start`, and
+`padding-block-end` moved into implemented Simple Web CSS for the default
+horizontal writing-mode path. Current evidence is recorded in
+`doc/09_report/html_css_full_rendering_goal_status_logical_block_spacing_2026-06-27.md`:
+implemented CSS is `147/147`, full CSS is `147/394`, full CSS unrendered is
+`247`, and unsupported inventory ownership is `254`. This is a completed
+narrow web-renderer slice, not completion evidence for vertical writing-mode
+remapping, full CSS, RenderDoc, Metal, or D3D12 lanes.
 
 WO-5 status: refreshed non-RenderDoc Linux evidence is passing in
 `doc/09_report/gui_web_2d_linux_vulkan_refresh_2026-06-27.md`. A fresh
