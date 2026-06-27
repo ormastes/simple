@@ -80,9 +80,10 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/macos_metal_render_log_compa
    Strict capture mode requires `macos_metal_gpu_capture_tool` to be
    `xcode-gpu-frame-capture`, `macos_metal_gpu_capture_artifact`, and a capture
    artifact whose first bytes are `XCODE-GPUTRACE`; the capture env must also
-   claim the same native artifact marker. Bare relative capture artifact names
+   claim the same native artifact marker. Relative capture artifact names
    resolve beside the capture env so stale repo-root files cannot satisfy the
-   proof. Capture artifacts must be regular files, not symlinks. A status-only
+   proof, even when the relative name contains directories. Capture artifacts
+   must be regular files, not symlinks. A status-only
    row, browser-metadata row, or env-only claimed magic is diagnostic, not
    native GPU-capture proof.
 5. Run `scripts/check/check-macos-metal-render-log-compare.shs` and consume the
@@ -213,8 +214,9 @@ macos_metal_render_log_compare_pairwise_status=pass
     missing.
 20. Reject strict Metal capture rows that use browser metadata as the capture
     tool even when the `.gputrace` artifact bytes are valid.
-21. Reject strict Metal capture rows whose bare relative `.gputrace` artifact
-    would otherwise be satisfied by a stale working-directory file.
+21. Reject strict Metal capture rows whose relative `.gputrace` artifact would
+    otherwise be satisfied by a stale working-directory file, including nested
+    relative artifact paths.
 22. Reject strict Metal capture rows whose `.gputrace` artifact is a symlink to
     another capture artifact.
 
