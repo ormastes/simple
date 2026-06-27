@@ -13,8 +13,8 @@ record that the fallback output is advisory under the same review gate.
 
 ## Current Baseline
 
-- `main` includes `da5fa7a130f0 test(gui): retain vulkan direct run
-  artifacts`.
+- `main` includes `0469771fc204 docs(gui): refresh linux vulkan aggregate
+  evidence`.
 - 4K retained widget showcase evidence is current and passing in the retained
   evidence row used by the aggregate gate; see
   `doc/09_report/gui_showcase_4k_8k_perf_2026-06-26_next.md` and
@@ -36,13 +36,16 @@ record that the fallback output is advisory under the same review gate.
   `doc/09_report/gui_web_2d_vulkan_direct_run_artifacts_2026-06-27.md`.
 - Web WM modern shell evidence is no longer a blocker after the PATH fallback
   evidence slice.
-- RenderDoc `.rdc` capture remains blocked on this host by missing
-  `renderdoccmd` in the searched paths.
+- RenderDoc `.rdc` capture remains blocked for this current host session by
+  missing `renderdoccmd` in the searched paths. Older reports that found
+  RenderDoc tooling are dated diagnostics; current completion must use fresh
+  host discovery plus real `.rdc` files with `RDOC` magic.
 - The active completion blockers remain native RenderDoc `.rdc` evidence,
-  platform render-log comparison on Linux/macOS/Windows, production GUI/web
-  font offload and raw Metal readback evidence, live Tauri/Chrome parity
-  evidence, and full CSS specification coverage beyond the implemented Simple
-  Web subset.
+  platform render-log comparison on Linux/macOS/Windows, and full CSS
+  specification coverage beyond the implemented Simple Web subset. Existing
+  Darwin production parity/font/raw-Metal reports are not reopened by this
+  Linux host plan; any final completion claim still needs the aggregate gate to
+  accept the relevant fresh evidence rows.
 
 ## Current Parallel Start Status
 
@@ -72,8 +75,9 @@ Fallback sidecar findings accepted for planning only:
   evidence only as report text.
 - Treat older queue/readback and platform-matrix plans as candidate stale-doc
   followups, not as blockers for this replan.
-- Spark may collect host readiness, browser backing, RenderDoc capture output,
-  per-platform proof logs, and retained perf rows.
+- Spark may collect diagnostics, readiness output, and report pointers. Proof
+  rows and completion gates remain advisory until Lane C verifies fresh host
+  evidence.
 - Normal/high-capability review must accept ARGB equivalence, native render-log
   comparison, RenderDoc `.rdc` proof, no-raw-`rt_*` checks, and final 4K/8K
   performance claims.
@@ -313,19 +317,23 @@ host produced passing retained 4K and 8K rows with source revision
 `56a1985b1d38`, current-source aggregate validation, checksum/readback proof,
 RSS under budget, and `fallback_state=none`.
 
-WO-5 status: refreshed on 2026-06-27 in
-`doc/09_report/gui_web_2d_linux_vulkan_refresh_2026-06-27.md`. The current
-Linux host passes browser Vulkan backing for Electron and Chrome, direct
-Electron/Chrome/Simple ARGB comparison, Simple Vulkan backend proof, pairwise
-pixel comparison, Web WM modern shell evidence, and retained 4K/8K perf in one
-aggregate run. Strict Linux render-log comparison remains blocked until
-RenderDoc `.rdc` artifacts with `RDOC` magic exist for Simple, Chrome, and
-Electron.
-
 WO-9 status: the two explicit stale agent-task docs now carry 2026-06-27
 superseded/merged routing headers. Future cleanup may still classify deeper
 historical plan docs, but agents should no longer treat those two June 14
 matrix/handoff files as the active top-level plan.
+
+WO-5 status: refreshed non-RenderDoc Linux evidence is passing in
+`doc/09_report/gui_web_2d_linux_vulkan_refresh_2026-06-27.md`. A fresh
+RenderDoc host check is recorded in
+`doc/09_report/gui_web_2d_linux_renderdoc_host_blocker_2026-06-27.md`; this
+host has hardware Vulkan, Chrome, and Electron available, and the Linux host
+passes browser Vulkan backing, direct Electron/Chrome/Simple ARGB comparison,
+Simple Vulkan backend proof, pairwise pixel comparison, Web WM modern shell
+evidence, and retained 4K/8K perf in the current aggregate. The same fresh host
+check found no `renderdoccmd`, `renderdoc`, or `qrenderdoc`, no passwordless
+sudo for package installation, and no local `apt-cache policy renderdoc`
+package row. Treat this session as `missing-renderdoccmd-in-search-paths` until
+a prepared Ubuntu GUI host installs RenderDoc or exposes `RDOC_HOME`.
 
 ## Linux Vulkan Sequencing
 
@@ -398,14 +406,17 @@ Normal-review acceptance:
 
 ## Review State
 
-- Spark Lane A: attempted, blocked by Spark quota until 5:04 AM; queued for
-  restart.
+- Spark Lane A: attempted twice, most recently as `Singer`; blocked by Spark
+  quota until 5:04 AM and queued for restart.
 - Spark Lane B: attempted, blocked by Spark quota until 5:04 AM; queued for
   restart.
 - Mini fallback Lane A: completed; planning findings integrated above.
 - Mini fallback Lane B: completed; wrapper/key matrix integrated above.
-- Normal review Lane C: started as `Ampere`; its findings must be checked before
-  this planning slice is synced.
+- Normal review Lane C: completed in this slice as `Wegener`; accepted
+  corrections are integrated above, except historical reports are not treated as
+  current proof when a fresher host check disagrees.
+- Current mini fallback for the Linux RenderDoc host blocker: started as
+  `Rawls` after Spark quota failed; accepted corrections are integrated above.
 
 ## Hard Stop Conditions
 

@@ -71,16 +71,21 @@ gui_web_2d_vulkan_device=NVIDIA TITAN RTX
 gui_web_2d_vulkan_driver=NVIDIA
 ```
 
-RenderDoc is not currently available on `PATH`:
+RenderDoc was not available on `PATH` for this host check:
 
 ```text
 gui_web_2d_vulkan_renderdoc_status=unavailable
 gui_web_2d_vulkan_renderdoc_reason=missing-renderdoccmd-in-search-paths
 ```
 
-The aggregate therefore remains incomplete. The remaining blockers include
-Simple, Chrome, Electron, and widget `.rdc` capture with `RDOC` magic, Simple
-Engine2D clear/rect readback parity, pairwise Electron/Chrome/Simple ARGB
-comparison artifacts, Web WM Electron interaction evidence, native
-Linux/macOS/Windows render-log comparison, production GUI/web parity/font/Metal
-readback evidence, and full CSS coverage.
+The aggregate therefore remains incomplete. Later Linux refresh evidence proves
+browser backing, direct Electron/Chrome/Simple ARGB artifacts, pairwise pixel
+equivalence, Web WM evidence, and current-source 4K/8K retained performance; do
+not reopen those rows from this older report.
+
+The remaining blockers for the Linux lane are valid Simple/Chrome/Electron and
+widget `.rdc` captures with `RDOC` magic, strict Linux render-log comparison
+using those native captures, platform render-log comparison on macOS/Windows,
+and full CSS coverage beyond the implemented Simple Web subset. Older reports
+that found RenderDoc tooling are dated diagnostics; current proof requires fresh
+host discovery plus actual `.rdc` artifacts.
