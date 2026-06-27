@@ -75,6 +75,38 @@ function proofSourceArtifact(marker) {
   return { status: 'pass', size: actualSize, actualSize };
 }
 
+function pngArtifact(filePath, expectedSize) {
+  if (typeof filePath !== 'string' || filePath.length === 0) {
+    return { status: 'missing', size: '', actualSize: '' };
+  }
+  let stat;
+  try {
+    stat = fs.lstatSync(filePath);
+  } catch (_err) {
+    return { status: 'missing', size: '', actualSize: '' };
+  }
+  if (stat.isSymbolicLink()) return { status: 'symlink', size: '', actualSize: '' };
+  if (!stat.isFile()) return { status: 'not-regular', size: '', actualSize: '' };
+  const actualSize = String(stat.size);
+  if (stat.nlink > 1) return { status: 'hardlink', size: actualSize, actualSize };
+  if (stat.size <= 8) return { status: 'empty', size: actualSize, actualSize };
+  const expectedSizeText = jsonIntegerTextOrBlank(expectedSize);
+  if (expectedSizeText && expectedSizeText !== actualSize) {
+    return { status: 'size-mismatch', size: expectedSizeText, actualSize };
+  }
+  let header;
+  try {
+    header = fs.readFileSync(filePath).subarray(0, 8);
+  } catch (_err) {
+    return { status: 'missing', size: '', actualSize: '' };
+  }
+  const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (header.length !== pngSignature.length || !header.equals(pngSignature)) {
+    return { status: 'not-png', size: actualSize, actualSize };
+  }
+  return { status: 'pass', size: actualSize, actualSize };
+}
+
 const [proofPath, widthText, heightText] = process.argv.slice(2);
 if (!proofPath || !widthText || !heightText) {
   emit('electron_live_smoke_validation_status', 'fail');
@@ -132,6 +164,7 @@ const expectedWidth = expectedWidthText === null ? NaN : Number(expectedWidthTex
 const expectedHeight = expectedHeightText === null ? NaN : Number(expectedHeightText);
 const expectedProofSource = 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript';
 const proofSource = proofSourceArtifact(expectedProofSource);
+const screenshotArtifact = pngArtifact(proof.screenshot_path, proof.screenshot_png_size_bytes);
 const userAgent = textSample(proof.electron_user_agent);
 const maxEventTimingMs = 1000;
 const maxEventDispatchToPaintMs = 1000;
@@ -194,6 +227,22 @@ if (proof.target !== 'electron') {
   reason = 'missing-event-dispatch-to-paint';
 } else if (proof.blur_or_tolerance_used !== false) {
   reason = 'blur-or-tolerance-not-allowed';
+} else if (textSample(proof.screenshot_error).length > 0) {
+  reason = 'screenshot-capture-error';
+} else if (screenshotArtifact.status !== 'pass') {
+  reason = `screenshot-artifact-${screenshotArtifact.status}`;
+} else if (proof.screenshot_width !== expectedWidth || proof.screenshot_height !== expectedHeight) {
+  reason = 'screenshot-dimensions-mismatch';
+} else if (!integerNumberAtLeast(proof.screenshot_png_size_bytes, 9)) {
+  reason = 'screenshot-png-size-missing';
+} else if (proof.screenshot_bitmap_byte_count !== expectedWidth * expectedHeight * 4) {
+  reason = 'screenshot-bitmap-size-mismatch';
+} else if (!integerNumberAtLeast(proof.screenshot_pixel_checksum, 1)) {
+  reason = 'screenshot-pixel-checksum-missing';
+} else if (!integerNumberAtLeast(proof.screenshot_nontransparent_pixel_count, 1)) {
+  reason = 'screenshot-nontransparent-pixels-missing';
+} else if (!integerNumberAtLeast(proof.screenshot_distinct_color_count, 2)) {
+  reason = 'screenshot-distinct-colors-missing';
 }
 
 emit('electron_live_smoke_validation_status', reason === 'pass' ? 'pass' : 'fail');
@@ -228,6 +277,17 @@ emit('electron_live_smoke_event_dispatch_type', proof.event_dispatch_type);
 emit('electron_live_smoke_event_dispatch_detail', proof.event_dispatch_detail);
 emit('electron_live_smoke_event_dispatch_error', proof.event_dispatch_error);
 emit('electron_live_smoke_event_dispatch_to_paint_ms', jsonNumberTextOrBlank(proof.event_dispatch_to_paint_ms));
+emit('electron_live_smoke_screenshot_path', proof.screenshot_path);
+emit('electron_live_smoke_screenshot_file_status', screenshotArtifact.status);
+emit('electron_live_smoke_screenshot_size_bytes', jsonIntegerTextOrBlank(proof.screenshot_png_size_bytes));
+emit('electron_live_smoke_screenshot_actual_size_bytes', screenshotArtifact.actualSize);
+emit('electron_live_smoke_screenshot_width', jsonIntegerTextOrBlank(proof.screenshot_width));
+emit('electron_live_smoke_screenshot_height', jsonIntegerTextOrBlank(proof.screenshot_height));
+emit('electron_live_smoke_screenshot_bitmap_byte_count', jsonIntegerTextOrBlank(proof.screenshot_bitmap_byte_count));
+emit('electron_live_smoke_screenshot_pixel_checksum', jsonIntegerTextOrBlank(proof.screenshot_pixel_checksum));
+emit('electron_live_smoke_screenshot_nontransparent_pixel_count', jsonIntegerTextOrBlank(proof.screenshot_nontransparent_pixel_count));
+emit('electron_live_smoke_screenshot_distinct_color_count', jsonIntegerTextOrBlank(proof.screenshot_distinct_color_count));
+emit('electron_live_smoke_screenshot_error', proof.screenshot_error);
 emit('electron_live_smoke_blur_or_tolerance_used', jsonBoolTextOrBlank(proof.blur_or_tolerance_used));
 
 if (reason !== 'pass') {

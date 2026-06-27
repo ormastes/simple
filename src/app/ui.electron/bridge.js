@@ -38,6 +38,7 @@ function handleSimpleMessageLine(line, win = mainWindow) {
             if (process.env.SIMPLE_ELECTRON_PROOF_PATH) {
                 Promise.resolve(rendered)
                     .then(() => win.webContents.executeJavaScript(electronLiveSmokeProofScript()))
+                    .then(envelope => attachElectronLiveSmokeScreenshot(win, envelope))
                     .then(envelope => {
                         fs.writeFileSync(process.env.SIMPLE_ELECTRON_PROOF_PATH, JSON.stringify(envelope));
                         if (app) {
@@ -79,6 +80,63 @@ function handleSimpleMessageLine(line, win = mainWindow) {
         return { handled: false, kind: 'parse_error' };
     }
     return { handled: false, kind: 'unknown' };
+}
+
+function bitmapEvidence(bitmap) {
+    let checksum = 0;
+    let nonTransparent = 0;
+    const distinct = new Set();
+    for (let index = 0; index + 3 < bitmap.length; index += 4) {
+        const b = bitmap[index];
+        const g = bitmap[index + 1];
+        const r = bitmap[index + 2];
+        const a = bitmap[index + 3];
+        checksum = (checksum + ((r + 1) * 3) + ((g + 1) * 5) + ((b + 1) * 7) + ((a + 1) * 11) + index) >>> 0;
+        if (a !== 0) {
+            nonTransparent += 1;
+        }
+        if (distinct.size < 4096) {
+            distinct.add(`${r},${g},${b},${a}`);
+        }
+    }
+    return {
+        checksum,
+        nonTransparent,
+        distinctColorCount: distinct.size
+    };
+}
+
+function attachElectronLiveSmokeScreenshot(win, envelope) {
+    const screenshotPath = process.env.SIMPLE_ELECTRON_SCREENSHOT_PATH || '';
+    if (!screenshotPath || !win || !win.webContents) {
+        return Promise.resolve(Object.assign({}, envelope, {
+            screenshot_path: '',
+            screenshot_error: 'missing-screenshot-path'
+        }));
+    }
+    const resolvedScreenshotPath = path.resolve(screenshotPath);
+    return win.webContents.capturePage().then(image => {
+        const png = image.toPNG();
+        const bitmap = image.toBitmap();
+        const size = image.getSize();
+        const pixels = bitmapEvidence(bitmap);
+        fs.mkdirSync(path.dirname(resolvedScreenshotPath), { recursive: true });
+        fs.writeFileSync(resolvedScreenshotPath, png);
+        return Object.assign({}, envelope, {
+            screenshot_path: resolvedScreenshotPath,
+            screenshot_width: size.width,
+            screenshot_height: size.height,
+            screenshot_png_size_bytes: png.length,
+            screenshot_bitmap_byte_count: bitmap.length,
+            screenshot_pixel_checksum: pixels.checksum,
+            screenshot_nontransparent_pixel_count: pixels.nonTransparent,
+            screenshot_distinct_color_count: pixels.distinctColorCount,
+            screenshot_error: ''
+        });
+    }).catch(err => Object.assign({}, envelope, {
+        screenshot_path: resolvedScreenshotPath,
+        screenshot_error: String(err && err.message ? err.message : err)
+    }));
 }
 
 function parseCliArgs(argv) {

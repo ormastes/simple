@@ -59,6 +59,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 - The proof must include Chromium/Electron runtime evidence from the renderer
   user agent and Electron/Chrome process versions, not only a hand-authored
   source marker.
+- The proof must include a regular single-link PNG screenshot artifact plus
+  viewport, bitmap-byte, checksum, nontransparent-pixel, and distinct-color
+  rows so DOM-only evidence cannot stand in for a rendered capture.
 - The proof target and surface must identify the live Electron main surface,
   and early wrapper diagnostics must preserve those identity rows.
 - The proof JSON path itself must be a regular single-link file, never a
@@ -81,7 +84,7 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={target:\"electron\",surface_id:\"main\",proof_source:\"src/app/ui.electron/bridge.js:electronLiveSmokeProofScript\",browser_engine:\"chromium\",electron_user_agent:\"Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36\",electron_process_version:\"42.5.0\",chrome_process_version:\"142.0.0.0\",width:1280,height:720,body_html_length:64,css_length:12,app_element_present:true,body_text_length:23,body_text_sample:\"Hello World from Web!\",performance_now_available:true,performance_now_delta_ms:1.25,animation_frame_available:true,animation_frame_count:2,css_animation_probe:true,event_dispatch_available:true,event_dispatch_count:1,event_dispatch_type:\"simple-electron-live-smoke-event\",event_dispatch_detail:\"live-smoke-input\",event_dispatch_error:\"\",event_dispatch_to_paint_ms:1.5,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const png=Buffer.from(\"89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6360000002000100ffff03000006000557bfab860000000049454e44ae426082\",\"hex\");const screenshot=process.argv[1]+\".png\";fs.writeFileSync(screenshot,png);const p={target:\"electron\",surface_id:\"main\",proof_source:\"src/app/ui.electron/bridge.js:electronLiveSmokeProofScript\",browser_engine:\"chromium\",electron_user_agent:\"Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36\",electron_process_version:\"42.5.0\",chrome_process_version:\"142.0.0.0\",width:1280,height:720,body_html_length:64,css_length:12,app_element_present:true,body_text_length:23,body_text_sample:\"Hello World from Web!\",performance_now_available:true,performance_now_delta_ms:1.25,animation_frame_available:true,animation_frame_count:2,css_animation_probe:true,event_dispatch_available:true,event_dispatch_count:1,event_dispatch_type:\"simple-electron-live-smoke-event\",event_dispatch_detail:\"live-smoke-input\",event_dispatch_error:\"\",event_dispatch_to_paint_ms:1.5,screenshot_path:screenshot,screenshot_width:1280,screenshot_height:720,screenshot_png_size_bytes:png.length,screenshot_bitmap_byte_count:3686400,screenshot_pixel_checksum:12345,screenshot_nontransparent_pixel_count:4096,screenshot_distinct_color_count:3,screenshot_error:\"\",blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Electron live smoke proof validator":
 
@@ -124,6 +127,17 @@ describe "Electron live smoke proof validator":
         expect(evidence).to_contain("electron_live_smoke_event_dispatch_detail=live-smoke-input")
         expect(evidence).to_contain("electron_live_smoke_event_dispatch_error=")
         expect(evidence).to_contain("electron_live_smoke_event_dispatch_to_paint_ms=1.5")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_path=" + root + "/proof.json.png")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_file_status=pass")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_size_bytes=75")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_actual_size_bytes=75")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_width=1280")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_height=720")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_bitmap_byte_count=3686400")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_pixel_checksum=12345")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_nontransparent_pixel_count=4096")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_distinct_color_count=3")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_error=")
         expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=false")
 
     it "rejects missing DOM render evidence":
@@ -390,6 +404,40 @@ describe "Electron live smoke proof validator":
         expect(paint_slow).to_contain("electron_live_smoke_validation_reason=missing-event-dispatch-to-paint")
         expect(paint_slow).to_contain("electron_live_smoke_event_dispatch_to_paint_ms=1001")
 
+    it "rejects missing stale or blank screenshot capture proof":
+        val root = "build/test-electron-live-smoke-validator-screenshot"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/missing.json", "fs.unlinkSync(screenshot)") +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/missing.json 1280 720 > " + root + "/missing.env; " +
+            _proof_command(root + "/size.json", "p.screenshot_png_size_bytes=999") +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/size.json 1280 720 > " + root + "/size.env; " +
+            _proof_command(root + "/width.json", "p.screenshot_width=640") +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/width.json 1280 720 > " + root + "/width.env; " +
+            _proof_command(root + "/blank.json", "p.screenshot_nontransparent_pixel_count=0") +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/blank.json 1280 720 > " + root + "/blank.env; " +
+            _proof_command(root + "/colors.json", "p.screenshot_distinct_color_count=1") +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/colors.json 1280 720 > " + root + "/colors.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val missing = file_read(root + "/missing.env")
+        val size = file_read(root + "/size.env")
+        val width = file_read(root + "/width.env")
+        val blank = file_read(root + "/blank.env")
+        val colors = file_read(root + "/colors.env")
+        step("Confirm Electron live smoke needs a bound nonblank screenshot artifact")
+        expect(missing).to_contain("electron_live_smoke_validation_reason=screenshot-artifact-missing")
+        expect(missing).to_contain("electron_live_smoke_screenshot_file_status=missing")
+        expect(size).to_contain("electron_live_smoke_validation_reason=screenshot-artifact-size-mismatch")
+        expect(size).to_contain("electron_live_smoke_screenshot_size_bytes=999")
+        expect(size).to_contain("electron_live_smoke_screenshot_actual_size_bytes=75")
+        expect(width).to_contain("electron_live_smoke_validation_reason=screenshot-dimensions-mismatch")
+        expect(width).to_contain("electron_live_smoke_screenshot_width=640")
+        expect(blank).to_contain("electron_live_smoke_validation_reason=screenshot-nontransparent-pixels-missing")
+        expect(blank).to_contain("electron_live_smoke_screenshot_nontransparent_pixel_count=0")
+        expect(colors).to_contain("electron_live_smoke_validation_reason=screenshot-distinct-colors-missing")
+        expect(colors).to_contain("electron_live_smoke_screenshot_distinct_color_count=1")
+
     it "rejects string booleans for DOM performance animation CSS and tolerance proof":
         val root = "build/test-electron-live-smoke-validator-string-booleans"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
@@ -618,6 +666,10 @@ describe "Electron live smoke proof validator":
         expect(wrapper).to_contain("electron_live_smoke_event_dispatch_detail")
         expect(wrapper).to_contain("electron_live_smoke_event_dispatch_error")
         expect(wrapper).to_contain("electron_live_smoke_event_dispatch_to_paint_ms")
+        expect(wrapper).to_contain("SIMPLE_ELECTRON_SCREENSHOT_PATH")
+        expect(wrapper).to_contain("electron_live_smoke_screenshot_path")
+        expect(wrapper).to_contain("electron_live_smoke_screenshot_file_status")
+        expect(wrapper).to_contain("electron_live_smoke_screenshot_pixel_checksum")
         expect(wrapper).to_contain("electron_live_smoke_blur_or_tolerance_used")
         expect(package_json).to_contain("--simple-bin ${SIMPLE_BIN:-../../src/compiler_rust/target/debug/simple}")
         expect_not(package_json.contains("--simple-bin bin/simple"))
@@ -637,6 +689,9 @@ describe "Electron live smoke proof validator":
         expect(bridge).to_contain("eventDispatchStartMs")
         expect(bridge).to_contain("eventDispatchToPaintMs")
         expect(bridge).to_contain("simple-electron-live-smoke-event")
+        expect(bridge).to_contain("attachElectronLiveSmokeScreenshot")
+        expect(bridge).to_contain("capturePage()")
+        expect(bridge).to_contain("screenshot_nontransparent_pixel_count")
         expect(bridge).to_contain("document.createEvent('CustomEvent')")
         expect(bridge).to_contain("new RegExp('Chrome/|Chromium/')")
         val preload = file_read("src/app/ui.electron/preload.js")
@@ -689,4 +744,15 @@ describe "Electron live smoke proof validator":
         expect(evidence).to_contain("electron_live_smoke_event_dispatch_detail=")
         expect(evidence).to_contain("electron_live_smoke_event_dispatch_error=")
         expect(evidence).to_contain("electron_live_smoke_event_dispatch_to_paint_ms=")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_path=")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_file_status=")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_size_bytes=")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_actual_size_bytes=")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_width=")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_height=")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_bitmap_byte_count=")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_pixel_checksum=")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_nontransparent_pixel_count=")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_distinct_color_count=")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_error=")
         expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=")
