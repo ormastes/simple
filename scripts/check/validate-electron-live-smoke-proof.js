@@ -57,6 +57,23 @@ if (!proofPath || !widthText || !heightText) {
   process.exit(1);
 }
 
+let proofPathStat;
+try {
+  proofPathStat = fs.lstatSync(proofPath);
+} catch (err) {
+  emit('electron_live_smoke_validation_status', 'fail');
+  emit('electron_live_smoke_validation_reason', `missing-proof-json:${err && err.message ? err.message : err}`);
+  emit('electron_live_smoke_proof_symlink_status', 'unknown');
+  process.exit(1);
+}
+
+if (proofPathStat.isSymbolicLink()) {
+  emit('electron_live_smoke_validation_status', 'fail');
+  emit('electron_live_smoke_validation_reason', 'proof-json-symlink');
+  emit('electron_live_smoke_proof_symlink_status', 'fail');
+  process.exit(1);
+}
+
 let proof;
 try {
   proof = JSON.parse(fs.readFileSync(proofPath, 'utf8'));
@@ -129,6 +146,7 @@ if (proof.target !== 'electron') {
 
 emit('electron_live_smoke_validation_status', reason === 'pass' ? 'pass' : 'fail');
 emit('electron_live_smoke_validation_reason', reason);
+emit('electron_live_smoke_proof_symlink_status', proofPathStat.isSymbolicLink() ? 'fail' : 'pass');
 emit('electron_live_smoke_target', proof.target);
 emit('electron_live_smoke_surface_id', proof.surface_id);
 emit('electron_live_smoke_proof_source', proof.proof_source);

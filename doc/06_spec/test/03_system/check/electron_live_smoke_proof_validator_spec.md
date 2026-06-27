@@ -27,7 +27,7 @@ electron_live_smoke_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -103,6 +103,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
   source marker.
 - The proof target and surface must identify the live Electron main surface,
   and early wrapper diagnostics must preserve those identity rows.
+- The proof JSON path itself must be a regular file, never a symlink to a
+  stale or attacker-controlled proof.
 - The live smoke shell wrapper delegates JSON validation to the proof validator.
 - The package live smoke script must launch the built local Simple compiler, or
   a caller-provided `SIMPLE_BIN`, instead of a non-existent package-local
@@ -127,7 +129,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -142,6 +144,7 @@ val evidence = file_read(root + "/evidence.env")
 step("Inspect normalized Electron live smoke proof rows")
 expect(evidence).to_contain("electron_live_smoke_validation_status=pass")
 expect(evidence).to_contain("electron_live_smoke_validation_reason=pass")
+expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=pass")
 expect(evidence).to_contain("electron_live_smoke_target=electron")
 expect(evidence).to_contain("electron_live_smoke_surface_id=main")
 expect(evidence).to_contain("electron_live_smoke_proof_source=src/app/ui.electron/bridge.js:electronLiveSmokeProofScript")
@@ -707,12 +710,45 @@ expect(fractional).to_contain("electron_live_smoke_height=720")
 
 </details>
 
+#### rejects symlinked proof JSON before reading renderer evidence
+
+-  proof command
+   - Expected: code equals `1`
+- Confirm Electron live smoke proof path cannot be a symlink
+   - Expected: evidence does not contain `electron_live_smoke_target=electron`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-live-smoke-validator-symlink"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/real.json", "") +
+    " && ln -s real.json " + root + "/proof-link.json" +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/proof-link.json 1280 720 > " + root + "/symlink.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/symlink.env")
+step("Confirm Electron live smoke proof path cannot be a symlink")
+expect(evidence).to_contain("electron_live_smoke_validation_status=fail")
+expect(evidence).to_contain("electron_live_smoke_validation_reason=proof-json-symlink")
+expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=fail")
+expect(evidence.contains("electron_live_smoke_target=electron")).to_equal(false)
+```
+
+</details>
+
 #### keeps the Electron live smoke wrapper wired to the validator and bridge proof
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -728,6 +764,7 @@ expect(wrapper).to_contain("cat \"$VALIDATION_ENV\"")
 expect(wrapper).to_contain("electron_live_smoke=fail proof=$PROOF_PATH validation=$VALIDATION_ENV")
 expect(wrapper).to_contain("emit_blank_validation_rows")
 expect(wrapper).to_contain("electron_live_smoke_validation_status")
+expect(wrapper).to_contain("electron_live_smoke_proof_symlink_status")
 expect(wrapper).to_contain("electron_live_smoke_target")
 expect(wrapper).to_contain("electron_live_smoke_surface_id")
 expect(wrapper).to_contain("electron_live_smoke_proof_source")
@@ -782,7 +819,7 @@ expect(envelopes).to_contain("css_length")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -798,6 +835,7 @@ expect(evidence).to_contain("electron_live_smoke=unavailable")
 expect(evidence).to_contain("error=missing_command:node")
 expect(evidence).to_contain("electron_live_smoke_validation_status=unavailable")
 expect(evidence).to_contain("electron_live_smoke_validation_reason=missing_command:node")
+expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=")
 expect(evidence).to_contain("electron_live_smoke_target=")
 expect(evidence).to_contain("electron_live_smoke_surface_id=")
 expect(evidence).to_contain("electron_live_smoke_proof_source=")
@@ -831,8 +869,8 @@ expect(evidence).to_contain("electron_live_smoke_blur_or_tolerance_used=")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
