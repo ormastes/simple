@@ -78,6 +78,15 @@ file_link_count() {
     fi
 }
 
+num_at_least() {
+    value="$1"
+    min="$2"
+    case "$value" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$value" -ge "$min" ]
+}
+
 artifact_file_reason() {
     path="$1"
     expected_size="$2"
@@ -100,6 +109,37 @@ artifact_file_reason() {
         return
     fi
     echo pass
+}
+
+validation_metric_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/.*[[:space:]]${key}=\\([^[:space:]]*\\).*/\\1/p" "$file" 2>/dev/null | tail -n 1
+}
+
+load_ios_screenshot_artifact_rows() {
+    validation_log="$BUILD_DIR/ios_screenshot_validation.log"
+    ios_screenshot_actual_size_bytes="$(file_size_bytes "$SCREENSHOT")"
+    ios_screenshot_width=""
+    ios_screenshot_height=""
+    ios_screenshot_distinct_color_count=""
+    ios_screenshot_distinct_color_min=16
+    ios_screenshot_pixel_diversity_status=unavailable
+    if [ -s "$validation_log" ]; then
+        ios_screenshot_width="$(validation_metric_of width "$validation_log")"
+        ios_screenshot_height="$(validation_metric_of height "$validation_log")"
+        ios_screenshot_distinct_color_count="$(validation_metric_of unique_colors "$validation_log")"
+        ios_screenshot_file_reason="$(artifact_file_reason "$SCREENSHOT" "")"
+        ios_screenshot_file_status="$(artifact_file_status "$ios_screenshot_file_reason")"
+        if num_at_least "$ios_screenshot_distinct_color_count" "$ios_screenshot_distinct_color_min"; then
+            ios_screenshot_pixel_diversity_status=pass
+        else
+            ios_screenshot_pixel_diversity_status=fail
+        fi
+    else
+        ios_screenshot_file_status=unavailable
+        ios_screenshot_file_reason=not-run
+    fi
 }
 
 artifact_file_status() {
@@ -163,6 +203,15 @@ emit_unavailable_ios_diagnostics() {
     echo "tauri_ios_mobile_renderer_simple_bin_source=$SIMPLE_BIN_SOURCE"
     echo "tauri_ios_mobile_renderer_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "ios_screenshot=$SCREENSHOT"
+    load_ios_screenshot_artifact_rows
+    echo "ios_screenshot_actual_size_bytes=$ios_screenshot_actual_size_bytes"
+    echo "ios_screenshot_file_status=$ios_screenshot_file_status"
+    echo "ios_screenshot_file_reason=$ios_screenshot_file_reason"
+    echo "ios_screenshot_width=$ios_screenshot_width"
+    echo "ios_screenshot_height=$ios_screenshot_height"
+    echo "ios_screenshot_distinct_color_count=$ios_screenshot_distinct_color_count"
+    echo "ios_screenshot_distinct_color_min=$ios_screenshot_distinct_color_min"
+    echo "ios_screenshot_pixel_diversity_status=$ios_screenshot_pixel_diversity_status"
     echo "ios_log_stream=$LOG_STREAM"
     echo "ios_dev_log=$IOS_DEV_LOG"
     echo "ios_render_log_validation_env=$IOS_RENDER_LOG_VALIDATION_ENV"
@@ -425,6 +474,16 @@ test -s "$SCREENSHOT" || fail "iOS simulator screenshot is empty: $SCREENSHOT"
 
 validate_screenshot_png "$SCREENSHOT" ios_mobile_renderer_screenshot \
     || fail "iOS mobile renderer screenshot PNG validation failed"
+load_ios_screenshot_artifact_rows
+if [ "$ios_screenshot_file_status" != "pass" ]; then
+    fail "ios-screenshot-artifact-$ios_screenshot_file_reason"
+fi
+if ! num_at_least "$ios_screenshot_width" 300 || ! num_at_least "$ios_screenshot_height" 300; then
+    fail "ios-screenshot-dimensions-missing"
+fi
+if [ "$ios_screenshot_pixel_diversity_status" != "pass" ]; then
+    fail "ios-screenshot-pixel-diversity-failed"
+fi
 
 node "$IOS_RENDER_LOG_VALIDATOR" "$IOS_DEV_LOG" "$LOG_STREAM" > "$IOS_RENDER_LOG_VALIDATION_ENV" \
     || {
@@ -549,6 +608,14 @@ echo "tauri_ios_mobile_renderer_simple_bin_status=$SIMPLE_BIN_STATUS"
 echo "ios_simulator=$SIM_UDID"
 echo "ios_simulator_name=$SIM_NAME"
 echo "ios_screenshot=$SCREENSHOT"
+echo "ios_screenshot_actual_size_bytes=$ios_screenshot_actual_size_bytes"
+echo "ios_screenshot_file_status=$ios_screenshot_file_status"
+echo "ios_screenshot_file_reason=$ios_screenshot_file_reason"
+echo "ios_screenshot_width=$ios_screenshot_width"
+echo "ios_screenshot_height=$ios_screenshot_height"
+echo "ios_screenshot_distinct_color_count=$ios_screenshot_distinct_color_count"
+echo "ios_screenshot_distinct_color_min=$ios_screenshot_distinct_color_min"
+echo "ios_screenshot_pixel_diversity_status=$ios_screenshot_pixel_diversity_status"
 echo "ios_log_stream=$LOG_STREAM"
 echo "ios_dev_log=$IOS_DEV_LOG"
 echo "ios_render_log_validation_env=$IOS_RENDER_LOG_VALIDATION_ENV"
