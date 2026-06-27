@@ -306,8 +306,111 @@ browser_metal_detail_reason() {
     fi
 }
 
+browser_metal_source_reason() {
+    source_name="$1"
+    source_path="$2"
+    if [ -z "$source_path" ] || [ ! -f "$source_path" ]; then
+        printf '%s\n' "${source_name}-metal-source-missing"
+        return
+    fi
+    if [ ! -s "$source_path" ]; then
+        printf '%s\n' "${source_name}-metal-source-empty"
+        return
+    fi
+    if ! command -v node >/dev/null 2>&1; then
+        printf '%s\n' "${source_name}-metal-source-reader-missing"
+        return
+    fi
+    node - "$source_name" "$source_path" <<'NODE'
+const fs = require("fs");
+
+const sourceName = process.argv[2] || "";
+const sourcePath = process.argv[3] || "";
+const text = fs.readFileSync(sourcePath, "utf8");
+
+function finish(reason) {
+  process.stdout.write(`${reason}\n`);
+}
+
+function flattenJson(value, prefix, rows) {
+  if (value === null || value === undefined) return;
+  if (typeof value !== "object") {
+    rows.push([prefix, String(value)]);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => flattenJson(item, `${prefix}.${index}`, rows));
+    return;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    flattenJson(child, prefix ? `${prefix}.${key}` : key, rows);
+  }
+}
+
+function envRows(raw) {
+  const rows = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const index = line.indexOf("=");
+    if (index <= 0) continue;
+    rows.push([line.slice(0, index), line.slice(index + 1)]);
+  }
+  return rows;
+}
+
+let rows = envRows(text);
+if (rows.length === 0) {
+  try {
+    rows = [];
+    flattenJson(JSON.parse(text), "", rows);
+  } catch (_err) {
+    finish(`${sourceName}-metal-source-proof-invalid`);
+    process.exit(0);
+  }
+}
+
+const canonicalPrefix = `macos_metal_${sourceName}_browser_backing_`;
+function firstMatchingValue(predicates) {
+  for (const [key, value] of rows) {
+    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const rawLower = key.toLowerCase();
+    if (predicates.some((predicate) => predicate(normalized, rawLower))) {
+      return String(value || "");
+    }
+  }
+  return "";
+}
+
+function suffix(expected) {
+  const normalizedExpected = expected.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return (normalized, rawLower) =>
+    normalized === `${canonicalPrefix}${expected}`.replace(/[^a-z0-9]/g, "") ||
+    normalized.endsWith(normalizedExpected) ||
+    rawLower.endsWith(expected.toLowerCase());
+}
+
+const gpuCompositing = firstMatchingValue([suffix("gpu_compositing"), suffix("gpuCompositing")]);
+const displayType = firstMatchingValue([suffix("display_type"), suffix("displayType")]);
+const glParts = firstMatchingValue([suffix("gl_implementation_parts"), suffix("glImplementationParts")]);
+const skiaBackend = firstMatchingValue([suffix("skia_backend_type"), suffix("skiaBackendType")]);
+const glRenderer = firstMatchingValue([suffix("gl_renderer"), suffix("glRenderer"), suffix("renderer")]);
+const metadata = `${displayType} ${glParts} ${skiaBackend} ${glRenderer}`;
+
+if (!/enabled/i.test(gpuCompositing)) {
+  finish(`${sourceName}-metal-source-gpu-compositing-missing`);
+} else if (/swiftshader|llvmpipe|opengl|vulkan|direct3d|d3d|software|disabled/i.test(metadata)) {
+  finish(`${sourceName}-metal-source-fallback-metadata`);
+} else if (!/metal|mtl|apple gpu|apple m[0-9]|agx/i.test(metadata)) {
+  finish(`${sourceName}-metal-source-metadata-missing`);
+} else {
+  finish("pass");
+}
+NODE
+}
+
 electron_backing_detail_reason="$(browser_metal_detail_reason electron "$electron_backing_reason" "$electron_backing_gpu_compositing" "$electron_backing_display_type" "$electron_backing_gl_implementation_parts" "$electron_backing_skia_backend_type" "$electron_backing_gl_renderer" "$electron_backing_source_file_status")"
 chrome_backing_detail_reason="$(browser_metal_detail_reason chrome "$chrome_backing_reason" "$chrome_backing_gpu_compositing" "$chrome_backing_display_type" "$chrome_backing_gl_implementation_parts" "$chrome_backing_skia_backend_type" "$chrome_backing_gl_renderer" "$chrome_backing_source_file_status")"
+electron_backing_source_reason="$(browser_metal_source_reason electron "$electron_backing_source")"
+chrome_backing_source_reason="$(browser_metal_source_reason chrome "$chrome_backing_source")"
 
 if [ "$metal_status" != "pass" ] || [ "$metal_module" != "true" ] || [ "$metal_submit" != "true" ] || [ "$metal_readback" != "true" ]; then
     [ "$compare_status" = "unavailable" ] || compare_status="fail"
@@ -335,6 +438,8 @@ if [ "$chrome_backing" != "pass" ]; then [ "$compare_status" = "unavailable" ] |
 if [ "$browser_backing" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "browser-metal-backing-${browser_backing:-missing}"; fi
 if [ "$electron_backing" = "pass" ] && [ "$electron_backing_detail_reason" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "$electron_backing_detail_reason"; fi
 if [ "$chrome_backing" = "pass" ] && [ "$chrome_backing_detail_reason" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "$chrome_backing_detail_reason"; fi
+if [ "$electron_backing" = "pass" ] && [ "$electron_backing_source_reason" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "$electron_backing_source_reason"; fi
+if [ "$chrome_backing" = "pass" ] && [ "$chrome_backing_source_reason" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "$chrome_backing_source_reason"; fi
 if [ "$pixel_status" != "pass" ] || [ "$pixel_mode" != "pairwise-argb-diff" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "pixel-comparison-${pixel_status:-missing}"; fi
 if [ "$ec_diff" != "pass" ] || [ "$es_diff" != "pass" ] || [ "$cs_diff" != "pass" ]; then [ "$compare_status" = "unavailable" ] || compare_status="fail"; add_reason "pairwise-diff-incomplete-or-fail"; fi
 simple_argb_reason="$(render_log_argb_source_reason macos_metal simple "$MACOS_METAL_BROWSER_ENV")"
@@ -430,7 +535,9 @@ browser_backing_gate_status="pass"
 if [ "$electron_backing" != "pass" ] || [ "$chrome_backing" != "pass" ] ||
     [ "$browser_backing" != "pass" ] ||
     [ "$electron_backing_detail_reason" != "pass" ] ||
-    [ "$chrome_backing_detail_reason" != "pass" ]; then
+    [ "$chrome_backing_detail_reason" != "pass" ] ||
+    [ "$electron_backing_source_reason" != "pass" ] ||
+    [ "$chrome_backing_source_reason" != "pass" ]; then
     browser_backing_gate_status="fail"
 fi
 
@@ -534,6 +641,7 @@ render_log_write_native_log "$ELECTRON_LOG" "macos" "metal" "electron" "browser-
     render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_status" "$electron_backing"
     render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_reason" "$electron_backing_reason"
     render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_detail_reason" "$electron_backing_detail_reason"
+    render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_source_reason" "$electron_backing_source_reason"
     render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_gpu_compositing" "$electron_backing_gpu_compositing"
     render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_display_type" "$electron_backing_display_type"
     render_log_append_kv "macos_metal_render_log_compare_electron_browser_backing_gl_implementation_parts" "$electron_backing_gl_implementation_parts"
@@ -544,6 +652,7 @@ render_log_write_native_log "$ELECTRON_LOG" "macos" "metal" "electron" "browser-
     render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_status" "$chrome_backing"
     render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_reason" "$chrome_backing_reason"
     render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_detail_reason" "$chrome_backing_detail_reason"
+    render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_source_reason" "$chrome_backing_source_reason"
     render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_gpu_compositing" "$chrome_backing_gpu_compositing"
     render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_display_type" "$chrome_backing_display_type"
     render_log_append_kv "macos_metal_render_log_compare_chrome_browser_backing_gl_implementation_parts" "$chrome_backing_gl_implementation_parts"
