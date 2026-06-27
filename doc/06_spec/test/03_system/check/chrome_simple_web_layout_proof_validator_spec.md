@@ -27,7 +27,7 @@ chrome_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,6 +76,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   rounding.
 - Malformed `frame_us` fails closed instead of relying on shell integer
   comparison behavior.
+- Implausibly high `frame_us` values fail closed instead of counting as valid
+  Chrome frame timing proof.
 - Blur/tolerance use, missing ARGB capture, missing geometry, malformed
   mismatch counts, and checksum mismatches are rejected.
 - ARGB capture and Chrome geometry proof paths must resolve to nonempty files
@@ -323,6 +325,34 @@ expect(evidence).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-timing")
 expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=")
 expect(evidence.contains("chrome_simple_web_layout_chrome_frame_us=not-a-number")).to_equal(false)
+```
+
+</details>
+
+#### rejects implausibly high Chrome frame timing
+
+-  proof command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-validator-slow-frame"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "p.frame_us=1000001") +
+    " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+expect(evidence).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-timing")
+expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=1000001")
 ```
 
 </details>
@@ -787,7 +817,7 @@ expect(pixel).to_contain("chrome_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -813,6 +843,7 @@ expect(script).to_contain("chrome_simple_web_layout_geometry_viewport_width")
 expect(script).to_contain("chrome_simple_web_layout_geometry_viewport_height")
 expect(script).to_contain("chrome_simple_web_layout_geometry_item_count")
 expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
+expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
 expect(script).to_contain("status=divergent")
 val capture = file_read("tools/chrome-live-bitmap/capture_html_argb.js")
@@ -875,8 +906,8 @@ expect(evidence).to_contain("chrome_simple_web_layout_geometry_item_count=0")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

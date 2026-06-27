@@ -27,6 +27,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
   rounding.
 - Malformed `frame_us` fails closed instead of relying on shell integer
   comparison behavior.
+- Implausibly high `frame_us` values fail closed instead of counting as valid
+  Chrome frame timing proof.
 - Blur/tolerance use, missing ARGB capture, missing geometry, malformed
   mismatch counts, and checksum mismatches are rejected.
 - ARGB capture and Chrome geometry proof paths must resolve to nonempty files
@@ -202,6 +204,19 @@ describe "Chrome Simple Web layout proof validator":
         expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-timing")
         expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=")
         expect(evidence.contains("chrome_simple_web_layout_chrome_frame_us=not-a-number")).to_equal(false)
+
+    it "rejects implausibly high Chrome frame timing":
+        val root = "build/test-chrome-layout-validator-slow-frame"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/proof.json", "p.frame_us=1000001") +
+            " && node scripts/check/validate-chrome-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/evidence.env")
+        expect(evidence).to_contain("chrome_simple_web_layout_validation_status=fail")
+        expect(evidence).to_contain("chrome_simple_web_layout_validation_reason=missing-chrome-timing")
+        expect(evidence).to_contain("chrome_simple_web_layout_chrome_frame_us=1000001")
 
     it "rejects missing capture and geometry proof rows":
         val root = "build/test-chrome-layout-validator-missing-artifacts"
@@ -483,6 +498,7 @@ describe "Chrome Simple Web layout proof validator":
         expect(script).to_contain("chrome_simple_web_layout_geometry_viewport_height")
         expect(script).to_contain("chrome_simple_web_layout_geometry_item_count")
         expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
+        expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
         expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
         expect(script).to_contain("status=divergent")
         val capture = file_read("tools/chrome-live-bitmap/capture_html_argb.js")
