@@ -10,14 +10,28 @@ REPORT_PATH="${REPORT_PATH:-doc/09_report/electron_simple_web_layout_manifest_ev
 TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-60}"
 BITMAP_SCRIPT="${ELECTRON_LAYOUT_MANIFEST_BITMAP_SCRIPT:-scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs}"
 RESUME="${ELECTRON_LAYOUT_MANIFEST_RESUME:-0}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 if [ "${SIMPLE_BIN:-}" = "" ]; then
-    for candidate in bin/simple ./bin/simple src/compiler_rust/target/release/simple; do
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+    for candidate in \
+        "bin/simple" \
+        "./bin/simple" \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple"
+    do
         if [ -x "$candidate" ]; then
             SIMPLE_BIN="$candidate"
-            case "$candidate" in
-                src/compiler_rust/target/release/simple) SIMPLE_BIN_SOURCE="in-tree-release" ;;
-                *) SIMPLE_BIN_SOURCE="repo-bin" ;;
-            esac
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
             break
         fi
     done
@@ -28,12 +42,48 @@ if [ "${SIMPLE_BIN:-}" = "" ]; then
 else
     SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 fi
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
-SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-default-missing}"
-export SIMPLE_BIN SIMPLE_BIN_SOURCE
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN_STATUS=missing
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    {
+        echo "electron_simple_web_layout_manifest_status=unavailable"
+        echo "electron_simple_web_layout_manifest_reason=simple-bin-$SIMPLE_BIN_STATUS"
+        echo "electron_simple_web_layout_manifest_simple_bin=$SIMPLE_BIN"
+        echo "electron_simple_web_layout_manifest_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "electron_simple_web_layout_manifest_simple_bin_status=$SIMPLE_BIN_STATUS"
+        echo "electron_simple_web_layout_manifest_dependency_status=missing"
+        echo "electron_simple_web_layout_manifest_dependency_reason=simple-bin-$SIMPLE_BIN_STATUS"
+        echo "electron_simple_web_layout_manifest_dependency_missing_count=0"
+        echo "electron_simple_web_layout_manifest_manifest=$MANIFEST_PATH"
+        echo "electron_simple_web_layout_manifest_case_count=0"
+        echo "electron_simple_web_layout_manifest_pass_count=0"
+        echo "electron_simple_web_layout_manifest_tracked_count=0"
+        echo "electron_simple_web_layout_manifest_fail_count=0"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# Electron Simple Web Layout Manifest Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: simple-bin-$SIMPLE_BIN_STATUS"
+        echo "- manifest: $MANIFEST_PATH"
+        echo "- simple binary: $SIMPLE_BIN ($SIMPLE_BIN_SOURCE, $SIMPLE_BIN_STATUS)"
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+    exit 1
+fi
 
 field_of() {
     key="$1"
@@ -74,7 +124,7 @@ dependency_reason=
     echo
     echo "- manifest: $MANIFEST_PATH"
     echo "- timeout seconds: $TIMEOUT_SECS"
-    echo "- simple binary: $SIMPLE_BIN ($SIMPLE_BIN_SOURCE)"
+    echo "- simple binary: $SIMPLE_BIN ($SIMPLE_BIN_SOURCE, $SIMPLE_BIN_STATUS)"
     echo
     echo "## Cases"
 } >"$REPORT_PATH"
@@ -189,6 +239,7 @@ fi
     echo "electron_simple_web_layout_manifest_reason=$reason"
     echo "electron_simple_web_layout_manifest_simple_bin=$SIMPLE_BIN"
     echo "electron_simple_web_layout_manifest_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "electron_simple_web_layout_manifest_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "electron_simple_web_layout_manifest_dependency_status=$dependency_status"
     echo "electron_simple_web_layout_manifest_dependency_reason=$dependency_reason"
     echo "electron_simple_web_layout_manifest_dependency_missing_count=$dependency_missing_count"

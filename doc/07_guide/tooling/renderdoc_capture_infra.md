@@ -1091,6 +1091,12 @@ The current canonical evidence contract is:
   `production_gui_web_renderer_parity_simple_bin_status`. The Rust seed under
   `src/compiler_rust/` is `forbidden` for this production evidence path and is
   not executed; missing self-hosted binaries fail closed as `missing`. The nested
+  Electron/Simple layout manifest records this same contract as
+  `electron_simple_web_layout_manifest_simple_bin`,
+  `electron_simple_web_layout_manifest_simple_bin_source`, and
+  `electron_simple_web_layout_manifest_simple_bin_status`; the parent parity
+  evidence forwards those as
+  `production_gui_web_renderer_parity_layout_manifest_simple_bin*`. The nested
   backend-executed parity subcheck records the same contract as
   `production_gui_backend_simple_bin`,
   `production_gui_backend_simple_bin_source`, and

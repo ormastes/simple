@@ -190,7 +190,7 @@ the produced `evidence.env` to validate the final release-blocking contract.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 99 lines folded for reproduction.
+Runnable source: 101 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -293,6 +293,8 @@ expect(script).to_contain("PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_S
 expect(script).to_contain("timeout \"$SUBCHECK_TIMEOUT_SECS\" \"$@\"")
 expect(script).to_contain("electron_simple_web_layout_manifest_dependency_status")
 expect(script).to_contain("production_gui_web_renderer_parity_layout_manifest_dependency_status")
+expect(script).to_contain("electron_simple_web_layout_manifest_simple_bin_status")
+expect(script).to_contain("production_gui_web_renderer_parity_layout_manifest_simple_bin_status=$simple_bin_status")
 ```
 
 </details>
