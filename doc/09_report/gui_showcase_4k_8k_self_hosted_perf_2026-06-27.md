@@ -1,0 +1,55 @@
+# GUI Showcase 4K/8K Self-Hosted Perf Evidence - 2026-06-27
+
+## Summary
+
+Fresh retained widget-showcase performance rows pass for the current source
+revision `27e4c0690486` using the repo self-hosted release binary
+`release/x86_64-unknown-linux-gnu/simple`. Both rows build a native ELF alias,
+run with `fallback_state=none`, scan the full readback buffer, and pass RSS
+budgets.
+
+This proves the current retained 4K/8K showcase perf contract for this host. It
+does not prove RenderDoc `.rdc`, Chrome/Electron Vulkan backing, macOS Metal,
+Windows D3D12, production GUI/web parity, or full CSS coverage.
+
+## Commands
+
+```sh
+BUILD_DIR=build/widget-showcase-4k-200fps-current-2026-06-27-self-hosted \
+TIMEOUT_SECS=60 \
+sh scripts/check/check-widget-showcase-4k-200fps.shs
+
+RESOLUTION=8k \
+BUILD_DIR=build/widget-showcase-8k-perf-current-2026-06-27-self-hosted \
+TIMEOUT_SECS=90 \
+sh scripts/check/check-widget-showcase-4k-200fps.shs
+
+GUI_SHOWCASE_REQUIRE_CURRENT_SOURCE_REVISION=1 \
+GUI_SHOWCASE_4K_PERF_ENV=build/widget-showcase-4k-200fps-current-2026-06-27-self-hosted/status.env \
+GUI_SHOWCASE_8K_PERF_ENV=build/widget-showcase-8k-perf-current-2026-06-27-self-hosted/status.env \
+BUILD_DIR=build/gui-renderdoc-current-2026-06-27-self-hosted-perf \
+REPORT_PATH=build/gui-renderdoc-current-2026-06-27-self-hosted-perf/report.md \
+GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/gui-renderdoc-current-2026-06-27-self-hosted-perf-cache \
+GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 \
+sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
+```
+
+## Evidence
+
+| Row | Status | FPS x1000 | RSS KiB | Binary Source | Native Format | Fallback | Source Status |
+| --- | --- | ---: | --- | --- | --- | --- | --- |
+| 4K 200fps | pass (`met-200fps`) | 53763440 | 131328 / 262144 | self-hosted-release | pass | none | current |
+| 8K perf | pass (`met-target-fps`) | 15281173 | 519680 / 750000 | self-hosted-release | pass | none | current |
+
+Readback proof:
+
+- 4K: `3840x2160`, `8294400` pixels, `5458` nonzero pixels, checksum
+  `23357114226484`, retained static frame, redraw frames `1`.
+- 8K: `7680x4320`, `33177600` pixels, `203` nonzero pixels, checksum
+  `869060580878`, retained static frame, redraw frames `1`.
+
+## Aggregate Boundary
+
+The aggregate remains `incomplete` after accepting these perf rows because the
+run intentionally did not provide the remaining platform/browser/RenderDoc
+parity evidence.
