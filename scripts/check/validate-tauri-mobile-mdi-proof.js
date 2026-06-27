@@ -92,6 +92,8 @@ let canonicalProofJson = "";
 let conflictingProofLog = false;
 let proofMarkerParseError = "";
 let failureMarker = false;
+let proofMarkerSourcePath = "";
+let proofMarkerSourceSizeBytes = "";
 const failureMarkerPattern =
   /(eval FAIL|inline shell eval FAIL|delayed inline shell eval FAIL|Fatal signal|F\/DEBUG|F\/libc|NSURLErrorDomain|failed provisional load|Headless UI completed|subprocess exited with code|Simple subprocess stdout closed before a valid render arrived|parse error|Requested GL implementation .* not found|Exiting GPU process due to errors during initialization)/i;
 for (const file of files) {
@@ -136,6 +138,8 @@ for (const file of files) {
         canonicalProofJson = normalized;
       }
       lastJson = sourceLastJson;
+      proofMarkerSourcePath = file;
+      proofMarkerSourceSizeBytes = String(stat.size);
     } catch (err) {
       if (!proofMarkerParseError) {
         proofMarkerParseError = String(err && err.message ? err.message : err);
@@ -155,6 +159,8 @@ function emitSourceRows() {
   emit("mdi_proof_missing_source_count", missingSourceCount);
   emit("mdi_proof_symlink_source_count", symlinkSourceCount);
   emit("mdi_proof_empty_source_count", emptySourceCount);
+  emit("mdi_proof_marker_source_path", proofMarkerSourcePath);
+  emit("mdi_proof_marker_source_size_bytes", proofMarkerSourceSizeBytes);
 }
 
 if (missingSourceCount > 0) {

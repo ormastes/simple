@@ -108,6 +108,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 - Runtime failure markers in any requested device log fail the MDI proof even
   when the JSON counters otherwise prove render, event, capture, performance,
   and animation detail.
+- Passing MDI proof emits the exact marker source path and byte size so mobile
+  event/capture/performance/animation evidence is bound to a concrete log
+  artifact.
 - Unsupported platform prefixes fail closed with neutral diagnostics instead
   of minting misleading `ios_mdi_*` or `android_mdi_*` evidence rows.
 
@@ -125,7 +128,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -146,6 +149,8 @@ expect(evidence).to_contain("ios_mdi_proof_marker_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_marker_source_path=" + root + "/device.log")
+expect(evidence).to_contain("ios_mdi_proof_marker_source_size_bytes=656")
 expect(evidence).to_contain("ios_mdi_proof_window_count=4")
 expect(evidence).to_contain("ios_mdi_render_status=pass")
 expect(evidence).to_contain("ios_mdi_render_image_count=1")
@@ -1052,7 +1057,7 @@ expect(evidence).to_contain("ios_mdi_animation_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1065,9 +1070,13 @@ expect(validator).to_contain("jsonBoolTextOrBlank")
 expect(ios).to_contain("ios_mdi_proof_empty_source_count")
 expect(ios).to_contain("ios_mdi_proof_symlink_source_count")
 expect(ios).to_contain("ios_mdi_proof_marker_source_count")
+expect(ios).to_contain("ios_mdi_proof_marker_source_path")
+expect(ios).to_contain("ios_mdi_proof_marker_source_size_bytes")
 expect(android).to_contain("android_mdi_proof_empty_source_count")
 expect(android).to_contain("android_mdi_proof_symlink_source_count")
 expect(android).to_contain("android_mdi_proof_marker_source_count")
+expect(android).to_contain("android_mdi_proof_marker_source_path")
+expect(android).to_contain("android_mdi_proof_marker_source_size_bytes")
 expect(ios).to_contain("ios_mdi_capture_device_pixel_ratio")
 expect(android).to_contain("android_mdi_capture_device_pixel_ratio")
 expect(shell).to_contain("devicePixelRatio")
@@ -1075,15 +1084,21 @@ expect(shell).to_contain("screenOrientation")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_empty_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_symlink_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_count")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_path")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_size_bytes")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_empty_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_symlink_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_count")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_path")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_size_bytes")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_capture_device_pixel_ratio")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_screen_orientation")
 expect(aggregate).to_contain("ios-mdi-proof-source-empty")
 expect(aggregate).to_contain("ios-mdi-proof-source-symlink")
+expect(aggregate).to_contain("ios-mdi-proof-marker-source-artifact-missing")
 expect(aggregate).to_contain("android-mdi-proof-source-empty")
 expect(aggregate).to_contain("android-mdi-proof-source-symlink")
+expect(aggregate).to_contain("android-mdi-proof-marker-source-artifact-missing")
 ```
 
 </details>
