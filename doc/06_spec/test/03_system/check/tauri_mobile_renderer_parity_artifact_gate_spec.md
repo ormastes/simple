@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 36 | 36 | 0 | 0 |
+| 37 | 37 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -123,6 +123,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 - The aggregate requires desktop production backend timing rows before
   accepting mobile renderer evidence.
 - The aggregate emits explicit mobile screenshot and MDI proof file status rows.
+- The aggregate rejects pre-existing symlinked or hardlinked mobile lane output
+  env contracts before reading iOS or Android wrapper evidence rows.
 - The aggregate preserves iOS and Android render-log validator env rows before
   deriving mobile parity status.
 - The aggregate requires iOS render-log validator rows to identify the coherent
@@ -417,6 +419,38 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coheren
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_actual_size_bytes=223")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status=fail")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=hardlink")
+```
+
+</details>
+
+#### rejects aliased mobile lane output env contracts before reading wrapper rows
+
+- Confirm aggregate does not read through pre-existing lane env aliases
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-aliased-lane-env"
+val command = _run_aggregate_command(root, "present", "present", "png", "png")
+    .replace("BUILD_DIR=" + root + "/out REPORT_PATH=", "mkdir -p " + root + "/out && printf 'status=pass\\nreason=forged\\n' > " + root + "/forged-ios.env && ln -s ../forged-ios.env " + root + "/out/ios.out && printf 'status=pass\\nreason=forged\\n' > " + root + "/forged-android.env && ln " + root + "/forged-android.env " + root + "/out/android.out && BUILD_DIR=" + root + "/out REPORT_PATH=")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm aggregate does not read through pre-existing lane env aliases")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-lane-output-env-symlink")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_lane_output_env_file_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_lane_output_env_file_reason=symlink")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_lane_output_env_file_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_lane_output_env_file_reason=hardlink")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_android_status=fail")
 ```
 
 </details>

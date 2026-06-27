@@ -74,6 +74,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 - The aggregate requires desktop production backend timing rows before
   accepting mobile renderer evidence.
 - The aggregate emits explicit mobile screenshot and MDI proof file status rows.
+- The aggregate rejects pre-existing symlinked or hardlinked mobile lane output
+  env contracts before reading iOS or Android wrapper evidence rows.
 - The aggregate preserves iOS and Android render-log validator env rows before
   deriving mobile parity status.
 - The aggregate requires iOS render-log validator rows to identify the coherent
@@ -226,6 +228,10 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_total_pixels_per_second_avg=2400000")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_total_pixels_per_second_max=2800000")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_production_backend_timing_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_lane_output_env_file_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_lane_output_env_file_reason=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_lane_output_env_file_status=pass")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_lane_output_env_file_reason=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_html_len=347702")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=pass")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status=pass")
@@ -450,6 +456,24 @@ describe "Tauri mobile renderer parity artifact gates":
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_actual_size_bytes=49")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_status=fail")
         expect(evidence).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_file_reason=size-mismatch")
+
+    it "rejects aliased mobile lane output env contracts before reading wrapper rows":
+        val root = "build/test-tauri-mobile-artifact-gate-aliased-lane-env"
+        val command = _run_aggregate_command(root, "present", "present", "png", "png")
+            .replace("BUILD_DIR=" + root + "/out REPORT_PATH=", "mkdir -p " + root + "/out && printf 'status=pass\\nreason=forged\\n' > " + root + "/forged-ios.env && ln -s ../forged-ios.env " + root + "/out/ios.out && printf 'status=pass\\nreason=forged\\n' > " + root + "/forged-android.env && ln " + root + "/forged-android.env " + root + "/out/android.out && BUILD_DIR=" + root + "/out REPORT_PATH=")
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/stdout.env")
+        step("Confirm aggregate does not read through pre-existing lane env aliases")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-lane-output-env-symlink")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_lane_output_env_file_status=fail")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_lane_output_env_file_reason=symlink")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_lane_output_env_file_status=fail")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_lane_output_env_file_reason=hardlink")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_status=fail")
+        expect(evidence).to_contain("tauri_mobile_renderer_parity_android_status=fail")
 
     it "rejects an iOS pass claim with fallback GPU render-log markers":
         val root = "build/test-tauri-mobile-artifact-gate-ios-fallback-gpu"
