@@ -573,6 +573,8 @@ debugger capture is required. Strict mode requires either
 `windows_d3d12_pix_capture_artifact_magic=PIX`, or
 `windows_d3d12_gpu_debugger_capture_artifact` for an equivalent debugger log.
 Status-only debugger rows are diagnostic and do not prove native D3D12 capture.
+PIX and GPU debugger artifacts must be regular, non-symlink, non-hardlink
+files so strict evidence cannot be substituted through shared capture aliases.
 Completion keys:
 
 ```text
