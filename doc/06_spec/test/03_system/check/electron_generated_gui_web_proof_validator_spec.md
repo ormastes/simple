@@ -27,7 +27,7 @@ electron_generated_gui_web_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -74,6 +74,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   `electron_generated_gui_web_*` rows.
 - Large checksum and weighted-checksum values compare as exact decimal integer
   text, not rounded JavaScript numbers.
+- Checksum proof rows must match the recomputed captured ARGB artifact
+  checksum, not only each other.
 - Malformed and implausibly high `frame_us` values fail closed instead of
   relying on shell integer comparison behavior.
 - Blur/tolerance use, missing ARGB capture, missing capture provenance,
@@ -123,7 +125,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -149,6 +151,8 @@ expect(evidence).to_contain("electron_generated_gui_web_chrome_process_version=1
 expect(evidence).to_contain("electron_generated_gui_web_gpu_compositing=disabled_software")
 expect(evidence).to_contain("electron_generated_gui_web_gpu_rasterization=disabled_software")
 expect(evidence).to_contain("electron_generated_gui_web_scene=generated-gui-widget-html")
+expect(evidence).to_contain("electron_generated_gui_web_simple_checksum=29686813943040")
+expect(evidence).to_contain("electron_generated_gui_web_electron_weighted_checksum=102612472394117760")
 expect(evidence).to_contain("electron_generated_gui_web_mismatch_count=0")
 expect(evidence).to_contain("electron_generated_gui_web_proof_iterations=3")
 expect(evidence).to_contain("electron_generated_gui_web_electron_frame_us=1250")
@@ -170,6 +174,8 @@ expect(evidence).to_contain("electron_generated_gui_web_captured_argb_width=96")
 expect(evidence).to_contain("electron_generated_gui_web_captured_argb_height=72")
 expect(evidence).to_contain("electron_generated_gui_web_captured_argb_pixel_count=6912")
 expect(evidence).to_contain("electron_generated_gui_web_captured_argb_nonzero_pixel_count=6912")
+expect(evidence).to_contain("electron_generated_gui_web_captured_argb_checksum=29686813943040")
+expect(evidence).to_contain("electron_generated_gui_web_captured_argb_weighted_checksum=102612472394117760")
 expect(evidence).to_contain("electron_generated_gui_web_blur_or_tolerance_used=false")
 ```
 
@@ -865,7 +871,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val root = "build/test-electron-generated-gui-web-validator-divergent"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-    _proof_command(root + "/checksum.json", "p.checksum=\"101\"") +
+    _proof_command(root + "/checksum.json", "p.checksum=\"29686813943039\"") +
     " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/checksum.json > " + root + "/checksum.env; " +
     _proof_command(root + "/pixel.json", "p.mismatch_count=4") +
     " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/pixel.json > " + root + "/pixel.env"
@@ -881,12 +887,52 @@ expect(pixel).to_contain("electron_generated_gui_web_mismatch_count=4")
 
 </details>
 
+#### rejects checksum rows that do not match captured generated GUI ARGB
+
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm internally matching proof checksums must still match captured generated GUI ARGB
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-generated-gui-web-validator-artifact-checksum"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/checksum.json", "const artifactPath=path.join(path.dirname(process.argv[1]),\"captured.json\");const artifact=JSON.parse(fs.readFileSync(artifactPath,\"utf8\"));artifact.pixels[0]=4294967294;fs.writeFileSync(artifactPath,JSON.stringify(artifact))") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/checksum.json > " + root + "/checksum.env; " +
+    _proof_command(root + "/weighted.json", "const artifactPath=path.join(path.dirname(process.argv[1]),\"captured.json\");const artifact={width:96,height:72,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*72).fill(1)};artifact.pixels[0]=2;artifact.pixels[1]=0;fs.writeFileSync(artifactPath,JSON.stringify(artifact));p.checksum=\"6912\";p.expected_checksum=\"6912\";p.weighted_checksum=\"23891328\";p.expected_weighted_checksum=\"23891328\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/weighted.json > " + root + "/weighted.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val checksum = file_read(root + "/checksum.env")
+val weighted = file_read(root + "/weighted.env")
+step("Confirm internally matching proof checksums must still match captured generated GUI ARGB")
+expect(checksum).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(checksum).to_contain("electron_generated_gui_web_validation_reason=captured-argb-checksum-mismatch")
+expect(checksum).to_contain("electron_generated_gui_web_electron_checksum=29686813943040")
+expect(checksum).to_contain("electron_generated_gui_web_captured_argb_checksum=29686813943039")
+expect(weighted).to_contain("electron_generated_gui_web_validation_status=fail")
+expect(weighted).to_contain("electron_generated_gui_web_validation_reason=captured-argb-weighted-checksum-mismatch")
+expect(weighted).to_contain("electron_generated_gui_web_electron_weighted_checksum=23891328")
+expect(weighted).to_contain("electron_generated_gui_web_captured_argb_checksum=6912")
+expect(weighted).to_contain("electron_generated_gui_web_captured_argb_weighted_checksum=23891327")
+```
+
+</details>
+
 #### keeps the live Electron wrapper wired to validator and divergent mapping
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -914,6 +960,10 @@ expect(script).to_contain("electron_generated_gui_web_captured_argb_symlink_stat
 expect(script).to_contain("electron_generated_gui_web_captured_argb_size_bytes")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_format")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_nonzero_pixel_count")
+expect(validator).to_contain("electron_generated_gui_web_captured_argb_checksum")
+expect(validator).to_contain("electron_generated_gui_web_captured_argb_weighted_checksum")
+expect(validator).to_contain("captured-argb-checksum-mismatch")
+expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("electron_generated_gui_web_proof_renderer")
 expect(script).to_contain("electron_generated_gui_web_proof_source")
 expect(script).to_contain("checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch")
@@ -934,8 +984,8 @@ expect(fixture).to_contain("chrome_process_version")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

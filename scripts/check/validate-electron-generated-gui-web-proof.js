@@ -174,6 +174,41 @@ function nonzeroPixelCount(pixels) {
   return count;
 }
 
+function checksum(pixels) {
+  if (!Array.isArray(pixels)) return '';
+  let sum = 0n;
+  for (const pixel of pixels) {
+    if (
+      typeof pixel !== 'number' ||
+      !Number.isInteger(pixel) ||
+      pixel < 0 ||
+      pixel > 0xffffffff
+    ) {
+      return '';
+    }
+    sum += BigInt(pixel);
+  }
+  return sum.toString();
+}
+
+function weightedChecksum(pixels) {
+  if (!Array.isArray(pixels)) return '';
+  let sum = 0n;
+  for (let i = 0; i < pixels.length; i += 1) {
+    const pixel = pixels[i];
+    if (
+      typeof pixel !== 'number' ||
+      !Number.isInteger(pixel) ||
+      pixel < 0 ||
+      pixel > 0xffffffff
+    ) {
+      return '';
+    }
+    sum += BigInt(pixel) * BigInt(i + 1);
+  }
+  return sum.toString();
+}
+
 const proofPath = process.argv[2];
 if (!proofPath) {
   emit('electron_generated_gui_web_validation_status', 'fail');
@@ -212,6 +247,8 @@ const capturedArgbJson = readJsonArtifact(capturedArgbStat);
 const capturedArgb = capturedArgbJson.value || {};
 const capturedArgbPixels = Array.isArray(capturedArgb.pixels) ? capturedArgb.pixels : [];
 const capturedArgbNonzeroPixels = nonzeroPixelCount(capturedArgbPixels);
+const capturedArgbChecksum = checksum(capturedArgbPixels);
+const capturedArgbWeightedChecksum = weightedChecksum(capturedArgbPixels);
 const expectedProofSource = 'tools/electron-live-bitmap/exact_fixture.js';
 const expectedCaptureBackend = 'electron-offscreen-capture-page';
 const expectedCompositorMode = 'offscreen-osr-exact-srgb';
@@ -288,6 +325,10 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'captured-argb-pixel-count-mismatch';
 } else if (capturedArgbNonzeroPixels < 1) {
   reason = 'blank-captured-argb';
+} else if (!sameInteger(proof.checksum, capturedArgbChecksum)) {
+  reason = 'captured-argb-checksum-mismatch';
+} else if (!sameInteger(proof.weighted_checksum, capturedArgbWeightedChecksum)) {
+  reason = 'captured-argb-weighted-checksum-mismatch';
 } else if (!jsonIntegerAtLeast(proof.capture_native_width, 1) || !jsonIntegerAtLeast(proof.capture_native_height, 1) || typeof proof.capture_downsampled !== 'boolean') {
   reason = 'missing-capture-provenance';
 } else if (!sameJsonInteger(proof.capture_native_width, proof.width) || !sameJsonInteger(proof.capture_native_height, proof.height)) {
@@ -339,6 +380,8 @@ emit('electron_generated_gui_web_captured_argb_width', jsonIntegerTextOrBlank(ca
 emit('electron_generated_gui_web_captured_argb_height', jsonIntegerTextOrBlank(capturedArgb.height));
 emit('electron_generated_gui_web_captured_argb_pixel_count', String(capturedArgbPixels.length));
 emit('electron_generated_gui_web_captured_argb_nonzero_pixel_count', String(capturedArgbNonzeroPixels));
+emit('electron_generated_gui_web_captured_argb_checksum', capturedArgbChecksum);
+emit('electron_generated_gui_web_captured_argb_weighted_checksum', capturedArgbWeightedChecksum);
 emit('electron_generated_gui_web_text_normalization_pixels', jsonIntegerTextOrBlank(proof.generated_gui_text_normalization_pixels));
 
 if (reason !== 'pass') {
