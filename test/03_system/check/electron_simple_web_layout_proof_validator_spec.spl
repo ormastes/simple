@@ -39,6 +39,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 - Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
   match the proof viewport, include the expected pixel count, and contain
   nonzero pixels with numeric uint32 JSON pixel values.
+- Electron geometry proof must parse as offscreen Electron geometry, match the
+  proof viewport, and include at least one measured layout item with numeric
+  bounds intersecting the captured viewport.
 - Requested viewport, native capture provenance, ARGB readback dimensions,
   mismatch counts, and frame timing values must be real JSON numbers, not
   stringified rows, and malformed live numeric rows must not be re-emitted as
@@ -61,7 +64,7 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);const argb={width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(4294967295)};fs.writeFileSync(path.join(dir,\"captured.json\"),JSON.stringify(argb));const p={renderer:\"electron-live-capture-page\",proof_source:\"tools/electron-live-bitmap/exact_fixture.js\",capture_backend:\"electron-offscreen-capture-page\",compositor_mode:\"offscreen-osr-exact-srgb\",browser_engine:\"chromium\",electron_user_agent:\"Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36\",electron_process_version:\"42.5.0\",chrome_process_version:\"142.0.0.0\",gpu_feature_status:{gpu_compositing:\"disabled_software\",rasterization:\"disabled_software\"},gpu_compositing:\"disabled_software\",gpu_rasterization:\"disabled_software\",scene:\"simple-web-layout-text-flow\",width:96,height:64,iterations:3,checksum:\"18446744073709551610\",expected_checksum:\"18446744073709551610\",weighted_checksum:\"18446744073709551611\",expected_weighted_checksum:\"18446744073709551611\",mismatch_count:0,frame_us:1250,capture_native_width:96,capture_native_height:64,capture_downsampled:false,captured_argb_path:\"captured.json\",captured_argb_written:true,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\");const path=require(\"path\");const dir=path.dirname(process.argv[1]);const argb={width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(4294967295)};fs.writeFileSync(path.join(dir,\"captured.json\"),JSON.stringify(argb));const g={producer:\"electron-offscreen-geometry\",viewport:{width:96,height:64},items:[{label:\"root\",tag:\"div\",x:0,y:0,width:96,height:64}]};fs.writeFileSync(path.join(dir,\"geometry.json\"),JSON.stringify(g));const p={renderer:\"electron-live-capture-page\",proof_source:\"tools/electron-live-bitmap/exact_fixture.js\",capture_backend:\"electron-offscreen-capture-page\",compositor_mode:\"offscreen-osr-exact-srgb\",browser_engine:\"chromium\",electron_user_agent:\"Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36\",electron_process_version:\"42.5.0\",chrome_process_version:\"142.0.0.0\",gpu_feature_status:{gpu_compositing:\"disabled_software\",rasterization:\"disabled_software\"},gpu_compositing:\"disabled_software\",gpu_rasterization:\"disabled_software\",scene:\"simple-web-layout-text-flow\",width:96,height:64,iterations:3,checksum:\"18446744073709551610\",expected_checksum:\"18446744073709551610\",weighted_checksum:\"18446744073709551611\",expected_weighted_checksum:\"18446744073709551611\",mismatch_count:0,frame_us:1250,capture_native_width:96,capture_native_height:64,capture_downsampled:false,captured_argb_path:\"captured.json\",captured_argb_written:true,geometry_path:\"geometry.json\",geometry_written:true,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Electron Simple Web layout proof validator":
 
@@ -99,6 +102,14 @@ describe "Electron Simple Web layout proof validator":
         expect(evidence).to_contain("electron_simple_web_layout_capture_native_width=96")
         expect(evidence).to_contain("electron_simple_web_layout_capture_native_height=64")
         expect(evidence).to_contain("electron_simple_web_layout_capture_downsampled=false")
+        expect(evidence).to_contain("electron_simple_web_layout_geometry_path=geometry.json")
+        expect(evidence).to_contain("electron_simple_web_layout_geometry_written=true")
+        expect(evidence).to_contain("electron_simple_web_layout_geometry_file_status=pass")
+        expect(evidence).to_contain("electron_simple_web_layout_geometry_producer=electron-offscreen-geometry")
+        expect(evidence).to_contain("electron_simple_web_layout_geometry_viewport_width=96")
+        expect(evidence).to_contain("electron_simple_web_layout_geometry_viewport_height=64")
+        expect(evidence).to_contain("electron_simple_web_layout_geometry_item_count=1")
+        expect(evidence).to_contain("electron_simple_web_layout_geometry_measured_item_count=1")
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_path=captured.json")
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_written=true")
         expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_status=pass")
@@ -327,6 +338,44 @@ describe "Electron Simple Web layout proof validator":
         expect(blank).to_contain("electron_simple_web_layout_validation_reason=blank-captured-argb")
         expect(blank).to_contain("electron_simple_web_layout_captured_argb_nonzero_pixel_count=0")
 
+    it "rejects missing, malformed, mismatched, and unmeasured Electron geometry":
+        val root = "build/test-electron-layout-validator-geometry"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/missing.json", "p.geometry_path=\"missing.json\"") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
+            _proof_command(root + "/empty.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),\"\")") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/empty.json > " + root + "/empty.env; " +
+            _proof_command(root + "/malformed.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),JSON.stringify({producer:\"manual\",viewport:{width:96,height:64},items:[{x:0,y:0,width:96,height:64}]}))") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/malformed.json > " + root + "/malformed.env; " +
+            _proof_command(root + "/viewport.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),JSON.stringify({producer:\"electron-offscreen-geometry\",viewport:{width:95,height:64},items:[{x:0,y:0,width:95,height:64}]}))") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/viewport.json > " + root + "/viewport.env; " +
+            _proof_command(root + "/items.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),JSON.stringify({producer:\"electron-offscreen-geometry\",viewport:{width:96,height:64},items:[]}))") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/items.json > " + root + "/items.env; " +
+            _proof_command(root + "/measured.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"geometry.json\"),JSON.stringify({producer:\"electron-offscreen-geometry\",viewport:{width:96,height:64},items:[{label:\"placeholder\"},{x:120,y:80,width:10,height:10}]}))") +
+            " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/measured.json > " + root + "/measured.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val missing = file_read(root + "/missing.env")
+        val empty = file_read(root + "/empty.env")
+        val malformed = file_read(root + "/malformed.env")
+        val viewport = file_read(root + "/viewport.env")
+        val items = file_read(root + "/items.env")
+        val measured = file_read(root + "/measured.env")
+        step("Confirm Electron geometry must be a measured offscreen DOM artifact")
+        expect(missing).to_contain("electron_simple_web_layout_validation_reason=missing-electron-geometry-file")
+        expect(missing).to_contain("electron_simple_web_layout_geometry_file_status=missing")
+        expect(empty).to_contain("electron_simple_web_layout_validation_reason=empty-electron-geometry-file")
+        expect(empty).to_contain("electron_simple_web_layout_geometry_file_status=empty")
+        expect(malformed).to_contain("electron_simple_web_layout_validation_reason=malformed-electron-geometry")
+        expect(viewport).to_contain("electron_simple_web_layout_validation_reason=electron-geometry-viewport-mismatch")
+        expect(viewport).to_contain("electron_simple_web_layout_geometry_viewport_width=95")
+        expect(items).to_contain("electron_simple_web_layout_validation_reason=missing-electron-geometry-items")
+        expect(items).to_contain("electron_simple_web_layout_geometry_item_count=0")
+        expect(measured).to_contain("electron_simple_web_layout_validation_reason=missing-electron-geometry-measured-items")
+        expect(measured).to_contain("electron_simple_web_layout_geometry_item_count=2")
+        expect(measured).to_contain("electron_simple_web_layout_geometry_measured_item_count=0")
+
     it "rejects missing requested viewport and native capture viewport mismatch":
         val root = "build/test-electron-layout-validator-viewport"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
@@ -428,6 +477,9 @@ describe "Electron Simple Web layout proof validator":
         val validator = file_read("scripts/check/validate-electron-simple-web-layout-proof.js")
         expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
         expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
+        expect(validator).to_contain("measuredGeometryItemCount")
+        expect(validator).to_contain("missing-electron-geometry-measured-items")
+        expect(validator).to_contain("electron_simple_web_layout_geometry_measured_item_count")
 
         val script = file_read("scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs")
         expect(script).to_contain("validate-electron-simple-web-layout-proof.js")
@@ -440,6 +492,9 @@ describe "Electron Simple Web layout proof validator":
         expect(script).to_contain("electron_simple_web_layout_chrome_process_version")
         expect(script).to_contain("electron_simple_web_layout_gpu_compositing")
         expect(script).to_contain("electron_simple_web_layout_estimated_fps_floor")
+        expect(script).to_contain("ELECTRON_BITMAP_GEOMETRY_PATH")
+        expect(script).to_contain("electron_simple_web_layout_geometry_file_status")
+        expect(script).to_contain("electron_simple_web_layout_geometry_measured_item_count")
         expect(script).to_contain("electron_simple_web_layout_captured_argb_file_status")
         expect(script).to_contain("electron_simple_web_layout_captured_argb_size_bytes")
         expect(script).to_contain("electron_simple_web_layout_captured_argb_format")
@@ -451,6 +506,8 @@ describe "Electron Simple Web layout proof validator":
 
         val fixture = file_read("tools/electron-live-bitmap/exact_fixture.js")
         expect(fixture).to_contain("proof_source: \"tools/electron-live-bitmap/exact_fixture.js\"")
+        expect(fixture).to_contain("ELECTRON_BITMAP_GEOMETRY_PATH")
+        expect(fixture).to_contain("producer: \"electron-offscreen-geometry\"")
         expect(fixture).to_contain("electron_user_agent")
         expect(fixture).to_contain("electron_process_version")
         expect(fixture).to_contain("chrome_process_version")

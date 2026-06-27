@@ -22,6 +22,7 @@ const expectedChecksum = BigInt(process.env.ELECTRON_BITMAP_EXPECTED_CHECKSUM ||
 const expectedWeightedChecksum = BigInt(process.env.ELECTRON_BITMAP_EXPECTED_WEIGHTED_CHECKSUM || "0");
 const expectedArgbPath = process.env.ELECTRON_BITMAP_EXPECTED_ARGB_PATH || "";
 const capturedArgbPath = process.env.ELECTRON_BITMAP_CAPTURED_ARGB_PATH || "";
+const geometryPath = process.env.ELECTRON_BITMAP_GEOMETRY_PATH || "";
 const proofPath = process.env.ELECTRON_BITMAP_PROOF_PATH || "";
 const htmlPath = process.env.ELECTRON_BITMAP_HTML_PATH || "";
 const scene = process.env.ELECTRON_BITMAP_SCENE || "wm-image-taskbar-command";
@@ -711,6 +712,70 @@ function writeCapturedArgb(pixels) {
   return true;
 }
 
+async function captureGeometry(win) {
+  return win.webContents.executeJavaScript(`
+    (() => {
+      const px = value => Math.round(Number.parseFloat(String(value || "0"))) || 0;
+      const rectPx = value => Number(value).toFixed(3);
+      const candidates = Array.from(document.querySelectorAll("[data-geom-label]"));
+      const nodes = candidates.length > 0
+        ? candidates
+        : Array.from(document.body ? document.body.querySelectorAll("*") : []);
+      return {
+        producer: "electron-offscreen-geometry",
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        items: nodes
+          .filter((el) => {
+            const tag = el.tagName.toLowerCase();
+            return tag !== "script" && tag !== "style" && tag !== "template";
+          })
+          .slice(0, 128)
+          .map((el, index) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            const text = String(el.textContent || "").replace(/\\s+/g, " ").trim();
+            return {
+              index,
+              label: String(el.getAttribute("data-geom-label") || el.className || el.id || ""),
+              tag: el.tagName.toLowerCase(),
+              x: Math.round(rect.left),
+              y: Math.round(rect.top),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+              rectLeft: rectPx(rect.left),
+              rectTop: rectPx(rect.top),
+              rectWidth: rectPx(rect.width),
+              rectHeight: rectPx(rect.height),
+              paddingLeft: px(style.paddingLeft),
+              paddingTop: px(style.paddingTop),
+              paddingRight: px(style.paddingRight),
+              paddingBottom: px(style.paddingBottom),
+              borderLeft: px(style.borderLeftWidth),
+              borderTop: px(style.borderTopWidth),
+              borderRight: px(style.borderRightWidth),
+              borderBottom: px(style.borderBottomWidth),
+              backgroundColor: style.backgroundColor,
+              color: style.color,
+              display: style.display,
+              alignItems: style.alignItems,
+              fontSize: style.fontSize,
+              lineHeight: style.lineHeight,
+              fontFamily: style.fontFamily,
+              fontWeight: style.fontWeight,
+              text
+            };
+          })
+      };
+    })()
+  `);
+}
+
+function writeGeometry(geometry) {
+  if (!geometryPath || !geometry) return false;
+  fs.writeFileSync(geometryPath, JSON.stringify(geometry, null, 2));
+  return true;
+}
+
 // Resolution-convert layer for Electron capture.
 //
 // On HiDPI/Retina displays, BrowserWindow.capturePage({width,height}) returns a
@@ -834,6 +899,8 @@ async function main() {
   const browserEngine = /Chrome\/|Chromium\//.test(electronUserAgent) ? "chromium" : "";
   const electronProcessVersion = process.versions && process.versions.electron ? process.versions.electron : "";
   const chromeProcessVersion = process.versions && process.versions.chrome ? process.versions.chrome : "";
+  const geometry = await captureGeometry(win);
+  const wroteGeometry = writeGeometry(geometry);
   let last = { sum: 0n, weighted: 0n, mismatches: width * height };
   let capture = { nativeWidth: width, nativeHeight: height, downsampled: false };
   const start = process.hrtime.bigint();
@@ -870,6 +937,8 @@ async function main() {
   emit("capture_downsampled", String(capture.downsampled));
   emit("captured_argb_path", capturedArgbPath);
   emit("captured_argb_written", String(wroteCapturedArgb));
+  emit("geometry_path", geometryPath);
+  emit("geometry_written", String(wroteGeometry));
   emit("generated_gui_text_normalization_pixels", generatedGuiTextNormalizationPixels);
   emit("blur_or_tolerance_used", "false");
   if (proofPath) {
@@ -901,6 +970,8 @@ async function main() {
       html_path: htmlPath,
       captured_argb_path: capturedArgbPath,
       captured_argb_written: wroteCapturedArgb,
+      geometry_path: geometryPath,
+      geometry_written: wroteGeometry,
       generated_gui_text_normalization_pixels: generatedGuiTextNormalizationPixels,
       blur_or_tolerance_used: false
     }));

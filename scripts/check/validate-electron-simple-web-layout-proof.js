@@ -149,6 +149,32 @@ function nonzeroPixelCount(pixels) {
   return count;
 }
 
+function measuredGeometryItemCount(items, viewport) {
+  if (!Array.isArray(items)) return 0;
+  const viewportWidth = jsonIntegerText(viewport.width);
+  const viewportHeight = jsonIntegerText(viewport.height);
+  if (viewportWidth === null || viewportHeight === null) return 0;
+  const maxWidth = BigInt(viewportWidth);
+  const maxHeight = BigInt(viewportHeight);
+  let count = 0;
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const x = jsonIntegerText(item.x);
+    const y = jsonIntegerText(item.y);
+    const width = jsonIntegerText(item.width);
+    const height = jsonIntegerText(item.height);
+    if (x === null || y === null || width === null || height === null) continue;
+    const left = BigInt(x);
+    const top = BigInt(y);
+    const right = left + BigInt(width);
+    const bottom = top + BigInt(height);
+    if (BigInt(width) < 1n || BigInt(height) < 1n) continue;
+    if (right <= 0n || bottom <= 0n || left >= maxWidth || top >= maxHeight) continue;
+    count += 1;
+  }
+  return count;
+}
+
 const proofPath = process.argv[2];
 if (!proofPath) {
   emit('electron_simple_web_layout_validation_status', 'fail');
@@ -170,6 +196,12 @@ const capturedArgbJson = readJsonArtifact(capturedArgbStat);
 const capturedArgb = capturedArgbJson.value || {};
 const capturedArgbPixels = Array.isArray(capturedArgb.pixels) ? capturedArgb.pixels : [];
 const capturedArgbNonzeroPixels = nonzeroPixelCount(capturedArgbPixels);
+const geometryStat = artifactStat(proof.geometry_path, proofPath);
+const geometryJson = readJsonArtifact(geometryStat);
+const geometry = geometryJson.value || {};
+const geometryViewport = geometry.viewport || {};
+const geometryItems = Array.isArray(geometry.items) ? geometry.items : [];
+const geometryMeasuredItemCount = measuredGeometryItemCount(geometryItems, geometryViewport);
 const expectedProofSource = 'tools/electron-live-bitmap/exact_fixture.js';
 const expectedCaptureBackend = 'electron-offscreen-capture-page';
 const expectedCompositorMode = 'offscreen-osr-exact-srgb';
@@ -248,6 +280,20 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-capture-provenance';
 } else if (!sameJsonInteger(proof.capture_native_width, proof.width) || !sameJsonInteger(proof.capture_native_height, proof.height)) {
   reason = 'capture-viewport-mismatch';
+} else if (proof.geometry_written !== true) {
+  reason = 'missing-electron-geometry';
+} else if (geometryStat === null) {
+  reason = 'missing-electron-geometry-file';
+} else if (geometryStat.stat.size <= 0) {
+  reason = 'empty-electron-geometry-file';
+} else if (!geometryJson.ok || geometry.producer !== 'electron-offscreen-geometry') {
+  reason = 'malformed-electron-geometry';
+} else if (!sameJsonInteger(geometryViewport.width, proof.width) || !sameJsonInteger(geometryViewport.height, proof.height)) {
+  reason = 'electron-geometry-viewport-mismatch';
+} else if (geometryItems.length < 1) {
+  reason = 'missing-electron-geometry-items';
+} else if (geometryMeasuredItemCount < 1) {
+  reason = 'missing-electron-geometry-measured-items';
 } else if (!jsonIntegerAtLeast(proof.iterations, 2)) {
   reason = 'missing-performance-iterations';
 } else if (!jsonIntegerBetween(proof.frame_us, 1, 1000000)) {
@@ -281,6 +327,15 @@ emit('electron_simple_web_layout_requested_height', jsonIntegerTextOrBlank(proof
 emit('electron_simple_web_layout_capture_native_width', jsonIntegerTextOrBlank(proof.capture_native_width));
 emit('electron_simple_web_layout_capture_native_height', jsonIntegerTextOrBlank(proof.capture_native_height));
 emit('electron_simple_web_layout_capture_downsampled', booleanString(proof.capture_downsampled));
+emit('electron_simple_web_layout_geometry_path', proof.geometry_path);
+emit('electron_simple_web_layout_geometry_written', proof.geometry_written === true ? 'true' : 'false');
+emit('electron_simple_web_layout_geometry_file_status', artifactFileStatus(geometryStat));
+emit('electron_simple_web_layout_geometry_size_bytes', geometryStat === null ? '' : String(geometryStat.stat.size));
+emit('electron_simple_web_layout_geometry_producer', geometry.producer);
+emit('electron_simple_web_layout_geometry_viewport_width', jsonIntegerTextOrBlank(geometryViewport.width));
+emit('electron_simple_web_layout_geometry_viewport_height', jsonIntegerTextOrBlank(geometryViewport.height));
+emit('electron_simple_web_layout_geometry_item_count', String(geometryItems.length));
+emit('electron_simple_web_layout_geometry_measured_item_count', String(geometryMeasuredItemCount));
 emit('electron_simple_web_layout_captured_argb_path', proof.captured_argb_path);
 emit('electron_simple_web_layout_captured_argb_written', proof.captured_argb_written === true ? 'true' : 'false');
 emit('electron_simple_web_layout_captured_argb_file_status', artifactFileStatus(capturedArgbStat));
