@@ -60,8 +60,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
 - Proof source must identify the live exact fixture producer, not a generic
   hand-authored JSON file.
 - The proof source marker must resolve to a regular nonempty exact fixture
-  producer source file so stale JSON cannot be paired with a missing Electron
-  capture script.
+  producer source file that still contains the live renderer/proof-source
+  markers, so stale JSON cannot be paired with a missing, substituted, or
+  aliased Electron capture script.
 - The proof JSON and captured ARGB artifact must be single regular files, not
   symlinks or hardlinks to mutable or substituted evidence.
 - The live Electron wrapper must promote and require proof symlink/hardlink
@@ -169,6 +170,34 @@ describe "Electron Simple Web Engine2D proof validator":
         expect(evidence).to_contain("electron_simple_web_engine2d_proof_source=tools/electron-live-bitmap/exact_fixture.js")
         expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_file_status=missing")
         expect(evidence).to_contain("electron_simple_web_engine2d_proof_source_size_bytes=")
+
+    it "rejects substituted Electron Engine2D proof source artifacts":
+        val root = "build/test-electron-engine2d-validator-source-artifact-substituted"
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/hardlink/tools/electron-live-bitmap " + root + "/directory/tools/electron-live-bitmap " + root + "/markerless/tools/electron-live-bitmap && " +
+            _proof_command(root + "/proof.json", "") +
+            " && cp " + root + "/proof.json " + root + "/hardlink/proof.json && cp " + root + "/captured.json " + root + "/hardlink/captured.json && cp tools/electron-live-bitmap/exact_fixture.js " + root + "/hardlink/original-exact-fixture.js && ln " + root + "/hardlink/original-exact-fixture.js " + root + "/hardlink/tools/electron-live-bitmap/exact_fixture.js && " +
+            "cd " + root + "/hardlink && node ../../../scripts/check/validate-electron-simple-web-engine2d-proof.js proof.json > hardlink.env; hardlink_code=$?; cd ../../.. && " +
+            "cp " + root + "/proof.json " + root + "/directory/proof.json && mkdir -p " + root + "/directory/tools/electron-live-bitmap/exact_fixture.js && cp " + root + "/captured.json " + root + "/directory/captured.json && " +
+            "cd " + root + "/directory && node ../../../scripts/check/validate-electron-simple-web-engine2d-proof.js proof.json > directory.env; directory_code=$?; cd ../../.. && " +
+            "cp " + root + "/proof.json " + root + "/markerless/proof.json && cp " + root + "/captured.json " + root + "/markerless/captured.json && printf 'module.exports = {};\\n' > " + root + "/markerless/tools/electron-live-bitmap/exact_fixture.js && " +
+            "cd " + root + "/markerless && node ../../../scripts/check/validate-electron-simple-web-engine2d-proof.js proof.json > markerless.env; markerless_code=$?; cd ../../.. && " +
+            "[ \"$hardlink_code\" -eq 1 ] && [ \"$directory_code\" -eq 1 ] && [ \"$markerless_code\" -eq 1 ]"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val hardlink = file_read(root + "/hardlink/hardlink.env")
+        val directory = file_read(root + "/directory/directory.env")
+        val markerless = file_read(root + "/markerless/markerless.env")
+        step("Confirm Engine2D proof source evidence cannot be hardlinked, non-regular, or markerless")
+        expect(hardlink).to_contain("electron_simple_web_engine2d_validation_status=fail")
+        expect(hardlink).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-proof-source-file-hardlink")
+        expect(hardlink).to_contain("electron_simple_web_engine2d_proof_source_file_status=hardlink")
+        expect(directory).to_contain("electron_simple_web_engine2d_validation_status=fail")
+        expect(directory).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-proof-source-file-not-regular")
+        expect(directory).to_contain("electron_simple_web_engine2d_proof_source_file_status=not-regular")
+        expect(markerless).to_contain("electron_simple_web_engine2d_validation_status=fail")
+        expect(markerless).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-proof-source-file-marker-missing")
+        expect(markerless).to_contain("electron_simple_web_engine2d_proof_source_file_status=marker-missing")
 
     it "rejects missing Electron capture backend and GPU feature diagnostics":
         val root = "build/test-electron-engine2d-validator-backend"
@@ -641,7 +670,10 @@ describe "Electron Simple Web Engine2D proof validator":
         expect(validator).to_contain("electron_simple_web_engine2d_captured_argb_hardlink_status")
         expect(validator).to_contain("proof-json-hardlink")
         expect(validator).to_contain("captured-argb-hardlink")
+        expect(validator).to_contain("proofSourceArtifact")
+        expect(validator).to_contain("marker-missing")
         val fixture = file_read("tools/electron-live-bitmap/exact_fixture.js")
         expect(fixture).to_contain("electron_user_agent")
         expect(fixture).to_contain("electron_process_version")
         expect(fixture).to_contain("chrome_process_version")
+        expect(fixture).to_contain("proof_source: \"tools/electron-live-bitmap/exact_fixture.js\"")

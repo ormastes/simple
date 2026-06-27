@@ -94,6 +94,28 @@ function pathInfo(filePath) {
   };
 }
 
+function proofSourceArtifact(filePath) {
+  const info = pathInfo(filePath);
+  if (info.isSymlink) return { status: 'symlink', size: '' };
+  if (info.lstat === null) return { status: 'missing', size: '' };
+  if (!info.lstat.isFile()) return { status: 'not-regular', size: '' };
+  if (info.hasMultipleLinks) return { status: 'hardlink', size: String(info.lstat.size) };
+  if (info.lstat.size <= 0) return { status: 'empty', size: '0' };
+  let source = '';
+  try {
+    source = fs.readFileSync(filePath, 'utf8');
+  } catch (_err) {
+    return { status: 'missing', size: '' };
+  }
+  if (
+    !source.includes('renderer: "electron-live-capture-page"') ||
+    !source.includes('proof_source: "tools/electron-live-bitmap/exact_fixture.js"')
+  ) {
+    return { status: 'marker-missing', size: String(info.lstat.size) };
+  }
+  return { status: 'pass', size: String(info.lstat.size) };
+}
+
 function artifactStat(value, proofPath) {
   if (typeof value !== 'string' || value.trim() === '') {
     return null;
@@ -278,19 +300,9 @@ const capturedArgbNonzeroPixels = nonzeroPixelCount(capturedArgbPixels);
 const capturedArgbChecksum = checksum(capturedArgbPixels);
 const capturedArgbWeightedChecksum = weightedChecksum(capturedArgbPixels);
 const expectedProofSource = 'tools/electron-live-bitmap/exact_fixture.js';
-const proofSourceStat = pathInfo(expectedProofSource);
-const proofSourceFileStatus = proofSourceStat.isSymlink
-  ? 'symlink'
-  : proofSourceStat.lstat === null || !proofSourceStat.lstat.isFile()
-    ? 'missing'
-    : proofSourceStat.lstat.size <= 0
-      ? 'empty'
-      : 'pass';
-const proofSourceSizeBytes = proofSourceFileStatus === 'empty'
-  ? '0'
-  : proofSourceFileStatus === 'pass'
-    ? String(proofSourceStat.lstat.size)
-    : '';
+const proofSource = proofSourceArtifact(expectedProofSource);
+const proofSourceFileStatus = proofSource.status;
+const proofSourceSizeBytes = proofSource.size;
 const expectedCaptureBackend = 'electron-offscreen-capture-page';
 const expectedCompositorMode = 'offscreen-osr-exact-srgb';
 const browserEngine = textField(proof.browser_engine);
