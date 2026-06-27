@@ -14,6 +14,7 @@ const files = process.argv.slice(2).filter(Boolean);
 const requestedSourceCount = files.length;
 let missingSourceCount = 0;
 let emptySourceCount = 0;
+let symlinkSourceCount = 0;
 let sourceCount = 0;
 let text = '';
 let coherentSource = false;
@@ -32,7 +33,21 @@ function renderHtmlLen(content) {
 }
 
 for (const file of files) {
-  if (!file || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
+  let stat;
+  try {
+    stat = file ? fs.lstatSync(file) : null;
+  } catch (_err) {
+    stat = null;
+  }
+  if (!stat) {
+    missingSourceCount += 1;
+    continue;
+  }
+  if (stat.isSymbolicLink()) {
+    symlinkSourceCount += 1;
+    continue;
+  }
+  if (!stat.isFile()) {
     missingSourceCount += 1;
     continue;
   }
@@ -67,6 +82,8 @@ if (requestedSourceCount === 0 || sourceCount === 0) {
   reason = 'missing-ios-render-log-source';
 } else if (missingSourceCount > 0) {
   reason = 'ios-render-log-source-missing';
+} else if (symlinkSourceCount > 0) {
+  reason = 'ios-render-log-source-symlink';
 } else if (emptySourceCount > 0) {
   reason = 'ios-render-log-source-empty';
 } else if (failureMarker) {
@@ -93,6 +110,7 @@ emit('ios_render_log_requested_source_count', requestedSourceCount);
 emit('ios_render_log_source_count', sourceCount);
 emit('ios_render_log_missing_source_count', missingSourceCount);
 emit('ios_render_log_empty_source_count', emptySourceCount);
+emit('ios_render_log_symlink_source_count', symlinkSourceCount);
 emit('ios_render_log_source_coherence_status', coherentSource ? 'pass' : 'fail');
 emit('ios_render_log_marker_status', renderMarker ? 'pass' : 'fail');
 emit('ios_render_log_html_len', htmlLen);
