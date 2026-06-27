@@ -74,6 +74,9 @@ function artifactStat(value, proofPath) {
     ? [raw]
     : [raw, path.join(path.dirname(proofPath), raw)];
   for (const candidate of candidates) {
+    if (path.resolve(candidate) === path.resolve(proofPath)) {
+      continue;
+    }
     try {
       const stat = fs.statSync(candidate);
       if (stat.isFile()) {

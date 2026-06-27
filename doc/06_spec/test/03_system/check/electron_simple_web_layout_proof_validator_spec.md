@@ -27,7 +27,7 @@ electron_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -79,6 +79,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
   viewport mismatches are rejected.
 - ARGB capture proof paths must resolve to nonempty files instead of relying
   on `captured_argb_written=true` alone.
+- ARGB capture proof paths must not resolve back to the top-level proof JSON
+  even if the proof contains artifact-shaped fields.
 - Captured ARGB files must parse as `argb-u32` Electron live-capture artifacts,
   match the proof viewport, include the expected pixel count, and contain
   nonzero pixels with numeric uint32 JSON pixel values.
@@ -315,6 +317,38 @@ expect(empty).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(empty).to_contain("electron_simple_web_layout_validation_reason=empty-captured-argb-file")
 expect(empty).to_contain("electron_simple_web_layout_captured_argb_file_status=pass")
 expect(empty).to_contain("electron_simple_web_layout_captured_argb_size_bytes=0")
+```
+
+</details>
+
+#### rejects captured ARGB paths that point back at the proof JSON
+
+-  proof command
+   - Expected: code equals `1`
+- Confirm the proof JSON cannot be reused as its own ARGB artifact
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-layout-validator-self-artifact"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/proof.json", "p.captured_argb_path=path.basename(process.argv[1]);p.width=2;p.height=2;p.capture_native_width=2;p.capture_native_height=2;p.format=\"argb-u32\";p.producer=\"electron-live-capture-page\";p.pixels=Array(4).fill(4294967295)") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm the proof JSON cannot be reused as its own ARGB artifact")
+expect(evidence).to_contain("electron_simple_web_layout_validation_status=fail")
+expect(evidence).to_contain("electron_simple_web_layout_validation_reason=missing-captured-argb-file")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_path=proof.json")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_file_status=fail")
+expect(evidence).to_contain("electron_simple_web_layout_captured_argb_size_bytes=")
 ```
 
 </details>
@@ -557,10 +591,13 @@ expect(pixel).to_contain("electron_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+val validator = file_read("scripts/check/validate-electron-simple-web-layout-proof.js")
+expect(validator).to_contain("path.resolve(candidate) === path.resolve(proofPath)")
+
 val script = file_read("scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs")
 expect(script).to_contain("validate-electron-simple-web-layout-proof.js")
 expect(script).to_contain("cat \"$VALIDATED_ENV\"")
@@ -584,8 +621,8 @@ expect(fixture).to_contain("proof_source: \"tools/electron-live-bitmap/exact_fix
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
