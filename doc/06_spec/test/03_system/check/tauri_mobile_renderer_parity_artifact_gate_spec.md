@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -86,6 +86,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
   the high-level performance and animation statuses claim pass.
 - Malformed mobile MDI input-to-paint detail rows fail even when the high-level
   interaction-latency status claims pass.
+- Implausibly high mobile MDI performance and input-to-paint timing rows fail
+  even when the high-level timing statuses claim pass.
 - Malformed mobile MDI routed-event detail rows fail even when the high-level
   event status claims pass.
 - Mobile MDI failure-marker rows fail even when the high-level MDI status and
@@ -354,6 +356,40 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_interaction
 
 </details>
 
+#### rejects mobile pass claims with implausibly high timing rows
+
+- Confirm aggregate timing detail rows are capped at 1000 ms
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-high-timing"
+val ios_command = _run_aggregate_command(root + "-ios", "present", "present", "png", "png").replace("ios_mdi_performance_now_delta_ms=1.25", "ios_mdi_performance_now_delta_ms=1001")
+val android_command = _run_aggregate_command(root + "-android", "present", "present", "png", "png").replace("android_mdi_input_to_paint_ms=2.5", "android_mdi_input_to_paint_ms=1001")
+val command = ios_command + "; ios_code=$?; " + android_command + "; android_code=$?; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val ios = file_read(root + "-ios/stdout.env")
+val android = file_read(root + "-android/stdout.env")
+step("Confirm aggregate timing detail rows are capped at 1000 ms")
+expect(ios).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(ios).to_contain("tauri_mobile_renderer_parity_reason=ios-mdi-render-event-capture-performance-animation-proof-incomplete")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_status=pass")
+expect(ios).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_now_delta_ms=1001")
+expect(android).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(android).to_contain("tauri_mobile_renderer_parity_reason=android-mdi-render-event-capture-performance-animation-proof-incomplete")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_interaction_latency_status=pass")
+expect(android).to_contain("tauri_mobile_renderer_parity_android_mdi_input_to_paint_ms=1001")
+```
+
+</details>
+
 #### rejects mobile pass claims with incomplete routed-event detail rows
 
 - Confirm aggregate pass claims require detailed routed-event rows
@@ -491,7 +527,7 @@ expect(android).to_contain("tauri_mobile_renderer_parity_android_screenshot_file
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -515,6 +551,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_render_image
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_event_taskbar_labels_visible")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_mdi_performance_now_available")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_mdi_animation_frame_available")
+expect(script).to_contain("num_positive_at_most \"$performance_delta\" 1000")
+expect(script).to_contain("num_positive_at_most \"$input_to_paint\" 1000")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_reason")
 expect(script).to_contain("tauri_mobile_renderer_parity_android_screenshot_file_status")
@@ -529,8 +567,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_metal
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
