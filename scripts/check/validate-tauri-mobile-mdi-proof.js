@@ -103,6 +103,15 @@ function fileIdentity(stat) {
   if (!stat || stat.dev === undefined || stat.ino === undefined) return "";
   return `${stat.dev}:${stat.ino}`;
 }
+
+let jsonPathStat = null;
+try {
+  jsonPathStat = fs.lstatSync(jsonPath);
+} catch (_err) {
+  jsonPathStat = null;
+}
+const jsonPathIdentity = jsonPathStat && jsonPathStat.isFile() ? fileIdentity(jsonPathStat) : "";
+
 for (const file of files) {
   let stat = null;
   if (file) {
@@ -124,11 +133,11 @@ for (const file of files) {
     nonregularSourceCount += 1;
     continue;
   }
-  if (stat.nlink > 1) {
+  const identity = fileIdentity(stat);
+  if (stat.nlink > 1 && (!identity || identity !== jsonPathIdentity)) {
     hardlinkSourceCount += 1;
     continue;
   }
-  const identity = fileIdentity(stat);
   if (identity) {
     sourceFileIdentities.add(identity);
   }
@@ -228,12 +237,6 @@ if (files.some((file) => sameResolvedPath(jsonPath, file))) {
   process.exit(1);
 }
 
-let jsonPathStat = null;
-try {
-  jsonPathStat = fs.lstatSync(jsonPath);
-} catch (_err) {
-  jsonPathStat = null;
-}
 if (jsonPathStat && jsonPathStat.isSymbolicLink()) {
   emit("mdi_proof_json", jsonPath);
   emit("mdi_proof_status", "fail");
@@ -254,6 +257,14 @@ if (jsonPathStat && sourceFileIdentities.has(fileIdentity(jsonPathStat))) {
   emit("mdi_proof_json", jsonPath);
   emit("mdi_proof_status", "fail");
   emit("mdi_proof_reason", "mdi-proof-json-path-overlaps-source");
+  emitSourceRows();
+  process.exit(1);
+}
+
+if (jsonPathStat && jsonPathStat.nlink > 1) {
+  emit("mdi_proof_json", jsonPath);
+  emit("mdi_proof_status", "fail");
+  emit("mdi_proof_reason", "mdi-proof-json-path-hardlink");
   emitSourceRows();
   process.exit(1);
 }

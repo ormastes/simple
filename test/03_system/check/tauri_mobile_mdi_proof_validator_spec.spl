@@ -35,6 +35,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
   the source evidence it just consumed.
 - The extracted proof JSON output path must also be a regular destination, not
   a symlink to another artifact outside the requested device logs.
+- Existing extracted proof JSON output paths must not be hardlinked aliases of
+  unrelated artifacts outside the requested device logs.
 - Existing extracted proof JSON output paths must not be directories or other
   non-regular artifacts.
 - `performanceNowAvailable=true` is not enough: the proof must include an
@@ -328,6 +330,32 @@ describe "Tauri mobile MDI proof validator":
         step("Confirm extracted MDI proof cannot be written through a symlinked JSON path")
         expect(evidence).to_contain("android_mdi_proof_status=fail")
         expect(evidence).to_contain("android_mdi_proof_reason=mdi-proof-json-path-symlink")
+        expect(evidence).to_contain("android_mdi_proof_json=" + root + "/proof.json")
+        expect(evidence).to_contain("android_mdi_proof_requested_source_count=1")
+        expect(evidence).to_contain("android_mdi_proof_source_count=1")
+        expect(evidence).to_contain("android_mdi_proof_marker_source_count=1")
+        expect(evidence).to_contain("android_mdi_proof_missing_source_count=0")
+        expect(evidence).to_contain("android_mdi_proof_symlink_source_count=0")
+        expect(evidence).to_contain("android_mdi_proof_hardlink_source_count=0")
+        expect(evidence).to_contain("android_mdi_proof_empty_source_count=0")
+        expect(evidence).to_contain("android_mdi_proof_nonregular_source_count=0")
+        expect(external).to_contain("{\"stale\":true}")
+
+    it "rejects hardlinked proof JSON output paths before writing extracted MDI proof":
+        val root = "build/test-tauri-mobile-mdi-validator-hardlink-json-output"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " " + root + "-external && " +
+            _proof_log_command(root + "/device.log", "") +
+            " && printf '{\"stale\":true}\\n' > " + root + "-external/proof.json && " +
+            "ln " + root + "-external/proof.json " + root + "/proof.json && " +
+            "node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val evidence = file_read(root + "/evidence.env")
+        val external = file_read(root + "-external/proof.json")
+        step("Confirm extracted MDI proof cannot be written through a hardlinked JSON path")
+        expect(evidence).to_contain("android_mdi_proof_status=fail")
+        expect(evidence).to_contain("android_mdi_proof_reason=mdi-proof-json-path-hardlink")
         expect(evidence).to_contain("android_mdi_proof_json=" + root + "/proof.json")
         expect(evidence).to_contain("android_mdi_proof_requested_source_count=1")
         expect(evidence).to_contain("android_mdi_proof_source_count=1")
@@ -773,6 +801,7 @@ describe "Tauri mobile MDI proof validator":
         val shell = file_read("tools/tauri-shell/src-tauri/src/lib.rs")
         val validator = file_read("scripts/check/validate-tauri-mobile-mdi-proof.js")
         expect(validator).to_contain("jsonBoolTextOrBlank")
+        expect(validator).to_contain("mdi-proof-json-path-hardlink")
         expect(ios).to_contain("ios_mdi_proof_empty_source_count")
         expect(ios).to_contain("ios_mdi_proof_symlink_source_count")
         expect(ios).to_contain("ios_mdi_proof_hardlink_source_count")
