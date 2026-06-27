@@ -20,6 +20,9 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 # Directories to skip during source collection
 val _skip_dirs = ["test", "tests", "doc", "docs", "verification", "resources", "scripts", "build"]
 
+fn _driver_source_trace_enabled() -> bool:
+    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
 pub fn _driver_should_skip_dir(name: text) -> bool:
     var i = 0
     while i < _skip_dirs.len():
@@ -29,7 +32,8 @@ pub fn _driver_should_skip_dir(name: text) -> bool:
     false
 
 pub fn _driver_is_bootstrap_entry_source(path: text, module_name: text) -> bool:
-    path.ends_with("/app/cli/bootstrap_main.spl") or path == "./src/app/cli/bootstrap_main.spl" or module_name == "app.cli.bootstrap_main"
+    val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    path.ends_with("/app/cli/bootstrap_main.spl") or path == "./src/app/cli/bootstrap_main.spl" or module_name == "app.cli.bootstrap_main" or (native_entry != "" and path == native_entry)
 
 pub fn _driver_module_name_from_path(path: text) -> text:
     var mod_path = path
@@ -53,10 +57,10 @@ pub fn _driver_module_aliases(path: text, content: text, module_name: text) -> [
 pub fn _driver_collect_sources(p: text) -> [SourceFile]:
     """Collect source files from a path (file or directory). Returns list of SourceFile."""
     var result: [SourceFile] = []
-    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+    if _driver_source_trace_enabled():
         print "[collect_sources] path {p}"
     if p.ends_with(".spl"):
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        if _driver_source_trace_enabled():
             print "[collect_sources] file {p}"
         # It's a source file
         if p.ends_with("/check.spl") or p.ends_with("\\check.spl"):
@@ -74,22 +78,22 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
             if not core_allowed3:
                 return result
         val content = rt_file_read_text(p) ?? ""
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        if _driver_source_trace_enabled():
             print "[collect_sources] content_len {content.len()}"
         if content != "":
             val module_name = _driver_module_name_from_path(p)
             val aliases = _driver_module_aliases(p, content, module_name)
-            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            if _driver_source_trace_enabled():
                 print "[collect_sources] file_result {aliases.len()}"
             return aliases
     else:
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        if _driver_source_trace_enabled():
             print "[collect_sources] dir {p}"
         # Use find for directory roots. The generated bootstrap compiler corrupts
         # some static arrays used by the old recursive walker.
         val cmd = "find {p} -type f -name '*.spl' 2>/dev/null"
         val (stdout, _, code) = rt_process_run("sh", ["-c", cmd])
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        if _driver_source_trace_enabled():
             print "[collect_sources] find_code {code} stdout_len {stdout.len()}"
         if code != 0 or stdout == "":
             return result

@@ -201,6 +201,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [dynlib_api.md](dynlib_api.md) | Dynamic library API |
 | [execve_syscall.md](execve_syscall.md) | Execve syscall guide |
 | [lean_verification_workflow.md](lean_verification_workflow.md) | Lean verification workflow |
+| [tooling/pure_simple_tooling.md](tooling/pure_simple_tooling.md) | Pure Simple tool dispatch, test-daemon, and completion gate |
 | [ssh_serial_transport.md](ssh_serial_transport.md) | SSH serial transport |
 | [wine_dll_loading.md](wine_dll_loading.md) | Wine DLL loading |
 

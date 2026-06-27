@@ -40,6 +40,11 @@ mirrored manual doc, read it as an operator manual, and fix step names,
 captures, `@inline`/`@prev` visibility, and helper names until the primary flow
 is understandable without opening the source spec.
 
+Completion gate: do not mark a goal, SPipe phase, verify report, or ship lane
+complete when workflow/tooling behavior changed and the matching guide, skill,
+agent, command, or generated/manual spec docs are still stale. Update the docs
+first, then run focused verification evidence once.
+
 For recent unfinished-plan cleanup lanes, use
 `doc/07_guide/infra/recent_plan_cleanup.md`. Keep the cleanup matrix under
 `doc/03_plan/agent_tasks/` with sidecar lanes/`N/A`, merge owner, and final

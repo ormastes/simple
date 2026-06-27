@@ -50,11 +50,16 @@
    - shared interface/manual helper names match design, spec, manual, and
      tooling references
    - placeholder helpers fail explicitly with `assert(false)` or `fail(...)`
-11. Verify the `## Cooperative Review` plan from the state file was completed:
+11. If workflow/tooling behavior changed, verify the matching `doc/07_guide`,
+    `doc/06_spec`, `.codex/skills`, `.agents/skills`, `.claude/skills`,
+    `.claude/agents/spipe`, and `.gemini/commands` updates exist or are
+    explicitly recorded as `N/A`. Stale process docs fail verification; do not
+    mark the agent goal or SPipe lane complete before this gate passes.
+12. Verify the `## Cooperative Review` plan from the state file was completed:
     lower-model sidecar lanes are either reviewed/merged or explicitly `N/A`,
     and the normal/highest-capability review accepted broad findings,
     coverage claims, generated-manual quality, exclusions, and done marks.
-12. Run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
+13. Run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
     `sh scripts/audit/direct-env-runtime-guard.shs --staged`; app leaf and
     `src/lib/gc_async_mut` env reads or process calls outside owner modules
     must use env/process facades, not local `rt_env_get`, `rt_process_run`,

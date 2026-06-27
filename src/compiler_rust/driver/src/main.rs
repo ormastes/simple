@@ -137,22 +137,15 @@ struct CommandEntry {
 
 /// Execute a command entry: Simple-first with Rust fallback.
 fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
+    let pure_simple_tool = command_is_pure_simple_tool(entry.name);
+
     // 1. Check env var override → Rust
-    if !entry.env_override.is_empty() && std::env::var(entry.env_override).is_ok() {
+    if !pure_simple_tool && !entry.env_override.is_empty() && std::env::var(entry.env_override).is_ok() {
         return run_rust_handler(&entry.rust_handler, ctx);
     }
 
-    if entry.name == "native-build" && native_build_should_use_simple(ctx.args) {
-        eprintln!("[native-build] dispatching to Simple app: src/app/cli/native_build_main.spl");
-        if let Some(code) =
-            dispatch_to_simple_app("src/app/cli/native_build_main.spl", ctx.args, ctx.gc_log, ctx.gc_off)
-        {
-            return code;
-        }
-    }
-
     // 2. Check if any args require the Rust handler
-    if !entry.needs_rust_flags.is_empty() {
+    if !pure_simple_tool && !entry.needs_rust_flags.is_empty() {
         let needs_rust = ctx.args[1..].iter().any(|a| {
             entry
                 .needs_rust_flags
@@ -164,6 +157,29 @@ fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
         }
     }
 
+    if entry.name == "test" {
+        if test_should_use_single_runner(ctx.args) {
+            if let Some(code) = dispatch_to_simple_app(
+                "src/app/test_runner_new/test_runner_single.spl",
+                ctx.args,
+                ctx.gc_log,
+                ctx.gc_off,
+            ) {
+                return code;
+            }
+        }
+        if test_should_use_light_daemon_client(ctx.args) {
+            if let Some(code) = dispatch_to_simple_app(
+                "src/app/test_runner_new/test_runner_client.spl",
+                ctx.args,
+                ctx.gc_log,
+                ctx.gc_off,
+            ) {
+                return code;
+            }
+        }
+    }
+
     // 3. Try Simple app
     if !entry.app_path.is_empty() {
         if let Some(code) = dispatch_to_simple_app(entry.app_path, ctx.args, ctx.gc_log, ctx.gc_off) {
@@ -171,24 +187,67 @@ fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
         }
     }
 
+    if pure_simple_tool {
+        eprintln!(
+            "error: pure-Simple tool '{}' unavailable; refusing Rust fallback",
+            entry.name
+        );
+        return 1;
+    }
+
     // 4. Fallback → Rust
     run_rust_handler(&entry.rust_handler, ctx)
 }
 
-fn native_build_should_use_simple(args: &[String]) -> bool {
-    let mut i = 1; // skip "native-build"
-    while i < args.len() {
-        let arg = args[i].as_str();
-        if arg == "--backend" && i + 1 < args.len() {
-            let backend = args[i + 1].as_str();
-            return backend == "llvm-lib" || backend == "llvmlib";
-        }
-        if let Some(backend) = arg.strip_prefix("--backend=") {
-            return backend == "llvm-lib" || backend == "llvmlib";
-        }
-        i += 1;
-    }
-    false
+fn test_should_use_single_runner(args: &[String]) -> bool {
+    args.iter().skip(1).any(|arg| arg == "--no-session-daemon")
+}
+
+fn test_should_use_light_daemon_client(args: &[String]) -> bool {
+    args.iter()
+        .skip(1)
+        .any(|arg| !arg.starts_with('-') && arg.ends_with(".spl"))
+}
+
+fn command_is_pure_simple_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "test"
+            | "test-daemon"
+            | "check"
+            | "examples-check"
+            | "native-build"
+            | "vscode"
+            | "electron"
+            | "fmt"
+            | "lint"
+            | "fix"
+            | "i18n"
+            | "migrate"
+            | "mcp"
+            | "diff"
+            | "context"
+            | "query"
+            | "info"
+            | "spec-coverage"
+            | "replay"
+            | "gen-lean"
+            | "feature-gen"
+            | "task-gen"
+            | "bug-gen"
+            | "spec-gen"
+            | "todo-scan"
+            | "todo-gen"
+            | "brief"
+            | "dashboard"
+            | "coverage"
+            | "depgraph"
+            | "lsp"
+            | "dap"
+            | "spipe-docgen"
+            | "security"
+            | "verify"
+    )
 }
 
 fn run_rust_handler(handler: &Handler, ctx: &CommandContext) -> i32 {
@@ -295,12 +354,11 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_COMPILE_RUST",
         needs_rust_flags: &[],
     },
-    // Native build (Rust-only: compile .spl → native binary via Cranelift)
     CommandEntry {
         name: "native-build",
-        app_path: "",
+        app_path: "src/app/cli/native_build_main.spl",
         rust_handler: Handler::Args(handle_native_build),
-        env_override: "SIMPLE_NATIVE_BUILD_RUST",
+        env_override: "",
         needs_rust_flags: &[],
     },
     CommandEntry {
@@ -327,14 +385,14 @@ const COMMAND_TABLE: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "vscode",
-        app_path: "",
+        app_path: "src/app/cli/vscode_entry.spl",
         rust_handler: Handler::Args(handle_vscode),
         env_override: "",
         needs_rust_flags: &[],
     },
     CommandEntry {
         name: "electron",
-        app_path: "",
+        app_path: "src/app/cli/electron_entry.spl",
         rust_handler: Handler::Args(handle_electron),
         env_override: "",
         needs_rust_flags: &[],
@@ -387,46 +445,56 @@ const COMMAND_TABLE: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "examples-check",
-        app_path: "",
+        app_path: "src/app/cli/examples_check_entry.spl",
         rust_handler: Handler::Args(handle_examples_check),
         env_override: "",
         needs_rust_flags: &[],
     },
-    // Testing - always use Rust handler (mature implementation with Rust test integration + DB tracking)
+    // Testing - pure-Simple runner only. Do not silently fall back to Rust.
     CommandEntry {
         name: "test",
-        app_path: "src/app/cli/test_entry.spl",
+        app_path: "src/app/test_runner_new/main.spl",
         rust_handler: Handler::ArgsGc(handle_test_rust),
-        env_override: "SIMPLE_TEST_RUST",
+        env_override: "",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "test-daemon",
+        app_path: "src/app/test_daemon/main.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: test-daemon app not found");
+            1
+        }),
+        env_override: "",
         needs_rust_flags: &[],
     },
     // Code quality
     CommandEntry {
         name: "lint",
-        app_path: "src/app/lint/main.spl",
+        app_path: "src/app/cli/lint_entry.spl",
         rust_handler: Handler::Args(run_lint),
-        env_override: "SIMPLE_LINT_RUST",
-        needs_rust_flags: &["--json", "--fix"],
+        env_override: "",
+        needs_rust_flags: &[],
     },
     CommandEntry {
         name: "fix",
         app_path: "src/app/cli/lint_entry.spl",
         rust_handler: Handler::Args(run_lint),
-        env_override: "SIMPLE_FIX_RUST",
+        env_override: "",
         needs_rust_flags: &[],
     },
     CommandEntry {
         name: "fmt",
-        app_path: "src/app/formatter/main.spl",
+        app_path: "src/app/cli/lint_entry.spl",
         rust_handler: Handler::Args(run_fmt),
-        env_override: "SIMPLE_FMT_RUST",
-        needs_rust_flags: &["--json"],
+        env_override: "",
+        needs_rust_flags: &[],
     },
     CommandEntry {
         name: "check",
-        app_path: "",
+        app_path: "src/app/cli/check_entry.spl",
         rust_handler: Handler::Custom(handle_check_wrapper),
-        env_override: "SIMPLE_CHECK_RUST",
+        env_override: "",
         needs_rust_flags: &[],
     },
     CommandEntry {
@@ -447,7 +515,7 @@ const COMMAND_TABLE: &[CommandEntry] = &[
     // Migration and tooling
     CommandEntry {
         name: "migrate",
-        app_path: "src/app/migrate/main.spl",
+        app_path: "src/compiler/90.tools/migrate/main.spl",
         rust_handler: Handler::Args(run_migrate),
         env_override: "SIMPLE_MIGRATE_RUST",
         needs_rust_flags: &[],
@@ -515,7 +583,7 @@ const COMMAND_TABLE: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "security",
-        app_path: "",
+        app_path: "src/app/cli/security_entry.spl",
         rust_handler: Handler::Args(run_security),
         env_override: "",
         needs_rust_flags: &[],
@@ -680,9 +748,9 @@ const COMMAND_TABLE: &[CommandEntry] = &[
     // Verification
     CommandEntry {
         name: "verify",
-        app_path: "",
+        app_path: "src/app/verify/main.spl",
         rust_handler: Handler::ArgsGc(run_verify),
-        env_override: "SIMPLE_VERIFY_RUST",
+        env_override: "",
         needs_rust_flags: &[],
     },
     // Qualified ignore
@@ -845,14 +913,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
             1
         }),
         env_override: "",
-        needs_rust_flags: &[],
-    },
-    // Native build (compile .spl project to native binary via Cranelift)
-    CommandEntry {
-        name: "native-build",
-        app_path: "",
-        rust_handler: Handler::Args(handle_native_build),
-        env_override: "SIMPLE_NATIVE_BUILD_RUST",
         needs_rust_flags: &[],
     },
 ];
@@ -1086,19 +1146,46 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/app/office/mod.spl"
         && app_relative_path != "src/app/cli/bootstrap_main.spl"
         && app_relative_path != "src/app/cli/native_build_main.spl"
+        && app_relative_path != "src/app/cli/vscode_entry.spl"
+        && app_relative_path != "src/app/cli/electron_entry.spl"
+        && app_relative_path != "src/app/cli/security_entry.spl"
         && app_relative_path != "src/app/cli/main.spl"
         && app_relative_path != "src/app/os/main.spl"
         && app_relative_path != "src/app/play/main.spl"
         && app_relative_path != "src/app/dashboard/main.spl"
         && app_relative_path != "src/app/lsp/main.spl"
+        && app_relative_path != "src/compiler/90.tools/migrate/main.spl"
         && app_relative_path != "src/compiler/90.tools/sffi_gen/main.spl"
+        && app_relative_path != "src/app/i18n/main.spl"
+        && app_relative_path != "src/app/mcp/main.spl"
+        && app_relative_path != "src/app/diff/main.spl"
+        && app_relative_path != "src/app/cli/check_entry.spl"
+        && app_relative_path != "src/app/cli/examples_check_entry.spl"
+        && app_relative_path != "src/app/query/main.spl"
+        && app_relative_path != "src/app/info/main.spl"
+        && app_relative_path != "src/app/spec_coverage/main.spl"
+        && app_relative_path != "src/app/replay/main.spl"
+        && app_relative_path != "src/app/gen_lean/main.spl"
+        && app_relative_path != "src/app/feature_gen/main.spl"
+        && app_relative_path != "src/app/task_gen/main.spl"
+        && app_relative_path != "src/app/bug_gen/main.spl"
+        && app_relative_path != "src/app/spec_gen/main.spl"
+        && app_relative_path != "src/app/todo_scan/main.spl"
+        && app_relative_path != "src/app/todo_gen/main.spl"
+        && app_relative_path != "src/app/brief/main.spl"
         && app_relative_path != "src/app/plugin/main.spl"
         && app_relative_path != "src/app/wrapper_gen/mod.spl"
         && app_relative_path != "src/app/llm_process_gen/main.spl"
         && app_relative_path != "src/app/context/main.spl"
         && app_relative_path != "src/app/llm_runtime/control_cli.spl"
         && app_relative_path != "src/app/spipe_docgen/main.spl"
+        && app_relative_path != "src/app/verify/main.spl"
         && app_relative_path != "src/app/md_diagram_update/main.spl"
+        && app_relative_path != "src/app/test_runner_new/main.spl"
+        && app_relative_path != "src/app/test_runner_new/test_runner_client.spl"
+        && app_relative_path != "src/app/test_runner_new/test_runner_single.spl"
+        && app_relative_path != "src/app/test_daemon/main.spl"
+        && app_relative_path != "src/app/test_daemon/light_daemon.spl"
         && app_relative_path != "src/app/deps/main.spl"
     {
         return None;
@@ -1133,6 +1220,12 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         return Some(run_file_with_args(&path, gc_log, gc_off, full_args));
     }
 
+    if app_receives_user_args_only(app_relative_path) {
+        let mut full_args = vec![path.to_string_lossy().to_string()];
+        full_args.extend(args.iter().skip(1).cloned());
+        return Some(run_file_with_args(&path, gc_log, gc_off, full_args));
+    }
+
     if app_relative_path == "src/app/llm_runtime/control_cli.spl" {
         let mut full_args = vec![path.to_string_lossy().to_string()];
         full_args.extend(args.iter().skip(1).cloned());
@@ -1160,6 +1253,36 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
     full_args.extend(args.iter().cloned());
 
     Some(run_file_with_args(&path, gc_log, gc_off, full_args))
+}
+
+fn app_receives_user_args_only(app_relative_path: &str) -> bool {
+    matches!(
+        app_relative_path,
+        "src/compiler/90.tools/migrate/main.spl"
+            | "src/app/i18n/main.spl"
+            | "src/app/mcp/main.spl"
+            | "src/app/diff/main.spl"
+            | "src/app/query/main.spl"
+            | "src/app/info/main.spl"
+            | "src/app/spec_coverage/main.spl"
+            | "src/app/replay/main.spl"
+            | "src/app/gen_lean/main.spl"
+            | "src/app/feature_gen/main.spl"
+            | "src/app/task_gen/main.spl"
+            | "src/app/bug_gen/main.spl"
+            | "src/app/spec_gen/main.spl"
+            | "src/app/todo_scan/main.spl"
+            | "src/app/todo_gen/main.spl"
+            | "src/app/brief/main.spl"
+            | "src/app/dashboard/main.spl"
+            | "src/app/verify/main.spl"
+            | "src/app/cli/check_entry.spl"
+            | "src/app/cli/examples_check_entry.spl"
+            | "src/app/cli/native_build_main.spl"
+            | "src/app/cli/vscode_entry.spl"
+            | "src/app/cli/electron_entry.spl"
+            | "src/app/cli/security_entry.spl"
+    )
 }
 
 /// Original Rust test runner implementation (fallback)

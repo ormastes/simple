@@ -5,9 +5,9 @@
 
 
 use std.daemon_sdk.types.{DaemonRequest, DaemonResponse, daemon_request_new}
-use std.daemon_sdk.client.{daemon_send_request}
-use app.test_daemon.types.{
-    TestDaemonConfig,
+use std.daemon_sdk.client.{daemon_submit_and_wait}
+use app.test_daemon.types.{TestDaemonConfig}
+use app.test_daemon.{
     TREQ_AGENT_REGISTER, TREQ_AGENT_CLAIM_BATCH,
     TREQ_AGENT_REPORT_RESULT, TREQ_AGENT_DEREGISTER,
     TRESP_COMPLETED, TRESP_ERROR
@@ -26,13 +26,13 @@ fn agent_register(config: TestDaemonConfig, agent_id: text, capabilities: text) 
     var req = daemon_request_new(TREQ_AGENT_REGISTER)
     req.fields["agent_id"] = agent_id
     req.fields["capabilities"] = capabilities
-    val resp = daemon_send_request(config.daemon, req)
+    val resp = daemon_submit_and_wait(req, config.daemon, 5000)
     resp.status == TRESP_COMPLETED
 
 fn agent_claim_batch(config: TestDaemonConfig, agent_id: text) -> [text]:
     var req = daemon_request_new(TREQ_AGENT_CLAIM_BATCH)
     req.fields["agent_id"] = agent_id
-    val resp = daemon_send_request(config.daemon, req)
+    val resp = daemon_submit_and_wait(req, config.daemon, 5000)
     if resp.status != TRESP_COMPLETED:
         return []
 
@@ -53,13 +53,13 @@ fn agent_report_result(config: TestDaemonConfig, agent_id: text, test_path: text
     req.fields["output"] = output
     val status = if failed > 0: 3 else: 2
     req.fields["status"] = "{status}"
-    val resp = daemon_send_request(config.daemon, req)
+    val resp = daemon_submit_and_wait(req, config.daemon, 5000)
     resp.status == TRESP_COMPLETED
 
 fn agent_deregister(config: TestDaemonConfig, agent_id: text) -> bool:
     var req = daemon_request_new(TREQ_AGENT_DEREGISTER)
     req.fields["agent_id"] = agent_id
-    val resp = daemon_send_request(config.daemon, req)
+    val resp = daemon_submit_and_wait(req, config.daemon, 5000)
     resp.status == TRESP_COMPLETED
 
 # ============================================================================
@@ -86,7 +86,7 @@ fn agent_run_loop(config: TestDaemonConfig, agent_id: text, capabilities: text):
         for test_path in batch:
             print "[agent {agent_id}] Running: {test_path}"
             val start = rt_time_now_unix_micros()
-            val cmd = "bin/simple test {test_path} 2>&1"
+            val cmd = "bin/simple test {test_path} --no-session-daemon --sequential 2>&1"
             val output = rt_shell_exec(cmd)
             val exit_code = rt_shell_exit_code()
             val elapsed = (rt_time_now_unix_micros() - start) / 1000

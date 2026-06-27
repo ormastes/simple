@@ -9,18 +9,16 @@ use app.io.cli_ops (rt_cli_handle_compile, rt_env_get, env_set, _cli_eprint, _cl
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
-use lazy compiler.driver.driver_api (aot_native_file_with_backend, aot_native_project_with_backend)
 use lazy compiler.backend.linker.lib_smf_writer (LibSmfBuilder)
 use lazy app.compile.native (compile_native)
 use compiler.driver.driver_types (CompileOptions, CompileMode, CompileResult)
-use compiler.common.driver_core_types (compileoptions_normalize_mir_optimization, driver_output_format_both)
+use compiler.common.driver_core_types (compileoptions_normalize_mir_optimization, driver_output_format_both, driver_output_format_native)
 use compiler.mir_opt (mir_optimization_inventory_lines)
 use compiler.mir_opt.mod (TargetOptContext, target_opt_context_default)
 use app.build.build_cli (parse_build_driver_flags, build_driver_flags_to_target_opt_ctx)
 use app.startup.launch_metadata.{launch_metadata_for_native_build, launch_metadata_sidecar_path, render_launch_metadata_sidecar}
 
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
-extern fn rt_native_build(args: [text]) -> i64
 
 fn compile_simpleos(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
     """Compile for SimpleOS targets (bare-metal ELF with SimpleOS conventions).
@@ -313,7 +311,11 @@ fn cli_native_build(args: [text]) -> i64:
             return 1
         i = i + 1
 
-    if backend_explicit and (backend == "llvm-lib" or backend == "llvmlib"):
+    if not backend_explicit:
+        backend = "llvm"
+        backend_explicit = true
+
+    if backend_explicit and (backend == "llvm-lib" or backend == "llvmlib" or backend == "llvm" or backend == "cranelift"):
         # Pure Simple path: use CompilerDriver with LLVM lib backend
         # Parse native-build args: --source, --entry, -o, --strip, --no-mangle, etc.
         var entry_point = ""
@@ -438,18 +440,21 @@ fn cli_native_build(args: [text]) -> i64:
             j = j + 1
 
         if entry_point == "":
-            _cli_eprint("Error: No entry point specified for llvm-lib backend")
-            _cli_eprint("Usage: simple native-build --backend=llvm-lib --entry <file.spl> -o <output> [--source <dir>]...")
+            _cli_eprint("Error: No entry point specified for native-build backend")
+            _cli_eprint("Usage: simple native-build --backend=llvm --entry <file.spl> -o <output> [--source <dir>]...")
             return 1
 
         if verbose:
-            _cli_eprint("[native-build] Using pure Simple LLVM lib backend")
+            _cli_eprint("[native-build] Using pure Simple native backend {backend}")
             _cli_eprint("[native-build] Entry: {entry_point}, Output: {output}")
             if source_dirs.len() > 0:
                 _cli_eprint("[native-build] Source dirs: {source_dirs}")
         val old_log_mode = env_get("SIMPLE_OS_LOG_MODE") ?? ""
         if not env_set("SIMPLE_OS_LOG_MODE", log_mode):
             _cli_eprint("Error: could not export SIMPLE_OS_LOG_MODE={log_mode}")
+            return 1
+        if not env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry_point):
+            _cli_eprint("Error: could not export SIMPLE_NATIVE_BUILD_ENTRY={entry_point}")
             return 1
         if not optimization_requested:
             release = true
@@ -469,17 +474,28 @@ fn cli_native_build(args: [text]) -> i64:
             options.mode = CompileMode.Aot
             options.output_file = Some(output)
             options.output_format = driver_output_format_both()
-            options.backend = "llvm-lib"
+            options.backend = backend
             options.release = release
             options.opt_level = opt_level
             options.target_opt_ctx = _nb_target_opt_ctx
             options = compileoptions_normalize_mir_optimization(options)
             val driver = compiler_driver_create(options)
             compiler_driver_run_compile(driver)
-        elif source_dirs.len() > 0:
-            aot_native_project_with_backend(source_dirs, entry_point, output, "llvm-lib", strip, release, opt_level)
         else:
-            aot_native_file_with_backend(entry_point, output, "llvm-lib", release, opt_level)
+            var options = CompileOptions.default()
+            for source_dir in source_dirs:
+                options.input_files.push(source_dir)
+            options.input_files.push(entry_point)
+            options.mode = CompileMode.Aot
+            options.output_file = Some(output)
+            options.output_format = driver_output_format_native()
+            options.backend = backend
+            options.release = release
+            options.opt_level = opt_level
+            options.target_opt_ctx = _nb_target_opt_ctx
+            options = compileoptions_normalize_mir_optimization(options)
+            val driver = compiler_driver_create(options)
+            compiler_driver_run_compile(driver)
         match result:
             case CompileResult.Success(_):
                 val metadata = launch_metadata_for_native_build("host", "", "native")
@@ -501,16 +517,12 @@ fn cli_native_build(args: [text]) -> i64:
                     _cli_eprint("error: {err}")
                 return 1
     else:
-        val driver = _cli_driver_binary()
-        if driver != "":
-            val driver_args = cli_normalize_runtime_bundle_aliases(args)
-            val result = _cli_process_run(driver, driver_args)
-            if result.0 != "":
-                print_raw(result.0)
-            if result.1 != "":
-                _cli_eprint(result.1.trim())
-            return result.2
-        return rt_native_build(cli_normalize_runtime_bundle_aliases(args))
+        if backend_explicit:
+            _cli_eprint("Error: native-build backend '{backend}' is not available in the pure Simple command path")
+        else:
+            _cli_eprint("Error: native-build requires --backend=llvm-lib in the pure Simple command path")
+        _cli_eprint("The Rust seed is bootstrap-only; native-build no longer falls back to rt_native_build.")
+        return 1
 
 fn cli_normalize_runtime_bundle_aliases(args: [text]) -> [text]:
     """Map semantic Simple/C runtime lane names onto legacy driver values.

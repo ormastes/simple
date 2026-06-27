@@ -1,17 +1,74 @@
-use app.io.cli_ops.{cli_get_args}
-use app.io.cli_compile.{cli_native_build}
+# Lightweight entrypoint for `simple native-build`.
+
+use std.cli.cli_util.{get_cli_args}
+use app.io.process_ops.{process_run_timeout}
+
+val OUTPUT_LIMIT = 12000
 
 fn native_build_entry_args() -> [text]:
-    val raw_args = cli_get_args()
+    val raw_args = get_cli_args()
     var start_idx = 1
-    if raw_args.len() > 1 and raw_args[1].ends_with("native_build_main.spl"):
-        start_idx = 2
+    var i = 0
+    while i < raw_args.len():
+        if raw_args[i].ends_with("native_build_main.spl") or raw_args[i] == "native-build":
+            start_idx = i + 1
+            break
+        i = i + 1
     var args: [text] = []
-    var i = start_idx
+    i = start_idx
     while i < raw_args.len():
         args.push(raw_args[i])
         i = i + 1
     args
 
+fn print_help():
+    print "Simple Native Build"
+    print ""
+    print "Usage: simple native-build [options] [source-dirs...]"
+    print ""
+    print "Options:"
+    print "  --source <dir>       Source directory to compile (repeatable)"
+    print "  -o <path>            Output binary path"
+    print "  --entry <file>       Entry file"
+    print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
+    print "  --release            Release build"
+    print "  -h, --help           Show this help"
+
+fn print_bounded(output: text):
+    if output.len() == 0:
+        return
+    if output.len() <= OUTPUT_LIMIT:
+        print output
+        return
+    val head_len = OUTPUT_LIMIT / 2
+    val tail_len = OUTPUT_LIMIT - head_len
+    print output[0:head_len]
+    print "[stdout truncated by native-build entry]"
+    print output[output.len() - tail_len:output.len()]
+
+fn eprint_bounded(output: text):
+    if output.len() == 0:
+        return
+    if output.len() <= OUTPUT_LIMIT:
+        eprint output
+        return
+    val head_len = OUTPUT_LIMIT / 2
+    val tail_len = OUTPUT_LIMIT - head_len
+    eprint output[0:head_len]
+    eprint "[stderr truncated by native-build entry]"
+    eprint output[output.len() - tail_len:output.len()]
+
 fn main() -> i64:
-    cli_native_build(native_build_entry_args())
+    val args = native_build_entry_args()
+    if args.len() == 0 or args.contains("-h") or args.contains("--help"):
+        print_help()
+        return 0
+
+    var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
+    for arg in args:
+        worker_args.push(arg)
+    val (stdout, stderr, code) = process_run_timeout("bin/simple", worker_args, 120000)
+    print_bounded(stdout)
+    if code != 0:
+        eprint_bounded(stderr)
+    code as i64

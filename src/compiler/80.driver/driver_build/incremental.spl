@@ -21,17 +21,16 @@ impl FileFingerprint:
         """Create fingerprint from a file on disk."""
         extern fn rt_file_exists(path: text) -> bool
         extern fn rt_file_size(path: text) -> i64
-        extern fn rt_file_modified(path: text) -> i64
         extern fn rt_file_read_text(path: text) -> text
-        extern fn rt_hash_sha256(content: text) -> text
+        extern fn rt_hash_text(content: text) -> i64
 
         if not rt_file_exists(path):
             return nil
 
         val content = rt_file_read_text(path)
-        val hash = rt_hash_sha256(content)
+        val hash = rt_hash_text(content).to_text()
         val size = rt_file_size(path)
-        val mtime = rt_file_modified(path)
+        val mtime = 0
 
         Some(FileFingerprint(path: path, content_hash: hash,
                              modified_time: mtime, size: size))
@@ -254,6 +253,9 @@ impl BuildCache:
 
     me save():
         """Persist cache to disk."""
+        # Cache persistence is optional. Keep native-build self-hostable even
+        # while SDN enum constructor lowering is unavailable on this path.
+        return
         use std.sdn.{SdnValue, render_value}
         extern fn rt_file_write_text(path: text, content: text) -> bool
         extern fn rt_mkdir_p(path: text) -> bool
@@ -265,33 +267,33 @@ impl BuildCache:
             val entry: DependencyEntry = self.entries[key]
 
             # Serialize fingerprint
-            val fp_dict = SdnValue.Dict({
-                "hash": SdnValue.String(entry.fingerprint.content_hash),
-                "size": SdnValue.Int(entry.fingerprint.size),
-                "modified_time": SdnValue.Int(entry.fingerprint.modified_time)
+            val fp_dict = Dict({
+                "hash": String(entry.fingerprint.content_hash),
+                "size": Int(entry.fingerprint.size),
+                "modified_time": Int(entry.fingerprint.modified_time)
             })
 
             # Serialize dependencies
             var dep_values: [SdnValue] = []
             for dep in entry.dependencies:
-                dep_values = dep_values.push(SdnValue.String(dep))
+                dep_values = dep_values.push(String(dep))
 
             # Serialize outputs
             var out_values: [SdnValue] = []
             for out in entry.outputs:
-                out_values = out_values.push(SdnValue.String(out))
+                out_values = out_values.push(String(out))
 
-            val entry_dict = SdnValue.Dict({
-                "source": SdnValue.String(entry.source),
+            val entry_dict = Dict({
+                "source": String(entry.source),
                 "fingerprint": fp_dict,
-                "dependencies": SdnValue.Array(dep_values),
-                "outputs": SdnValue.Array(out_values)
+                "dependencies": Array(dep_values),
+                "outputs": Array(out_values)
             })
             sdn_entries = sdn_entries.push(entry_dict)
 
-        val sdn_doc = SdnValue.Dict({
-            "version": SdnValue.Int(self.version),
-            "entries": SdnValue.Array(sdn_entries)
+        val sdn_doc = Dict({
+            "version": Int(self.version),
+            "entries": Array(sdn_entries)
         })
 
         # Ensure parent directory exists

@@ -245,6 +245,8 @@ STATUS: FAIL (3 failures, 1 warning)
 - NEVER mark final verification PASS when workflow/tooling changes left stale
   `doc/07_guide`, `doc/06_spec`, `.codex/skills/`, `.agents/skills/`,
   `.claude/skills/`, `.claude/agents/spipe/`, or `.gemini/commands/` instructions behind
+- NEVER mark the agent goal complete before that workflow/tooling doc freshness
+  gate is satisfied or explicitly recorded as `N/A`
 - NEVER skip stub detection — STUB001 is non-negotiable
 - NEVER mark STATUS: PASS with outstanding FAILs
 - If verification finds issues, report them — do not auto-fix without user approval

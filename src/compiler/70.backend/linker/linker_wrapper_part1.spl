@@ -98,26 +98,32 @@ fn detect_preferred_backend(extra_flags: [text]) -> text:
 
 fn unresolved_symbol_flags_for_unix_linker(os: text) -> [text]:
     if os == "linux" or os == "freebsd":
-        return ["--allow-multiple-definition", "--unresolved-symbols=ignore-all"]
+        return ["--allow-multiple-definition"]
     []
 
 fn unresolved_symbol_flags_for_cc(os_name: text) -> [text]:
     if os_name == "Linux" or os_name == "FreeBSD":
-        return ["-Wl,--allow-multiple-definition", "-Wl,--unresolved-symbols=ignore-all"]
+        return ["-Wl,--allow-multiple-definition"]
     []
+
+fn linker_trace_enabled() -> bool:
+    (env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
 # ============================================================================
 # Native Linking
 # ============================================================================
 
 fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
-    print "[LINKER] link_to_native: {object_files.len()} files, output={output}"
+    val trace = linker_trace_enabled()
+    if trace:
+        print "[LINKER] link_to_native: {object_files.len()} files, output={output}"
     if object_files.len() == 0:
         return Err("No object files to link")
 
     # If inputs are SMF/LSM, build a self-contained binary instead of raw native link.
     val smf_inputs = filter_smf_inputs(object_files)
-    print "[LINKER] smf_inputs={smf_inputs.len()}"
+    if trace:
+        print "[LINKER] smf_inputs={smf_inputs.len()}"
     if smf_inputs.len() > 0:
         val mixed = smf_inputs.len() != object_files.len()
         if mixed:
@@ -125,40 +131,52 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
         return link_smf_bundle(smf_inputs, output, config)
 
     val os = host_os()
-    print "[LINKER] os={os}"
+    if trace:
+        print "[LINKER] os={os}"
 
     # Platform-specific linking
     if os == "windows":
         return link_native_windows(object_files, output, config)
 
     # Unix-like: Linux, macOS, FreeBSD
-    print "[LINKER] calling link_native_unix..."
+    if trace:
+        print "[LINKER] calling link_native_unix..."
     link_native_unix(object_files, output, config)
 
 fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     val os = host_os()
     val arch = host_arch()
-    print "[LINKER] link_native_unix: os={os}, arch={arch}"
+    val trace = linker_trace_enabled()
+    if trace:
+        print "[LINKER] link_native_unix: os={os}, arch={arch}"
 
     # Try to find platform linker (mold > lld > ld)
-    print "[LINKER] calling find_linker..."
+    if trace:
+        print "[LINKER] calling find_linker..."
     val linker_result = find_linker()
-    print "[LINKER] find_linker returned, is_err={linker_result.is_err()}"
+    if trace:
+        print "[LINKER] find_linker returned, is_err={linker_result.is_err()}"
     if linker_result.is_err():
-        print "[LINKER] No direct linker found, falling back to cc"
+        if trace:
+            print "[LINKER] No direct linker found, falling back to cc"
         return link_native_cc(object_files, output, config)
 
     val linker_info = linker_result.unwrap()
-    print "[LINKER] linker_info unwrapped"
+    if trace:
+        print "[LINKER] linker_info unwrapped"
     val linker_path = linker_info[0]
-    print "[LINKER] got linker_path={linker_path}"
+    if trace:
+        print "[LINKER] got linker_path={linker_path}"
     val linker_type = linker_info[1]
-    print "[LINKER] got linker_type"
+    if trace:
+        print "[LINKER] got linker_type"
 
     # Discover CRT files needed for direct linker invocation
-    print "[LINKER] calling find_crt_files..."
+    if trace:
+        print "[LINKER] calling find_crt_files..."
     val crt = find_crt_files(config.pie, config.verbose)
-    print "[LINKER] crt.found={crt.found}"
+    if trace:
+        print "[LINKER] crt.found={crt.found}"
     if not crt.found:
         debug("linker", "CRT files not found, falling back to cc")
         if config.verbose:
@@ -508,16 +526,10 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     if object_files.len() == 0:
         return Err("cc fallback requires at least one object file")
     val obj0 = object_files[0]
-    val obj1 = if object_files.len() > 1: object_files[1] else: ""
-    val obj2 = if object_files.len() > 2: object_files[2] else: ""
-    val obj3 = if object_files.len() > 3: object_files[3] else: ""
-    val obj4 = if object_files.len() > 4: object_files[4] else: ""
-    val obj5 = if object_files.len() > 5: object_files[5] else: ""
-    val obj6 = if object_files.len() > 6: object_files[6] else: ""
-    val obj7 = if object_files.len() > 7: object_files[7] else: ""
 
-    # Bootstrap-safe fixed argument vectors. Dynamic push from an empty array
-    # can trigger rt_array_push_grow crashes in stage1-generated compilers.
+    # Keep the fallback complete: native-build links user objects, runtime
+    # objects, and a generated entry object. Truncating this list produces a
+    # binary with an unresolved main.
     val os_name = host_os()
     if os_name == "macos" or os_name == "darwin":
         # External libs/frameworks referenced by libsimple_native_all.a (see
@@ -542,7 +554,6 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             "-lc", "-lpthread",
             "-Wl,--as-needed", "-lm", "-lSDL2", "-Wl,--no-as-needed",
             "-Wl,--allow-multiple-definition",
-            "-Wl,--unresolved-symbols=ignore-all",
             "-Wl,--gc-sections",
             "-o", output
         ]
@@ -553,21 +564,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         return Err("cc linking failed: {err_msg}")
     else:
         var args: [text] = ["-fuse-ld=lld"]
-        args.push(obj0)
-        if object_files.len() > 1:
-            args.push(obj1)
-        if object_files.len() > 2:
-            args.push(obj2)
-        if object_files.len() > 3:
-            args.push(obj3)
-        if object_files.len() > 4:
-            args.push(obj4)
-        if object_files.len() > 5:
-            args.push(obj5)
-        if object_files.len() > 6:
-            args.push(obj6)
-        if object_files.len() > 7:
-            args.push(obj7)
+        for obj in object_files:
+            args.push(obj)
         args.push("-lc")
         args.push("-lpthread")
         args.push("-ldl")
@@ -576,7 +574,6 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("-lSDL2")
         args.push("-Wl,--no-as-needed")
         args.push("-Wl,--allow-multiple-definition")
-        args.push("-Wl,--unresolved-symbols=ignore-all")
         args.push("-Wl,--gc-sections")
         args.push("-Wl,--icf=safe")
         args.push("-o")

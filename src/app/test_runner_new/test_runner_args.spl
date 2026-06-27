@@ -2,8 +2,8 @@
 #
 # Parses command-line arguments and creates TestOptions.
 
-use std.test_runner.test_runner_types.{OutputFormat, TestExecutionMode, TestLevel, TestOptions}
-use std.io.{shell_output, env_get, file_exists}
+use std.test_runner.test_runner_types.{TestExecutionMode, TestLevel, TestOptions}
+use std.io.{shell_output, file_exists}
 
 # =========================================================================
 # Mode String Parsing
@@ -51,7 +51,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var force_rebuild = false
     var keep_artifacts = false
     var run_all = false
-    var format = OutputFormat.Default
+    var format = "text"
     var list_skip_features = false
     var planned_only = false
     var no_limits = false
@@ -67,12 +67,10 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var resume = false
     var cpu_threshold = 75.0  # Stop at 75% CPU usage (= less than 25% free)
     var mem_threshold = 75.0  # Stop at 75% RAM usage (= less than 25% free)
-    # Disable parallel by default when running as a child of the test runner
-    # (SIMPLE_TEST_RUNNER_RUST is set by the runtime when spawning child processes
-    # via cli.rs / cli_sffi.rs). Without this guard every worker process would
-    # itself spin up another worker pool, causing exponential process explosion.
-    var parallel = env_get("SIMPLE_TEST_RUNNER_RUST") != "1"
-    var sequential = false
+    # Daemon-owned execution is the default resource boundary. Child test
+    # invocations use --no-session-daemon --sequential to avoid re-entering it.
+    var parallel = false
+    var sequential = true
     var max_workers = 0
     var parallel_timeout = 300
     var closure_warnings = false
@@ -94,8 +92,9 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var security_supply_chain = false
     var spl_doctest = false
     var max_mem_gb = 16
+    var max_procs = 64
     var mem_check = false
-    var fork_mode = _is_fork_available()
+    var fork_mode = false
     var resource_limit_pct = 75
     var no_cache = false
     var refresh_manifest = false
@@ -103,8 +102,8 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var clean = false
     var no_cover_check = false
     # Session sharing options
-    var session_share = false
-    var session_daemon = false
+    var session_share = true
+    var session_daemon = true
     var session_kind = ""
     var max_sessions = 0
     var session_debug = false
@@ -299,6 +298,9 @@ fn parse_test_args(args: [text]) -> TestOptions:
         elif arg == "--session-daemon":
             session_daemon = true
             session_share = true
+        elif arg == "--no-session-daemon":
+            session_daemon = false
+            session_share = false
         elif arg == "--session-kind":
             i = i + 1
             if i < args.len():
@@ -334,12 +336,12 @@ fn parse_test_args(args: [text]) -> TestOptions:
             if i < args.len():
                 tag = args[i]
         elif arg == "--doc":
-            format = OutputFormat.Doc
+            format = "doc"
         elif arg == "--format":
             i = i + 1
             if i < args.len():
                 if args[i] == "doc":
-                    format = OutputFormat.Doc
+                    format = "doc"
         elif arg == "--compile":
             mode = TestExecutionMode.Compile
         elif arg == "--mode":
@@ -367,6 +369,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
 
     if no_limits:
         max_mem_gb = 0
+        max_procs = 0
 
     TestOptions(
         path: path,
@@ -426,6 +429,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
         security_supply_chain: security_supply_chain,
         spl_doctest: spl_doctest,
         max_mem_gb: max_mem_gb,
+        max_procs: max_procs,
         mem_check: mem_check,
         fork_mode: fork_mode,
         resource_limit_pct: resource_limit_pct,

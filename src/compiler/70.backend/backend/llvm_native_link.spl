@@ -9,7 +9,7 @@
 # Usage:
 #   val result = link_llvm_native(user_objects, output, config, verbose)
 
-use app.io.mod (shell, file_write, file_delete, file_exists, getpid)
+use app.io.sysinfo_ops.{getpid}
 use compiler.backend.backend.entry_point.{generate_entry_point_ir}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, llc_available}
@@ -21,6 +21,10 @@ extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+
+fn llvm_link_trace_enabled() -> bool:
+    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
 # ============================================================================
 # Configuration
@@ -119,27 +123,36 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
 
     Returns Ok(output_path) on success, Err(message) on failure.
     """
-    print "[LLVM-LINK] enter link_llvm_native"
+    val trace = llvm_link_trace_enabled()
+    if trace:
+        print "[LLVM-LINK] enter link_llvm_native"
     val verbose = options.verbose
-    print "[LLVM-LINK] verbose={verbose}"
+    if trace:
+        print "[LLVM-LINK] verbose={verbose}"
     val pid = getpid()
-    print "[LLVM-LINK] pid={pid}"
+    if trace:
+        print "[LLVM-LINK] pid={pid}"
 
     # Step 1: Compile C runtime to object files
-    print "[LLVM-LINK] step 1: compile_runtime_objects..."
+    if trace:
+        print "[LLVM-LINK] step 1: compile_runtime_objects..."
     val rt_result = compile_runtime_objects(verbose, options.opt_level)
-    print "[LLVM-LINK] compile_runtime_objects returned"
+    if trace:
+        print "[LLVM-LINK] compile_runtime_objects returned"
     val runtime_objects = match rt_result:
         case Ok(paths):
             paths
         case Err(err):
             return Err("Runtime compilation failed: {err}")
-    print "[LLVM-LINK] got {runtime_objects.len()} runtime objects"
+    if trace:
+        print "[LLVM-LINK] got {runtime_objects.len()} runtime objects"
 
     # Step 2: Generate and compile entry point
-    print "[LLVM-LINK] step 2: compile entry point..."
+    if trace:
+        print "[LLVM-LINK] step 2: compile entry point..."
     val c_result = compile_entry_point_c(pid, verbose, options.opt_level)
-    print "[LLVM-LINK] entry point compiled"
+    if trace:
+        print "[LLVM-LINK] entry point compiled"
     val entry_obj_path = match c_result:
         case Ok(path):
             path
@@ -148,20 +161,19 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             return Err("Entry point compilation failed: {err}")
 
     # Step 3: Combine all objects and link
-    print "[LLVM-LINK] step 3: combining objects..."
+    if trace:
+        print "[LLVM-LINK] step 3: combining objects..."
     var all_objects: [text] = []
     for obj in user_objects:
         all_objects = all_objects.push(obj)
-    all_objects = all_objects.push(runtime_objects[0])
-    all_objects = all_objects.push(runtime_objects[1])
-    all_objects = all_objects.push(runtime_objects[2])
-    all_objects = all_objects.push(runtime_objects[3])
-    all_objects = all_objects.push(runtime_objects[4])
-    all_objects = all_objects.push(runtime_objects[5])
+    for obj in runtime_objects:
+        all_objects = all_objects.push(obj)
     all_objects = all_objects.push(entry_obj_path)
-    print "[LLVM-LINK] total objects: {all_objects.len()}"
+    if trace:
+        print "[LLVM-LINK] total objects: {all_objects.len()}"
 
-    print "[LLVM-LINK] creating NativeLinkConfig..."
+    if trace:
+        print "[LLVM-LINK] creating NativeLinkConfig..."
     var link_config = NativeLinkConfig(
         libraries: [],
         library_paths: [],
@@ -171,10 +183,12 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         verbose: options.verbose,
         extra_flags: []
     )
-    print "[LLVM-LINK] calling link_to_native..."
+    if trace:
+        print "[LLVM-LINK] calling link_to_native..."
 
     val link_result = link_to_native(all_objects, output, link_config)
-    print "[LLVM-LINK] link_to_native returned"
+    if trace:
+        print "[LLVM-LINK] link_to_native returned"
 
     # Cleanup temp files
     cleanup_runtime_objects(runtime_objects)

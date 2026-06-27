@@ -157,6 +157,8 @@ not create, rewrite, or weaken SPipe after verification.
 - Do not mark PASS when workflow/tooling changes left stale `doc/07_guide`,
   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
   `.claude/agents/spipe/`, or `.gemini/commands/` instructions behind
+- Do not mark the agent goal complete before that workflow/tooling doc
+  freshness gate is satisfied or explicitly recorded as `N/A`
 - For `simple_context` or context-mode changes, verify the MCP/tooling guide,
   generated manuals, and skill/command docs mention any new `--sql`/`--db`
   behavior, embedded SQLite facade boundary, and explicit absence statuses.

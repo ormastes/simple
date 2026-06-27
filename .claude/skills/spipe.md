@@ -41,6 +41,11 @@ generated-manual shape, or verification contracts, refresh the matching
 `.claude/skills`, `.claude/agents/spipe`, and `.gemini/commands` instructions
 before accepting PASS.
 
+Do not mark a goal, SPipe phase, verify report, or ship lane complete when
+workflow/tooling behavior changed but the matching guide, skill, agent,
+command, or generated/manual spec docs are stale. The documentation freshness
+gate is part of completion, not a release follow-up.
+
 Check or install that wiring with:
 
 ```bash
