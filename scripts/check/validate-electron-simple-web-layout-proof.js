@@ -65,6 +65,14 @@ function booleanString(value) {
   return clean(value);
 }
 
+function textField(value) {
+  return typeof value === 'string' ? value : '';
+}
+
+function plainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 function artifactStat(value, proofPath) {
   if (typeof value !== 'string' || value.trim() === '') {
     return null;
@@ -146,6 +154,15 @@ const capturedArgb = capturedArgbJson.value || {};
 const capturedArgbPixels = Array.isArray(capturedArgb.pixels) ? capturedArgb.pixels : [];
 const capturedArgbNonzeroPixels = nonzeroPixelCount(capturedArgbPixels);
 const expectedProofSource = 'tools/electron-live-bitmap/exact_fixture.js';
+const expectedCaptureBackend = 'electron-offscreen-capture-page';
+const expectedCompositorMode = 'offscreen-osr-exact-srgb';
+const proofGpuFeatureStatus = plainObject(proof.gpu_feature_status) ? proof.gpu_feature_status : null;
+const proofGpuCompositing = textField(proof.gpu_compositing);
+const proofGpuRasterization = textField(proof.gpu_rasterization);
+const frameUsText = jsonIntegerText(proof.frame_us);
+const estimatedFpsFloor = frameUsText === null || BigInt(frameUsText) <= 0n
+  ? ''
+  : String(1000000n / BigInt(frameUsText));
 
 let reason = 'pass';
 if (proof.blur_or_tolerance_used !== false) {
@@ -156,6 +173,18 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'unexpected-electron-proof-source';
 } else if (typeof proof.scene !== 'string' || !proof.scene.startsWith('simple-web-layout-')) {
   reason = 'unexpected-electron-scene';
+} else if (proof.capture_backend !== expectedCaptureBackend) {
+  reason = 'unexpected-capture-backend';
+} else if (proof.compositor_mode !== expectedCompositorMode) {
+  reason = 'unexpected-compositor-mode';
+} else if (
+  proofGpuFeatureStatus === null ||
+  proofGpuCompositing.trim() === '' ||
+  proofGpuRasterization.trim() === '' ||
+  proofGpuFeatureStatus.gpu_compositing !== proofGpuCompositing ||
+  proofGpuFeatureStatus.rasterization !== proofGpuRasterization
+) {
+  reason = 'missing-gpu-feature-status';
 } else if (decimalIntegerText(proof.checksum) === null || decimalIntegerText(proof.expected_checksum) === null) {
   reason = 'missing-checksum-proof';
 } else if (!sameInteger(proof.checksum, proof.expected_checksum)) {
@@ -190,6 +219,8 @@ if (proof.blur_or_tolerance_used !== false) {
   reason = 'missing-capture-provenance';
 } else if (!sameJsonInteger(proof.capture_native_width, proof.width) || !sameJsonInteger(proof.capture_native_height, proof.height)) {
   reason = 'capture-viewport-mismatch';
+} else if (!jsonIntegerAtLeast(proof.iterations, 2)) {
+  reason = 'missing-performance-iterations';
 } else if (!jsonIntegerAtLeast(proof.frame_us, 1)) {
   reason = 'missing-electron-timing';
 }
@@ -198,6 +229,10 @@ emit('electron_simple_web_layout_validation_status', reason === 'pass' ? 'pass' 
 emit('electron_simple_web_layout_validation_reason', reason);
 emit('electron_simple_web_layout_renderer', proof.renderer);
 emit('electron_simple_web_layout_proof_source', proof.proof_source);
+emit('electron_simple_web_layout_capture_backend', proof.capture_backend);
+emit('electron_simple_web_layout_compositor_mode', proof.compositor_mode);
+emit('electron_simple_web_layout_gpu_compositing', proofGpuCompositing);
+emit('electron_simple_web_layout_gpu_rasterization', proofGpuRasterization);
 emit('electron_simple_web_layout_scene', proof.scene);
 emit('electron_simple_web_layout_simple_checksum', integerTextOrClean(proof.expected_checksum));
 emit('electron_simple_web_layout_electron_checksum', integerTextOrClean(proof.checksum));
@@ -205,7 +240,9 @@ emit('electron_simple_web_layout_simple_weighted_checksum', integerTextOrClean(p
 emit('electron_simple_web_layout_electron_weighted_checksum', integerTextOrClean(proof.weighted_checksum));
 emit('electron_simple_web_layout_mismatch_count', jsonIntegerTextOrBlank(proof.mismatch_count));
 emit('electron_simple_web_layout_blur_or_tolerance_used', proof.blur_or_tolerance_used === false ? 'false' : clean(proof.blur_or_tolerance_used));
+emit('electron_simple_web_layout_proof_iterations', jsonIntegerTextOrBlank(proof.iterations));
 emit('electron_simple_web_layout_electron_frame_us', jsonIntegerTextOrBlank(proof.frame_us));
+emit('electron_simple_web_layout_estimated_fps_floor', estimatedFpsFloor);
 emit('electron_simple_web_layout_requested_width', jsonIntegerTextOrBlank(proof.width));
 emit('electron_simple_web_layout_requested_height', jsonIntegerTextOrBlank(proof.height));
 emit('electron_simple_web_layout_capture_native_width', jsonIntegerTextOrBlank(proof.capture_native_width));

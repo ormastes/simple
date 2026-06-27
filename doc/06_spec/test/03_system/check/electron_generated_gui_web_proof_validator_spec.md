@@ -27,7 +27,7 @@ electron_generated_gui_web_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -94,6 +94,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
   wrapper status, preserving exact failure diagnostics in check output.
 - Proof renderer, source marker, and scene identity must match the live
   generated-GUI Electron capture path.
+- Complete proofs must identify the Electron offscreen capture backend,
+  compositor mode, Chromium GPU feature-status diagnostics, and at least two
+  measured capture iterations.
 - The live Electron wrapper consumes the validator and still maps real pixel
   mismatches to `divergent` evidence.
 
@@ -111,7 +114,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_generated_gui_web_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -128,9 +131,15 @@ expect(evidence).to_contain("electron_generated_gui_web_validation_status=pass")
 expect(evidence).to_contain("electron_generated_gui_web_validation_reason=pass")
 expect(evidence).to_contain("electron_generated_gui_web_renderer=electron-live-capture-page")
 expect(evidence).to_contain("electron_generated_gui_web_proof_source=tools/electron-live-bitmap/exact_fixture.js")
+expect(evidence).to_contain("electron_generated_gui_web_capture_backend=electron-offscreen-capture-page")
+expect(evidence).to_contain("electron_generated_gui_web_compositor_mode=offscreen-osr-exact-srgb")
+expect(evidence).to_contain("electron_generated_gui_web_gpu_compositing=disabled_software")
+expect(evidence).to_contain("electron_generated_gui_web_gpu_rasterization=disabled_software")
 expect(evidence).to_contain("electron_generated_gui_web_scene=generated-gui-widget-html")
 expect(evidence).to_contain("electron_generated_gui_web_mismatch_count=0")
+expect(evidence).to_contain("electron_generated_gui_web_proof_iterations=3")
 expect(evidence).to_contain("electron_generated_gui_web_electron_frame_us=1250")
+expect(evidence).to_contain("electron_generated_gui_web_estimated_fps_floor=800")
 expect(evidence).to_contain("electron_generated_gui_web_requested_width=96")
 expect(evidence).to_contain("electron_generated_gui_web_requested_height=72")
 expect(evidence).to_contain("electron_generated_gui_web_capture_native_width=96")
@@ -223,6 +232,53 @@ expect(wrong).to_contain("electron_generated_gui_web_proof_source=tools/manual/g
 
 </details>
 
+#### rejects missing Electron capture backend and GPU feature diagnostics
+
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm generated GUI proof carries Electron backend and GPU diagnostics
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-generated-gui-web-validator-backend-gpu"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/backend.json", "p.capture_backend=\"manual-json\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/backend.json > " + root + "/backend.env; " +
+    _proof_command(root + "/mode.json", "p.compositor_mode=\"unknown\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/mode.json > " + root + "/mode.env; " +
+    _proof_command(root + "/gpu.json", "delete p.gpu_feature_status") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/gpu.json > " + root + "/gpu.env; " +
+    _proof_command(root + "/gpu-mismatch.json", "p.gpu_feature_status.rasterization=\"enabled\"") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/gpu-mismatch.json > " + root + "/gpu-mismatch.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val backend = file_read(root + "/backend.env")
+val mode = file_read(root + "/mode.env")
+val gpu_env = file_read(root + "/gpu.env")
+val gpu_mismatch = file_read(root + "/gpu-mismatch.env")
+step("Confirm generated GUI proof carries Electron backend and GPU diagnostics")
+expect(backend).to_contain("electron_generated_gui_web_validation_reason=unexpected-capture-backend")
+expect(backend).to_contain("electron_generated_gui_web_capture_backend=manual-json")
+expect(mode).to_contain("electron_generated_gui_web_validation_reason=unexpected-compositor-mode")
+expect(mode).to_contain("electron_generated_gui_web_compositor_mode=unknown")
+expect(gpu_env).to_contain("electron_generated_gui_web_validation_reason=missing-gpu-feature-status")
+expect(gpu_env).to_contain("electron_generated_gui_web_gpu_compositing=disabled_software")
+expect(gpu_mismatch).to_contain("electron_generated_gui_web_validation_reason=missing-gpu-feature-status")
+expect(gpu_mismatch).to_contain("electron_generated_gui_web_gpu_rasterization=disabled_software")
+```
+
+</details>
+
 #### rejects large checksum values that differ past JavaScript number precision
 
 -  proof command
@@ -259,6 +315,7 @@ expect(evidence).to_contain("electron_generated_gui_web_simple_weighted_checksum
 #### rejects malformed Electron frame timing
 
 -  proof command
+-  proof command
    - Expected: code equals `1`
    - Expected: evidence does not contain `electron_generated_gui_web_electron_frame_us=not-a-number`
 
@@ -266,22 +323,27 @@ expect(evidence).to_contain("electron_generated_gui_web_simple_weighted_checksum
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-generated-gui-web-validator-bad-frame"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/proof.json", "p.frame_us=\"not-a-number\"") +
-    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/proof.json > " + root + "/evidence.env; " +
+    _proof_command(root + "/iterations.json", "p.iterations=1") +
+    " && node scripts/check/validate-electron-generated-gui-web-proof.js " + root + "/iterations.json > " + root + "/iterations.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val evidence = file_read(root + "/evidence.env")
+val iterations = file_read(root + "/iterations.env")
 expect(evidence).to_contain("electron_generated_gui_web_validation_status=fail")
 expect(evidence).to_contain("electron_generated_gui_web_validation_reason=missing-electron-timing")
 expect(evidence).to_contain("electron_generated_gui_web_electron_frame_us=")
 expect(evidence.contains("electron_generated_gui_web_electron_frame_us=not-a-number")).to_equal(false)
+expect(iterations).to_contain("electron_generated_gui_web_validation_reason=missing-performance-iterations")
+expect(iterations).to_contain("electron_generated_gui_web_proof_iterations=1")
 ```
 
 </details>
@@ -660,7 +722,7 @@ expect(pixel).to_contain("electron_generated_gui_web_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -671,6 +733,9 @@ val script = file_read("scripts/check/check-electron-generated-gui-web-parity-ev
 expect(script).to_contain("validate-electron-generated-gui-web-proof.js")
 expect(script).to_contain("cat \"$VALIDATED_ENV\"")
 expect(script).to_contain("electron_generated_gui_web_validation_status")
+expect(script).to_contain("electron_generated_gui_web_capture_backend")
+expect(script).to_contain("electron_generated_gui_web_gpu_compositing")
+expect(script).to_contain("electron_generated_gui_web_estimated_fps_floor")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_file_status")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_size_bytes")
 expect(script).to_contain("electron_generated_gui_web_captured_argb_format")
@@ -687,8 +752,8 @@ expect(script).to_contain("status=divergent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

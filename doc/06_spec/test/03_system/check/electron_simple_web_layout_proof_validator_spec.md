@@ -27,7 +27,7 @@ electron_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -93,6 +93,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 - Proof renderer must be the live Electron capture page, the proof must carry
   the live Electron capture source marker, and scenes must stay within the
   Simple Web layout scene family.
+- Complete proofs must identify the Electron offscreen capture backend,
+  compositor mode, Chromium GPU feature-status diagnostics, and at least two
+  measured capture iterations.
 - The live Electron layout wrapper consumes the validator and still maps real
   pixel mismatches to `divergent` evidence.
 
@@ -110,7 +113,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_layout_p
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -127,11 +130,17 @@ expect(evidence).to_contain("electron_simple_web_layout_validation_status=pass")
 expect(evidence).to_contain("electron_simple_web_layout_validation_reason=pass")
 expect(evidence).to_contain("electron_simple_web_layout_renderer=electron-live-capture-page")
 expect(evidence).to_contain("electron_simple_web_layout_proof_source=tools/electron-live-bitmap/exact_fixture.js")
+expect(evidence).to_contain("electron_simple_web_layout_capture_backend=electron-offscreen-capture-page")
+expect(evidence).to_contain("electron_simple_web_layout_compositor_mode=offscreen-osr-exact-srgb")
+expect(evidence).to_contain("electron_simple_web_layout_gpu_compositing=disabled_software")
+expect(evidence).to_contain("electron_simple_web_layout_gpu_rasterization=disabled_software")
 expect(evidence).to_contain("electron_simple_web_layout_scene=simple-web-layout-text-flow")
 expect(evidence).to_contain("electron_simple_web_layout_simple_checksum=18446744073709551610")
 expect(evidence).to_contain("electron_simple_web_layout_electron_weighted_checksum=18446744073709551611")
 expect(evidence).to_contain("electron_simple_web_layout_mismatch_count=0")
+expect(evidence).to_contain("electron_simple_web_layout_proof_iterations=3")
 expect(evidence).to_contain("electron_simple_web_layout_electron_frame_us=1250")
+expect(evidence).to_contain("electron_simple_web_layout_estimated_fps_floor=800")
 expect(evidence).to_contain("electron_simple_web_layout_requested_width=96")
 expect(evidence).to_contain("electron_simple_web_layout_requested_height=64")
 expect(evidence).to_contain("electron_simple_web_layout_capture_native_width=96")
@@ -220,8 +229,56 @@ expect(wrong).to_contain("electron_simple_web_layout_proof_source=tools/manual/e
 
 </details>
 
+#### rejects missing Electron capture backend and GPU feature diagnostics
+
+-  proof command
+-  proof command
+-  proof command
+-  proof command
+   - Expected: code equals `1`
+- Confirm layout proof carries Electron backend and GPU diagnostics
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-layout-validator-backend-gpu"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_command(root + "/backend.json", "p.capture_backend=\"manual-json\"") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/backend.json > " + root + "/backend.env; " +
+    _proof_command(root + "/mode.json", "p.compositor_mode=\"unknown\"") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/mode.json > " + root + "/mode.env; " +
+    _proof_command(root + "/gpu.json", "delete p.gpu_feature_status") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/gpu.json > " + root + "/gpu.env; " +
+    _proof_command(root + "/gpu-mismatch.json", "p.gpu_feature_status.rasterization=\"enabled\"") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/gpu-mismatch.json > " + root + "/gpu-mismatch.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val backend = file_read(root + "/backend.env")
+val mode = file_read(root + "/mode.env")
+val gpu_env = file_read(root + "/gpu.env")
+val gpu_mismatch = file_read(root + "/gpu-mismatch.env")
+step("Confirm layout proof carries Electron backend and GPU diagnostics")
+expect(backend).to_contain("electron_simple_web_layout_validation_reason=unexpected-capture-backend")
+expect(backend).to_contain("electron_simple_web_layout_capture_backend=manual-json")
+expect(mode).to_contain("electron_simple_web_layout_validation_reason=unexpected-compositor-mode")
+expect(mode).to_contain("electron_simple_web_layout_compositor_mode=unknown")
+expect(gpu_env).to_contain("electron_simple_web_layout_validation_reason=missing-gpu-feature-status")
+expect(gpu_env).to_contain("electron_simple_web_layout_gpu_compositing=disabled_software")
+expect(gpu_mismatch).to_contain("electron_simple_web_layout_validation_reason=missing-gpu-feature-status")
+expect(gpu_mismatch).to_contain("electron_simple_web_layout_gpu_rasterization=disabled_software")
+```
+
+</details>
+
 #### rejects malformed Electron layout frame timing
 
+-  proof command
 -  proof command
    - Expected: code equals `1`
    - Expected: evidence does not contain `electron_simple_web_layout_electron_frame_us=not-a-number`
@@ -230,22 +287,27 @@ expect(wrong).to_contain("electron_simple_web_layout_proof_source=tools/manual/e
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-layout-validator-bad-frame"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
     _proof_command(root + "/proof.json", "p.frame_us=\"not-a-number\"") +
-    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/proof.json > " + root + "/evidence.env; " +
+    _proof_command(root + "/iterations.json", "p.iterations=1") +
+    " && node scripts/check/validate-electron-simple-web-layout-proof.js " + root + "/iterations.json > " + root + "/iterations.env"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val evidence = file_read(root + "/evidence.env")
+val iterations = file_read(root + "/iterations.env")
 expect(evidence).to_contain("electron_simple_web_layout_validation_status=fail")
 expect(evidence).to_contain("electron_simple_web_layout_validation_reason=missing-electron-timing")
 expect(evidence).to_contain("electron_simple_web_layout_electron_frame_us=")
 expect(evidence.contains("electron_simple_web_layout_electron_frame_us=not-a-number")).to_equal(false)
+expect(iterations).to_contain("electron_simple_web_layout_validation_reason=missing-performance-iterations")
+expect(iterations).to_contain("electron_simple_web_layout_proof_iterations=1")
 ```
 
 </details>
@@ -591,7 +653,7 @@ expect(pixel).to_contain("electron_simple_web_layout_mismatch_count=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -602,6 +664,9 @@ val script = file_read("scripts/check/check-electron-simple-web-layout-bitmap-ev
 expect(script).to_contain("validate-electron-simple-web-layout-proof.js")
 expect(script).to_contain("cat \"$VALIDATED_ENV\"")
 expect(script).to_contain("electron_simple_web_layout_validation_status")
+expect(script).to_contain("electron_simple_web_layout_capture_backend")
+expect(script).to_contain("electron_simple_web_layout_gpu_compositing")
+expect(script).to_contain("electron_simple_web_layout_estimated_fps_floor")
 expect(script).to_contain("electron_simple_web_layout_captured_argb_file_status")
 expect(script).to_contain("electron_simple_web_layout_captured_argb_size_bytes")
 expect(script).to_contain("electron_simple_web_layout_captured_argb_format")
@@ -621,8 +686,8 @@ expect(fixture).to_contain("proof_source: \"tools/electron-live-bitmap/exact_fix
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
