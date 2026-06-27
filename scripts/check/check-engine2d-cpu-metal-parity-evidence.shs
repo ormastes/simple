@@ -10,32 +10,114 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-# Prefer the cargo-built release binary (CI convention); fall back to the
-# deployed bin/simple symlink on dev machines that did not build it.
-if [ -z "${SIMPLE_BIN:-}" ]; then
-    for _cand in src/compiler_rust/target/release/simple bin/simple; do
-        if [ -x "$_cand" ]; then SIMPLE_BIN="$_cand"; break; fi
+# Prefer self-hosted Simple. The Rust seed is bootstrap/debug infrastructure
+# and must not produce release evidence rows for CPU/Metal parity.
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+if [ -z "${SIMPLE_BIN+x}" ]; then
+    SIMPLE_BIN=""
+    SIMPLE_BIN_SOURCE=auto-self-hosted
+    for _cand in bin/simple ./bin/simple release/*/simple bin/release/*/simple build/bootstrap/stage3/simple; do
+        if [ -x "$_cand" ]; then
+            SIMPLE_BIN="$_cand"
+            break
+        fi
     done
 fi
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -z "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 TIMEOUT_SECS="${ENGINE2D_PARITY_TIMEOUT_SECS:-240}"
 WORK_DIR="${BUILD_DIR:-build/engine2d-cpu-metal-parity-evidence}"
 HARNESS="test/02_integration/rendering/engine2d_cpu_metal_parity_run.spl"
 LOG="$WORK_DIR/parity.log"
+ENV_PATH="$WORK_DIR/parity.env"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/engine2d_cpu_metal_parity_$(date -u +%F).md}"
 
 mkdir -p "$WORK_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$ENV_PATH" "$LOG" "$REPORT_PATH"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 run_with_timeout() {
     if have timeout; then timeout "$TIMEOUT_SECS" "$@"; else "$@"; fi
 }
 
-if [ ! -x "$SIMPLE_BIN" ]; then
-    echo "engine2d_cpu_metal_parity_status=fail" >"$WORK_DIR/parity.env"
-    echo "engine2d_cpu_metal_parity_reason=missing-simple-binary" >>"$WORK_DIR/parity.env"
-    echo "FAIL: $SIMPLE_BIN not executable"
+write_env() {
+    echo "engine2d_cpu_metal_parity_status=$STATUS"
+    echo "engine2d_cpu_metal_parity_reason=$REASON"
+    echo "engine2d_cpu_metal_parity_simple_bin=$SIMPLE_BIN"
+    echo "engine2d_cpu_metal_parity_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "engine2d_cpu_metal_parity_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "engine2d_cpu_metal_parity_verdict=${VERDICT:-none}"
+    echo "engine2d_cpu_metal_parity_clear=${CLEAR_LINE:-none}"
+    echo "engine2d_cpu_metal_parity_rects=${RECTS_LINE:-none}"
+    echo "engine2d_cpu_metal_parity_gradient=${GRADIENT_LINE:-none}"
+    echo "engine2d_cpu_metal_parity_line=${LINE_LINE:-none}"
+    echo "engine2d_cpu_metal_parity_circle=${CIRCLE_LINE:-none}"
+    echo "engine2d_cpu_metal_parity_rounded_rect=${ROUNDED_LINE:-none}"
+    echo "engine2d_cpu_metal_parity_triangle=${TRIANGLE_LINE:-none}"
+    echo "engine2d_cpu_metal_parity_policy=exact-bitmap-no-blur-no-tolerance"
+    echo "engine2d_cpu_metal_parity_harness=$HARNESS"
+}
+
+write_report() {
+    echo "# Engine2D CPU vs Metal Bit-Level Parity"
+    echo
+    echo "- status: $STATUS"
+    echo "- reason: $REASON"
+    echo "- simple_bin: $SIMPLE_BIN"
+    echo "- simple_bin_source: $SIMPLE_BIN_SOURCE"
+    echo "- simple_bin_status: $SIMPLE_BIN_STATUS"
+    echo "- verdict: ${VERDICT:-none}"
+    echo "- policy: exact bitmap, no blur, no tolerance"
+    echo "- harness: $HARNESS"
+    echo
+    echo "## Scenes"
+    echo "- ${CLEAR_LINE:-clear: none}"
+    echo "- ${RECTS_LINE:-rects: none}"
+    echo "- ${GRADIENT_LINE:-gradient: none}"
+    echo "- ${LINE_LINE:-line: none}"
+    echo "- ${CIRCLE_LINE:-circle: none}"
+    echo "- ${ROUNDED_LINE:-rounded_rect: none}"
+    echo "- ${TRIANGLE_LINE:-triangle: none}"
+}
+
+fail_early() {
+    STATUS=fail
+    REASON="$1"
+    VERDICT=none
+    CLEAR_LINE=none
+    RECTS_LINE=none
+    GRADIENT_LINE=none
+    LINE_LINE=none
+    CIRCLE_LINE=none
+    ROUNDED_LINE=none
+    TRIANGLE_LINE=none
+    write_env >"$ENV_PATH"
+    write_report >"$REPORT_PATH"
+    cat "$ENV_PATH"
+    echo "engine2d-cpu-metal-parity: $STATUS ($REASON)"
     exit 1
+}
+
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    fail_early "simple-bin-$SIMPLE_BIN_STATUS"
 fi
 
 SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" run "$HARNESS" --mode=interpreter >"$LOG" 2>&1 || true
@@ -58,39 +140,8 @@ case "$VERDICT" in
     *)      STATUS=fail; REASON=no-verdict-emitted ;;
 esac
 
-{
-    echo "engine2d_cpu_metal_parity_status=$STATUS"
-    echo "engine2d_cpu_metal_parity_reason=$REASON"
-    echo "engine2d_cpu_metal_parity_verdict=${VERDICT:-none}"
-    echo "engine2d_cpu_metal_parity_clear=${CLEAR_LINE:-none}"
-    echo "engine2d_cpu_metal_parity_rects=${RECTS_LINE:-none}"
-    echo "engine2d_cpu_metal_parity_gradient=${GRADIENT_LINE:-none}"
-    echo "engine2d_cpu_metal_parity_line=${LINE_LINE:-none}"
-    echo "engine2d_cpu_metal_parity_circle=${CIRCLE_LINE:-none}"
-    echo "engine2d_cpu_metal_parity_rounded_rect=${ROUNDED_LINE:-none}"
-    echo "engine2d_cpu_metal_parity_triangle=${TRIANGLE_LINE:-none}"
-    echo "engine2d_cpu_metal_parity_policy=exact-bitmap-no-blur-no-tolerance"
-    echo "engine2d_cpu_metal_parity_harness=$HARNESS"
-} >"$WORK_DIR/parity.env"
-
-{
-    echo "# Engine2D CPU vs Metal Bit-Level Parity"
-    echo
-    echo "- status: $STATUS"
-    echo "- reason: $REASON"
-    echo "- verdict: ${VERDICT:-none}"
-    echo "- policy: exact bitmap, no blur, no tolerance"
-    echo "- harness: $HARNESS"
-    echo
-    echo "## Scenes"
-    echo "- ${CLEAR_LINE:-clear: none}"
-    echo "- ${RECTS_LINE:-rects: none}"
-    echo "- ${GRADIENT_LINE:-gradient: none}"
-    echo "- ${LINE_LINE:-line: none}"
-    echo "- ${CIRCLE_LINE:-circle: none}"
-    echo "- ${ROUNDED_LINE:-rounded_rect: none}"
-    echo "- ${TRIANGLE_LINE:-triangle: none}"
-} >"$REPORT_PATH"
+write_env >"$ENV_PATH"
+write_report >"$REPORT_PATH"
 
 echo "engine2d-cpu-metal-parity: $STATUS ($REASON)"
 [ "$STATUS" = "pass" ] || exit 1

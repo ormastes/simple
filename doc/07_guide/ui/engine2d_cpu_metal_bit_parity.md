@@ -16,6 +16,16 @@ the engine2d GPU module graph is imported, so this is a `run` harness, not a
 `_spec`). The harness renders identical scenes on both backends, downloads each
 backend's own framebuffer, and asserts pixel-exact equality.
 
+The gate is valid only with self-hosted Simple provenance. It now selects
+`bin/simple`, `release/*/simple`, `bin/release/*/simple`, or
+`build/bootstrap/stage3/simple` by default and records
+`engine2d_cpu_metal_parity_simple_bin`,
+`engine2d_cpu_metal_parity_simple_bin_source`, and
+`engine2d_cpu_metal_parity_simple_bin_status` in `parity.env`. Any
+`src/compiler_rust/**` override fails before the harness runs with
+`engine2d_cpu_metal_parity_reason=simple-bin-forbidden`; that output is a
+blocked evidence row, not CPU/Metal parity proof.
+
 Two guards prevent the false-greens this area has a history of:
 
 - **Metal must run on the GPU.** Each scene asserts `gpu_frame_complete == true`
