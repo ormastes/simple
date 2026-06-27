@@ -27,7 +27,7 @@ tauri_ios_render_log_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -96,6 +96,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_ios_render_log_validat
 - The iOS renderer wrapper keeps render-log, Metal, MDI event/capture,
   performance, input-to-paint, and animation diagnostic rows on early
   unavailable/fail exits.
+- The iOS renderer wrapper preserves validator-derived failure rows on later
+  fail diagnostics instead of masking them with generic duplicate keys.
 - The iOS renderer wrapper persists render-log and MDI validator output and
   re-emits validator-derived success rows instead of fixed pass strings.
 - The iOS renderer wrapper, mobile aggregate, and Tauri shell source are wired
@@ -582,6 +584,36 @@ expect(evidence).to_contain("ios_mdi_css_animation_probe=")
 
 </details>
 
+#### preserves validator-derived rows when wrapper diagnostics fail
+
+- Confirm fail diagnostics reuse existing validator env rows
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val direct = file_read("scripts/check/check-tauri-ios-mobile-renderer-evidence.shs")
+step("Confirm fail diagnostics reuse existing validator env rows")
+expect(direct).to_contain("emit_existing_or_default")
+expect(direct).to_contain("emit_existing_or_default ios_render_log_validation_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_render_log_validation_reason \"$diagnostic_reason\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_render_log_source_coherence_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_render_log_tauri_context_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_render_log_metal_context_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_render_log_fallback_marker_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_proof_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_failure_marker_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_event_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_interaction_latency_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_animation_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
+```
+
+</details>
+
 #### keeps the iOS renderer wrappers and Tauri shell wired to the validator
 
 <details>
@@ -641,8 +673,8 @@ expect(tauri).to_contain("metal_layer=CAMetalLayer")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
