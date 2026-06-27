@@ -93,6 +93,29 @@ function pathInfo(filePath) {
   };
 }
 
+function proofSourceArtifact(filePath) {
+  const info = pathInfo(filePath);
+  if (info.isSymlink) return { status: 'symlink', size: '' };
+  if (info.lstat === null) return { status: 'missing', size: '' };
+  if (!info.lstat.isFile()) return { status: 'not-regular', size: '' };
+  if (info.hasMultipleLinks) return { status: 'hardlink', size: String(info.lstat.size) };
+  if (info.lstat.size <= 0) return { status: 'empty', size: '0' };
+  let source = '';
+  try {
+    source = fs.readFileSync(filePath, 'utf8');
+  } catch (_err) {
+    return { status: 'missing', size: '' };
+  }
+  if (
+    !source.includes('proof_source: "tools/chrome-live-bitmap/capture_html_argb.js"') ||
+    !source.includes('capture_mode: geometryOutputPath ? "chrome-devtools-screenshot" : "chrome-headless-screenshot"') ||
+    !source.includes('producer: "chrome-headless-screenshot"')
+  ) {
+    return { status: 'marker-missing', size: String(info.lstat.size) };
+  }
+  return { status: 'pass', size: String(info.lstat.size) };
+}
+
 function artifactStat(value, proofPath) {
   if (typeof value !== 'string' || value.trim() === '') {
     return null;
@@ -302,21 +325,9 @@ const geometryViewport = geometry.viewport || {};
 const geometryItems = Array.isArray(geometry.items) ? geometry.items : [];
 const geometryMeasuredItemCount = measuredGeometryItemCount(geometryItems, geometryViewport);
 const expectedProofSource = 'tools/chrome-live-bitmap/capture_html_argb.js';
-const proofSourceStat = pathInfo(expectedProofSource);
-const proofSourceFileStatus = proofSourceStat.isSymlink
-  ? 'symlink'
-  : proofSourceStat.lstat === null || !proofSourceStat.lstat.isFile()
-    ? 'missing'
-    : proofSourceStat.hasMultipleLinks
-      ? 'hardlink'
-      : proofSourceStat.lstat.size <= 0
-        ? 'empty'
-        : 'pass';
-const proofSourceSizeBytes = proofSourceFileStatus === 'empty'
-  ? '0'
-  : proofSourceFileStatus === 'pass'
-    ? String(proofSourceStat.lstat.size)
-    : '';
+const proofSource = proofSourceArtifact(expectedProofSource);
+const proofSourceFileStatus = proofSource.status;
+const proofSourceSizeBytes = proofSource.size;
 const chromeUserAgent = typeof proof.chrome_user_agent === 'string' ? proof.chrome_user_agent : '';
 const chromeProduct = typeof proof.chrome_product === 'string' ? proof.chrome_product : '';
 const chromeProtocolVersion = typeof proof.chrome_protocol_version === 'string' ? proof.chrome_protocol_version : '';

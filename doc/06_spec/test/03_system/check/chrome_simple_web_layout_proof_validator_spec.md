@@ -27,7 +27,7 @@ chrome_simple_web_layout_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 25 | 25 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -112,8 +112,9 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/chrome_simple_web_layout_pro
 - The top-level proof must carry the live Chrome capture source marker; a
   hand-authored proof object with valid-looking artifacts is not sufficient.
 - The top-level proof source marker must resolve to a single-link regular
-  nonempty Chrome capture producer source file so stale JSON cannot be paired
-  with a missing or aliased DevTools capture script.
+  nonempty Chrome capture producer source file with expected DevTools capture
+  markers so stale JSON cannot be paired with a missing, substituted, or
+  aliased capture script.
 - The top-level proof must carry Chrome DevTools capture mode, Chrome or
   Chromium runtime user-agent, product, and protocol version evidence, not only
   a binary path.
@@ -270,6 +271,48 @@ expect(hardlink).to_contain("chrome_simple_web_layout_validation_status=fail")
 expect(hardlink).to_contain("chrome_simple_web_layout_validation_reason=unexpected-chrome-proof-source-file-hardlink")
 expect(hardlink).to_contain("chrome_simple_web_layout_proof_source=tools/chrome-live-bitmap/capture_html_argb.js")
 expect(hardlink).to_contain("chrome_simple_web_layout_proof_source_file_status=hardlink")
+```
+
+</details>
+
+#### rejects substituted Chrome capture source artifacts
+
+- Confirm Chrome proof source evidence cannot be hardlinked, non-regular, or markerless
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-chrome-layout-validator-source-artifact-substituted"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/hardlink/tools/chrome-live-bitmap " + root + "/directory/tools/chrome-live-bitmap " + root + "/markerless/tools/chrome-live-bitmap && " +
+    _proof_command(root + "/proof.json", "") +
+    " && cp " + root + "/proof.json " + root + "/hardlink/proof.json && cp tools/chrome-live-bitmap/capture_html_argb.js " + root + "/hardlink/original-capture.js && ln " + root + "/hardlink/original-capture.js " + root + "/hardlink/tools/chrome-live-bitmap/capture_html_argb.js && " +
+    "cd " + root + "/hardlink && node ../../../scripts/check/validate-chrome-simple-web-layout-proof.js proof.json > hardlink.env; hardlink_code=$?; cd ../../.. && " +
+    "cp " + root + "/proof.json " + root + "/directory/proof.json && mkdir -p " + root + "/directory/tools/chrome-live-bitmap/capture_html_argb.js && " +
+    "cd " + root + "/directory && node ../../../scripts/check/validate-chrome-simple-web-layout-proof.js proof.json > directory.env; directory_code=$?; cd ../../.. && " +
+    "cp " + root + "/proof.json " + root + "/markerless/proof.json && printf 'module.exports = {};\\n' > " + root + "/markerless/tools/chrome-live-bitmap/capture_html_argb.js && " +
+    "cd " + root + "/markerless && node ../../../scripts/check/validate-chrome-simple-web-layout-proof.js proof.json > markerless.env; markerless_code=$?; cd ../../.. && " +
+    "[ \"$hardlink_code\" -eq 1 ] && [ \"$directory_code\" -eq 1 ] && [ \"$markerless_code\" -eq 1 ]"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val hardlink = file_read(root + "/hardlink/hardlink.env")
+val directory = file_read(root + "/directory/directory.env")
+val markerless = file_read(root + "/markerless/markerless.env")
+step("Confirm Chrome proof source evidence cannot be hardlinked, non-regular, or markerless")
+expect(hardlink).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(hardlink).to_contain("chrome_simple_web_layout_validation_reason=unexpected-chrome-proof-source-file-hardlink")
+expect(hardlink).to_contain("chrome_simple_web_layout_proof_source_file_status=hardlink")
+expect(directory).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(directory).to_contain("chrome_simple_web_layout_validation_reason=unexpected-chrome-proof-source-file-not-regular")
+expect(directory).to_contain("chrome_simple_web_layout_proof_source_file_status=not-regular")
+expect(markerless).to_contain("chrome_simple_web_layout_validation_status=fail")
+expect(markerless).to_contain("chrome_simple_web_layout_validation_reason=unexpected-chrome-proof-source-file-marker-missing")
+expect(markerless).to_contain("chrome_simple_web_layout_proof_source_file_status=marker-missing")
 ```
 
 </details>
@@ -1156,6 +1199,8 @@ expect(validator).to_contain("missing-chrome-geometry-measured-items")
 expect(validator).to_contain("jsonIntegerBetween(proof.frame_us, 1, 1000000)")
 expect(validator).to_contain("jsonBoolTextOrBlank")
 expect(validator).to_contain("missing-chrome-bin")
+expect(validator).to_contain("proofSourceArtifact")
+expect(validator).to_contain("marker-missing")
 expect(validator).to_contain("captured-argb-checksum-mismatch")
 expect(validator).to_contain("captured-argb-weighted-checksum-mismatch")
 expect(script).to_contain("captured-argb-checksum-mismatch")
