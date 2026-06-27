@@ -27,7 +27,7 @@ tauri_mobile_mdi_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -73,8 +73,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 - Complete mobile MDI proof logs validate and emit normalized
   `{prefix}_mdi_*` rows.
 - Explicitly requested mobile MDI proof source paths must exist and be
-  nonempty; a valid companion device log cannot hide a missing or empty
-  requested source artifact.
+  nonempty regular files; a valid companion device log cannot hide a missing,
+  empty, or symlinked requested source artifact.
 - When multiple requested device logs contain MDI proof markers, their latest
   proof JSON must agree; conflicting render/event/capture/performance/
   animation proof payloads fail closed instead of letting one log shadow
@@ -123,7 +123,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 49 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -142,6 +142,7 @@ expect(evidence).to_contain("ios_mdi_proof_requested_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_marker_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_window_count=4")
 expect(evidence).to_contain("ios_mdi_render_status=pass")
@@ -190,7 +191,7 @@ expect(evidence).to_contain("ios_mdi_css_animation_probe=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -209,6 +210,7 @@ expect(evidence).to_contain("ios_mdi_proof_requested_source_count=2")
 expect(evidence).to_contain("ios_mdi_proof_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_marker_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
 ```
 
@@ -224,7 +226,7 @@ expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -244,7 +246,44 @@ expect(evidence).to_contain("ios_mdi_proof_requested_source_count=2")
 expect(evidence).to_contain("ios_mdi_proof_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_marker_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=1")
+```
+
+</details>
+
+#### rejects symlinked requested mobile MDI proof log source paths
+
+-  proof log command
+   - Expected: code equals `1`
+- Confirm a valid companion MDI proof log cannot hide a symlinked requested source
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-mdi-validator-symlink-source"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _proof_log_command(root + "/device.log", "") +
+    " && ln -s device.log " + root + "/linked.log && " +
+    "node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log " + root + "/linked.log > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm a valid companion MDI proof log cannot hide a symlinked requested source")
+expect(evidence).to_contain("ios_mdi_proof_status=fail")
+expect(evidence).to_contain("ios_mdi_proof_reason=symlink-mdi-proof-source")
+expect(evidence).to_contain("ios_mdi_proof_requested_source_count=2")
+expect(evidence).to_contain("ios_mdi_proof_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_marker_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=1")
+expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
 ```
 
 </details>
@@ -260,7 +299,7 @@ expect(evidence).to_contain("ios_mdi_proof_empty_source_count=1")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -280,6 +319,7 @@ expect(evidence).to_contain("ios_mdi_proof_requested_source_count=2")
 expect(evidence).to_contain("ios_mdi_proof_source_count=2")
 expect(evidence).to_contain("ios_mdi_proof_marker_source_count=2")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
 ```
 
@@ -295,7 +335,7 @@ expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -315,6 +355,7 @@ expect(evidence).to_contain("ios_mdi_proof_json=" + root + "/device.log")
 expect(evidence).to_contain("ios_mdi_proof_requested_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_source_count=1")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
 expect(device_log).to_contain("[tauri-shell] mdi proof:")
 ```
@@ -969,7 +1010,7 @@ expect(evidence).to_contain("ios_mdi_animation_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -980,21 +1021,27 @@ val shell = file_read("tools/tauri-shell/src-tauri/src/lib.rs")
 val validator = file_read("scripts/check/validate-tauri-mobile-mdi-proof.js")
 expect(validator).to_contain("jsonBoolTextOrBlank")
 expect(ios).to_contain("ios_mdi_proof_empty_source_count")
+expect(ios).to_contain("ios_mdi_proof_symlink_source_count")
 expect(ios).to_contain("ios_mdi_proof_marker_source_count")
 expect(android).to_contain("android_mdi_proof_empty_source_count")
+expect(android).to_contain("android_mdi_proof_symlink_source_count")
 expect(android).to_contain("android_mdi_proof_marker_source_count")
 expect(ios).to_contain("ios_mdi_capture_device_pixel_ratio")
 expect(android).to_contain("android_mdi_capture_device_pixel_ratio")
 expect(shell).to_contain("devicePixelRatio")
 expect(shell).to_contain("screenOrientation")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_empty_source_count")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_symlink_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_empty_source_count")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_symlink_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_proof_marker_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_capture_device_pixel_ratio")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_capture_screen_orientation")
 expect(aggregate).to_contain("ios-mdi-proof-source-empty")
+expect(aggregate).to_contain("ios-mdi-proof-source-symlink")
 expect(aggregate).to_contain("android-mdi-proof-source-empty")
+expect(aggregate).to_contain("android-mdi-proof-source-symlink")
 ```
 
 </details>
@@ -1003,8 +1050,8 @@ expect(aggregate).to_contain("android-mdi-proof-source-empty")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -611,7 +611,7 @@ expect(evidence).to_contain("ios_render_log_failure_marker_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 47 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -650,6 +650,8 @@ expect(evidence).to_contain("ios_mdi_proof_requested_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_marker_source_count=0")
 expect(evidence).to_contain("ios_mdi_proof_missing_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_symlink_source_count=0")
+expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
 expect(evidence).to_contain("ios_mdi_render_status=")
 expect(evidence).to_contain("ios_mdi_event_status=")
 expect(evidence).to_contain("ios_mdi_event_body_click_routed=")
@@ -674,7 +676,7 @@ expect(evidence).to_contain("ios_mdi_css_animation_probe=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -692,6 +694,7 @@ expect(direct).to_contain("emit_existing_or_default ios_render_log_metal_context
 expect(direct).to_contain("emit_existing_or_default ios_render_log_fallback_marker_status \"$diagnostic_status\" \"$IOS_RENDER_LOG_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_mdi_proof_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_mdi_failure_marker_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
+expect(direct).to_contain("emit_existing_or_default ios_mdi_proof_symlink_source_count 0 \"$MDI_PROOF_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_mdi_event_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_mdi_interaction_latency_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
 expect(direct).to_contain("emit_existing_or_default ios_mdi_animation_status \"$diagnostic_status\" \"$MDI_PROOF_VALIDATION_ENV\"")
@@ -704,7 +707,7 @@ expect(direct).to_contain("emit_existing_or_default ios_mdi_animation_status \"$
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -733,6 +736,7 @@ expect(direct).to_contain("ios_mdi_input_to_paint_ms")
 expect(direct).to_contain("ios_mdi_interaction_latency_status")
 expect(direct).to_contain("ios_mdi_failure_marker_status")
 expect(direct).to_contain("ios_mdi_proof_marker_source_count")
+expect(direct).to_contain("ios_mdi_proof_symlink_source_count")
 expect(direct).to_contain("ios_mdi_event_body_click_routed")
 expect(direct).to_contain("ios_mdi_event_taskbar_labels_visible")
 expect(aggregate).to_contain("TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR")
@@ -751,6 +755,7 @@ expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_body_click_routed")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_marker_source_count")
+expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_proof_symlink_source_count")
 expect(aggregate).to_contain("tauri_mobile_renderer_parity_ios_mdi_event_taskbar_labels_visible")
 expect(aggregate).to_contain("ios-tauri-wkwebview-context-missing")
 expect(aggregate).to_contain("ios-metal-context-missing")

@@ -84,6 +84,7 @@ if (prefix !== "ios" && prefix !== "android") {
 const requestedSourceCount = files.length;
 let missingSourceCount = 0;
 let emptySourceCount = 0;
+let symlinkSourceCount = 0;
 let sourceCount = 0;
 let lastJson = "";
 let proofMarkerSourceCount = 0;
@@ -94,7 +95,23 @@ let failureMarker = false;
 const failureMarkerPattern =
   /(eval FAIL|inline shell eval FAIL|delayed inline shell eval FAIL|Fatal signal|F\/DEBUG|F\/libc|NSURLErrorDomain|failed provisional load|Headless UI completed|subprocess exited with code|Simple subprocess stdout closed before a valid render arrived|parse error|Requested GL implementation .* not found|Exiting GPU process due to errors during initialization)/i;
 for (const file of files) {
-  if (!file || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
+  let stat = null;
+  if (file) {
+    try {
+      stat = fs.lstatSync(file);
+    } catch (_err) {
+      stat = null;
+    }
+  }
+  if (!file || !stat) {
+    missingSourceCount += 1;
+    continue;
+  }
+  if (stat.isSymbolicLink()) {
+    symlinkSourceCount += 1;
+    continue;
+  }
+  if (!stat.isFile()) {
     missingSourceCount += 1;
     continue;
   }
@@ -136,6 +153,7 @@ function emitSourceRows() {
   emit("mdi_proof_source_count", sourceCount);
   emit("mdi_proof_marker_source_count", proofMarkerSourceCount);
   emit("mdi_proof_missing_source_count", missingSourceCount);
+  emit("mdi_proof_symlink_source_count", symlinkSourceCount);
   emit("mdi_proof_empty_source_count", emptySourceCount);
 }
 
@@ -143,6 +161,14 @@ if (missingSourceCount > 0) {
   emit("mdi_proof_json", jsonPath);
   emit("mdi_proof_status", "fail");
   emit("mdi_proof_reason", "missing-mdi-proof-source");
+  emitSourceRows();
+  process.exit(1);
+}
+
+if (symlinkSourceCount > 0) {
+  emit("mdi_proof_json", jsonPath);
+  emit("mdi_proof_status", "fail");
+  emit("mdi_proof_reason", "symlink-mdi-proof-source");
   emitSourceRows();
   process.exit(1);
 }
