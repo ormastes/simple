@@ -80,13 +80,13 @@ coverage.
 
 - Record the functional SSpec owner for implemented Simple Web CSS properties
 - Keep the full implemented Simple Web CSS subset tied to renderer behavior
-   - Expected: implemented.split(" ").len() equals `147`
+   - Expected: implemented.split(" ").len() equals `153`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 73 lines folded for reproduction.
+Runnable source: 79 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -95,12 +95,13 @@ val owner = _implemented_css_owner()
 expect(owner).to_contain("simple_web_generated_html_css_combinations_spec.spl")
 
 step("Keep the full implemented Simple Web CSS subset tied to renderer behavior")
-val implemented = "align-content align-items align-self animation animation-delay animation-direction animation-duration animation-fill-mode animation-iteration-count animation-name animation-play-state animation-timing-function aspect-ratio background background-clip background-color background-origin background-image background-position background-repeat background-size border border-bottom border-bottom-color border-bottom-style border-bottom-width border-color border-left border-left-color border-left-style border-left-width border-right border-right-color border-right-style border-right-width border-style border-top border-top-color border-top-style border-width border-top-width border-radius border-bottom-left-radius border-bottom-right-radius border-top-left-radius border-top-right-radius bottom box-sizing box-shadow caret-color color column-gap cursor direction display flex flex-basis flex-direction flex-flow flex-grow flex-shrink flex-wrap font font-size font-style font-weight gap height justify-content left letter-spacing line-height margin margin-block margin-block-end margin-block-start margin-bottom margin-inline margin-inline-end margin-inline-start margin-left margin-right margin-top max-height max-width min-height min-width object-fit object-position opacity order outline outline-color outline-offset outline-style outline-width overflow overflow-wrap overflow-x overflow-y padding padding-block padding-block-end padding-block-start padding-bottom padding-inline padding-inline-end padding-inline-start padding-left padding-right padding-top position resize right row-gap tab-size text-align text-align-last text-decoration text-decoration-color text-decoration-line text-decoration-style text-decoration-thickness text-indent text-overflow text-shadow text-transform text-underline-offset text-underline-position top transform transform-box transform-origin transform-style transition transition-delay transition-duration transition-property transition-timing-function unicode-bidi visibility white-space width word-break word-spacing word-wrap z-index"
-expect(implemented.split(" ").len()).to_equal(147)
+val implemented = "align-content align-items align-self animation animation-delay animation-direction animation-duration animation-fill-mode animation-iteration-count animation-name animation-play-state animation-timing-function aspect-ratio background background-clip background-color background-origin background-image background-position background-repeat background-size block-size border border-bottom border-bottom-color border-bottom-style border-bottom-width border-color border-left border-left-color border-left-style border-left-width border-right border-right-color border-right-style border-right-width border-style border-top border-top-color border-top-style border-width border-top-width border-radius border-bottom-left-radius border-bottom-right-radius border-top-left-radius border-top-right-radius bottom box-sizing box-shadow caret-color color column-gap cursor direction display flex flex-basis flex-direction flex-flow flex-grow flex-shrink flex-wrap font font-size font-style font-weight gap height inline-size justify-content left letter-spacing line-height margin margin-block margin-block-end margin-block-start margin-bottom margin-inline margin-inline-end margin-inline-start margin-left margin-right margin-top max-block-size max-height max-inline-size max-width min-block-size min-height min-inline-size min-width object-fit object-position opacity order outline outline-color outline-offset outline-style outline-width overflow overflow-wrap overflow-x overflow-y padding padding-block padding-block-end padding-block-start padding-bottom padding-inline padding-inline-end padding-inline-start padding-left padding-right padding-top position resize right row-gap tab-size text-align text-align-last text-decoration text-decoration-color text-decoration-line text-decoration-style text-decoration-thickness text-indent text-overflow text-shadow text-transform text-underline-offset text-underline-position top transform transform-box transform-origin transform-style transition transition-delay transition-duration transition-property transition-timing-function unicode-bidi visibility white-space width word-break word-spacing word-wrap z-index"
+expect(implemented.split(" ").len()).to_equal(153)
 expect(implemented).to_contain("aspect-ratio")
 expect(implemented).to_contain("object-fit")
 expect(implemented).to_contain("object-position")
 expect(implemented).to_contain("display")
+expect(implemented).to_contain("block-size")
 expect(implemented).to_contain("background-color")
 expect(implemented).to_contain("background-clip")
 expect(implemented).to_contain("background-image")
@@ -132,6 +133,11 @@ expect(implemented).to_contain("flex-flow")
 expect(implemented).to_contain("flex-wrap")
 expect(implemented).to_contain("letter-spacing")
 expect(implemented).to_contain("line-height")
+expect(implemented).to_contain("inline-size")
+expect(implemented).to_contain("max-block-size")
+expect(implemented).to_contain("max-inline-size")
+expect(implemented).to_contain("min-block-size")
+expect(implemented).to_contain("min-inline-size")
 expect(implemented).to_contain("opacity")
 expect(implemented).to_contain("margin-block")
 expect(implemented).to_contain("margin-inline")
@@ -171,13 +177,19 @@ expect(implemented).to_contain("z-index")
 
 - Record the inventory SSpec owner for unsupported CSS properties
 - Keep the complete current unsupported W3C property inventory visible without claiming renderer support
-   - Expected: unsupported_cases.len() equals `254`
+   - Expected: unsupported_cases.len() equals `248`
+   - Expected: unsupported does not contain `block-size`
+   - Expected: unsupported does not contain `inline-size`
+   - Expected: unsupported does not contain `min-block-size`
+   - Expected: unsupported does not contain `min-inline-size`
+   - Expected: unsupported does not contain `max-block-size`
+   - Expected: unsupported does not contain `max-inline-size`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -188,13 +200,19 @@ expect(owner).to_contain("simple_web_css_inventory_traceability_spec.spl")
 step("Keep the complete current unsupported W3C property inventory visible without claiming renderer support")
 val unsupported = _unsupported_css_inventory()
 val unsupported_cases = unsupported.split(" ")
-expect(unsupported_cases.len()).to_equal(254)
+expect(unsupported_cases.len()).to_equal(248)
 expect(unsupported).to_contain("accent-color")
 expect(unsupported).to_contain("border-image-source")
 expect(unsupported).to_contain("grid-template-columns")
 expect(unsupported).to_contain("scroll-padding-inline-start")
 expect(unsupported).to_contain("view-transition-name")
 expect(unsupported).to_contain("writing-mode")
+expect(unsupported.contains("block-size")).to_equal(false)
+expect(unsupported.contains("inline-size")).to_equal(false)
+expect(unsupported.contains("min-block-size")).to_equal(false)
+expect(unsupported.contains("min-inline-size")).to_equal(false)
+expect(unsupported.contains("max-block-size")).to_equal(false)
+expect(unsupported.contains("max-inline-size")).to_equal(false)
 ```
 
 </details>

@@ -276,12 +276,12 @@ checksum, and exact geometry is downgraded to `fail`.
    - Expected: rendering_manifest_tag_covered equals `105`
    - Expected: rendering_manifest_tag_covered_names.split(",").len() equals `105`
    - Expected: rendering_manifest_tag_missing equals ``
-   - Expected: rendering_manifest_css_count equals `147`
+   - Expected: rendering_manifest_css_count equals `153`
    - Expected: rendering_manifest_css_source equals `scripts/check/check-html-css-sspec-traceability.shs`
    - Expected: rendering_manifest_css_source_status equals `pass`
    - Expected: rendering_manifest_css_source_count equals `rendering_manifest_css_count`
-   - Expected: rendering_manifest_css_covered equals `147`
-   - Expected: rendering_manifest_css_covered_names.split(",").len() equals `132`
+   - Expected: rendering_manifest_css_covered equals `153`
+   - Expected: rendering_manifest_css_covered_names.split(",").len() equals `153`
    - Expected: rendering_manifest_css_missing equals ``
    - Expected: rendering_manifest_css_scope equals `implemented-simple-web-css`
    - Expected: rendering_manifest_total_css_count equals `traceability_css_count`
@@ -295,11 +295,11 @@ checksum, and exact geometry is downgraded to `fail`.
    - Expected: full_rendering_goal_html_total equals `105`
    - Expected: full_rendering_goal_html_rendered equals `105`
    - Expected: full_rendering_goal_implemented_css_status equals `pass`
-   - Expected: full_rendering_goal_implemented_css_total equals `147`
-   - Expected: full_rendering_goal_implemented_css_rendered equals `147`
+   - Expected: full_rendering_goal_implemented_css_total equals `153`
+   - Expected: full_rendering_goal_implemented_css_rendered equals `153`
    - Expected: full_rendering_goal_full_css_status equals `incomplete`
    - Expected: full_rendering_goal_full_css_total equals `traceability_css_count`
-   - Expected: full_rendering_goal_full_css_rendered equals `147`
+   - Expected: full_rendering_goal_full_css_rendered equals `153`
    - Expected: full_rendering_goal_full_css_unrendered equals `rendering_manifest_unrendered_css_count`
    - Expected: full_rendering_goal_full_css_unrendered_properties equals `rendering_manifest_unrendered_css_properties`
    - Expected: html_css_implemented_surface_status equals `pass`
@@ -320,7 +320,7 @@ checksum, and exact geometry is downgraded to `fail`.
    - Expected: windows_d3d12_render_log_required_api equals `d3d12`
    - Expected: traceability_status equals `pass`
    - Expected: traceability_html_count equals `105`
-   - Expected: traceability_implemented_css_count equals `147`
+   - Expected: traceability_implemented_css_count equals `153`
    - Expected: traceability_unsupported_css_missing_count equals `0`
    - Expected: comparison_fixture_status equals `pass`
    - Expected: comparison_artifact_reason equals `pass`
@@ -407,12 +407,12 @@ expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest=t
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_fixture=scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source=scripts/check/check-html-css-sspec-traceability.shs")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_status=pass")
-expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_count=147")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_source_count=153")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_count=105")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_covered_count=105")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_covered=")
-expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_count=147")
-expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_covered_count=147")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_count=153")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_covered_count=153")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_covered=")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_scope=implemented-simple-web-css")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_total_css_property_count=")
@@ -427,10 +427,10 @@ expect(evidence).to_contain("html_css_full_rendering_goal_html_tag_status=pass")
 expect(evidence).to_contain("html_css_full_rendering_goal_html_tag_total_count=105")
 expect(evidence).to_contain("html_css_full_rendering_goal_html_tag_rendered_count=105")
 expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_status=pass")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=147")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=147")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=153")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_rendered_count=153")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_status=incomplete")
-expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=147")
+expect(evidence).to_contain("html_css_full_rendering_goal_full_css_rendered_count=153")
 expect(evidence).to_contain("html_css_full_rendering_goal_full_css_unrendered_count=")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_command=sh scripts/check/check-web-wm-modern-shell-evidence.shs")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_source=existing-evidence")
@@ -459,11 +459,11 @@ expect(evidence).to_contain("html_css_implemented_surface_status=pass")
 expect(evidence).to_contain("html_css_implemented_surface_reason=all-implemented-html-and-css-rendered")
 expect(evidence).to_contain("html_css_implemented_surface_html_total_count=105")
 expect(evidence).to_contain("html_css_implemented_surface_html_rendered_count=105")
-expect(evidence).to_contain("html_css_implemented_surface_css_total_count=147")
-expect(evidence).to_contain("html_css_implemented_surface_css_rendered_count=147")
+expect(evidence).to_contain("html_css_implemented_surface_css_total_count=153")
+expect(evidence).to_contain("html_css_implemented_surface_css_rendered_count=153")
 expect(evidence).to_contain("html_css_full_css_completion_status=incomplete")
 expect(evidence).to_contain("html_css_full_css_completion_reason=css-spec-properties-unrendered")
-expect(evidence).to_contain("html_css_full_css_completion_rendered_count=147")
+expect(evidence).to_contain("html_css_full_css_completion_rendered_count=153")
 expect(evidence).to_contain("html_css_full_css_completion_unrendered_count=")
 expect(evidence).to_contain("html_css_readiness_answer=implemented-html-css-ready-full-css-incomplete")
 expect(evidence).to_contain("native_render_log_platform_matrix_status=")
@@ -507,7 +507,7 @@ expect(evidence).to_contain("html_css_traceability_exit_code=0")
 expect(evidence).to_contain("html_css_traceability_evidence_env=build/test-gui-renderdoc-feature-coverage-status/sspec-traceability/evidence.env")
 expect(evidence).to_contain("html_css_traceability_required_html_tag_count=105")
 expect(evidence).to_contain("html_css_traceability_required_css_property_min_count=390")
-expect(evidence).to_contain("html_css_traceability_implemented_css_property_count=147")
+expect(evidence).to_contain("html_css_traceability_implemented_css_property_count=153")
 expect(evidence).to_contain("html_css_traceability_implemented_css_property_indexed_count=")
 expect(evidence).to_contain("html_css_traceability_unsupported_css_property_count=")
 expect(evidence).to_contain("html_css_traceability_unsupported_css_properties=")
@@ -1100,22 +1100,22 @@ expect(rendering_manifest_tag_covered_names).to_contain("article")
 expect(rendering_manifest_tag_covered_names).to_contain("video")
 expect(rendering_manifest_tag_covered_names.split(",").len()).to_equal(105)
 expect(rendering_manifest_tag_missing).to_equal("")
-expect(rendering_manifest_css_count).to_equal("147")
+expect(rendering_manifest_css_count).to_equal("153")
 expect(rendering_manifest_css_source).to_equal("scripts/check/check-html-css-sspec-traceability.shs")
 expect(rendering_manifest_css_source_status).to_equal("pass")
 expect(rendering_manifest_css_source_count).to_equal(rendering_manifest_css_count)
-expect(rendering_manifest_css_covered).to_equal("147")
+expect(rendering_manifest_css_covered).to_equal("153")
 expect(rendering_manifest_css_covered_names).to_contain("align-content")
 expect(rendering_manifest_css_covered_names).to_contain("align-items")
 expect(rendering_manifest_css_covered_names).to_contain("align-self")
 expect(rendering_manifest_css_covered_names).to_contain("display")
 expect(rendering_manifest_css_covered_names).to_contain("justify-content")
 expect(rendering_manifest_css_covered_names).to_contain("border-style")
-expect(rendering_manifest_css_covered_names.split(",").len()).to_equal(132)
+expect(rendering_manifest_css_covered_names.split(",").len()).to_equal(153)
 expect(rendering_manifest_css_missing).to_equal("")
 expect(rendering_manifest_css_scope).to_equal("implemented-simple-web-css")
 expect(rendering_manifest_total_css_count).to_equal(traceability_css_count)
-expect(rendering_manifest_unrendered_css_count.to_i64()).to_be_greater_than(252)
+expect(rendering_manifest_unrendered_css_count.to_i64()).to_be_greater_than(240)
 expect(rendering_manifest_unrendered_css_properties).to_equal(traceability_unsupported_css_properties)
 expect(rendering_manifest_unrendered_css_properties).to_contain("accent-color")
 expect(rendering_manifest_case_count).to_equal("50")
@@ -1128,11 +1128,11 @@ expect(full_rendering_goal_html_status).to_equal("pass")
 expect(full_rendering_goal_html_total).to_equal("105")
 expect(full_rendering_goal_html_rendered).to_equal("105")
 expect(full_rendering_goal_implemented_css_status).to_equal("pass")
-expect(full_rendering_goal_implemented_css_total).to_equal("147")
-expect(full_rendering_goal_implemented_css_rendered).to_equal("147")
+expect(full_rendering_goal_implemented_css_total).to_equal("153")
+expect(full_rendering_goal_implemented_css_rendered).to_equal("153")
 expect(full_rendering_goal_full_css_status).to_equal("incomplete")
 expect(full_rendering_goal_full_css_total).to_equal(traceability_css_count)
-expect(full_rendering_goal_full_css_rendered).to_equal("147")
+expect(full_rendering_goal_full_css_rendered).to_equal("153")
 expect(full_rendering_goal_full_css_unrendered).to_equal(rendering_manifest_unrendered_css_count)
 expect(full_rendering_goal_full_css_unrendered_properties).to_equal(rendering_manifest_unrendered_css_properties)
 expect(html_css_implemented_surface_status).to_equal("pass")
@@ -1162,9 +1162,9 @@ expect(windows_d3d12_render_log_required_api).to_equal("d3d12")
 expect(traceability_status).to_equal("pass")
 expect(traceability_html_count).to_equal("105")
 expect(traceability_css_count.to_i64()).to_be_greater_than(389)
-expect(traceability_implemented_css_count).to_equal("147")
+expect(traceability_implemented_css_count).to_equal("153")
 expect(traceability_implemented_css_indexed_count.to_i64()).to_be_greater_than(50)
-expect(traceability_unsupported_css_count.to_i64()).to_be_greater_than(253)
+expect(traceability_unsupported_css_count.to_i64()).to_be_greater_than(247)
 expect(traceability_unsupported_css_properties.len()).to_be_greater_than(1000)
 expect(traceability_unsupported_css_missing_count).to_equal("0")
 expect(comparison_fixture_status).to_equal("pass")
@@ -1768,9 +1768,9 @@ expect(code).to_equal(0)
 
 step("Assert keyed cache misses stale unkeyed rows and reports current CSS state")
 val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-stale-cache/out/evidence.env")
-expect(evidence).to_contain("html_css_traceability_implemented_css_property_count=147")
-expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_count=147")
-expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=147")
+expect(evidence).to_contain("html_css_traceability_implemented_css_property_count=153")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_count=153")
+expect(evidence).to_contain("html_css_full_rendering_goal_implemented_css_total_count=153")
 expect(evidence).to_contain("html_css_full_rendering_goal_animation_css_status=pass")
 ```
 

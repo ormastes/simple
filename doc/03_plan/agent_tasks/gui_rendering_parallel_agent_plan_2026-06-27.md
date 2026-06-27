@@ -378,6 +378,7 @@ This session's immediate integration target:
 | WO-16 CSS logical inline spacing slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `141/141`, and no full-CSS/native-platform completion is claimed |
 | WO-17 Goal completion checklist SSpec | Main agent defines, Spark/fallback may inspect, normal/high-capability agent reviews | High for read-only review, low for source edits | `test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl`, generated/manual doc, this plan | The SSpec lists all final gates as fail-fast scenario helpers; goal completion requires replacing every placeholder with evidence assertions and making the spec pass |
 | WO-18 CSS logical block spacing slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `147/147`, and no full-CSS/native-platform completion is claimed |
+| WO-19 CSS logical sizing slice | Main agent | Low: Spark may only inspect evidence after implementation | Renderer, CSS traceability wrapper, Electron bitmap evidence fixture, focused renderer/inventory/system specs, generated docs, report | Focused renderer spec passes, full CSS gate reports implemented CSS `153/153`, and no full-CSS/native-platform completion is claimed |
 
 WO-12 rule: do not spawn Spark against source-edit scopes until the read-only
 gap/matrix lanes complete and a normal reviewer approves the intended write
@@ -474,6 +475,16 @@ horizontal writing-mode path. Current evidence is recorded in
 `doc/09_report/html_css_full_rendering_goal_status_logical_block_spacing_2026-06-27.md`:
 implemented CSS is `147/147`, full CSS is `147/394`, full CSS unrendered is
 `247`, and unsupported inventory ownership is `254`. This is a completed
+narrow web-renderer slice, not completion evidence for vertical writing-mode
+remapping, full CSS, RenderDoc, Metal, or D3D12 lanes.
+
+WO-19 status, 2026-06-27: `inline-size`, `block-size`,
+`min-inline-size`, `max-inline-size`, `min-block-size`, and
+`max-block-size` moved into implemented Simple Web CSS for the default
+horizontal writing-mode path. Current evidence is recorded in
+`doc/09_report/html_css_full_rendering_goal_status_logical_sizing_2026-06-27.md`:
+implemented CSS is `153/153`, full CSS is `153/394`, full CSS unrendered is
+`241`, and unsupported inventory ownership is `248`. This is a completed
 narrow web-renderer slice, not completion evidence for vertical writing-mode
 remapping, full CSS, RenderDoc, Metal, or D3D12 lanes.
 
