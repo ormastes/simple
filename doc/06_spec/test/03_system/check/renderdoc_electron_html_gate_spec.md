@@ -27,7 +27,7 @@ renderdoc_electron_html_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -83,6 +83,9 @@ sh scripts/check/check-renderdoc-electron-html-gate.shs || true
   to have the expected dimensions, `argb-u32` format, the
   `electron-chromium-capture` producer, complete pixel data, and nonblank
   rendered pixels.
+- Electron live-bitmap ARGB dimensions, native dimensions, and pixels must be
+  real safe JSON integers; stringified or unsafe exponential values are not
+  accepted as rendered bitmap proof.
 - The `.rdc` capture file and Electron ARGB JSON proof must be regular files,
   not symlinks to substituted or stale artifacts.
 
@@ -361,6 +364,47 @@ expect(evidence).to_contain("rdoc_electron_html_gate_required_argb_status=pass")
 
 </details>
 
+#### rejects unsafe or stringified Electron ARGB bitmap proof values
+
+- Confirm Electron ARGB bitmap proof rejects coerced numeric values
+   - Expected: unsafe does not contain `rdoc_electron_html_gate_argb_width=1e+21`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-renderdoc-electron-html-gate-argb-types"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/source && " +
+    "printf 'RDOCsynthetic electron capture\\n' > " + root + "/source/electron.rdc && " +
+    "printf '{\"width\":1e21,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > " + root + "/source/unsafe_argb.json && " +
+    "printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,\"4278190335\",4294967295,4294967295]}\\n' > " + root + "/source/string_pixel_argb.json && " +
+    "printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=" + root + "/source/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=" + root + "/source/unsafe_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan\\n' > " + root + "/source/unsafe.env && " +
+    "RDOC_ELECTRON_HTML_EVIDENCE_ENV=" + root + "/source/unsafe.env BUILD_DIR=" + root + "/unsafe-out REPORT_PATH=" + root + "/unsafe-report.md sh scripts/check/check-renderdoc-electron-html-gate.shs || true; " +
+    "printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=" + root + "/source/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=" + root + "/source/string_pixel_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan\\n' > " + root + "/source/string-pixel.env && " +
+    "RDOC_ELECTRON_HTML_EVIDENCE_ENV=" + root + "/source/string-pixel.env BUILD_DIR=" + root + "/string-pixel-out REPORT_PATH=" + root + "/string-pixel-report.md sh scripts/check/check-renderdoc-electron-html-gate.shs || true"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val unsafe = rt_file_read_text(root + "/unsafe-out/evidence.env") ?? ""
+val string_pixel = rt_file_read_text(root + "/string-pixel-out/evidence.env") ?? ""
+step("Confirm Electron ARGB bitmap proof rejects coerced numeric values")
+expect(unsafe).to_contain("rdoc_electron_html_gate_status=fail")
+expect(unsafe).to_contain("rdoc_electron_html_gate_reason=missing-electron-argb-dimensions")
+expect(unsafe).to_contain("rdoc_electron_html_gate_argb_status=invalid")
+expect(unsafe).to_contain("rdoc_electron_html_gate_argb_width=")
+expect(unsafe.contains("rdoc_electron_html_gate_argb_width=1e+21")).to_equal(false)
+expect(string_pixel).to_contain("rdoc_electron_html_gate_status=fail")
+expect(string_pixel).to_contain("rdoc_electron_html_gate_reason=unexpected-electron-argb-pixel-type")
+expect(string_pixel).to_contain("rdoc_electron_html_gate_argb_status=invalid")
+expect(string_pixel).to_contain("rdoc_electron_html_gate_argb_pixel_count=4")
+```
+
+</details>
+
 #### rejects Electron captures from an unexpected binary path
 
 <details>
@@ -474,8 +518,8 @@ expect(evidence).to_contain("rdoc_electron_html_gate_required_features=Vulkan")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

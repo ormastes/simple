@@ -98,32 +98,52 @@ write_argb_gate_env() {
     node - "$argb_path" "$expected_width" "$expected_height" <<'NODE' >"$out_path"
 const fs = require("fs");
 const argbPath = process.argv[2] || "";
-const expectedWidth = Number(process.argv[3] || 0);
-const expectedHeight = Number(process.argv[4] || 0);
+const expectedWidth = positiveIntegerText(process.argv[3] || "") ? Number(process.argv[3]) : 0;
+const expectedHeight = positiveIntegerText(process.argv[4] || "") ? Number(process.argv[4]) : 0;
 
 function emit(key, value) {
   console.log(`rdoc_electron_html_gate_argb_${key}=${value === undefined || value === null ? "" : value}`);
+}
+
+function positiveIntegerText(value) {
+  if (!/^[1-9][0-9]*$/.test(String(value || ""))) return false;
+  return Number.isSafeInteger(Number(value));
+}
+
+function safePositiveInteger(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function safeUint32(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff;
 }
 
 emit("path", argbPath);
 try {
   const payload = JSON.parse(fs.readFileSync(argbPath, "utf8"));
   const pixels = Array.isArray(payload.pixels) ? payload.pixels : [];
-  const width = Number(payload.width || 0);
-  const height = Number(payload.height || 0);
+  const widthText = safePositiveInteger(payload.width) ? payload.width : "";
+  const heightText = safePositiveInteger(payload.height) ? payload.height : "";
+  const width = widthText === "" ? 0 : widthText;
+  const height = heightText === "" ? 0 : heightText;
   const format = String(payload.format || "");
   const producer = String(payload.producer || "");
-  const nativeWidth = Number(payload.nativeWidth || 0);
-  const nativeHeight = Number(payload.nativeHeight || 0);
+  const nativeWidth = safePositiveInteger(payload.nativeWidth) ? payload.nativeWidth : "";
+  const nativeHeight = safePositiveInteger(payload.nativeHeight) ? payload.nativeHeight : "";
   let nonblank = 0;
   for (const value of pixels) {
-    const pixel = Number(value) >>> 0;
+    if (!safeUint32(value)) continue;
+    const pixel = value >>> 0;
     const alpha = (pixel >>> 24) & 255;
     if (alpha !== 0 && pixel !== 0xffffffff) nonblank++;
   }
   let status = "pass";
   let reason = "pass";
-  if (width <= 0 || height <= 0) {
+  const expectedPixelCount = width > 0 && height > 0 ? width * height : 0;
+  if (expectedWidth <= 0 || expectedHeight <= 0) {
+    status = "invalid";
+    reason = "missing-electron-argb-expected-dimensions";
+  } else if (width <= 0 || height <= 0) {
     status = "invalid";
     reason = "missing-electron-argb-dimensions";
   } else if (expectedWidth > 0 && width !== expectedWidth) {
@@ -138,17 +158,20 @@ try {
   } else if (producer !== "electron-chromium-capture") {
     status = "invalid";
     reason = "unexpected-electron-argb-producer";
-  } else if (pixels.length !== width * height) {
+  } else if (!Number.isSafeInteger(expectedPixelCount) || pixels.length !== expectedPixelCount) {
     status = "invalid";
     reason = "unexpected-electron-argb-pixel-count";
+  } else if (!pixels.every(safeUint32)) {
+    status = "invalid";
+    reason = "unexpected-electron-argb-pixel-type";
   } else if (nonblank <= 0) {
     status = "invalid";
     reason = "blank-electron-argb-capture";
   }
   emit("status", status);
   emit("reason", reason);
-  emit("width", width);
-  emit("height", height);
+  emit("width", widthText);
+  emit("height", heightText);
   emit("format", format);
   emit("producer", producer);
   emit("native_width", nativeWidth);
