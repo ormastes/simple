@@ -6,9 +6,9 @@
 - implemented CSS ready: pass
 - full CSS inventory ready: incomplete
 - HTML tags rendered: 105/105
-- implemented CSS rendered: 211/211 (implemented-simple-web-css)
-- full CSS rendered: 211/394
-- full CSS unrendered: 183
+- implemented CSS rendered: 212/212 (implemented-simple-web-css)
+- full CSS rendered: 212/394
+- full CSS unrendered: 182
 - animation CSS rendered: 0/0 (pass)
 - manifest cases: 50/50
 
@@ -36,23 +36,23 @@
 - html_css_full_rendering_goal_all_implemented_css_ready_status=pass
 - html_css_full_rendering_goal_all_implemented_css_ready_reason=pass
 - html_css_full_rendering_goal_implemented_css_scope=implemented-simple-web-css
-- html_css_full_rendering_goal_implemented_css_total_count=211
-- html_css_full_rendering_goal_implemented_css_rendered_count=211
+- html_css_full_rendering_goal_implemented_css_total_count=212
+- html_css_full_rendering_goal_implemented_css_rendered_count=212
 - html_css_full_rendering_goal_implemented_css_missing=
 - html_css_full_rendering_goal_full_css_status=incomplete
 - html_css_full_rendering_goal_all_css_properties_ready_status=incomplete
 - html_css_full_rendering_goal_all_css_properties_ready_reason=full-css-rendering-incomplete
 - html_css_full_rendering_goal_full_css_total_count=394
 - html_css_full_rendering_goal_full_css_required_min_count=390
-- html_css_full_rendering_goal_full_css_rendered_count=211
-- html_css_full_rendering_goal_full_css_unrendered_count=183
-- html_css_full_rendering_goal_full_css_unrendered_properties=accent-color,all,azimuth,backface-visibility,background-attachment,background-blend-mode,border-collapse,border-image,border-image-outset,border-image-repeat,border-image-slice,border-image-source,border-image-width,border-spacing,box-decoration-break,break-after,break-before,break-inside,caption-side,clip,clip-path,clip-rule,color-adjust,color-interpolation-filters,color-scheme,column-count,column-fill,column-rule,column-rule-color,column-rule-style,column-rule-width,column-span,column-width,columns,counter-increment,counter-reset,counter-set,elevation,empty-cells,filter,flood-color,flood-opacity,font-feature-settings,font-language-override,font-palette,font-size-adjust,font-stretch,font-synthesis-position,font-synthesis-small-caps,font-synthesis-style,font-synthesis-weight,font-variant,font-variant-alternates,font-variant-caps,font-variant-east-asian,font-variant-emoji,font-variant-ligatures,font-variant-numeric,font-variant-position,font-variation-settings,font-width,forced-color-adjust,glyph-orientation-vertical,grid,grid-area,grid-auto-columns,grid-auto-flow,grid-auto-rows,grid-column,grid-column-end,grid-column-gap,grid-column-start,grid-gap,grid-row,grid-row-end,grid-row-gap,grid-row-start,grid-template,grid-template-areas,grid-template-columns,grid-template-rows,hanging-punctuation,hyphenate-character,image-orientation,isolation,justify-items,justify-self,lighting-color,list-style-image,list-style-position,marker-side,mask,mask-border,mask-border-mode,mask-border-outset,mask-border-repeat,mask-border-slice,mask-border-source,mask-border-width,mask-clip,mask-composite,mask-image,mask-mode,mask-origin,mask-position,mask-repeat,mask-size,mask-type,mix-blend-mode,offset,offset-anchor,offset-distance,offset-path,offset-position,offset-rotate,orphans,overflow-anchor,page-break-after,page-break-before,page-break-inside,perspective,perspective-origin,pitch,pitch-range,place-content,place-items,place-self,play-during,print-color-adjust,property-name,quotes,rest,rest-after,rest-before,richness,rotate,scale,scroll-margin,scroll-margin-block,scroll-margin-block-end,scroll-margin-block-start,scroll-margin-bottom,scroll-margin-inline,scroll-margin-inline-end,scroll-margin-inline-start,scroll-margin-left,scroll-margin-right,scroll-margin-top,scroll-padding,scroll-padding-block,scroll-padding-block-end,scroll-padding-block-start,scroll-padding-bottom,scroll-padding-inline,scroll-padding-inline-end,scroll-padding-inline-start,scroll-padding-left,scroll-padding-right,scroll-padding-top,scroll-snap-align,scroll-snap-stop,scroll-snap-type,shape-image-threshold,shape-margin,shape-outside,speak-as,speak-header,speak-numeral,speak-punctuation,speech-rate,stress,text-box,text-box-edge,text-box-trim,text-emphasis,text-emphasis-color,text-emphasis-position,text-emphasis-style,translate,view-transition-name,voice-balance,voice-duration,voice-pitch,voice-range,voice-rate,voice-stress,voice-volume,volume,widows,will-change
+- html_css_full_rendering_goal_full_css_rendered_count=212
+- html_css_full_rendering_goal_full_css_unrendered_count=182
+- html_css_full_rendering_goal_full_css_unrendered_properties=accent-color,all,azimuth,backface-visibility,background-attachment,background-blend-mode,border-collapse,border-image,border-image-outset,border-image-repeat,border-image-slice,border-image-source,border-image-width,border-spacing,box-decoration-break,break-after,break-before,break-inside,caption-side,clip,clip-path,clip-rule,color-adjust,color-interpolation-filters,color-scheme,column-count,column-fill,column-rule,column-rule-color,column-rule-style,column-rule-width,column-span,column-width,columns,counter-increment,counter-reset,counter-set,elevation,empty-cells,filter,flood-color,flood-opacity,font-feature-settings,font-language-override,font-palette,font-size-adjust,font-stretch,font-synthesis-position,font-synthesis-small-caps,font-synthesis-style,font-variant,font-variant-alternates,font-variant-caps,font-variant-east-asian,font-variant-emoji,font-variant-ligatures,font-variant-numeric,font-variant-position,font-variation-settings,font-width,forced-color-adjust,glyph-orientation-vertical,grid,grid-area,grid-auto-columns,grid-auto-flow,grid-auto-rows,grid-column,grid-column-end,grid-column-gap,grid-column-start,grid-gap,grid-row,grid-row-end,grid-row-gap,grid-row-start,grid-template,grid-template-areas,grid-template-columns,grid-template-rows,hanging-punctuation,hyphenate-character,image-orientation,isolation,justify-items,justify-self,lighting-color,list-style-image,list-style-position,marker-side,mask,mask-border,mask-border-mode,mask-border-outset,mask-border-repeat,mask-border-slice,mask-border-source,mask-border-width,mask-clip,mask-composite,mask-image,mask-mode,mask-origin,mask-position,mask-repeat,mask-size,mask-type,mix-blend-mode,offset,offset-anchor,offset-distance,offset-path,offset-position,offset-rotate,orphans,overflow-anchor,page-break-after,page-break-before,page-break-inside,perspective,perspective-origin,pitch,pitch-range,place-content,place-items,place-self,play-during,print-color-adjust,property-name,quotes,rest,rest-after,rest-before,richness,rotate,scale,scroll-margin,scroll-margin-block,scroll-margin-block-end,scroll-margin-block-start,scroll-margin-bottom,scroll-margin-inline,scroll-margin-inline-end,scroll-margin-inline-start,scroll-margin-left,scroll-margin-right,scroll-margin-top,scroll-padding,scroll-padding-block,scroll-padding-block-end,scroll-padding-block-start,scroll-padding-bottom,scroll-padding-inline,scroll-padding-inline-end,scroll-padding-inline-start,scroll-padding-left,scroll-padding-right,scroll-padding-top,scroll-snap-align,scroll-snap-stop,scroll-snap-type,shape-image-threshold,shape-margin,shape-outside,speak-as,speak-header,speak-numeral,speak-punctuation,speech-rate,stress,text-box,text-box-edge,text-box-trim,text-emphasis,text-emphasis-color,text-emphasis-position,text-emphasis-style,translate,view-transition-name,voice-balance,voice-duration,voice-pitch,voice-range,voice-rate,voice-stress,voice-volume,volume,widows,will-change
 - html_css_full_rendering_goal_animation_css_status=pass
 - html_css_full_rendering_goal_animation_css_scope=animation-transition-transform-css
 - html_css_full_rendering_goal_animation_css_total_count=0
 - html_css_full_rendering_goal_animation_css_rendered_count=0
 - html_css_full_rendering_goal_animation_css_unrendered_count=0
 - html_css_full_rendering_goal_animation_css_unrendered_properties=
-- html_css_full_rendering_goal_unsupported_css_inventory_count=190
+- html_css_full_rendering_goal_unsupported_css_inventory_count=189
 - html_css_full_rendering_goal_manifest_case_count=50
 - html_css_full_rendering_goal_manifest_required_case_count=50
