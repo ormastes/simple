@@ -20,7 +20,9 @@ Current evidence must also include self-hosted Simple binary provenance:
 specs run with `gui_color_image_pipeline_8k_reason=simple-bin-forbidden`; that
 is blocked evidence, not a valid 8K GUI pipeline pass.
 
-As of 2026-06-27, the wrapper also fails explicitly with
-`gui_color_image_pipeline_8k_reason=missing-focused-spec` when the focused
-browser specs referenced by the old lane are absent. Track that blocker in
-`doc/08_tracking/bug/gui_color_image_pipeline_8k_stale_browser_specs_2026-06-27.md`.
+As of 2026-06-27, the wrapper no longer depends on the removed
+`examples/11_advanced/browser/**` focused specs. The generated probe uses the
+current `std.common.color.lab_xyz` and `std.common.image.image_info` modules and
+must emit `gui_color_image_pipeline_8k_image_fail_closed_ok=true` before the
+row counts as a current-source pass. Historical stale-spec details are recorded
+in `doc/08_tracking/bug/gui_color_image_pipeline_8k_stale_browser_specs_2026-06-27.md`.

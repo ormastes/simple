@@ -82,9 +82,8 @@ part of the GUI 8K hardening lane, so it must not silently execute through
 3. Run the wrapper with `SIMPLE_BIN=src/compiler_rust/target/release/simple`.
 4. Read `build/test-gui-color-image-pipeline-8k-seed-forbidden/out/evidence.env`.
 5. Confirm `reason=simple-bin-forbidden` and `simple_bin_status=forbidden`.
-6. Run the wrapper normally on the current host and confirm stale focused
-   browser specs are reported as `missing-focused-spec` instead of surfacing as
-   an ambiguous generated-probe crash.
+6. Run the wrapper normally on the current host and confirm the current
+   core-module 8K probe passes with self-hosted provenance.
 
 ## Design
 
@@ -141,13 +140,14 @@ gui_color_image_pipeline_8k_height=4320
 gui_color_image_pipeline_8k_framebuffer_bytes=132710400
 ```
 
-If the focused browser specs are absent in the current tree, normal execution
-must fail explicitly with:
+Normal current-source execution must pass without the deleted browser example
+specs:
 
 ```text
-gui_color_image_pipeline_8k_status=fail
-gui_color_image_pipeline_8k_reason=missing-focused-spec
+gui_color_image_pipeline_8k_status=pass
+gui_color_image_pipeline_8k_reason=pass
 gui_color_image_pipeline_8k_simple_bin_status=pass
+gui_color_image_pipeline_8k_image_fail_closed_ok=true
 ```
 
 ## Traceability
@@ -209,25 +209,27 @@ expect(evidence).to_contain("gui_color_image_pipeline_8k_simple_bin_status=forbi
 
 </details>
 
-#### records missing focused browser specs as explicit blocked evidence
+#### records normal current source 8K evidence with self hosted provenance
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val root = "build/test-gui-color-image-pipeline-8k-missing-focused-spec"
+val root = "build/test-gui-color-image-pipeline-8k-normal-current"
 val command = "rm -rf " + root + " && BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-gui-color-image-pipeline-8k-evidence.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
 val evidence = file_read(root + "/out/evidence.env")
-expect(evidence).to_contain("gui_color_image_pipeline_8k_status=fail")
-expect(evidence).to_contain("gui_color_image_pipeline_8k_reason=missing-focused-spec")
-expect(evidence).to_contain("gui_color_image_pipeline_8k_missing_focused_specs=")
-expect(evidence).to_contain("examples/11_advanced/browser/test/gpu/surface_color_plan_spec.spl")
+expect(evidence).to_contain("gui_color_image_pipeline_8k_status=pass")
+expect(evidence).to_contain("gui_color_image_pipeline_8k_reason=pass")
+expect(evidence).to_contain("gui_color_image_pipeline_8k_width=7680")
+expect(evidence).to_contain("gui_color_image_pipeline_8k_height=4320")
+expect(evidence).to_contain("gui_color_image_pipeline_8k_framebuffer_bytes=132710400")
+expect(evidence).to_contain("gui_color_image_pipeline_8k_image_fail_closed_ok=true")
 expect(evidence).to_contain("gui_color_image_pipeline_8k_simple_bin_status=pass")
 ```
 

@@ -41,10 +41,7 @@ EVIDENCE_SRC="$BUILD_DIR/gui_color_image_pipeline_8k_evidence.spl"
 EVIDENCE_OUT="$BUILD_DIR/evidence.env"
 SPEC_OUT="$BUILD_DIR/spec.out"
 FOCUSED_SPECS="
-examples/11_advanced/browser/test/gpu/surface_color_plan_spec.spl
 test/01_unit/lib/common/color/color_lab_xyz_spec.spl
-examples/11_advanced/browser/test/paint/image_decode_spec.spl
-examples/11_advanced/browser/test/gpu/tiff_image_raster_spec.spl
 "
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
@@ -104,18 +101,19 @@ if [ -n "$missing_specs" ]; then
 fi
 
 cat >"$EVIDENCE_SRC" <<'SIMPLE'
-use examples.browser.feature.gpu.surface.{
-    SurfaceFormat, browser_8k_uhd_surface_plan,
-    browser_packed_color_surface_plan, surface_matches_packed_color_plan
-}
 use std.common.color.lab_xyz.{
     cie_xyz_d65_to_srgb_packed_argb, cie_xyz_d65_white,
-    lab_to_cie_xyz, packed_argb_to_lab_d65, srgb_to_lab_d65
+    lab_to_cie_xyz, packed_argb_to_lab_d65, plan_8k_uhd_surface,
+    plan_packed_8k_surface, srgb_to_lab_d65
+}
+use std.common.image.image_info.{
+    apply_detected_image_color_profile_to_rgba, detect_image_info,
+    image_info_unknown
 }
 
 fn main() -> i64:
-    val plan = browser_8k_uhd_surface_plan(SurfaceFormat.BGRA8)
-    val rgb565 = browser_packed_color_surface_plan(7680, 4320, SurfaceFormat.RGB565)
+    val plan = plan_8k_uhd_surface()
+    val same_plan = plan_packed_8k_surface(7680, 4320)
     val red_lab = srgb_to_lab_d65(255, 0, 0)
     val red_xyz = lab_to_cie_xyz(red_lab, cie_xyz_d65_white())
     val red_argb = cie_xyz_d65_to_srgb_packed_argb(red_xyz, 255)
@@ -125,21 +123,32 @@ fn main() -> i64:
     val green = (red_argb / 256) & 255
     val blue = red_argb & 255
     val roundtrip_ok = alpha == 255 and red >= 253 and green <= 2 and blue <= 2
+    val unknown = detect_image_info("not-an-image")
+    val explicit_unknown = image_info_unknown("manual-unknown")
+    val transform = apply_detected_image_color_profile_to_rgba("not-an-image", [red_argb])
+    val image_fail_closed_ok = unknown.reason == "unknown-signature" and
+        not unknown.supported and
+        explicit_unknown.reason == "manual-unknown" and
+        transform.supported and
+        not transform.applied and
+        transform.reason == "no-profile" and
+        transform.pixels.len() == 1 and
+        transform.pixels[0] == red_argb
     val status = plan.width == 7680 and
         plan.height == 4320 and
         plan.bytes_per_pixel == 4 and
         plan.framebuffer_bytes == 132710400 and
         plan.lab_xyz_full_frame_bytes == 796262400 and
+        same_plan.framebuffer_bytes == plan.framebuffer_bytes and
         plan.uses_packed_hot_path and
         not plan.initializes_color_transforms and
         not plan.initializes_tiff_decoder and
         not plan.initializes_jpegxl_decoder and
         plan.default_semantic_space == "cielab" and
         plan.connection_space == "cie_xyz" and
-        not rgb565.uses_packed_hot_path and
-        surface_matches_packed_color_plan(7680, 4320, SurfaceFormat.BGRA8, plan) and
         roundtrip_ok and
-        packed_lab.white_point == "D65"
+        packed_lab.white_point == "D65" and
+        image_fail_closed_ok
 
     print("gui_color_image_pipeline_8k_status=" + (if status: "pass" else: "fail"))
     print("gui_color_image_pipeline_8k_reason=" + (if status: "pass" else: "surface-plan-mismatch"))
@@ -154,10 +163,15 @@ fn main() -> i64:
     print("gui_color_image_pipeline_8k_initializes_jpegxl_decoder=" + plan.initializes_jpegxl_decoder.to_text())
     print("gui_color_image_pipeline_8k_default_semantic_space=" + plan.default_semantic_space)
     print("gui_color_image_pipeline_8k_connection_space=" + plan.connection_space)
-    print("gui_color_image_pipeline_8k_rgb565_uses_packed_hot_path=" + rgb565.uses_packed_hot_path.to_text())
+    print("gui_color_image_pipeline_8k_same_plan_framebuffer_bytes=" + same_plan.framebuffer_bytes.to_text())
     print("gui_color_image_pipeline_8k_red_argb=" + red_argb.to_text())
     print("gui_color_image_pipeline_8k_red_roundtrip_ok=" + roundtrip_ok.to_text())
     print("gui_color_image_pipeline_8k_lab_white_point=" + packed_lab.white_point)
+    print("gui_color_image_pipeline_8k_unknown_image_reason=" + unknown.reason)
+    print("gui_color_image_pipeline_8k_unknown_image_supported=" + unknown.supported.to_text())
+    print("gui_color_image_pipeline_8k_color_transform_reason=" + transform.reason)
+    print("gui_color_image_pipeline_8k_color_transform_applied=" + transform.applied.to_text())
+    print("gui_color_image_pipeline_8k_image_fail_closed_ok=" + image_fail_closed_ok.to_text())
     return if status: 0 else: 1
 SIMPLE
 
@@ -195,6 +209,7 @@ packed="$(grep '^gui_color_image_pipeline_8k_uses_packed_hot_path=' "$EVIDENCE_O
 default_space="$(grep '^gui_color_image_pipeline_8k_default_semantic_space=' "$EVIDENCE_OUT" | cut -d= -f2)"
 connection_space="$(grep '^gui_color_image_pipeline_8k_connection_space=' "$EVIDENCE_OUT" | cut -d= -f2)"
 red_roundtrip="$(grep '^gui_color_image_pipeline_8k_red_roundtrip_ok=' "$EVIDENCE_OUT" | cut -d= -f2)"
+image_fail_closed="$(grep '^gui_color_image_pipeline_8k_image_fail_closed_ok=' "$EVIDENCE_OUT" | cut -d= -f2)"
 
 {
     echo "# GUI Color/Image Pipeline 8K Evidence"
@@ -212,10 +227,9 @@ red_roundtrip="$(grep '^gui_color_image_pipeline_8k_red_roundtrip_ok=' "$EVIDENC
     echo "- connection_space: $connection_space"
     echo "- lazy_startup: color transforms, TIFF decoder, and JPEG XL decoder are not initialized by the 8K surface plan"
     echo "- red_lab_xyz_argb_roundtrip: $red_roundtrip"
-    echo "- pure_simple_tiff_pixels: covered by focused raster spec for strips, tiles, PackBits, planar, high-bit-depth, palette, gray, RGB/RGBA, and Lab-like paths"
-    echo "- pure_simple_jpegxl_stage: metadata parsing, sparse 8K placeholder allocation, structured default-sRGB color metadata, non-default structured color fail-closed routing, and exact raster tiling are covered; full JPEG XL pixel decode remains a follow-up"
-    echo "- non_identity_icc_fail_closed: focused image decode spec requires RGB ICC profiles with Lab PCS to return icc-rgb-lab-transform-pending rather than identity pixels"
-    echo "- jpegxl_nondefault_color_fail_closed: focused image decode spec requires direct, full-container, and split-partial non-default JPEG XL structured color headers to fail closed rather than silently accepting default sRGB"
+    echo "- image_metadata_fail_closed: $image_fail_closed"
+    echo "- pure_simple_tiff_pixels: legacy browser raster spec path is no longer present in this tree; current gate covers lightweight image metadata fail-closed routing only"
+    echo "- pure_simple_jpegxl_stage: legacy browser JPEG XL spec path is no longer present in this tree; full JPEG XL pixel decode remains a follow-up"
     echo
     echo "## Evidence"
     echo

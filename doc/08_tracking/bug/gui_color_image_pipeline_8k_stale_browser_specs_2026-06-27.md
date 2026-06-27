@@ -9,9 +9,13 @@ focused browser specs and generated-probe imports that are absent in the current
 tree. With the self-hosted Simple binary, the wrapper can no longer produce a
 valid normal 8K GUI color/image evidence row from those stale paths.
 
-## Current Evidence
+Status: resolved by replacing the stale browser-example dependencies with a
+current core-module probe over `std.common.color.lab_xyz` and
+`std.common.image.image_info`.
 
-The wrapper now fails explicitly before the generated probe with:
+## Previous Evidence
+
+Before the fix, the wrapper failed explicitly before the generated probe with:
 
 - `gui_color_image_pipeline_8k_status=fail`
 - `gui_color_image_pipeline_8k_reason=missing-focused-spec`
@@ -30,7 +34,10 @@ not find the module.
 
 ## Required Fix
 
-Restore or replace the focused browser surface/image specs and update the
-generated 8K probe to import current module paths. A completion claim for this
-lane requires a normal wrapper run with `gui_color_image_pipeline_8k_status=pass`
-and `gui_color_image_pipeline_8k_simple_bin_status=pass`.
+Completed in the same lane: the generated probe imports current module paths and
+normal wrapper evidence now requires:
+
+- `gui_color_image_pipeline_8k_status=pass`
+- `gui_color_image_pipeline_8k_reason=pass`
+- `gui_color_image_pipeline_8k_simple_bin_status=pass`
+- `gui_color_image_pipeline_8k_image_fail_closed_ok=true`
