@@ -27,7 +27,7 @@ electron_live_smoke_proof_validator_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -106,7 +106,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 - The proof target and surface must identify the live Electron main surface,
   and early wrapper diagnostics must preserve those identity rows.
 - The proof JSON path itself must be a regular file, never a symlink to a
-  stale or attacker-controlled proof.
+  stale or attacker-controlled proof, and never a non-file artifact.
 - The live smoke shell wrapper delegates JSON validation to the proof validator.
 - The package live smoke script must launch the built local Simple compiler, or
   a caller-provided `SIMPLE_BIN`, instead of a non-existent package-local
@@ -772,6 +772,36 @@ step("Confirm Electron live smoke proof path cannot be a symlink")
 expect(evidence).to_contain("electron_live_smoke_validation_status=fail")
 expect(evidence).to_contain("electron_live_smoke_validation_reason=proof-json-symlink")
 expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=fail")
+expect(evidence.contains("electron_live_smoke_target=electron")).to_equal(false)
+```
+
+</details>
+
+#### rejects non regular proof JSON artifacts before parsing renderer evidence
+
+- Expected: code equals `1`
+- Confirm Electron live smoke proof path must be a regular file
+   - Expected: evidence does not contain `electron_live_smoke_target=electron`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-electron-live-smoke-validator-nonregular"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/proof-dir" +
+    " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/proof-dir 1280 720 > " + root + "/directory.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/directory.env")
+step("Confirm Electron live smoke proof path must be a regular file")
+expect(evidence).to_contain("electron_live_smoke_validation_status=fail")
+expect(evidence).to_contain("electron_live_smoke_validation_reason=proof-json-not-regular")
+expect(evidence).to_contain("electron_live_smoke_proof_symlink_status=pass")
 expect(evidence.contains("electron_live_smoke_target=electron")).to_equal(false)
 ```
 

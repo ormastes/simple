@@ -97,6 +97,13 @@ if (proofPathStat.isSymbolicLink()) {
   process.exit(1);
 }
 
+if (!proofPathStat.isFile()) {
+  emit('electron_live_smoke_validation_status', 'fail');
+  emit('electron_live_smoke_validation_reason', 'proof-json-not-regular');
+  emit('electron_live_smoke_proof_symlink_status', 'pass');
+  process.exit(1);
+}
+
 let proof;
 try {
   proof = JSON.parse(fs.readFileSync(proofPath, 'utf8'));
