@@ -27,7 +27,7 @@ web_wm_modern_shell_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -72,6 +72,10 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/web_wm_modern_shell_evidence
 
 - The wrapper emits legacy artifact keys and canonical `*_path` aliases.
 - Early unavailable exits keep the artifact path rows for aggregate diagnostics.
+- PATH `simple` fallback is opt-in for the wrapper.
+- The aggregate nested Web WM run enables the opt-in fallback.
+- The aggregate refreshes the default stale `simple-runtime-unavailable` Web WM
+  env instead of reusing it forever.
 
 ## Scenarios
 
@@ -120,12 +124,38 @@ expect(evidence).to_contain("web_wm_modern_shell_evidence_interaction_log_path="
 
 </details>
 
+#### keeps PATH Simple runtime discovery opt-in and enables it from aggregate
+
+- Inspect runtime fallback contract
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val wrapper = file_read("scripts/check/check-web-wm-modern-shell-evidence.shs")
+val aggregate = file_read("scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
+
+step("Inspect runtime fallback contract")
+expect(wrapper).to_contain("ALLOW_PATH_SIMPLE_CMD")
+expect(wrapper).to_contain("command -v simple")
+expect(aggregate).to_contain("\"ALLOW_PATH_SIMPLE_CMD\": \"1\"")
+expect(aggregate).to_contain("web_wm_modern_shell_should_refresh")
+expect(aggregate).to_contain("simple-runtime-unavailable")
+expect(aggregate).to_contain("allow_path_simple=1")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

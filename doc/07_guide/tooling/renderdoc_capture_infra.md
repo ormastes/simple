@@ -941,9 +941,13 @@ input, pointer, and click evidence. The aggregate also emits explicit
 interaction PNG, and interaction log artifacts so missing host output is visible
 without inferring it from blank paths. The wrapper keeps the legacy artifact
 keys and also emits canonical `*_path` aliases; aggregate checks consume the
-canonical aliases. `environment-unavailable` remains a useful host diagnosis but
-is still reported as `modern Web WM Electron visual and interaction evidence`
-in `blocked_completion_gates` until a real Electron host produces the pass row.
+canonical aliases. Direct wrapper runs only use PATH-based `simple` discovery
+when `ALLOW_PATH_SIMPLE_CMD=1` is set; the aggregate nested Web WM run enables
+that opt-in fallback so clean jj worktrees can use the installed Simple binary
+without hardcoded host paths. `environment-unavailable` remains a useful host
+diagnosis but is still reported as `modern Web WM Electron visual and
+interaction evidence` in `blocked_completion_gates` until a real Electron host
+produces the pass row.
 
 For the all-GUI-item claim, use the focused wrapper
 `scripts/check/check-gui-widget-renderdoc-goal-status.shs`. It composes the
