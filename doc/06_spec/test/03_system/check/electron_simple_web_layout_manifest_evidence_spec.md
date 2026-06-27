@@ -47,7 +47,7 @@ Validates the manifest-level wrapper behavior around tracked divergence policies
 | Design | doc/07_guide/ui/pixel_comparison_guide.md |
 | Research | N/A |
 | Source | `test/03_system/check/electron_simple_web_layout_manifest_evidence_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -196,14 +196,14 @@ counts from completed per-case evidence.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val root = "build/test-electron-simple-web-layout-manifest-tracked-policy"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
     "printf 'tracked_case|fixture-scene|96|64|track-css-flex-column-divergence|tracked fixture\\nopacity_case|fixture-opacity|96|64|track-compositor-opacity-rounding|opacity tracked fixture\\nexact_case|fixture-exact|96|64|exact|exact fixture\\n' > " + root + "/manifest.txt && " +
-    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\ncase \"$ELECTRON_BITMAP_SCENE\" in\\nfixture-scene) printf \"electron_simple_web_layout_status=divergent\\\\nelectron_simple_web_layout_reason=checksum-mismatch\\\\nelectron_simple_web_layout_scene=$ELECTRON_BITMAP_SCENE\\\\nelectron_simple_web_layout_width=$ELECTRON_BITMAP_WIDTH\\\\nelectron_simple_web_layout_height=$ELECTRON_BITMAP_HEIGHT\\\\nelectron_simple_web_layout_mismatch_count=7\\\\nelectron_simple_web_layout_blur_or_tolerance_used=false\\\\nelectron_simple_web_layout_exit_code=2\\\\n\" > \"$BUILD_DIR/evidence.env\"; exit 1;;\\n*) printf \"electron_simple_web_layout_status=pass\\\\nelectron_simple_web_layout_reason=pass\\\\nelectron_simple_web_layout_scene=$ELECTRON_BITMAP_SCENE\\\\nelectron_simple_web_layout_width=$ELECTRON_BITMAP_WIDTH\\\\nelectron_simple_web_layout_height=$ELECTRON_BITMAP_HEIGHT\\\\nelectron_simple_web_layout_mismatch_count=0\\\\nelectron_simple_web_layout_blur_or_tolerance_used=false\\\\nelectron_simple_web_layout_exit_code=0\\\\n\" > \"$BUILD_DIR/evidence.env\";;\\nesac\\n' > " + root + "/fixture/bitmap.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\ncase \"$ELECTRON_BITMAP_SCENE\" in\\nfixture-scene) printf \"electron_simple_web_layout_status=divergent\\\\nelectron_simple_web_layout_reason=text-raster-mismatch\\\\nelectron_simple_web_layout_scene=$ELECTRON_BITMAP_SCENE\\\\nelectron_simple_web_layout_width=$ELECTRON_BITMAP_WIDTH\\\\nelectron_simple_web_layout_height=$ELECTRON_BITMAP_HEIGHT\\\\nelectron_simple_web_layout_mismatch_count=7\\\\nelectron_simple_web_layout_mismatch_class=text-raster-mismatch\\\\nelectron_simple_web_layout_blur_or_tolerance_used=false\\\\nelectron_simple_web_layout_exit_code=2\\\\n\" > \"$BUILD_DIR/evidence.env\"; exit 1;;\\n*) printf \"electron_simple_web_layout_status=pass\\\\nelectron_simple_web_layout_reason=pass\\\\nelectron_simple_web_layout_scene=$ELECTRON_BITMAP_SCENE\\\\nelectron_simple_web_layout_width=$ELECTRON_BITMAP_WIDTH\\\\nelectron_simple_web_layout_height=$ELECTRON_BITMAP_HEIGHT\\\\nelectron_simple_web_layout_mismatch_count=0\\\\nelectron_simple_web_layout_mismatch_class=\\\\nelectron_simple_web_layout_blur_or_tolerance_used=false\\\\nelectron_simple_web_layout_exit_code=0\\\\n\" > \"$BUILD_DIR/evidence.env\";;\\nesac\\n' > " + root + "/fixture/bitmap.sh && " +
     "MANIFEST_PATH=" + root + "/manifest.txt ELECTRON_LAYOUT_MANIFEST_BITMAP_SCRIPT=" + root + "/fixture/bitmap.sh BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-electron-simple-web-layout-manifest-evidence.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
@@ -215,6 +215,8 @@ expect(evidence).to_contain("electron_simple_web_layout_manifest_pass_count=1")
 expect(evidence).to_contain("electron_simple_web_layout_manifest_tracked_count=2")
 expect(evidence).to_contain("electron_simple_web_layout_manifest_fail_count=0")
 expect(evidence).to_contain("electron_simple_web_layout_manifest_tracked_case_policy=track-css-flex-column-divergence")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_tracked_case_reason=text-raster-mismatch")
+expect(evidence).to_contain("electron_simple_web_layout_manifest_tracked_case_mismatch_class=text-raster-mismatch")
 expect(evidence).to_contain("electron_simple_web_layout_manifest_opacity_case_policy=track-compositor-opacity-rounding")
 ```
 
