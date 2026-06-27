@@ -28,10 +28,62 @@ ELECTRON_BIN="$ROOT/tools/electron-shell/node_modules/.bin/electron.cmd"
 if [ ! -f "$ELECTRON_BIN" ]; then
     ELECTRON_BIN="$ROOT/tools/electron-shell/node_modules/.bin/electron"
 fi
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple.exe}"
-if [ ! -f "$SIMPLE_BIN" ]; then
-    SIMPLE_BIN="bin/simple"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
+
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+if [ -n "${SIMPLE_BIN:-}" ]; then
+    if is_rust_seed_simple "$SIMPLE_BIN"; then
+        SIMPLE_BIN_SOURCE="explicit-env-rust-seed-forbidden"
+        SIMPLE_BIN_STATUS=forbidden
+    fi
+else
+    SIMPLE_BIN=""
+    SIMPLE_BIN_SOURCE=missing
+    for candidate in \
+        "$ROOT"/bin/release/*/simple.exe \
+        "$ROOT"/release/*/simple.exe \
+        "$ROOT"/build/bootstrap/stage3/simple.exe \
+        "$ROOT"/bin/simple
+    do
+        if [ -f "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="self-hosted:$candidate"
+            SIMPLE_BIN_STATUS=pass
+            break
+        fi
+    done
 fi
+
+if [ "$SIMPLE_BIN_STATUS" = forbidden ]; then
+    echo "electron_vulkan_web_parity_windows_status=fail"
+    echo "electron_vulkan_web_parity_windows_reason=simple-bin-forbidden"
+    echo "electron_vulkan_web_parity_windows_simple_bin=$SIMPLE_BIN"
+    echo "electron_vulkan_web_parity_windows_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "electron_vulkan_web_parity_windows_simple_bin_status=$SIMPLE_BIN_STATUS"
+    exit 1
+fi
+
+if [ ! -f "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    echo "electron_vulkan_web_parity_windows_status=skip"
+    echo "electron_vulkan_web_parity_windows_reason=simple-bin-missing"
+    echo "electron_vulkan_web_parity_windows_simple_bin=$SIMPLE_BIN"
+    echo "electron_vulkan_web_parity_windows_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "electron_vulkan_web_parity_windows_simple_bin_status=$SIMPLE_BIN_STATUS"
+    exit 0
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 
 mkdir -p "$WORK"
 HTML="$WORK/page.html"
@@ -63,6 +115,9 @@ ELECTRON_CAPTURE_SETTLE_MS=1000 \
     tools/electron-live-bitmap/capture_html_argb.js
 
 echo "[2/3] Rendering through the Vulkan-backed Engine2D web surface..."
+echo "electron_vulkan_web_parity_windows_simple_bin=$SIMPLE_BIN"
+echo "electron_vulkan_web_parity_windows_simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "electron_vulkan_web_parity_windows_simple_bin_status=$SIMPLE_BIN_STATUS"
 EVWP_BG="$BG_DEC" EVWP_WIDTH="$WIDTH" EVWP_HEIGHT="$HEIGHT" EVWP_OUTPUT="$VULKAN_JSON" \
 SIMPLE_EXECUTION_MODE=interpret \
     "$SIMPLE_BIN" run src/app/test/electron_vulkan_web_parity.spl
