@@ -27,7 +27,7 @@ tauri_mobile_renderer_parity_artifact_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 34 | 34 | 0 | 0 |
+| 36 | 36 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -128,7 +128,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_renderer_parity
 - The aggregate requires iOS render-log validator rows to identify the coherent
   Metal-backed WKWebView render-log source path and byte size.
 - The aggregate re-checks the coherent iOS render-log source as a regular file
-  artifact and rejects missing, symlinked, or byte-size-mismatched paths.
+  artifact and rejects missing, symlinked, hardlinked, or byte-size-mismatched
+  paths.
 - The aggregate requires Android render-log validator rows to identify the
   coherent Vulkan-backed WebView render-log source path and byte size.
 - The aggregate re-checks the coherent Android render-log source as a regular
@@ -354,6 +355,68 @@ expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coheren
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_actual_size_bytes=223")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status=fail")
 expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=size-mismatch")
+```
+
+</details>
+
+#### rejects iOS render-log validator pass claims with symlinked coherent source artifacts
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-symlink-ios-coherent-source"
+val validator = root + "/fake-ios-render-validator.js"
+val coherent_path = root + "/artifacts/linked-ios.log"
+val inject_validator = "printf 'const fs = require(\"fs\");\\ntry { fs.unlinkSync(\"" + coherent_path + "\"); } catch (_err) {}\\nfs.symlinkSync(\"ios.log\", \"" + coherent_path + "\");\\nprocess.stdout.write(\"ios_render_log_validation_status=pass\\\\nios_render_log_validation_reason=pass\\\\nios_render_log_requested_source_count=2\\\\nios_render_log_source_count=2\\\\nios_render_log_missing_source_count=0\\\\nios_render_log_empty_source_count=0\\\\nios_render_log_symlink_source_count=0\\\\nios_render_log_hardlink_source_count=0\\\\nios_render_log_source_coherence_status=pass\\\\nios_render_log_coherent_source_path=" + coherent_path + "\\\\nios_render_log_coherent_source_size_bytes=223\\\\nios_render_log_marker_status=pass\\\\nios_render_log_html_len=347702\\\\nios_render_log_metal_marker_status=pass\\\\nios_render_log_fallback_marker_status=pass\\\\nios_render_log_tauri_context_status=pass\\\\nios_render_log_metal_context_status=pass\\\\nios_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
+val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm coherent iOS render-log source rows cannot point at symlink artifacts")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-render-log-coherent-source-symlink")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validation_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path=" + coherent_path)
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes=223")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_actual_size_bytes=223")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=symlink")
+```
+
+</details>
+
+#### rejects iOS render-log validator pass claims with hardlinked coherent source artifacts
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-tauri-mobile-artifact-gate-hardlink-ios-coherent-source"
+val validator = root + "/fake-ios-render-validator.js"
+val coherent_path = root + "/artifacts/linked-ios.log"
+val inject_validator = "printf 'const fs = require(\"fs\");\\ntry { fs.unlinkSync(\"" + coherent_path + "\"); } catch (_err) {}\\nfs.linkSync(\"" + root + "/artifacts/ios.log\", \"" + coherent_path + "\");\\nprocess.stdout.write(\"ios_render_log_validation_status=pass\\\\nios_render_log_validation_reason=pass\\\\nios_render_log_requested_source_count=2\\\\nios_render_log_source_count=2\\\\nios_render_log_missing_source_count=0\\\\nios_render_log_empty_source_count=0\\\\nios_render_log_symlink_source_count=0\\\\nios_render_log_hardlink_source_count=0\\\\nios_render_log_source_coherence_status=pass\\\\nios_render_log_coherent_source_path=" + coherent_path + "\\\\nios_render_log_coherent_source_size_bytes=223\\\\nios_render_log_marker_status=pass\\\\nios_render_log_html_len=347702\\\\nios_render_log_metal_marker_status=pass\\\\nios_render_log_fallback_marker_status=pass\\\\nios_render_log_tauri_context_status=pass\\\\nios_render_log_metal_context_status=pass\\\\nios_render_log_failure_marker_status=pass\\\\n\");\\n' > " + validator + " && chmod +x " + validator
+val command = _run_aggregate_command(root, "present", "present", "png", "png").replace("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=", inject_validator + " && TAURI_MOBILE_RENDERER_IOS_RENDER_LOG_VALIDATOR=" + validator + " PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=")
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm coherent iOS render-log source rows cannot point at hardlinked artifacts")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_reason=ios-render-log-coherent-source-hardlink")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validation_status=pass")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_path=" + coherent_path)
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_size_bytes=223")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_actual_size_bytes=223")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status=fail")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=hardlink")
 ```
 
 </details>
@@ -1252,6 +1315,7 @@ expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status")
 expect(script).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason")
 expect(script).to_contain("ios-render-log-coherent-source-artifact-missing")
+expect(script).to_contain("ios-render-log-coherent-source-symlink")
 expect(script).to_contain("ios-render-log-coherent-source-hardlink")
 expect(script).to_contain("ios-render-log-coherent-source-size-mismatch")
 expect(script).to_contain("ios-render-log-coherent-source-missing")
@@ -1313,8 +1377,8 @@ expect(script).to_contain("tauri_mobile_renderer_parity_production_backend_timin
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 34 |
-| Active scenarios | 34 |
+| Total scenarios | 36 |
+| Active scenarios | 36 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
